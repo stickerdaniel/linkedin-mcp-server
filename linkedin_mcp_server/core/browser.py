@@ -1,12 +1,13 @@
 """Browser lifecycle management using Patchright with persistent context."""
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
 from pathlib import Path
 from collections.abc import Coroutine, Mapping
-from typing import Any
+from typing import Any, TypeVar
 
 from patchright.async_api import (
     BrowserContext,
@@ -32,6 +33,8 @@ from linkedin_mcp_server.hidden_target import (
     open_hidden_page,
 )
 from linkedin_mcp_server.process_tree import (
+    WindowsJob,
+    contain_browser_launch,
     drain_browser_process_marker,
     forget_browser_process_marker,
     new_browser_process_marker,
@@ -42,27 +45,36 @@ from .exceptions import NetworkError, ProxyConnectionError
 
 logger = logging.getLogger(__name__)
 
+T = TypeVar("T")
+
 _DEFAULT_USER_DATA_DIR = Path.home() / ".linkedin-mcp" / "profile"
 _PRIVATE_FILE_MODE = 0o600
 _CLEANUP_TIMEOUT_SECONDS = 10
 
 
-async def _await_deferring_cancels(coro: Coroutine[Any, Any, bool]) -> bool:
+async def await_deferring_cancels(coro: Coroutine[Any, Any, T]) -> tuple[T, bool]:
     """Await *coro* to completion, holding back cancels until it finishes.
 
     Mirrors ``session_state.run_deferring_cancels``. A bare ``shield`` is not
-    enough: it re-raises on the *next* cancel, discarding the result. Here that
-    result decides whether a browser is provably gone, so losing it would let a
-    caller hand the profile on with Chromium possibly still running. The cancel
-    is not swallowed; the caller re-raises it.
+    enough: it re-raises on the *next* cancel, discarding the result. Everywhere
+    this is used that result decides whether a browser is provably gone, so
+    losing it would let a caller hand the profile on with Chromium possibly
+    still running. Overlapping cancels are real -- a tool timeout racing a
+    server shutdown -- so the loop keeps waiting however many arrive.
+
+    Returns the result and whether a cancel arrived, so the caller can finish
+    settling the profile and then re-raise whatever it was already handling.
+    Nothing is swallowed here; the decision belongs to the caller.
     """
     task = asyncio.ensure_future(coro)
+    cancelled = False
     while True:
         try:
-            return await asyncio.shield(task)
+            return await asyncio.shield(task), cancelled
         except asyncio.CancelledError:
+            cancelled = True
             if task.done():
-                return task.result()
+                return task.result(), True
 
 
 class BrowserManager:
@@ -120,6 +132,11 @@ class BrowserManager:
         self._process_marker, self._process_environment = new_browser_process_marker()
 
         self._playwright: Playwright | None = None
+        #: This launch's Windows containment, or None on POSIX and before the
+        #: driver exists. On Windows it is the whole of the attribution: there
+        #: is no environment marker to scan for, so a close with nothing here
+        #: cannot prove anything and says so. See ``contain_browser_launch``.
+        self._containment: WindowsJob | None = None
         self._context: BrowserContext | None = None
         self._page: Page | None = None
         self._is_authenticated = False
@@ -156,7 +173,14 @@ class BrowserManager:
         # Cleared first so a cancellation mid-teardown leaves it false rather
         # than claiming a shutdown that never completed.
         self._close_confirmed = False
-        self._close_confirmed = await self.close()
+        # Deferred rather than abandoned: the login path reads
+        # :attr:`close_confirmed` from a ``finally`` and releases the profile on
+        # it, so a cancel landing here would drop the one answer that decides
+        # whether the profile may go. The cancel is re-raised, not swallowed.
+        confirmed, cancelled = await await_deferring_cancels(self.close())
+        self._close_confirmed = confirmed
+        if cancelled:
+            raise asyncio.CancelledError
 
     @property
     def _windowless(self) -> bool:
@@ -228,23 +252,48 @@ class BrowserManager:
         # and it says so with the path.
         return str(registry_path) if registry_path else None
 
+    async def _start_contained_driver(self) -> Playwright:
+        """Start one Patchright driver and contain what it is about to spawn.
+
+        The containment has to exist between these two events and nowhere else.
+        Windows Job membership is inherited at process creation, so the Node
+        driver must be in the Job before it spawns Chromium -- and it spawns
+        nothing until ``launch_persistent_context``, which is the next thing
+        the caller does.
+
+        A driver that cannot be contained is stopped here rather than handed
+        back. It has launched nothing yet, so a proved stop is a complete
+        cleanup and leaves the profile untouched; a stop that fails keeps the
+        handle for ``close()`` to deal with.
+        """
+        # The attach flag only where a hidden target is actually going to be
+        # created. It has to exist before the driver subprocess does, and it
+        # then lives in that process for its whole lifetime -- restoring it here
+        # afterwards does nothing to the child. So a visible login, or a
+        # platform that falls back to real headless, would otherwise spend its
+        # entire run promoting extension and other `other` targets into
+        # `context.pages` for no reason.
+        if self._windowless:
+            with attaching_to_other_targets():
+                driver = await async_playwright().start()
+        else:
+            driver = await async_playwright().start()
+        self._playwright = driver
+        try:
+            self._containment = contain_browser_launch(driver)
+        except BaseException:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(driver.stop(), timeout=_CLEANUP_TIMEOUT_SECONDS)
+                self._playwright = None
+            raise
+        return driver
+
     async def start(self) -> None:
         """Start Patchright and launch persistent browser context."""
         if self._context is not None:
             raise RuntimeError("Browser already started. Call close() first.")
         try:
-            # Only where a hidden target is actually going to be created. The
-            # flag has to exist before the driver subprocess does, and it then
-            # lives in that process for its whole lifetime -- restoring it here
-            # afterwards does nothing to the child. So a visible login, or a
-            # platform that falls back to real headless, would otherwise spend
-            # its entire run promoting extension and other `other` targets into
-            # `context.pages` for no reason.
-            if self._windowless:
-                with attaching_to_other_targets():
-                    self._playwright = await async_playwright().start()
-            else:
-                self._playwright = await async_playwright().start()
+            driver = await self._start_contained_driver()
 
             # Before the profile directory is so much as created, and long
             # before it is opened. The driver had to start first, because only
@@ -293,11 +342,9 @@ class BrowserManager:
             # service workers at all. See the browser identity rules in
             # AGENTS.md and the measurements in docs/browser-fingerprint.md.
             try:
-                self._context = (
-                    await self._playwright.chromium.launch_persistent_context(
-                        self.user_data_dir,
-                        **context_options,
-                    )
+                self._context = await driver.chromium.launch_persistent_context(
+                    self.user_data_dir,
+                    **context_options,
                 )
             except Exception as exc:
                 # A launch can leave detached Chromium behind even when Patchright
@@ -337,7 +384,7 @@ class BrowserManager:
                 # concurrent access, so only a confirmed driver stop may proceed.
                 try:
                     await asyncio.wait_for(
-                        self._playwright.stop(), timeout=_CLEANUP_TIMEOUT_SECONDS
+                        driver.stop(), timeout=_CLEANUP_TIMEOUT_SECONDS
                     )
                 except Exception as stop_exc:
                     logger.warning(
@@ -345,17 +392,51 @@ class BrowserManager:
                         type(stop_exc).__name__,
                     )
                     raise exc from None
-                self._playwright = await async_playwright().start()
+                self._playwright = None
+
+                # A stopped driver proves the Node process and the leader it
+                # spawned are gone, and nothing else. Chromium is spawned
+                # detached into its own group, so a refused headed launch can
+                # leave a tree standing that outlives its driver -- and the
+                # fallback below reopens the very same profile directory. That
+                # is concurrent profile access, which is the corruption this
+                # whole module exists to prevent, so this launch's residue is
+                # drained before a second driver is allowed to exist.
+                #
+                # Off the loop: this scans processes and can sleep.
+                drained, cancelled = await await_deferring_cancels(
+                    asyncio.to_thread(
+                        drain_browser_process_marker,
+                        self._process_marker,
+                        containment=self._containment,
+                    )
+                )
+                if not drained:
+                    # Recorded so the teardown below cannot answer from empty
+                    # handles: this launch began a shutdown and did not finish
+                    # it, and only a proved drain may say otherwise.
+                    self._close_interrupted = True
+                    logger.error(
+                        "The refused headed launch left processes on the "
+                        "profile; aborting the headless fallback rather than "
+                        "opening a second browser on it."
+                    )
+                    raise exc from None
+                self._containment = None
+                if cancelled:
+                    # The drain was worth finishing; the fallback is not. Held
+                    # back only until this launch was proved gone, and re-raised
+                    # now rather than opening a browser nobody is waiting for.
+                    raise asyncio.CancelledError
+                driver = await self._start_contained_driver()
 
                 context_options["headless"] = True
                 context_options.pop("no_viewport", None)
                 context_options.update(self._geometry())
                 try:
-                    self._context = (
-                        await self._playwright.chromium.launch_persistent_context(
-                            self.user_data_dir,
-                            **context_options,
-                        )
+                    self._context = await driver.chromium.launch_persistent_context(
+                        self.user_data_dir,
+                        **context_options,
                     )
                 except Exception as retry_exc:
                     # Logged before it is discarded. The raise below keeps the
@@ -422,7 +503,7 @@ class BrowserManager:
             # real (a tool timeout racing server shutdown), and a second one
             # landing on the shield would discard the very result that decides
             # whether the profile may be handed on.
-            closed = await _await_deferring_cancels(self.close())
+            closed, _ = await await_deferring_cancels(self.close())
             if isinstance(e, BrowserDowngradeError):
                 # Through untouched, and ahead of the shutdown check rather than
                 # after it. Both wrappings below carry a recovery that would
@@ -494,10 +575,19 @@ class BrowserManager:
         self._close_interrupted = True
         confirmed = True
 
-        if context is None and playwright is None and not resuming:
+        if (
+            context is None
+            and playwright is None
+            and self._containment is None
+            and not resuming
+        ):
             # Nothing was ever handed out, so no driver ran and no Chromium can
             # carry this launch's marker. The other emptiness -- a close that
             # took the handles and was cut off -- goes through the drain below.
+            # The containment is checked as well as the handles, because on
+            # Windows it is the attribution and the handles are not: leaving a
+            # live Job unexamined here would claim a shutdown from the one
+            # object that could have disproved it.
             self._close_proven = True
             self._close_interrupted = False
             forget_browser_process_marker(self._process_marker)
@@ -546,7 +636,9 @@ class BrowserManager:
             # so a close that returns cleanly says nothing about the rest of the
             # tree. Off the loop: this scans processes and can sleep.
             confirmed = await asyncio.to_thread(
-                drain_browser_process_marker, self._process_marker
+                drain_browser_process_marker,
+                self._process_marker,
+                containment=self._containment,
             )
             if not confirmed:
                 logger.error(

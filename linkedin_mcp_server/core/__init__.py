@@ -7,7 +7,7 @@ from .auth import (
     resolve_remember_me_prompt,
     wait_for_manual_login,
 )
-from .browser import BrowserManager
+from .browser import BrowserManager, await_deferring_cancels
 from .exceptions import (
     AuthenticationError,
     ElementNotFoundError,
@@ -33,6 +33,7 @@ from .utils import detect_rate_limit, handle_modal_close, scroll_to_bottom
 __all__ = [
     "AuthenticationError",
     "BrowserManager",
+    "await_deferring_cancels",
     "detect_auth_barrier",
     "detect_auth_barrier_quick",
     "ElementNotFoundError",

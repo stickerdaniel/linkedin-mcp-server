@@ -827,7 +827,8 @@ class TestConfirmedClose:
         manager._playwright = MagicMock(stop=AsyncMock())
         monkeypatch.setattr(
             "linkedin_mcp_server.core.browser.drain_browser_process_marker",
-            lambda _marker: False,  # Chromium is still there to be found
+            # Chromium is still there to be found
+            lambda _marker, **_containment: False,
         )
 
         cancelled = asyncio.ensure_future(manager.close())

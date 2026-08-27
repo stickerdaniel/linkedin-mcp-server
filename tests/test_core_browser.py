@@ -4,6 +4,8 @@ import asyncio
 import contextlib
 import json
 import os
+import subprocess
+import sys
 import time
 from unittest import mock
 from unittest.mock import AsyncMock, MagicMock
@@ -11,6 +13,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from linkedin_mcp_server.core.browser import BrowserManager
+from linkedin_mcp_server.core.exceptions import NetworkError
+from linkedin_mcp_server.exceptions import BrowserShutdownUnconfirmedError
+from linkedin_mcp_server.process_tree import forget_browser_process_marker
 
 
 def test_a_no_viewport_override_is_refused(tmp_path):
@@ -296,6 +301,7 @@ class TestTheWindowlessLaunchEndToEnd:
         class _Playwright2(_Playwright):
             async def stop(self):
                 stops["count"] += 1
+                recorder.setdefault("events", []).append("stop")
                 if stop_hangs:
                     await asyncio.sleep(30)
                 return None
@@ -306,6 +312,7 @@ class TestTheWindowlessLaunchEndToEnd:
             recorder.setdefault("flags_at_driver_start", []).append(
                 os.environ.get(ATTACH_TO_OTHER)
             )
+            recorder.setdefault("events", []).append("driver-start")
             recorder["driver_stops"] = stops
             return _Playwright2()
 
@@ -523,6 +530,202 @@ class TestTheWindowlessLaunchEndToEnd:
         assert recorder["flags_at_driver_start"] == [None]
 
 
+class TestTheHeadlessFallbackWaitsForTheFirstLaunchToGo:
+    """A refused headed launch must be provably gone before the retry opens one.
+
+    ``Playwright.stop()`` proves the Node driver and the leader it spawned have
+    exited, and nothing else. Chromium is spawned detached into its own group,
+    so the refused launch's tree can outlive its driver -- and the fallback
+    reopens the very same profile directory. Two Chromiums on one profile is
+    the corruption the whole module exists to prevent, and it was reachable
+    from an ordinary headed refusal on a Mac with no window server.
+    """
+
+    _fake_playwright = TestTheWindowlessLaunchEndToEnd._fake_playwright
+
+    @staticmethod
+    def _drain(recorder: dict, monkeypatch, *, proves: bool) -> None:
+        def drain(marker: str, *, containment: object = None) -> bool:
+            recorder.setdefault("events", []).append("drain")
+            return proves
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.core.browser.drain_browser_process_marker", drain
+        )
+
+    async def test_the_drain_runs_between_the_stop_and_the_second_driver(
+        self, tmp_path, monkeypatch
+    ):
+        recorder: dict = {}
+        start, _ = self._fake_playwright(recorder, refuse_headed=True)
+        self._drain(recorder, monkeypatch, proves=True)
+        manager = BrowserManager(user_data_dir=tmp_path / "p", headless=True)
+
+        with mock.patch(
+            "linkedin_mcp_server.core.browser.hidden_target_is_supported",
+            return_value=True,
+        ):
+            with mock.patch(
+                "linkedin_mcp_server.core.browser.async_playwright"
+            ) as playwright:
+                playwright.return_value.start = start
+                await manager.start()
+
+        # Order is the whole assertion. Draining after the second driver came up
+        # would be draining while two browsers share one profile.
+        assert recorder["events"] == ["driver-start", "stop", "drain", "driver-start"]
+        assert recorder["options"]["headless"] is True
+
+    async def test_an_unproven_drain_opens_no_second_browser(
+        self, tmp_path, monkeypatch
+    ):
+        recorder: dict = {}
+        start, _ = self._fake_playwright(recorder, refuse_headed=True)
+        self._drain(recorder, monkeypatch, proves=False)
+        manager = BrowserManager(user_data_dir=tmp_path / "p", headless=True)
+
+        with mock.patch(
+            "linkedin_mcp_server.core.browser.hidden_target_is_supported",
+            return_value=True,
+        ):
+            with mock.patch(
+                "linkedin_mcp_server.core.browser.async_playwright"
+            ) as playwright:
+                playwright.return_value.start = start
+                # Not the launch error: an unproven drain means something of
+                # this launch may still be on the profile, and the caller has
+                # to keep it rather than release it and try again.
+                with pytest.raises(BrowserShutdownUnconfirmedError):
+                    await manager.start()
+
+        assert recorder["flags_at_driver_start"] == ["1"], "a second driver started"
+        # One driver, one stop, then the abort drain and the teardown's retry.
+        assert recorder["events"] == ["driver-start", "stop", "drain", "drain"]
+        assert recorder["options"]["headless"] is False
+        assert manager._close_confirmed is False
+
+    async def test_a_retry_that_proves_it_still_does_not_resume_the_fallback(
+        self, tmp_path, monkeypatch
+    ):
+        """The abort is final; only the profile's fate is left open.
+
+        A drain that fails once and succeeds on the teardown's retry frees the
+        profile, so the launch reports the window failure it started with
+        rather than holding the directory. It does not go back and open the
+        browser it declined to open.
+        """
+        recorder: dict = {}
+        start, _ = self._fake_playwright(recorder, refuse_headed=True)
+        answers = iter([False, True])
+
+        def drain(marker: str, *, containment: object = None) -> bool:
+            recorder.setdefault("events", []).append("drain")
+            return next(answers)
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.core.browser.drain_browser_process_marker", drain
+        )
+        manager = BrowserManager(user_data_dir=tmp_path / "p", headless=True)
+
+        with mock.patch(
+            "linkedin_mcp_server.core.browser.hidden_target_is_supported",
+            return_value=True,
+        ):
+            with mock.patch(
+                "linkedin_mcp_server.core.browser.async_playwright"
+            ) as playwright:
+                playwright.return_value.start = start
+                with pytest.raises(NetworkError, match="headed launch refused"):
+                    await manager.start()
+
+        assert recorder["flags_at_driver_start"] == ["1"]
+        assert recorder["events"] == ["driver-start", "stop", "drain", "drain"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
+class TestTheFallbackDrainAgainstRealProcesses:
+    """The same abort, measured against a process instead of a stub.
+
+    The consumer tests above prove the ordering; this proves the thing being
+    ordered actually kills something. The fake launch leaves a real detached
+    process carrying this launch's environment marker, exactly as a refused
+    headed Chromium does, and the fallback may not start until it is gone.
+    """
+
+    async def test_a_real_residual_process_is_gone_before_the_second_driver(
+        self, tmp_path
+    ):
+        from linkedin_mcp_server.hidden_target import ATTACH_TO_OTHER
+
+        residual: dict = {}
+        alive_at_second_start: list[bool] = []
+
+        def _running(pid: int) -> bool:
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                return False
+            state = subprocess.run(
+                ["ps", "-o", "stat=", "-p", str(pid)],
+                capture_output=True,
+                text=True,
+                check=False,
+            ).stdout.strip()
+            return bool(state) and not state.startswith("Z")
+
+        class _Chromium:
+            async def launch_persistent_context(self, user_data_dir, **kwargs):
+                if not kwargs.get("headless"):
+                    # A headed launch that leaves its detached tree behind.
+                    process = subprocess.Popen(
+                        [sys.executable, "-c", "import time; time.sleep(120)"],
+                        env=kwargs["env"],
+                        start_new_session=True,
+                    )
+                    residual["process"] = process
+                    raise RuntimeError("headed launch refused: no window server")
+                return _Context()
+
+        class _Context:
+            pages = [MagicMock(url="about:blank")]
+
+        class _Driver:
+            chromium = _Chromium()
+
+            async def stop(self):
+                return None
+
+        async def start():
+            if residual:
+                alive_at_second_start.append(_running(residual["process"].pid))
+            return _Driver()
+
+        manager = BrowserManager(user_data_dir=tmp_path / "p", headless=True)
+        try:
+            with mock.patch(
+                "linkedin_mcp_server.core.browser.hidden_target_is_supported",
+                return_value=True,
+            ):
+                with mock.patch(
+                    "linkedin_mcp_server.core.browser.async_playwright"
+                ) as playwright:
+                    playwright.return_value.start = start
+                    await manager.start()
+
+            assert alive_at_second_start == [False], (
+                "the fallback driver started while the refused launch was alive"
+            )
+            assert not _running(residual["process"].pid)
+            assert ATTACH_TO_OTHER not in os.environ
+        finally:
+            process = residual.get("process")
+            if process is not None:
+                if process.poll() is None:
+                    process.kill()
+                process.wait(timeout=10)
+            forget_browser_process_marker(manager._process_marker)
+
+
 def _make_cookie(
     name: str,
     value: str = "value",
@@ -673,8 +876,12 @@ class TestCloseConfirmationIsSticky:
         drained: list[str] = []
         forgotten: list[str] = []
 
-        def drain(marker: str) -> bool:
+        def drain(marker: str, *, containment: object = None) -> bool:
+            # The containment travels with the marker: on Windows it is the
+            # whole of the attribution, and a drain that ignored it would be
+            # answering about the wrong launch.
             drained.append(marker)
+            assert containment is manager._containment
             return drains
 
         monkeypatch.setattr(

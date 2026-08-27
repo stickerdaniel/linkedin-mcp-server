@@ -53,6 +53,14 @@ _POSIX_PROCESS_SNAPSHOT_SECONDS = 1.0
 #: enough for a wedged Chromium to answer SIGKILL, short enough that a close
 #: which cannot prove it still returns and lets the caller keep the profile.
 _MARKER_DRAIN_SECONDS = 10.0
+#: The kernel's own word for "this process has exited and only its unreaped
+#: table entry is left". Nothing else in a process row says it: PID, PGID and
+#: the start timestamp all survive the exit unchanged, which is exactly why the
+#: identity checks in this module cannot see it on their own.
+_ZOMBIE_STATE = "Z"
+
+#: parent, process group, kernel start identity, kernel run state.
+_ProcessRow = tuple[int, int, str | None, str | None]
 
 
 class ProcessTreeError(RuntimeError):
@@ -167,9 +175,19 @@ def new_browser_process_marker() -> tuple[str, dict[str, str]]:
     return marker, {_BROWSER_PROCESS_MARKER: marker}
 
 
-def _linux_process_rows() -> dict[int, tuple[int, int, str | None]]:
-    """Read ancestry, groups and kernel start identities directly from procfs."""
-    rows: dict[int, tuple[int, int, str | None]] = {}
+def _stat_fields(pid: int) -> list[str]:
+    """The procfs ``stat`` fields of *pid*, from its run state onwards."""
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text()
+    except (OSError, UnicodeError):
+        return []
+    closing = raw.rfind(")")
+    return raw[closing + 2 :].split() if closing >= 0 else []
+
+
+def _linux_process_rows() -> dict[int, _ProcessRow]:
+    """Read ancestry, groups, kernel start identities and run states from procfs."""
+    rows: dict[int, _ProcessRow] = {}
     for entry in Path("/proc").iterdir():
         if not entry.name.isdigit():
             continue
@@ -187,11 +205,11 @@ def _linux_process_rows() -> dict[int, tuple[int, int, str | None]]:
             group = int(fields[2])
         except ValueError:
             continue
-        rows[process] = (parent, group, f"proc:{fields[19]}")
+        rows[process] = (parent, group, f"proc:{fields[19]}", fields[0])
     return rows
 
 
-def _ps_process_rows() -> dict[int, tuple[int, int, str | None]]:
+def _ps_process_rows() -> dict[int, _ProcessRow]:
     """Read process ancestry on POSIX systems without procfs."""
     ps = next(
         (
@@ -205,7 +223,7 @@ def _ps_process_rows() -> dict[int, tuple[int, int, str | None]]:
         return {}
     try:
         snapshot = subprocess.run(
-            [ps, "-A", "-o", "pid=", "-o", "ppid=", "-o", "pgid="],
+            [ps, "-A", "-o", "pid=", "-o", "ppid=", "-o", "pgid=", "-o", "state="],
             check=True,
             capture_output=True,
             text=True,
@@ -214,25 +232,54 @@ def _ps_process_rows() -> dict[int, tuple[int, int, str | None]]:
     except (OSError, subprocess.SubprocessError):
         return {}
 
-    rows: dict[int, tuple[int, int, str | None]] = {}
+    rows: dict[int, _ProcessRow] = {}
     for line in snapshot.splitlines():
         fields = line.split()
-        if len(fields) != 3:
+        # BSD ``state`` is a run-state letter plus optional flag letters
+        # (``Ss``, ``S+``), so only its first character is the state itself.
+        # A row without one is kept rather than dropped: the state is an extra
+        # signal here and never the only one.
+        if len(fields) == 3:
+            fields = [*fields, ""]
+        if len(fields) != 4:
             continue
         try:
-            process, parent, group = map(int, fields)
+            process, parent, group = map(int, fields[:3])
         except ValueError:
             continue
-        rows[process] = (parent, group, None)
+        rows[process] = (parent, group, None, fields[3][:1] or None)
     return rows
 
 
-def _posix_process_rows() -> dict[int, tuple[int, int, str | None]]:
+def _posix_process_rows() -> dict[int, _ProcessRow]:
     return (
         _linux_process_rows()
         if sys.platform.startswith("linux")
         else _ps_process_rows()
     )
+
+
+def _has_exited_unreaped(pid: int, state: str | None) -> bool:
+    """Whether nothing is left of *pid* but an unreaped process-table entry.
+
+    A zombie has already released every file, mapping and lock it held, so it
+    cannot touch the profile, and it cannot be waited for by this owner when its
+    parent is somebody else -- a Chromium grandchild reparented to PID 1 in a
+    container stays a zombie for as long as that PID 1 declines to reap. Without
+    this the hard-exit drain has nothing to end its loop on: ``/proc`` still
+    reports the PGID and the start time, so every identity check below keeps
+    answering that the group is alive, and the owner never kills its own group
+    or releases its locks.
+
+    Only the kernel run state answers it, and only where a run state exists.
+    Darwin needs no second answer: ``proc_pidinfo(PROC_PIDTBSDINFO)`` reads zero
+    bytes for a zombie, so :func:`_kernel_start_identity` already returns None
+    there and the identity comparison rejects it (measured on 26.0).
+    """
+    if state is None and sys.platform.startswith("linux"):
+        fields = _stat_fields(pid)
+        state = fields[0] if fields else None
+    return state == _ZOMBIE_STATE
 
 
 def _marked_posix_processes(marker: str) -> tuple[int, ...]:
@@ -293,7 +340,7 @@ def _posix_detached_descendants(
     except OSError:
         return ()
     children: dict[int, list[int]] = {}
-    for process, (parent, _group, _identity) in rows.items():
+    for process, (parent, _group, _identity, _state) in rows.items():
         children.setdefault(parent, []).append(process)
 
     detached: list[tuple[int, int, int, str]] = []
@@ -306,7 +353,7 @@ def _posix_detached_descendants(
                 continue
             seen.add(child)
             pending.append((child, depth + 1))
-            _parent, group, identity = rows[child]
+            _parent, group, identity, _state = rows[child]
             if group == process_group:
                 continue
             identity = identity or _kernel_start_identity(child)
@@ -324,6 +371,7 @@ def remember_detached_process_groups(marker: str | None = None) -> None:
         return
     pid = os.getpid()
     process_group = os.getpgrp()
+    rows: dict[int, _ProcessRow]
     try:
         rows = _posix_process_rows()
     except OSError:
@@ -382,7 +430,7 @@ def forget_browser_process_marker(marker: str) -> None:
 
 
 def _refresh_marked_process_groups(
-    rows: dict[int, tuple[int, int, str | None]],
+    rows: dict[int, _ProcessRow],
     markers: tuple[str, ...] | None = None,
 ) -> None:
     """Add every currently marked browser group to the hard-exit registry.
@@ -432,10 +480,24 @@ def _refresh_marked_process_groups(
 def _registered_group_still_matches(
     group: int,
     registration: _PosixGroupRegistration,
-    rows: dict[int, tuple[int, int, str | None]],
+    rows: dict[int, _ProcessRow],
 ) -> bool:
+    """Whether this group still holds a live process of the launch it was filed under.
+
+    Both anchors are checked against the kernel run state as well as the start
+    identity, and only a zombie is discounted. That is deliberately the one
+    exception: a zombie has released everything it held, so it can neither open
+    the profile nor be reaped by this owner, while every other state -- stopped,
+    uninterruptible, traced -- is a process that can still come back and must
+    keep the locks. The identity comparison is untouched, so a reused PID or
+    PGID is still refused (#809).
+    """
     leader = rows.get(group)
-    if leader is not None and leader[1] == group:
+    if (
+        leader is not None
+        and leader[1] == group
+        and not _has_exited_unreaped(group, leader[3])
+    ):
         current = leader[2] or _kernel_start_identity(group)
         if (
             current is not None
@@ -453,9 +515,13 @@ def _registered_group_still_matches(
                     continue
             except OSError:
                 continue
+            if _has_exited_unreaped(process, None):
+                continue
             current = _kernel_start_identity(process)
         else:
             if row[1] != group:
+                continue
+            if _has_exited_unreaped(process, row[3]):
                 continue
             current = row[2] or _kernel_start_identity(process)
         if current is not None and current == identity:
@@ -610,6 +676,95 @@ def _drain_adopted_windows_job() -> None:
         time.sleep(_JOB_POLL_SECONDS)
 
 
+def _patchright_driver_process(playwright: Any) -> Any:
+    """The Node driver process behind one Patchright ``Playwright`` handle.
+
+    Measured against patchright 1.61.2 (``_impl/_transport.py``): the async
+    driver is started by ``asyncio.create_subprocess_exec`` inside
+    ``PipeTransport.connect`` and kept on the transport as ``_proc``, reached
+    from the public object through ``_impl_obj._connection._transport``. Private
+    the whole way, so ``tests/test_process_tree.py`` pins the shape against a
+    real driver rather than against a hand-written double.
+
+    Raises rather than returning None on anything unexpected. The caller uses
+    this to build the only attribution Windows has, and a launch it cannot
+    attribute must not start.
+    """
+    impl = getattr(playwright, "_impl_obj", playwright)
+    connection = getattr(impl, "_connection", None)
+    transport = getattr(connection, "_transport", None)
+    process = getattr(transport, "_proc", None)
+    if process is None:
+        raise ProcessTreeError("Patchright exposed no driver process to contain")
+    return process
+
+
+def contain_browser_launch(playwright: Any) -> WindowsJob | None:
+    """Contain one browser launch's descendants behind a Job of its own.
+
+    Windows only; POSIX answers with the environment marker instead and gets
+    None. Called after the driver starts and before it is asked to launch
+    anything, which is the whole window in which this works: Job membership is
+    inherited at creation, so the Node driver has to be in the Job before it
+    spawns Chromium, and it spawns nothing until ``launch_persistent_context``.
+
+    This exists because a Job is the *only* attribution Windows has. An
+    environment block belongs to its own process and reading another one's takes
+    the debugger APIs, so the POSIX marker scan has no counterpart here. Before
+    this, the drain answered from the daemon owner's adopted Job and returned
+    "empty" whenever there was none -- which is every direct-mode server, and
+    direct mode launches browsers too.
+
+    The Job is created kill-on-close and its handle is not inheritable, so a
+    crash of this process ends the browser rather than leaving it on the profile.
+    """
+    if not _IS_WINDOWS:
+        return None
+    process = _patchright_driver_process(playwright)
+    job = WindowsJob.anonymous()
+    try:
+        job.assign_asyncio_process(process)
+    except BaseException:
+        # Nothing is in the Job yet, so closing it kills nothing. The handle
+        # would otherwise be leaked by a launch that goes on to fail.
+        job.close()
+        raise
+    return job
+
+
+def _drain_windows_browser_job(job: WindowsJob | None, deadline: float) -> bool:
+    """End and bury one launch's Windows Job, and say whether it emptied.
+
+    ``TerminateJobObject`` reaches every process in the Job and nothing outside
+    it, which is what keeps this off the installer: its supervisor and worker
+    sit in a Job of their own (``WindowsJob.anonymous`` in ``bootstrap``) that
+    this handle has no authority over.
+
+    A Job that cannot be emptied keeps its handle, so the containment stays
+    armed and this process's exit still ends what is inside it.
+    """
+    if job is None:
+        # The launch produced no Job, so nothing here can name its processes.
+        # Not knowing is not proof, and a drain that answers "empty" from an
+        # absent Job is the false proof this function replaced.
+        logger.error(
+            "This browser launch has no Windows Job, so its shutdown cannot be proved."
+        )
+        return False
+    if job.closed:
+        # Already settled by an earlier close, whose verdict stands: a proved
+        # drain emptied the Job before the handle went, and an abandoned one
+        # never proved anything.
+        return job.drained
+    try:
+        job.terminate()
+        job.wait_until_empty(timeout=max(deadline - time.monotonic(), 0.0))
+    except ProcessTreeError as exc:
+        logger.error("The browser Job did not drain: %s", exc)
+        return False
+    return True
+
+
 def _in_another_owned_job(win32job: Any, handle: Any) -> bool:
     """Whether an adopted-Job member also sits in a Job this owner still holds."""
     for job in tuple(_live_windows_jobs):
@@ -633,8 +788,15 @@ def _drain_adopted_windows_job_members(deadline: float) -> bool:
     minus two exclusions that keep it from being a tree kill. The owner, which
     has to survive its own browser. And every member of another Job this owner
     still holds: the installer supervisor and its worker sit in one of those
-    (``WindowsJob.anonymous`` in ``bootstrap``), while a browser never does,
-    because Chromium is spawned by the Node driver and nothing assigns it.
+    (``WindowsJob.anonymous`` in ``bootstrap``), and so now does every *other*
+    live browser launch (:func:`contain_browser_launch`).
+
+    That second exclusion is why this runs after the per-launch Job rather than
+    instead of it. A browser's own Job is closed by the time this is reached, so
+    its escapees -- anything the Job never held -- are still in scope here,
+    while a concurrent launch's contained processes are not. Attribution comes
+    from the Job that was assigned before Chromium existed; this is the sweep
+    for what got past it.
     """
     if _adopted_windows_job is None:
         return True
@@ -683,7 +845,10 @@ def _drain_adopted_windows_job_members(deadline: float) -> bool:
 
 
 def drain_browser_process_marker(
-    marker: str, *, timeout: float = _MARKER_DRAIN_SECONDS
+    marker: str,
+    *,
+    containment: WindowsJob | None = None,
+    timeout: float = _MARKER_DRAIN_SECONDS,
 ) -> bool:
     """Prove one browser launch left nothing of itself running.
 
@@ -696,11 +861,15 @@ def drain_browser_process_marker(
     graceful attempt rejects. So the group can outlive a clean close, and
     nothing in the API says whether it did.
 
-    This answers it, for this launch and no other. Blocking: the caller runs it
-    off the event loop.
+    This answers it, for this launch and no other: on POSIX from *marker*, and
+    on Windows from *containment*, the Job assigned to this launch's driver
+    before it could spawn anything. Blocking: the caller runs it off the event
+    loop.
     """
     deadline = time.monotonic() + max(timeout, 0.0)
     if _IS_WINDOWS:
+        if not _drain_windows_browser_job(containment, deadline):
+            return False
         return _drain_adopted_windows_job_members(deadline)
     if marker not in _registered_browser_markers:
         # Nothing was ever registered under it, so no launch got far enough to
@@ -767,10 +936,29 @@ class WindowsJob:
         self.name = name
         self._win32api = win32api
         self._win32job = win32job
+        # Whether this Job was seen holding nothing before its handle went. Kept
+        # past ``close()`` because a browser close can be retried after its
+        # result was lost to a cancel, and a closed Job cannot be queried again:
+        # without this the retry would report an unproven shutdown and keep a
+        # profile that is provably free.
+        self._drained = False
 
     @classmethod
     def anonymous(cls) -> WindowsJob:
-        """Create an anonymous Job for one installer run."""
+        """Create an unnamed Job for one contained run of something.
+
+        Two callers, and the anonymity is what keeps them apart: an installer
+        run (``bootstrap``) and a browser launch
+        (:func:`contain_browser_launch`). Neither Job can be opened by name, so
+        neither can reach into the other, and each is terminated only through
+        the handle its own creator holds. That is the whole of the separation
+        the browser drain relies on when it ends its Job without touching a
+        download in progress.
+
+        Use :meth:`named` instead where another process has to find the Job:
+        only the owner handoff does, and only because the process that creates
+        that Job is not the process that lives in it.
+        """
         return cls._create(None)
 
     @classmethod
@@ -851,6 +1039,11 @@ class WindowsJob:
     @property
     def closed(self) -> bool:
         return self._handle is None
+
+    @property
+    def drained(self) -> bool:
+        """Whether this Job was proved empty before its handle was released."""
+        return self._drained
 
     @property
     def job_handle(self) -> Any | None:
@@ -944,6 +1137,7 @@ class WindowsJob:
             else:
                 consecutive_failures = 0
                 if active == 0:
+                    self._drained = True
                     self.close()
                     return
 

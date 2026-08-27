@@ -222,6 +222,15 @@ jobs:
           cat /tmp/xvfb.log >&2
           exit 1
 
+      # Separate from the process tests above, which run before a browser
+      # exists and would skip this. It belongs on every leg because the
+      # attribution differs per platform: POSIX scans for an environment
+      # marker the browser carries, while Windows has no such marker and
+      # depends on Chromium joining the Job its Node driver was assigned to
+      # -- a fact about Windows that only Windows can confirm.
+      - name: Run the browser containment test
+        run: uv run pytest tests/test_browser_containment.py
+
       - name: Run the identity gate
         env:
           # Only where one was started. macOS ignores it, but naming a display
