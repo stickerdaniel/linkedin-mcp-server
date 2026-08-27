@@ -22,7 +22,7 @@ from typing import Any
 
 import pytest
 
-from linkedin_mcp_server import process_control
+from linkedin_mcp_server import daemon_election, process_control
 from linkedin_mcp_server.process_control import ControlListener
 
 _NONCE = "0123456789abcdef" * 4
@@ -94,6 +94,69 @@ class TestAuthorization:
             silent.close()
             child.close()
 
+    def test_a_silent_peer_leaves_the_production_wait_enough_to_attach(
+        self, listener: ControlListener
+    ):
+        # The wait the election actually gives this is one second, and the
+        # per-peer bound used to be one second as well, so the first silent peer
+        # spent the whole of it and the owner queued behind it was killed for
+        # never attaching. The owner's frame is already in the receive buffer
+        # here, exactly as it is in production: it is sent on connect, long
+        # before the prepared generation that starts this wait.
+        silent = socket.create_connection((listener.host, listener.port))
+        child = _attach(listener)
+        try:
+            began = time.monotonic()
+            listener.accept_within(
+                nonce=_NONCE, timeout=daemon_election._PREPARED_READ_SECONDS
+            )
+            elapsed = time.monotonic() - began
+            listener.send(_RECORD)
+
+            assert child.readline() == _RECORD
+            assert elapsed < daemon_election._PREPARED_READ_SECONDS, (
+                "the silent peer spent the whole production wait"
+            )
+        finally:
+            silent.close()
+            child.close()
+
+    def test_a_full_queue_of_silent_peers_leaves_the_owner_its_turn(
+        self, listener: ControlListener
+    ):
+        # The whole queue against the whole production wait, which is the worst
+        # case that can be standing there when the wait begins: the listener
+        # holds _BACKLOG connections, so the most silent peers that can sit ahead
+        # of the owner is one fewer, the owner itself filling the last slot.
+        # Measured, and the reason this is not _BACKLOG silent peers plus a
+        # child: a seventeenth connect is not refused but dropped, and the client
+        # then waits a full second on a SYN retransmit for a slot that nothing is
+        # draining. A share-of-what-is-left bound is what survives this; every
+        # fixed per-peer span, floors included, is emptied by enough repetitions.
+        silent = [
+            socket.create_connection((listener.host, listener.port))
+            for _ in range(process_control._BACKLOG - 1)
+        ]
+        child = _attach(listener)
+        try:
+            began = time.monotonic()
+            listener.accept_within(
+                nonce=_NONCE, timeout=daemon_election._PREPARED_READ_SECONDS
+            )
+            elapsed = time.monotonic() - began
+            listener.send(_RECORD)
+
+            assert child.readline() == _RECORD
+            # And with room to spare rather than by a hair, so a loaded machine
+            # reaches the same verdict.
+            assert elapsed < daemon_election._PREPARED_READ_SECONDS / 2, (
+                "a full queue of silent peers spent the production wait"
+            )
+        finally:
+            for peer in silent:
+                peer.close()
+            child.close()
+
     def test_a_rendezvous_nothing_attaches_to_is_bounded(
         self, listener: ControlListener
     ):
@@ -109,6 +172,46 @@ class TestAuthorization:
     ):
         with pytest.raises(OSError, match="No daemon is attached"):
             listener.send(_RECORD)
+
+
+class TestPeerAllowance:
+    """What one unauthenticated peer is given, out of the wait that is left."""
+
+    def test_a_peer_never_gets_the_whole_remaining_wait(self):
+        # However little is left, including the short remainders a floor used to
+        # hand over whole. This is the property the guarantee rests on.
+        for remaining in (0.001, 0.01, 0.06, 0.2, 1.0, 5.0, 30.0):
+            assert process_control._peer_allowance(remaining) < remaining
+
+    def test_a_wait_already_spent_gives_nothing(self):
+        assert process_control._peer_allowance(0.0) == 0.0
+        assert process_control._peer_allowance(-1.0) == 0.0
+
+    def test_a_full_queue_of_silent_peers_cannot_spend_the_production_wait(self):
+        # The arithmetic behind the socket test, stated where it can be read: a
+        # peer for every slot in the backlog, each spending its whole allowance,
+        # against the wait the election actually gives. More than half of it is
+        # still there afterwards, and the owner needs a scheduled read.
+        remaining = daemon_election._PREPARED_READ_SECONDS
+        for _ in range(process_control._BACKLOG):
+            remaining -= process_control._peer_allowance(remaining)
+
+        assert remaining > daemon_election._PREPARED_READ_SECONDS / 2
+
+    def test_no_number_of_silent_peers_closes_the_wait(self):
+        # Peers keep arriving as the queue drains, so the guarantee cannot stop
+        # at one backlog. The share leaves a remainder at every depth.
+        remaining = daemon_election._PREPARED_READ_SECONDS
+        for _ in range(10 * process_control._BACKLOG):
+            remaining -= process_control._peer_allowance(remaining)
+
+        assert remaining > 0.0
+
+    def test_a_long_wait_is_still_capped_absolutely(self):
+        # The ceiling binds only past thirty-two seconds; no caller has a wait
+        # like that today, and the cap is what keeps one from handing a stranger
+        # a share proportional to it.
+        assert process_control._peer_allowance(60.0) == process_control._PEER_SECONDS
 
 
 class TestAbortAuthority:

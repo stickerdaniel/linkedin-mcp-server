@@ -61,12 +61,43 @@ _MAX_RECORD_BYTES = 128
 #: address is taken. Mirrors ``daemon_owner._bind_loopback``.
 _NO_IPV6 = (errno.EAFNOSUPPORT, errno.EADDRNOTAVAIL, errno.EPROTONOSUPPORT)
 
-#: How long one unauthenticated peer may take to present its frame. Bounded
-#: separately from the whole wait, because they are different questions: a
-#: stranger that connects and then says nothing would otherwise spend the
-#: child's entire rendezvous while the child's own connection sat queued behind
-#: it. The child sends its frame immediately after connecting.
+#: The absolute ceiling on what one unauthenticated peer may take to present its
+#: frame. The share below is what bounds this for every caller there is; the
+#: ceiling only binds a wait longer than thirty-two seconds, and it is here so
+#: that a future caller with one cannot hand a stranger a proportionally
+#: enormous span.
 _PEER_SECONDS = 1.0
+
+#: The share of what is *left* of the whole wait that one unauthenticated peer
+#: may spend, derived from the backlog rather than chosen: the backlog is how
+#: many connections can be queued at once, so it is also the most peers that can
+#: already sit ahead of the child when the wait begins. At half of its
+#: reciprocal, a full backlog of silent peers costs ``1 - (1 - 1/32)**16``, three
+#: eighths of the wait, and the child queued behind them still has the rest.
+#:
+#: A share and never a fixed span, in either direction. The fixed span was the
+#: defect: an owner is accepted within ``daemon_election._PREPARED_READ_SECONDS``,
+#: one second, and the per-peer bound was one second too, so the first silent
+#: peer consumed the whole wait and the owner queued behind it was killed for
+#: never attaching. A *floor* under the share is the same defect one step down,
+#: because any allowance that stops shrinking with the wait can be repeated until
+#: the wait is gone: at a floor of 50ms, ten silent peers emptied a one-second
+#: wait, and the backlog holds sixteen.
+_PEER_SHARE = 1.0 / (2 * _BACKLOG)
+
+
+def _peer_allowance(remaining: float) -> float:
+    """How long to give one unauthenticated peer, out of the wait that is left.
+
+    Always less than what is left, however little that is, so the connection
+    behind this peer keeps a turn. The honest frame does not need a long
+    allowance: the child sends it immediately on connect, a whole endpoint
+    startup before the parent begins this wait, so it is in the receive buffer
+    before the connection is even accepted and the read only has to be scheduled.
+    """
+    if remaining <= 0.0:
+        return 0.0
+    return min(remaining * _PEER_SHARE, _PEER_SECONDS)
 
 
 class ControlChannel(Protocol):
@@ -121,7 +152,8 @@ class ControlListener:
         stranger reaching a loopback port cannot be prevented and must not be
         able to spend the child's rendezvous. The deadline is what bounds that:
         the child's own connection is already queued by the time this is called,
-        so a full backlog of strangers still leaves it reachable.
+        so a full backlog of strangers still leaves it reachable, and each one
+        of them may spend only a share of what is left rather than all of it.
         """
         listener = self._listener
         if listener is None:
@@ -176,10 +208,12 @@ class ControlListener:
         Exactly as many bytes as the frame occupies, so a peer cannot make this
         read further than the parent agreed to read, and compared whole rather
         than while it arrives, so a wrong nonce costs the same wherever it
-        diverges.
+        diverges. It also takes only a share of the time the caller has left, so
+        a peer that never speaks cannot spend the wait of the one behind it.
         """
         presented = bytearray()
-        peer_deadline = min(deadline, time.monotonic() + _PEER_SECONDS)
+        began = time.monotonic()
+        peer_deadline = began + _peer_allowance(deadline - began)
         try:
             while len(presented) < len(expected):
                 connection.settimeout(max(peer_deadline - time.monotonic(), 0.0))
