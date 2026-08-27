@@ -45,6 +45,7 @@ import queue
 import socket
 import stat
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -86,6 +87,8 @@ from linkedin_mcp_server.server_role import (
 from linkedin_mcp_server.session_state import auth_root_dir, get_runtime_id
 
 logger = logging.getLogger(__name__)
+
+_IS_WINDOWS = os.name == "nt"
 
 #: Records carried by the authenticated startup control and handshake pipes. The
 #: nonce is handed over only after this process exists, so interpreter startup
@@ -132,6 +135,45 @@ def daemon_log_path(auth_root: Path) -> Path:
     return daemon_descriptor.daemon_dir(auth_root) / _LOG_FILE
 
 
+def _publish_windows_daemon_log(log_path: Path) -> None:
+    """Publish an empty private log without exposing an in-progress final path."""
+    try:
+        log_path.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        harden_file(log_path)
+        return
+
+    descriptor, staged_name = tempfile.mkstemp(
+        prefix=".daemon-log-", dir=log_path.parent
+    )
+    staged = Path(staged_name)
+    created = os.fstat(descriptor)
+    os.close(descriptor)
+    published = False
+    try:
+        harden_created_file(staged)
+        try:
+            staged.rename(log_path)
+        except FileExistsError:
+            harden_file(log_path)
+            return
+        published = True
+        harden_file(log_path)
+    except BaseException:
+        candidate = log_path if published else staged
+        with contextlib.suppress(OSError):
+            current = candidate.lstat()
+            if (current.st_dev, current.st_ino) == (created.st_dev, created.st_ino):
+                candidate.unlink()
+        raise
+    finally:
+        if not published:
+            with contextlib.suppress(OSError):
+                staged.unlink()
+
+
 def _attach_daemon_log(auth_root: Path) -> Path:
     """Open the daemon log inside the child and attach both output streams.
 
@@ -141,29 +183,33 @@ def _attach_daemon_log(auth_root: Path) -> Path:
     """
     directory = daemon_descriptor.prepare_daemon_state(auth_root)
     log_path = directory / _LOG_FILE
-    try:
-        log_path.lstat()
-    except FileNotFoundError:
-        existed = False
+    created = False
+    if _IS_WINDOWS:
+        _publish_windows_daemon_log(log_path)
     else:
-        existed = True
-        # The directory only became private above. An entry planted before then
-        # has to prove its own owner and access before open can append to it.
-        harden_file(log_path)
+        try:
+            log_path.lstat()
+        except FileNotFoundError:
+            created = True
+        else:
+            # The directory only became private above. An entry planted before then
+            # has to prove its own owner and access before open can append to it.
+            harden_file(log_path)
 
     flags = (
         os.O_APPEND
-        | os.O_CREAT
         | os.O_WRONLY
         | getattr(os, "O_NOFOLLOW", 0)
         | getattr(os, "O_NONBLOCK", 0)
         | getattr(os, "O_CLOEXEC", 0)
     )
+    if created:
+        flags |= os.O_CREAT
     descriptor = os.open(log_path, flags, 0o600)
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             raise PrivateStateError(f"{log_path} is not a regular file")
-        if not existed:
+        if created:
             harden_created_file(log_path)
         if not is_still_at(descriptor, log_path):
             raise PrivateStateError(
@@ -173,7 +219,7 @@ def _attach_daemon_log(auth_root: Path) -> Path:
         os.dup2(descriptor, sys.stdout.fileno())
         os.dup2(descriptor, sys.stderr.fileno())
     except BaseException:
-        if not existed and is_still_at(descriptor, log_path):
+        if created and is_still_at(descriptor, log_path):
             with contextlib.suppress(OSError):
                 log_path.unlink()
         raise
@@ -742,6 +788,7 @@ async def _serve(
     handshake: Handshake,
     handshake_nonce: str,
     control: TextIO,
+    startup_protocol: int = daemon_config.STARTUP_PROTOCOL_VERSION,
     job_name: str | None = None,
 ) -> int:
     """Run the endpoint, prepare it, and serve only after parent commit."""
@@ -793,35 +840,41 @@ async def _serve(
         )
 
         commit_deadline = time.monotonic() + _COMMIT_AUTH_SECONDS
+        predecessor_protocol = startup_protocol < daemon_config.STARTUP_PROTOCOL_VERSION
         _forget_superseded_tokens(auth_root)
         daemon_descriptor.prepare(auth_root, descriptor, token)
-        handshake.prepared(instance_id)
+        if predecessor_protocol:
+            # A predecessor parent has no commit record. Its only safe handoff is
+            # READY before publication: after this authenticated verdict it no
+            # longer kills a silent child, while the daemon lock prevents another
+            # owner from publishing during the remaining commit.
+            handshake.ready()
+        else:
+            handshake.prepared(instance_id)
 
         # Failed starts deliberately leave this generation's unique pending files.
         # Removing them re-enters account-home storage and can pin this process in
         # the kernel while it still owns the lock. The next successful lock holder's
         # pre-publication sweep removes every superseded generation instead.
 
-        # The lock holder performs the replacement. That ties commit authority to
-        # the process whose death frees the daemon lock: a suspended or stale
-        # frontend can never publish after its child has died and another child
-        # has won. EOF before this record means the parent never validated us. The
-        # same startup deadline bounds a live but suspended parent, whose pipe
-        # otherwise stays open forever while this child holds the daemon lock.
-        try:
-            decision = await _read_control_until(control, commit_deadline)
-        except TimeoutError:
-            logger.warning("The daemon starter did not authorize commit in time")
-            handshake.retry()
-            server.should_exit = True
-            await _stop_within(serving, _FAILED_STARTUP_SHUTDOWN_SECONDS)
-            return 1
-        if decision != f"{HANDSHAKE} {handshake_nonce} {COMMIT}\n":
-            logger.info("The daemon starter exited before committing this owner")
-            handshake.abort()
-            server.should_exit = True
-            await _stop_within(serving, _FAILED_STARTUP_SHUTDOWN_SECONDS)
-            return 0
+        # A predecessor frontend predates parent authorization. READY above ends
+        # its termination authority before this child attempts publication; current
+        # frontends use the atomic prepare/commit boundary below.
+        if not predecessor_protocol:
+            try:
+                decision = await _read_control_until(control, commit_deadline)
+            except TimeoutError:
+                logger.warning("The daemon starter did not authorize commit in time")
+                handshake.retry()
+                server.should_exit = True
+                await _stop_within(serving, _FAILED_STARTUP_SHUTDOWN_SECONDS)
+                return 1
+            if decision != f"{HANDSHAKE} {handshake_nonce} {COMMIT}\n":
+                logger.info("The daemon starter exited before committing this owner")
+                handshake.abort()
+                server.should_exit = True
+                await _stop_within(serving, _FAILED_STARTUP_SHUTDOWN_SECONDS)
+                return 0
 
         # The parent retains termination authority until this exact commit record.
         # Adopt before the first replacement attempt so parent loss cannot kill an
@@ -873,7 +926,8 @@ async def _serve(
         # follow, so a blocked log or state mount cannot strand a canonical owner
         # before the frontend learns it is ready.
         get_liveness().the_endpoint_is_live()
-        handshake.committed()
+        if not predecessor_protocol:
+            handshake.committed()
     except BaseException:
         server.should_exit = True
         # Through the same bounded stop as the stand-down path, and for the same
@@ -1173,6 +1227,8 @@ class Handshake(Protocol):
 
     def prepared(self, instance_id: str) -> None: ...
 
+    def ready(self) -> None: ...
+
     def committed(self) -> None: ...
 
     def fail(self) -> None: ...
@@ -1206,6 +1262,9 @@ class _Handshake:
 
     def prepared(self, instance_id: str) -> None:
         self._write(f"{PREPARED} {instance_id}", close=False)
+
+    def ready(self) -> None:
+        self._write(READY)
 
     def committed(self) -> None:
         self._write(COMMITTED)
@@ -1379,6 +1438,15 @@ def main(argv: list[str] | None = None) -> int:
         handshake.close()
         return 1
 
+    if _IS_WINDOWS and (
+        handover.startup_protocol < daemon_config.STARTUP_PROTOCOL_VERSION
+    ):
+        abandon_pending_inherited_lock()
+        bootstrap.report(BOOTSTRAP_STATE)
+        handshake.fail()
+        handshake.close()
+        return 1
+
     try:
         log_path = _attach_daemon_log(auth_root)
     except BaseException:
@@ -1407,6 +1475,7 @@ def main(argv: list[str] | None = None) -> int:
                 log_path=log_path,
                 handshake=handshake,
                 handshake_nonce=handover.handshake_nonce,
+                startup_protocol=handover.startup_protocol,
                 control=sys.stdin,
                 job_name=args.job_name,
             )

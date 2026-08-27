@@ -15,10 +15,11 @@ anything running as this account (``/proc/<pid>/environ`` and ``ps``), and what
 travels here includes ``proxy_password``. A pipe is read once by one process and
 never lands anywhere.
 
-Both ends are the same installation: the frontend starts the owner with its own
-interpreter and its own package, so this codec never crosses versions. It is
-still a parse of untrusted-shaped input rather than a restore, because the thing
-being reconstructed decides which browser opens against a logged-in session.
+A long-running frontend can start an owner after the package was upgraded on
+disk, so the handover carries a startup-protocol version. Missing means the
+pre-commit predecessor protocol. Input is still parsed as untrusted-shaped data
+because the reconstructed values decide which browser opens against a logged-in
+session.
 """
 
 from __future__ import annotations
@@ -47,6 +48,8 @@ if TYPE_CHECKING:
 #: *frontend's* invocation, and an owner that adopted them would try to run the
 #: client's transport or re-run its ``--login``.
 _SERVER_FIELDS = ("tool_timeout_seconds", "log_level")
+STARTUP_PROTOCOL_VERSION = 2
+_PREDECESSOR_STARTUP_PROTOCOL_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -55,6 +58,7 @@ class OwnerHandover:
 
     config: AppConfig
     handshake_nonce: str
+    startup_protocol: int = STARTUP_PROTOCOL_VERSION
 
 
 def _encoded(config: AppConfig) -> dict[str, object]:
@@ -83,6 +87,7 @@ def encode_handover(config: AppConfig, handshake_nonce: str) -> str:
         raise ValueError("The owner handshake nonce is invalid")
     payload = _encoded(config)
     payload["handshake_nonce"] = handshake_nonce
+    payload["startup_protocol"] = STARTUP_PROTOCOL_VERSION
     return json.dumps(payload)
 
 
@@ -126,7 +131,19 @@ def decode_handover(raw: str) -> OwnerHandover:
     if not valid_nonce(handshake_nonce):
         raise ValueError("The owner configuration has no valid handshake nonce")
     assert isinstance(handshake_nonce, str)
-    return OwnerHandover(_decoded(parsed), handshake_nonce)
+    startup_protocol = parsed.get(
+        "startup_protocol", _PREDECESSOR_STARTUP_PROTOCOL_VERSION
+    )
+    if (
+        not isinstance(startup_protocol, int)
+        or isinstance(startup_protocol, bool)
+        or startup_protocol
+        not in (_PREDECESSOR_STARTUP_PROTOCOL_VERSION, STARTUP_PROTOCOL_VERSION)
+    ):
+        raise ValueError(
+            "The owner configuration names an unsupported startup protocol"
+        )
+    return OwnerHandover(_decoded(parsed), handshake_nonce, startup_protocol)
 
 
 def _apply(

@@ -53,6 +53,7 @@ import os
 import secrets
 import socket
 import stat
+import tempfile
 import unicodedata
 import uuid
 from collections.abc import Mapping
@@ -485,26 +486,31 @@ def _verify_legacy_tombstone(legacy: Path) -> None:
         raise _legacy_migration_error(legacy)
 
 
-def _ensure_legacy_windows_tombstone(home: Path) -> None:
-    """Leave an exclusion object that every pre-v2 release refuses to cross."""
+def _legacy_windows_tombstone_exists(home: Path) -> bool:
     legacy = home / _LEGACY_WINDOWS_STATE_DIR
-    flags = (
-        os.O_WRONLY
-        | os.O_CREAT
-        | os.O_EXCL
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_CLOEXEC", 0)
-    )
     try:
-        descriptor = os.open(legacy, flags, 0o600)
-    except FileExistsError:
-        try:
-            _verify_legacy_tombstone(legacy)
-        except (OSError, PrivateStateError) as exc:
-            raise _legacy_migration_error(legacy) from exc
+        legacy.lstat()
+    except FileNotFoundError:
+        return False
+    try:
+        _verify_legacy_tombstone(legacy)
+    except (OSError, PrivateStateError) as exc:
+        raise _legacy_migration_error(legacy) from exc
+    return True
+
+
+def _ensure_legacy_windows_tombstone(home: Path, staging_root: Path) -> None:
+    """Publish a complete private exclusion object for every pre-v2 release."""
+    legacy = home / _LEGACY_WINDOWS_STATE_DIR
+    if _legacy_windows_tombstone_exists(home):
         return
 
+    descriptor, staged_name = tempfile.mkstemp(
+        prefix=".legacy-exclusion-", dir=staging_root
+    )
+    staged = Path(staged_name)
     created = os.fstat(descriptor)
+    published = False
     try:
         try:
             remaining = memoryview(_LEGACY_WINDOWS_TOMBSTONE)
@@ -517,14 +523,28 @@ def _ensure_legacy_windows_tombstone(home: Path) -> None:
         finally:
             os.close(descriptor)
 
-        harden_created_file(legacy)
+        harden_created_file(staged)
+        try:
+            staged.rename(legacy)
+        except FileExistsError:
+            try:
+                _verify_legacy_tombstone(legacy)
+            except (OSError, PrivateStateError) as exc:
+                raise _legacy_migration_error(legacy) from exc
+            return
+        published = True
         _verify_legacy_tombstone(legacy)
     except BaseException:
+        candidate = legacy if published else staged
         with contextlib.suppress(OSError):
-            current = legacy.lstat()
+            current = candidate.lstat()
             if (current.st_dev, current.st_ino) == (created.st_dev, created.st_ino):
-                legacy.unlink()
+                candidate.unlink()
         raise
+    finally:
+        if not published:
+            with contextlib.suppress(OSError):
+                staged.unlink()
 
 
 def _windows_directory_identity(path: Path) -> tuple[int, int]:
@@ -623,9 +643,11 @@ def prepare_daemon_state(auth_root: Path) -> Path:
         if os.name == "nt":
             _pin_windows_account_home(home)
         verify_children_cannot_be_replaced(home)
-        _ensure_legacy_windows_tombstone(home)
+        legacy_exists = _legacy_windows_tombstone_exists(home)
         application_root = home / _APPLICATION_STATE_DIR
         harden_directory_entry(application_root)
+        if not legacy_exists:
+            _ensure_legacy_windows_tombstone(home, application_root)
         harden_directory_entry(root)
     else:
         harden_directory(root)

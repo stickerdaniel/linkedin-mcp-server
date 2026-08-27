@@ -892,6 +892,43 @@ class TestStateLocation:
         with pytest.raises(NotADirectoryError):
             secure_mkdir(legacy / "daemon")
 
+    def test_windows_tombstone_is_hardened_before_publication(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import windows_acl
+
+        legacy = tmp_path / ".mcp-server-linkedin"
+        application = tmp_path / ".mcp-server-linkedin-v2"
+        hardened: list[Path] = []
+        real_harden = daemon_descriptor_module.harden_created_file
+
+        def harden(staged: Path) -> None:
+            assert staged.parent == application
+            assert staged != legacy
+            assert not legacy.exists()
+            hardened.append(staged)
+            real_harden(staged)
+
+        monkeypatch.setattr(daemon_descriptor_module, "_WINDOWS", True)
+        monkeypatch.setattr(
+            daemon_descriptor_module,
+            "_APPLICATION_STATE_DIR",
+            application.name,
+        )
+        monkeypatch.setattr(
+            windows_acl, "verify_children_cannot_be_replaced", lambda _path: None
+        )
+        monkeypatch.setattr(
+            windows_acl, "restrict_to_current_user", lambda *args, **kwargs: None
+        )
+        monkeypatch.setattr(daemon_descriptor_module, "harden_created_file", harden)
+
+        prepare_daemon_state(tmp_path / "auth")
+
+        assert len(hardened) == 1
+        assert not hardened[0].exists()
+        assert legacy.read_bytes() == daemon_descriptor_module._LEGACY_WINDOWS_TOMBSTONE
+
     def test_windows_removes_a_fresh_tombstone_when_hardening_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):

@@ -33,6 +33,7 @@ from typing import Any, cast
 import pytest
 
 import linkedin_mcp_server.daemon as daemon_module
+import linkedin_mcp_server.daemon_config as daemon_config
 import linkedin_mcp_server.daemon_descriptor as daemon_descriptor_module
 import linkedin_mcp_server.daemon_election as election_module
 import linkedin_mcp_server.daemon_owner as daemon_owner
@@ -4328,6 +4329,7 @@ class TestPublishingLast:
         track_cleanup: bool = False,
         server_factory: Callable[[Callable[[], None]], object] | None = None,
         job_name: str | None = None,
+        startup_protocol: int = daemon_config.STARTUP_PROTOCOL_VERSION,
         commit_implementation: Callable[[Path, str], object] | None = None,
     ) -> int:
         import asyncio
@@ -4351,6 +4353,9 @@ class TestPublishingLast:
         class _RecordingHandshake:
             def prepared(self, instance_id: str) -> None:
                 order.append("prepared")
+
+            def ready(self) -> None:
+                order.append("ready")
 
             def committed(self) -> None:
                 order.append("committed")
@@ -4468,9 +4473,27 @@ class TestPublishingLast:
                 handshake=_RecordingHandshake(),
                 handshake_nonce="0123456789abcdef" * 4,
                 control=cast(Any, control if control is not None else _Control()),
+                startup_protocol=startup_protocol,
                 job_name=job_name,
             )
         )
+
+    def test_predecessor_frontend_receives_ready_without_commit_control(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        order: list[str] = []
+
+        self._run_serve(
+            tmp_path,
+            monkeypatch,
+            order,
+            startup_protocol=1,
+        )
+
+        assert "prepared" not in order
+        assert "control" not in order
+        assert order.index("ready") < order.index("commit")
+        assert "committed" not in order
 
     def test_a_descriptor_is_prepared_only_after_the_endpoint_answers(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -66,6 +66,23 @@ class TestRoundTrip:
 
         assert handover.handshake_nonce == _NONCE
         assert handover.config.browser.headless is False
+        assert handover.startup_protocol == daemon_config.STARTUP_PROTOCOL_VERSION
+
+    def test_missing_startup_protocol_means_the_predecessor_frontend(self):
+        payload = json.loads(daemon_config.encode_handover(_config(), _NONCE))
+        payload.pop("startup_protocol")
+
+        handover = daemon_config.decode_handover(json.dumps(payload))
+
+        assert handover.startup_protocol == 1
+
+    @pytest.mark.parametrize("value", [True, 0, 3, "2"])
+    def test_unknown_startup_protocol_is_refused(self, value: object):
+        payload = json.loads(daemon_config.encode_handover(_config(), _NONCE))
+        payload["startup_protocol"] = value
+
+        with pytest.raises(ValueError, match="startup protocol"):
+            daemon_config.decode_handover(json.dumps(payload))
 
     def test_owner_handover_requires_a_valid_nonce(self):
         with pytest.raises(ValueError, match="handshake nonce"):
@@ -193,6 +210,35 @@ class TestDaemonLogState:
         described = describe_dacl(log_path)
         assert described.protected is True
         assert len(described.entries) == 1
+
+    def test_windows_log_is_hardened_before_publication(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import daemon_owner
+
+        log_path = tmp_path / "daemon.log"
+        hardened: list[Path] = []
+        verified: list[Path] = []
+        real_harden = daemon_owner.harden_created_file
+
+        def harden(staged: Path) -> None:
+            assert staged.parent == log_path.parent
+            assert staged != log_path
+            assert not log_path.exists()
+            hardened.append(staged)
+            real_harden(staged)
+
+        monkeypatch.setattr(daemon_owner, "harden_created_file", harden)
+        monkeypatch.setattr(
+            daemon_owner, "harden_file", lambda path: verified.append(path)
+        )
+
+        daemon_owner._publish_windows_daemon_log(log_path)
+
+        assert len(hardened) == 1
+        assert not hardened[0].exists()
+        assert verified == [log_path]
+        assert log_path.is_file()
 
     def test_failed_fresh_log_hardening_removes_the_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -545,6 +591,59 @@ class TestRefusing:
 
         assert daemon_owner.main(["--lock-fd", "123"]) == 1
         assert events == ["unlocked:123", f"diagnostic:{code}", "aborted"]
+
+    def test_predecessor_windows_frontend_is_refused_before_state_access(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import daemon_owner
+
+        events: list[str] = []
+        config = AppConfig()
+        config.browser.user_data_dir = str(tmp_path / "profile")
+
+        class RecordingBootstrap:
+            def __init__(self, _stream: object) -> None:
+                pass
+
+            def report(self, code: str) -> None:
+                events.append(f"diagnostic:{code}")
+
+            def close(self) -> None:
+                pass
+
+        class RecordingHandshake:
+            def __init__(self, _stream: object, _nonce: str) -> None:
+                pass
+
+            def fail(self) -> None:
+                events.append("failed")
+
+            def close(self) -> None:
+                events.append("closed")
+
+        monkeypatch.setattr(daemon_owner, "_IS_WINDOWS", True)
+        monkeypatch.setattr(daemon_owner, "_BootstrapDiagnostics", RecordingBootstrap)
+        monkeypatch.setattr(daemon_owner, "_Handshake", RecordingHandshake)
+        monkeypatch.setattr(daemon_owner, "_claim_bootstrap_stream", lambda: None)
+        monkeypatch.setattr(daemon_owner, "_claim_handshake_stream", lambda: None)
+        monkeypatch.setattr(
+            daemon_owner,
+            "_read_handover",
+            lambda: daemon_config.OwnerHandover(config, _NONCE, startup_protocol=1),
+        )
+        monkeypatch.setattr(daemon_owner, "auth_root_dir", lambda _profile: tmp_path)
+        monkeypatch.setattr(
+            daemon_owner,
+            "_attach_daemon_log",
+            lambda _auth_root: pytest.fail("predecessor reached the v2 state root"),
+        )
+
+        assert daemon_owner.main([]) == 1
+        assert events == [
+            f"diagnostic:{daemon_owner.BOOTSTRAP_STATE}",
+            "failed",
+            "closed",
+        ]
 
     def test_lock_adoption_failure_unlocks_the_inherited_handoff(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
