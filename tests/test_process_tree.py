@@ -1014,6 +1014,89 @@ def test_registered_group_kill_revalidates_kernel_identity(
     assert killed == [(456, signal.SIGKILL)]
 
 
+def test_hard_exit_rescans_markers_for_later_browser_groups(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    killed: list[tuple[int, signal.Signals]] = []
+    original_groups = dict(process_tree._registered_posix_groups)
+    original_markers = set(process_tree._registered_browser_markers)
+    process_tree._registered_posix_groups.clear()
+    process_tree._registered_browser_markers.clear()
+    process_tree._registered_browser_markers.add("launch-marker")
+    monkeypatch.setattr(process_tree, "_marked_posix_processes", lambda marker: (900,))
+    monkeypatch.setattr(
+        process_tree,
+        "_posix_process_rows",
+        lambda: {900: (1, 789, "late-member")},
+    )
+    monkeypatch.setattr(process_tree, "_kernel_start_identity", lambda process: None)
+    monkeypatch.setattr(process_tree, "process_group_exists", lambda group: True)
+    monkeypatch.setattr(os, "getpgrp", lambda: 100)
+    monkeypatch.setattr(os, "killpg", lambda group, sig: killed.append((group, sig)))
+
+    try:
+        targeted = process_tree._kill_registered_process_groups()
+        registration = process_tree._registered_posix_groups[789]
+    finally:
+        process_tree._registered_posix_groups.clear()
+        process_tree._registered_posix_groups.update(original_groups)
+        process_tree._registered_browser_markers.clear()
+        process_tree._registered_browser_markers.update(original_markers)
+
+    assert targeted == (789,)
+    assert registration.members == {900: "late-member"}
+    assert killed == [(789, signal.SIGKILL)]
+
+
+def test_hard_exit_waits_for_targeted_groups_to_disappear(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    checks = iter([True, True, False])
+    slept: list[float] = []
+    monkeypatch.setattr(
+        process_tree, "process_group_exists", lambda group: next(checks)
+    )
+    monkeypatch.setattr(process_tree.time, "sleep", slept.append)
+
+    process_tree._wait_for_process_groups((456,))
+
+    assert slept == [process_tree._JOB_POLL_SECONDS, process_tree._JOB_POLL_SECONDS]
+
+
+@_POSIX_ONLY
+def test_posix_hard_exit_drains_browser_groups_before_owner_exit(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    events: list[object] = []
+    monkeypatch.setattr(os, "getpid", lambda: 100)
+    monkeypatch.setattr(os, "getpgrp", lambda: 100)
+    monkeypatch.setattr(
+        process_tree,
+        "_kill_registered_process_groups",
+        lambda: events.append("kill-browser") or (456,),
+    )
+    monkeypatch.setattr(
+        process_tree,
+        "_wait_for_process_groups",
+        lambda groups: events.append(("drain-browser", groups)),
+    )
+    monkeypatch.setattr(
+        os,
+        "killpg",
+        lambda group, sig: events.append(("kill-owner", group, sig)),
+    )
+    monkeypatch.setattr(os, "_exit", lambda status: events.append(("exit", status)))
+
+    process_tree.hard_exit_process_tree(7)
+
+    assert events == [
+        "kill-browser",
+        ("drain-browser", (456,)),
+        ("kill-owner", 100, signal.SIGKILL),
+        ("exit", 7),
+    ]
+
+
 def test_reused_browser_group_replaces_the_old_registration(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -1166,10 +1249,12 @@ print(browser.pid, flush=True)
     try:
         process_tree.remember_detached_process_groups(marker)
         registration = process_tree._registered_posix_groups[browser_pid]
+        assert marker in process_tree._registered_browser_markers
         assert registration.members[browser_pid] == process_tree._kernel_start_identity(
             browser_pid
         )
     finally:
+        process_tree._registered_browser_markers.discard(marker)
         process_tree._registered_posix_groups.pop(browser_pid, None)
         if _alive(browser_pid):
             os.killpg(browser_pid, signal.SIGKILL)
@@ -1246,6 +1331,79 @@ daemon_owner._exit_hard()
             os.kill(browser_pid, signal.SIGKILL)
 
 
+def test_adopted_windows_job_drains_every_other_process(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    current = os.getpid()
+    queries = iter([(current, 700), (current,)])
+    terminated: list[int] = []
+    closed: list[int] = []
+
+    class ProcessHandle:
+        def __init__(self, process: int) -> None:
+            self.process = process
+
+        def Close(self) -> None:
+            closed.append(self.process)
+
+    class Api:
+        @staticmethod
+        def OpenProcess(access: int, inherit: bool, process: int) -> ProcessHandle:
+            assert access == 1
+            assert inherit is False
+            return ProcessHandle(process)
+
+        @staticmethod
+        def TerminateProcess(handle: ProcessHandle, status: int) -> None:
+            assert status == 1
+            terminated.append(handle.process)
+
+    class Con:
+        PROCESS_TERMINATE = 1
+
+    class Job:
+        JobObjectBasicProcessIdList = 3
+
+        @staticmethod
+        def QueryInformationJobObject(handle: int, information: int) -> tuple[int, ...]:
+            assert handle == 123
+            assert information == Job.JobObjectBasicProcessIdList
+            return next(queries)
+
+    original = process_tree._adopted_windows_job
+    process_tree._adopted_windows_job = 123
+    monkeypatch.setattr(
+        process_tree, "_windows_modules", lambda: (Api(), Con(), Job(), object())
+    )
+    monkeypatch.setattr(process_tree.time, "sleep", lambda _seconds: None)
+    try:
+        process_tree._drain_adopted_windows_job()
+    finally:
+        process_tree._adopted_windows_job = original
+
+    assert terminated == [700]
+    assert closed == [700]
+
+
+def test_windows_hard_exit_drains_the_job_before_releasing_locks(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    events: list[object] = []
+    monkeypatch.setattr(process_tree, "_IS_WINDOWS", True)
+    monkeypatch.setattr(
+        process_tree,
+        "_drain_adopted_windows_job",
+        lambda: events.append("drain-job"),
+    )
+    monkeypatch.setattr(
+        process_tree.os, "_exit", lambda status: events.append(("exit", status))
+    )
+
+    process_tree.hard_exit_process_tree(7)
+
+    assert events == ["drain-job", ("exit", 7)]
+
+
 class TestWindowsJobObject:
     @_WINDOWS_ONLY
     def test_owner_adoption_survives_parent_close_and_hard_exit_drains(
@@ -1257,7 +1415,7 @@ import subprocess
 import sys
 import time
 
-from linkedin_mcp_server.process_tree import WindowsJob
+from linkedin_mcp_server.process_tree import WindowsJob, hard_exit_process_tree
 
 name = sys.argv[1]
 WindowsJob.verify_current_process(name)
@@ -1269,7 +1427,7 @@ child = subprocess.Popen(
     stderr=subprocess.DEVNULL,
 )
 print(os.getpid(), child.pid, flush=True)
-time.sleep(600)
+hard_exit_process_tree(7)
 """
         job = process_tree.WindowsJob.named("owner-integration")
         nonce = process_tree.release_nonce()
@@ -1292,15 +1450,7 @@ time.sleep(600)
             owner_pid, descendant_pid = map(int, process.stdout.readline().split())
 
             job.close()
-            assert _alive(owner_pid)
-            assert _alive(descendant_pid)
-
-            subprocess.run(
-                ["taskkill", "/PID", str(owner_pid), "/F"],
-                check=True,
-                capture_output=True,
-            )
-            process.wait(timeout=30)
+            assert process.wait(timeout=30) == 7
             assert _wait_gone(owner_pid, descendant_pid)
         finally:
             if not job.closed:

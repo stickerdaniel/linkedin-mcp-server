@@ -19,6 +19,7 @@ from typing import Any, NoReturn
 
 logger = logging.getLogger(__name__)
 
+_IS_WINDOWS = os.name == "nt"
 _adopted_windows_job: int | None = None
 _retained_windows_jobs: list[WindowsJob] = []
 _BROWSER_PROCESS_MARKER = "LINKEDIN_MCP_BROWSER_PROCESS_MARKER"
@@ -31,6 +32,7 @@ class _PosixGroupRegistration:
 
 
 _registered_posix_groups: dict[int, _PosixGroupRegistration] = {}
+_registered_browser_markers: set[str] = set()
 _JOB_API_FAILURE_LIMIT = 3
 _JOB_POLL_SECONDS = 0.01
 _JOB_NAME_ATTEMPTS = 8
@@ -212,6 +214,7 @@ def remember_detached_process_groups(marker: str | None = None) -> None:
 
     observed = list(_posix_detached_descendants(pid, process_group))
     if marker is not None:
+        _registered_browser_markers.add(marker)
         known = {process for process, _group, _identity in observed}
         for process in _marked_posix_processes(marker):
             if process in known:
@@ -233,14 +236,49 @@ def remember_detached_process_groups(marker: str | None = None) -> None:
         )
 
 
+def _refresh_marked_process_groups(
+    rows: dict[int, tuple[int, int, str | None]],
+) -> None:
+    """Add every currently marked browser group to the hard-exit registry."""
+    owner_group = os.getpgrp()
+    grouped: dict[int, dict[int, str]] = {}
+    for marker in tuple(_registered_browser_markers):
+        for process in _marked_posix_processes(marker):
+            row = rows.get(process)
+            if row is not None:
+                group = row[1]
+                identity = row[2] or _kernel_start_identity(process)
+            else:
+                try:
+                    group = os.getpgid(process)
+                except OSError:
+                    continue
+                identity = _kernel_start_identity(process)
+            if group == owner_group or identity is None:
+                continue
+            grouped.setdefault(group, {})[process] = identity
+
+    for group, members in grouped.items():
+        registration = _registered_posix_groups.get(group)
+        if registration is None:
+            _registered_posix_groups[group] = _PosixGroupRegistration(
+                leader_identity=_kernel_start_identity(group),
+                members=members,
+            )
+        else:
+            registration.members.update(members)
+
+
 def _registered_group_still_matches(
     group: int,
     registration: _PosixGroupRegistration,
     rows: dict[int, tuple[int, int, str | None]],
 ) -> bool:
-    current = _kernel_start_identity(group)
-    if current is not None:
-        return current == registration.leader_identity
+    leader = rows.get(group)
+    if leader is not None and leader[1] == group:
+        current = leader[2] or _kernel_start_identity(group)
+        if current == registration.leader_identity:
+            return True
     if not process_group_exists(group):
         return False
     for process, identity in registration.members.items():
@@ -252,34 +290,95 @@ def _registered_group_still_matches(
     return False
 
 
-def _kill_registered_process_groups() -> None:
+def _kill_registered_process_groups() -> tuple[int, ...]:
     try:
         rows = _posix_process_rows()
     except OSError:
         rows = {}
+    _refresh_marked_process_groups(rows)
+
+    targeted: list[int] = []
     for group, registration in tuple(_registered_posix_groups.items()):
         if not _registered_group_still_matches(group, registration, rows):
             continue
+        targeted.append(group)
         with contextlib.suppress(OSError):
             os.killpg(group, signal.SIGKILL)
+    return tuple(targeted)
+
+
+def _wait_for_process_groups(groups: tuple[int, ...]) -> None:
+    """Keep the owner's locks until every targeted browser group is gone."""
+    remaining = set(groups)
+    while remaining:
+        for group in tuple(remaining):
+            registration = _registered_posix_groups.get(group)
+            if registration is None:
+                continue
+            for process in registration.members:
+                with contextlib.suppress(ChildProcessError, OSError):
+                    os.waitpid(process, os.WNOHANG)
+        remaining = {group for group in remaining if process_group_exists(group)}
+        if remaining:
+            time.sleep(_JOB_POLL_SECONDS)
+
+
+def _drain_adopted_windows_job() -> None:
+    """Terminate every other Job member before this owner releases its locks."""
+    if _adopted_windows_job is None:
+        return
+    win32api, win32con, win32job, _winerror = _windows_modules()
+    current = os.getpid()
+    while True:
+        try:
+            members = win32job.QueryInformationJobObject(
+                _adopted_windows_job, win32job.JobObjectBasicProcessIdList
+            )
+        except BaseException:  # noqa: BLE001 - releasing the locks is less safe
+            time.sleep(_JOB_POLL_SECONDS)
+            continue
+        descendants = tuple(
+            int(process)
+            for process in members
+            if process is not None and int(process) not in (0, current)
+        )
+        if not descendants:
+            return
+        for process in descendants:
+            handle: Any | None = None
+            try:
+                handle = win32api.OpenProcess(
+                    win32con.PROCESS_TERMINATE, False, process
+                )
+                win32api.TerminateProcess(handle, 1)
+            except BaseException:  # noqa: BLE001 - the next Job query proves exit
+                pass
+            finally:
+                if handle is not None:
+                    with contextlib.suppress(BaseException):
+                        handle.Close()
+        time.sleep(_JOB_POLL_SECONDS)
 
 
 def hard_exit_process_tree(status: int) -> NoReturn:
-    """Exit immediately and kill descendants across their POSIX process groups."""
-    if os.name != "nt":
+    """Drain managed descendants before this process releases ownership locks."""
+    if _IS_WINDOWS:
+        _drain_adopted_windows_job()
+    else:
         pid = os.getpid()
         try:
             process_group = os.getpgrp()
             if process_group == pid:
-                # Chromium is deliberately spawned detached by Patchright. Snapshot
-                # it while the Node parent still makes ancestry observable, then kill
-                # escaped descendants before the owner's own group.
-                _kill_registered_process_groups()
+                # Chromium is deliberately spawned detached by Patchright. Kill and
+                # drain those groups while this owner still holds the daemon and
+                # profile locks, then end the owner's own group.
+                groups = _kill_registered_process_groups()
+                _wait_for_process_groups(groups)
                 os.killpg(process_group, signal.SIGKILL)
         except OSError:
             pass
-    # On Windows, process exit closes the only Job handle. On POSIX this is the
-    # fallback when the caller was not launched as the expected group leader.
+    # The Windows Job now contains only this owner. On POSIX this is the fallback
+    # when the caller was not launched as the expected group leader.
     os._exit(status)
 
 
