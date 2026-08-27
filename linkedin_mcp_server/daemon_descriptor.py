@@ -117,6 +117,7 @@ def _application_state_dir(platform_name: str) -> str:
 
 _APPLICATION_STATE_DIR = _application_state_dir(os.name)
 _LEGACY_WINDOWS_STATE_DIR = ".mcp-server-linkedin"
+_LEGACY_WINDOWS_TOMBSTONE = b"mcp-server-linkedin-v2\n"
 _WINDOWS = os.name == "nt"
 
 # Enough that guessing is not a strategy. Read straight from the OS source.
@@ -278,7 +279,10 @@ def daemon_state_root() -> Path:
     the same reason, and no lock addressed by path can avoid it. The account
     that could do this is the one whose browser is at stake.
     """
-    return (_account_home() / _APPLICATION_STATE_DIR / _DAEMON_DIR).resolve()
+    root = _account_home() / _APPLICATION_STATE_DIR / _DAEMON_DIR
+    # Windows must inspect each application-owned component before following it.
+    # Resolving here would turn a junction into an ordinary-looking target first.
+    return root if _WINDOWS else root.resolve()
 
 
 def _canonical_path(path: Path, label: str) -> Path:
@@ -457,24 +461,62 @@ def daemon_dir(auth_root: Path) -> Path:
     return daemon_state_root() / _daemon_dir_name(auth_root)
 
 
-def _refuse_legacy_windows_state() -> None:
-    """Prevent a new owner from running beside one using the legacy namespace."""
-    if not _WINDOWS:
-        return
-    legacy = _account_home() / _LEGACY_WINDOWS_STATE_DIR
-    try:
-        legacy.lstat()
-    except FileNotFoundError:
-        return
-    except OSError as exc:
-        raise PrivateStateError(
-            f"Could not inspect legacy Windows daemon state at {legacy}: {exc}"
-        ) from exc
-    raise PrivateStateError(
+def _legacy_migration_error(legacy: Path) -> PrivateStateError:
+    return PrivateStateError(
         f"Legacy Windows daemon state still exists at {legacy}. Stop every "
         "mcp-server-linkedin process, remove that directory, and restart the MCP "
         "host before using the new private state namespace."
     )
+
+
+def _verify_legacy_tombstone(legacy: Path) -> None:
+    harden_file(legacy)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    descriptor = os.open(legacy, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise _legacy_migration_error(legacy)
+        marker = os.read(descriptor, len(_LEGACY_WINDOWS_TOMBSTONE) + 1)
+    finally:
+        os.close(descriptor)
+    if marker != _LEGACY_WINDOWS_TOMBSTONE:
+        raise _legacy_migration_error(legacy)
+
+
+def _ensure_legacy_windows_tombstone(home: Path) -> None:
+    """Leave an exclusion object that every pre-v2 release refuses to cross."""
+    legacy = home / _LEGACY_WINDOWS_STATE_DIR
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        descriptor = os.open(legacy, flags, 0o600)
+    except FileExistsError:
+        try:
+            _verify_legacy_tombstone(legacy)
+        except (OSError, PrivateStateError) as exc:
+            raise _legacy_migration_error(legacy) from exc
+        return
+
+    try:
+        remaining = memoryview(_LEGACY_WINDOWS_TOMBSTONE)
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                raise OSError("legacy exclusion marker write made no progress")
+            remaining = remaining[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+    from linkedin_mcp_server.windows_acl import restrict_to_current_user
+
+    restrict_to_current_user(legacy, directory=False)
+    _verify_legacy_tombstone(legacy)
 
 
 def prepare_daemon_state(auth_root: Path) -> Path:
@@ -486,9 +528,20 @@ def prepare_daemon_state(auth_root: Path) -> Path:
     its own right. Files inside are hardened separately before their contents or
     locking semantics are used.
     """
-    _refuse_legacy_windows_state()
     root = daemon_state_root()
-    harden_directory(root)
+    if _WINDOWS:
+        home = _account_home()
+        from linkedin_mcp_server.windows_acl import (
+            verify_children_cannot_be_replaced,
+        )
+
+        verify_children_cannot_be_replaced(home)
+        _ensure_legacy_windows_tombstone(home)
+        application_root = home / _APPLICATION_STATE_DIR
+        harden_directory_entry(application_root)
+        harden_directory_entry(root)
+    else:
+        harden_directory(root)
     directory = root / _daemon_dir_name(auth_root)
     harden_directory_entry(directory)
     return directory

@@ -756,6 +756,29 @@ class TestStateLocation:
             == ".mcp-server-linkedin"
         )
 
+    def test_windows_refuses_an_unsafe_account_home_before_writing_state(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import windows_acl
+
+        monkeypatch.setattr(daemon_descriptor_module, "_WINDOWS", True)
+        monkeypatch.setattr(
+            daemon_descriptor_module,
+            "_APPLICATION_STATE_DIR",
+            ".mcp-server-linkedin-v2",
+        )
+
+        def refuse(_path: Path) -> None:
+            raise PrivateStateError("unsafe home")
+
+        monkeypatch.setattr(windows_acl, "verify_children_cannot_be_replaced", refuse)
+
+        with pytest.raises(PrivateStateError, match="unsafe home"):
+            prepare_daemon_state(tmp_path / "auth")
+
+        assert not (tmp_path / ".mcp-server-linkedin").exists()
+        assert not (tmp_path / ".mcp-server-linkedin-v2").exists()
+
     def test_windows_refuses_legacy_state_before_creating_the_new_namespace(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
@@ -763,11 +786,16 @@ class TestStateLocation:
         legacy.mkdir()
         marker = legacy / "legacy-marker"
         marker.write_text("untouched")
+        from linkedin_mcp_server import windows_acl
+
         monkeypatch.setattr(daemon_descriptor_module, "_WINDOWS", True)
         monkeypatch.setattr(
             daemon_descriptor_module,
             "_APPLICATION_STATE_DIR",
             ".mcp-server-linkedin-v2",
+        )
+        monkeypatch.setattr(
+            windows_acl, "verify_children_cannot_be_replaced", lambda _path: None
         )
 
         with pytest.raises(PrivateStateError, match="Stop every mcp-server-linkedin"):
@@ -785,6 +813,120 @@ class TestStateLocation:
             prepare_daemon_state(tmp_path / "auth")
 
         assert not (tmp_path / ".mcp-server-linkedin-v2").exists()
+
+    def test_windows_tombstone_blocks_an_old_namespace_from_reappearing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import windows_acl
+        from linkedin_mcp_server.common_utils import secure_mkdir
+
+        monkeypatch.setattr(daemon_descriptor_module, "_WINDOWS", True)
+        monkeypatch.setattr(
+            daemon_descriptor_module,
+            "_APPLICATION_STATE_DIR",
+            ".mcp-server-linkedin-v2",
+        )
+        monkeypatch.setattr(
+            windows_acl, "verify_children_cannot_be_replaced", lambda _path: None
+        )
+        monkeypatch.setattr(
+            windows_acl, "restrict_to_current_user", lambda *args, **kwargs: None
+        )
+
+        first = prepare_daemon_state(tmp_path / "auth")
+        second = prepare_daemon_state(tmp_path / "auth")
+        legacy = tmp_path / ".mcp-server-linkedin"
+
+        assert first == second
+        assert legacy.read_bytes() == daemon_descriptor_module._LEGACY_WINDOWS_TOMBSTONE
+        with pytest.raises(NotADirectoryError):
+            secure_mkdir(legacy / "daemon")
+
+    def test_windows_refuses_an_invalid_legacy_tombstone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import windows_acl
+
+        legacy = tmp_path / ".mcp-server-linkedin"
+        legacy.write_text("foreign marker")
+        monkeypatch.setattr(daemon_descriptor_module, "_WINDOWS", True)
+        monkeypatch.setattr(
+            daemon_descriptor_module,
+            "_APPLICATION_STATE_DIR",
+            ".mcp-server-linkedin-v2",
+        )
+        monkeypatch.setattr(
+            windows_acl, "verify_children_cannot_be_replaced", lambda _path: None
+        )
+
+        with pytest.raises(PrivateStateError, match="Legacy Windows daemon state"):
+            prepare_daemon_state(tmp_path / "auth")
+
+        assert not (tmp_path / ".mcp-server-linkedin-v2").exists()
+
+    @pytest.mark.skipif(os.name == "nt", reason="portable symbolic-link contract")
+    def test_windows_refuses_a_link_at_the_application_namespace(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import windows_acl
+
+        target = tmp_path / "redirected"
+        target.mkdir()
+        application = tmp_path / ".mcp-server-linkedin-v2"
+        application.symlink_to(target, target_is_directory=True)
+        monkeypatch.setattr(daemon_descriptor_module, "_WINDOWS", True)
+        monkeypatch.setattr(
+            daemon_descriptor_module,
+            "_APPLICATION_STATE_DIR",
+            ".mcp-server-linkedin-v2",
+        )
+        monkeypatch.setattr(
+            windows_acl, "verify_children_cannot_be_replaced", lambda _path: None
+        )
+        monkeypatch.setattr(
+            windows_acl, "restrict_to_current_user", lambda *args, **kwargs: None
+        )
+
+        with pytest.raises(PrivateStateError, match="symbolic link"):
+            prepare_daemon_state(tmp_path / "auth")
+
+        assert list(target.iterdir()) == []
+
+    @windows_only
+    def test_windows_refuses_a_permissive_application_namespace(self, tmp_path: Path):
+        from linkedin_mcp_server.windows_acl import describe_dacl
+
+        application = tmp_path / ".mcp-server-linkedin-v2"
+        application.mkdir()
+        subprocess.run(
+            ["icacls", str(application), "/grant", "*S-1-1-0:(OI)(CI)F"],
+            check=True,
+            capture_output=True,
+        )
+
+        with pytest.raises(PrivateStateError, match="grants access"):
+            prepare_daemon_state(tmp_path / "auth")
+
+        assert "S-1-1-0" in {entry.sid for entry in describe_dacl(application).entries}
+
+    @windows_only
+    def test_windows_refuses_a_junction_at_the_application_namespace(
+        self, tmp_path: Path
+    ):
+        target = tmp_path / "redirected"
+        target.mkdir()
+        application = tmp_path / ".mcp-server-linkedin-v2"
+        subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/J", str(application), str(target)],
+            check=True,
+            capture_output=True,
+        )
+        try:
+            with pytest.raises(PrivateStateError, match="Windows reparse point"):
+                prepare_daemon_state(tmp_path / "auth")
+            assert list(target.iterdir()) == []
+        finally:
+            application.rmdir()
 
     @posix_only
     def test_fresh_state_is_private_under_umask_zero(self, tmp_path: Path):

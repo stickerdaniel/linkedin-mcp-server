@@ -1169,3 +1169,40 @@ def verify_owner_only(path: Path, *, directory: bool) -> None:
             f"{FILE_ALL_ACCESS:#010x} that was asked for, so the filesystem "
             f"stored something other than what was requested"
         )
+
+
+def verify_children_cannot_be_replaced(path: Path) -> None:
+    """Refuse a parent that lets an unprivileged account replace its children."""
+    sid, sid_buffer = current_user_sid()
+    try:
+        current_user = _sid_to_string(sid)
+    finally:
+        del sid_buffer
+
+    trusted = {
+        current_user,
+        "S-1-5-18",  # LocalSystem
+        "S-1-5-32-544",  # BUILTIN\\Administrators
+    }
+    owner = read_owner(path)
+    if owner not in trusted:
+        raise PrivateStateError(
+            f"{path} is owned by {owner}, which can rewrite its child permissions"
+        )
+
+    for entry in describe_dacl(path).entries:
+        if entry.flags & INHERIT_ONLY_ACE:
+            continue
+        if entry.type == ACCESS_DENIED_ACE_TYPE:
+            continue
+        if entry.type != ACCESS_ALLOWED_ACE_TYPE:
+            raise PrivateStateError(
+                f"{path} carries an unsupported permission entry for {entry.sid}"
+            )
+        if entry.sid in trusted:
+            continue
+        if entry.mask & _CHILD_REPLACEMENT_RIGHTS:
+            raise PrivateStateError(
+                f"{path} grants {entry.sid} permission to replace private state "
+                "below the account home"
+            )

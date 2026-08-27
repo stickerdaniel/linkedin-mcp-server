@@ -1069,6 +1069,34 @@ class TestWindowsAcl:
         assert "S-1-5-11" not in granted  # Authenticated Users
 
     @windows_only
+    def test_a_private_parent_prevents_child_replacement(self, tmp_path: Path):
+        from linkedin_mcp_server.windows_acl import (
+            verify_children_cannot_be_replaced,
+        )
+
+        parent = tmp_path / "account-home"
+        harden_directory(parent)
+
+        verify_children_cannot_be_replaced(parent)
+
+    @windows_only
+    def test_a_parent_granting_delete_child_is_refused(self, tmp_path: Path):
+        from linkedin_mcp_server.windows_acl import (
+            verify_children_cannot_be_replaced,
+        )
+
+        parent = tmp_path / "account-home"
+        harden_directory(parent)
+        subprocess.run(
+            ["icacls", str(parent), "/grant", "*S-1-1-0:(DC)"],
+            check=True,
+            capture_output=True,
+        )
+
+        with pytest.raises(PrivateStateError, match="replace private state"):
+            verify_children_cannot_be_replaced(parent)
+
+    @windows_only
     def test_hardening_preserves_current_ownership(self, tmp_path: Path):
         # The entry is created by this account and remains owned by it. Hardening
         # refuses foreign content instead of laundering its ownership.
