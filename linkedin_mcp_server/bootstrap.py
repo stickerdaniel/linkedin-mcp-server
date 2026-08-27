@@ -890,7 +890,15 @@ async def _cleanup_assigned_windows_job_once(
     if job is None or popen is None or not proc.assigned:
         return
 
-    await asyncio.to_thread(job.terminate)
+    try:
+        await asyncio.to_thread(job.terminate)
+    except BaseException:
+        # Kill-on-close is the independent containment mechanism. If the explicit
+        # API refuses termination, closing the owner handle is the last
+        # deterministic action that can still end the tree.
+        await asyncio.to_thread(job.close)
+        proc.assigned = False
+        raise
     returncode = await _wait_for_direct_process_exit_within(
         proc, _installer_stop_remaining(deadline)
     )

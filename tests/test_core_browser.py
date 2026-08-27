@@ -330,6 +330,11 @@ class TestTheWindowlessLaunchEndToEnd:
 
         # The page handed to callers is the windowless one, not the startup one.
         assert manager.page.url.startswith("about:blank#")
+        from linkedin_mcp_server.process_tree import _BROWSER_PROCESS_MARKER
+
+        assert recorder["options"]["env"][_BROWSER_PROCESS_MARKER] == (
+            manager._process_marker
+        )
         # The driver saw the flag; setting it afterwards would be too late.
         assert recorder["flags_at_driver_start"] == ["1"]
         # And it did not leak past the launch.
@@ -345,15 +350,17 @@ class TestTheWindowlessLaunchEndToEnd:
         recorder: dict = {}
         start, _ = self._fake_playwright(recorder)
         manager = BrowserManager(user_data_dir=tmp_path / "p", headless=True)
-        remembered: list[bool] = []
+        remembered: list[str] = []
 
         async def fail_after_launch(*args, **kwargs):
-            assert remembered == [True], "page setup ran before group registration"
+            assert remembered == [manager._process_marker], (
+                "page setup ran before group registration"
+            )
             raise RuntimeError("page setup failed")
 
         monkeypatch.setattr(
             "linkedin_mcp_server.core.browser.remember_detached_process_groups",
-            lambda: remembered.append(True),
+            lambda marker: remembered.append(marker),
         )
         closed = AsyncMock(return_value=True)
         with mock.patch.object(manager, "close", closed):
@@ -372,7 +379,7 @@ class TestTheWindowlessLaunchEndToEnd:
                         with pytest.raises(Exception, match="page setup failed"):
                             await manager.start()
 
-        assert remembered == [True, True]
+        assert remembered == [manager._process_marker, manager._process_marker]
         closed.assert_awaited_once()
 
     async def test_a_refused_window_falls_back_to_headless(self, tmp_path):
@@ -408,14 +415,8 @@ class TestTheWindowlessLaunchEndToEnd:
         assert recorder["flags_at_driver_start"] == ["1", None]
         assert recorder["driver_stops"]["count"] == 1
 
-    async def test_a_driver_that_will_not_stop_does_not_block_the_fallback(
-        self, tmp_path
-    ):
-        """A wedged driver must not turn a recoverable launch into a hang.
-
-        `close()` bounds its own cleanup for exactly this reason. Leaving one
-        driver behind is the lesser cost against never returning.
-        """
+    async def test_a_driver_that_will_not_stop_aborts_the_fallback(self, tmp_path):
+        """A second browser must not open while the first driver may survive."""
         recorder: dict = {}
         start, _ = self._fake_playwright(recorder, refuse_headed=True, stop_hangs=True)
         manager = BrowserManager(user_data_dir=tmp_path / "p", headless=True)
@@ -432,15 +433,14 @@ class TestTheWindowlessLaunchEndToEnd:
                     "linkedin_mcp_server.core.browser.async_playwright"
                 ) as playwright:
                     playwright.return_value.start = start
-                    await manager.start()
+                    with pytest.raises(Exception):
+                        await manager.start()
         elapsed = time.monotonic() - began
 
-        assert recorder["options"]["headless"] is True
-        assert recorder["flags_at_driver_start"] == ["1", None]
-        # The timing is the assertion, not decoration. Without the bound this
-        # still *succeeds* -- it just waits out the wedged driver first, which
-        # is precisely the behaviour being ruled out. The fake hangs for 30s;
-        # anything near that means the bound was skipped.
+        assert recorder["options"]["headless"] is False
+        assert recorder["flags_at_driver_start"] == ["1"]
+        # Both the first stop and the cleanup retry are bounded. The fake hangs
+        # for 30s; anything near that means one of those bounds was skipped.
         assert elapsed < 5, f"the wedged driver was waited out ({elapsed:.1f}s)"
 
     async def test_a_launch_that_fails_either_way_reports_the_first_error(

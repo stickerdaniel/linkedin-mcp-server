@@ -13,6 +13,7 @@ import signal
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -20,7 +21,16 @@ logger = logging.getLogger(__name__)
 
 _adopted_windows_job: int | None = None
 _retained_windows_jobs: list[WindowsJob] = []
-_registered_posix_groups: dict[int, str] = {}
+_BROWSER_PROCESS_MARKER = "LINKEDIN_MCP_BROWSER_PROCESS_MARKER"
+
+
+@dataclass
+class _PosixGroupRegistration:
+    leader_identity: str | None
+    members: dict[int, str]
+
+
+_registered_posix_groups: dict[int, _PosixGroupRegistration] = {}
 _JOB_API_FAILURE_LIMIT = 3
 _JOB_POLL_SECONDS = 0.01
 _JOB_NAME_ATTEMPTS = 8
@@ -30,6 +40,12 @@ _POSIX_PROCESS_SNAPSHOT_SECONDS = 1.0
 
 class ProcessTreeError(RuntimeError):
     """The operating system could not establish descendant containment."""
+
+
+def new_browser_process_marker() -> tuple[str, dict[str, str]]:
+    """Return a private marker and the browser environment entry that carries it."""
+    marker = secrets.token_hex(32)
+    return marker, {_BROWSER_PROCESS_MARKER: marker}
 
 
 def _linux_process_rows() -> dict[int, tuple[int, int, str | None]]:
@@ -92,16 +108,69 @@ def _ps_process_rows() -> dict[int, tuple[int, int, str | None]]:
     return rows
 
 
+def _posix_process_rows() -> dict[int, tuple[int, int, str | None]]:
+    return (
+        _linux_process_rows()
+        if sys.platform.startswith("linux")
+        else _ps_process_rows()
+    )
+
+
+def _marked_posix_processes(marker: str) -> tuple[int, ...]:
+    """Return processes carrying this browser launch's private environment marker."""
+    expected = f"{_BROWSER_PROCESS_MARKER}={marker}".encode()
+    if sys.platform.startswith("linux"):
+        found: list[int] = []
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                environment = (entry / "environ").read_bytes().split(b"\0")
+            except OSError:
+                continue
+            if expected in environment:
+                found.append(int(entry.name))
+        return tuple(found)
+
+    ps = next(
+        (
+            candidate
+            for candidate in ("/bin/ps", "/usr/bin/ps")
+            if Path(candidate).is_file()
+        ),
+        None,
+    )
+    if ps is None:
+        return ()
+    try:
+        snapshot = subprocess.run(
+            [ps, "eww", "-A", "-o", "pid=", "-o", "command="],
+            check=True,
+            capture_output=True,
+            timeout=_POSIX_PROCESS_SNAPSHOT_SECONDS,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ()
+
+    found = []
+    needle = expected + b" "
+    for line in snapshot.splitlines():
+        fields = line.lstrip().split(maxsplit=1)
+        if len(fields) != 2 or needle not in fields[1] + b" ":
+            continue
+        try:
+            found.append(int(fields[0]))
+        except ValueError:
+            continue
+    return tuple(found)
+
+
 def _posix_detached_descendants(
     pid: int, process_group: int
 ) -> tuple[tuple[int, int, str], ...]:
     """Snapshot escaped descendants, groups and kernel start identities."""
     try:
-        rows = (
-            _linux_process_rows()
-            if sys.platform.startswith("linux")
-            else _ps_process_rows()
-        )
+        rows = _posix_process_rows()
     except OSError:
         return ()
     children: dict[int, list[int]] = {}
@@ -130,26 +199,66 @@ def _posix_detached_descendants(
     )
 
 
-def remember_detached_process_groups() -> None:
-    """Retain browser groups while their parentage is still observable."""
+def remember_detached_process_groups(marker: str | None = None) -> None:
+    """Retain browser groups by ancestry and a launch-specific process marker."""
     if os.name == "nt":
         return
     pid = os.getpid()
     process_group = os.getpgrp()
-    for _descendant, group, _identity in _posix_detached_descendants(
-        pid, process_group
-    ):
-        identity = _kernel_start_identity(group)
-        if identity is not None:
-            _registered_posix_groups.setdefault(group, identity)
+    try:
+        rows = _posix_process_rows()
+    except OSError:
+        rows = {}
+
+    observed = list(_posix_detached_descendants(pid, process_group))
+    if marker is not None:
+        known = {process for process, _group, _identity in observed}
+        for process in _marked_posix_processes(marker):
+            if process in known:
+                continue
+            row = rows.get(process)
+            if row is None or row[1] == process_group:
+                continue
+            identity = row[2] or _kernel_start_identity(process)
+            if identity is not None:
+                observed.append((process, row[1], identity))
+
+    grouped: dict[int, dict[int, str]] = {}
+    for process, group, identity in observed:
+        grouped.setdefault(group, {})[process] = identity
+    for group, members in grouped.items():
+        _registered_posix_groups[group] = _PosixGroupRegistration(
+            leader_identity=_kernel_start_identity(group),
+            members=members,
+        )
+
+
+def _registered_group_still_matches(
+    group: int,
+    registration: _PosixGroupRegistration,
+    rows: dict[int, tuple[int, int, str | None]],
+) -> bool:
+    current = _kernel_start_identity(group)
+    if current is not None:
+        return current == registration.leader_identity
+    if not process_group_exists(group):
+        return False
+    for process, identity in registration.members.items():
+        row = rows.get(process)
+        if row is None or row[1] != group:
+            continue
+        if (row[2] or _kernel_start_identity(process)) == identity:
+            return True
+    return False
 
 
 def _kill_registered_process_groups() -> None:
-    for group, identity in tuple(_registered_posix_groups.items()):
-        current = _kernel_start_identity(group)
-        if current is not None and current != identity:
-            continue
-        if current is None and not process_group_exists(group):
+    try:
+        rows = _posix_process_rows()
+    except OSError:
+        rows = {}
+    for group, registration in tuple(_registered_posix_groups.items()):
+        if not _registered_group_still_matches(group, registration, rows):
             continue
         with contextlib.suppress(OSError):
             os.killpg(group, signal.SIGKILL)

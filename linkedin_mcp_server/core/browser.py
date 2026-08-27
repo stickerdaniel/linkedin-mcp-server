@@ -5,7 +5,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from collections.abc import Coroutine
+from collections.abc import Coroutine, Mapping
 from typing import Any
 
 from patchright.async_api import (
@@ -31,7 +31,10 @@ from linkedin_mcp_server.hidden_target import (
     hidden_target_is_supported,
     open_hidden_page,
 )
-from linkedin_mcp_server.process_tree import remember_detached_process_groups
+from linkedin_mcp_server.process_tree import (
+    new_browser_process_marker,
+    remember_detached_process_groups,
+)
 
 from .exceptions import NetworkError, ProxyConnectionError
 
@@ -112,6 +115,7 @@ class BrowserManager:
         # screen the same browser reported as 720 tall.
         self.viewport = viewport
         self.launch_options = launch_options
+        self._process_marker, self._process_environment = new_browser_process_marker()
 
         self._playwright: Playwright | None = None
         self._context: BrowserContext | None = None
@@ -262,6 +266,15 @@ class BrowserManager:
                 **self.launch_options,
                 "locale": "en-US",
             }
+            configured_environment = context_options.get("env")
+            if configured_environment is None:
+                browser_environment = dict(os.environ)
+            elif isinstance(configured_environment, Mapping):
+                browser_environment = dict(configured_environment)
+            else:
+                raise TypeError("Browser launch env must be a mapping")
+            browser_environment.update(self._process_environment)
+            context_options["env"] = browser_environment
 
             # No ``user_agent`` here, deliberately. Patchright leaves the client
             # hints reporting the real browser, so an override contradicts
@@ -279,7 +292,7 @@ class BrowserManager:
                 # A launch can leave detached Chromium behind even when Patchright
                 # never returns a context. Retain its group while the Node driver's
                 # ancestry still makes it discoverable.
-                remember_detached_process_groups()
+                remember_detached_process_groups(self._process_marker)
                 # A headed launch needs somewhere to put a window, and whether
                 # this machine has one cannot be decided from the platform name
                 # alone: a Mac reached over SSH, a launchd daemon, or a CI
@@ -308,21 +321,19 @@ class BrowserManager:
                 # promoting `other` targets would put a component extension's
                 # page into `context.pages`, and the code below takes the first
                 # one as the page to authenticate and scrape with.
-                # Bounded, and its failure survived, for the same reason
-                # ``close()`` bounds its own cleanup: a wedged driver can hang
-                # ``stop()`` indefinitely. Turning a recoverable launch into a
-                # permanent hang would be the worse trade, so a driver that will
-                # not stop is left behind and said so.
+                # Bounded, and a failure aborts the fallback. Starting another
+                # Chromium while the first driver may still own this profile is
+                # concurrent access, so only a confirmed driver stop may proceed.
                 try:
                     await asyncio.wait_for(
                         self._playwright.stop(), timeout=_CLEANUP_TIMEOUT_SECONDS
                     )
                 except Exception as stop_exc:
                     logger.warning(
-                        "The refused driver did not stop (%s); continuing with a "
-                        "fresh one.",
+                        "The refused driver did not stop (%s); aborting the fallback.",
                         type(stop_exc).__name__,
                     )
+                    raise exc from None
                 self._playwright = await async_playwright().start()
 
                 context_options["headless"] = True
@@ -355,7 +366,7 @@ class BrowserManager:
             # Patchright starts Chromium in its own POSIX process group. Capture
             # that group before page setup or authentication can fail and before
             # the Node driver can exit and reparent it.
-            remember_detached_process_groups()
+            remember_detached_process_groups(self._process_marker)
             logger.info(
                 "Persistent browser launched (headless=%s, user_data_dir=%s)",
                 self.headless,
@@ -388,7 +399,7 @@ class BrowserManager:
             # A failure before a context was returned can still have spawned a
             # detached browser. This is idempotent with the two launch checkpoints
             # above and must run before cleanup can make ancestry disappear.
-            remember_detached_process_groups()
+            remember_detached_process_groups(self._process_marker)
             # BaseException so a cancelled launch is cleaned up too: Chromium may
             # already be running, and leaving it would hold the profile.
             #

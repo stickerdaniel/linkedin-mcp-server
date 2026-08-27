@@ -1749,6 +1749,36 @@ class TestInstallerSupervisorLaunch:
         assert managed.assigned
         assert managed.windows_popen is popen
 
+    async def test_termination_failure_closes_the_kill_on_close_job(self):
+        from linkedin_mcp_server import bootstrap
+
+        proc = _FakeProc([], 0)
+
+        class _Job:
+            closed = False
+
+            def terminate(self) -> None:
+                raise RuntimeError("termination failed")
+
+            def close(self) -> None:
+                self.closed = True
+
+        job = _Job()
+        managed = bootstrap._InstallerProcess(
+            cast(Any, proc),
+            windows_job=cast(Any, job),
+            windows_popen=cast(Any, object()),
+            assigned=True,
+        )
+
+        with pytest.raises(RuntimeError, match="termination failed"):
+            await bootstrap._cleanup_assigned_windows_job_once(
+                managed, asyncio.get_running_loop().time() + 1.0
+            )
+
+        assert job.closed
+        assert not managed.assigned
+
     @pytest.mark.skipif(os.name != "nt", reason="requires the CPython proactor")
     async def test_real_cpython_wait_unregister_contract(self):
         from linkedin_mcp_server import bootstrap

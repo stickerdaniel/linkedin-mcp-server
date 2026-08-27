@@ -55,6 +55,7 @@ jobs:
           tests/test_daemon_election.py::TestRealOwner::test_an_owner_is_started_and_answers
           tests/test_daemon_election.py::TestRealOwner::test_a_crashed_owner_is_replaced
           tests/test_daemon_election.py::TestRealOwner::test_many_clients_starting_at_once_elect_exactly_one_owner
+          tests/test_bootstrap.py::TestInstallerSupervisorLaunch::test_real_cpython_wait_unregister_contract
           tests/test_installer_supervisor.py
           tests/test_installer_worker.py
           tests/test_process_tree.py

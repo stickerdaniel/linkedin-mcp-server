@@ -945,11 +945,12 @@ def test_confirmed_shutdown_retains_other_detached_process_groups():
     from linkedin_mcp_server.drivers import browser as drv
 
     original = dict(process_tree._registered_posix_groups)
-    process_tree._registered_posix_groups[123] = "still-running"
+    registration = process_tree._PosixGroupRegistration("leader", {124: "member"})
+    process_tree._registered_posix_groups[123] = registration
     drv._browser_lease = None
     try:
         drv._settle_the_profile(confirmed=True)
-        assert process_tree._registered_posix_groups[123] == "still-running"
+        assert process_tree._registered_posix_groups[123] is registration
     finally:
         process_tree._registered_posix_groups.clear()
         process_tree._registered_posix_groups.update(original)

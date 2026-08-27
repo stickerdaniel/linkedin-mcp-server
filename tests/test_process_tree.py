@@ -6,6 +6,7 @@ import asyncio
 import importlib
 import json
 import os
+import secrets
 import signal
 import subprocess
 import sys
@@ -982,11 +983,24 @@ def test_registered_group_kill_revalidates_kernel_identity(
     killed: list[tuple[int, signal.Signals]] = []
     original = dict(process_tree._registered_posix_groups)
     process_tree._registered_posix_groups.clear()
-    process_tree._registered_posix_groups.update({123: "old", 456: "same"})
+    process_tree._registered_posix_groups.update(
+        {
+            123: process_tree._PosixGroupRegistration("old", {124: "old-member"}),
+            456: process_tree._PosixGroupRegistration("gone", {457: "same-member"}),
+            789: process_tree._PosixGroupRegistration("gone", {790: "unknown-member"}),
+        }
+    )
     monkeypatch.setattr(
         process_tree,
         "_kernel_start_identity",
-        lambda group: "new" if group == 123 else None,
+        lambda process: (
+            "new" if process == 123 else "same-member" if process == 457 else None
+        ),
+    )
+    monkeypatch.setattr(
+        process_tree,
+        "_posix_process_rows",
+        lambda: {457: (1, 456, "same-member"), 790: (1, 789, None)},
     )
     monkeypatch.setattr(process_tree, "process_group_exists", lambda group: True)
     monkeypatch.setattr(os, "killpg", lambda group, sig: killed.append((group, sig)))
@@ -998,6 +1012,34 @@ def test_registered_group_kill_revalidates_kernel_identity(
         process_tree._registered_posix_groups.update(original)
 
     assert killed == [(456, signal.SIGKILL)]
+
+
+def test_reused_browser_group_replaces_the_old_registration(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    original = dict(process_tree._registered_posix_groups)
+    process_tree._registered_posix_groups.clear()
+    process_tree._registered_posix_groups[456] = process_tree._PosixGroupRegistration(
+        "old", {457: "old-member"}
+    )
+    monkeypatch.setattr(process_tree, "_posix_process_rows", lambda: {})
+    monkeypatch.setattr(
+        process_tree,
+        "_posix_detached_descendants",
+        lambda *_args: ((458, 456, "new-member"),),
+    )
+    monkeypatch.setattr(
+        process_tree, "_kernel_start_identity", lambda process: "new-leader"
+    )
+
+    try:
+        process_tree.remember_detached_process_groups()
+        registration = process_tree._registered_posix_groups[456]
+        assert registration.leader_identity == "new-leader"
+        assert registration.members == {458: "new-member"}
+    finally:
+        process_tree._registered_posix_groups.clear()
+        process_tree._registered_posix_groups.update(original)
 
 
 def test_linux_detached_discovery_does_not_need_ps(monkeypatch: pytest.MonkeyPatch):
@@ -1085,6 +1127,53 @@ daemon_owner._exit_hard()
         descendant_pid = locals().get("descendant_pid")
         if isinstance(descendant_pid, int) and _alive(descendant_pid):
             os.kill(descendant_pid, signal.SIGKILL)
+
+
+@_POSIX_ONLY
+def test_process_marker_recovers_a_browser_after_driver_reparenting():
+    marker = secrets.token_hex(32)
+    driver_code = r"""
+import os
+import subprocess
+import sys
+
+environment = dict(os.environ)
+environment[sys.argv[1]] = sys.argv[2]
+browser = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(600)"],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    start_new_session=True,
+    env=environment,
+)
+print(browser.pid, flush=True)
+"""
+    driver = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            driver_code,
+            process_tree._BROWSER_PROCESS_MARKER,
+            marker,
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert driver.stdout is not None
+    browser_pid = int(driver.stdout.readline())
+    driver.wait(timeout=30)
+    try:
+        process_tree.remember_detached_process_groups(marker)
+        registration = process_tree._registered_posix_groups[browser_pid]
+        assert registration.members[browser_pid] == process_tree._kernel_start_identity(
+            browser_pid
+        )
+    finally:
+        process_tree._registered_posix_groups.pop(browser_pid, None)
+        if _alive(browser_pid):
+            os.killpg(browser_pid, signal.SIGKILL)
+        assert _wait_gone(browser_pid)
 
 
 @_POSIX_ONLY
