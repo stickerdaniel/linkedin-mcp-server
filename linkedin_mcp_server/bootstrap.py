@@ -24,7 +24,7 @@ import tempfile
 import threading
 import time
 from typing import Any, NoReturn, TypeVar
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 from fastmcp import Context
 from rich.console import Console
@@ -157,17 +157,29 @@ _MAX_LINE_CHARS = 64 * 1024
 #: the line. Backslashes too, which Node normalises to slashes before
 #: authenticating, so ``https:\\user:pw@host`` is a working credential.
 _CREDENTIALS_IN_URL = re.compile(r"[/\\]{2}[^/\\\s]*@")
-#: The query of any URL. A mirror can carry its credential there as easily as
-#: in the userinfo, patchright pastes its download path onto whatever
-#: ``PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST`` names, and no list of parameter names
-#: is ever complete: ``?token=``, ``?auth_token=``, ``?x-api-key=`` and
-#: ``?X-Amz-Signature=`` are all in use. So the whole query goes, and the part
-#: that identifies the mirror stays. Stopping at an apostrophe as well as at
-#: whitespace, because the run would otherwise reach past the quote that closes
-#: a response body and swallow the ``'. URL: `` that ends it, which is what
-#: ``_installer_lines`` looks for. A query holding a literal apostrophe is not
-#: something patchright constructs.
-_QUERY_IN_URL = re.compile(r"(?i)(\bhttps?:[/\\]{2}[^\s?']*)\?[^\s']*")
+#: Any absolute HTTP(S) URL, from its scheme to the first whitespace or
+#: apostrophe. Everything the origin does not name is replaced, because nothing
+#: here can tell a public build path from a capability.
+#:
+#: The configured mirror is not the only URL that reaches this output.
+#: Patchright's download client follows redirects and interpolates the location
+#: it *ended* on into its timeout and its error, so a mirror answering 302 with
+#: ``https://cdn.example/another-bearer-token/chromium.zip`` puts a path
+#: credential nobody configured into the debug log, into the retained failure
+#: that becomes ``BrowserSetupFailedError``, and from there into whatever an MCP
+#: client shows. Redacting the configured prefix cannot reach that URL, and no
+#: parameter or path-segment list ever will either: ``?token=``, ``?api_key=``,
+#: ``?X-Amz-Signature=`` and bare path tokens are all in use. So the whole URL
+#: below the origin goes, and the part that says which mirror answered stays.
+#:
+#: Stopping at an apostrophe as well as at whitespace, because the run would
+#: otherwise reach past the quote that closes a response body and swallow the
+#: ``'. URL: `` that ends it, which is what ``_installer_lines`` looks for. A
+#: URL holding a literal apostrophe is not something patchright constructs.
+_URL_IN_TEXT = re.compile(r"(?i)\b(https?):[/\\]{2}([^\s']*)")
+#: Where an authority ends. Backslashes are normalised to slashes first, as Node
+#: does before resolving, so they are not in this class.
+_AUTHORITY_ENDS = re.compile(r"[/?#]")
 #: C0 and C1 controls and escape sequences. The eight-bit C1 forms do the same
 #: work as their ESC pairs on terminals that accept them, so U+009B followed by
 #: "2J" clears a screen exactly as "\x1b[2J" does. Patchright quotes a whole non-200 response
@@ -730,7 +742,14 @@ async def start_background_browser_setup_if_needed() -> None:
 
     # The readiness phase belongs to the shared task, so a timed-out tool caller
     # cannot abandon it or start another filesystem thread on the next retry.
-    await asyncio.shield(checked.wait())
+    # Awaited directly and not through ``asyncio.shield``: the shield is what
+    # protects ``setup_task``, and this is an Event that nothing here cancels
+    # anyway. Shielding it wrapped ``wait()`` in an anonymous task that outlived
+    # the cancelled caller and stayed on ``_waiters`` until the Event was set,
+    # once per abandoned tool call. ``Event.wait`` removes its own waiter in a
+    # ``finally``, so cancellation here leaves nothing behind and leaves the
+    # shared task untouched.
+    await checked.wait()
     task = _state.setup_task
     if task is not None and task.done():
         try:
@@ -1627,10 +1646,6 @@ class _InstallerTemporaryRoot:
     pin: Any | None
 
 
-def _windows_private_temp_creation_supported() -> bool:
-    return os.name != "nt" or sys.version_info >= (3, 12, 4)
-
-
 def _installer_temporary_parent() -> Path:
     """Return a temp parent whose pathname other local accounts cannot replace."""
     parent = Path(tempfile.gettempdir()).resolve(strict=True)
@@ -1681,15 +1696,14 @@ def _installer_temporary_parent() -> Path:
 
 
 def _create_installer_temporary_root() -> _InstallerTemporaryRoot:
-    if not _windows_private_temp_creation_supported():
-        raise PrivateStateError(
-            "Private browser installation on Windows requires Python 3.12.4 or "
-            "newer because earlier 3.12 releases create temporary directories "
-            "with inherited access."
-        )
     parent = _installer_temporary_parent()
     pin: Any | None = None
     if os.name == "nt":
+        # Not ``tempfile.mkdtemp``, which is why no Python version floor applies
+        # here: ``create_owner_only_directory`` names the current user as owner
+        # and hands ``CreateDirectoryW`` a protected DACL of its own, so the
+        # directory is never inheriting from its parent in the first place. The
+        # 3.12.4 change to ``mkdtemp`` decides nothing on this path.
         from linkedin_mcp_server.windows_acl import create_owner_only_directory
 
         path, pin = create_owner_only_directory(
@@ -2461,24 +2475,69 @@ def _cli_progress() -> Iterator[Callable[[str], None]]:
         _finish(progress, task)
 
 
-def _redacted_download_host(configured: str) -> str:
-    """Preserve a mirror's origin while removing its configured private path."""
+def _origin_of(scheme: str, authority: str) -> str | None:
+    """``scheme://[***@]host[:port]``, or ``None`` when that cannot be read.
+
+    Userinfo is reported as present rather than dropped: that a credential was
+    in the URL is the diagnosis, and its value is not.
+    """
     try:
-        parsed = urlsplit(configured)
+        parsed = urlsplit(f"{scheme}://{authority}")
         hostname = parsed.hostname
-    except ValueError:
-        return "***"
-    if not parsed.scheme or hostname is None:
-        return "***"
-    if ":" in hostname and not hostname.startswith("["):
-        hostname = f"[{hostname}]"
-    try:
         port = parsed.port
     except ValueError:
-        return "***"
+        return None
+    if not hostname:
+        return None
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
     netloc = hostname if port is None else f"{hostname}:{port}"
-    path = "/***" if parsed.path.rstrip("/") else ""
-    return urlunsplit((parsed.scheme, netloc, path, "", ""))
+    userinfo = "***@" if "@" in authority else ""
+    return f"{scheme}://{userinfo}{netloc}"
+
+
+def _redacted_origin(scheme: str, rest: str) -> str:
+    """One URL reduced to its origin and a marker for everything after it.
+
+    The first delimiter after the authority survives the redaction, and that is
+    load-bearing rather than cosmetic. ``_safe_to_print`` runs on a buffer that
+    is still growing, so a URL split across two reads is redacted once per read;
+    turning ``https://host/`` into ``https://host`` would let the next read's
+    ``secret`` land against the host and print as part of it. Keeping the
+    delimiter means the second pass sees ``/***secret`` and collapses it again,
+    which is what makes the redaction stable under append.
+    """
+    # Node normalises backslashes to slashes before it resolves a URL, so
+    # ``https:\\host\path`` is that same URL and is read as one.
+    rest = rest.replace("\\", "/")
+    authority = _AUTHORITY_ENDS.split(rest, maxsplit=1)[0]
+    remainder = rest[len(authority) :]
+    origin = _origin_of(scheme, authority)
+    if origin is None:
+        # An authority this cannot parse is one this cannot vouch for either, so
+        # none of it is kept. A delimiter is *added* rather than dropped, for the
+        # same append stability: ``https://[bad`` reduced to ``https://***``
+        # would let the next read complete a plausible hostname out of the
+        # marker and print the rest of the URL as part of it. Measured.
+        return f"{scheme}://***/***"
+    return f"{origin}{remainder[0]}***" if remainder else origin
+
+
+def _redacted_url(found: re.Match[str]) -> str:
+    return _redacted_origin(found.group(1).lower(), found.group(2))
+
+
+#: A configured mirror is not required to be HTTP, so its scheme is read as a
+#: scheme rather than matched against one.
+_CONFIGURED_SCHEME = re.compile(r"(?s)([A-Za-z][A-Za-z0-9+.\-]*):[/\\]{2}(.*)\Z")
+
+
+def _redacted_download_host(configured: str) -> str:
+    """Preserve a mirror's origin while removing its configured private path."""
+    found = _CONFIGURED_SCHEME.match(configured)
+    if found is None:
+        return "***"
+    return _redacted_origin(found.group(1).lower(), found.group(2))
 
 
 def _safe_to_print(text: str) -> str:
@@ -2489,10 +2548,15 @@ def _safe_to_print(text: str) -> str:
     ``//us\x1b[0mer:pw@host`` unmatched and then hand the stripper a whole
     credential to put back together.
 
-    The configured mirror base is handled separately because operators sometimes
-    encode access tokens in its path. Patchright appends the public browser build
-    path to that private base, so replacing the exact configured prefix preserves
-    the useful suffix without disclosing the credential.
+    Every HTTP(S) URL then keeps its origin and loses the rest, because the URL
+    patchright prints is not always the one an operator configured: its download
+    client follows redirects and reports the location it ended on. A mirror can
+    therefore introduce a path credential this process was never told about, and
+    only a rule that holds for every URL covers that.
+
+    The configured mirror base is still handled separately, for the case that
+    rule cannot reach: a download host given without a scheme is not a URL to
+    any pattern here, and its path would print as ordinary text.
     """
     text = _TERMINAL_CONTROLS.sub("", text)
     for variable in (
@@ -2510,9 +2574,11 @@ def _safe_to_print(text: str) -> str:
         text = text.replace(configured, redacted)
         without_slash = configured.rstrip("/")
         if without_slash != configured:
-            text = text.replace(without_slash, redacted.rstrip("/"))
-    text = _CREDENTIALS_IN_URL.sub("//***@", text)
-    return _QUERY_IN_URL.sub(r"\1?***", text)
+            text = text.replace(without_slash, _redacted_download_host(without_slash))
+    text = _URL_IN_TEXT.sub(_redacted_url, text)
+    # Last, for what is not an HTTP(S) URL: another scheme's userinfo, and the
+    # scheme-relative ``//user@host`` form.
+    return _CREDENTIALS_IN_URL.sub("//***@", text)
 
 
 async def _installer_lines(stream: asyncio.StreamReader) -> AsyncIterator[str]:

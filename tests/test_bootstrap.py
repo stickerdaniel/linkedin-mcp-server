@@ -1402,6 +1402,61 @@ class TestTwoStageInstall:
         await shared
         assert installed.is_set()
 
+    async def test_a_cancelled_caller_leaves_no_waiter_behind(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        """Waiting for readiness must not outlive the caller that asked for it.
+
+        ``asyncio.shield`` wraps its argument in a task of its own, and that
+        task keeps running after the shield has raised into the caller: it stays
+        registered on the Event until the Event is set, once per tool call that
+        timed out. Awaiting the Event directly lets ``Event.wait`` drop its own
+        waiter in a ``finally``, while the shared setup task, which is what the
+        shield was there to protect, is not something this await can cancel.
+        """
+        from linkedin_mcp_server import bootstrap
+
+        blocked = threading.Event()
+        release = threading.Event()
+        installed = asyncio.Event()
+
+        def readiness() -> bool:
+            blocked.set()
+            release.wait()
+            return False
+
+        async def setup(**_kwargs: object) -> None:
+            installed.set()
+
+        config = SimpleNamespace(browser=SimpleNamespace(chrome_path=None))
+        monkeypatch.setattr(bootstrap, "get_config", lambda: config)
+        monkeypatch.setattr(bootstrap, "_browser_setup_ready", readiness)
+        monkeypatch.setattr(bootstrap, "_run_browser_setup", setup)
+
+        initialize_bootstrap("managed")
+        before = asyncio.all_tasks()
+        caller = asyncio.create_task(start_background_browser_setup_if_needed())
+        while not blocked.is_set():
+            await asyncio.sleep(0)
+        shared = get_bootstrap_state().setup_task
+        checked = get_bootstrap_state().setup_check_complete
+        assert shared is not None and checked is not None
+        # The caller is parked on the Event by now, which is what makes the
+        # absence of a waiter after the cancellation mean something.
+        assert len(checked._waiters) == 1
+        caller.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+
+        assert list(checked._waiters) == [], "the Event still holds a waiter"
+        assert asyncio.all_tasks() - before - {shared, caller} == set()
+
+        # And the shared setup the shield was protecting still runs to the end.
+        assert get_bootstrap_state().setup_task is shared
+        release.set()
+        await shared
+        assert installed.is_set()
+
     async def test_readiness_miss_keeps_existing_metadata_until_install_succeeds(
         self, isolate_profile_dir, monkeypatch
     ):
@@ -2300,7 +2355,7 @@ class TestInstallerSupervisorLaunch:
         reported = str(excinfo.value)
         assert "secret" not in reported
         assert "\x1b" not in reported
-        assert "https://***@example.test/x?***" in reported
+        assert "https://***@example.test/***" in reported
 
     @pytest.mark.parametrize(
         ("lines", "message", "written"),
@@ -2821,23 +2876,46 @@ class TestPatchrightInstallStreaming:
         assert blocked.is_set()
         assert asyncio.get_running_loop().time() - started < 0.1
 
-    def test_old_windows_patch_is_refused_before_creating_a_temp_root(
-        self, monkeypatch
+    @pytest.mark.parametrize("release", [(3, 12, 0), (3, 12, 3), (3, 13, 15)])
+    def test_windows_creates_its_own_acl_on_every_supported_python(
+        self, tmp_path, monkeypatch, release
     ):
-        from linkedin_mcp_server import bootstrap
-        from linkedin_mcp_server.private_state import PrivateStateError
+        """No Python version floor applies to the installer's temporary root.
 
+        ``tempfile.mkdtemp`` gained its owner-only Windows behaviour in 3.12.4,
+        and this path does not call it: ``create_owner_only_directory`` names
+        the owner itself and hands ``CreateDirectoryW`` a protected DACL, so
+        3.12.0 gets exactly the same directory 3.13 does. The releases below the
+        old floor are the point of the sweep.
+        """
+        from linkedin_mcp_server import bootstrap, windows_acl
+
+        temporary_root = tmp_path / "private"
+        temporary_root.mkdir()
+        entry = SimpleNamespace(
+            st_mode=stat.S_IFDIR | 0o700, st_dev=1, st_ino=2, st_file_attributes=0
+        )
+        created: list[Path] = []
         monkeypatch.setattr(bootstrap.os, "name", "nt")
-        monkeypatch.setattr(bootstrap.sys, "version_info", (3, 12, 3))
-        assert not bootstrap._windows_private_temp_creation_supported()
+        monkeypatch.setattr(bootstrap.sys, "version_info", release)
+        monkeypatch.setattr(bootstrap, "_installer_temporary_parent", lambda: tmp_path)
         monkeypatch.setattr(
             bootstrap.tempfile,
             "mkdtemp",
-            lambda **_kwargs: pytest.fail("an unsafe root was created"),
+            lambda **_kwargs: pytest.fail("the Windows path must not use mkdtemp"),
         )
 
-        with pytest.raises(PrivateStateError, match="Python 3.12.4"):
-            bootstrap._create_installer_temporary_root()
+        def create(parent: Path, *, prefix: str) -> tuple[Path, object]:
+            created.append(parent)
+            return temporary_root, object()
+
+        monkeypatch.setattr(windows_acl, "create_owner_only_directory", create)
+        monkeypatch.setattr(bootstrap.Path, "lstat", lambda _path: entry)
+
+        root = bootstrap._create_installer_temporary_root()
+
+        assert root.path == temporary_root
+        assert created == [tmp_path]
 
     @pytest.mark.skipif(os.name == "nt", reason="POSIX directory modes are required")
     def test_replaceable_temporary_parent_is_refused_before_creation(
@@ -3273,7 +3351,7 @@ class TestPatchrightInstallStreaming:
         everything = " ".join(seen) + " ".join(r.message for r in caplog.records)
         assert "s3cr3t" not in everything
         assert "ci-bot" not in everything
-        assert "mirror.example/chromium.zip" in everything
+        assert "https://***@mirror.example/***" in everything
 
     @pytest.mark.parametrize(
         "variable",
@@ -3304,7 +3382,80 @@ class TestPatchrightInstallStreaming:
 
         everything = str(excinfo.value) + " ".join(r.message for r in caplog.records)
         assert token not in everything
-        assert "mirror.example/***/builds/chromium.zip" in everything
+        assert "https://mirror.example/***" in everything
+
+    @pytest.mark.parametrize("configured", ["", "https://mirror.example"])
+    async def test_a_redirect_target_cannot_carry_a_path_credential_out(
+        self, monkeypatch, caplog, configured: str
+    ):
+        """The URL patchright reports is the one it ended on, not the one set.
+
+        Its download client follows redirects and interpolates the final
+        location into the timeout it raises, so a mirror can answer 302 and put
+        a capability nobody configured into the debug log and into the retained
+        failure that becomes ``BrowserSetupFailedError``. Redacting the
+        configured prefix never reaches that URL: it runs with the variable both
+        unset and set to an origin the redirect leaves.
+        """
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.exceptions import BrowserSetupFailedError
+
+        if configured:
+            monkeypatch.setenv("PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST", configured)
+        else:
+            monkeypatch.delenv("PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST", raising=False)
+        redirected = "https://cdn.example/another-bearer-token/chromium.zip"
+        self._patch_proc(
+            monkeypatch,
+            [
+                f"Downloading Chromium from {redirected}\n".encode(),
+                f"Timeout 30000ms exceeded while downloading {redirected}\n".encode(),
+            ],
+            1,
+        )
+        seen: list[str] = []
+
+        with caplog.at_level(logging.DEBUG, logger="linkedin_mcp_server.bootstrap"):
+            with pytest.raises(BrowserSetupFailedError) as excinfo:
+                await bootstrap._run_patchright_install("--no-shell")
+            with pytest.raises(BrowserSetupFailedError):
+                await bootstrap._run_patchright_install(
+                    "--no-shell", line_callback=seen.append
+                )
+
+        everything = (
+            str(excinfo.value)
+            + " ".join(r.message for r in caplog.records)
+            + " ".join(seen)
+        )
+        assert "another-bearer-token" not in everything
+        assert "https://cdn.example/***" in everything
+
+    async def test_a_redirect_target_split_across_reads_is_still_redacted(
+        self, monkeypatch
+    ):
+        """Sanitising a growing buffer must not print the far half of a URL.
+
+        Each read redacts the whole buffer again, so the redaction has to be
+        stable under append: a version that drops the delimiter along with the
+        path lets the next read's token land against the hostname.
+        """
+        from linkedin_mcp_server import bootstrap
+
+        url = "https://cdn.example/another-bearer-token/chromium.zip"
+        line = f"Downloading Chromium from {url}\n".encode()
+        leaked: list[int] = []
+
+        for cut in range(len(line) + 1):
+            self._patch_proc(monkeypatch, [line[:cut], line[cut:]], 0)
+            seen: list[str] = []
+            await bootstrap._run_patchright_install(
+                "--no-shell", line_callback=seen.append
+            )
+            if "another-bearer-token" in "".join(seen):
+                leaked.append(cut)
+
+        assert leaked == []
 
     async def test_the_failure_message_is_bounded(self, monkeypatch):
         """A pathological installer must not be quoted back in full."""
@@ -3778,6 +3929,93 @@ class TestCredentialRedaction:
         assert "s3cr3t" not in redacted
         assert "mirror.example" in redacted
 
+    @pytest.mark.parametrize(
+        ("url", "expected"),
+        [
+            # A path segment is a capability as often as a query parameter is,
+            # and a redirect can introduce one from a host nothing configured.
+            (
+                "https://mirror.example/s3cr3t/chromium.zip",
+                "https://mirror.example/***",
+            ),
+            ("https://mirror.example/s3cr3t", "https://mirror.example/***"),
+            # A bare trailing slash still keeps its delimiter, because this runs
+            # on a buffer that is still growing.
+            ("https://mirror.example/", "https://mirror.example/***"),
+            # An origin alone says which mirror answered and is kept whole.
+            ("https://mirror.example", "https://mirror.example"),
+            ("https://mirror.example:8443", "https://mirror.example:8443"),
+            # Node normalises backslashes before resolving, so this is the same
+            # URL and loses the same path.
+            ("https:\\\\mirror.example\\s3cr3t\\x.zip", "https://mirror.example/***"),
+            # IPv6 keeps its brackets and its port; a literal is an origin too.
+            ("https://[2001:db8::1]:8443/s3cr3t/x", "https://[2001:db8::1]:8443/***"),
+            ("https://[::1]/s3cr3t", "https://[::1]/***"),
+            # A fragment and a query keep their own delimiter for the same
+            # append-stability reason the path does.
+            ("https://mirror.example#s3cr3t", "https://mirror.example#***"),
+            ("https://mirror.example?t=s3cr3t", "https://mirror.example?***"),
+            # Malformed authorities are vouched for by nothing, so nothing of
+            # them is kept.
+            ("https://[unclosed/s3cr3t", "https://***/***"),
+            ("https://mirror.example:notaport/s3cr3t", "https://***/***"),
+            ("https://]/s3cr3t", "https://***/***"),
+        ],
+    )
+    def test_a_url_keeps_its_origin_and_nothing_else(self, url, expected):
+        from linkedin_mcp_server.bootstrap import _safe_to_print
+
+        assert _safe_to_print(f"from {url} now") == f"from {expected} now"
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://mirror.example/s3cr3t/x.zip",
+            "https://ci-bot:s3cr3t@mirror.example/a/b",
+            "https://mirror.example/dl?token=s3cr3t",
+            "https://mirror.example#s3cr3t",
+            "https://[2001:db8::1]:8443/s3cr3t/x",
+            "https:\\\\mirror.example\\s3cr3t\\x.zip",
+            # The malformed shapes matter most here: a marker that a later read
+            # can complete into a plausible hostname prints the rest beside it.
+            "https://[unclosed/s3cr3t",
+            "https://mirror.example:notaport/s3cr3t",
+        ],
+    )
+    def test_redaction_is_stable_however_the_text_arrives(self, url):
+        """``_safe_to_print`` re-runs on a buffer that keeps growing.
+
+        Its output is therefore its own input on the next read, and a secret
+        that arrives in two halves must not survive the join. Every offset is
+        swept because only some of them straddle a delimiter.
+        """
+        from linkedin_mcp_server.bootstrap import _safe_to_print
+
+        text = f"Downloading Chromium from {url} now"
+        surviving = [
+            cut
+            for cut in range(len(text) + 1)
+            if "s3cr3t" in _safe_to_print(_safe_to_print(text[:cut]) + text[cut:])
+        ]
+
+        assert surviving == []
+
+    def test_a_download_host_without_a_scheme_is_still_redacted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The one case the per-URL rule cannot reach, which is why both run.
+
+        A configured host with no scheme is not a URL to any pattern here, so
+        the path patchright pastes onto it would print as ordinary text.
+        """
+        from linkedin_mcp_server.bootstrap import _safe_to_print
+
+        monkeypatch.setenv("PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST", "mirror.example/s3cr3t")
+
+        assert _safe_to_print("from mirror.example/s3cr3t/builds/x.zip") == (
+            "from ***/builds/x.zip"
+        )
+
     def test_an_invalid_unused_fallback_does_not_break_output(
         self, monkeypatch: pytest.MonkeyPatch
     ):
@@ -3787,7 +4025,7 @@ class TestCredentialRedaction:
         monkeypatch.setenv("PLAYWRIGHT_DOWNLOAD_HOST", "http://[")
 
         assert _safe_to_print("Downloading from https://valid.example/x.zip") == (
-            "Downloading from https://valid.example/x.zip"
+            "Downloading from https://valid.example/***"
         )
 
     @pytest.mark.parametrize("straddle", [0, 1, 2, 3])
@@ -3935,7 +4173,7 @@ class TestQuotedResponseBodiesAreDropped:
 
         assert "first" not in seen[0] and "second" not in seen[0]
         assert seen[0].count("<response body omitted>") == 1
-        assert seen[0].endswith("'. URL: http://b/x.zip")
+        assert seen[0].endswith("'. URL: http://b/***")
 
     async def test_a_body_cannot_close_itself_with_prose_behind_it(self, monkeypatch):
         """On one physical line only its final closer can end the body."""
@@ -3950,7 +4188,7 @@ class TestQuotedResponseBodiesAreDropped:
 
         assert "sup3rs3cr3tvalue" not in printed
         assert "still inside the page" not in printed
-        assert "'. URL: http://real/x.zip" in printed
+        assert "'. URL: http://real/***" in printed
         assert "coreBundle.js" in printed, "and patchright's own trace comes back"
 
     async def test_a_multiline_body_cannot_forge_its_closing_marker(self, monkeypatch):
