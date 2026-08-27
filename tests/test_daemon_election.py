@@ -1848,7 +1848,7 @@ class TestWindowsAtomicOwnerHandoff:
             validation_error=TimeoutError(),
         )
 
-        assert outcome is election_module._Started.ABORTED
+        assert outcome is election_module._Started.NO
         assert events[-5:] == [
             "terminate-job",
             "wait-child",
@@ -2213,7 +2213,7 @@ class TestAtomicStartupCommit:
             validate=lambda *a, **k: None,
         )
 
-        assert outcome is election_module._Started.ABORTED
+        assert outcome is election_module._Started.NO
         assert child.killed
         assert b"commit\n" not in child.input.written
         assert events == ["discard"]

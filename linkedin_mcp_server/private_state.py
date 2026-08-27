@@ -29,6 +29,7 @@ import logging
 import os
 import stat
 import sys
+import tempfile
 import threading
 import contextlib
 from collections.abc import Callable, Iterator
@@ -187,21 +188,39 @@ def harden_directory_entry(path: Path) -> None:
     the same reason.
     """
     with _as_private_state_error(path, "prepare the private directory"):
-        created = False
         try:
             entry = path.lstat()
         except FileNotFoundError:
-            if _WINDOWS and not _windows_private_creation_supported():
-                raise PrivateStateError(
-                    "Private directory creation on Windows requires Python "
-                    "3.12.4 or newer"
-                )
-            try:
-                path.mkdir(mode=_PRIVATE_DIR_MODE)
-            except FileExistsError:
-                entry = path.lstat()
+            if _WINDOWS:
+                if not _windows_private_creation_supported():
+                    raise PrivateStateError(
+                        "Private directory creation on Windows requires Python "
+                        "3.12.4 or newer"
+                    )
+                staged = Path(tempfile.mkdtemp(prefix=".private-", dir=path.parent))
+                try:
+                    harden_created_directory(staged)
+                    staged_entry = staged.lstat()
+                    try:
+                        staged.rename(path)
+                    except FileExistsError:
+                        entry = path.lstat()
+                    else:
+                        published = path.lstat()
+                        if not _same_entry(staged_entry, published):
+                            raise PrivateStateError(
+                                f"{path} changed while its private directory was "
+                                "being published"
+                            )
+                        return
+                finally:
+                    with contextlib.suppress(OSError):
+                        staged.rmdir()
             else:
-                created = True
+                try:
+                    path.mkdir(mode=_PRIVATE_DIR_MODE)
+                except FileExistsError:
+                    pass
                 entry = path.lstat()
 
         if stat.S_ISLNK(entry.st_mode):
@@ -214,19 +233,6 @@ def harden_directory_entry(path: Path) -> None:
             raise PrivateStateError(f"Not a directory: {path}")
 
         if _WINDOWS:
-            if created:
-                try:
-                    harden_created_directory(path)
-                except BaseException:
-                    with contextlib.suppress(OSError):
-                        current = path.lstat()
-                        if _same_entry(entry, current) and stat.S_ISDIR(
-                            current.st_mode
-                        ):
-                            path.rmdir()
-                    raise
-                return
-
             from linkedin_mcp_server.windows_acl import verify_owner_only
 
             verify_owner_only(path, directory=True)
@@ -282,7 +288,7 @@ def harden_created_file(path: Path) -> None:
 
         from linkedin_mcp_server.windows_acl import restrict_to_current_user
 
-        restrict_to_current_user(path, directory=False)
+        restrict_to_current_user(path, directory=False, created=True)
         current = path.lstat()
         _refuse_windows_reparse_point(path, current)
         if not _same_entry(entry, current):

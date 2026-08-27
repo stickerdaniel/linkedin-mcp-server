@@ -1203,7 +1203,13 @@ def verify_children_cannot_be_replaced(path: Path) -> None:
             f"{path} is owned by {owner}, which can rewrite its child permissions"
         )
 
-    for entry in describe_dacl(path).entries:
+    described = describe_dacl(path)
+    if not described.protected:
+        raise PrivateStateError(
+            f"{path} still inherits permissions that can change after verification"
+        )
+
+    for entry in described.entries:
         if entry.type == ACCESS_DENIED_ACE_TYPE:
             continue
         if entry.type != ACCESS_ALLOWED_ACE_TYPE:

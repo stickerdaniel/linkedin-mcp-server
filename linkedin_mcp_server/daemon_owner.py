@@ -1313,7 +1313,7 @@ def _take_lock(auth_root: Path, inherited_fd: int | None) -> DaemonLock | None:
 
 def _abandon_inherited_lock(fd: int) -> None:
     """Unlock a failed handoff even while the suspended parent keeps a copy."""
-    with contextlib.suppress(OSError):
+    with contextlib.suppress(OSError, ValueError):
         _release_locked_fd(fd)
 
 
@@ -1326,6 +1326,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--lock-fd", type=int, default=None)
     parser.add_argument("--job-name", default=None)
     args = parser.parse_args(argv)
+
+    def abandon_pending_inherited_lock() -> None:
+        if args.lock_fd is None:
+            return
+        _abandon_inherited_lock(args.lock_fd)
+        args.lock_fd = None
 
     # Standard output is the verdict channel. A private duplicate of standard
     # error carries one fixed, non-secret diagnosis until the real log is ready.
@@ -1346,9 +1352,7 @@ def main(argv: list[str] | None = None) -> int:
         # Closing only this copy would leave a suspended starter holding it after
         # this child times out, so a failed handoff explicitly unlocks the shared
         # open-file description before reporting failure.
-        if args.lock_fd is not None:
-            _abandon_inherited_lock(args.lock_fd)
-            args.lock_fd = None
+        abandon_pending_inherited_lock()
         bootstrap.report(BOOTSTRAP_CONFIGURATION)
         _close_handshake_stream(handshake_stream)
         return 1
@@ -1369,6 +1373,7 @@ def main(argv: list[str] | None = None) -> int:
         profile = Path(config.browser.user_data_dir).expanduser().resolve()
         auth_root = auth_root_dir(profile)
     except BaseException:
+        abandon_pending_inherited_lock()
         bootstrap.report(BOOTSTRAP_STATE)
         handshake.abort()
         handshake.close()
@@ -1377,6 +1382,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         log_path = _attach_daemon_log(auth_root)
     except BaseException:
+        abandon_pending_inherited_lock()
         bootstrap.report(BOOTSTRAP_LOG)
         handshake.abort()
         handshake.close()
@@ -1387,6 +1393,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         configure_logging(log_level=config.server.log_level, json_format=True)
         lock = _take_lock(auth_root, args.lock_fd)
+        args.lock_fd = None
         if lock is None:
             logger.info("Another process won the daemon election")
             handshake.retry()
@@ -1405,10 +1412,12 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
     except DaemonLockError:
+        abandon_pending_inherited_lock()
         logger.exception("The daemon could not take ownership")
         handshake.abort()
         return 1
     except Exception:
+        abandon_pending_inherited_lock()
         logger.exception("The daemon stopped with an error")
         handshake.fail()
         return 1
@@ -1417,6 +1426,7 @@ def main(argv: list[str] | None = None) -> int:
         # released even by a path that forgot to answer.
         bootstrap.close()
         handshake.close()
+        abandon_pending_inherited_lock()
         if lock is not None:
             lock.release()
 

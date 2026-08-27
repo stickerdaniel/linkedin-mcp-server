@@ -858,7 +858,7 @@ def _spawn(
             # Waiting for a verdict would leave it holding the lock until its own
             # authorization timeout expires.
             stop_child()
-            return _Started.ABORTED
+            return _Started.NO
         except Exception:
             logger.warning("The daemon prepared unusable startup state", exc_info=True)
             verdict = _await_committed(

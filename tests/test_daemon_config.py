@@ -518,6 +518,11 @@ class TestRefusing:
             "exception",
             lambda *_args, **_kwargs: pytest.fail("pre-log failure used logging"),
         )
+        monkeypatch.setattr(
+            daemon_owner,
+            "_abandon_inherited_lock",
+            lambda fd: events.append(f"unlocked:{fd}"),
+        )
         if stage == "state":
 
             class UnresolvablePath:
@@ -538,8 +543,75 @@ class TestRefusing:
                 ),
             )
 
-        assert daemon_owner.main([]) == 1
-        assert events == [f"diagnostic:{code}", "aborted"]
+        assert daemon_owner.main(["--lock-fd", "123"]) == 1
+        assert events == ["unlocked:123", f"diagnostic:{code}", "aborted"]
+
+    def test_lock_adoption_failure_unlocks_the_inherited_handoff(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import daemon_owner
+        from linkedin_mcp_server.daemon_lock import DaemonLockError
+
+        events: list[str] = []
+        config = AppConfig()
+        config.browser.user_data_dir = str(tmp_path / "profile")
+
+        class RecordingBootstrap:
+            def __init__(self, _stream: object) -> None:
+                pass
+
+            def report(self, code: str) -> None:
+                events.append(f"diagnostic:{code}")
+
+            def close(self) -> None:
+                events.append("bootstrap-closed")
+
+        class RecordingHandshake:
+            def __init__(self, _stream: object, _nonce: str) -> None:
+                pass
+
+            def abort(self) -> None:
+                events.append("aborted")
+
+            def close(self) -> None:
+                events.append("handshake-closed")
+
+        monkeypatch.setattr(daemon_owner, "_BootstrapDiagnostics", RecordingBootstrap)
+        monkeypatch.setattr(daemon_owner, "_Handshake", RecordingHandshake)
+        monkeypatch.setattr(daemon_owner, "_claim_bootstrap_stream", lambda: None)
+        monkeypatch.setattr(daemon_owner, "_claim_handshake_stream", lambda: None)
+        monkeypatch.setattr(
+            daemon_owner,
+            "_read_handover",
+            lambda: daemon_config.OwnerHandover(config, _NONCE),
+        )
+        monkeypatch.setattr(daemon_owner, "auth_root_dir", lambda profile: tmp_path)
+        monkeypatch.setattr(
+            daemon_owner,
+            "_attach_daemon_log",
+            lambda auth_root: tmp_path / "daemon.log",
+        )
+        monkeypatch.setattr(daemon_owner, "configure_logging", lambda **kwargs: None)
+        monkeypatch.setattr(
+            daemon_owner,
+            "_take_lock",
+            lambda *args: (_ for _ in ()).throw(DaemonLockError("cannot adopt")),
+        )
+        monkeypatch.setattr(
+            daemon_owner,
+            "_abandon_inherited_lock",
+            lambda fd: events.append(f"unlocked:{fd}"),
+        )
+        monkeypatch.setattr(daemon_owner.logger, "exception", lambda *args: None)
+
+        assert daemon_owner.main(["--lock-fd", "123"]) == 1
+        assert events == [
+            f"diagnostic:{daemon_owner.BOOTSTRAP_ATTACHED}",
+            "unlocked:123",
+            "aborted",
+            "bootstrap-closed",
+            "handshake-closed",
+        ]
 
     def test_log_attachment_closes_bootstrap_with_an_actionable_record(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
