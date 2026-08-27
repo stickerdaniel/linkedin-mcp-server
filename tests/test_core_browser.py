@@ -657,6 +657,133 @@ async def test_export_storage_state_requires_context(tmp_path):
     assert exported is False
 
 
+class TestCloseConfirmationIsSticky:
+    """A close that was cut off may not be answered from its own leftovers.
+
+    ``close()`` takes the handles before its first await, so a cancel landing in
+    the middle leaves an object with nothing left to close and a Chromium that
+    may still be running. Reading that emptiness as success is what released the
+    profile lease and deleted the runtime directory underneath a live browser.
+    """
+
+    @staticmethod
+    def _wired(tmp_path, monkeypatch, *, drains: bool):
+        """A started manager, with the drain and the marker registry observable."""
+        manager = BrowserManager(user_data_dir=tmp_path / "profile")
+        drained: list[str] = []
+        forgotten: list[str] = []
+
+        def drain(marker: str) -> bool:
+            drained.append(marker)
+            return drains
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.core.browser.drain_browser_process_marker", drain
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.core.browser.forget_browser_process_marker",
+            forgotten.append,
+        )
+        return manager, drained, forgotten
+
+    @staticmethod
+    def _hanging_context() -> tuple[MagicMock, asyncio.Event]:
+        entered = asyncio.Event()
+
+        async def never_returns() -> None:
+            entered.set()
+            await asyncio.sleep(3600)
+
+        context = MagicMock()
+        context.close = AsyncMock(side_effect=never_returns)
+        return context, entered
+
+    async def _cancel_a_close(self, manager, context) -> None:
+        context_mock, entered = context
+        manager._context = context_mock
+        manager._playwright = MagicMock(stop=AsyncMock())
+        task = asyncio.ensure_future(manager.close())
+        await entered.wait()
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_close_stays_unconfirmed_on_every_retry(
+        self, tmp_path, monkeypatch
+    ):
+        manager, drained, forgotten = self._wired(tmp_path, monkeypatch, drains=False)
+        await self._cancel_a_close(manager, self._hanging_context())
+
+        assert manager._context is None, "the cancel did not take the handles"
+        assert await manager.close() is False
+        assert await manager.close() is False
+        assert forgotten == [], "an unproven close forgot the launch marker"
+        assert drained == [manager._process_marker, manager._process_marker]
+
+    @pytest.mark.asyncio
+    async def test_a_retry_confirms_only_once_the_drain_proves_it(
+        self, tmp_path, monkeypatch
+    ):
+        """The drain is the evidence, not the empty handles."""
+        manager, drained, forgotten = self._wired(tmp_path, monkeypatch, drains=True)
+        await self._cancel_a_close(manager, self._hanging_context())
+
+        assert await manager.close() is True
+        assert drained == [manager._process_marker]
+        assert forgotten == [manager._process_marker]
+
+    @pytest.mark.asyncio
+    async def test_a_proved_close_answers_from_its_own_record(
+        self, tmp_path, monkeypatch
+    ):
+        """Once proved, a later close does not scan for a forgotten marker."""
+        manager, drained, _forgotten = self._wired(tmp_path, monkeypatch, drains=True)
+        manager._context = MagicMock(close=AsyncMock())
+        manager._playwright = MagicMock(stop=AsyncMock())
+
+        assert await manager.close() is True
+        assert await manager.close() is True
+        assert drained == [manager._process_marker]
+
+    @pytest.mark.asyncio
+    async def test_a_close_that_cannot_drain_is_not_confirmed(
+        self, tmp_path, monkeypatch
+    ):
+        """Patchright's own verdict is not proof that the tree went with it."""
+        manager, drained, forgotten = self._wired(tmp_path, monkeypatch, drains=False)
+        manager._context = MagicMock(close=AsyncMock())
+        manager._playwright = MagicMock(stop=AsyncMock())
+
+        assert await manager.close() is False
+        assert drained == [manager._process_marker]
+        assert forgotten == []
+
+    @pytest.mark.asyncio
+    async def test_a_manager_that_never_launched_needs_no_drain(
+        self, tmp_path, monkeypatch
+    ):
+        """No driver ran, so no process can be carrying this marker."""
+        manager, drained, forgotten = self._wired(tmp_path, monkeypatch, drains=False)
+
+        assert await manager.close() is True
+        assert drained == []
+        assert forgotten == [manager._process_marker]
+
+    @pytest.mark.asyncio
+    async def test_a_failed_cleanup_step_stays_unconfirmed_on_retry(
+        self, tmp_path, monkeypatch
+    ):
+        """A raising ``context.close()`` is an interrupted teardown too."""
+        manager, _drained, forgotten = self._wired(tmp_path, monkeypatch, drains=False)
+        manager._context = MagicMock(close=AsyncMock(side_effect=RuntimeError("boom")))
+        manager._playwright = MagicMock(stop=AsyncMock())
+
+        assert await manager.close() is False
+        assert await manager.close() is False
+        assert forgotten == []
+
+
 @pytest.mark.asyncio
 async def test_close_is_idempotent_and_resets_state(tmp_path):
     browser = BrowserManager(user_data_dir=tmp_path / "profile")

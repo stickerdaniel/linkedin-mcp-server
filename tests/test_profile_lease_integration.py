@@ -798,6 +798,56 @@ class TestConfirmedClose:
         assert lease.held, "the lease was released on an unconfirmed close"
         lease.release()
 
+    async def test_a_cancelled_close_keeps_the_lease_on_the_retry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The real manager, because the hole was in its answer, not the caller's.
+
+        A cancel mid-teardown leaves the handles taken and Chromium possibly
+        running. The retry that follows used to find nothing left to close and
+        report success from that alone, which released the profile to the next
+        process.
+        """
+        import asyncio
+
+        from linkedin_mcp_server.core.browser import BrowserManager
+        from linkedin_mcp_server.drivers import browser as browser_module
+
+        lease = get_profile_lease(tmp_path / "profile")
+        assert lease.try_acquire()
+
+        entered = asyncio.Event()
+
+        async def never_returns() -> None:
+            entered.set()
+            await asyncio.sleep(3600)
+
+        manager = BrowserManager(user_data_dir=tmp_path / "profile")
+        manager._context = MagicMock(close=AsyncMock(side_effect=never_returns))
+        manager._playwright = MagicMock(stop=AsyncMock())
+        monkeypatch.setattr(
+            "linkedin_mcp_server.core.browser.drain_browser_process_marker",
+            lambda _marker: False,  # Chromium is still there to be found
+        )
+
+        cancelled = asyncio.ensure_future(manager.close())
+        await entered.wait()
+        cancelled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled
+
+        with patch.multiple(
+            browser_module,
+            _browser=manager,
+            _browser_cookie_export_path=None,
+            _browser_lease=lease,
+        ):
+            with patch.object(browser_module, "get_profile_lease", return_value=lease):
+                await browser_module.close_browser()
+
+        assert lease.held, "the retry released the profile it could not prove free"
+        lease.release()
+
     async def test_confirmed_close_releases_the_lease(self, tmp_path: Path) -> None:
         from linkedin_mcp_server.drivers import browser as browser_module
 

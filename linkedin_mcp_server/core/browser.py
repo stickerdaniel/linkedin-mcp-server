@@ -32,6 +32,7 @@ from linkedin_mcp_server.hidden_target import (
     open_hidden_page,
 )
 from linkedin_mcp_server.process_tree import (
+    drain_browser_process_marker,
     forget_browser_process_marker,
     new_browser_process_marker,
     remember_detached_process_groups,
@@ -132,6 +133,15 @@ class BrowserManager:
         # False until a teardown proves Chromium exited. Pessimistic by default:
         # a launch that is cancelled before close runs must not read as clean.
         self._close_confirmed = False
+        # The same answer, kept across calls rather than per call. ``close()``
+        # takes the handles before its first await, so a cancel landing in the
+        # middle leaves an object with nothing left to close and a Chromium that
+        # may still be running. Answering the retry from that emptiness is what
+        # released the lease and deleted the runtime directory under a live
+        # browser. These two say which emptiness it is: nothing was ever
+        # started, or a teardown began and never finished.
+        self._close_proven = False
+        self._close_interrupted = False
 
     async def __aenter__(self) -> "BrowserManager":
         await self.start()
@@ -461,15 +471,35 @@ class BrowserManager:
         when this returns. Callers that hand the profile to another process on
         the strength of a close must check this: releasing it while Chromium is
         alive reintroduces the concurrent-profile corruption.
+
+        The answer is sticky in both directions. Once a teardown has been proved
+        complete every later call agrees, and until then no call may claim it:
+        an interrupted close is retried rather than believed, and a retry that
+        finds the handles already gone still has to prove the browser is.
         """
+        if self._close_proven:
+            # Proved once, and the marker was forgotten on the strength of it.
+            # Draining again would scan the machine for something no process
+            # can be carrying any more.
+            return True
+
         context = self._context
         playwright = self._playwright
         self._context = None
         self._page = None
         self._playwright = None
+        # Set before the first await below and cleared only by a proved drain,
+        # so a cancel escaping any of them leaves the interruption recorded.
+        resuming = self._close_interrupted
+        self._close_interrupted = True
         confirmed = True
 
-        if context is None and playwright is None:
+        if context is None and playwright is None and not resuming:
+            # Nothing was ever handed out, so no driver ran and no Chromium can
+            # carry this launch's marker. The other emptiness -- a close that
+            # took the handles and was cut off -- goes through the drain below.
+            self._close_proven = True
+            self._close_interrupted = False
             forget_browser_process_marker(self._process_marker)
             return True
 
@@ -510,6 +540,22 @@ class BrowserManager:
 
         logger.info("Browser closed")
         if confirmed:
+            # The API's own verdict is not the browser's. Patchright waits for
+            # the leader it spawned and for its temporary directories, and
+            # signals the detached group only when that graceful attempt fails,
+            # so a close that returns cleanly says nothing about the rest of the
+            # tree. Off the loop: this scans processes and can sleep.
+            confirmed = await asyncio.to_thread(
+                drain_browser_process_marker, self._process_marker
+            )
+            if not confirmed:
+                logger.error(
+                    "Browser processes from this launch are still running after "
+                    "close, so the shutdown stays unconfirmed."
+                )
+        if confirmed:
+            self._close_proven = True
+            self._close_interrupted = False
             forget_browser_process_marker(self._process_marker)
         return confirmed
 

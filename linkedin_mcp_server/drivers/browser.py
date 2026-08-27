@@ -504,10 +504,11 @@ async def _bridge_runtime_profile(
                 ) from exc
             raise
     except BrowserShutdownUnconfirmedError:
-        # Chromium may still be running on this runtime profile. Closing again
-        # would report success — the manager has already dropped its handles —
-        # and deleting the directory underneath a live browser is exactly what
-        # this guard exists to prevent. Leave everything for the operator.
+        # Chromium may still be running on this runtime profile, and deleting
+        # the directory underneath a live browser is exactly what this guard
+        # exists to prevent. The manager keeps that answer across calls, so a
+        # second close cannot talk this path out of it either. Leave everything
+        # for the operator.
         raise
     except BaseException as exc:
         # BaseException so a cancelled bridge still closes Chromium before the

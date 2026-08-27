@@ -1239,6 +1239,324 @@ def test_confirmed_browser_close_forgets_its_marker_registration(
     assert process_tree._registered_posix_groups[789].markers == {shared}
 
 
+class TestOneLaunchesResidualBrowser:
+    """What a single browser close may kill, and what it must prove.
+
+    Patchright's graceful close waits for the leader it spawned and for its
+    temporary directories, and signals the detached group only when that attempt
+    fails (1.61.2, ``packages/utils/processLauncher.ts``). So a close that
+    returns cleanly is not evidence, and the drain that supplies it runs while
+    the owner keeps living -- which is what makes its aim, rather than its
+    reach, the thing worth testing.
+    """
+
+    @staticmethod
+    def _registry(monkeypatch: pytest.MonkeyPatch, groups: dict) -> None:
+        monkeypatch.setattr(process_tree, "_registered_browser_markers", {"browser"})
+        monkeypatch.setattr(process_tree, "_registered_posix_groups", groups)
+        monkeypatch.setattr(process_tree, "_marked_posix_processes", lambda _m: ())
+        monkeypatch.setattr(process_tree, "_kernel_start_identity", lambda _p: None)
+        monkeypatch.setattr(os, "getpgrp", lambda: 100)
+
+    def test_it_spares_a_group_only_ancestry_tied_to_this_launch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The installer supervisor is detached too, and nobody asked it to stop."""
+        killed: list[tuple[int, signal.Signals]] = []
+        alive = iter([True, False])
+        self._registry(
+            monkeypatch,
+            {
+                456: process_tree._PosixGroupRegistration(
+                    leader_identity=None,
+                    members={457: "browser-member"},
+                    markers={"browser"},
+                    proved_markers={"browser"},
+                ),
+                789: process_tree._PosixGroupRegistration(
+                    leader_identity=None,
+                    members={790: "installer-member"},
+                    markers={"browser"},
+                ),
+            },
+        )
+        monkeypatch.setattr(
+            process_tree,
+            "_posix_process_rows",
+            lambda: {
+                457: (1, 456, "browser-member"),
+                790: (1, 789, "installer-member"),
+            },
+        )
+        monkeypatch.setattr(
+            process_tree, "process_group_exists", lambda _group: next(alive)
+        )
+        monkeypatch.setattr(
+            os, "killpg", lambda group, sig: killed.append((group, sig))
+        )
+
+        assert process_tree.drain_browser_process_marker("browser") is True
+        assert killed == [(456, signal.SIGKILL)]
+        assert 789 in process_tree._registered_posix_groups
+
+    def test_it_never_signals_the_owners_own_group(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A registration can only reach the owner's group by mistake, and once is enough."""
+        killed: list[int] = []
+        self._registry(
+            monkeypatch,
+            {
+                100: process_tree._PosixGroupRegistration(
+                    leader_identity=None,
+                    members={101: "member"},
+                    markers={"browser"},
+                    proved_markers={"browser"},
+                )
+            },
+        )
+        monkeypatch.setattr(
+            process_tree, "_posix_process_rows", lambda: {101: (1, 100, "member")}
+        )
+        monkeypatch.setattr(process_tree, "process_group_exists", lambda _group: True)
+        monkeypatch.setattr(os, "killpg", lambda group, _sig: killed.append(group))
+
+        assert process_tree.drain_browser_process_marker("browser") is True
+        assert killed == []
+
+    def test_a_group_that_will_not_die_is_reported_rather_than_waited_out(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        killed: list[int] = []
+        self._registry(
+            monkeypatch,
+            {
+                456: process_tree._PosixGroupRegistration(
+                    leader_identity=None,
+                    members={457: "browser-member"},
+                    markers={"browser"},
+                    proved_markers={"browser"},
+                )
+            },
+        )
+        monkeypatch.setattr(
+            process_tree,
+            "_posix_process_rows",
+            lambda: {457: (1, 456, "browser-member")},
+        )
+        monkeypatch.setattr(process_tree, "process_group_exists", lambda _group: True)
+        monkeypatch.setattr(os, "killpg", lambda group, _sig: killed.append(group))
+        monkeypatch.setattr(process_tree.time, "sleep", lambda _seconds: None)
+
+        assert (
+            process_tree.drain_browser_process_marker("browser", timeout=0.0) is False
+        )
+        assert killed == [456]
+
+    def test_a_marked_process_no_group_kill_can_reach_stays_unproven(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The kill works on groups; the proof is that nothing carries the marker."""
+        self._registry(monkeypatch, {})
+        monkeypatch.setattr(process_tree, "_marked_posix_processes", lambda _m: (900,))
+        monkeypatch.setattr(
+            process_tree, "_posix_process_rows", lambda: {900: (1, 100, "owner-group")}
+        )
+        monkeypatch.setattr(process_tree.time, "sleep", lambda _seconds: None)
+
+        assert (
+            process_tree.drain_browser_process_marker("browser", timeout=0.0) is False
+        )
+
+    def test_a_launch_that_registered_nothing_needs_no_scan(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr(process_tree, "_registered_browser_markers", set())
+        monkeypatch.setattr(
+            process_tree,
+            "_marked_posix_processes",
+            lambda _m: pytest.fail("scanned for a marker no browser was given"),
+        )
+
+        assert process_tree.drain_browser_process_marker("browser") is True
+
+
+@_POSIX_ONLY
+def test_marker_drain_buries_a_group_whose_leader_already_exited():
+    """The leader Patchright watched can go while its group does not.
+
+    Two launches run at once here, because the drain has to aim: the second one
+    stands in for every browser, installer and guardian that is not the one
+    being closed, and it is still running afterwards.
+    """
+    surviving = secrets.token_hex(32)
+    closing = secrets.token_hex(32)
+    leader_code = (
+        "import subprocess, sys\n"
+        "child = subprocess.Popen(\n"
+        "    [sys.executable, '-c', 'import time; time.sleep(600)'],\n"
+        "    stdin=subprocess.DEVNULL,\n"
+        "    stdout=subprocess.DEVNULL,\n"
+        "    stderr=subprocess.DEVNULL,\n"
+        ")\n"
+        "print(child.pid, flush=True)\n"
+    )
+
+    def launch(marker: str) -> tuple[int, int]:
+        environment = dict(os.environ)
+        environment[process_tree._BROWSER_PROCESS_MARKER] = marker
+        leader = subprocess.Popen(
+            [sys.executable, "-c", leader_code],
+            stdout=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+            env=environment,
+        )
+        assert leader.stdout is not None
+        child_pid = int(leader.stdout.readline())
+        # The leader exits at once, exactly as it does once Patchright has
+        # closed the browser it spawned; its group outlives it.
+        assert leader.wait(timeout=30) == 0
+        return leader.pid, child_pid
+
+    closing_group, closing_child = launch(closing)
+    surviving_group, surviving_child = launch(surviving)
+    try:
+        process_tree.remember_detached_process_groups(closing)
+        process_tree.remember_detached_process_groups(surviving)
+        registration = process_tree._registered_posix_groups[closing_group]
+        assert registration.proved_markers == {closing}
+
+        assert process_tree.drain_browser_process_marker(closing) is True
+        assert _wait_gone(closing_child)
+        assert _alive(surviving_child), "the drain reached another launch"
+        assert surviving in process_tree._registered_browser_markers
+        assert surviving in (
+            process_tree._registered_posix_groups[surviving_group].markers
+        )
+    finally:
+        for marker in (closing, surviving):
+            process_tree._registered_browser_markers.discard(marker)
+        for group in (closing_group, surviving_group):
+            process_tree._registered_posix_groups.pop(group, None)
+        for pid in (closing_child, surviving_child):
+            if _alive(pid):
+                os.kill(pid, signal.SIGKILL)
+        assert _wait_gone(closing_child, surviving_child)
+
+
+def test_windows_marker_drain_spares_the_owner_and_its_other_jobs(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Windows has no marker to read, so the Job is the whole of the attribution.
+
+    Which makes the exclusions the substance: this owner, and the members of a
+    Job it still holds for something else. The installer supervisor and its
+    worker sit in one of those, and a browser never does.
+    """
+    current = os.getpid()
+    queries = iter([(current, 700, 800), (current, 800)])
+    terminated: list[int] = []
+
+    class ProcessHandle:
+        def __init__(self, process: int) -> None:
+            self.process = process
+
+        def Close(self) -> None:
+            pass
+
+    class Api:
+        @staticmethod
+        def OpenProcess(access: int, inherit: bool, process: int) -> ProcessHandle:
+            return ProcessHandle(process)
+
+        @staticmethod
+        def TerminateProcess(handle: ProcessHandle, status: int) -> None:
+            terminated.append(handle.process)
+
+    class Con:
+        PROCESS_TERMINATE = 1
+        PROCESS_QUERY_LIMITED_INFORMATION = 2
+
+    class Job:
+        JobObjectBasicProcessIdList = 3
+
+        @staticmethod
+        def QueryInformationJobObject(handle: int, information: int) -> tuple[int, ...]:
+            assert handle == 123
+            return next(queries)
+
+        @staticmethod
+        def IsProcessInJob(handle: ProcessHandle, job: Any) -> bool:
+            if job == "installer-job":
+                return handle.process == 800
+            return True
+
+    monkeypatch.setattr(process_tree, "_IS_WINDOWS", True)
+    monkeypatch.setattr(process_tree, "_adopted_windows_job", 123)
+    monkeypatch.setattr(
+        process_tree,
+        "_live_windows_jobs",
+        [SimpleNamespace(job_handle="installer-job")],
+    )
+    monkeypatch.setattr(
+        process_tree, "_windows_modules", lambda: (Api(), Con(), Job(), object())
+    )
+    monkeypatch.setattr(process_tree.time, "sleep", lambda _seconds: None)
+
+    assert process_tree.drain_browser_process_marker("browser") is True
+    assert terminated == [700]
+
+
+def test_windows_marker_drain_reports_a_member_that_stays(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    current = os.getpid()
+    terminated: list[int] = []
+
+    class ProcessHandle:
+        def __init__(self, process: int) -> None:
+            self.process = process
+
+        def Close(self) -> None:
+            pass
+
+    class Api:
+        @staticmethod
+        def OpenProcess(access: int, inherit: bool, process: int) -> ProcessHandle:
+            return ProcessHandle(process)
+
+        @staticmethod
+        def TerminateProcess(handle: ProcessHandle, status: int) -> None:
+            terminated.append(handle.process)
+
+    class Con:
+        PROCESS_TERMINATE = 1
+        PROCESS_QUERY_LIMITED_INFORMATION = 2
+
+    class Job:
+        JobObjectBasicProcessIdList = 3
+
+        @staticmethod
+        def QueryInformationJobObject(handle: int, information: int) -> tuple[int, ...]:
+            return (current, 700)
+
+        @staticmethod
+        def IsProcessInJob(handle: ProcessHandle, job: Any) -> bool:
+            return True
+
+    monkeypatch.setattr(process_tree, "_IS_WINDOWS", True)
+    monkeypatch.setattr(process_tree, "_adopted_windows_job", 123)
+    monkeypatch.setattr(process_tree, "_live_windows_jobs", [])
+    monkeypatch.setattr(
+        process_tree, "_windows_modules", lambda: (Api(), Con(), Job(), object())
+    )
+    monkeypatch.setattr(process_tree.time, "sleep", lambda _seconds: None)
+
+    assert process_tree.drain_browser_process_marker("browser", timeout=0.0) is False
+    assert terminated == [700]
+
+
 def test_linux_detached_discovery_does_not_need_ps(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(process_tree.sys, "platform", "linux")
     monkeypatch.setattr(
