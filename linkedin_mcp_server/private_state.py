@@ -215,7 +215,16 @@ def harden_directory_entry(path: Path) -> None:
 
         if _WINDOWS:
             if created:
-                harden_created_directory(path)
+                try:
+                    harden_created_directory(path)
+                except BaseException:
+                    with contextlib.suppress(OSError):
+                        current = path.lstat()
+                        if _same_entry(entry, current) and stat.S_ISDIR(
+                            current.st_mode
+                        ):
+                            path.rmdir()
+                    raise
                 return
 
             from linkedin_mcp_server.windows_acl import verify_owner_only

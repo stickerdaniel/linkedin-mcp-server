@@ -2397,7 +2397,7 @@ class TestAtomicStartupCommit:
                 auth_root, profile, _config(profile), timeout=2.0
             )
 
-            assert outcome is election_module._Attempt.FAILED
+            assert outcome is election_module._Attempt.ABORTED
             assert marker.read_text() == "opening"
             assert all(child.returncode is not None for child in children)
             assert log_path.is_fifo(), "the child replaced the planted log entry"
@@ -2442,8 +2442,33 @@ class TestAtomicStartupCommit:
             election_module._start_contending_for_the_lock(
                 profile.parent, config, timeout=1.0
             )
-            is election_module._Attempt.FAILED
+            is election_module._Attempt.ABORTED
         )
+
+    def test_aborted_owner_start_does_not_retry_for_the_election_budget(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        profile = _profile(tmp_path)
+        config = _config(profile)
+        starts: list[bool] = []
+        monkeypatch.setattr(
+            election_module,
+            "_start_owner",
+            lambda *args, **kwargs: (
+                starts.append(True),
+                election_module._Attempt.ABORTED,
+            )[1],
+        )
+        monkeypatch.setattr(
+            election_module,
+            "_live_lookup",
+            lambda *args, **kwargs: (OwnerLookup(OwnerState.ABSENT), False),
+        )
+
+        outcome = obtain_owner(profile.parent, profile, config, deadline_seconds=90.0)
+
+        assert not outcome.worth_connecting
+        assert starts == [True]
 
     def test_commit_request_failure_leaves_a_live_child_to_settle_itself(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

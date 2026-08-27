@@ -1212,6 +1212,14 @@ def verify_children_cannot_be_replaced(path: Path) -> None:
             )
         if entry.sid in trusted:
             continue
+        if (
+            entry.sid == _CREATOR_OWNER_SID
+            and entry.flags & INHERIT_ONLY_ACE
+            and entry.flags & (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE)
+        ):
+            # Windows substitutes the resulting child's owner when this inherited
+            # placeholder becomes effective. It grants no foreign principal.
+            continue
         if _can_replace_child(entry):
             raise PrivateStateError(
                 f"{path} grants {entry.sid} permission to replace private state "

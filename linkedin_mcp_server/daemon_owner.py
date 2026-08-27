@@ -172,6 +172,11 @@ def _attach_daemon_log(auth_root: Path) -> Path:
             )
         os.dup2(descriptor, sys.stdout.fileno())
         os.dup2(descriptor, sys.stderr.fileno())
+    except BaseException:
+        if not existed and is_still_at(descriptor, log_path):
+            with contextlib.suppress(OSError):
+                log_path.unlink()
+        raise
     finally:
         os.close(descriptor)
     return log_path

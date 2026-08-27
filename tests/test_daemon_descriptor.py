@@ -15,6 +15,7 @@ import sys
 import unicodedata
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -756,6 +757,55 @@ class TestStateLocation:
             == ".mcp-server-linkedin"
         )
 
+    def test_windows_account_home_pin_retains_every_replaceable_component(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import windows_acl
+
+        real_lstat = Path.lstat
+        opened: list[Path] = []
+        closed: list[object] = []
+
+        def windows_lstat(path: Path):
+            entry = real_lstat(path)
+            return SimpleNamespace(
+                st_mode=entry.st_mode,
+                st_dev=entry.st_dev,
+                st_ino=entry.st_ino,
+                st_file_attributes=0,
+            )
+
+        monkeypatch.setattr(Path, "lstat", windows_lstat)
+        monkeypatch.setattr(
+            windows_acl,
+            "pin_directory",
+            lambda path: (opened.append(path), object())[1],
+        )
+        monkeypatch.setattr(
+            windows_acl, "close_directory_pin", lambda pin: closed.append(pin)
+        )
+
+        daemon_descriptor_module._pin_windows_account_home(tmp_path)
+        daemon_descriptor_module._pin_windows_account_home(tmp_path)
+
+        expected: list[Path] = []
+        current = tmp_path
+        while current.parent != current:
+            expected.append(current)
+            current = current.parent
+        assert opened == list(reversed(expected))
+        daemon_descriptor_module.reset_daemon_descriptor_for_testing()
+        assert len(closed) == len(opened)
+
+    @windows_only
+    def test_windows_pins_the_account_home_against_replacement(self, tmp_path: Path):
+        moved = tmp_path.with_name(f"{tmp_path.name}-moved")
+
+        prepare_daemon_state(tmp_path / "auth")
+
+        with pytest.raises(OSError):
+            tmp_path.rename(moved)
+
     def test_windows_refuses_an_unsafe_account_home_before_writing_state(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
@@ -841,6 +891,34 @@ class TestStateLocation:
         assert legacy.read_bytes() == daemon_descriptor_module._LEGACY_WINDOWS_TOMBSTONE
         with pytest.raises(NotADirectoryError):
             secure_mkdir(legacy / "daemon")
+
+    def test_windows_removes_a_fresh_tombstone_when_hardening_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import windows_acl
+
+        monkeypatch.setattr(daemon_descriptor_module, "_WINDOWS", True)
+        monkeypatch.setattr(
+            daemon_descriptor_module,
+            "_APPLICATION_STATE_DIR",
+            ".mcp-server-linkedin-v2",
+        )
+        monkeypatch.setattr(
+            daemon_descriptor_module, "_pin_windows_account_home", lambda _path: None
+        )
+        monkeypatch.setattr(
+            windows_acl, "verify_children_cannot_be_replaced", lambda _path: None
+        )
+        monkeypatch.setattr(
+            daemon_descriptor_module,
+            "harden_created_file",
+            lambda _path: (_ for _ in ()).throw(PrivateStateError("ACL failure")),
+        )
+
+        with pytest.raises(PrivateStateError, match="ACL failure"):
+            prepare_daemon_state(tmp_path / "auth")
+
+        assert not (tmp_path / ".mcp-server-linkedin").exists()
 
     def test_windows_refuses_an_invalid_legacy_tombstone(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

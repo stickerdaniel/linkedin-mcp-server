@@ -194,6 +194,24 @@ class TestDaemonLogState:
         assert described.protected is True
         assert len(described.entries) == 1
 
+    def test_failed_fresh_log_hardening_removes_the_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import daemon_descriptor, daemon_owner
+        from linkedin_mcp_server.private_state import PrivateStateError
+
+        monkeypatch.setattr(daemon_descriptor, "_account_home", lambda: tmp_path)
+        monkeypatch.setattr(
+            daemon_owner,
+            "harden_created_file",
+            lambda _path: (_ for _ in ()).throw(PrivateStateError("ACL failure")),
+        )
+
+        with pytest.raises(PrivateStateError, match="ACL failure"):
+            daemon_owner._attach_daemon_log(tmp_path / "auth")
+
+        assert not daemon_owner.daemon_log_path(tmp_path / "auth").exists()
+
     @pytest.mark.skipif(os.name == "nt", reason="POSIX symlink semantics are required")
     def test_a_planted_log_symlink_is_refused_before_open(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -43,6 +43,7 @@ them rather than share one path that is only true on one of them.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import weakref
@@ -201,6 +202,9 @@ class DaemonLock:
                     "being established"
                 )
         except BaseException:
+            if not existed and is_still_at(fd, self._path):
+                with contextlib.suppress(OSError):
+                    self._path.unlink()
             os.close(fd)
             raise
 

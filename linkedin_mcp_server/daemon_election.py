@@ -261,6 +261,9 @@ def obtain_owner(
             # in the meantime without one process per polling pass.
             attempt = _Attempt.CONTENDED
 
+        if attempt is _Attempt.ABORTED:
+            logger.warning("A daemon child reported a permanent startup failure")
+            return ElectionOutcome(look(), started_owner=started)
         if attempt is _Attempt.FAILED:
             # A local child failure proves only that child is gone. Another
             # frontend may already have a child holding the lock this one freed,
@@ -631,6 +634,10 @@ class _Attempt(enum.Enum):
     #: ``_stop_child`` logs that the profile may remain locked.
     FAILED = "failed"
 
+    #: The child proved a permanent startup or publication failure. Retrying the
+    #: same state would only spend the remaining election budget.
+    ABORTED = "aborted"
+
 
 def _start_owner(
     auth_root: Path,
@@ -667,8 +674,10 @@ def _start_contending_for_the_lock(
     )
     if started is _Started.YES:
         return _Attempt.STARTED
-    if started in (_Started.NO, _Started.ABORTED):
+    if started is _Started.NO:
         return _Attempt.FAILED
+    if started is _Started.ABORTED:
+        return _Attempt.ABORTED
     return _Attempt.CONTENDED
 
 

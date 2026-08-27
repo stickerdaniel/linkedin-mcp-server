@@ -186,6 +186,20 @@ class TestScope:
         finally:
             lock.release()
 
+    def test_failed_fresh_lock_hardening_removes_the_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        def refuse(_path: Path) -> None:
+            raise PrivateStateError("ACL failure")
+
+        monkeypatch.setattr(daemon_lock_module, "harden_created_file", refuse)
+        lock = DaemonLock(tmp_path / "auth")
+
+        with pytest.raises(PrivateStateError, match="ACL failure"):
+            lock.try_acquire()
+
+        assert not lock.path.exists()
+
     @pytest.mark.skipif(os.name != "nt", reason="Windows ACLs are required")
     def test_lock_file_uses_the_private_file_acl(self, tmp_path: Path):
         from linkedin_mcp_server.windows_acl import describe_dacl

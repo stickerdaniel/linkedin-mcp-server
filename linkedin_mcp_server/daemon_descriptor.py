@@ -120,6 +120,7 @@ _APPLICATION_STATE_DIR = _application_state_dir(os.name)
 _LEGACY_WINDOWS_STATE_DIR = ".mcp-server-linkedin"
 _LEGACY_WINDOWS_TOMBSTONE = b"mcp-server-linkedin-v2\n"
 _WINDOWS = os.name == "nt"
+_windows_account_home_pins: dict[str, tuple[tuple[int, int], tuple[Any, ...]]] = {}
 
 # Enough that guessing is not a strategy. Read straight from the OS source.
 _TOKEN_BYTES = 32
@@ -503,19 +504,104 @@ def _ensure_legacy_windows_tombstone(home: Path) -> None:
             raise _legacy_migration_error(legacy) from exc
         return
 
+    created = os.fstat(descriptor)
     try:
-        remaining = memoryview(_LEGACY_WINDOWS_TOMBSTONE)
-        while remaining:
-            written = os.write(descriptor, remaining)
-            if written <= 0:
-                raise OSError("legacy exclusion marker write made no progress")
-            remaining = remaining[written:]
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+        try:
+            remaining = memoryview(_LEGACY_WINDOWS_TOMBSTONE)
+            while remaining:
+                written = os.write(descriptor, remaining)
+                if written <= 0:
+                    raise OSError("legacy exclusion marker write made no progress")
+                remaining = remaining[written:]
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
-    harden_created_file(legacy)
-    _verify_legacy_tombstone(legacy)
+        harden_created_file(legacy)
+        _verify_legacy_tombstone(legacy)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            current = legacy.lstat()
+            if (current.st_dev, current.st_ino) == (created.st_dev, created.st_ino):
+                legacy.unlink()
+        raise
+
+
+def _windows_directory_identity(path: Path) -> tuple[int, int]:
+    entry = path.lstat()
+    attributes = getattr(entry, "st_file_attributes", None)
+    if attributes is None:
+        raise PrivateStateError(
+            f"Windows did not report file attributes for account-home path {path}"
+        )
+    if stat.S_ISLNK(entry.st_mode) or attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+        raise PrivateStateError(
+            f"Account-home path {path} is a reparse point and cannot anchor daemon state"
+        )
+    if not stat.S_ISDIR(entry.st_mode):
+        raise PrivateStateError(f"Account-home path is not a directory: {path}")
+    return entry.st_dev, entry.st_ino
+
+
+def _pin_windows_account_home(home: Path) -> None:
+    """Keep every replaceable account-home path component fixed for this process."""
+    key = os.path.normcase(str(home.absolute()))
+    existing = _windows_account_home_pins.get(key)
+    if existing is not None:
+        if _windows_directory_identity(home) != existing[0]:
+            raise PrivateStateError(
+                f"Windows account-home path {home} changed while daemon state was in use"
+            )
+        return
+
+    from linkedin_mcp_server.windows_acl import close_directory_pin, pin_directory
+
+    chain: list[Path] = []
+    current = home
+    while current.parent != current:
+        chain.append(current)
+        current = current.parent
+
+    pins: list[Any] = []
+    try:
+        home_identity: tuple[int, int] | None = None
+        for path in reversed(chain):
+            before = _windows_directory_identity(path)
+            pin = pin_directory(path)
+            pins.append(pin)
+            if _windows_directory_identity(path) != before:
+                raise PrivateStateError(
+                    f"Windows account-home path {path} was replaced while it was pinned"
+                )
+            if path == home:
+                home_identity = before
+        if home_identity is None:
+            raise PrivateStateError(f"Windows account-home path is unusable: {home}")
+
+        retained = (home_identity, tuple(pins))
+        prior = _windows_account_home_pins.setdefault(key, retained)
+        if prior is not retained:
+            for pin in reversed(pins):
+                close_directory_pin(pin)
+    except BaseException:
+        for pin in reversed(pins):
+            with contextlib.suppress(OSError, PrivateStateError):
+                close_directory_pin(pin)
+        raise
+
+
+def reset_daemon_descriptor_for_testing() -> None:
+    """Release process-lifetime Windows pins between isolated tests."""
+    if not _windows_account_home_pins:
+        return
+    from linkedin_mcp_server.windows_acl import close_directory_pin
+
+    retained = tuple(_windows_account_home_pins.values())
+    _windows_account_home_pins.clear()
+    for _identity, pins in retained:
+        for pin in reversed(pins):
+            with contextlib.suppress(OSError, PrivateStateError):
+                close_directory_pin(pin)
 
 
 def prepare_daemon_state(auth_root: Path) -> Path:
@@ -534,6 +620,8 @@ def prepare_daemon_state(auth_root: Path) -> Path:
             verify_children_cannot_be_replaced,
         )
 
+        if os.name == "nt":
+            _pin_windows_account_home(home)
         verify_children_cannot_be_replaced(home)
         _ensure_legacy_windows_tombstone(home)
         application_root = home / _APPLICATION_STATE_DIR
