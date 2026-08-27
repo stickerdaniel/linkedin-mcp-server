@@ -2754,6 +2754,25 @@ class TestNotHoldingTheLockForever:
 
         assert asyncio.run(exercise()), "the wedged owner kept the lock"
 
+    def test_a_completed_shutdown_hard_exits_when_chromium_is_unconfirmed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        import asyncio
+
+        from linkedin_mcp_server import daemon_owner
+
+        exited: list[bool] = []
+        monkeypatch.setattr(daemon_owner, "hard_exit_required", lambda: True)
+        monkeypatch.setattr(daemon_owner, "_exit_hard", lambda: exited.append(True))
+
+        async def exercise() -> None:
+            serving = asyncio.create_task(asyncio.sleep(0))
+            await daemon_owner._stop_within(serving, 1)
+
+        asyncio.run(exercise())
+
+        assert exited == [True]
+
     def test_a_shutdown_that_never_completes_stops_waiting(
         self, monkeypatch: pytest.MonkeyPatch
     ):

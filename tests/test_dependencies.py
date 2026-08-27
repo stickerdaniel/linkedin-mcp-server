@@ -925,6 +925,62 @@ class TestAWedgeFromAnywhereFreesTheOwner:
         assert stand_down_reason() is None, "a healthy owner was told to exit"
 
 
+def test_browser_activation_remembers_detached_process_groups(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from linkedin_mcp_server.drivers import browser as drv
+
+    remembered: list[bool] = []
+    browser = MagicMock()
+    config = MagicMock()
+    config.browser.default_timeout = 30_000
+    monkeypatch.setattr(drv, "get_config", lambda: config)
+    monkeypatch.setattr(
+        drv, "remember_detached_process_groups", lambda: remembered.append(True)
+    )
+
+    drv._apply_browser_settings(browser)
+
+    browser.page.set_default_timeout.assert_called_once_with(30_000)
+    assert remembered == [True]
+
+
+def test_confirmed_shutdown_forgets_detached_process_groups(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from linkedin_mcp_server.drivers import browser as drv
+
+    forgotten: list[bool] = []
+    monkeypatch.setattr(
+        drv, "forget_detached_process_groups", lambda: forgotten.append(True)
+    )
+    drv._browser_lease = None
+
+    drv._settle_the_profile(confirmed=True)
+
+    assert forgotten == [True]
+
+
+def test_unconfirmed_shutdown_without_local_lease_requires_hard_exit(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from linkedin_mcp_server.drivers import browser as drv
+    from linkedin_mcp_server import server_role
+
+    lease = MagicMock()
+    lease.browser_open = True
+    monkeypatch.setattr(
+        "linkedin_mcp_server.profile_lease.get_profile_lease", lambda: lease
+    )
+    drv._browser_lease = None
+    server_role.set_process_role(server_role.ServerRole.OWNER)
+    try:
+        drv._settle_the_profile(confirmed=False)
+        assert server_role.hard_exit_required()
+    finally:
+        server_role.reset_process_role_for_testing()
+
+
 class TestTheBrowserKeepsItsOwnLease:
     """Ownership as an object it holds, rather than a fact it remembers.
 
@@ -1040,6 +1096,7 @@ class TestTheBrowserKeepsItsOwnLease:
         from linkedin_mcp_server.server_role import (
             ServerRole,
             a_held_profile_means_this_owner_must_go,
+            hard_exit_required,
             set_process_role,
             stand_down_reason,
         )
@@ -1053,6 +1110,7 @@ class TestTheBrowserKeepsItsOwnLease:
 
         looked_up.assert_not_called()
         assert stand_down_reason() is not None
+        assert hard_exit_required()
 
     async def test_a_startup_that_could_not_tear_down_keeps_its_extra_reference(
         self, tmp_path

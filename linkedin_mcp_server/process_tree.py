@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 _adopted_windows_job: int | None = None
 _retained_windows_jobs: list[WindowsJob] = []
+_registered_posix_groups: dict[int, str] = {}
 _JOB_API_FAILURE_LIMIT = 3
 _JOB_POLL_SECONDS = 0.01
 _JOB_NAME_ATTEMPTS = 8
@@ -93,8 +94,8 @@ def _ps_process_rows() -> dict[int, tuple[int, int, str | None]]:
 
 def _posix_detached_descendants(
     pid: int, process_group: int
-) -> tuple[tuple[int, str], ...]:
-    """Snapshot escaped descendants and their kernel start identities."""
+) -> tuple[tuple[int, int, str], ...]:
+    """Snapshot escaped descendants, groups and kernel start identities."""
     try:
         rows = (
             _linux_process_rows()
@@ -107,7 +108,7 @@ def _posix_detached_descendants(
     for process, (parent, _group, _identity) in rows.items():
         children.setdefault(parent, []).append(process)
 
-    detached: list[tuple[int, int, str]] = []
+    detached: list[tuple[int, int, int, str]] = []
     pending = [(pid, 0)]
     seen = {pid}
     while pending:
@@ -122,18 +123,41 @@ def _posix_detached_descendants(
                 continue
             identity = identity or _kernel_start_identity(child)
             if identity is not None:
-                detached.append((depth + 1, child, identity))
+                detached.append((depth + 1, child, group, identity))
     return tuple(
-        (child, identity) for _depth, child, identity in sorted(detached, reverse=True)
+        (child, group, identity)
+        for _depth, child, group, identity in sorted(detached, reverse=True)
     )
 
 
-def _kill_detached_descendants(pid: int, process_group: int) -> None:
-    for descendant, identity in _posix_detached_descendants(pid, process_group):
-        if _kernel_start_identity(descendant) != identity:
+def remember_detached_process_groups() -> None:
+    """Retain browser groups while their parentage is still observable."""
+    if os.name == "nt":
+        return
+    pid = os.getpid()
+    process_group = os.getpgrp()
+    for _descendant, group, _identity in _posix_detached_descendants(
+        pid, process_group
+    ):
+        identity = _kernel_start_identity(group)
+        if identity is not None:
+            _registered_posix_groups.setdefault(group, identity)
+
+
+def forget_detached_process_groups() -> None:
+    """Forget groups after browser shutdown has been confirmed."""
+    _registered_posix_groups.clear()
+
+
+def _kill_registered_process_groups() -> None:
+    for group, identity in tuple(_registered_posix_groups.items()):
+        current = _kernel_start_identity(group)
+        if current is not None and current != identity:
+            continue
+        if current is None and not process_group_exists(group):
             continue
         with contextlib.suppress(OSError):
-            os.kill(descendant, signal.SIGKILL)
+            os.killpg(group, signal.SIGKILL)
 
 
 def hard_exit_process_tree(status: int) -> NoReturn:
@@ -146,7 +170,7 @@ def hard_exit_process_tree(status: int) -> NoReturn:
                 # Chromium is deliberately spawned detached by Patchright. Snapshot
                 # it while the Node parent still makes ancestry observable, then kill
                 # escaped descendants before the owner's own group.
-                _kill_detached_descendants(pid, process_group)
+                _kill_registered_process_groups()
                 os.killpg(process_group, signal.SIGKILL)
         except OSError:
             pass

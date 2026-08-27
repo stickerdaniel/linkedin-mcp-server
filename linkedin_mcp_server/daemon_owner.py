@@ -70,6 +70,7 @@ from linkedin_mcp_server.logging_config import configure_logging
 from linkedin_mcp_server.process_tree import WindowsJob, hard_exit_process_tree
 from linkedin_mcp_server.server_role import (
     ServerRole,
+    hard_exit_required,
     set_process_role,
     stand_down_reason,
 )
@@ -567,6 +568,11 @@ async def _stop_within(serving: asyncio.Task[None], seconds: float) -> None:
     """
     try:
         await asyncio.wait_for(asyncio.shield(serving), seconds)
+        if hard_exit_required():
+            logger.error(
+                "Browser shutdown was not confirmed; exiting hard before locks are released"
+            )
+            _exit_hard()
         return
     except TimeoutError:
         logger.error(
@@ -576,6 +582,8 @@ async def _stop_within(serving: asyncio.Task[None], seconds: float) -> None:
         )
     except Exception:
         logger.warning("The daemon endpoint stopped with an error", exc_info=True)
+        if hard_exit_required():
+            _exit_hard()
         return
 
     _exit_hard()

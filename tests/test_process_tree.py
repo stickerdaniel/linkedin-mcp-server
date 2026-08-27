@@ -976,23 +976,23 @@ os._exit(0)
                     os.kill(pid, signal.SIGKILL)
 
 
-def test_detached_kill_revalidates_kernel_identity(
+def test_registered_group_kill_revalidates_kernel_identity(
     monkeypatch: pytest.MonkeyPatch,
 ):
     killed: list[tuple[int, signal.Signals]] = []
-    monkeypatch.setattr(
-        process_tree,
-        "_posix_detached_descendants",
-        lambda _pid, _group: ((123, "old"), (456, "same")),
-    )
+    process_tree._registered_posix_groups.update({123: "old", 456: "same"})
     monkeypatch.setattr(
         process_tree,
         "_kernel_start_identity",
-        lambda pid: "new" if pid == 123 else "same",
+        lambda group: "new" if group == 123 else None,
     )
-    monkeypatch.setattr(os, "kill", lambda pid, sig: killed.append((pid, sig)))
+    monkeypatch.setattr(process_tree, "process_group_exists", lambda group: True)
+    monkeypatch.setattr(os, "killpg", lambda group, sig: killed.append((group, sig)))
 
-    process_tree._kill_detached_descendants(1, 1)
+    try:
+        process_tree._kill_registered_process_groups()
+    finally:
+        process_tree.forget_detached_process_groups()
 
     assert killed == [(456, signal.SIGKILL)]
 
@@ -1013,7 +1013,9 @@ def test_linux_detached_discovery_does_not_need_ps(monkeypatch: pytest.MonkeyPat
         lambda: pytest.fail("Linux hard exit called ps"),
     )
 
-    assert process_tree._posix_detached_descendants(10, 10) == ((20, "proc:browser"),)
+    assert process_tree._posix_detached_descendants(10, 10) == (
+        (20, 20, "proc:browser"),
+    )
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux procfs")
@@ -1035,7 +1037,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from linkedin_mcp_server import daemon_owner
+from linkedin_mcp_server import daemon_owner, process_tree
 
 child = subprocess.Popen(
     [sys.executable, "-c", "import time; time.sleep(600)"],
@@ -1044,6 +1046,7 @@ child = subprocess.Popen(
     stderr=subprocess.DEVNULL,
     start_new_session=True,
 )
+process_tree.remember_detached_process_groups()
 Path(sys.argv[1]).write_text(str(child.pid))
 daemon_owner._exit_hard()
 """
@@ -1079,6 +1082,76 @@ daemon_owner._exit_hard()
         descendant_pid = locals().get("descendant_pid")
         if isinstance(descendant_pid, int) and _alive(descendant_pid):
             os.kill(descendant_pid, signal.SIGKILL)
+
+
+@_POSIX_ONLY
+def test_registered_browser_group_survives_driver_reparenting(tmp_path: Path):
+    marker = tmp_path / "browser-pid.txt"
+    release = tmp_path / "release-driver"
+    script = r"""
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+from linkedin_mcp_server import daemon_owner, process_tree
+
+driver_code = r'''
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+browser = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(600)"],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    start_new_session=True,
+)
+Path(sys.argv[1]).write_text(str(browser.pid))
+while not Path(sys.argv[2]).exists():
+    time.sleep(0.01)
+'''
+driver = subprocess.Popen([sys.executable, "-c", driver_code, sys.argv[1], sys.argv[2]])
+marker = Path(sys.argv[1])
+while not marker.exists():
+    time.sleep(0.01)
+process_tree.remember_detached_process_groups()
+Path(sys.argv[2]).touch()
+driver.wait(timeout=30)
+time.sleep(0.05)
+daemon_owner._exit_hard()
+"""
+    process = subprocess.Popen(
+        [sys.executable, "-c", script, str(marker), str(release)],
+        cwd=_REPO_ROOT,
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        for _ in range(500):
+            if marker.exists():
+                break
+            if process.poll() is not None:
+                stderr = process.stderr.read() if process.stderr is not None else ""
+                pytest.fail(f"the driver exited before browser launch: {stderr!r}")
+            time.sleep(0.01)
+        else:
+            pytest.fail("the driver did not report its browser")
+
+        browser_pid = int(marker.read_text())
+        assert process.wait(timeout=30) == -signal.SIGKILL
+        assert _wait_gone(browser_pid)
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=30)
+        browser_pid = locals().get("browser_pid")
+        if isinstance(browser_pid, int) and _alive(browser_pid):
+            os.kill(browser_pid, signal.SIGKILL)
 
 
 class TestWindowsJobObject:
@@ -1246,10 +1319,21 @@ time.sleep(600)
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
+        from linkedin_mcp_server import bootstrap
+
         target_pid: int | None = None
         descendant_pid: int | None = None
+        managed: bootstrap._InstallerProcess | None = None
         try:
             popen = job.assign_asyncio_process(process)
+            wait = bootstrap._capture_windows_process_wait(process, popen)
+            managed = bootstrap._InstallerProcess(
+                process=process,
+                windows_job=job,
+                windows_popen=popen,
+                windows_wait=wait,
+                assigned=True,
+            )
             assert getattr(popen, "_handle", None) is not None
             assert process.stdin is not None
             process_tree.release_windows_gate(process.stdin, nonce)
@@ -1273,22 +1357,22 @@ time.sleep(600)
                 pytest.fail("the assigned target did not create its descendants")
             target_pid, descendant_pid = map(int, marker.read_text().split())
 
-            await asyncio.to_thread(job.terminate)
-            while process.returncode is None:
-                await asyncio.sleep(0.01)
-            job.release_popen_handle(popen)
-            await asyncio.to_thread(job.wait_until_empty, timeout=30)
+            deadline = asyncio.get_running_loop().time() + 30
+            await asyncio.shield(bootstrap._assigned_windows_cleanup(managed, deadline))
             assert _wait_gone(target_pid, descendant_pid)
         finally:
-            if not job.closed:
-                await asyncio.to_thread(job.terminate)
-                while process.returncode is None:
-                    await asyncio.sleep(0.01)
-                job.release_popen_handle(popen)
-                await asyncio.to_thread(job.wait_until_empty, timeout=30)
-            if process.returncode is None:
-                process.kill()
-                await process.wait()
+            if managed is not None and managed.assigned:
+                deadline = asyncio.get_running_loop().time() + 30
+                await asyncio.shield(
+                    bootstrap._assigned_windows_cleanup(managed, deadline)
+                )
+            elif managed is None:
+                if process.returncode is None:
+                    if process.stdin is not None:
+                        process.stdin.close()
+                    process.kill()
+                    await asyncio.wait_for(process.wait(), timeout=5)
+                job.close()
             for pid in (target_pid, descendant_pid):
                 if isinstance(pid, int) and _alive(pid):
                     subprocess.run(
@@ -1313,8 +1397,10 @@ time.sleep(600)
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
         )
+        assigned = False
         try:
             job.assign_popen(process)
+            assigned = True
             assert process.stdin is not None
             process_tree.release_windows_gate(process.stdin, nonce)
             job.terminate()
@@ -1322,11 +1408,13 @@ time.sleep(600)
             job.release_popen_handle(process)
             job.wait_until_empty(timeout=30)
         finally:
-            if not job.closed:
+            if not job.closed and assigned:
                 job.terminate()
                 process.wait(timeout=30)
                 job.release_popen_handle(process)
                 job.wait_until_empty(timeout=30)
-            if process.poll() is None:
-                process.kill()
-                process.wait(timeout=30)
+            elif not job.closed:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=5)
+                job.close()

@@ -41,6 +41,10 @@ from linkedin_mcp_server.exceptions import (
     BrowserShutdownUnconfirmedError,
     ProfileRootRefusedError,
 )
+from linkedin_mcp_server.process_tree import (
+    forget_detached_process_groups,
+    remember_detached_process_groups,
+)
 from linkedin_mcp_server.profile_lease import ProfileLease, get_profile_lease
 from linkedin_mcp_server.server_role import a_held_profile_means_this_owner_must_go
 from linkedin_mcp_server.session_state import (
@@ -134,7 +138,8 @@ def experimental_persist_derived_runtime() -> bool:
 
 
 def _apply_browser_settings(browser: BrowserManager) -> None:
-    """Apply configuration settings to browser instance."""
+    """Apply settings and retain detached browser groups while ancestry is live."""
+    remember_detached_process_groups()
     config = get_config()
     browser.page.set_default_timeout(config.browser.default_timeout)
 
@@ -817,10 +822,15 @@ def _settle_the_profile(*, confirmed: bool) -> None:
     """
     global _browser_lease
 
+    if confirmed:
+        forget_detached_process_groups()
+
     lease, _browser_lease = _browser_lease, None
     if lease is None:
-        # Nothing was ever taken, so nothing is owed. A browser created while the
-        # middleware already held a reference is the ordinary case.
+        # The middleware may own the lease instead. An unconfirmed browser still
+        # requires an owner hard exit before that outer reference is released.
+        if not confirmed:
+            a_held_profile_means_this_owner_must_go()
         return
 
     if confirmed:
