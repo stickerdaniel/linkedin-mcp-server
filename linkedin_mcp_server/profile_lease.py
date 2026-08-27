@@ -394,6 +394,13 @@ class ProfileLease:
         self._reset_if_forked()
         return self._fd is not None and self._owner_pid == os.getpid()
 
+    def guardian_fd(self) -> int:
+        """Return the held POSIX descriptor a crash guardian must inherit."""
+        self._reset_if_forked()
+        if self._fd is None or self._owner_pid != os.getpid():
+            raise ProfileLeaseUnavailableError("The profile lease is not held")
+        return self._fd
+
     @property
     def held_seconds(self) -> float:
         """How long the lease has been held, or 0.0 when it is not.

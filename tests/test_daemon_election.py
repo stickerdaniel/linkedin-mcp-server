@@ -1288,30 +1288,39 @@ def test_owner_rejects_unauthenticated_startup_verdicts_at_eof():
     )
 
 
-def test_owner_startup_diagnostics_are_bounded():
-    class _NoisyStartup:
-        reads = 0
-
-        def readline(self, size: int = -1) -> bytes:
-            self.reads += 1
-            return b"x" * size
-
-    stream = _NoisyStartup()
-    child = SimpleNamespace(stdout=stream)
+def test_owner_accepts_a_verdict_after_large_finite_startup_output():
+    nonce = "0123456789abcdef" * 4
+    frame = f"owner {nonce} ready\n".encode()
+    child = SimpleNamespace(stdout=io.BytesIO(b"x" * 5000 + frame))
 
     assert (
         election_module._await_ready(
             cast(Any, child),
-            handshake_nonce="0123456789abcdef" * 4,
+            handshake_nonce=nonce,
             timeout=1,
         )
-        is _Started.NO
+        is _Started.YES
     )
-    assert stream.reads <= 34
 
 
 @pytest.mark.slow
 class TestWindowsOwnerHandoff:
+    def test_owner_requests_breakaway_from_the_host_job(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr(election_module, "_IS_WINDOWS", True)
+        monkeypatch.setattr(
+            election_module.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x1, raising=False
+        )
+        monkeypatch.setattr(
+            election_module.subprocess, "DETACHED_PROCESS", 0x2, raising=False
+        )
+        monkeypatch.setattr(
+            election_module.subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x4, raising=False
+        )
+
+        assert election_module._detachment_flags() == 0x7
+
     def test_assignment_precedes_release_and_parent_close_follows_ready(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):

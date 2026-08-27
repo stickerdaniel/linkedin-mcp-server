@@ -1069,6 +1069,7 @@ async def _supervisor_start_error(
     await _stop_installer(proc)
     lines = captured.decode("utf-8", "replace").splitlines()
     detail = lines[-1] if lines else "the supervisor exited before it was ready"
+    detail = _safe_to_print(detail)
     return BrowserSetupFailedError(
         f"Patchright Chromium browser setup could not start: {detail}"
     )

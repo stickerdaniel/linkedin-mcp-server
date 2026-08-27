@@ -41,6 +41,10 @@ from linkedin_mcp_server.exceptions import (
     BrowserShutdownUnconfirmedError,
     ProfileRootRefusedError,
 )
+from linkedin_mcp_server.process_tree import (
+    release_browser_guardian,
+    start_browser_guardian,
+)
 from linkedin_mcp_server.profile_lease import ProfileLease, get_profile_lease
 from linkedin_mcp_server.server_role import a_held_profile_means_this_owner_must_go
 from linkedin_mcp_server.session_state import (
@@ -587,6 +591,7 @@ async def _create_browser() -> BrowserManager:
         took_lease = True
 
     try:
+        start_browser_guardian(lease.guardian_fd())
         browser = await _create_browser_locked()
     except BrowserShutdownUnconfirmedError:
         # A browser from this attempt may still be running on the profile. Keep
@@ -615,6 +620,7 @@ async def _create_browser() -> BrowserManager:
         # BaseException, not Exception: a cancelled startup would otherwise
         # leave the reference held with nothing tracking it, wedging every other
         # process until this one exits.
+        release_browser_guardian()
         if took_lease:
             lease.release()
         raise
@@ -818,6 +824,8 @@ def _settle_the_profile(*, confirmed: bool) -> None:
     global _browser_lease
 
     lease, _browser_lease = _browser_lease, None
+    if confirmed:
+        release_browser_guardian()
     if lease is None:
         # The middleware may own the lease instead. An unconfirmed browser still
         # requires an owner hard exit before that outer reference is released.

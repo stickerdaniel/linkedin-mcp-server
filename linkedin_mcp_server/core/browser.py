@@ -32,6 +32,7 @@ from linkedin_mcp_server.hidden_target import (
     open_hidden_page,
 )
 from linkedin_mcp_server.process_tree import (
+    forget_browser_process_marker,
     new_browser_process_marker,
     remember_detached_process_groups,
 )
@@ -469,6 +470,7 @@ class BrowserManager:
         confirmed = True
 
         if context is None and playwright is None:
+            forget_browser_process_marker(self._process_marker)
             return True
 
         # Bound each cleanup step. A wedged Chromium (stale SingletonLock,
@@ -507,6 +509,8 @@ class BrowserManager:
                 logger.error("Error stopping playwright: %s", exc)
 
         logger.info("Browser closed")
+        if confirmed:
+            forget_browser_process_marker(self._process_marker)
         return confirmed
 
     @property

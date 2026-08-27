@@ -1485,6 +1485,29 @@ class TestInstallerSupervisorLaunch:
         with pytest.raises(BrowserSetupFailedError, match="nested job refused"):
             await bootstrap._start_installer_supervisor("--no-shell")
 
+    async def test_start_failure_sanitizes_the_final_diagnostic(self, monkeypatch):
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.exceptions import BrowserSetupFailedError
+
+        proc = _FakeProc([], 1)
+        stderr = asyncio.StreamReader()
+        stderr.feed_data(
+            b"sitecustomize: https://user:secret@example.test/x?token=secret\x1b[2J\n"
+        )
+        stderr.feed_eof()
+        proc.stderr = cast(Any, stderr)
+        monkeypatch.setattr(
+            asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)
+        )
+
+        with pytest.raises(BrowserSetupFailedError) as excinfo:
+            await bootstrap._start_installer_supervisor("--no-shell")
+
+        reported = str(excinfo.value)
+        assert "secret" not in reported
+        assert "\x1b" not in reported
+        assert "https://***@example.test/x?***" in reported
+
     @pytest.mark.parametrize(
         ("lines", "message", "written"),
         [

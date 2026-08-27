@@ -70,6 +70,8 @@ from linkedin_mcp_server.process_tree import (
 
 logger = logging.getLogger(__name__)
 
+_IS_WINDOWS = os.name == "nt"
+
 #: How long a frontend waits for an owner to become attachable before giving up
 #: and reporting what it last saw. It is what bounds the delay a user sees when
 #: something goes wrong rather than when it goes right.
@@ -1006,18 +1008,16 @@ def _detachment_flags() -> int:
 
     The Windows equivalent is a creation flag. ``CREATE_NEW_PROCESS_GROUP``
     removes the child from the console group that receives ``Ctrl+C`` and
-    ``Ctrl+Break``, and ``DETACHED_PROCESS`` gives it no console at all, which
-    is right for a process whose output already goes to a log file.
-
-    Unmeasured, unlike the POSIX side, and said so where it matters: nothing in
-    this repository runs Windows outside CI, and a job object that kills its
-    tree ignores both flags. This is the documented mechanism rather than a
-    verified outcome.
+    ``Ctrl+Break``, ``DETACHED_PROCESS`` gives it no console, and
+    ``CREATE_BREAKAWAY_FROM_JOB`` keeps a host's kill-on-close Job from retaining
+    authority after the owner adopts its own Job.
     """
-    if os.name != "nt":
+    if not _IS_WINDOWS:
         return 0
     return (  # pragma: no cover - exercised on the Windows runner
-        subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+        subprocess.CREATE_NEW_PROCESS_GROUP
+        | subprocess.DETACHED_PROCESS
+        | subprocess.CREATE_BREAKAWAY_FROM_JOB
     )
 
 
@@ -1120,7 +1120,6 @@ def _await_ready(
                 cast(BinaryIO, stream),
                 marker=marker,
                 parse=lambda frame: _reported_owner_verdict(frame, handshake_nonce),
-                max_diagnostic_bytes=4096,
             )
             verdicts.put(reported[1] if reported is not None else None)
         except OSError:  # pragma: no cover - the stream closed under us

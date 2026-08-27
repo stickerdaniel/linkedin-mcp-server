@@ -657,6 +657,9 @@ class TestAWedgeFromAnywhereFreesTheOwner:
                 self.refs += 1
                 return True
 
+            def guardian_fd(self):
+                return 7
+
             def mark_browser_open(self):
                 self.browser_open = True
 
@@ -676,6 +679,7 @@ class TestAWedgeFromAnywhereFreesTheOwner:
                 "linkedin_mcp_server.profile_lease.get_profile_lease",
                 return_value=lease,
             ),
+            patch.object(drv, "start_browser_guardian"),
             patch.object(
                 drv, "_create_browser_locked", teardown_that_could_not_be_confirmed
             ),
@@ -1138,6 +1142,9 @@ class TestTheBrowserKeepsItsOwnLease:
                 self.refs += 1
                 return True
 
+            def guardian_fd(self):
+                return 7
+
             def mark_browser_open(self):
                 self.browser_open = True
 
@@ -1158,6 +1165,7 @@ class TestTheBrowserKeepsItsOwnLease:
                 "linkedin_mcp_server.profile_lease.get_profile_lease",
                 return_value=lease,
             ),
+            patch.object(drv, "start_browser_guardian"),
             patch.object(
                 drv, "_create_browser_locked", teardown_that_could_not_be_confirmed
             ),

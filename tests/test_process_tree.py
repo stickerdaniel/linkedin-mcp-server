@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import io
 import json
 import os
 import secrets
@@ -20,8 +21,10 @@ from typing import Any, cast
 import pytest
 
 import linkedin_mcp_server.process_gate as process_gate
+import linkedin_mcp_server.process_guardian as process_guardian
 from linkedin_mcp_server.process_protocol import new_nonce
 import linkedin_mcp_server.process_tree as process_tree
+from linkedin_mcp_server.profile_lease import ProfileLease
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _POSIX_ONLY = pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
@@ -1014,6 +1017,41 @@ def test_registered_group_kill_revalidates_kernel_identity(
     assert killed == [(456, signal.SIGKILL)]
 
 
+def test_registered_group_uses_kernel_fallback_when_snapshot_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    registration = process_tree._PosixGroupRegistration(
+        leader_identity=None,
+        members={457: "member-start"},
+    )
+    monkeypatch.setattr(process_tree, "process_group_exists", lambda _group: True)
+    monkeypatch.setattr(os, "getpgid", lambda process: 456 if process == 457 else 0)
+    monkeypatch.setattr(
+        process_tree,
+        "_kernel_start_identity",
+        lambda process: "member-start" if process == 457 else None,
+    )
+
+    assert process_tree._registered_group_still_matches(456, registration, {})
+
+
+def test_unknown_leader_identity_does_not_authenticate_a_reused_group(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    registration = process_tree._PosixGroupRegistration(
+        leader_identity=None,
+        members={},
+    )
+    monkeypatch.setattr(process_tree, "process_group_exists", lambda _group: True)
+    monkeypatch.setattr(process_tree, "_kernel_start_identity", lambda _process: None)
+
+    assert not process_tree._registered_group_still_matches(
+        456,
+        registration,
+        {456: (1, 456, None)},
+    )
+
+
 def test_hard_exit_rescans_markers_for_later_browser_groups(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -1053,6 +1091,22 @@ def test_hard_exit_waits_for_targeted_groups_to_disappear(
 ):
     checks = iter([True, True, False])
     slept: list[float] = []
+    monkeypatch.setattr(process_tree, "_registered_browser_markers", set())
+    monkeypatch.setattr(
+        process_tree,
+        "_registered_posix_groups",
+        {
+            456: process_tree._PosixGroupRegistration(
+                leader_identity=None,
+                members={457: "member-start"},
+            )
+        },
+    )
+    monkeypatch.setattr(
+        process_tree,
+        "_posix_process_rows",
+        lambda: {457: (1, 456, "member-start")},
+    )
     monkeypatch.setattr(
         process_tree, "process_group_exists", lambda group: next(checks)
     )
@@ -1061,6 +1115,36 @@ def test_hard_exit_waits_for_targeted_groups_to_disappear(
     process_tree._wait_for_process_groups((456,))
 
     assert slept == [process_tree._JOB_POLL_SECONDS, process_tree._JOB_POLL_SECONDS]
+
+
+def test_hard_exit_stops_waiting_when_a_group_identity_is_reused(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    snapshots = iter(
+        [
+            {457: (1, 456, "member-start")},
+            {456: (1, 456, "reused-leader")},
+        ]
+    )
+    slept: list[float] = []
+    monkeypatch.setattr(process_tree, "_registered_browser_markers", set())
+    monkeypatch.setattr(
+        process_tree,
+        "_registered_posix_groups",
+        {
+            456: process_tree._PosixGroupRegistration(
+                leader_identity="leader-start",
+                members={457: "member-start"},
+            )
+        },
+    )
+    monkeypatch.setattr(process_tree, "_posix_process_rows", lambda: next(snapshots))
+    monkeypatch.setattr(process_tree, "process_group_exists", lambda _group: True)
+    monkeypatch.setattr(process_tree.time, "sleep", slept.append)
+
+    process_tree._wait_for_process_groups((456,))
+
+    assert slept == [process_tree._JOB_POLL_SECONDS]
 
 
 @_POSIX_ONLY
@@ -1123,6 +1207,36 @@ def test_reused_browser_group_replaces_the_old_registration(
     finally:
         process_tree._registered_posix_groups.clear()
         process_tree._registered_posix_groups.update(original)
+
+
+def test_confirmed_browser_close_forgets_its_marker_registration(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    marker = "launch-marker"
+    shared = "shared-marker"
+    monkeypatch.setattr(process_tree, "_registered_browser_markers", {marker, shared})
+    monkeypatch.setattr(
+        process_tree,
+        "_registered_posix_groups",
+        {
+            456: process_tree._PosixGroupRegistration(
+                leader_identity="leader",
+                members={457: "member"},
+                markers={marker},
+            ),
+            789: process_tree._PosixGroupRegistration(
+                leader_identity="leader",
+                members={790: "member"},
+                markers={marker, shared},
+            ),
+        },
+    )
+
+    process_tree.forget_browser_process_marker(marker)
+
+    assert process_tree._registered_browser_markers == {shared}
+    assert 456 not in process_tree._registered_posix_groups
+    assert process_tree._registered_posix_groups[789].markers == {shared}
 
 
 def test_linux_detached_discovery_does_not_need_ps(monkeypatch: pytest.MonkeyPatch):
@@ -1210,6 +1324,235 @@ daemon_owner._exit_hard()
         descendant_pid = locals().get("descendant_pid")
         if isinstance(descendant_pid, int) and _alive(descendant_pid):
             os.kill(descendant_pid, signal.SIGKILL)
+
+
+def test_crash_guardian_kills_the_owner_group_before_browser_drain(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    events: list[object] = []
+    monkeypatch.setattr(process_guardian.sys, "argv", ["guardian", "10", "11", "456"])
+    monkeypatch.setattr(
+        process_guardian.os, "fdopen", lambda *_args, **_kwargs: io.BytesIO()
+    )
+    monkeypatch.setattr(process_guardian.os, "write", lambda *_args: 6)
+    monkeypatch.setattr(process_guardian.os, "close", lambda _fd: None)
+    monkeypatch.setattr(process_guardian.os, "getpgrp", lambda: 789)
+    monkeypatch.setattr(
+        process_guardian.os,
+        "killpg",
+        lambda group, sent: events.append(("kill", group, sent)),
+    )
+    monkeypatch.setattr(
+        process_guardian,
+        "_drain",
+        lambda markers: events.append(("drain", markers)),
+    )
+
+    assert process_guardian.main() == 0
+    assert events == [
+        ("kill", 456, signal.SIGKILL),
+        ("drain", set()),
+    ]
+
+
+def test_crash_guardian_requires_a_quiet_interval_after_an_empty_scan(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    snapshots = iter([set(), {456}, set()])
+    now = [0.0]
+    killed: list[int] = []
+
+    def marked(_markers: set[str]) -> set[int]:
+        return next(snapshots, set())
+
+    def sleep(_seconds: float) -> None:
+        now[0] += 0.5
+
+    monkeypatch.setattr(process_guardian, "_marked_groups", marked)
+    monkeypatch.setattr(process_guardian.os, "getpgrp", lambda: 100)
+    monkeypatch.setattr(
+        process_guardian.os,
+        "killpg",
+        lambda group, _signal: killed.append(group),
+    )
+    monkeypatch.setattr(process_guardian.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(process_guardian.time, "sleep", sleep)
+
+    process_guardian._drain({"marker"})
+
+    assert killed == [456]
+
+
+@_POSIX_ONLY
+def test_crash_guardian_holds_profile_until_detached_browser_is_gone(
+    tmp_path: Path,
+):
+    auth_root = tmp_path / "auth"
+    script = r"""
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+from linkedin_mcp_server.process_tree import (
+    new_browser_process_marker,
+    remember_detached_process_groups,
+    start_browser_guardian,
+)
+from linkedin_mcp_server.profile_lease import ProfileLease
+
+auth_root = Path(sys.argv[1])
+auth_root.mkdir(parents=True)
+lease = ProfileLease(auth_root)
+assert lease.try_acquire()
+start_browser_guardian(lease.guardian_fd())
+marker, marker_environment = new_browser_process_marker()
+environment = dict(os.environ)
+environment.update(marker_environment)
+browser = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(600)"],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    start_new_session=True,
+    env=environment,
+)
+remember_detached_process_groups(marker)
+print(os.getpid(), browser.pid, flush=True)
+time.sleep(600)
+"""
+    process = subprocess.Popen(
+        [sys.executable, "-c", script, str(auth_root)],
+        cwd=_REPO_ROOT,
+        start_new_session=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    contender = None
+    browser_pid: int | None = None
+    try:
+        assert process.stdout is not None
+        reported_owner, browser_pid = map(int, process.stdout.readline().split())
+        assert reported_owner == process.pid
+        os.kill(process.pid, signal.SIGKILL)
+        assert process.wait(timeout=30) == -signal.SIGKILL
+
+        contender = ProfileLease(auth_root)
+        acquired = False
+        for _ in range(500):
+            if contender.try_acquire():
+                acquired = True
+                assert not _alive(browser_pid)
+                break
+            time.sleep(0.01)
+        assert acquired
+        assert _wait_gone(browser_pid)
+    finally:
+        if contender is not None:
+            contender.release()
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=30)
+        if browser_pid is not None and _alive(browser_pid):
+            os.killpg(browser_pid, signal.SIGKILL)
+
+
+@_POSIX_ONLY
+def test_crash_guardian_stops_a_driver_before_its_delayed_browser_launch(
+    tmp_path: Path,
+):
+    auth_root = tmp_path / "auth"
+    launched = tmp_path / "browser-pid"
+    driver_code = r"""
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+time.sleep(0.25)
+browser = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(600)"],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    start_new_session=True,
+    env=dict(os.environ),
+)
+Path(sys.argv[1]).write_text(str(browser.pid))
+time.sleep(600)
+"""
+    owner_code = r"""
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+from linkedin_mcp_server.process_tree import (
+    new_browser_process_marker,
+    start_browser_guardian,
+)
+from linkedin_mcp_server.profile_lease import ProfileLease
+
+auth_root = Path(sys.argv[1])
+auth_root.mkdir(parents=True)
+lease = ProfileLease(auth_root)
+assert lease.try_acquire()
+start_browser_guardian(lease.guardian_fd())
+_marker, marker_environment = new_browser_process_marker()
+environment = dict(os.environ)
+environment.update(marker_environment)
+driver = subprocess.Popen(
+    [sys.executable, "-c", sys.argv[3], sys.argv[2]],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    env=environment,
+)
+print(os.getpid(), driver.pid, flush=True)
+time.sleep(600)
+"""
+    process = subprocess.Popen(
+        [sys.executable, "-c", owner_code, str(auth_root), str(launched), driver_code],
+        cwd=_REPO_ROOT,
+        start_new_session=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    contender = None
+    driver_pid: int | None = None
+    try:
+        assert process.stdout is not None
+        reported_owner, driver_pid = map(int, process.stdout.readline().split())
+        assert reported_owner == process.pid
+        os.kill(process.pid, signal.SIGKILL)
+        assert process.wait(timeout=30) == -signal.SIGKILL
+
+        contender = ProfileLease(auth_root)
+        for _ in range(500):
+            if contender.try_acquire():
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("the crash guardian did not release the profile")
+        assert _wait_gone(driver_pid)
+        assert not launched.exists()
+    finally:
+        if contender is not None:
+            contender.release()
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=30)
+        if driver_pid is not None and _alive(driver_pid):
+            os.kill(driver_pid, signal.SIGKILL)
+        if launched.exists():
+            browser_pid = int(launched.read_text())
+            if _alive(browser_pid):
+                os.killpg(browser_pid, signal.SIGKILL)
 
 
 @_POSIX_ONLY
@@ -1349,7 +1692,7 @@ def test_adopted_windows_job_drains_every_other_process(
     class Api:
         @staticmethod
         def OpenProcess(access: int, inherit: bool, process: int) -> ProcessHandle:
-            assert access == 1
+            assert access == 3
             assert inherit is False
             return ProcessHandle(process)
 
@@ -1360,6 +1703,7 @@ def test_adopted_windows_job_drains_every_other_process(
 
     class Con:
         PROCESS_TERMINATE = 1
+        PROCESS_QUERY_LIMITED_INFORMATION = 2
 
     class Job:
         JobObjectBasicProcessIdList = 3
@@ -1369,6 +1713,11 @@ def test_adopted_windows_job_drains_every_other_process(
             assert handle == 123
             assert information == Job.JobObjectBasicProcessIdList
             return next(queries)
+
+        @staticmethod
+        def IsProcessInJob(handle: ProcessHandle, job: int) -> bool:
+            assert job == 123
+            return handle.process == 700
 
     original = process_tree._adopted_windows_job
     process_tree._adopted_windows_job = 123
@@ -1383,6 +1732,55 @@ def test_adopted_windows_job_drains_every_other_process(
 
     assert terminated == [700]
     assert closed == [700]
+
+
+def test_adopted_windows_job_revalidates_process_membership(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    current = os.getpid()
+    queries = iter([(current, 700), (current,)])
+    terminated: list[int] = []
+
+    class ProcessHandle:
+        def Close(self) -> None:
+            pass
+
+    class Api:
+        @staticmethod
+        def OpenProcess(access: int, inherit: bool, process: int) -> ProcessHandle:
+            return ProcessHandle()
+
+        @staticmethod
+        def TerminateProcess(handle: ProcessHandle, status: int) -> None:
+            terminated.append(status)
+
+    class Con:
+        PROCESS_TERMINATE = 1
+        PROCESS_QUERY_LIMITED_INFORMATION = 2
+
+    class Job:
+        JobObjectBasicProcessIdList = 3
+
+        @staticmethod
+        def QueryInformationJobObject(handle: int, information: int) -> tuple[int, ...]:
+            return next(queries)
+
+        @staticmethod
+        def IsProcessInJob(handle: ProcessHandle, job: int) -> bool:
+            return False
+
+    original = process_tree._adopted_windows_job
+    process_tree._adopted_windows_job = 123
+    monkeypatch.setattr(
+        process_tree, "_windows_modules", lambda: (Api(), Con(), Job(), object())
+    )
+    monkeypatch.setattr(process_tree.time, "sleep", lambda _seconds: None)
+    try:
+        process_tree._drain_adopted_windows_job()
+    finally:
+        process_tree._adopted_windows_job = original
+
+    assert terminated == []
 
 
 def test_windows_hard_exit_drains_the_job_before_releasing_locks(

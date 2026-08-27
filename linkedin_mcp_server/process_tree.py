@@ -13,7 +13,7 @@ import signal
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -29,10 +29,13 @@ _BROWSER_PROCESS_MARKER = "LINKEDIN_MCP_BROWSER_PROCESS_MARKER"
 class _PosixGroupRegistration:
     leader_identity: str | None
     members: dict[int, str]
+    markers: set[str] = field(default_factory=set)
 
 
 _registered_posix_groups: dict[int, _PosixGroupRegistration] = {}
 _registered_browser_markers: set[str] = set()
+_browser_guardian_process: subprocess.Popen[Any] | None = None
+_browser_guardian_control_fd: int | None = None
 _JOB_API_FAILURE_LIMIT = 3
 _JOB_POLL_SECONDS = 0.01
 _JOB_NAME_ATTEMPTS = 8
@@ -44,9 +47,111 @@ class ProcessTreeError(RuntimeError):
     """The operating system could not establish descendant containment."""
 
 
+def start_browser_guardian(lease_fd: int) -> None:
+    """Start a detached POSIX process that retains the profile lease on crashes."""
+    global _browser_guardian_control_fd, _browser_guardian_process
+    if _IS_WINDOWS:
+        return
+    if _browser_guardian_process is not None:
+        if _browser_guardian_process.poll() is None:
+            return
+        _browser_guardian_process = None
+        _browser_guardian_control_fd = None
+
+    control_read, control_write = os.pipe()
+    ready_read, ready_write = os.pipe()
+    owner_pid = os.getpid()
+    owner_group = os.getpgrp()
+    protected_owner_group = owner_group if owner_group == owner_pid else 0
+    guardian = Path(__file__).with_name("process_guardian.py").resolve()
+    process: subprocess.Popen[Any] | None = None
+    try:
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-I",
+                "-S",
+                "-u",
+                str(guardian),
+                str(control_read),
+                str(ready_write),
+                str(protected_owner_group),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            pass_fds=(control_read, ready_write, lease_fd),
+            start_new_session=True,
+        )
+        os.close(control_read)
+        control_read = -1
+        os.close(ready_write)
+        ready_write = -1
+        readable, _, _ = select.select([ready_read], [], [], 5.0)
+        if not readable or os.read(ready_read, 6) != b"ready\n":
+            raise ProcessTreeError("The browser crash guardian did not start")
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.close(control_write)
+        if process is not None:
+            with contextlib.suppress(OSError):
+                process.kill()
+            with contextlib.suppress(OSError, subprocess.SubprocessError):
+                process.wait(timeout=5)
+        raise
+    finally:
+        for descriptor in (control_read, ready_read, ready_write):
+            if descriptor >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(descriptor)
+
+    _browser_guardian_process = process
+    _browser_guardian_control_fd = control_write
+
+
+def release_browser_guardian() -> None:
+    """Release the crash guardian after Chromium is confirmed gone."""
+    global _browser_guardian_control_fd, _browser_guardian_process
+    process = _browser_guardian_process
+    control_fd = _browser_guardian_control_fd
+    _browser_guardian_process = None
+    _browser_guardian_control_fd = None
+    if control_fd is not None:
+        with contextlib.suppress(OSError):
+            os.write(control_fd, b"release\n")
+        with contextlib.suppress(OSError):
+            os.close(control_fd)
+    if process is None:
+        return
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(OSError):
+            process.kill()
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            process.wait(timeout=5)
+
+
+def _send_marker_to_guardian(marker: str) -> None:
+    process = _browser_guardian_process
+    control_fd = _browser_guardian_control_fd
+    if process is None or control_fd is None:
+        return
+    if process.poll() is not None:
+        raise ProcessTreeError("The browser crash guardian exited unexpectedly")
+    try:
+        os.write(control_fd, f"marker {marker}\n".encode("ascii"))
+    except OSError as exc:
+        raise ProcessTreeError(
+            "The browser crash guardian could not retain its marker"
+        ) from exc
+
+
 def new_browser_process_marker() -> tuple[str, dict[str, str]]:
     """Return a private marker and the browser environment entry that carries it."""
     marker = secrets.token_hex(32)
+    _send_marker_to_guardian(marker)
     return marker, {_BROWSER_PROCESS_MARKER: marker}
 
 
@@ -213,6 +318,13 @@ def remember_detached_process_groups(marker: str | None = None) -> None:
         rows = {}
 
     observed = list(_posix_detached_descendants(pid, process_group))
+    guardian = _browser_guardian_process
+    if guardian is not None:
+        observed = [
+            item
+            for item in observed
+            if item[0] != guardian.pid and item[1] != guardian.pid
+        ]
     if marker is not None:
         _registered_browser_markers.add(marker)
         known = {process for process, _group, _identity in observed}
@@ -233,7 +345,19 @@ def remember_detached_process_groups(marker: str | None = None) -> None:
         _registered_posix_groups[group] = _PosixGroupRegistration(
             leader_identity=_kernel_start_identity(group),
             members=members,
+            markers={marker} if marker is not None else set(),
         )
+
+
+def forget_browser_process_marker(marker: str) -> None:
+    """Drop confirmed-gone browser registrations from future hard exits."""
+    _registered_browser_markers.discard(marker)
+    for group, registration in tuple(_registered_posix_groups.items()):
+        if marker not in registration.markers:
+            continue
+        registration.markers.discard(marker)
+        if not registration.markers:
+            _registered_posix_groups.pop(group, None)
 
 
 def _refresh_marked_process_groups(
@@ -242,6 +366,7 @@ def _refresh_marked_process_groups(
     """Add every currently marked browser group to the hard-exit registry."""
     owner_group = os.getpgrp()
     grouped: dict[int, dict[int, str]] = {}
+    grouped_markers: dict[int, set[str]] = {}
     for marker in tuple(_registered_browser_markers):
         for process in _marked_posix_processes(marker):
             row = rows.get(process)
@@ -257,6 +382,7 @@ def _refresh_marked_process_groups(
             if group == owner_group or identity is None:
                 continue
             grouped.setdefault(group, {})[process] = identity
+            grouped_markers.setdefault(group, set()).add(marker)
 
     for group, members in grouped.items():
         registration = _registered_posix_groups.get(group)
@@ -264,9 +390,11 @@ def _refresh_marked_process_groups(
             _registered_posix_groups[group] = _PosixGroupRegistration(
                 leader_identity=_kernel_start_identity(group),
                 members=members,
+                markers=grouped_markers[group],
             )
         else:
             registration.members.update(members)
+            registration.markers.update(grouped_markers[group])
 
 
 def _registered_group_still_matches(
@@ -277,15 +405,28 @@ def _registered_group_still_matches(
     leader = rows.get(group)
     if leader is not None and leader[1] == group:
         current = leader[2] or _kernel_start_identity(group)
-        if current == registration.leader_identity:
+        if (
+            current is not None
+            and registration.leader_identity is not None
+            and current == registration.leader_identity
+        ):
             return True
     if not process_group_exists(group):
         return False
     for process, identity in registration.members.items():
         row = rows.get(process)
-        if row is None or row[1] != group:
-            continue
-        if (row[2] or _kernel_start_identity(process)) == identity:
+        if row is None:
+            try:
+                if os.getpgid(process) != group:
+                    continue
+            except OSError:
+                continue
+            current = _kernel_start_identity(process)
+        else:
+            if row[1] != group:
+                continue
+            current = row[2] or _kernel_start_identity(process)
+        if current is not None and current == identity:
             return True
     return False
 
@@ -318,7 +459,19 @@ def _wait_for_process_groups(groups: tuple[int, ...]) -> None:
             for process in registration.members:
                 with contextlib.suppress(ChildProcessError, OSError):
                     os.waitpid(process, os.WNOHANG)
-        remaining = {group for group in remaining if process_group_exists(group)}
+        try:
+            rows = _posix_process_rows()
+        except OSError:
+            rows = {}
+        _refresh_marked_process_groups(rows)
+        remaining = {
+            group
+            for group in remaining
+            if (
+                (registration := _registered_posix_groups.get(group)) is not None
+                and _registered_group_still_matches(group, registration, rows)
+            )
+        }
         if remaining:
             time.sleep(_JOB_POLL_SECONDS)
 
@@ -348,9 +501,13 @@ def _drain_adopted_windows_job() -> None:
             handle: Any | None = None
             try:
                 handle = win32api.OpenProcess(
-                    win32con.PROCESS_TERMINATE, False, process
+                    win32con.PROCESS_TERMINATE
+                    | win32con.PROCESS_QUERY_LIMITED_INFORMATION,
+                    False,
+                    process,
                 )
-                win32api.TerminateProcess(handle, 1)
+                if win32job.IsProcessInJob(handle, _adopted_windows_job):
+                    win32api.TerminateProcess(handle, 1)
             except BaseException:  # noqa: BLE001 - the next Job query proves exit
                 pass
             finally:
