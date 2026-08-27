@@ -62,6 +62,7 @@ from linkedin_mcp_server.exceptions import (
     OwnerStandingDownError,
     ProfileRootRefusedError,
 )
+from linkedin_mcp_server.private_state import harden_directory
 from linkedin_mcp_server.process_protocol import new_nonce
 from linkedin_mcp_server.process_tree import (
     ProcessTreeError,
@@ -1591,7 +1592,17 @@ async def _watch_installer_activity(
 
 
 def _create_installer_temporary_root() -> Path:
-    return Path(tempfile.mkdtemp(prefix="linkedin-mcp-installer-"))
+    temporary_root = Path(tempfile.mkdtemp(prefix="linkedin-mcp-installer-"))
+    try:
+        # Python before 3.12.4 ignores mkdtemp's 0o700 mode on Windows, and a
+        # non-ACL filesystem can silently inherit access for other accounts.
+        # Establish and read back the same owner-only boundary used for daemon
+        # state before any downloader receives this path.
+        harden_directory(temporary_root)
+    except BaseException:
+        _remove_installer_temporary_root(temporary_root)
+        raise
+    return temporary_root
 
 
 def _remove_installer_temporary_root(temporary_root: Path) -> None:

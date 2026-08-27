@@ -2771,6 +2771,52 @@ class TestPatchrightInstallStreaming:
         assert blocked.is_set()
         assert asyncio.get_running_loop().time() - started < 0.1
 
+    def test_installer_temporary_root_is_hardened_before_use(
+        self, tmp_path, monkeypatch
+    ):
+        from linkedin_mcp_server import bootstrap
+
+        temporary_root = tmp_path / "private"
+        events: list[tuple[str, Path]] = []
+
+        def make_temporary_root(*, prefix: str) -> str:
+            assert prefix == "linkedin-mcp-installer-"
+            temporary_root.mkdir()
+            events.append(("create", temporary_root))
+            return str(temporary_root)
+
+        def harden(path: Path) -> None:
+            assert path == temporary_root
+            events.append(("harden", path))
+
+        monkeypatch.setattr(bootstrap.tempfile, "mkdtemp", make_temporary_root)
+        monkeypatch.setattr(bootstrap, "harden_directory", harden)
+
+        assert bootstrap._create_installer_temporary_root() == temporary_root
+        assert events == [("create", temporary_root), ("harden", temporary_root)]
+
+    def test_installer_temporary_root_is_removed_when_hardening_fails(
+        self, tmp_path, monkeypatch
+    ):
+        from linkedin_mcp_server import bootstrap
+
+        temporary_root = tmp_path / "private"
+
+        def make_temporary_root(*, prefix: str) -> str:
+            assert prefix == "linkedin-mcp-installer-"
+            temporary_root.mkdir()
+            return str(temporary_root)
+
+        def refuse(_path: Path) -> None:
+            raise RuntimeError("ACLs unavailable")
+
+        monkeypatch.setattr(bootstrap.tempfile, "mkdtemp", make_temporary_root)
+        monkeypatch.setattr(bootstrap, "harden_directory", refuse)
+
+        with pytest.raises(RuntimeError, match="ACLs unavailable"):
+            bootstrap._create_installer_temporary_root()
+        assert not temporary_root.exists()
+
     async def test_private_temp_environment_is_removed_after_tree_exit(
         self, tmp_path, monkeypatch
     ):
