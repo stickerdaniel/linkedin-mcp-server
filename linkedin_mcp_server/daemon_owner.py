@@ -56,10 +56,7 @@ from typing import Any, NoReturn, Protocol, TextIO
 import httpx
 
 from linkedin_mcp_server import __version__, daemon_config, daemon_descriptor
-from linkedin_mcp_server.bootstrap import (
-    browser_setup_failure_pending,
-    browser_setup_in_progress,
-)
+from linkedin_mcp_server.bootstrap import browser_setup_in_progress
 from linkedin_mcp_server.config import set_config
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon_lock import DaemonLock, DaemonLockError
@@ -556,7 +553,6 @@ async def _serve_until_stopped(
             and quiet is not None
             and quiet >= idle_timeout
             and not browser_setup_in_progress()
-            and not browser_setup_failure_pending()
         ):
             logger.info("Nothing has needed the browser in %.0fs; exiting", quiet)
             server.should_exit = True

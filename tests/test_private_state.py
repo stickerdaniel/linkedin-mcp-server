@@ -494,6 +494,36 @@ class TestWindowsAcl:
         assert described.entries[0].flags == CONTAINER_INHERITANCE
 
     @windows_only
+    def test_a_directory_can_be_private_from_creation(self, tmp_path: Path):
+        from linkedin_mcp_server.windows_acl import (
+            CONTAINER_INHERITANCE,
+            create_owner_only_directory,
+            close_directory_pin,
+            current_user_sid,
+            describe_dacl,
+            _sid_to_string,
+        )
+
+        parent = tmp_path / "temporary"
+        harden_directory(parent)
+        target, pin = create_owner_only_directory(parent, prefix="installer-")
+        try:
+            sid, buffer = current_user_sid()
+            try:
+                expected = _sid_to_string(sid)
+            finally:
+                del buffer
+
+            described = describe_dacl(target)
+            assert described.protected is True
+            assert [(entry.sid, entry.flags) for entry in described.entries] == [
+                (expected, CONTAINER_INHERITANCE)
+            ]
+        finally:
+            close_directory_pin(pin)
+            target.rmdir()
+
+    @windows_only
     def test_a_file_grants_only_this_account_and_inherits_nothing(self, tmp_path: Path):
         from linkedin_mcp_server.windows_acl import describe_dacl
 
@@ -700,6 +730,153 @@ class TestWindowsAclOffWindows:
                 user_sid,
             )
         ]
+
+    @pytest.mark.parametrize(
+        "right_name",
+        ["FILE_ADD_FILE", "FILE_ADD_SUBDIRECTORY", "FILE_DELETE_CHILD", "DELETE"],
+    )
+    def test_untrusted_parent_replacement_permission_is_refused(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        right_name: str,
+    ):
+        from linkedin_mcp_server import windows_acl
+
+        monkeypatch.setattr(
+            windows_acl, "current_user_sid", lambda: (object(), object())
+        )
+        monkeypatch.setattr(
+            windows_acl, "_sid_to_string", lambda _sid: "current-account"
+        )
+        monkeypatch.setattr(windows_acl, "read_owner", lambda _path: "current-account")
+        monkeypatch.setattr(
+            windows_acl,
+            "describe_dacl",
+            lambda _path: windows_acl.Dacl(
+                protected=True,
+                entries=(
+                    windows_acl.AccessEntry(
+                        sid="another-account",
+                        type=windows_acl.ACCESS_ALLOWED_ACE_TYPE,
+                        flags=0,
+                        mask=getattr(windows_acl, right_name),
+                    ),
+                ),
+            ),
+        )
+
+        with pytest.raises(PrivateStateError, match="replace private state"):
+            windows_acl.verify_children_cannot_be_replaced(tmp_path)
+
+    def test_inheriting_temporary_parent_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import windows_acl
+
+        monkeypatch.setattr(
+            windows_acl, "current_user_sid", lambda: (object(), object())
+        )
+        monkeypatch.setattr(
+            windows_acl, "_sid_to_string", lambda _sid: "current-account"
+        )
+        monkeypatch.setattr(windows_acl, "read_owner", lambda _path: "current-account")
+        monkeypatch.setattr(
+            windows_acl,
+            "describe_dacl",
+            lambda _path: windows_acl.Dacl(protected=False, entries=()),
+        )
+
+        with pytest.raises(PrivateStateError, match="inherits permissions"):
+            windows_acl.verify_children_cannot_be_replaced(tmp_path)
+
+        windows_acl.verify_children_cannot_be_replaced(
+            tmp_path, require_protected=False
+        )
+
+    def test_security_descriptor_matches_the_native_pointer_width(self):
+        from linkedin_mcp_server import windows_acl
+
+        expected = 40 if ctypes.sizeof(ctypes.c_void_p) == 8 else 20
+        assert ctypes.sizeof(windows_acl._SECURITY_DESCRIPTOR) == expected
+
+    def test_private_directory_uses_its_final_acl_at_creation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import windows_acl
+
+        acl = windows_acl._PACL(456)
+        created: list[Path] = []
+        parent_checked: list[tuple[Path, bool]] = []
+        pinned: list[tuple[Path, object]] = []
+        closed: list[object] = []
+        verified: list[Path] = []
+
+        class Advapi:
+            InitializeSecurityDescriptor = staticmethod(lambda *_args: True)
+            SetSecurityDescriptorOwner = staticmethod(lambda *_args: True)
+            SetSecurityDescriptorDacl = staticmethod(lambda *_args: True)
+            SetSecurityDescriptorControl = staticmethod(lambda *_args: True)
+
+        class Kernel:
+            @staticmethod
+            def CreateDirectoryW(path: str, attributes: object) -> bool:
+                assert attributes is not None
+                target = Path(path)
+                target.mkdir()
+                created.append(target)
+                return True
+
+            @staticmethod
+            def LocalFree(value: object) -> None:
+                assert value == acl
+
+        monkeypatch.setattr(windows_acl, "_load", lambda: (Advapi(), Kernel()))
+
+        def pin(path: Path) -> object:
+            handle = object()
+            pinned.append((path, handle))
+            return handle
+
+        monkeypatch.setattr(windows_acl, "pin_directory", pin)
+        monkeypatch.setattr(
+            windows_acl, "close_directory_pin", lambda handle: closed.append(handle)
+        )
+        monkeypatch.setattr(
+            windows_acl,
+            "verify_children_cannot_be_replaced",
+            lambda path, *, require_protected: parent_checked.append(
+                (path, require_protected)
+            ),
+        )
+        monkeypatch.setattr(
+            windows_acl, "_require_acl_capable_volume", lambda _path: None
+        )
+        monkeypatch.setattr(windows_acl, "_clear_last_error", lambda: None)
+        monkeypatch.setattr(
+            windows_acl,
+            "current_user_sid",
+            lambda: (windows_acl._PSID(123), object()),
+        )
+        monkeypatch.setattr(
+            windows_acl, "_build_owner_only_acl", lambda *_args, **_kwargs: acl
+        )
+        monkeypatch.setattr(
+            windows_acl,
+            "verify_owner_only",
+            lambda path, **_kwargs: verified.append(path),
+        )
+
+        target, child_pin = windows_acl.create_owner_only_directory(
+            tmp_path, prefix="installer-"
+        )
+
+        assert parent_checked == [(tmp_path, False)]
+        assert created == [target]
+        assert verified == [target]
+        assert [path for path, _handle in pinned] == [tmp_path, target]
+        assert closed == [pinned[0][1]]
+        assert child_pin is pinned[1][1]
 
     def test_foreign_initial_owner_is_refused_before_acl_construction(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

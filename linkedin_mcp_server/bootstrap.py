@@ -190,15 +190,9 @@ _TERMINAL_CONTROLS = re.compile(
 _RESPONSE_BODY_OPENS = re.compile(r"server returned code \d{1,3} body '")
 _RESPONSE_BODY_CLOSES = "'. URL: "
 #: The closing marker as patchright writes it: the marker, the download URL,
-#: end of line. Anchored, because the body between the markers is a stranger's
-#: bytes and can hold the marker itself: measured against a refusing mirror,
-#: the real closer starts a line of its own and its URL runs to the end of it,
-#: so a marker with prose behind it is the body talking and the drop stays
-#: open. This narrows the forgery to a body line that ends in a URL-shaped
-#: token; it cannot close it, because the grammar is ambiguous at the source.
-#: What the drop is *for* does not rest on that: the escape sequences are
-#: stripped, the credentials redacted, the markup disabled and the line length
-#: capped whether or not a body is recognised as one.
+#: end of line. A response body can forge that exact shape after it has emitted
+#: a newline, so a multiline body stays elided through EOF. A single physical
+#: line is unambiguous: patchright's real closer is the final marker on that line.
 _RESPONSE_BODY_CLOSED = re.compile(r"'\. URL: \S*\Z")
 #: One short of the marker, which is the most of it that a forced cut can leave
 #: on the far side of a fragment boundary.
@@ -1694,13 +1688,17 @@ def _create_installer_temporary_root() -> _InstallerTemporaryRoot:
             "with inherited access."
         )
     parent = _installer_temporary_parent()
-    path = Path(tempfile.mkdtemp(prefix="linkedin-mcp-installer-", dir=parent))
     pin: Any | None = None
+    if os.name == "nt":
+        from linkedin_mcp_server.windows_acl import create_owner_only_directory
+
+        path, pin = create_owner_only_directory(
+            parent, prefix="linkedin-mcp-installer-"
+        )
+    else:
+        path = Path(tempfile.mkdtemp(prefix="linkedin-mcp-installer-", dir=parent))
     try:
         if os.name == "nt":
-            from linkedin_mcp_server.windows_acl import pin_directory
-
-            pin = pin_directory(path)
             details = path.lstat()
             attributes = getattr(details, "st_file_attributes", None)
             if attributes is None:
@@ -1743,15 +1741,12 @@ def _create_installer_temporary_root() -> _InstallerTemporaryRoot:
             path.rmdir()
         raise
     temporary_root = _InstallerTemporaryRoot(path, details.st_dev, details.st_ino, pin)
-    try:
-        # Python before 3.12.4 ignores mkdtemp's 0o700 mode on Windows, and a
-        # non-ACL filesystem can silently inherit access for other accounts.
-        # Establish and read back the same owner-only boundary used for daemon
-        # state before any downloader receives this path.
-        harden_created_directory(path)
-    except BaseException:
-        _remove_installer_temporary_root(temporary_root)
-        raise
+    if os.name != "nt":
+        try:
+            harden_created_directory(path)
+        except BaseException:
+            _remove_installer_temporary_root(temporary_root)
+            raise
     return temporary_root
 
 
@@ -2468,8 +2463,11 @@ def _cli_progress() -> Iterator[Callable[[str], None]]:
 
 def _redacted_download_host(configured: str) -> str:
     """Preserve a mirror's origin while removing its configured private path."""
-    parsed = urlsplit(configured)
-    hostname = parsed.hostname
+    try:
+        parsed = urlsplit(configured)
+        hostname = parsed.hostname
+    except ValueError:
+        return "***"
     if not parsed.scheme or hostname is None:
         return "***"
     if ":" in hostname and not hostname.startswith("["):
@@ -2527,29 +2525,37 @@ async def _installer_lines(stream: asyncio.StreamReader) -> AsyncIterator[str]:
     would raise out of a render callback and the 400-digit sizes were all the
     same bytes arriving through the same quotes.
 
-    Stateful across lines, because the body carries its own newlines and the
-    marker that ends it can be thousands of lines further on. While a body is
-    open every line is dropped whole, which also bounds what a mirror can make
-    this process hold.
+    Stateful across fragments because one physical line can exceed the output
+    cap. A body that crosses a real newline keeps the rest of the stream elided:
+    remote bytes can forge the same line shape as Patchright's closer, so there
+    is no safe point to resume. Every body fragment is dropped whole, which also
+    bounds what a mirror can make this process hold.
     """
     eliding = False
+    crossed_body_line = False
     carry = ""
-    async for line in _split_installer_output(stream):
+    async for line, line_ended in _split_installer_output(stream):
         if eliding:
-            # The cut in ``_split_installer_output`` falls wherever the cap
-            # does, including inside the marker, and half a marker on each side
-            # of it would leave this open for the rest of the install: the URL,
-            # the stack trace and every later retry dropped with the body.
+            # A forced fragment is still part of the opener's physical line. Keep
+            # only enough of its tail to recognize a closer split by the cap, and
+            # believe that closer only when the real line ends. Once body content
+            # has crossed a newline, its own line can forge the exact close shape,
+            # so confidentiality requires eliding the rest of the stream.
             joined = carry + line
-            found = _RESPONSE_BODY_CLOSED.search(joined)
-            if found is None:
-                carry = joined[-_CLOSER_CARRY:]
+            if not crossed_body_line and line_ended:
+                found = _RESPONSE_BODY_CLOSED.search(joined)
+                if found is not None:
+                    eliding = False
+                    carry = ""
+                    line = joined[found.start() :]
+                else:
+                    crossed_body_line = True
+                    carry = ""
+                    continue
+            else:
+                if not crossed_body_line:
+                    carry = joined[-_CLOSER_CARRY:]
                 continue
-            eliding = False
-            carry = ""
-            # Resume at the marker: what follows it is patchright's own text.
-            # Anything the match takes from the carry is marker, not body.
-            line = joined[found.start() :]
         kept: list[str] = []
         # Scanning forward from ``pos`` rather than over the result: the marker
         # stays in what is kept, so a search from the front would find the same
@@ -2565,7 +2571,8 @@ async def _installer_lines(stream: asyncio.StreamReader) -> AsyncIterator[str]:
             found = _RESPONSE_BODY_CLOSED.search(line, opened.end())
             if found is None:
                 eliding = True
-                carry = line[-_CLOSER_CARRY:]
+                crossed_body_line = line_ended
+                carry = "" if line_ended else line[-_CLOSER_CARRY:]
                 break
             pos = found.start()
         # Yielded even when empty, so what a caller sees is still the line
@@ -2573,7 +2580,9 @@ async def _installer_lines(stream: asyncio.StreamReader) -> AsyncIterator[str]:
         yield "".join(kept)
 
 
-async def _split_installer_output(stream: asyncio.StreamReader) -> AsyncIterator[str]:
+async def _split_installer_output(
+    stream: asyncio.StreamReader,
+) -> AsyncIterator[tuple[str, bool]]:
     """The installer's output, split into lines, with no limit on line length.
 
     Deliberately not ``async for line in stream``. That reads through
@@ -2607,7 +2616,7 @@ async def _split_installer_output(stream: asyncio.StreamReader) -> AsyncIterator
                 # below ends where the cap fell, and trimming there would eat
                 # whitespace the installer wrote.
                 line, buffer = buffer[:end].rstrip(), buffer[end + 1 :]
-                yield line
+                yield line, True
                 continue
             if len(buffer) <= _MAX_LINE_CHARS:
                 break
@@ -2633,11 +2642,11 @@ async def _split_installer_output(stream: asyncio.StreamReader) -> AsyncIterator
             # coincidence, and the body it opens then prints in full. Both ends
             # want the same thing, which is a splitter that knows where the
             # markers are, and that is its own change.
-            yield buffer[:_MAX_LINE_CHARS]
+            yield buffer[:_MAX_LINE_CHARS], False
             buffer = buffer[_MAX_LINE_CHARS:]
     buffer += decoder.decode(b"", final=True)
     if buffer:
-        yield buffer.rstrip()
+        yield buffer.rstrip(), True
 
 
 def _write_install_metadata(

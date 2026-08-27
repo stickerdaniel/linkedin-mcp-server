@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import secrets
 from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
@@ -59,10 +60,12 @@ SET_ACCESS = 2
 NO_INHERITANCE = 0x00
 OBJECT_INHERIT_ACE = 0x01
 CONTAINER_INHERIT_ACE = 0x02
+INHERIT_ONLY_ACE = 0x08
 INHERITED_ACE = 0x10
 CONTAINER_INHERITANCE = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
 
 ACCESS_ALLOWED_ACE_TYPE = 0x00
+ACCESS_DENIED_ACE_TYPE = 0x01
 SE_FILE_OBJECT = 1
 
 OWNER_SECURITY_INFORMATION = 0x00000001
@@ -75,9 +78,36 @@ PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000
 REPLACE_PROTECTED_DACL = DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION
 
 SE_DACL_PROTECTED = 0x1000
+SECURITY_DESCRIPTOR_REVISION = 1
 FILE_ALL_ACCESS = 0x001F01FF
+FILE_WRITE_DATA = 0x00000002
+FILE_APPEND_DATA = 0x00000004
+FILE_ADD_FILE = FILE_WRITE_DATA
+FILE_ADD_SUBDIRECTORY = FILE_APPEND_DATA
+FILE_DELETE_CHILD = 0x00000040
+DELETE = 0x00010000
+WRITE_DAC = 0x00040000
+WRITE_OWNER = 0x00080000
+GENERIC_WRITE = 0x40000000
+GENERIC_ALL = 0x10000000
+_FILE_REPLACEMENT_RIGHTS = (
+    FILE_WRITE_DATA
+    | FILE_APPEND_DATA
+    | DELETE
+    | WRITE_DAC
+    | WRITE_OWNER
+    | GENERIC_WRITE
+    | GENERIC_ALL
+)
+_DIRECTORY_REPLACEMENT_RIGHTS = (
+    FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_DELETE_CHILD | _FILE_REPLACEMENT_RIGHTS
+)
+_CREATOR_OWNER_SID = "S-1-3-0"
 
 FILE_PERSISTENT_ACLS = 0x00000008
+ERROR_FILE_EXISTS = 80
+ERROR_ALREADY_EXISTS = 183
+_PRIVATE_DIRECTORY_ATTEMPTS = 16
 
 FILE_READ_ATTRIBUTES = 0x00000080
 FILE_SHARE_READ = 0x00000001
@@ -176,6 +206,26 @@ class _EXPLICIT_ACCESS_W(ctypes.Structure):
     ]
 
 
+class _SECURITY_DESCRIPTOR(ctypes.Structure):
+    _fields_ = [
+        ("Revision", wintypes.BYTE),
+        ("Sbz1", wintypes.BYTE),
+        ("Control", wintypes.WORD),
+        ("Owner", _PSID),
+        ("Group", _PSID),
+        ("Sacl", _PACL),
+        ("Dacl", _PACL),
+    ]
+
+
+class _SECURITY_ATTRIBUTES(ctypes.Structure):
+    _fields_ = [
+        ("nLength", wintypes.DWORD),
+        ("lpSecurityDescriptor", wintypes.LPVOID),
+        ("bInheritHandle", wintypes.BOOL),
+    ]
+
+
 def _load() -> tuple[ctypes.CDLL, ctypes.CDLL]:
     """Return the two security libraries, binding their signatures once.
 
@@ -214,6 +264,34 @@ def _load() -> tuple[ctypes.CDLL, ctypes.CDLL]:
         ctypes.POINTER(wintypes.DWORD),
     ]
     _advapi32.GetTokenInformation.restype = wintypes.BOOL
+
+    _advapi32.InitializeSecurityDescriptor.argtypes = [
+        _PSECURITY_DESCRIPTOR,
+        wintypes.DWORD,
+    ]
+    _advapi32.InitializeSecurityDescriptor.restype = wintypes.BOOL
+
+    _advapi32.SetSecurityDescriptorOwner.argtypes = [
+        _PSECURITY_DESCRIPTOR,
+        _PSID,
+        wintypes.BOOL,
+    ]
+    _advapi32.SetSecurityDescriptorOwner.restype = wintypes.BOOL
+
+    _advapi32.SetSecurityDescriptorDacl.argtypes = [
+        _PSECURITY_DESCRIPTOR,
+        wintypes.BOOL,
+        _PACL,
+        wintypes.BOOL,
+    ]
+    _advapi32.SetSecurityDescriptorDacl.restype = wintypes.BOOL
+
+    _advapi32.SetSecurityDescriptorControl.argtypes = [
+        _PSECURITY_DESCRIPTOR,
+        wintypes.WORD,
+        wintypes.WORD,
+    ]
+    _advapi32.SetSecurityDescriptorControl.restype = wintypes.BOOL
 
     _advapi32.SetEntriesInAclW.argtypes = [
         wintypes.ULONG,
@@ -285,6 +363,12 @@ def _load() -> tuple[ctypes.CDLL, ctypes.CDLL]:
         wintypes.HANDLE,
     ]
     _kernel32.CreateFileW.restype = wintypes.HANDLE
+
+    _kernel32.CreateDirectoryW.argtypes = [
+        wintypes.LPCWSTR,
+        ctypes.POINTER(_SECURITY_ATTRIBUTES),
+    ]
+    _kernel32.CreateDirectoryW.restype = wintypes.BOOL
 
     _kernel32.LocalFree.argtypes = [_HLOCAL]
     _kernel32.LocalFree.restype = _HLOCAL
@@ -429,6 +513,73 @@ def _build_owner_only_acl(sid: _PSID, *, directory: bool) -> _PACL:
     if not acl:
         raise PrivateStateError("SetEntriesInAclW returned no ACL")
     return acl
+
+
+def create_owner_only_directory(
+    parent: Path, *, prefix: str
+) -> tuple[Path, wintypes.HANDLE]:
+    """Create and pin a random child with its final owner-only ACL."""
+    _advapi32, _kernel32 = _load()
+    parent_pin = pin_directory(parent)
+    sid_buffer: ctypes.Array | None = None
+    acl = _PACL()
+    try:
+        verify_children_cannot_be_replaced(parent, require_protected=False)
+        _require_acl_capable_volume(parent)
+        sid, sid_buffer = current_user_sid()
+        acl = _build_owner_only_acl(sid, directory=True)
+
+        descriptor_buffer = _SECURITY_DESCRIPTOR()
+        descriptor = ctypes.cast(ctypes.byref(descriptor_buffer), _PSECURITY_DESCRIPTOR)
+        if not _advapi32.InitializeSecurityDescriptor(
+            descriptor, SECURITY_DESCRIPTOR_REVISION
+        ):
+            _fail("InitializeSecurityDescriptor")
+        if not _advapi32.SetSecurityDescriptorOwner(descriptor, sid, False):
+            _fail("SetSecurityDescriptorOwner")
+        if not _advapi32.SetSecurityDescriptorDacl(descriptor, True, acl, False):
+            _fail("SetSecurityDescriptorDacl")
+        if not _advapi32.SetSecurityDescriptorControl(
+            descriptor,
+            SE_DACL_PROTECTED,
+            SE_DACL_PROTECTED,
+        ):
+            _fail("SetSecurityDescriptorControl")
+
+        attributes = _SECURITY_ATTRIBUTES(
+            ctypes.sizeof(_SECURITY_ATTRIBUTES),
+            descriptor,
+            False,
+        )
+        for _ in range(_PRIVATE_DIRECTORY_ATTEMPTS):
+            path = parent / f"{prefix}{secrets.token_hex(16)}"
+            _clear_last_error()
+            if _kernel32.CreateDirectoryW(str(path), ctypes.byref(attributes)):
+                break
+            code = _last_error()
+            if code not in (ERROR_FILE_EXISTS, ERROR_ALREADY_EXISTS):
+                _fail("CreateDirectoryW", code)
+        else:
+            raise PrivateStateError(
+                f"Could not create a unique private directory below {parent}"
+            )
+
+        try:
+            verify_owner_only(path, directory=True)
+            child_pin = pin_directory(path)
+        except BaseException:
+            try:
+                path.rmdir()
+            except OSError:
+                pass
+            raise
+        return path, child_pin
+    finally:
+        if acl:
+            _kernel32.LocalFree(acl)
+        if sid_buffer is not None:
+            del sid_buffer
+        close_directory_pin(parent_pin)
 
 
 def restrict_to_current_user(
@@ -594,6 +745,67 @@ def _sid_to_string(sid: _PSID) -> str:
         return text.value or ""
     finally:
         _kernel32.LocalFree(ctypes.cast(text, _HLOCAL))
+
+
+def _can_replace_child(entry: AccessEntry) -> bool:
+    """Whether an ACE grants replacement rights on this directory or its children."""
+    applies_here = not entry.flags & INHERIT_ONLY_ACE
+    if applies_here and entry.mask & _DIRECTORY_REPLACEMENT_RIGHTS:
+        return True
+    if entry.flags & OBJECT_INHERIT_ACE and entry.mask & _FILE_REPLACEMENT_RIGHTS:
+        return True
+    return bool(
+        entry.flags & CONTAINER_INHERIT_ACE
+        and entry.mask & _DIRECTORY_REPLACEMENT_RIGHTS
+    )
+
+
+def verify_children_cannot_be_replaced(
+    path: Path, *, require_protected: bool = True
+) -> None:
+    """Refuse a parent that lets an unprivileged account replace its children."""
+    sid, sid_buffer = current_user_sid()
+    try:
+        current_user = _sid_to_string(sid)
+    finally:
+        del sid_buffer
+
+    trusted = {
+        current_user,
+        "S-1-5-18",  # LocalSystem
+        "S-1-5-32-544",  # BUILTIN\\Administrators
+    }
+    owner = read_owner(path)
+    if owner not in trusted:
+        raise PrivateStateError(
+            f"{path} is owned by {owner}, which can rewrite its child permissions"
+        )
+
+    described = describe_dacl(path)
+    if require_protected and not described.protected:
+        raise PrivateStateError(
+            f"{path} still inherits permissions that can change after verification"
+        )
+
+    for entry in described.entries:
+        if entry.type == ACCESS_DENIED_ACE_TYPE:
+            continue
+        if entry.type != ACCESS_ALLOWED_ACE_TYPE:
+            raise PrivateStateError(
+                f"{path} carries an unsupported permission entry for {entry.sid}"
+            )
+        if entry.sid in trusted:
+            continue
+        if (
+            entry.sid == _CREATOR_OWNER_SID
+            and entry.flags & INHERIT_ONLY_ACE
+            and entry.flags & (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE)
+        ):
+            continue
+        if _can_replace_child(entry):
+            raise PrivateStateError(
+                f"{path} grants {entry.sid} permission to replace private state below it"
+            )
 
 
 def pin_directory(path: Path) -> wintypes.HANDLE:

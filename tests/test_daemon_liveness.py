@@ -685,7 +685,7 @@ class TestGoingAwayWhenNobodyNeedsIt:
                 await setup
             bootstrap.get_bootstrap_state().setup_task = None
 
-    async def test_unconsumed_setup_failure_holds_the_owner_open(self):
+    async def test_unconsumed_setup_failure_exits_after_fresh_idle_grace(self):
         from linkedin_mcp_server import bootstrap, daemon_liveness
 
         liveness = daemon_liveness.get_liveness()
@@ -700,7 +700,7 @@ class TestGoingAwayWhenNobodyNeedsIt:
             await setup
         bootstrap.get_bootstrap_state().setup_task = setup
         try:
-            assert await self._run_loop(idle_timeout=0.05, ticks=0.2) is False
+            assert await self._run_loop(idle_timeout=0.05, ticks=0.2) is True
         finally:
             bootstrap.get_bootstrap_state().setup_task = None
 

@@ -2295,7 +2295,7 @@ class TestInstallerSupervisorLaunch:
         )
 
         with pytest.raises(BrowserSetupFailedError) as excinfo:
-            await bootstrap._start_installer_supervisor("--no-shell")
+            await bootstrap._start_installer_supervisor("--no-shell", {})
 
         reported = str(excinfo.value)
         assert "secret" not in reported
@@ -2878,12 +2878,11 @@ class TestPatchrightInstallStreaming:
         monkeypatch.setattr(bootstrap.os, "name", "nt")
         monkeypatch.setattr(bootstrap, "_installer_temporary_parent", lambda: tmp_path)
         monkeypatch.setattr(
-            bootstrap.tempfile,
-            "mkdtemp",
-            lambda **_kwargs: str(temporary_root),
+            windows_acl,
+            "create_owner_only_directory",
+            lambda *_args, **_kwargs: (temporary_root, pin),
         )
         monkeypatch.setattr(bootstrap.Path, "lstat", lambda _path: entry)
-        monkeypatch.setattr(windows_acl, "pin_directory", lambda _path: pin)
         monkeypatch.setattr(
             windows_acl, "close_directory_pin", lambda handle: closed.append(handle)
         )
@@ -3779,6 +3778,18 @@ class TestCredentialRedaction:
         assert "s3cr3t" not in redacted
         assert "mirror.example" in redacted
 
+    def test_an_invalid_unused_fallback_does_not_break_output(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server.bootstrap import _safe_to_print
+
+        monkeypatch.setenv("PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST", "https://valid.example")
+        monkeypatch.setenv("PLAYWRIGHT_DOWNLOAD_HOST", "http://[")
+
+        assert _safe_to_print("Downloading from https://valid.example/x.zip") == (
+            "Downloading from https://valid.example/x.zip"
+        )
+
     @pytest.mark.parametrize("straddle", [0, 1, 2, 3])
     async def test_a_url_is_redacted_wherever_the_cut_falls(
         self, monkeypatch, straddle
@@ -3817,8 +3828,9 @@ class TestQuotedResponseBodiesAreDropped:
     Patchright's ``Download failed: server returned code N body '…'. URL: …``
     quotes whatever a refusing mirror sent, verbatim and once per retry. That
     body is where the escape sequences, the reflected credentials, the rich
-    markup and the 400-digit sizes all came from, so it is dropped between the
-    markers rather than defended against downstream.
+    markup and the 400-digit sizes all came from. A single-line body is dropped
+    between its markers. A multiline body takes the remaining stream because its
+    own lines can forge the closing shape.
     """
 
     #: Measured, not composed: one error block as patchright 1.61.2 wrote it to a
@@ -3858,26 +3870,26 @@ class TestQuotedResponseBodiesAreDropped:
         assert "999%" not in printed
         assert "sup3rs3cr3tvalue" not in printed
 
-    async def test_what_patchright_wrote_itself_survives(self, monkeypatch):
-        """The diagnosis is the status code and the URL, and both are kept."""
+    async def test_the_authenticated_prefix_survives(self, monkeypatch):
+        """The status before the remote body remains useful and trustworthy."""
         seen = await self._lines(monkeypatch, self.SAMPLE.encode())
         printed = "\n".join(seen)
 
         assert "server returned code 403" in printed
-        # The mirror is named; its credential and its query are not, and the
-        # archive path sits behind the query in a host configured this way.
-        assert "URL: http://***@mirror.example/?***" in printed
-        assert "coreBundle.js:29308:23" in printed, "output resumes after the body"
+        assert "URL:" not in printed
+        assert "coreBundle.js" not in printed
 
-    async def test_one_body_does_not_swallow_the_next_download(self, monkeypatch):
-        """A failed attempt is followed by four more, and they must show."""
+    async def test_a_multiline_body_takes_later_attempt_output_with_it(
+        self, monkeypatch
+    ):
+        """No later line has an authenticated boundary from the remote body."""
         seen = await self._lines(
             monkeypatch,
             self.SAMPLE.encode(),
             b"Downloading Chrome for Testing 149.0.7827.55 from https://cdn/x.zip\n",
         )
 
-        assert any("Downloading Chrome for Testing" in line for line in seen)
+        assert not any("Downloading Chrome for Testing" in line for line in seen)
 
     async def test_a_body_that_never_closes_takes_the_rest_with_it(self, monkeypatch):
         """A truncated response leaves the marker open, and open means dropped.
@@ -3926,19 +3938,11 @@ class TestQuotedResponseBodiesAreDropped:
         assert seen[0].endswith("'. URL: http://b/x.zip")
 
     async def test_a_body_cannot_close_itself_with_prose_behind_it(self, monkeypatch):
-        """The closer is anchored to the end of its line, so a forgery misses.
-
-        Measured against a refusing mirror: patchright's own closer starts a
-        line of its own and its URL runs to end of line. A body that writes the
-        marker mid-line is therefore still the body talking, and the drop stays
-        open rather than printing the rest of the page as if patchright had
-        written it.
-        """
+        """On one physical line only its final closer can end the body."""
         stream = (
-            "Download failed: server returned code 403 body '<html>\n"
-            "'. URL: http://forged/x and then sup3rs3cr3tvalue\n"
-            "still inside the page\n"
-            "'. URL: http://real/x.zip\n"
+            "Download failed: server returned code 403 body '<html> "
+            "'. URL: http://forged/x and then sup3rs3cr3tvalue "
+            "still inside the page '. URL: http://real/x.zip\n"
             "    at IncomingMessage.handleError (/x/coreBundle.js:1:1)\n"
         )
         seen = await self._lines(monkeypatch, stream.encode())
@@ -3949,33 +3953,21 @@ class TestQuotedResponseBodiesAreDropped:
         assert "'. URL: http://real/x.zip" in printed
         assert "coreBundle.js" in printed, "and patchright's own trace comes back"
 
-    async def test_a_body_line_ending_in_a_url_does_close_the_drop(self, monkeypatch):
-        """The limit the anchor leaves open, pinned so a change to it is visible.
-
-        The closer patchright writes is the marker, a URL, end of line, and
-        nothing at the source distinguishes that from a body line of the same
-        shape. So a page that ends a line with one closes the drop and the rest
-        of the page prints. Recorded rather than defended against: the
-        alternative is dropping the real closer too, which takes the URL, the
-        stack trace and every later retry with it.
-
-        What the drop is for does not rest on this. The rest of the page is
-        still stripped of terminal controls, still redacted, still capped, and
-        still rendered without markup, which is what the sibling tests hold.
-        """
+    async def test_a_multiline_body_cannot_forge_its_closing_marker(self, monkeypatch):
+        """After one body newline the protocol has no authentic closing shape."""
         stream = (
             "Download failed: server returned code 403 body '<html>\n"
             "'. URL: http://forged/x\n"
             "reflected sup3rs3cr3tvalue\n"
             "'. URL: http://real/x.zip\n"
+            "later installer output\n"
         )
         seen = await self._lines(monkeypatch, stream.encode())
         printed = "\n".join(seen)
 
-        assert "reflected sup3rs3cr3tvalue" in printed, (
-            "a body line of the closer's own shape ends the drop: known limit"
-        )
-        assert "\x1b" not in printed, "and the rest is still stripped"
+        assert "sup3rs3cr3tvalue" not in printed
+        assert "later installer output" not in printed
+        assert printed.endswith("<response body omitted>")
 
     @pytest.mark.parametrize("cuts", [1, 2])
     async def test_a_closer_split_by_the_forced_cut_still_closes(
