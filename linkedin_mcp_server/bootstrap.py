@@ -66,7 +66,7 @@ from linkedin_mcp_server.exceptions import (
 )
 from linkedin_mcp_server.private_state import (
     PrivateStateError,
-    harden_directory,
+    harden_created_directory,
     verify_no_extended_acl,
 )
 from linkedin_mcp_server.process_protocol import new_nonce
@@ -1748,7 +1748,7 @@ def _create_installer_temporary_root() -> _InstallerTemporaryRoot:
         # non-ACL filesystem can silently inherit access for other accounts.
         # Establish and read back the same owner-only boundary used for daemon
         # state before any downloader receives this path.
-        harden_directory(path)
+        harden_created_directory(path)
     except BaseException:
         _remove_installer_temporary_root(temporary_root)
         raise
@@ -2499,7 +2499,11 @@ def _safe_to_print(text: str) -> str:
     text = _TERMINAL_CONTROLS.sub("", text)
     for variable in (
         "PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST",
+        "npm_config_playwright_chromium_download_host",
+        "npm_package_config_playwright_chromium_download_host",
         "PLAYWRIGHT_DOWNLOAD_HOST",
+        "npm_config_playwright_download_host",
+        "npm_package_config_playwright_download_host",
     ):
         configured = os.getenv(variable, "").strip()
         if not configured:

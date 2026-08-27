@@ -634,6 +634,73 @@ class TestWindowsAclOffWindows:
             | windows_acl.FILE_FLAG_OPEN_REPARSE_POINT
         ]
 
+    def test_created_default_owner_is_normalized_to_the_token_user(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import windows_acl
+
+        user_sid = object()
+        default_owner_sid = object()
+        acl = object()
+        calls: list[tuple[int, object]] = []
+
+        class Advapi:
+            @staticmethod
+            def SetNamedSecurityInfoW(
+                path: str,
+                object_type: int,
+                information: int,
+                owner: object,
+                group: object,
+                dacl: object,
+                sacl: object,
+            ) -> int:
+                calls.append((information, owner))
+                return windows_acl.ERROR_SUCCESS
+
+        class Kernel:
+            @staticmethod
+            def LocalFree(value: object) -> None:
+                assert value is acl
+
+        monkeypatch.setattr(windows_acl, "_load", lambda: (Advapi(), Kernel()))
+        monkeypatch.setattr(
+            windows_acl, "_require_acl_capable_volume", lambda _path: None
+        )
+        monkeypatch.setattr(
+            windows_acl, "current_user_sid", lambda: (user_sid, object())
+        )
+        monkeypatch.setattr(
+            windows_acl,
+            "default_owner_sid",
+            lambda: (default_owner_sid, object()),
+        )
+        monkeypatch.setattr(
+            windows_acl,
+            "_sid_to_string",
+            lambda sid: {
+                user_sid: "current-account",
+                default_owner_sid: "default-owner",
+            }[sid],
+        )
+        monkeypatch.setattr(windows_acl, "read_owner", lambda _path: "default-owner")
+        monkeypatch.setattr(
+            windows_acl, "_build_owner_only_acl", lambda *_args, **_kwargs: acl
+        )
+        monkeypatch.setattr(
+            windows_acl, "verify_owner_only", lambda *_args, **_kwargs: None
+        )
+
+        windows_acl.restrict_to_current_user(tmp_path, directory=True, created=True)
+
+        assert calls == [
+            (
+                windows_acl.REPLACE_PROTECTED_DACL
+                | windows_acl.OWNER_SECURITY_INFORMATION,
+                user_sid,
+            )
+        ]
+
     def test_foreign_initial_owner_is_refused_before_acl_construction(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):

@@ -49,6 +49,7 @@ ERROR_INSUFFICIENT_BUFFER = 122
 
 TOKEN_QUERY = 0x0008
 TOKEN_USER_CLASS = 1  # TOKEN_INFORMATION_CLASS.TokenUser
+TOKEN_OWNER_CLASS = 4  # TOKEN_INFORMATION_CLASS.TokenOwner
 
 NO_MULTIPLE_TRUSTEE = 0
 TRUSTEE_IS_SID = 0
@@ -93,6 +94,10 @@ class _SID_AND_ATTRIBUTES(ctypes.Structure):
 
 class _TOKEN_USER(ctypes.Structure):
     _fields_ = [("User", _SID_AND_ATTRIBUTES)]
+
+
+class _TOKEN_OWNER(ctypes.Structure):
+    _fields_ = [("Owner", _PSID)]
 
 
 class _ACL(ctypes.Structure):
@@ -362,6 +367,41 @@ def current_user_sid() -> tuple[_PSID, ctypes.Array]:
         _kernel32.CloseHandle(token)
 
 
+def default_owner_sid() -> tuple[_PSID, ctypes.Array]:
+    """Return the SID Windows assigns to objects created by this token."""
+    _advapi32, _kernel32 = _load()
+
+    token = wintypes.HANDLE()
+    if not _advapi32.OpenProcessToken(
+        _kernel32.GetCurrentProcess(), TOKEN_QUERY, ctypes.byref(token)
+    ):
+        _fail("OpenProcessToken")
+
+    try:
+        needed = wintypes.DWORD(0)
+        _clear_last_error()
+        if _advapi32.GetTokenInformation(
+            token, TOKEN_OWNER_CLASS, None, 0, ctypes.byref(needed)
+        ):
+            raise PrivateStateError("GetTokenInformation sizing call succeeded")
+        code = _last_error()
+        if code != ERROR_INSUFFICIENT_BUFFER:
+            _fail("GetTokenInformation", code)
+
+        buffer = ctypes.create_string_buffer(needed.value)
+        if not _advapi32.GetTokenInformation(
+            token, TOKEN_OWNER_CLASS, buffer, needed.value, ctypes.byref(needed)
+        ):
+            _fail("GetTokenInformation")
+
+        token_owner = ctypes.cast(buffer, ctypes.POINTER(_TOKEN_OWNER)).contents
+        if not token_owner.Owner:
+            raise PrivateStateError("The process token carries no default owner SID")
+        return _PSID(token_owner.Owner), buffer
+    finally:
+        _kernel32.CloseHandle(token)
+
+
 def _build_owner_only_acl(sid: _PSID, *, directory: bool) -> _PACL:
     """Build a one-entry ACL granting full access to *sid* and nobody else."""
     _advapi32, _ = _load()
@@ -391,25 +431,52 @@ def _build_owner_only_acl(sid: _PSID, *, directory: bool) -> _PACL:
     return acl
 
 
-def restrict_to_current_user(path: Path, *, directory: bool) -> None:
-    """Give only this account access to its own *path*, and verify it."""
+def restrict_to_current_user(
+    path: Path, *, directory: bool, created: bool = False
+) -> None:
+    """Give only this account access to its own *path*, and verify it.
+
+    A new Windows object belongs to the token's default owner, which can be a
+    group SID rather than the token user. Callers may accept that owner only when
+    they know this process created the entry. The owner is then normalized to the
+    user SID together with the protected DACL.
+    """
     _advapi32, _kernel32 = _load()
     _require_acl_capable_volume(path)
 
     sid, sid_buffer = current_user_sid()
     expected_owner = _sid_to_string(sid)
+    accepted_owners = {expected_owner}
+    if created:
+        default_sid, default_buffer = default_owner_sid()
+        try:
+            accepted_owners.add(_sid_to_string(default_sid))
+        finally:
+            del default_buffer
+
     actual_owner = read_owner(path)
-    if actual_owner != expected_owner:
+    if actual_owner not in accepted_owners:
         del sid_buffer
         raise PrivateStateError(
-            f"{path} is owned by {actual_owner}, not by this account. Refusing "
-            f"to convert another account's content into trusted private state."
+            f"{path} is owned by {actual_owner}, not by this account or this "
+            f"process's default owner. Refusing to convert another account's "
+            f"content into trusted private state."
         )
 
+    replace_owner = actual_owner != expected_owner
     acl = _build_owner_only_acl(sid, directory=directory)
     try:
+        security_information = REPLACE_PROTECTED_DACL
+        if replace_owner:
+            security_information |= OWNER_SECURITY_INFORMATION
         code = _advapi32.SetNamedSecurityInfoW(
-            str(path), SE_FILE_OBJECT, REPLACE_PROTECTED_DACL, None, None, acl, None
+            str(path),
+            SE_FILE_OBJECT,
+            security_information,
+            sid if replace_owner else None,
+            None,
+            acl,
+            None,
         )
         # This one returns the error code rather than setting the thread's last
         # error, so checking GetLastError here would read a stale value from

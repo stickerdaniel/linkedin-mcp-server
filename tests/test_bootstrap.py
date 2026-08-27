@@ -2939,7 +2939,7 @@ class TestPatchrightInstallStreaming:
             events.append(("harden", path))
 
         monkeypatch.setattr(bootstrap.tempfile, "mkdtemp", make_temporary_root)
-        monkeypatch.setattr(bootstrap, "harden_directory", harden)
+        monkeypatch.setattr(bootstrap, "harden_created_directory", harden)
 
         created = bootstrap._create_installer_temporary_root()
 
@@ -2966,7 +2966,7 @@ class TestPatchrightInstallStreaming:
             raise RuntimeError("ACLs unavailable")
 
         monkeypatch.setattr(bootstrap.tempfile, "mkdtemp", make_temporary_root)
-        monkeypatch.setattr(bootstrap, "harden_directory", refuse)
+        monkeypatch.setattr(bootstrap, "harden_created_directory", refuse)
 
         with pytest.raises(RuntimeError, match="ACLs unavailable"):
             bootstrap._create_installer_temporary_root()
@@ -3278,7 +3278,14 @@ class TestPatchrightInstallStreaming:
 
     @pytest.mark.parametrize(
         "variable",
-        ["PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST", "PLAYWRIGHT_DOWNLOAD_HOST"],
+        [
+            "PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST",
+            "npm_config_playwright_chromium_download_host",
+            "npm_package_config_playwright_chromium_download_host",
+            "PLAYWRIGHT_DOWNLOAD_HOST",
+            "npm_config_playwright_download_host",
+            "npm_package_config_playwright_download_host",
+        ],
     )
     async def test_mirror_path_credentials_are_not_reported(
         self, monkeypatch, caplog, variable: str
