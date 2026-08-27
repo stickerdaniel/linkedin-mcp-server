@@ -131,6 +131,7 @@ def test_setup_failure_says_the_retry_starts_the_next_attempt():
         raise_tool_error(BrowserSetupFailedError("the mirror refused"))
 
     surfaced = str(caught.value)
+    assert "the mirror refused" in surfaced
     assert "Retry this tool to start" in surfaced
     assert "has started" not in surfaced
 

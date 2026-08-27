@@ -568,6 +568,26 @@ class TestWindowsAcl:
             windows_acl.restrict_to_current_user(target, directory=True)
 
     @windows_only
+    def test_a_pinned_directory_cannot_be_replaced(self, tmp_path: Path):
+        from linkedin_mcp_server.windows_acl import (
+            close_directory_pin,
+            pin_directory,
+        )
+
+        target = tmp_path / "installer-root"
+        target.mkdir()
+        replacement = tmp_path / "moved"
+        pin = pin_directory(target)
+        try:
+            with pytest.raises(OSError):
+                target.rename(replacement)
+        finally:
+            close_directory_pin(pin)
+
+        target.rename(replacement)
+        assert replacement.is_dir()
+
+    @windows_only
     def test_the_struct_layouts_match_the_windows_headers(self):
         # ctypes sizes a struct from its declared fields, so a wrong field type
         # produces a struct Windows reads at the wrong offsets and reports as

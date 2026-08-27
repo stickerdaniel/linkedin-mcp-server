@@ -59,6 +59,7 @@ from linkedin_mcp_server.exceptions import (
     BrowserSetupFailedError,
     BrowserSetupInProgressError,
     DockerHostLoginRequiredError,
+    LinkedInMCPError,
     OwnerStandingDownError,
     ProfileRootRefusedError,
 )
@@ -720,9 +721,13 @@ async def start_background_browser_setup_if_needed() -> None:
     if task is not None and task.done():
         try:
             task.result()
-        except BaseException:
+        except BaseException as exc:
             await _refresh_background_task_state()
-            _consume_background_setup_failure()
+            detail = _consume_background_setup_failure()
+            if isinstance(exc, LinkedInMCPError):
+                raise
+            if detail is not None:
+                raise BrowserSetupFailedError(detail) from exc
             raise
 
 
@@ -1600,35 +1605,122 @@ async def _watch_installer_activity(
             previous = current
 
 
+@dataclass(frozen=True, slots=True)
+class _InstallerTemporaryRoot:
+    path: Path
+    device: int
+    inode: int
+    pin: Any | None
+
+
 def _windows_private_temp_creation_supported() -> bool:
     return os.name != "nt" or sys.version_info >= (3, 12, 4)
 
 
-def _create_installer_temporary_root() -> Path:
+def _create_installer_temporary_root() -> _InstallerTemporaryRoot:
     if not _windows_private_temp_creation_supported():
         raise PrivateStateError(
             "Private browser installation on Windows requires Python 3.12.4 or "
             "newer because earlier 3.12 releases create temporary directories "
             "with inherited access."
         )
-    temporary_root = Path(tempfile.mkdtemp(prefix="linkedin-mcp-installer-"))
+    path = Path(tempfile.mkdtemp(prefix="linkedin-mcp-installer-"))
+    pin: Any | None = None
+    try:
+        if os.name == "nt":
+            from linkedin_mcp_server.windows_acl import pin_directory
+
+            pin = pin_directory(path)
+            details = path.stat()
+        else:
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+            )
+            pin = os.open(path, flags)
+            details = os.fstat(pin)
+    except BaseException:
+        if pin is not None:
+            if os.name == "nt":
+                from linkedin_mcp_server.windows_acl import close_directory_pin
+
+                with contextlib.suppress(OSError, PrivateStateError):
+                    close_directory_pin(pin)
+            else:
+                with contextlib.suppress(OSError):
+                    os.close(pin)
+        # No pinned identity means recursive cleanup cannot be aimed safely.
+        # Removing only an empty directory cannot consume substituted contents.
+        with contextlib.suppress(OSError):
+            path.rmdir()
+        raise
+    temporary_root = _InstallerTemporaryRoot(path, details.st_dev, details.st_ino, pin)
     try:
         # Python before 3.12.4 ignores mkdtemp's 0o700 mode on Windows, and a
         # non-ACL filesystem can silently inherit access for other accounts.
         # Establish and read back the same owner-only boundary used for daemon
         # state before any downloader receives this path.
-        harden_directory(temporary_root)
+        harden_directory(path)
     except BaseException:
         _remove_installer_temporary_root(temporary_root)
         raise
     return temporary_root
 
 
-def _remove_installer_temporary_root(temporary_root: Path) -> None:
-    shutil.rmtree(temporary_root, ignore_errors=True)
+def _remove_installer_temporary_root(temporary_root: _InstallerTemporaryRoot) -> None:
+    path = temporary_root.path
+    pin = temporary_root.pin
+    if pin is None:
+        with contextlib.suppress(OSError):
+            path.rmdir()
+        return
+
+    if os.name == "nt":
+        from linkedin_mcp_server.windows_acl import close_directory_pin
+
+        try:
+            try:
+                details = path.stat()
+            except OSError:
+                return
+            if (details.st_dev, details.st_ino) != (
+                temporary_root.device,
+                temporary_root.inode,
+            ):
+                return
+            # The retained handle has denied replacement and root deletion since
+            # creation. rmtree can remove only this directory's children.
+            shutil.rmtree(path, ignore_errors=True)
+        finally:
+            with contextlib.suppress(OSError, PrivateStateError):
+                close_directory_pin(pin)
+    else:
+        try:
+            details = os.fstat(pin)
+            if (details.st_dev, details.st_ino) != (
+                temporary_root.device,
+                temporary_root.inode,
+            ):
+                return
+            # Anchor traversal to the handle retained since creation. A rename or
+            # pathname substitution cannot redirect recursive deletion elsewhere.
+            shutil.rmtree(".", dir_fd=pin, ignore_errors=True)
+        finally:
+            with contextlib.suppress(OSError):
+                os.close(pin)
+
+    # Recursive deletion deliberately leaves the pinned root itself behind.
+    # Once the pin is released, remove only an empty directory at the pathname;
+    # a last-moment substitution can therefore never delete unrelated contents.
+    with contextlib.suppress(OSError):
+        path.rmdir()
 
 
-def _start_installer_temporary_root_cleanup(temporary_root: Path) -> None:
+def _start_installer_temporary_root_cleanup(
+    temporary_root: _InstallerTemporaryRoot,
+) -> None:
     """Remove an installer temp root without extending its process lifetime."""
     cleanup = threading.Thread(
         target=_remove_installer_temporary_root,
@@ -1660,7 +1752,8 @@ async def _run_patchright_install(
     *line_callback* (``print`` for the CLI modes) receives each line too, so
     those modes show progress regardless of the log level.
     """
-    temporary_root = await _run_in_daemon_thread(_create_installer_temporary_root)
+    temporary = await _run_in_daemon_thread(_create_installer_temporary_root)
+    temporary_root = temporary.path
     activity: asyncio.Task[None] | None = None
     try:
         environment = _installer_environment(temporary_root)
@@ -1805,7 +1898,7 @@ async def _run_patchright_install(
             # The normal path has reaped the supervisor, and every exceptional
             # path above stops its tree before reaching this point. Cleanup is
             # best-effort and must never extend cancellation or shutdown.
-            _start_installer_temporary_root_cleanup(temporary_root)
+            _start_installer_temporary_root_cleanup(temporary)
 
 
 def _finish(progress: Progress, task: TaskID | None) -> None:

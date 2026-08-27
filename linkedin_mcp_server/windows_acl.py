@@ -78,6 +78,13 @@ FILE_ALL_ACCESS = 0x001F01FF
 
 FILE_PERSISTENT_ACLS = 0x00000008
 
+FILE_READ_ATTRIBUTES = 0x00000080
+FILE_SHARE_READ = 0x00000001
+FILE_SHARE_WRITE = 0x00000002
+OPEN_EXISTING = 3
+FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
 
 class _SID_AND_ATTRIBUTES(ctypes.Structure):
     _fields_ = [("Sid", _PSID), ("Attributes", wintypes.DWORD)]
@@ -261,6 +268,17 @@ def _load() -> tuple[ctypes.CDLL, ctypes.CDLL]:
 
     _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     _kernel32.CloseHandle.restype = wintypes.BOOL
+
+    _kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    _kernel32.CreateFileW.restype = wintypes.HANDLE
 
     _kernel32.LocalFree.argtypes = [_HLOCAL]
     _kernel32.LocalFree.restype = _HLOCAL
@@ -508,6 +526,30 @@ def _sid_to_string(sid: _PSID) -> str:
         return text.value or ""
     finally:
         _kernel32.LocalFree(ctypes.cast(text, _HLOCAL))
+
+
+def pin_directory(path: Path) -> wintypes.HANDLE:
+    """Open *path* while denying replacement until the handle is closed."""
+    _, kernel32 = _load()
+    handle = kernel32.CreateFileW(
+        str(path),
+        FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        None,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS,
+        None,
+    )
+    if handle == _INVALID_HANDLE_VALUE:
+        _fail("CreateFileW")
+    return handle
+
+
+def close_directory_pin(handle: wintypes.HANDLE) -> None:
+    """Close a handle returned by :func:`pin_directory`."""
+    _, kernel32 = _load()
+    if not kernel32.CloseHandle(handle):
+        _fail("CloseHandle")
 
 
 def read_owner(path: Path) -> str:

@@ -1082,6 +1082,27 @@ class TestSetupGate:
         release.set()
         await task
 
+    async def test_immediate_setup_failure_uses_the_setup_error_contract(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.exceptions import BrowserSetupFailedError
+
+        async def setup(**_kwargs: object) -> None:
+            raise NotADirectoryError("browser cache is a file")
+
+        config = SimpleNamespace(browser=SimpleNamespace(chrome_path=None))
+        monkeypatch.setattr(bootstrap, "get_config", lambda: config)
+        monkeypatch.setattr(bootstrap, "_browser_setup_ready", lambda: False)
+        monkeypatch.setattr(bootstrap, "_run_browser_setup", setup)
+        initialize_bootstrap("managed")
+
+        with pytest.raises(BrowserSetupFailedError, match="browser cache is a file"):
+            await bootstrap.start_background_browser_setup_if_needed()
+
+        assert get_bootstrap_state().setup_task is None
+        assert get_bootstrap_state().setup_state is SetupState.IDLE
+
     async def test_completed_setup_failure_is_reported_before_retry(
         self, isolate_profile_dir, monkeypatch
     ):
@@ -2769,7 +2790,7 @@ class TestPatchrightInstallStreaming:
         monkeypatch.setattr(
             bootstrap,
             "_create_installer_temporary_root",
-            lambda: tmp_path / "private",
+            lambda: bootstrap._InstallerTemporaryRoot(tmp_path / "private", 0, 0, None),
         )
         self._patch_proc(monkeypatch, [], 0)
         fallback = threading.Timer(0.2, release.set)
@@ -2825,7 +2846,13 @@ class TestPatchrightInstallStreaming:
         monkeypatch.setattr(bootstrap.tempfile, "mkdtemp", make_temporary_root)
         monkeypatch.setattr(bootstrap, "harden_directory", harden)
 
-        assert bootstrap._create_installer_temporary_root() == temporary_root
+        created = bootstrap._create_installer_temporary_root()
+
+        assert created.path == temporary_root
+        assert (created.device, created.inode) == (
+            temporary_root.stat().st_dev,
+            temporary_root.stat().st_ino,
+        )
         assert events == [("create", temporary_root), ("harden", temporary_root)]
 
     def test_installer_temporary_root_is_removed_when_hardening_fails(
@@ -2850,6 +2877,69 @@ class TestPatchrightInstallStreaming:
             bootstrap._create_installer_temporary_root()
         assert not temporary_root.exists()
 
+    def test_cleanup_refuses_a_replaced_temporary_root(self, tmp_path, monkeypatch):
+        from linkedin_mcp_server import bootstrap
+
+        temporary_root = tmp_path / "private"
+
+        def make_temporary_root(*, prefix: str) -> str:
+            assert prefix == "linkedin-mcp-installer-"
+            temporary_root.mkdir()
+            return str(temporary_root)
+
+        monkeypatch.setattr(bootstrap.tempfile, "mkdtemp", make_temporary_root)
+        created = bootstrap._create_installer_temporary_root()
+        moved = tmp_path / "original"
+        temporary_root.rename(moved)
+        temporary_root.mkdir()
+        victim = temporary_root / "keep"
+        victim.write_text("unrelated")
+
+        bootstrap._remove_installer_temporary_root(created)
+
+        assert victim.read_text() == "unrelated"
+        assert moved.is_dir()
+
+    @pytest.mark.skipif(os.name == "nt", reason="dir_fd anchors POSIX cleanup")
+    def test_cleanup_stays_on_the_open_root_during_path_replacement(
+        self, tmp_path, monkeypatch
+    ):
+        import shutil
+
+        from linkedin_mcp_server import bootstrap
+
+        temporary_root = tmp_path / "private"
+        temporary_root.mkdir()
+        (temporary_root / "download").write_text("partial")
+        details = temporary_root.stat()
+        pin = os.open(temporary_root, os.O_RDONLY | os.O_DIRECTORY)
+        created = bootstrap._InstallerTemporaryRoot(
+            temporary_root, details.st_dev, details.st_ino, pin
+        )
+        moved = tmp_path / "original"
+        victim = temporary_root / "keep"
+        real_rmtree = shutil.rmtree
+
+        def swap_then_remove(
+            path: str,
+            *,
+            dir_fd: int | None = None,
+            ignore_errors: bool = False,
+        ) -> None:
+            assert path == "."
+            assert dir_fd is not None
+            temporary_root.rename(moved)
+            temporary_root.mkdir()
+            victim.write_text("unrelated")
+            real_rmtree(path, dir_fd=dir_fd, ignore_errors=ignore_errors)
+
+        monkeypatch.setattr(bootstrap.shutil, "rmtree", swap_then_remove)
+
+        bootstrap._remove_installer_temporary_root(created)
+
+        assert victim.read_text() == "unrelated"
+        assert list(moved.iterdir()) == []
+
     async def test_private_temp_environment_is_removed_after_tree_exit(
         self, tmp_path, monkeypatch
     ):
@@ -2867,9 +2957,9 @@ class TestPatchrightInstallStreaming:
         remove = bootstrap._remove_installer_temporary_root
         removed_after_exit: list[bool] = []
 
-        def checked_remove(path: Path) -> None:
+        def checked_remove(root: bootstrap._InstallerTemporaryRoot) -> None:
             removed_after_exit.append(spawned.proc is not None and spawned.proc.waited)
-            remove(path)
+            remove(root)
 
         monkeypatch.setattr(
             bootstrap, "_remove_installer_temporary_root", checked_remove
@@ -3179,11 +3269,11 @@ class TestPatchrightInstallStreaming:
         cleanup_daemon: list[bool] = []
         remove = bootstrap._remove_installer_temporary_root
 
-        def blocked_remove(path: Path) -> None:
+        def blocked_remove(root: bootstrap._InstallerTemporaryRoot) -> None:
             cleanup_daemon.append(threading.current_thread().daemon)
             cleanup_started.set()
             cleanup_release.wait(timeout=5)
-            remove(path)
+            remove(root)
 
         monkeypatch.setattr(bootstrap.tempfile, "mkdtemp", make_temporary_root)
         monkeypatch.setattr(bootstrap, "_installer_lines", hanging_lines)

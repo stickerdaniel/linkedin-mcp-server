@@ -11,7 +11,10 @@ from typing import NoReturn
 
 from fastmcp.exceptions import ToolError
 
-from linkedin_mcp_server.core.proxy_errors import redacted_copy
+from linkedin_mcp_server.core.proxy_errors import (
+    redact_proxy_credentials,
+    redacted_copy,
+)
 from linkedin_mcp_server.core.exceptions import (
     InvalidReferenceError,
     AuthenticationError,
@@ -137,8 +140,10 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
 
     elif isinstance(exception, BrowserSetupFailedError):
         logger.warning("Browser setup failed%s: %s", ctx, exception)
+        detail = redact_proxy_credentials(str(exception))
         raise ToolError(
-            "LinkedIn browser setup was not ready. Retry this tool to start a fresh background setup attempt."
+            f"LinkedIn browser setup was not ready: {detail}. Retry this tool to "
+            "start a fresh background setup attempt."
         ) from exception
 
     elif isinstance(exception, OwnerStandingDownError):
