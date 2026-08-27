@@ -977,7 +977,7 @@ os._exit(0)
 
 
 @_POSIX_ONLY
-def test_daemon_hard_exit_terminates_its_process_group(tmp_path: Path):
+def test_daemon_hard_exit_terminates_a_detached_descendant(tmp_path: Path):
     marker = tmp_path / "daemon-descendant.txt"
     script = r"""
 import subprocess
@@ -991,6 +991,7 @@ child = subprocess.Popen(
     stdin=subprocess.DEVNULL,
     stdout=subprocess.DEVNULL,
     stderr=subprocess.DEVNULL,
+    start_new_session=True,
 )
 Path(sys.argv[1]).write_text(str(child.pid))
 daemon_owner._exit_hard()

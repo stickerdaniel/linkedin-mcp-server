@@ -24,19 +24,78 @@ _JOB_API_FAILURE_LIMIT = 3
 _JOB_POLL_SECONDS = 0.01
 _JOB_NAME_ATTEMPTS = 8
 _RELEASE_NONCE_BYTES = 32
+_POSIX_PROCESS_SNAPSHOT_SECONDS = 1.0
 
 
 class ProcessTreeError(RuntimeError):
     """The operating system could not establish descendant containment."""
 
 
+def _posix_detached_descendants(pid: int, process_group: int) -> tuple[int, ...]:
+    """Snapshot descendants that escaped *process_group*, deepest first."""
+    ps = next(
+        (
+            candidate
+            for candidate in ("/bin/ps", "/usr/bin/ps")
+            if Path(candidate).is_file()
+        ),
+        None,
+    )
+    if ps is None:
+        return ()
+    try:
+        snapshot = subprocess.run(
+            [ps, "-A", "-o", "pid=", "-o", "ppid=", "-o", "pgid="],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=_POSIX_PROCESS_SNAPSHOT_SECONDS,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ()
+
+    rows: dict[int, tuple[int, int]] = {}
+    children: dict[int, list[int]] = {}
+    for line in snapshot.splitlines():
+        fields = line.split()
+        if len(fields) != 3:
+            continue
+        try:
+            child, parent, group = map(int, fields)
+        except ValueError:
+            continue
+        rows[child] = (parent, group)
+        children.setdefault(parent, []).append(child)
+
+    detached: list[tuple[int, int]] = []
+    pending = [(pid, 0)]
+    seen = {pid}
+    while pending:
+        parent, depth = pending.pop()
+        for child in children.get(parent, ()):
+            if child in seen:
+                continue
+            seen.add(child)
+            pending.append((child, depth + 1))
+            if rows[child][1] != process_group:
+                detached.append((depth + 1, child))
+    return tuple(child for _depth, child in sorted(detached, reverse=True))
+
+
 def hard_exit_process_tree(status: int) -> NoReturn:
-    """Exit immediately and kill descendants in this process's private group."""
+    """Exit immediately and kill descendants across their POSIX process groups."""
     if os.name != "nt":
         pid = os.getpid()
         try:
-            if os.getpgrp() == pid:
-                os.killpg(pid, signal.SIGKILL)
+            process_group = os.getpgrp()
+            if process_group == pid:
+                # Chromium is deliberately spawned detached by Patchright. Snapshot
+                # it while the Node parent still makes ancestry observable, then kill
+                # escaped descendants before the owner's own group.
+                for descendant in _posix_detached_descendants(pid, process_group):
+                    with contextlib.suppress(OSError):
+                        os.kill(descendant, signal.SIGKILL)
+                os.killpg(process_group, signal.SIGKILL)
         except OSError:
             pass
     # On Windows, process exit closes the only Job handle. On POSIX this is the
