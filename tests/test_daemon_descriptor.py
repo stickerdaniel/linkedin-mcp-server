@@ -746,6 +746,46 @@ class TestEndpointUrl:
 
 
 class TestStateLocation:
+    def test_windows_uses_a_fresh_state_namespace(self):
+        assert (
+            daemon_descriptor_module._application_state_dir("nt")
+            == ".mcp-server-linkedin-v2"
+        )
+        assert (
+            daemon_descriptor_module._application_state_dir("posix")
+            == ".mcp-server-linkedin"
+        )
+
+    def test_windows_refuses_legacy_state_before_creating_the_new_namespace(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        legacy = tmp_path / ".mcp-server-linkedin"
+        legacy.mkdir()
+        marker = legacy / "legacy-marker"
+        marker.write_text("untouched")
+        monkeypatch.setattr(daemon_descriptor_module, "_WINDOWS", True)
+        monkeypatch.setattr(
+            daemon_descriptor_module,
+            "_APPLICATION_STATE_DIR",
+            ".mcp-server-linkedin-v2",
+        )
+
+        with pytest.raises(PrivateStateError, match="Stop every mcp-server-linkedin"):
+            prepare_daemon_state(tmp_path / "auth")
+
+        assert not (tmp_path / ".mcp-server-linkedin-v2").exists()
+        assert marker.read_text() == "untouched"
+
+    @windows_only
+    def test_windows_does_not_reuse_legacy_state(self, tmp_path: Path):
+        legacy = tmp_path / ".mcp-server-linkedin"
+        legacy.mkdir()
+
+        with pytest.raises(PrivateStateError, match="Legacy Windows daemon state"):
+            prepare_daemon_state(tmp_path / "auth")
+
+        assert not (tmp_path / ".mcp-server-linkedin-v2").exists()
+
     @posix_only
     def test_fresh_state_is_private_under_umask_zero(self, tmp_path: Path):
         previous = os.umask(0)

@@ -102,7 +102,22 @@ PROTOCOL_VERSION = 1
 _DESCRIPTOR_FILE = "daemon.json"
 _PENDING_DESCRIPTOR_PREFIX = "pending-"
 _DAEMON_DIR = "daemon"
-_APPLICATION_STATE_DIR = ".mcp-server-linkedin"
+
+
+def _application_state_dir(platform_name: str) -> str:
+    """Select the state namespace whose creation contract this platform meets."""
+    if platform_name == "nt":
+        # This namespace has only ever been created with Python 3.12.4+'s
+        # restricted creation DACL. Reusing the legacy namespace would leave
+        # already-open handles from a formerly permissive root effective after
+        # any path-based ACL repair.
+        return ".mcp-server-linkedin-v2"
+    return ".mcp-server-linkedin"
+
+
+_APPLICATION_STATE_DIR = _application_state_dir(os.name)
+_LEGACY_WINDOWS_STATE_DIR = ".mcp-server-linkedin"
+_WINDOWS = os.name == "nt"
 
 # Enough that guessing is not a strategy. Read straight from the OS source.
 _TOKEN_BYTES = 32
@@ -442,6 +457,26 @@ def daemon_dir(auth_root: Path) -> Path:
     return daemon_state_root() / _daemon_dir_name(auth_root)
 
 
+def _refuse_legacy_windows_state() -> None:
+    """Prevent a new owner from running beside one using the legacy namespace."""
+    if not _WINDOWS:
+        return
+    legacy = _account_home() / _LEGACY_WINDOWS_STATE_DIR
+    try:
+        legacy.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise PrivateStateError(
+            f"Could not inspect legacy Windows daemon state at {legacy}: {exc}"
+        ) from exc
+    raise PrivateStateError(
+        f"Legacy Windows daemon state still exists at {legacy}. Stop every "
+        "mcp-server-linkedin process, remove that directory, and restart the MCP "
+        "host before using the new private state namespace."
+    )
+
+
 def prepare_daemon_state(auth_root: Path) -> Path:
     """Establish owner-only storage before trusting any per-auth state entry.
 
@@ -451,6 +486,7 @@ def prepare_daemon_state(auth_root: Path) -> Path:
     its own right. Files inside are hardened separately before their contents or
     locking semantics are used.
     """
+    _refuse_legacy_windows_state()
     root = daemon_state_root()
     harden_directory(root)
     directory = root / _daemon_dir_name(auth_root)

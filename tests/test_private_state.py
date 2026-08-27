@@ -476,12 +476,102 @@ class TestRefusals:
         )
         monkeypatch.setattr(private_state, "_WINDOWS", True)
         monkeypatch.setattr(Path, "lstat", lambda path: next(entries))
-        monkeypatch.setattr(
-            windows_acl, "restrict_to_current_user", lambda *a, **k: None
-        )
+        monkeypatch.setattr(windows_acl, "verify_owner_only", lambda *a, **k: None)
 
         with pytest.raises(PrivateStateError, match="was replaced"):
             harden_directory_entry(target)
+
+    def test_existing_windows_directory_is_verified_without_acl_replacement(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import windows_acl
+
+        target = tmp_path / "daemon"
+        target.mkdir()
+        verified: list[tuple[Path, bool]] = []
+        monkeypatch.setattr(private_state, "_WINDOWS", True)
+        monkeypatch.setattr(
+            windows_acl,
+            "verify_owner_only",
+            lambda path, *, directory: verified.append((path, directory)),
+        )
+        monkeypatch.setattr(
+            windows_acl,
+            "restrict_to_current_user",
+            lambda *args, **kwargs: pytest.fail("an existing DACL was replaced"),
+        )
+
+        harden_directory(target)
+
+        assert verified == [(target, True)]
+
+    def test_existing_windows_file_is_verified_without_acl_replacement(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import windows_acl
+
+        target = tmp_path / "token"
+        target.touch()
+        verified: list[tuple[Path, bool]] = []
+        monkeypatch.setattr(private_state, "_WINDOWS", True)
+        monkeypatch.setattr(
+            windows_acl,
+            "verify_owner_only",
+            lambda path, *, directory: verified.append((path, directory)),
+        )
+        monkeypatch.setattr(
+            windows_acl,
+            "restrict_to_current_user",
+            lambda *args, **kwargs: pytest.fail("an existing DACL was replaced"),
+        )
+
+        harden_file(target)
+
+        assert verified == [(target, False)]
+
+    def test_new_windows_child_uses_created_directory_hardening(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        target = tmp_path / "per-auth"
+        entry = SimpleNamespace(
+            st_mode=stat.S_IFDIR | 0o700,
+            st_dev=1,
+            st_ino=2,
+            st_file_attributes=0,
+        )
+        real_lstat = Path.lstat
+        hardened: list[Path] = []
+
+        def lstat(path: Path):
+            if path == target and not path.exists():
+                raise FileNotFoundError(path)
+            if path == target:
+                return entry
+            return real_lstat(path)
+
+        monkeypatch.setattr(private_state, "_WINDOWS", True)
+        monkeypatch.setattr(Path, "lstat", lstat)
+        monkeypatch.setattr(
+            private_state,
+            "harden_created_directory",
+            lambda path: hardened.append(path),
+        )
+
+        harden_directory_entry(target)
+
+        assert hardened == [target]
+
+    def test_old_windows_python_refuses_before_creating_a_directory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        target = tmp_path / "per-auth"
+        monkeypatch.setattr(private_state, "_WINDOWS", True)
+        monkeypatch.setattr(private_state.sys, "version_info", (3, 12, 3))
+
+        with pytest.raises(PrivateStateError, match="3.12.4 or newer"):
+            harden_directory_entry(target)
+
+        assert not target.exists()
 
     def test_windows_missing_reparse_attributes_fail_closed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -899,7 +989,9 @@ class TestWindowsAcl:
     def test_a_file_grants_only_this_account_and_inherits_nothing(self, tmp_path: Path):
         from linkedin_mcp_server.windows_acl import describe_dacl
 
-        target = tmp_path / "token"
+        parent = tmp_path / "state"
+        harden_directory(parent)
+        target = parent / "token"
         target.touch()
         harden_file(target)
 
@@ -907,6 +999,48 @@ class TestWindowsAcl:
         assert described.protected is True
         assert len(described.entries) == 1
         assert described.entries[0].flags == 0
+
+    @windows_only
+    def test_an_existing_permissive_directory_is_refused_without_repair(
+        self, tmp_path: Path
+    ):
+        from linkedin_mcp_server.windows_acl import describe_dacl
+
+        target = tmp_path / "legacy-state"
+        target.mkdir()
+        subprocess.run(
+            ["icacls", str(target), "/grant", "*S-1-1-0:(OI)(CI)F"],
+            check=True,
+            capture_output=True,
+        )
+
+        with pytest.raises(
+            PrivateStateError, match="grants access|inherits permissions"
+        ):
+            harden_directory(target)
+
+        assert "S-1-1-0" in {entry.sid for entry in describe_dacl(target).entries}
+
+    @windows_only
+    def test_an_existing_permissive_file_is_refused_without_repair(
+        self, tmp_path: Path
+    ):
+        from linkedin_mcp_server.windows_acl import describe_dacl
+
+        target = tmp_path / "legacy-token"
+        target.touch()
+        subprocess.run(
+            ["icacls", str(target), "/grant", "*S-1-1-0:F"],
+            check=True,
+            capture_output=True,
+        )
+
+        with pytest.raises(
+            PrivateStateError, match="grants access|inherits permissions"
+        ):
+            harden_file(target)
+
+        assert "S-1-1-0" in {entry.sid for entry in describe_dacl(target).entries}
 
     @windows_only
     def test_a_permissive_parent_does_not_leak_in(self, tmp_path: Path):

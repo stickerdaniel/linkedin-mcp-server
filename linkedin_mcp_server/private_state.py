@@ -101,8 +101,19 @@ def _as_private_state_error(path: Path, action: str) -> Iterator[None]:
         raise PrivateStateError(f"Could not {action} {path}: {exc}") from exc
 
 
+def _windows_private_creation_supported() -> bool:
+    return not _WINDOWS or sys.version_info >= (3, 12, 4)
+
+
 def harden_created_directory(path: Path) -> None:
-    """Harden a directory known to have been created by this process."""
+    """Verify and harden a directory just created by this process.
+
+    Python 3.12.4 made ``mode=0o700`` create a restricted Windows DACL. That
+    closes the creation-to-hardening window for non-administrator accounts;
+    the stricter project DACL is then installed and read back. Older Windows
+    patch releases are refused because post-creation repair cannot undo access
+    another account may already have obtained.
+    """
     with _as_private_state_error(path, "prepare the new private directory"):
         entry = path.lstat()
         if stat.S_ISLNK(entry.st_mode):
@@ -112,62 +123,57 @@ def harden_created_directory(path: Path) -> None:
         if not stat.S_ISDIR(entry.st_mode):
             raise PrivateStateError(f"Not a directory: {path}")
         if _WINDOWS:
-            attributes = getattr(entry, "st_file_attributes", None)
-            if attributes is None:
+            if not _windows_private_creation_supported():
                 raise PrivateStateError(
-                    f"Windows did not report file attributes for {path}"
+                    "Private directory creation on Windows requires Python "
+                    "3.12.4 or newer"
                 )
-            if attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
-                raise PrivateStateError(
-                    f"{path} is a reparse point rather than a private directory"
-                )
+            _refuse_windows_reparse_point(path, entry)
             from linkedin_mcp_server.windows_acl import restrict_to_current_user
 
             restrict_to_current_user(path, directory=True)
+            current = path.lstat()
+            _refuse_windows_reparse_point(path, current)
+            if not _same_entry(entry, current):
+                raise PrivateStateError(
+                    f"{path} was replaced while it was being hardened"
+                )
             return
         _harden_posix(path, _PRIVATE_DIR_MODE)
 
 
 def harden_directory(path: Path) -> None:
-    """Create *path* if needed and leave it readable only by this account.
+    """Create owner-only storage or verify an existing private directory.
 
-    Existing directories are hardened too, which is the case that matters:
-    ``secure_mkdir`` applies its mode only to directories it creates, so a
-    daemon directory inside an auth root that some earlier version or the user
-    created with a default umask would otherwise keep those wider permissions
-    while the token inside it looked safe.
-
-    A link is followed rather than refused, unlike :func:`harden_file`. The
-    difference is where the two get their paths. Every caller here passes one
-    that ``daemon_state_root`` or ``daemon_dir`` already resolved, so a link is
-    part of the layout the user chose, and a home reached through one is an
-    ordinary arrangement. A file name, by contrast, is built from an identifier
-    and lands in a directory this hardens first.
+    Existing Windows directories are verified without rewriting their owner or
+    DACL. A permissive legacy directory may have outstanding handles whose
+    rights survive an ACL change, so normalizing it and continuing would turn a
+    path another account can still replace into trusted state.
     """
     with _as_private_state_error(path, "prepare the private directory"):
-        # An unexpanded tilde means expanduser could not resolve it, which
-        # happens for a user this system does not know. Left alone it becomes a
-        # directory literally named "~something" wherever the process happens
-        # to be running: measured, one appeared in the working directory. A
-        # path that was meant to be somewhere else is not somewhere to keep a
-        # secret.
         if str(path).startswith("~"):
             raise PrivateStateError(
                 f"{path} still begins with a tilde, so the home directory it "
                 f"names could not be resolved"
             )
-
-        if path.exists() and not path.is_dir():
+        existed = path.exists()
+        if existed and not path.is_dir():
             raise PrivateStateError(f"Not a directory: {path}")
-
+        if _WINDOWS and not existed and not _windows_private_creation_supported():
+            raise PrivateStateError(
+                "Private directory creation on Windows requires Python 3.12.4 or newer"
+            )
         secure_mkdir(path, mode=_PRIVATE_DIR_MODE)
-
         if _WINDOWS:
-            from linkedin_mcp_server.windows_acl import restrict_to_current_user
+            if existed:
+                from linkedin_mcp_server.windows_acl import verify_owner_only
 
-            restrict_to_current_user(path, directory=True)
+                verify_owner_only(path, directory=True)
+            else:
+                # Every missing component was created with Python's restricted
+                # 0o700 DACL before this pathname became observable.
+                harden_created_directory(path)
             return
-
         _harden_posix(path, _PRIVATE_DIR_MODE)
 
 
@@ -181,14 +187,21 @@ def harden_directory_entry(path: Path) -> None:
     the same reason.
     """
     with _as_private_state_error(path, "prepare the private directory"):
+        created = False
         try:
             entry = path.lstat()
         except FileNotFoundError:
+            if _WINDOWS and not _windows_private_creation_supported():
+                raise PrivateStateError(
+                    "Private directory creation on Windows requires Python "
+                    "3.12.4 or newer"
+                )
             try:
                 path.mkdir(mode=_PRIVATE_DIR_MODE)
             except FileExistsError:
                 entry = path.lstat()
             else:
+                created = True
                 entry = path.lstat()
 
         if stat.S_ISLNK(entry.st_mode):
@@ -201,15 +214,19 @@ def harden_directory_entry(path: Path) -> None:
             raise PrivateStateError(f"Not a directory: {path}")
 
         if _WINDOWS:
-            from linkedin_mcp_server.windows_acl import restrict_to_current_user
+            if created:
+                harden_created_directory(path)
+                return
 
-            restrict_to_current_user(path, directory=True)
+            from linkedin_mcp_server.windows_acl import verify_owner_only
+
+            verify_owner_only(path, directory=True)
             current = path.lstat()
             _refuse_windows_reparse_point(path, current)
             if not _same_entry(entry, current):
                 raise PrivateStateError(
-                    f"{path} was replaced while it was being hardened, so it no "
-                    f"longer refers to the directory this made private."
+                    f"{path} was replaced while it was being verified, so it no "
+                    f"longer refers to the private directory that was checked."
                 )
             return
 
@@ -235,13 +252,12 @@ def harden_directory_entry(path: Path) -> None:
 
 
 def harden_file(path: Path) -> None:
-    """Leave the existing file *path* readable only by this account.
+    """Establish that the existing file *path* is owner-only.
 
-    The file has to exist already, so a caller writing a secret creates it with
-    owner-only permissions itself and calls this to *establish* that rather
-    than assume it: the mode, the owner and the access list are read back, and
-    on Windows the access list is replaced outright. A refusal therefore means
-    the permissions could not be confirmed, not that the file is exposed.
+    The file has to exist already. POSIX hardens it through an open descriptor;
+    Windows verifies the owner and DACL without rewriting either, because a
+    formerly permissive file may still be reachable through an outstanding
+    handle. A refusal means the permissions could not be confirmed.
     """
     with _as_private_state_error(path, "inspect"):
         if not path.exists():
@@ -268,9 +284,9 @@ def harden_file(path: Path) -> None:
         raise PrivateStateError(f"{path} is not a regular file")
 
     if _WINDOWS:
-        from linkedin_mcp_server.windows_acl import restrict_to_current_user
+        from linkedin_mcp_server.windows_acl import verify_owner_only
 
-        restrict_to_current_user(path, directory=False)
+        verify_owner_only(path, directory=False)
         return
 
     # Opened once, then hardened through the descriptor. Checking the path for
