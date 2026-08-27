@@ -46,6 +46,7 @@ from linkedin_mcp_server.daemon import (
     look_up_owner,
 )
 from linkedin_mcp_server.daemon_lock import DaemonLockError
+from linkedin_mcp_server.process_control import ControlListener
 from linkedin_mcp_server.process_protocol import new_nonce, read_authenticated_status
 from linkedin_mcp_server.process_tree import (
     ProcessTreeError,
@@ -696,6 +697,9 @@ def _spawn(
     its own log. Every operation against state storage remains inside the process
     that a timed-out frontend can kill.
     """
+    # Bound before the child exists, because its address travels in the
+    # configuration record and a bind that fails here has no child to stop.
+    control = ControlListener.open()
     windows_job = WindowsJob.named("owner") if os.name == "nt" else None
     try:
         nonce = release_nonce() if windows_job is not None else None
@@ -720,6 +724,7 @@ def _spawn(
             creationflags=_detachment_flags(),
         )
     except BaseException:
+        control.close()
         if windows_job is not None:
             windows_job.close()
         raise
@@ -729,9 +734,12 @@ def _spawn(
     # the token the parent will accept.
     handshake_nonce = new_nonce()
     bootstrap = _BootstrapReport(getattr(child, "stderr", None))
-    config_handover_completed = False
     prepared_instance_id: str | None = None
-    commit_may_have_started = False
+    #: Whether the child may already own itself, either because a commit record
+    #: may have reached it or because it reported a publication a predecessor
+    #: protocol performs on its own authority. Past this, no exception licenses a
+    #: kill.
+    owner_may_be_adopted = False
     assigned = False
     job_settled = False
 
@@ -766,9 +774,12 @@ def _spawn(
         started = time.monotonic()
         try:
             _hand_over_config(
-                child, config, handshake_nonce=handshake_nonce, timeout=timeout
+                child,
+                config,
+                handshake_nonce=handshake_nonce,
+                control=control,
+                timeout=timeout,
             )
-            config_handover_completed = True
         except TimeoutError:
             logger.warning(
                 "The daemon never read its configuration; stopping it so the "
@@ -833,6 +844,16 @@ def _spawn(
         if verdict is _Started.RETRY:
             stop_child()
             return _Started.RETRY
+        if verdict is _Started.YES:
+            # A predecessor owner, started by this current frontend after the
+            # package was replaced on disk. Its protocol has no commit record and
+            # no prepared generation to validate: it published on its own
+            # authority and says so, and this process no longer gets to stop it.
+            # The election's own read of the published descriptor is what decides
+            # whether that owner is usable.
+            logger.info("The daemon published on the predecessor startup protocol")
+            owner_may_be_adopted = True
+            return _Started.YES
 
         if not isinstance(verdict, str):  # pragma: no cover - handled above
             raise AssertionError(f"Unexpected startup verdict: {verdict}")
@@ -841,6 +862,26 @@ def _spawn(
             _PREPARED_READ_SECONDS,
             max(timeout - (time.monotonic() - started), 0.0),
         )
+        try:
+            # Already queued: the child attaches before it prepares anything, so
+            # a prepared generation proves the connection exists to accept.
+            control.accept_within(
+                nonce=handshake_nonce,
+                timeout=prepared_deadline - time.monotonic(),
+            )
+        except (TimeoutError, OSError):
+            # Nothing was authorized, so this child cannot publish and stopping it
+            # frees the lock for the next attempt. Not terminal: another election
+            # pass may reach a child that can be authorized.
+            logger.warning(
+                "The daemon did not attach to its control channel", exc_info=True
+            )
+            stop_child()
+            return _Started.NO
+        except BaseException:
+            stop_child()
+            raise
+
         try:
             profile = _resolve_profile_until(
                 Path(config.browser.user_data_dir),
@@ -875,9 +916,9 @@ def _spawn(
         # The child owns the daemon lock and therefore owns publication. Once the
         # commit record may have reached it, no exception authorizes a kill: the
         # child either commits and serves or observes EOF and discards its state.
-        commit_may_have_started = True
+        owner_may_be_adopted = True
         try:
-            _send_commit(child, handshake_nonce=handshake_nonce)
+            _send_commit(control, handshake_nonce=handshake_nonce)
         except Exception:
             logger.warning(
                 "The daemon commit request could not be delivered", exc_info=True
@@ -915,20 +956,23 @@ def _spawn(
         )
     finally:
         if windows_job is not None and not job_settled:
-            if commit_may_have_started:
+            if owner_may_be_adopted:
                 # The exact COMMIT frame precedes owner adoption. Closing this copy
                 # cannot revoke an adopted owner, and kills one that never adopted.
                 release_job()
             else:
                 stop_child()
-        # EOF aborts a prepared child that never received the commit record. After
-        # that record it is only a lease: the lock holder settles publication.
-        if config_handover_completed and child.stdin is not None:
+        # End of file aborts a prepared child that never received the commit
+        # record. After that record it is only a lease: the lock holder settles
+        # publication. The configuration pipe was closed with its record, so a
+        # child on a predecessor protocol has long since been released.
+        control.close()
+        if child.stdin is not None:
             with contextlib.suppress(OSError, ValueError):
                 child.stdin.close()
         _release_handshake(child)
         _reap(child)
-        if prepared_instance_id is not None and not commit_may_have_started:
+        if prepared_instance_id is not None and not owner_may_be_adopted:
             try:
                 _discard_prepared_until(
                     auth_root,
@@ -1046,12 +1090,28 @@ def _hand_over_config(
     config: AppConfig,
     *,
     handshake_nonce: str,
+    control: ControlListener,
     timeout: float,
 ) -> None:
-    """Write and flush one config record without closing the control lease."""
+    """Write one config record and end the pipe on it.
+
+    Closed with the record rather than held open, and that is the whole of the
+    rollback fix. Every owner older than the commit protocol frames its
+    configuration by reading to end of file, so a pipe kept open for a later
+    commit record leaves such a child blocked in its very first read while this
+    process waits for a verdict it will never send. Authorization is on
+    *control* instead, which no predecessor looks for and none of them needs.
+
+    The close runs on the writing thread, so a pipe that cannot be closed is
+    bounded by the same wait as one that cannot be written.
+    """
     stream = child.stdin
     assert stream is not None
-    payload = daemon_config.encode_handover(config, handshake_nonce).encode() + b"\n"
+    endpoint = daemon_config.ControlEndpoint(control.host, control.port)
+    payload = (
+        daemon_config.encode_handover(config, handshake_nonce, endpoint).encode()
+        + b"\n"
+    )
 
     done: queue.Queue[BaseException | None] = queue.Queue()
 
@@ -1059,6 +1119,7 @@ def _hand_over_config(
         try:
             stream.write(payload)
             stream.flush()
+            stream.close()
         except BaseException as exc:  # noqa: BLE001 - reported to the caller
             with contextlib.suppress(OSError, ValueError):
                 stream.close()
@@ -1156,16 +1217,9 @@ def _discard_prepared_until(
     )
 
 
-def _send_commit(child: subprocess.Popen[bytes], *, handshake_nonce: str) -> None:
+def _send_commit(control: ControlListener, *, handshake_nonce: str) -> None:
     """Tell the lock-holding child to publish its validated generation."""
-    stream = child.stdin
-    assert stream is not None
-    stream.write(
-        f"{daemon_owner.HANDSHAKE} {handshake_nonce} {daemon_owner.COMMIT}\n".encode(
-            "ascii"
-        )
-    )
-    stream.flush()
+    control.send(f"{daemon_owner.HANDSHAKE} {handshake_nonce} {daemon_owner.COMMIT}\n")
 
 
 def _read_canonical_until(
@@ -1458,7 +1512,14 @@ def _read_owner_verdict(
 def _await_prepared(
     child: subprocess.Popen[bytes], *, handshake_nonce: str, timeout: float
 ) -> str | _Started:
-    """Wait for a prepared generation id, failure, EOF, or bounded silence."""
+    """Wait for a prepared generation id, a publication, failure, or silence.
+
+    ``READY`` is the one verdict that is not about this protocol at all. It comes
+    from an owner whose build predates the prepare/commit boundary, started by
+    this current frontend because the package on disk was replaced under it, and
+    it means the descriptor is already published. There is nothing left to
+    authorize and nothing this process may still stop.
+    """
     verdict = _read_owner_verdict(
         child,
         handshake_nonce=handshake_nonce,
@@ -1473,6 +1534,8 @@ def _await_prepared(
     status, instance_id = verdict
     if status == daemon_owner.PREPARED and instance_id is not None:
         return instance_id
+    if status == daemon_owner.READY:
+        return _Started.YES
     if status == daemon_owner.FAILED:
         logger.info("The daemon reported that it could not start")
         return _Started.NO

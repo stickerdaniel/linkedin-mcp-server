@@ -1,0 +1,236 @@
+"""The parent-owned channel that authorizes one owner's publication.
+
+The configuration pipe cannot also carry the commit record, and the reason is a
+rollback rather than an upgrade. ``@latest`` is the documented install, so a
+long-running frontend can start an owner from a package that was replaced on
+disk while it ran, and every owner older than the commit boundary frames its
+configuration by reading standard input to end of file. A parent that holds that
+pipe open for its own commit record then waits for a verdict from a child that is
+waiting for the parent to close. Neither side is wrong and neither side moves:
+the frontend spends its whole election budget, kills the child, and starts an
+identical one on the next pass.
+
+So the configuration pipe is closed as soon as the record is written, which is
+the framing every predecessor already expects, and authorization moves here.
+
+A loopback rendezvous rather than an inherited descriptor, because an inherited
+one cannot reach the child on both platforms. ``pass_fds`` is POSIX only, and the
+Windows owner is started behind :mod:`linkedin_mcp_server.process_gate`, which
+forwards the three standard handles and nothing else. Teaching the gate to
+forward a fourth would not help either: under a rollback the gate comes off the
+same replaced package as the owner, so the version that would forward it is
+exactly the version that is not running. Loopback needs no cooperation from
+anything in between, and both ends already depend on it, since loopback is how a
+frontend talks to the owner it elected.
+
+The channel is authenticated in both directions by the post-spawn handshake
+nonce, the same token that authenticates the startup verdict. It is handed over
+on the private configuration pipe after the child exists, so no other process on
+this machine has seen it: a stranger that reaches the port cannot present it, and
+a commit record that does not carry it is not the parent's. Closing is the abort,
+exactly as closing the configuration pipe used to be. A parent that goes away
+without committing leaves the child reading end of file.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import errno
+import logging
+import secrets
+import socket
+import time
+from typing import Protocol
+
+logger = logging.getLogger(__name__)
+
+#: The child's half of the rendezvous. Fixed length, so the parent reads exactly
+#: as many bytes as it expects from a peer it has not authenticated yet.
+_ATTACH_PREFIX = "attach "
+
+#: Enough that strangers arriving on the port cannot push the child's own
+#: connection out of the queue before the parent gets to it.
+_BACKLOG = 16
+
+#: The longest authorization record the child will assemble. The commit record
+#: is 79 bytes; this leaves room for a longer one without leaving the read
+#: unbounded.
+_MAX_RECORD_BYTES = 128
+
+#: A bind that fails this way on IPv6 means the host has none, not that the
+#: address is taken. Mirrors ``daemon_owner._bind_loopback``.
+_NO_IPV6 = (errno.EAFNOSUPPORT, errno.EADDRNOTAVAIL, errno.EPROTONOSUPPORT)
+
+#: How long one unauthenticated peer may take to present its frame. Bounded
+#: separately from the whole wait, because they are different questions: a
+#: stranger that connects and then says nothing would otherwise spend the
+#: child's entire rendezvous while the child's own connection sat queued behind
+#: it. The child sends its frame immediately after connecting.
+_PEER_SECONDS = 1.0
+
+
+class ControlChannel(Protocol):
+    """The child's side: one authenticated record, then end of file."""
+
+    def readline(self) -> str: ...
+
+
+def _attach_frame(nonce: str) -> bytes:
+    return f"{_ATTACH_PREFIX}{nonce}\n".encode("ascii")
+
+
+class ControlListener:
+    """One rendezvous, bound by the parent before the child it belongs to exists.
+
+    Bound before the spawn on purpose. The address travels in the configuration
+    record, so it has to be settled before that record is written, and a bind
+    that fails then has cost nothing: there is no child to stop.
+    """
+
+    def __init__(self, sock: socket.socket) -> None:
+        self._listener: socket.socket | None = sock
+        self._connection: socket.socket | None = None
+        address = sock.getsockname()
+        self.host: str = str(address[0])
+        self.port: int = int(address[1])
+
+    @classmethod
+    def open(cls) -> ControlListener:
+        """Bind an ephemeral loopback port, IPv6 first and IPv4 after it."""
+        for family, host in ((socket.AF_INET6, "::1"), (socket.AF_INET, "127.0.0.1")):
+            sock = socket.socket(family, socket.SOCK_STREAM)
+            try:
+                # Deliberately no SO_REUSEADDR, for the reason
+                # ``daemon_owner._bind_loopback`` gives: a port the kernel just
+                # handed out is unused, and on the BSDs the option would let a
+                # second bind succeed against a live listener.
+                sock.bind((host, 0))
+                sock.listen(_BACKLOG)
+            except OSError as exc:
+                sock.close()
+                if family is socket.AF_INET6 and exc.errno in _NO_IPV6:
+                    continue
+                raise
+            return cls(sock)
+        raise OSError("No loopback address could be bound for the owner control")
+
+    def accept_within(self, *, nonce: str, timeout: float) -> None:
+        """Take the connection that proves it read the configuration record.
+
+        Anything else on this port is refused and the wait continues, because a
+        stranger reaching a loopback port cannot be prevented and must not be
+        able to spend the child's rendezvous. The deadline is what bounds that:
+        the child's own connection is already queued by the time this is called,
+        so a full backlog of strangers still leaves it reachable.
+        """
+        listener = self._listener
+        if listener is None:
+            raise OSError("The owner control channel is closed")
+        expected = _attach_frame(nonce)
+        deadline = time.monotonic() + max(timeout, 0.0)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("The daemon did not attach to its control channel")
+            listener.settimeout(remaining)
+            try:
+                connection, _ = listener.accept()
+            except TimeoutError:
+                raise TimeoutError(
+                    "The daemon did not attach to its control channel"
+                ) from None
+            if self._proves_itself(connection, expected, deadline):
+                self._connection = connection
+                self._close_listener()
+                return
+            logger.debug("An unauthenticated peer reached the owner control channel")
+            connection.close()
+
+    def send(self, record: str) -> None:
+        """Deliver one authorization record to the attached child."""
+        connection = self._connection
+        if connection is None:
+            raise OSError("No daemon is attached to the owner control channel")
+        connection.sendall(record.encode("ascii"))
+
+    def close(self) -> None:
+        """End the channel. Without a record first, this is the abort."""
+        self._close_listener()
+        connection, self._connection = self._connection, None
+        if connection is not None:
+            with contextlib.suppress(OSError):
+                connection.close()
+
+    def _close_listener(self) -> None:
+        listener, self._listener = self._listener, None
+        if listener is not None:
+            with contextlib.suppress(OSError):
+                listener.close()
+
+    @staticmethod
+    def _proves_itself(
+        connection: socket.socket, expected: bytes, deadline: float
+    ) -> bool:
+        """Whether this peer presented the nonce, within the caller's deadline.
+
+        Exactly as many bytes as the frame occupies, so a peer cannot make this
+        read further than the parent agreed to read, and compared whole rather
+        than while it arrives, so a wrong nonce costs the same wherever it
+        diverges.
+        """
+        presented = bytearray()
+        peer_deadline = min(deadline, time.monotonic() + _PEER_SECONDS)
+        try:
+            while len(presented) < len(expected):
+                connection.settimeout(max(peer_deadline - time.monotonic(), 0.0))
+                piece = connection.recv(len(expected) - len(presented))
+                if not piece:
+                    return False
+                presented.extend(piece)
+        except OSError:
+            return False
+        return secrets.compare_digest(bytes(presented), expected)
+
+
+class _AttachedControl:
+    """The child's end, read as one line so it frames like the pipe it replaces.
+
+    A reset reads as end of file rather than as an error, and that is the point
+    rather than a convenience: a parent whose socket dies has not committed, and
+    the child must reach the same abort it reaches when the parent closes.
+    """
+
+    def __init__(self, connection: socket.socket) -> None:
+        self._connection = connection
+        self._stream = connection.makefile("r", encoding="ascii", newline="\n")
+
+    def readline(self) -> str:
+        try:
+            # Bounded, so nothing on this socket can grow without a newline. A
+            # truncated record simply is not the commit record and aborts.
+            return self._stream.readline(_MAX_RECORD_BYTES)
+        except (OSError, ValueError):
+            # ValueError covers a closed stream and an undecodable byte. Neither
+            # can have come from the parent, so both mean the same as a close.
+            logger.debug("The owner control channel ended", exc_info=True)
+            return ""
+
+    def close(self) -> None:
+        with contextlib.suppress(OSError):
+            self._stream.close()
+        with contextlib.suppress(OSError):
+            self._connection.close()
+
+
+def attach(host: str, port: int, *, nonce: str, timeout: float) -> ControlChannel:
+    """Connect to the parent's rendezvous and prove which child this is."""
+    connection = socket.create_connection((host, port), timeout=max(timeout, 0.0))
+    try:
+        connection.sendall(_attach_frame(nonce))
+        # Blocking from here on. The record may be a whole startup away, and the
+        # caller bounds that wait against its own commit deadline.
+        connection.settimeout(None)
+    except BaseException:
+        connection.close()
+        raise
+    return _AttachedControl(connection)

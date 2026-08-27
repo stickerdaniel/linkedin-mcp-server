@@ -54,7 +54,12 @@ from typing import Any, NoReturn, Protocol, TextIO
 
 import httpx
 
-from linkedin_mcp_server import __version__, daemon_config, daemon_descriptor
+from linkedin_mcp_server import (
+    __version__,
+    daemon_config,
+    daemon_descriptor,
+    process_control,
+)
 from linkedin_mcp_server.bootstrap import (
     browser_setup_failure_pending,
     browser_setup_in_progress,
@@ -749,8 +754,10 @@ async def _reconcile_uncertain_publication(
             _exit_uncertain_publication("Publication reconciliation was interrupted")
 
 
-async def _read_control_until(control: TextIO, deadline: float) -> str:
-    """Read one control record without making event-loop shutdown wait on stdin."""
+async def _read_control_until(
+    control: process_control.ControlChannel, deadline: float
+) -> str:
+    """Read one control record without making event-loop shutdown wait on it."""
     loop = asyncio.get_running_loop()
     result: asyncio.Future[str] = loop.create_future()
 
@@ -787,7 +794,7 @@ async def _serve(
     log_path: Path,
     handshake: Handshake,
     handshake_nonce: str,
-    control: TextIO,
+    control: process_control.ControlChannel,
     startup_protocol: int = daemon_config.STARTUP_PROTOCOL_VERSION,
     job_name: str | None = None,
 ) -> int:
@@ -840,7 +847,7 @@ async def _serve(
         )
 
         commit_deadline = time.monotonic() + _COMMIT_AUTH_SECONDS
-        predecessor_protocol = startup_protocol < daemon_config.STARTUP_PROTOCOL_VERSION
+        predecessor_protocol = not daemon_config.authorizes_commit(startup_protocol)
         _forget_superseded_tokens(auth_root)
         daemon_descriptor.prepare(auth_root, descriptor, token)
         if predecessor_protocol:
@@ -1403,8 +1410,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.job_name is None:
                 raise RuntimeError("The Windows owner has no Job Object handoff")
             WindowsJob.verify_current_process(args.job_name)
-        # Read before anything else touches the configuration: the frontend
-        # writes one line and keeps the pipe open for the commit decision.
+        # Read before anything else touches the configuration. The frontend
+        # closes this pipe after one record; current commit control is separate.
         handover = _read_handover()
     except BaseException:
         # The inherited descriptor shares one POSIX lock with every parent copy.
@@ -1438,14 +1445,31 @@ def main(argv: list[str] | None = None) -> int:
         handshake.close()
         return 1
 
-    if _IS_WINDOWS and (
-        handover.startup_protocol < daemon_config.STARTUP_PROTOCOL_VERSION
-    ):
+    if _IS_WINDOWS and not daemon_config.authorizes_commit(handover.startup_protocol):
         abandon_pending_inherited_lock()
         bootstrap.report(BOOTSTRAP_STATE)
         handshake.fail()
         handshake.close()
         return 1
+
+    # Before the first state access, so a rendezvous this process cannot reach
+    # costs nothing, and so the parent's authority over an unauthorized child is
+    # live for the whole of the startup that follows.
+    control: process_control.ControlChannel = sys.stdin
+    if handover.control is not None:
+        try:
+            control = process_control.attach(
+                handover.control.host,
+                handover.control.port,
+                nonce=handover.handshake_nonce,
+                timeout=_STARTUP_PROBE_SECONDS,
+            )
+        except BaseException:
+            abandon_pending_inherited_lock()
+            bootstrap.report(BOOTSTRAP_CONFIGURATION)
+            handshake.abort()
+            handshake.close()
+            return 1
 
     try:
         log_path = _attach_daemon_log(auth_root)
@@ -1454,6 +1478,7 @@ def main(argv: list[str] | None = None) -> int:
         bootstrap.report(BOOTSTRAP_LOG)
         handshake.abort()
         handshake.close()
+        _close_owned_control(control)
         return 1
     bootstrap.report(BOOTSTRAP_ATTACHED)
 
@@ -1476,7 +1501,7 @@ def main(argv: list[str] | None = None) -> int:
                 handshake=handshake,
                 handshake_nonce=handover.handshake_nonce,
                 startup_protocol=handover.startup_protocol,
-                control=sys.stdin,
+                control=control,
                 job_name=args.job_name,
             )
         )
@@ -1495,9 +1520,23 @@ def main(argv: list[str] | None = None) -> int:
         # released even by a path that forgot to answer.
         bootstrap.close()
         handshake.close()
+        _close_owned_control(control)
         abandon_pending_inherited_lock()
         if lock is not None:
             lock.release()
+
+
+def _close_owned_control(control: process_control.ControlChannel) -> None:
+    """Release a control channel this process opened, and never the inherited pipe.
+
+    Standard input belongs to the interpreter and to the predecessor protocols
+    that use it; only a channel this process connected for itself is closed here.
+    """
+    close = getattr(control, "close", None)
+    if control is sys.stdin or not callable(close):
+        return
+    with contextlib.suppress(OSError, ValueError):
+        close()
 
 
 def _read_handover(

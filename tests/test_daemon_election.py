@@ -18,6 +18,7 @@ from __future__ import annotations
 import contextlib
 import importlib
 import io
+import json
 import os
 import signal
 import socket
@@ -37,7 +38,7 @@ import linkedin_mcp_server.daemon_config as daemon_config
 import linkedin_mcp_server.daemon_descriptor as daemon_descriptor_module
 import linkedin_mcp_server.daemon_election as election_module
 import linkedin_mcp_server.daemon_owner as daemon_owner
-from linkedin_mcp_server import __version__
+from linkedin_mcp_server import __version__, process_control
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon import Attachment, OwnerLookup, OwnerState
 from linkedin_mcp_server.daemon_election import (
@@ -1556,16 +1557,41 @@ class TestWindowsAtomicOwnerHandoff:
             events.append("create-handshake-nonce")
             return handshake_nonce
 
+        class _Control:
+            """The rendezvous, stubbed so no real socket is bound here.
+
+            Only the accept is recorded. Where it sits relative to the Job is
+            what this class is about; the channel's own behaviour is pinned in
+            ``TestOwnerControlChannel``.
+            """
+
+            host = "127.0.0.1"
+            port = 4321
+
+            @classmethod
+            def open(cls) -> _Control:
+                return cls()
+
+            def accept_within(self, *, nonce: str, timeout: float) -> None:
+                assert nonce == handshake_nonce
+                assert timeout <= 1.0
+                events.append("attach")
+
+            def close(self) -> None:
+                pass
+
         def hand_over(
             process: object,
             sent: AppConfig,
             *,
             handshake_nonce: str,
+            control: object,
             timeout: float,
         ) -> None:
             assert process is child
             assert sent is config
             assert handshake_nonce == "0123456789abcdef" * 4
+            assert isinstance(control, _Control)
             assert timeout == 1.0
             events.append("config")
 
@@ -1592,8 +1618,8 @@ class TestWindowsAtomicOwnerHandoff:
             if validation_error is not None:
                 raise validation_error
 
-        def send_commit(process: object, *, handshake_nonce: str) -> None:
-            assert process is child
+        def send_commit(channel: object, *, handshake_nonce: str) -> None:
+            assert isinstance(channel, _Control)
             assert handshake_nonce == "0123456789abcdef" * 4
             events.append("commit")
 
@@ -1613,6 +1639,7 @@ class TestWindowsAtomicOwnerHandoff:
             election_module, "os", SimpleNamespace(name="nt", environ=os.environ)
         )
         monkeypatch.setattr(election_module, "WindowsJob", _Job)
+        monkeypatch.setattr(election_module, "ControlListener", _Control)
         monkeypatch.setattr(election_module, "release_nonce", lambda: "nonce")
         monkeypatch.setattr(election_module, "new_nonce", make_handshake_nonce)
         monkeypatch.setattr(election_module, "windows_gate_command", gate)
@@ -1666,6 +1693,7 @@ class TestWindowsAtomicOwnerHandoff:
             "release-gate",
             "config",
             "prepared",
+            "attach",
             "validate",
             "commit",
             "committed",
@@ -1877,6 +1905,117 @@ class TestWindowsAtomicOwnerHandoff:
         assert "close-parent-job" not in events
 
 
+@_POSIX_ONLY
+class TestPredecessorOwnerCompatibility:
+    """A current frontend starting an owner from a package rolled back on disk.
+
+    ``@latest`` is the documented install, so the frontend in memory and the
+    package on disk are two different things whenever one of them moved while the
+    other ran. A rollback makes the child older than its parent, and the
+    predecessor's framing is the part that breaks: it reads its configuration to
+    end of file, so a parent holding the pipe open for a commit record waits for
+    a verdict from a child that is waiting for the parent to close.
+
+    Driven through a real process rather than a stub of the protocol, because
+    the deadlock is in the process boundary itself. ``tests/predecessor_owner.py``
+    carries the predecessor's own read, quoted from the commit before the commit
+    boundary existed.
+
+    POSIX only, matching the neighbouring real-process tests: the Windows path
+    puts a Job Object and the release gate in front of the same exchange, and
+    neither is available to assert here.
+    """
+
+    def _run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, timeout: float
+    ) -> tuple[object, list[subprocess.Popen[Any]], float]:
+        profile = _profile(tmp_path)
+        config = _config(profile)
+        script = Path(__file__).with_name("predecessor_owner.py")
+        started: list[subprocess.Popen[Any]] = []
+        real = subprocess.Popen
+
+        monkeypatch.setattr(
+            election_module,
+            "_spawn_command",
+            lambda **_kwargs: [sys.executable, str(script)],
+        )
+
+        def record(command: list[str], **kwargs: Any) -> subprocess.Popen[Any]:
+            child = real(command, **kwargs)
+            started.append(child)
+            return child
+
+        monkeypatch.setattr(election_module.subprocess, "Popen", record)
+
+        began = time.monotonic()
+        outcome = election_module._spawn(
+            profile.parent, config, lock_fd=None, timeout=timeout
+        )
+        return outcome, started, time.monotonic() - began
+
+    def test_a_predecessor_owner_is_released_by_the_configuration_record(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        outcome, started, elapsed = self._run(tmp_path, monkeypatch, timeout=20.0)
+
+        try:
+            assert started, "no child was started"
+            # Without the close, this child is still parked in its first read and
+            # the parent has spent the whole budget waiting for a verdict.
+            assert outcome is election_module._Started.YES, (
+                "the predecessor owner never got past its configuration read"
+            )
+            assert elapsed < 10.0, (
+                "the parent waited out its budget rather than releasing the child"
+            )
+            # And it is still running. A predecessor publishes on its own
+            # authority before it reports, so this process may no longer stop it.
+            assert started[0].poll() is None
+            assert started[0].stdin is None or started[0].stdin.closed
+        finally:
+            for child in started:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait(timeout=30)
+
+    def test_the_predecessor_verdict_is_authenticated_like_any_other(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The same nonce check as every other startup record. A ``ready`` line
+        # from interpreter startup output, written before the nonce existed,
+        # cannot stand in for the one the owner sends.
+        monkeypatch.setattr(election_module, "new_nonce", lambda: _HANDSHAKE_NONCE)
+        frame = f"owner {_HANDSHAKE_NONCE} ready\n".encode()
+
+        class _Child:
+            pid = 424242
+            stdin = io.BytesIO()
+            stdout = io.BytesIO(b"ready\nowner deadbeef ready\n" + frame)
+            stderr = io.BytesIO()
+            returncode: int | None = None
+
+            def poll(self) -> int | None:
+                return self.returncode
+
+        child = _Child()
+        assert (
+            election_module._await_prepared(
+                cast(Any, child), handshake_nonce=_HANDSHAKE_NONCE, timeout=5.0
+            )
+            is election_module._Started.YES
+        )
+
+        forged = _Child()
+        forged.stdout = io.BytesIO(b"ready\nowner deadbeef ready\n")
+        assert (
+            election_module._await_prepared(
+                cast(Any, forged), handshake_nonce=_HANDSHAKE_NONCE, timeout=1.0
+            )
+            is election_module._Started.NO
+        )
+
+
 class TestAtomicStartupCommit:
     @pytest.fixture(autouse=True)
     def _stop_fake_groups(self, monkeypatch: pytest.MonkeyPatch):
@@ -1887,6 +2026,37 @@ class TestAtomicStartupCommit:
 
         monkeypatch.setattr(election_module, "terminate_process_group", stop)
         monkeypatch.setattr(election_module, "new_nonce", lambda: _HANDSHAKE_NONCE)
+
+    @pytest.fixture(autouse=True)
+    def control_peers(self, monkeypatch: pytest.MonkeyPatch):
+        """Give each control channel the peer a real child would attach.
+
+        The real listener rather than a stub, so these tests keep exercising the
+        authentication they depend on. A connect completes against the backlog
+        without an accept, so this needs no thread: the parent finds the peer
+        waiting exactly as it does in production.
+        """
+        opened = election_module.ControlListener.open
+        peers: list[process_control.ControlChannel] = []
+
+        def open_and_attach() -> election_module.ControlListener:
+            listener = opened()
+            peers.append(
+                process_control.attach(
+                    listener.host,
+                    listener.port,
+                    nonce=_HANDSHAKE_NONCE,
+                    timeout=5.0,
+                )
+            )
+            return listener
+
+        monkeypatch.setattr(
+            election_module.ControlListener, "open", staticmethod(open_and_attach)
+        )
+        yield peers
+        for peer in peers:
+            cast(Any, peer).close()
 
     class _Input(io.BytesIO):
         def __init__(self) -> None:
@@ -2237,7 +2407,10 @@ class TestAtomicStartupCommit:
         assert events == ["discard"]
 
     def test_only_the_lock_holding_child_commits(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        control_peers: list[Any],
     ):
         outcome, child, events = self._spawn(
             tmp_path,
@@ -2246,9 +2419,13 @@ class TestAtomicStartupCommit:
         )
 
         assert outcome is election_module._Started.YES
-        assert child.input.written.endswith(
-            f"owner {_HANDSHAKE_NONCE} commit\n".encode()
-        )
+        # On the control channel, and only there. The configuration pipe carries
+        # its one record and ends, so an owner that frames by end of file is
+        # released rather than left waiting behind an authorization it has never
+        # heard of.
+        assert control_peers[-1].readline() == f"owner {_HANDSHAKE_NONCE} commit\n"
+        assert child.input.written.endswith(b"}\n")
+        assert b"commit" not in child.input.written
         assert not child.killed
         assert events == []
 
@@ -2495,7 +2672,10 @@ class TestAtomicStartupCommit:
         assert events == []
 
     def test_interrupt_after_commit_request_does_not_kill_the_child(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        control_peers: list[Any],
     ):
         profile = _profile(tmp_path)
         config = _config(profile)
@@ -2520,9 +2700,7 @@ class TestAtomicStartupCommit:
         with pytest.raises(KeyboardInterrupt):
             election_module._spawn(profile.parent, config, lock_fd=None, timeout=1.0)
 
-        assert child.input.written.endswith(
-            f"owner {_HANDSHAKE_NONCE} commit\n".encode()
-        )
+        assert control_peers[-1].readline() == f"owner {_HANDSHAKE_NONCE} commit\n"
         assert not child.killed
         assert child.stdin.closed
 
@@ -2737,30 +2915,51 @@ class TestAtomicStartupCommit:
         assert not any(path.exists() for path in abandoned_paths)
         assert all(path.read_text() == "replacement" for path in replacement_paths)
 
-    def test_configuration_record_is_flushed_without_closing_the_lease(
-        self, tmp_path: Path
-    ):
+    def test_the_configuration_pipe_ends_on_its_record(self, tmp_path: Path):
+        # The rollback fix, at its narrowest. Every owner older than the commit
+        # boundary frames its configuration by reading to end of file, so a pipe
+        # held open past the record leaves such a child blocked in its first
+        # read while this process waits for a verdict it will never send.
         class _Flushed(io.BytesIO):
             flushes = 0
+            content = b""
 
             def flush(self) -> None:
                 self.flushes += 1
                 super().flush()
 
+            def close(self) -> None:
+                self.content = self.getvalue()
+                super().close()
+
         stream = _Flushed()
         child = self._Child(new_instance_id())
         child.stdin = stream
+        control = election_module.ControlListener.open()
 
-        election_module._hand_over_config(
-            cast(Any, child),
-            _config(_profile(tmp_path)),
-            handshake_nonce=_HANDSHAKE_NONCE,
-            timeout=1.0,
-        )
+        try:
+            election_module._hand_over_config(
+                cast(Any, child),
+                _config(_profile(tmp_path)),
+                handshake_nonce=_HANDSHAKE_NONCE,
+                control=control,
+                timeout=1.0,
+            )
+        finally:
+            control.close()
 
         assert stream.flushes == 1
-        assert stream.getvalue().endswith(b"\n")
-        assert not stream.closed
+        assert stream.closed, "the configuration pipe was left open past its record"
+        # Flushed before the close rather than by it, so a child reading the
+        # record and a child reading to end of file both see the same bytes.
+        assert stream.content.endswith(b"\n")
+        # And the rendezvous the commit record will arrive on travelled with it.
+        record = json.loads(stream.content)
+        assert record["startup_protocol"] == daemon_config.STARTUP_PROTOCOL_VERSION
+        assert (record["control_host"], record["control_port"]) == (
+            control.host,
+            control.port,
+        )
 
 
 @pytest.mark.slow
@@ -4494,6 +4693,32 @@ class TestPublishingLast:
         assert "control" not in order
         assert order.index("ready") < order.index("commit")
         assert "committed" not in order
+
+    @pytest.mark.parametrize("startup_protocol", [2, 3])
+    def test_every_authorizing_frontend_is_waited_for(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        startup_protocol: int,
+    ):
+        # Both versions that can authorize a commit are read the same way, and
+        # the owner never learns which channel carried the record: the frontend
+        # decides that when it chooses what to hand over. Protocol 2 is the
+        # rollback case in the other direction, a frontend that still holds the
+        # configuration pipe open for its own record.
+        order: list[str] = []
+
+        self._run_serve(
+            tmp_path,
+            monkeypatch,
+            order,
+            startup_protocol=startup_protocol,
+        )
+
+        assert "ready" not in order
+        assert order.index("prepared") < order.index("control")
+        assert order.index("control") < order.index("commit")
+        assert order[-1] == "committed"
 
     def test_a_descriptor_is_prepared_only_after_the_endpoint_answers(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

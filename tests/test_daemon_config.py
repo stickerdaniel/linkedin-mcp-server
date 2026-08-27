@@ -23,6 +23,7 @@ from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon_descriptor import config_fingerprint
 
 _NONCE = "0123456789abcdef" * 4
+_CONTROL = daemon_config.ControlEndpoint("127.0.0.1", 54321)
 
 
 def _config(**browser: object) -> AppConfig:
@@ -61,7 +62,7 @@ class TestRoundTrip:
         original = _config(headless=False)
 
         handover = daemon_config.decode_handover(
-            daemon_config.encode_handover(original, _NONCE)
+            daemon_config.encode_handover(original, _NONCE, _CONTROL)
         )
 
         assert handover.handshake_nonce == _NONCE
@@ -69,20 +70,91 @@ class TestRoundTrip:
         assert handover.startup_protocol == daemon_config.STARTUP_PROTOCOL_VERSION
 
     def test_missing_startup_protocol_means_the_predecessor_frontend(self):
-        payload = json.loads(daemon_config.encode_handover(_config(), _NONCE))
+        payload = json.loads(daemon_config.encode_handover(_config(), _NONCE, _CONTROL))
         payload.pop("startup_protocol")
+        payload.pop("control_host")
+        payload.pop("control_port")
 
         handover = daemon_config.decode_handover(json.dumps(payload))
 
         assert handover.startup_protocol == 1
+        assert handover.control is None
 
-    @pytest.mark.parametrize("value", [True, 0, 3, "2"])
+    @pytest.mark.parametrize("value", [True, 0, 4, "2"])
     def test_unknown_startup_protocol_is_refused(self, value: object):
-        payload = json.loads(daemon_config.encode_handover(_config(), _NONCE))
+        payload = json.loads(daemon_config.encode_handover(_config(), _NONCE, _CONTROL))
         payload["startup_protocol"] = value
 
         with pytest.raises(ValueError, match="startup protocol"):
             daemon_config.decode_handover(json.dumps(payload))
+
+    def test_the_current_record_names_the_control_rendezvous(self):
+        handover = daemon_config.decode_handover(
+            daemon_config.encode_handover(_config(), _NONCE, _CONTROL)
+        )
+
+        assert handover.startup_protocol == 3
+        assert handover.control == _CONTROL
+
+    def test_a_current_record_without_a_rendezvous_is_refused(self):
+        # Nothing could authorize such an owner: it would prepare a generation
+        # and then wait out its commit deadline with the lock in hand.
+        payload = json.loads(daemon_config.encode_handover(_config(), _NONCE, _CONTROL))
+        payload.pop("control_host")
+
+        with pytest.raises(ValueError, match="control host"):
+            daemon_config.decode_handover(json.dumps(payload))
+
+    @pytest.mark.parametrize("port", [0, 65536, -1, True, "8080", 8080.0])
+    def test_an_unusable_control_port_is_refused(self, port: object):
+        payload = json.loads(daemon_config.encode_handover(_config(), _NONCE, _CONTROL))
+        payload["control_port"] = port
+
+        with pytest.raises(ValueError, match="control port"):
+            daemon_config.decode_handover(json.dumps(payload))
+
+    @pytest.mark.parametrize("protocol", [1, 2])
+    def test_an_older_protocol_may_not_name_a_rendezvous(self, protocol: int):
+        # A frontend on either predecessor protocol never listens, so a record
+        # naming one did not come from a frontend that would answer it.
+        payload = json.loads(daemon_config.encode_handover(_config(), _NONCE, _CONTROL))
+        payload["startup_protocol"] = protocol
+
+        with pytest.raises(ValueError, match="control channel"):
+            daemon_config.decode_handover(json.dumps(payload))
+
+    def test_the_pipe_commit_protocol_still_decodes(self):
+        # The version between the two: commit authorization on the configuration
+        # pipe. An owner from this build can still be started by a frontend that
+        # speaks it, which is the rollback case in the other direction.
+        payload = json.loads(daemon_config.encode_handover(_config(), _NONCE, _CONTROL))
+        payload["startup_protocol"] = 2
+        del payload["control_host"], payload["control_port"]
+
+        handover = daemon_config.decode_handover(json.dumps(payload))
+
+        assert handover.startup_protocol == 2
+        assert handover.control is None
+        assert daemon_config.authorizes_commit(handover.startup_protocol)
+
+    def test_only_the_predecessor_protocol_publishes_unauthorized(self):
+        assert not daemon_config.authorizes_commit(1)
+        assert daemon_config.authorizes_commit(2)
+        assert daemon_config.authorizes_commit(3)
+
+    def test_the_rendezvous_stays_outside_the_sections_a_predecessor_parses(self):
+        # What makes a current record readable by an owner that has never heard
+        # of a control channel. Every version of the decoder reads ``browser``
+        # and ``server`` by name and refuses an unknown setting *inside* them,
+        # while ignoring top-level names it does not know.
+        payload = json.loads(daemon_config.encode_handover(_config(), _NONCE, _CONTROL))
+
+        assert {"control_host", "control_port", "startup_protocol"} <= set(payload)
+        assert not {"control_host", "control_port"} & set(payload["browser"])
+        assert not {"control_host", "control_port"} & set(payload["server"])
+        # And the predecessor's own reconstruction, which reads exactly these
+        # three names, still finds everything it needs.
+        assert {"browser", "server", "handshake_nonce"} <= set(payload)
 
     def test_owner_handover_requires_a_valid_nonce(self):
         with pytest.raises(ValueError, match="handshake nonce"):
@@ -411,6 +483,7 @@ class TestRefusing:
 
         import linkedin_mcp_server.drivers.browser as browser_module
         from linkedin_mcp_server import daemon_owner
+        from linkedin_mcp_server.process_control import ControlListener
 
         visible = AppConfig()
         visible.browser.user_data_dir = "~/p/profile"
@@ -424,7 +497,18 @@ class TestRefusing:
             "_attach_daemon_log",
             lambda auth_root: auth_root / "daemon.log",
         )
-        sys.stdin = io.StringIO(daemon_config.encode_handover(visible, _NONCE) + "\n")
+        # A real rendezvous, so the owner gets past its control attach and on to
+        # the lock. Nothing here accepts it: the connection waits in the backlog,
+        # exactly as it does until a parent has a prepared generation to validate.
+        control = ControlListener.open()
+        sys.stdin = io.StringIO(
+            daemon_config.encode_handover(
+                visible,
+                _NONCE,
+                daemon_config.ControlEndpoint(control.host, control.port),
+            )
+            + "\n"
+        )
         try:
             # It gets as far as taking the lock, which fails on the deliberately
             # invalid descriptor and is reported rather than raised. That is
@@ -435,6 +519,7 @@ class TestRefusing:
                 "the owner ignored the browser mode it was handed"
             )
         finally:
+            control.close()
             sys.stdin = stdin
             browser_module.set_headless(original)
 
