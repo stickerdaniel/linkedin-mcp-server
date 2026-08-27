@@ -980,6 +980,8 @@ def test_registered_group_kill_revalidates_kernel_identity(
     monkeypatch: pytest.MonkeyPatch,
 ):
     killed: list[tuple[int, signal.Signals]] = []
+    original = dict(process_tree._registered_posix_groups)
+    process_tree._registered_posix_groups.clear()
     process_tree._registered_posix_groups.update({123: "old", 456: "same"})
     monkeypatch.setattr(
         process_tree,
@@ -992,7 +994,8 @@ def test_registered_group_kill_revalidates_kernel_identity(
     try:
         process_tree._kill_registered_process_groups()
     finally:
-        process_tree.forget_detached_process_groups()
+        process_tree._registered_posix_groups.clear()
+        process_tree._registered_posix_groups.update(original)
 
     assert killed == [(456, signal.SIGKILL)]
 

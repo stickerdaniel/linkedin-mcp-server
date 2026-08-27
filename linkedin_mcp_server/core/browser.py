@@ -31,6 +31,7 @@ from linkedin_mcp_server.hidden_target import (
     hidden_target_is_supported,
     open_hidden_page,
 )
+from linkedin_mcp_server.process_tree import remember_detached_process_groups
 
 from .exceptions import NetworkError, ProxyConnectionError
 
@@ -275,6 +276,10 @@ class BrowserManager:
                     )
                 )
             except Exception as exc:
+                # A launch can leave detached Chromium behind even when Patchright
+                # never returns a context. Retain its group while the Node driver's
+                # ancestry still makes it discoverable.
+                remember_detached_process_groups()
                 # A headed launch needs somewhere to put a window, and whether
                 # this machine has one cannot be decided from the platform name
                 # alone: a Mac reached over SSH, a launchd daemon, or a CI
@@ -347,6 +352,10 @@ class BrowserManager:
                     # actually was.
                     raise exc from None
 
+            # Patchright starts Chromium in its own POSIX process group. Capture
+            # that group before page setup or authentication can fail and before
+            # the Node driver can exit and reparent it.
+            remember_detached_process_groups()
             logger.info(
                 "Persistent browser launched (headless=%s, user_data_dir=%s)",
                 self.headless,
@@ -376,6 +385,10 @@ class BrowserManager:
             logger.info("Browser context and page ready")
 
         except BaseException as e:
+            # A failure before a context was returned can still have spawned a
+            # detached browser. This is idempotent with the two launch checkpoints
+            # above and must run before cleanup can make ancestry disappear.
+            remember_detached_process_groups()
             # BaseException so a cancelled launch is cleaned up too: Chromium may
             # already be running, and leaving it would hold the profile.
             #

@@ -41,10 +41,6 @@ from linkedin_mcp_server.exceptions import (
     BrowserShutdownUnconfirmedError,
     ProfileRootRefusedError,
 )
-from linkedin_mcp_server.process_tree import (
-    forget_detached_process_groups,
-    remember_detached_process_groups,
-)
 from linkedin_mcp_server.profile_lease import ProfileLease, get_profile_lease
 from linkedin_mcp_server.server_role import a_held_profile_means_this_owner_must_go
 from linkedin_mcp_server.session_state import (
@@ -138,8 +134,7 @@ def experimental_persist_derived_runtime() -> bool:
 
 
 def _apply_browser_settings(browser: BrowserManager) -> None:
-    """Apply settings and retain detached browser groups while ancestry is live."""
-    remember_detached_process_groups()
+    """Apply settings to an authenticated browser."""
     config = get_config()
     browser.page.set_default_timeout(config.browser.default_timeout)
 
@@ -821,9 +816,6 @@ def _settle_the_profile(*, confirmed: bool) -> None:
     their own already on the way out.
     """
     global _browser_lease
-
-    if confirmed:
-        forget_detached_process_groups()
 
     lease, _browser_lease = _browser_lease, None
     if lease is None:

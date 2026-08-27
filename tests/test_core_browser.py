@@ -338,6 +338,43 @@ class TestTheWindowlessLaunchEndToEnd:
         assert pages[0].closed is True
         assert recorder["hidden_present_at_close"] is True
 
+    async def test_detached_groups_are_retained_before_page_setup(
+        self, tmp_path, monkeypatch
+    ):
+        """A post-launch failure must not make Chromium undiscoverable first."""
+        recorder: dict = {}
+        start, _ = self._fake_playwright(recorder)
+        manager = BrowserManager(user_data_dir=tmp_path / "p", headless=True)
+        remembered: list[bool] = []
+
+        async def fail_after_launch(*args, **kwargs):
+            assert remembered == [True], "page setup ran before group registration"
+            raise RuntimeError("page setup failed")
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.core.browser.remember_detached_process_groups",
+            lambda: remembered.append(True),
+        )
+        closed = AsyncMock(return_value=True)
+        with mock.patch.object(manager, "close", closed):
+            with mock.patch(
+                "linkedin_mcp_server.core.browser.hidden_target_is_supported",
+                return_value=True,
+            ):
+                with mock.patch(
+                    "linkedin_mcp_server.core.browser.open_hidden_page",
+                    side_effect=fail_after_launch,
+                ):
+                    with mock.patch(
+                        "linkedin_mcp_server.core.browser.async_playwright"
+                    ) as playwright:
+                        playwright.return_value.start = start
+                        with pytest.raises(Exception, match="page setup failed"):
+                            await manager.start()
+
+        assert remembered == [True, True]
+        closed.assert_awaited_once()
+
     async def test_a_refused_window_falls_back_to_headless(self, tmp_path):
         """The machine decides, not the platform name.
 

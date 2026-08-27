@@ -925,40 +925,34 @@ class TestAWedgeFromAnywhereFreesTheOwner:
         assert stand_down_reason() is None, "a healthy owner was told to exit"
 
 
-def test_browser_activation_remembers_detached_process_groups(
+def test_browser_activation_applies_the_default_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ):
     from linkedin_mcp_server.drivers import browser as drv
 
-    remembered: list[bool] = []
     browser = MagicMock()
     config = MagicMock()
     config.browser.default_timeout = 30_000
     monkeypatch.setattr(drv, "get_config", lambda: config)
-    monkeypatch.setattr(
-        drv, "remember_detached_process_groups", lambda: remembered.append(True)
-    )
 
     drv._apply_browser_settings(browser)
 
     browser.page.set_default_timeout.assert_called_once_with(30_000)
-    assert remembered == [True]
 
 
-def test_confirmed_shutdown_forgets_detached_process_groups(
-    monkeypatch: pytest.MonkeyPatch,
-):
+def test_confirmed_shutdown_retains_other_detached_process_groups():
+    from linkedin_mcp_server import process_tree
     from linkedin_mcp_server.drivers import browser as drv
 
-    forgotten: list[bool] = []
-    monkeypatch.setattr(
-        drv, "forget_detached_process_groups", lambda: forgotten.append(True)
-    )
+    original = dict(process_tree._registered_posix_groups)
+    process_tree._registered_posix_groups[123] = "still-running"
     drv._browser_lease = None
-
-    drv._settle_the_profile(confirmed=True)
-
-    assert forgotten == [True]
+    try:
+        drv._settle_the_profile(confirmed=True)
+        assert process_tree._registered_posix_groups[123] == "still-running"
+    finally:
+        process_tree._registered_posix_groups.clear()
+        process_tree._registered_posix_groups.update(original)
 
 
 def test_unconfirmed_shutdown_without_local_lease_requires_hard_exit(

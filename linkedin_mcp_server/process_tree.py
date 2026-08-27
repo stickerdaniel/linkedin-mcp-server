@@ -144,11 +144,6 @@ def remember_detached_process_groups() -> None:
             _registered_posix_groups.setdefault(group, identity)
 
 
-def forget_detached_process_groups() -> None:
-    """Forget groups after browser shutdown has been confirmed."""
-    _registered_posix_groups.clear()
-
-
 def _kill_registered_process_groups() -> None:
     for group, identity in tuple(_registered_posix_groups.items()):
         current = _kernel_start_identity(group)

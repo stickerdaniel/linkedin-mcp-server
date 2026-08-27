@@ -541,7 +541,14 @@ async def _serve_until_stopped(
             await _stop_within(serving, _STAND_DOWN_SHUTDOWN_SECONDS)
             return
         await asyncio.sleep(_STAND_DOWN_POLL_SECONDS)
-    await serving
+    try:
+        await serving
+    finally:
+        if hard_exit_required():
+            logger.error(
+                "Browser shutdown was not confirmed; exiting hard before locks are released"
+            )
+            _exit_hard()
 
 
 async def _stop_within(serving: asyncio.Task[None], seconds: float) -> None:
