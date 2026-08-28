@@ -1745,30 +1745,37 @@ def _snapshot_bytes(snapshot: tuple[tuple[str, int, int], ...]) -> int:
     return sum({name: size for name, size, _mtime in snapshot}.values())
 
 
+def _refuse_oversized_install(
+    snapshot: tuple[tuple[str, int, int], ...], baseline: int
+) -> None:
+    """Refuse an install whose growth above *baseline* passes the byte ceiling."""
+    written = _snapshot_bytes(snapshot) - baseline
+    if written > _INSTALLER_MAX_WRITTEN_BYTES:
+        raise BrowserSetupFailedError(
+            f"Patchright Chromium browser setup wrote {_format_size(written)}, "
+            f"past its {_format_size(_INSTALLER_MAX_WRITTEN_BYTES)} limit"
+        )
+
+
 async def _watch_installer_activity(
     callback: Callable[[], None],
     temporary_root: Path,
     extraction_paths: tuple[Path, ...],
+    opening: tuple[tuple[str, int, int], ...],
+    baseline: int,
 ) -> None:
-    """Report installer progress and refuse an install that never stops growing."""
-    previous = await _run_in_daemon_thread(
-        _installer_download_snapshot, temporary_root, extraction_paths
-    )
-    # An extraction root can hold a previous attempt's bytes before this one
-    # writes anything, so only growth above the opening snapshot is charged
-    # here. That snapshot is the one the poll already takes: no second walk.
-    baseline = _snapshot_bytes(previous)
+    """Report installer progress and refuse an install that never stops growing.
+
+    The caller takes *opening* and its *baseline* total before anything can
+    write, or the bytes landing before the first poll are charged to nobody.
+    """
+    previous = opening
     while True:
         await asyncio.sleep(_INSTALLER_ACTIVITY_POLL_SECONDS)
         current = await _run_in_daemon_thread(
             _installer_download_snapshot, temporary_root, extraction_paths
         )
-        written = _snapshot_bytes(current) - baseline
-        if written > _INSTALLER_MAX_WRITTEN_BYTES:
-            raise BrowserSetupFailedError(
-                f"Patchright Chromium browser setup wrote {_format_size(written)}, "
-                f"past its {_format_size(_INSTALLER_MAX_WRITTEN_BYTES)} limit"
-            )
+        _refuse_oversized_install(current, baseline)
         if current != previous:
             callback()
             previous = current
@@ -2032,6 +2039,13 @@ async def _run_patchright_install(
         extraction_paths = await _run_in_daemon_thread(
             _installer_extraction_paths, extra_arg, environment
         )
+        # Before the supervisor exists, so nothing this install writes lands in
+        # its own baseline, and only growth above a previous attempt's bytes is
+        # charged. The one opening walk; the watcher reuses this snapshot.
+        opening = await _run_in_daemon_thread(
+            _installer_download_snapshot, temporary_root, extraction_paths
+        )
+        baseline = _snapshot_bytes(opening)
         proc = _managed_installer(
             await _start_installer_supervisor(extra_arg, environment)
         )
@@ -2069,7 +2083,11 @@ async def _run_patchright_install(
         activity = (
             asyncio.create_task(
                 _watch_installer_activity(
-                    activity_callback, temporary_root, extraction_paths
+                    activity_callback,
+                    temporary_root,
+                    extraction_paths,
+                    opening,
+                    baseline,
                 ),
                 name="browser-installer-activity",
             )
@@ -2154,10 +2172,26 @@ async def _run_patchright_install(
                 raise settle_cancellation
             raise
         await _close_installer_lease(proc)
+        # Unconditional, because a poll can miss the final growth: CPython can
+        # publish returncode before pipe EOF, so the loop above leaves with the
+        # watcher parked between two sleeps. The tree has settled by here.
+        final = await _run_in_daemon_thread(
+            _installer_download_snapshot, temporary_root, extraction_paths
+        )
+        # Precedence, deliberately in this order. A nonzero exit keeps its own
+        # message, which says what went wrong; a breach beats success, because
+        # accepting returncode 0 is what records an oversized tree as ready.
         if returncode != 0:
             raise BrowserSetupFailedError(
                 "\n".join(lines) or "Patchright Chromium browser setup failed."
             )
+        try:
+            _refuse_oversized_install(final, baseline)
+        except BrowserSetupFailedError:
+            # The bound decided this install, so the watcher carrying the same
+            # breach into the cleanup below is not a missed one to warn about.
+            bound_raised = True
+            raise
     finally:
         try:
             if activity is not None:

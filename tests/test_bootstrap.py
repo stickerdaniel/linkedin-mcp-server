@@ -2104,7 +2104,7 @@ class TestInstallerSupervisorLaunch:
     async def test_silent_download_file_growth_reports_activity(self, monkeypatch):
         from linkedin_mcp_server import bootstrap
 
-        snapshots = iter([(), (("archive.zip", 1024, 1),)])
+        snapshots = iter([(("archive.zip", 1024, 1),)])
         active = asyncio.Event()
         monkeypatch.setattr(
             bootstrap,
@@ -2114,7 +2114,7 @@ class TestInstallerSupervisorLaunch:
         monkeypatch.setattr(bootstrap, "_INSTALLER_ACTIVITY_POLL_SECONDS", 0.001)
 
         watcher = asyncio.create_task(
-            bootstrap._watch_installer_activity(active.set, Path("private"), ())
+            bootstrap._watch_installer_activity(active.set, Path("private"), (), (), 0)
         )
         try:
             await asyncio.wait_for(active.wait(), timeout=1)
@@ -2131,8 +2131,8 @@ class TestInstallerSupervisorLaunch:
 
         # 4 KiB is already there; this install then writes 512 bytes, which is
         # under a 1 KiB ceiling only if the opening snapshot is the baseline.
+        opening = (("archive.zip", 4096, 1),)
         scripted = [
-            (("archive.zip", 4096, 1),),
             (("archive.zip", 4096, 2),),
             (("archive.zip", 4608, 3),),
         ]
@@ -2148,7 +2148,13 @@ class TestInstallerSupervisorLaunch:
         monkeypatch.setattr(bootstrap, "_INSTALLER_MAX_WRITTEN_BYTES", 1024)
 
         watcher = asyncio.create_task(
-            bootstrap._watch_installer_activity(active.set, Path("private"), ())
+            bootstrap._watch_installer_activity(
+                active.set,
+                Path("private"),
+                (),
+                opening,
+                bootstrap._snapshot_bytes(opening),
+            )
         )
         try:
             await asyncio.wait_for(active.wait(), timeout=2)
@@ -2204,9 +2210,16 @@ class TestInstallerSupervisorLaunch:
         assert len(str(failure.value)) < 200, "the diagnostic is bounded"
         assert proc.waited, "the installer was reaped rather than left running"
 
-    async def test_a_finished_install_keeps_its_result_over_a_late_bound(
+    async def test_a_late_bound_the_final_accounting_denies_is_only_a_warning(
         self, monkeypatch, caplog
     ):
+        """A watcher bound the tree no longer shows does not fail the install.
+
+        The final snapshot is the one that decides, and here it finds nothing
+        above the baseline: whatever the watcher saw is gone from disk, so the
+        damage the ceiling exists to bound is gone with it. The install keeps
+        its own result and the breach stays a log line.
+        """
         from linkedin_mcp_server import bootstrap
         from linkedin_mcp_server.exceptions import BrowserSetupFailedError
 
@@ -2216,9 +2229,9 @@ class TestInstallerSupervisorLaunch:
             _callback: Callable[[], None],
             _temporary_root: Path,
             _extraction_paths: tuple[Path, ...],
+            _opening: tuple[tuple[str, int, int], ...],
+            _baseline: int,
         ) -> None:
-            # The bound is reached only at finalisation, which is where a
-            # completed install has already produced its own result.
             try:
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
@@ -2244,6 +2257,172 @@ class TestInstallerSupervisorLaunch:
             )
 
         assert "exceeded a setup bound" in caplog.text
+
+    async def test_bytes_written_before_the_first_poll_are_charged(self, monkeypatch):
+        """The baseline is taken before the supervisor can write anything.
+
+        Measured against a baseline taken inside the watcher: an installer that
+        writes everything between its own start and the first poll has that
+        growth folded into its own baseline, and the ceiling then has nothing
+        left to refuse.
+        """
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.exceptions import BrowserSetupFailedError
+
+        class _NeverExitingProc(_FakeProc):
+            """Only the containment path reaps this one; it never exits itself."""
+
+            async def _wait(self) -> int:
+                while not self.stdin.closed:
+                    await asyncio.sleep(0.001)
+                self.returncode = self._final
+                return self.returncode
+
+        proc = _NeverExitingProc([], 0)
+        overflowing = (("archive.zip", 5 * 1024**3, 1),)
+        disk: list[tuple[tuple[str, int, int], ...]] = [()]
+
+        async def spawn(*_args: object, **_kwargs: object) -> _FakeProc:
+            # Everything lands at once, inside the first poll interval.
+            disk[0] = overflowing
+            return proc
+
+        async def hanging_lines(stream: object):
+            await asyncio.Event().wait()
+            if False:  # pragma: no cover - makes this an async generator
+                yield ""
+
+        monkeypatch.setattr(bootstrap, "_installer_lines", hanging_lines)
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+        monkeypatch.setattr(
+            bootstrap,
+            "_installer_download_snapshot",
+            lambda temporary_root, extraction_paths: disk[0],
+        )
+        monkeypatch.setattr(bootstrap, "_INSTALLER_ACTIVITY_POLL_SECONDS", 0.001)
+
+        with pytest.raises(BrowserSetupFailedError) as failure:
+            await asyncio.wait_for(
+                bootstrap._run_patchright_install(
+                    "--no-shell", activity_callback=lambda: None
+                ),
+                5,
+            )
+
+        assert "wrote 5.0 GiB" in str(failure.value)
+        assert proc.waited, "the installer was reaped rather than left running"
+
+    @staticmethod
+    def _exits_before_pipe_eof(
+        monkeypatch,
+        disk: list[tuple[tuple[str, int, int], ...]],
+        grown: tuple[tuple[str, int, int], ...],
+        returncode: int = 0,
+    ) -> _FakeProc:
+        """An installer reaped while its own pipes are still open.
+
+        The ordering CPython 3.14 can produce: ``Process.returncode`` is
+        published from the child watcher, and pipe EOF arrives afterwards. The
+        supervision loop leaves as soon as the process task resolves, so the
+        last of the install lands with the activity watcher parked between two
+        five-second polls and nothing but the final snapshot left to see it.
+        """
+        from linkedin_mcp_server import bootstrap
+
+        exited = asyncio.Event()
+
+        class _ExitsBeforePipeEOF(_FakeProc):
+            async def _wait(self) -> int:
+                self.returncode = self._final
+                exited.set()
+                return self.returncode
+
+        proc = _ExitsBeforePipeEOF([], returncode)
+
+        async def trailing_lines(stream: object):
+            await exited.wait()
+            disk[0] = grown
+            setattr(stream, "exhausted", True)
+            yield "done"
+
+        monkeypatch.setattr(bootstrap, "_installer_lines", trailing_lines)
+        monkeypatch.setattr(
+            asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)
+        )
+        monkeypatch.setattr(
+            bootstrap,
+            "_installer_download_snapshot",
+            lambda temporary_root, extraction_paths: disk[0],
+        )
+        return proc
+
+    async def test_growth_after_process_exit_beats_a_successful_install(
+        self, isolate_profile_dir, tmp_path, monkeypatch
+    ):
+        """The final snapshot refuses a tree the installer exited 0 on."""
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.exceptions import BrowserSetupFailedError
+
+        _patch_targets_and_version(monkeypatch)
+        monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "browsers"))
+        disk: list[tuple[tuple[str, int, int], ...]] = [()]
+        proc = self._exits_before_pipe_eof(
+            monkeypatch, disk, (("chrome", 5 * 1024**3, 1),)
+        )
+
+        with pytest.raises(BrowserSetupFailedError) as failure:
+            await asyncio.wait_for(
+                bootstrap._run_browser_setup(activity_callback=lambda: None), 5
+            )
+
+        assert proc.returncode == 0, "the installer itself succeeded"
+        assert "past its 4.0 GiB limit" in str(failure.value)
+        assert not install_metadata_path().exists(), "no browser was recorded ready"
+
+    async def test_the_installers_own_failure_outranks_the_final_bound(
+        self, isolate_profile_dir, tmp_path, monkeypatch
+    ):
+        """A nonzero exit keeps its own message, which says what went wrong.
+
+        The ceiling adds nothing to an install that is refused already, and the
+        output it collected is the only account of the failure there is.
+        """
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.exceptions import BrowserSetupFailedError
+
+        _patch_targets_and_version(monkeypatch)
+        monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "browsers"))
+        disk: list[tuple[tuple[str, int, int], ...]] = [()]
+        self._exits_before_pipe_eof(
+            monkeypatch, disk, (("chrome", 5 * 1024**3, 1),), returncode=1
+        )
+
+        with pytest.raises(BrowserSetupFailedError) as failure:
+            await asyncio.wait_for(
+                bootstrap._run_browser_setup(activity_callback=lambda: None), 5
+            )
+
+        assert str(failure.value) == "done"
+        assert not install_metadata_path().exists()
+
+    async def test_a_normal_install_passes_the_final_accounting(
+        self, isolate_profile_dir, tmp_path, monkeypatch
+    ):
+        """Growth under the ceiling, above bytes a previous attempt left."""
+        from linkedin_mcp_server import bootstrap
+
+        _patch_targets_and_version(monkeypatch)
+        monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "browsers"))
+        monkeypatch.setattr(bootstrap, "_INSTALLER_MAX_WRITTEN_BYTES", 1024)
+        disk: list[tuple[tuple[str, int, int], ...]] = [(("chrome", 4096, 1),)]
+        self._exits_before_pipe_eof(monkeypatch, disk, (("chrome", 4608, 2),))
+
+        await asyncio.wait_for(
+            bootstrap._run_browser_setup(activity_callback=lambda: None), 5
+        )
+
+        payload = json.loads(install_metadata_path().read_text())
+        assert payload["installed_targets"]["chromium-"] is True
 
     def test_real_activity_scanner_observes_private_archive_growth(self, tmp_path):
         from linkedin_mcp_server import bootstrap
@@ -2401,6 +2580,8 @@ class TestInstallerSupervisorLaunch:
             _callback: Callable[[], None],
             _temporary_root: Path,
             _extraction_paths: tuple[Path, ...],
+            _opening: tuple[tuple[str, int, int], ...],
+            _baseline: int,
         ) -> None:
             raise RuntimeError("watcher unavailable")
 
@@ -2435,6 +2616,8 @@ class TestInstallerSupervisorLaunch:
             _callback: Callable[[], None],
             _temporary_root: Path,
             _extraction_paths: tuple[Path, ...],
+            _opening: tuple[tuple[str, int, int], ...],
+            _baseline: int,
         ) -> None:
             try:
                 await asyncio.Event().wait()
