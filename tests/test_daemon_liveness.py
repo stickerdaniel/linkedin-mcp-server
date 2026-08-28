@@ -685,12 +685,20 @@ class TestGoingAwayWhenNobodyNeedsIt:
                 await setup
             bootstrap.get_bootstrap_state().setup_task = None
 
-    async def test_unconsumed_setup_failure_exits_after_fresh_idle_grace(self):
-        from linkedin_mcp_server import bootstrap, daemon_liveness
+    async def test_unconsumed_setup_failure_holds_the_owner_then_lets_it_go(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Both halves, because each one alone is a different bug. A failure is
+        # only reported on the *next* tool call, and the message it follows asks
+        # for that call in a minute or two: an owner with a shorter configured
+        # idle timeout that exits inside that window sends the retry to a fresh
+        # owner, which starts setup over and hides the diagnostic again. And a
+        # failure nobody ever comes back for must not pin the owner forever,
+        # which is what makes the grace bounded rather than a second wedge.
+        from linkedin_mcp_server import bootstrap, daemon_liveness, daemon_owner
 
-        liveness = daemon_liveness.get_liveness()
-        liveness.the_endpoint_is_live()
-        liveness._quiet_since = liveness._quiet_since - 60  # ty: ignore
+        grace = 1.0
+        monkeypatch.setattr(daemon_owner, "_SETUP_FAILURE_RETRY_GRACE_SECONDS", grace)
 
         async def failed_setup() -> None:
             raise RuntimeError("install failed")
@@ -699,8 +707,23 @@ class TestGoingAwayWhenNobodyNeedsIt:
         with pytest.raises(RuntimeError, match="install failed"):
             await setup
         bootstrap.get_bootstrap_state().setup_task = setup
+
+        liveness = daemon_liveness.get_liveness()
+        liveness.the_endpoint_is_live()
+        liveness._quiet_since = liveness._quiet_since - 60  # ty: ignore
+        # Where the quiet period starts in production: setup completion resets
+        # the idle clock, so the grace is measured from the failure rather than
+        # from whenever the endpoint was published.
+        liveness.background_activity_finished()
+
         try:
-            assert await self._run_loop(idle_timeout=0.05, ticks=0.2) is True
+            assert bootstrap.browser_setup_failure_pending()
+            held = await self._run_loop(idle_timeout=0.05, ticks=0.3)
+            quiet = liveness.quiet_for()
+            assert quiet is not None and 0.05 <= quiet < grace
+            assert held is False, "the owner exited before the retry could arrive"
+
+            assert await self._run_loop(idle_timeout=0.05, ticks=grace) is True
         finally:
             bootstrap.get_bootstrap_state().setup_task = None
 

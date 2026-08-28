@@ -1152,6 +1152,66 @@ class TestSetupGate:
         assert retry_task is not None
         await retry_task
 
+    async def test_a_retry_within_the_owner_grace_gets_the_first_failure(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        """The whole chain the grace exists for, on the production path.
+
+        The test above proves the retry consumes the failure; this one proves
+        the owner is still there to be retried. An owner configured with an idle
+        timeout shorter than the "minute or two" the failure message asks for
+        exits between the two calls, and the retry then reaches a fresh owner
+        that starts setup over instead of reporting what went wrong.
+        """
+        from linkedin_mcp_server import bootstrap, daemon_liveness, daemon_owner
+        from linkedin_mcp_server.daemon_owner import _serve_until_stopped
+        from linkedin_mcp_server.exceptions import BrowserSetupFailedError
+        from linkedin_mcp_server.server_role import ServerRole
+
+        fail = asyncio.Event()
+        attempts = 0
+
+        async def setup(**_kwargs: object) -> None:
+            nonlocal attempts
+            attempts += 1
+            await fail.wait()
+            raise BrowserSetupFailedError("the mirror refused")
+
+        config = SimpleNamespace(browser=SimpleNamespace(chrome_path=None))
+        monkeypatch.setattr(bootstrap, "get_config", lambda: config)
+        monkeypatch.setattr(bootstrap, "_browser_setup_ready", lambda: False)
+        monkeypatch.setattr(bootstrap, "_run_browser_setup", setup)
+        monkeypatch.setattr(bootstrap, "process_role", lambda: ServerRole.OWNER)
+        monkeypatch.setattr(daemon_owner, "_SETUP_FAILURE_RETRY_GRACE_SECONDS", 5.0)
+        initialize_bootstrap("managed")
+
+        liveness = daemon_liveness.get_liveness()
+        liveness.the_endpoint_is_live()
+
+        with pytest.raises(BrowserSetupInProgressError):
+            await ensure_tool_ready_or_raise("get_person_profile")
+
+        task = get_bootstrap_state().setup_task
+        assert task is not None
+        fail.set()
+        with pytest.raises(BrowserSetupFailedError, match="the mirror refused"):
+            await task
+        assert bootstrap.browser_setup_failure_pending()
+
+        server = MagicMock()
+        server.should_exit = False
+
+        async def serves() -> None:
+            await asyncio.sleep(0.2)
+
+        serving = asyncio.create_task(serves())
+        await _serve_until_stopped(server, serving, [], 0.05, lock=None)
+        assert server.should_exit is False, "the owner exited before the retry"
+
+        with pytest.raises(BrowserSetupFailedError, match="the mirror refused"):
+            await ensure_tool_ready_or_raise("get_person_profile")
+        assert attempts == 1, "the retry started a new setup instead of reporting"
+
     @pytest.mark.parametrize("headless", [True, False])
     async def test_full_only_releases_in_either_mode(
         self, isolate_profile_dir, monkeypatch, headless

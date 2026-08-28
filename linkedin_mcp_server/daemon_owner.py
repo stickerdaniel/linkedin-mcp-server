@@ -56,7 +56,10 @@ from typing import Any, NoReturn, Protocol, TextIO
 import httpx
 
 from linkedin_mcp_server import __version__, daemon_config, daemon_descriptor
-from linkedin_mcp_server.bootstrap import browser_setup_in_progress
+from linkedin_mcp_server.bootstrap import (
+    browser_setup_failure_pending,
+    browser_setup_in_progress,
+)
 from linkedin_mcp_server.config import set_config
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon_lock import DaemonLock, DaemonLockError
@@ -478,6 +481,11 @@ _STAND_DOWN_SHUTDOWN_SECONDS = 30.0
 #: never published.
 _FAILED_STARTUP_SHUTDOWN_SECONDS = 10.0
 
+#: How long an owner holds an unconsumed setup failure open for the retry the
+#: in-progress message asks for "in a minute or two". Bounded to match that
+#: guidance: an abandoned failure must not pin an owner forever.
+_SETUP_FAILURE_RETRY_GRACE_SECONDS = 120.0
+
 
 async def _serve_until_stopped(
     server: Any,
@@ -548,10 +556,17 @@ async def _serve_until_stopped(
         # in-progress response. That task is work for this owner even though no
         # tool call remains in liveness; exiting here would cancel every install
         # that lasts longer than the idle timeout and start it over next time.
+        #
+        # A failed setup is the other half: only the next tool call consumes the
+        # failure, so a shorter idle timeout would send that retry to a fresh
+        # owner that starts setup over and hides the diagnostic again.
+        quiet_required = idle_timeout
+        if browser_setup_failure_pending():
+            quiet_required = max(idle_timeout, _SETUP_FAILURE_RETRY_GRACE_SECONDS)
         if (
             idle_timeout > 0
             and quiet is not None
-            and quiet >= idle_timeout
+            and quiet >= quiet_required
             and not browser_setup_in_progress()
         ):
             logger.info("Nothing has needed the browser in %.0fs; exiting", quiet)
