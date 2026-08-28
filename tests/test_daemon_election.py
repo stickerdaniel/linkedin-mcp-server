@@ -5215,10 +5215,13 @@ class TestTheHardExitFreesTheElectionFirst:
     ):
         # Driven through the whole owner rather than through ``_exit_hard``, so
         # the lock reaching it is the production wiring and not the test's.
+        # Only the state operations are stood in for; `_serve_until_stopped`,
+        # which is what hands the lock down, stays the real one.
         import asyncio
 
         from linkedin_mcp_server import daemon_owner
 
+        nonce = "0123456789abcdef" * 4
         profile = _profile(tmp_path)
         config = _config(profile)
         auth_root = profile.parent
@@ -5240,6 +5243,27 @@ class TestTheHardExitFreesTheElectionFirst:
             async def serve(self, sockets: object = None) -> None:
                 return None
 
+        class _SilentHandshake:
+            def prepared(self, instance_id: str) -> None: ...
+
+            def ready(self) -> None: ...
+
+            def committed(self) -> None: ...
+
+            def fail(self) -> None: ...
+
+            def abort(self) -> None: ...
+
+            def retry(self) -> None: ...
+
+            def uncertain(self) -> None: ...
+
+            def close(self) -> None: ...
+
+        class _CommittingParent:
+            def readline(self) -> str:
+                return f"owner {nonce} commit\n"
+
         monkeypatch.setattr(daemon_owner, "hard_exit_process_tree", drain)
         monkeypatch.setattr(daemon_owner, "hard_exit_required", lambda: True)
         monkeypatch.setattr(daemon_owner, "_probe", probe)
@@ -5248,6 +5272,20 @@ class TestTheHardExitFreesTheElectionFirst:
         )
         monkeypatch.setattr(
             daemon_owner, "create_owner_server", lambda **kwargs: _StoppedServer()
+        )
+        monkeypatch.setattr(
+            daemon_owner.daemon_descriptor, "prepare", lambda *a, **k: None
+        )
+        monkeypatch.setattr(
+            daemon_owner.daemon_descriptor, "commit_prepared", lambda *a, **k: None
+        )
+        # Native Windows takes the adoption branch for real, and a genuine
+        # adoption would keep a handle in a module global the later Job tests
+        # then fail on. A stand-in keeps this case identical on both platforms.
+        monkeypatch.setattr(
+            daemon_owner.WindowsJob,
+            "adopt_current_process",
+            staticmethod(lambda name: None),
         )
 
         served: list[int] = []
@@ -5262,7 +5300,10 @@ class TestTheHardExitFreesTheElectionFirst:
                         profile=profile,
                         config=config,
                         log_path=auth_root / "daemon.log",
-                        ready=daemon_owner._Handshake(None, "0123456789abcdef" * 4),
+                        handshake=_SilentHandshake(),
+                        handshake_nonce=nonce,
+                        control=cast(Any, _CommittingParent()),
+                        job_name=_OWNER_JOB_NAME,
                     )
                 )
             )
@@ -5327,6 +5368,8 @@ class TestTheHardExitFreesTheElectionFirst:
             if process.poll() is None:
                 os.killpg(process.pid, signal.SIGKILL)
             process.wait(timeout=30)
+
+
 #: The Job Object handoff every generic ``_run_serve`` case carries. On
 #: Windows ``_serve`` refuses to publish without one, and the required Windows
 #: CI job runs this whole class natively, where ``os.name`` is "nt" with
@@ -5533,6 +5576,8 @@ class TestPublishingLast:
             serving: object,
             turnover: object,
             idle_timeout: float,
+            *,
+            lock: DaemonLock | None,
         ) -> None:
             import asyncio
 
@@ -6082,7 +6127,7 @@ class TestPublishingLast:
         blocked = threading.Event()
         release = threading.Event()
         turnover_sent = threading.Event()
-        exited: list[str] = []
+        exited: list[object] = []
         order: list[str] = []
 
         def read(root: Path) -> None:
@@ -6109,7 +6154,9 @@ class TestPublishingLast:
         monkeypatch.setattr(daemon_owner.daemon_descriptor, "read", read)
         monkeypatch.setattr(daemon_owner, "_STAND_DOWN_POLL_SECONDS", 0.001)
         monkeypatch.setattr(daemon_owner, "_COMMIT_AUTH_SECONDS", 1.0)
-        monkeypatch.setattr(daemon_owner, "_exit_hard", lambda: exited.append("hard"))
+        monkeypatch.setattr(
+            daemon_owner, "_exit_hard", lambda received: exited.append(received)
+        )
         started = time.monotonic()
         try:
             with pytest.raises(RuntimeError, match="hard exit returned"):
@@ -6125,7 +6172,13 @@ class TestPublishingLast:
 
         assert blocked.is_set(), "the first canonical read never started"
         assert turnover_sent.is_set(), "the endpoint could not request turnover"
-        assert exited and all(candidate == "hard" for candidate in exited)
+        # Driven through the real `_serve`, so what `_exit_hard` receives here is
+        # the owner's own lock and not a value this case handed to the helper.
+        # A reconciliation exit that skipped it would leave the election held for
+        # an unbounded browser drain.
+        assert exited and all(
+            isinstance(candidate, DaemonLock) for candidate in exited
+        ), "the uncertain-publication exit did not free the election first"
         assert order.count("commit") == 1, "publication retried after turnover"
         assert time.monotonic() - started < 0.5
 
@@ -6252,7 +6305,8 @@ class TestPublishingLast:
             should_exit = False
 
         commits: list[str] = []
-        exited: list[str] = []
+        exited: list[object] = []
+        lock = DaemonLock(tmp_path)
 
         async def exercise() -> None:
             stopped = asyncio.Event()
@@ -6285,7 +6339,7 @@ class TestPublishingLast:
             )
             monkeypatch.setattr(daemon_owner, "_commit_prepared_until", commit)
             monkeypatch.setattr(
-                daemon_owner, "_exit_hard", lambda: exited.append("hard")
+                daemon_owner, "_exit_hard", lambda received: exited.append(received)
             )
 
             with pytest.raises(RuntimeError, match="hard exit returned"):
@@ -6294,11 +6348,12 @@ class TestPublishingLast:
                     new_instance_id(),
                     server=_Server(),
                     serving=serving,
+                    lock=lock,
                 )
 
         asyncio.run(exercise())
 
-        assert exited == ["hard"]
+        assert exited == [lock], "the hard exit did not receive the owner lock"
         assert commits == [], "a dead endpoint was published during reconciliation"
 
     def test_endpoint_death_after_replacement_hard_exits_before_live(
@@ -6309,7 +6364,8 @@ class TestPublishingLast:
         class _Server:
             should_exit = False
 
-        exited: list[str] = []
+        exited: list[object] = []
+        lock = DaemonLock(tmp_path)
 
         async def exercise() -> None:
             stopped = asyncio.Event()
@@ -6338,7 +6394,7 @@ class TestPublishingLast:
             )
             monkeypatch.setattr(daemon_owner, "_commit_prepared_until", commit)
             monkeypatch.setattr(
-                daemon_owner, "_exit_hard", lambda: exited.append("hard")
+                daemon_owner, "_exit_hard", lambda received: exited.append(received)
             )
 
             with pytest.raises(RuntimeError, match="hard exit returned"):
@@ -6347,11 +6403,12 @@ class TestPublishingLast:
                     new_instance_id(),
                     server=_Server(),
                     serving=serving,
+                    lock=lock,
                 )
 
         asyncio.run(exercise())
 
-        assert exited == ["hard"]
+        assert exited == [lock], "the hard exit did not receive the owner lock"
 
     def test_reconciliation_cancels_a_call_after_heartbeats_stop(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -6363,7 +6420,8 @@ class TestPublishingLast:
         class _Server:
             should_exit = False
 
-        exited: list[str] = []
+        exited: list[object] = []
+        lock = DaemonLock(tmp_path)
 
         async def exercise() -> None:
             serving = asyncio.create_task(asyncio.sleep(3600))
@@ -6386,7 +6444,7 @@ class TestPublishingLast:
                 ),
             )
             monkeypatch.setattr(
-                daemon_owner, "_exit_hard", lambda: exited.append("hard")
+                daemon_owner, "_exit_hard", lambda received: exited.append(received)
             )
             reconciling = asyncio.create_task(
                 daemon_owner._reconcile_uncertain_publication(
@@ -6394,6 +6452,7 @@ class TestPublishingLast:
                     new_instance_id(),
                     server=_Server(),
                     serving=serving,
+                    lock=lock,
                 )
             )
             try:
@@ -6421,7 +6480,7 @@ class TestPublishingLast:
 
         asyncio.run(exercise())
 
-        assert exited == ["hard"]
+        assert exited == [lock], "the hard exit did not receive the owner lock"
 
     def test_stand_down_remains_active_during_reconciliation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -6433,7 +6492,8 @@ class TestPublishingLast:
 
         server = _Server()
         turnover: list[str] = []
-        exited: list[str] = []
+        exited: list[object] = []
+        lock = DaemonLock(tmp_path)
         commits: list[str] = []
 
         async def exercise() -> None:
@@ -6451,7 +6511,7 @@ class TestPublishingLast:
 
             monkeypatch.setattr(daemon_owner, "_commit_prepared_until", commit)
             monkeypatch.setattr(
-                daemon_owner, "_exit_hard", lambda: exited.append("hard")
+                daemon_owner, "_exit_hard", lambda received: exited.append(received)
             )
             reconciling = asyncio.create_task(
                 daemon_owner._reconcile_uncertain_publication(
@@ -6459,6 +6519,7 @@ class TestPublishingLast:
                     new_instance_id(),
                     server=server,
                     serving=serving,
+                    lock=lock,
                     turnover=turnover,
                 )
             )
@@ -6484,7 +6545,12 @@ class TestPublishingLast:
 
         asyncio.run(exercise())
 
-        assert exited
+        # More than one exit is possible only because the stand-in returns where
+        # the real one ends the process: the commit retry swallows `Exception`,
+        # so the next pass asks again. Every one of them still frees the election.
+        assert exited and all(candidate is lock for candidate in exited), (
+            "the hard exit did not receive the owner lock"
+        )
         assert server.should_exit
         assert commits == []
 
@@ -6498,7 +6564,8 @@ class TestPublishingLast:
             should_exit = False
 
         attempts: list[str] = []
-        exited: list[str] = []
+        exited: list[object] = []
+        lock = DaemonLock(tmp_path)
         recover = threading.Event()
 
         async def read(root: Path, deadline: float) -> None:
@@ -6525,7 +6592,7 @@ class TestPublishingLast:
             )
             monkeypatch.setattr(daemon_owner, "_commit_prepared_until", commit)
             monkeypatch.setattr(
-                daemon_owner, "_exit_hard", lambda: exited.append("hard")
+                daemon_owner, "_exit_hard", lambda received: exited.append(received)
             )
             monkeypatch.setattr(daemon_owner, "_UNCERTAIN_PUBLICATION_RETRY_SECONDS", 0)
             reconciling = asyncio.create_task(
@@ -6534,6 +6601,7 @@ class TestPublishingLast:
                     new_instance_id(),
                     server=_Server(),
                     serving=serving,
+                    lock=lock,
                 )
             )
             try:
@@ -6566,7 +6634,7 @@ class TestPublishingLast:
 
         asyncio.run(exercise())
 
-        assert exited == ["hard"]
+        assert exited == [lock], "the hard exit did not receive the owner lock"
 
     def test_reconciliation_reuses_one_blocked_canonical_read(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -6578,6 +6646,7 @@ class TestPublishingLast:
 
         reads: list[Path] = []
         attempts: list[str] = []
+        lock = DaemonLock(tmp_path)
         blocked = threading.Event()
         release = threading.Event()
 
@@ -6603,13 +6672,14 @@ class TestPublishingLast:
             monkeypatch.setattr(daemon_owner, "_commit_prepared_until", commit)
             monkeypatch.setattr(daemon_owner, "_COMMIT_AUTH_SECONDS", 0.01)
             monkeypatch.setattr(daemon_owner, "_UNCERTAIN_PUBLICATION_RETRY_SECONDS", 0)
-            monkeypatch.setattr(daemon_owner, "_exit_hard", lambda: None)
+            monkeypatch.setattr(daemon_owner, "_exit_hard", lambda received: None)
             reconciling = asyncio.create_task(
                 daemon_owner._reconcile_uncertain_publication(
                     tmp_path,
                     new_instance_id(),
                     server=_Server(),
                     serving=serving,
+                    lock=lock,
                 )
             )
             try:
@@ -6636,20 +6706,23 @@ class TestPublishingLast:
         asyncio.run(exercise())
 
     def test_uncertain_hard_exit_performs_no_diagnostic_io(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        exited: list[str] = []
+        exited: list[object] = []
+        lock = DaemonLock(tmp_path)
         monkeypatch.setattr(
             daemon_owner.logger,
             "error",
             lambda *a, **k: pytest.fail("hard exit attempted a diagnostic write"),
         )
-        monkeypatch.setattr(daemon_owner, "_exit_hard", lambda: exited.append("hard"))
+        monkeypatch.setattr(
+            daemon_owner, "_exit_hard", lambda received: exited.append(received)
+        )
 
         with pytest.raises(RuntimeError, match="hard exit returned"):
-            daemon_owner._exit_uncertain_publication("already logged")
+            daemon_owner._exit_uncertain_publication("already logged", lock=lock)
 
-        assert exited == ["hard"]
+        assert exited == [lock], "the hard exit did not receive the owner lock"
 
     def test_hard_exit_skips_logging_shutdown(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(
@@ -6664,7 +6737,7 @@ class TestPublishingLast:
         )
 
         with pytest.raises(SystemExit) as exited:
-            daemon_owner._exit_hard()
+            daemon_owner._exit_hard(None)
 
         assert exited.value.code == 1
 

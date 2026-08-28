@@ -576,17 +576,26 @@ async def _read_canonical_until(
     return await _await_canonical_read_until(_start_canonical_read(auth_root), deadline)
 
 
-def _exit_uncertain_publication(_reason: str) -> NoReturn:
-    """Exit without I/O or unwinding after an already logged ambiguity."""
-    _exit_hard()
+def _exit_uncertain_publication(_reason: str, *, lock: DaemonLock | None) -> NoReturn:
+    """Exit without I/O or unwinding after an already logged ambiguity.
+
+    *lock* is handed down rather than looked up, for the reason it is handed
+    down through :func:`_stop_within`: this exit drains the process tree with no
+    bound, and an election left held for that drain is a profile no successor
+    can take over.
+    """
+    _exit_hard(lock)
     raise RuntimeError("The hard exit returned during uncertain publication")
 
 
-def _require_uncertain_endpoint(server: Any, serving: asyncio.Task[None]) -> None:
+def _require_uncertain_endpoint(
+    server: Any, serving: asyncio.Task[None], *, lock: DaemonLock | None
+) -> None:
     """Refuse to publish an uncertain generation after its endpoint stops."""
     if getattr(server, "should_exit", False):
         _exit_uncertain_publication(
-            "The daemon endpoint was asked to stop during publication reconciliation"
+            "The daemon endpoint was asked to stop during publication reconciliation",
+            lock=lock,
         )
     if not serving.done():
         return
@@ -594,24 +603,30 @@ def _require_uncertain_endpoint(server: Any, serving: asyncio.Task[None]) -> Non
         with contextlib.suppress(BaseException):
             serving.exception()
     _exit_uncertain_publication(
-        "The daemon endpoint stopped during publication reconciliation"
+        "The daemon endpoint stopped during publication reconciliation", lock=lock
     )
 
 
 def _maintain_uncertain_publication(
-    server: Any, serving: asyncio.Task[None], turnover: list[str]
+    server: Any,
+    serving: asyncio.Task[None],
+    turnover: list[str],
+    *,
+    lock: DaemonLock | None,
 ) -> None:
     """Keep frontend-visible lifecycle controls active before startup completes."""
-    _require_uncertain_endpoint(server, serving)
+    _require_uncertain_endpoint(server, serving, lock=lock)
     if stand_down_reason() is not None:
         server.should_exit = True
         _exit_uncertain_publication(
-            "The daemon became unable to serve during publication reconciliation"
+            "The daemon became unable to serve during publication reconciliation",
+            lock=lock,
         )
     if turnover:
         server.should_exit = True
         _exit_uncertain_publication(
-            "A newer build requested stand-down during publication reconciliation"
+            "A newer build requested stand-down during publication reconciliation",
+            lock=lock,
         )
     get_liveness().cancel_the_abandoned()
 
@@ -657,6 +672,7 @@ async def _reconcile_uncertain_publication(
     *,
     server: Any,
     serving: asyncio.Task[None],
+    lock: DaemonLock | None,
     turnover: list[str] | None = None,
 ) -> None:
     """Keep a live endpoint locked until its publication is provable.
@@ -682,6 +698,10 @@ async def _reconcile_uncertain_publication(
     undiscoverable and holds the lock until storage recovers. Moving coordination
     state off remote storage, tracked by #796, is what can add a bounded terminal
     path without weakening this invariant.
+
+    Every terminal path out of this loop is a hard exit, so *lock* comes in with
+    the call: the exit releases the election before its unbounded process-tree
+    drain, and the profile lease alone keeps a successor off the browser.
     """
     canonical_read: asyncio.Future[daemon_descriptor.DaemonDescriptor | None] | None = (
         None
@@ -689,7 +709,7 @@ async def _reconcile_uncertain_publication(
     requests = [] if turnover is None else turnover
 
     def maintenance() -> None:
-        _maintain_uncertain_publication(server, serving, requests)
+        _maintain_uncertain_publication(server, serving, requests, lock=lock)
 
     while True:
         maintenance()
@@ -701,7 +721,9 @@ async def _reconcile_uncertain_publication(
                 canonical_read, deadline, maintenance
             )
         except asyncio.CancelledError:
-            _exit_uncertain_publication("Publication reconciliation was cancelled")
+            _exit_uncertain_publication(
+                "Publication reconciliation was cancelled", lock=lock
+            )
         except Exception:
             # Retain a read that timed out: its native thread cannot be cancelled,
             # and starting another on the next pass would leak one thread per retry.
@@ -711,7 +733,9 @@ async def _reconcile_uncertain_publication(
                 canonical_read = None
             canonical = None
         except BaseException:
-            _exit_uncertain_publication("Publication reconciliation was interrupted")
+            _exit_uncertain_publication(
+                "Publication reconciliation was interrupted", lock=lock
+            )
         else:
             canonical_read = None
         maintenance()
@@ -723,23 +747,29 @@ async def _reconcile_uncertain_publication(
                 auth_root, instance_id, deadline, maintenance=maintenance
             )
         except asyncio.CancelledError:
-            _exit_uncertain_publication("Publication reconciliation was cancelled")
+            _exit_uncertain_publication(
+                "Publication reconciliation was cancelled", lock=lock
+            )
         except Exception:
             # No error here authorizes releasing the lock; the next pass asks both
             # the canonical state and the same pending replacement again.
             pass
         except BaseException:
-            _exit_uncertain_publication("Publication reconciliation was interrupted")
+            _exit_uncertain_publication(
+                "Publication reconciliation was interrupted", lock=lock
+            )
         else:
             try:
                 # Commit is synchronous. Let the endpoint task and pending
                 # cancellation run before declaring the returned replacement live.
                 await asyncio.sleep(0)
             except asyncio.CancelledError:
-                _exit_uncertain_publication("Publication reconciliation was cancelled")
+                _exit_uncertain_publication(
+                    "Publication reconciliation was cancelled", lock=lock
+                )
             except BaseException:
                 _exit_uncertain_publication(
-                    "Publication reconciliation was interrupted"
+                    "Publication reconciliation was interrupted", lock=lock
                 )
             maintenance()
             return
@@ -749,9 +779,13 @@ async def _reconcile_uncertain_publication(
                 _UNCERTAIN_PUBLICATION_RETRY_SECONDS, maintenance
             )
         except asyncio.CancelledError:
-            _exit_uncertain_publication("Publication reconciliation was cancelled")
+            _exit_uncertain_publication(
+                "Publication reconciliation was cancelled", lock=lock
+            )
         except BaseException:
-            _exit_uncertain_publication("Publication reconciliation was interrupted")
+            _exit_uncertain_publication(
+                "Publication reconciliation was interrupted", lock=lock
+            )
 
 
 async def _read_control_until(
@@ -874,13 +908,13 @@ async def _serve(
                 logger.warning("The daemon starter did not authorize commit in time")
                 handshake.retry()
                 server.should_exit = True
-                await _stop_within(serving, _FAILED_STARTUP_SHUTDOWN_SECONDS)
+                await _stop_within(serving, _FAILED_STARTUP_SHUTDOWN_SECONDS, lock=lock)
                 return 1
             if decision != f"{HANDSHAKE} {handshake_nonce} {COMMIT}\n":
                 logger.info("The daemon starter exited before committing this owner")
                 handshake.abort()
                 server.should_exit = True
-                await _stop_within(serving, _FAILED_STARTUP_SHUTDOWN_SECONDS)
+                await _stop_within(serving, _FAILED_STARTUP_SHUTDOWN_SECONDS, lock=lock)
                 return 0
 
         # The parent retains termination authority until this exact commit record.
@@ -895,7 +929,7 @@ async def _serve(
                 logger.exception("The daemon could not adopt its Windows Job Object")
                 handshake.abort()
                 server.should_exit = True
-                await _stop_within(serving, _FAILED_STARTUP_SHUTDOWN_SECONDS)
+                await _stop_within(serving, _FAILED_STARTUP_SHUTDOWN_SECONDS, lock=lock)
                 return 1
 
         try:
@@ -909,7 +943,7 @@ async def _serve(
                 logger.exception("Daemon descriptor publication failed definitively")
                 handshake.abort()
                 server.should_exit = True
-                await _stop_within(serving, _FAILED_STARTUP_SHUTDOWN_SECONDS)
+                await _stop_within(serving, _FAILED_STARTUP_SHUTDOWN_SECONDS, lock=lock)
                 raise
             # The replacement may already name this live endpoint. Preserve both
             # its token and its process while the existing reconciliation loop
@@ -926,6 +960,7 @@ async def _serve(
                 instance_id,
                 server=server,
                 serving=serving,
+                lock=lock,
                 turnover=turnover,
             )
 
