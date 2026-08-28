@@ -547,11 +547,16 @@ class BrowserManager:
     async def close(self) -> bool:
         """Close persistent context and cleanup resources.
 
-        Returns whether shutdown was *confirmed*. Both cleanup steps are bounded
-        and their failures swallowed, so a wedged Chromium can still be running
-        when this returns. Callers that hand the profile to another process on
-        the strength of a close must check this: releasing it while Chromium is
-        alive reintroduces the concurrent-profile corruption.
+        Returns whether shutdown was *confirmed*. Both Patchright cleanup steps
+        are bounded and their failures swallowed, so a wedged Chromium can still
+        be running when they return. Callers that hand the profile to another
+        process on the strength of a close must check this: releasing it while
+        Chromium is alive reintroduces the concurrent-profile corruption.
+
+        The verdict comes from the OS-level drain rather than from those steps,
+        and the drain runs however they went. It is the only thing here that can
+        both see the detached tree and end it, so a close that fails at the API
+        is exactly the close that needs it most.
 
         The answer is sticky in both directions. Once a teardown has been proved
         complete every later call agrees, and until then no call may claim it:
@@ -629,22 +634,37 @@ class BrowserManager:
                 logger.error("Error stopping playwright: %s", exc)
 
         logger.info("Browser closed")
-        if confirmed:
-            # The API's own verdict is not the browser's. Patchright waits for
-            # the leader it spawned and for its temporary directories, and
-            # signals the detached group only when that graceful attempt fails,
-            # so a close that returns cleanly says nothing about the rest of the
-            # tree. Off the loop: this scans processes and can sleep.
-            confirmed = await asyncio.to_thread(
-                drain_browser_process_marker,
-                self._process_marker,
-                containment=self._containment,
+        # The API's own verdict is not the browser's. Patchright waits for the
+        # leader it spawned and for its temporary directories, and signals the
+        # detached group only when that graceful attempt fails, so a close that
+        # returns cleanly says nothing about the rest of the tree.
+        #
+        # Run whatever the two steps above did, and take the answer from here
+        # alone. A context that would not close is precisely when a tree is most
+        # likely left standing, so skipping the one check that could see it
+        # would leave the profile's fate to the API that just failed to report
+        # it -- and the drain is not a report but a kill, which is the only
+        # thing that can still end that tree. It cuts the other way too: the
+        # Node driver carries no marker, so a driver that misses its stop while
+        # Chromium is provably gone no longer keeps the profile busy for the
+        # rest of this process's life. Off the loop: this scans processes and
+        # can sleep.
+        drained = await asyncio.to_thread(
+            drain_browser_process_marker,
+            self._process_marker,
+            containment=self._containment,
+        )
+        if not drained:
+            logger.error(
+                "Browser processes from this launch are still running after "
+                "close, so the shutdown stays unconfirmed."
             )
-            if not confirmed:
-                logger.error(
-                    "Browser processes from this launch are still running after "
-                    "close, so the shutdown stays unconfirmed."
-                )
+        elif not confirmed:
+            logger.warning(
+                "Patchright cleanup did not complete, but this launch left no "
+                "processes behind, so the shutdown is confirmed."
+            )
+        confirmed = drained
         if confirmed:
             self._close_proven = True
             self._close_interrupted = False

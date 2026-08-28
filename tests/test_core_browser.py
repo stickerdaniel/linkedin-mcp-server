@@ -991,6 +991,82 @@ class TestCloseConfirmationIsSticky:
         assert forgotten == []
 
 
+class TestTheDrainRunsWhateverPatchrightDid:
+    """The API step that failed is the one whose tree most needs ending.
+
+    ``context.close()`` and ``playwright.stop()`` are bounded and can raise, and
+    a wedged Chromium is exactly what makes them do it. Leaving the OS-level
+    drain out of that case skipped the only thing that can both see the detached
+    group and kill it, so the launch was left running *and* the profile marked
+    busy for the rest of the process's life.
+    """
+
+    _wired = staticmethod(TestCloseConfirmationIsSticky._wired)
+
+    @staticmethod
+    def _hanging_context() -> MagicMock:
+        async def never_returns() -> None:
+            await asyncio.sleep(3600)
+
+        return MagicMock(close=AsyncMock(side_effect=never_returns))
+
+    @pytest.mark.asyncio
+    async def test_a_context_that_will_not_close_is_still_drained(
+        self, tmp_path, monkeypatch
+    ):
+        manager, drained, forgotten = self._wired(tmp_path, monkeypatch, drains=True)
+        manager._context = MagicMock(close=AsyncMock(side_effect=RuntimeError("boom")))
+        manager._playwright = MagicMock(stop=AsyncMock())
+
+        assert await manager.close() is True
+        assert drained == [manager._process_marker]
+        assert forgotten == [manager._process_marker]
+
+    @pytest.mark.asyncio
+    async def test_a_driver_that_will_not_stop_is_still_drained(
+        self, tmp_path, monkeypatch
+    ):
+        """The Node driver carries no marker, so Chromium can be gone without it."""
+        manager, drained, forgotten = self._wired(tmp_path, monkeypatch, drains=True)
+        manager._context = MagicMock(close=AsyncMock())
+        manager._playwright = MagicMock(
+            stop=AsyncMock(side_effect=RuntimeError("boom"))
+        )
+
+        assert await manager.close() is True
+        assert drained == [manager._process_marker]
+        assert forgotten == [manager._process_marker]
+
+    @pytest.mark.asyncio
+    async def test_a_context_close_that_times_out_is_still_drained(
+        self, tmp_path, monkeypatch
+    ):
+        manager, drained, forgotten = self._wired(tmp_path, monkeypatch, drains=True)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.core.browser._CLEANUP_TIMEOUT_SECONDS", 0.01
+        )
+        manager._context = self._hanging_context()
+        manager._playwright = MagicMock(stop=AsyncMock())
+
+        assert await manager.close() is True
+        assert drained == [manager._process_marker]
+        assert forgotten == [manager._process_marker]
+
+    @pytest.mark.asyncio
+    async def test_a_failed_cleanup_and_a_failed_drain_stay_unconfirmed(
+        self, tmp_path, monkeypatch
+    ):
+        """Only the drain may lift the verdict, and this one proved nothing."""
+        manager, drained, forgotten = self._wired(tmp_path, monkeypatch, drains=False)
+        manager._context = MagicMock(close=AsyncMock(side_effect=RuntimeError("boom")))
+        manager._playwright = MagicMock(stop=AsyncMock())
+
+        assert await manager.close() is False
+        assert await manager.close() is False
+        assert drained == [manager._process_marker, manager._process_marker]
+        assert forgotten == []
+
+
 @pytest.mark.asyncio
 async def test_close_is_idempotent_and_resets_state(tmp_path):
     browser = BrowserManager(user_data_dir=tmp_path / "profile")
