@@ -11,7 +11,7 @@ elects an owner and then declines to use it, forever.
 So the resolved configuration is handed over explicitly, on the child's standard
 input, together with the post-spawn nonce that authenticates its startup verdict.
 Not the environment and not the command line, because both are readable by
-anything running as this account — ``/proc/<pid>/environ`` and ``ps`` — and what
+anything running as this account (``/proc/<pid>/environ`` and ``ps``), and what
 travels here includes ``proxy_password``. A pipe is read once by one process and
 never lands anywhere.
 
