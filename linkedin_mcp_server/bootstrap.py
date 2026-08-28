@@ -1659,7 +1659,14 @@ class _InstallerTemporaryRoot:
 
 
 def _installer_temporary_parent() -> Path:
-    """Return a temp parent whose pathname other local accounts cannot replace."""
+    """Return a temp parent whose pathname other local accounts cannot replace.
+
+    The walk below is the POSIX half. Windows asks the same question through
+    ``windows_acl.verify_ancestry_cannot_be_replaced``, and it is asked there
+    rather than here because the answer is only worth anything while the chain
+    is pinned, and the pins have to be held across the creation that happens
+    after this function has already returned.
+    """
     parent = Path(tempfile.gettempdir()).resolve(strict=True)
     if os.name == "nt":
         return parent

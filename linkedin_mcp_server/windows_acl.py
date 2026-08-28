@@ -25,6 +25,8 @@ from __future__ import annotations
 import ctypes
 import os
 import secrets
+import stat
+from collections.abc import Sequence
 from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
@@ -103,6 +105,42 @@ _DIRECTORY_REPLACEMENT_RIGHTS = (
     FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_DELETE_CHILD | _FILE_REPLACEMENT_RIGHTS
 )
 _CREATOR_OWNER_SID = "S-1-3-0"
+#: What an ACE has to grant before an account can take an *existing, named*
+#: directory away from the path that sits on it: delete it, or rewrite who may.
+#:
+#: Deliberately narrower than ``_DIRECTORY_REPLACEMENT_RIGHTS``, which is the
+#: question asked of the immediate parent. The rights to add a file or a
+#: subdirectory are not here, because creating a new name beside ``Temp`` does
+#: not replace ``Temp``, and a default Windows install grants exactly that on
+#: ``C:\`` to Authenticated Users. Asking the ancestry the parent's question
+#: would refuse every standard machine.
+#:
+#: ``FILE_DELETE_CHILD`` is the same question one level down: an account holding
+#: it on a container deletes the component below without ever needing ``DELETE``
+#: on that component itself. ``GENERIC_WRITE`` is absent because it maps to
+#: ``FILE_GENERIC_WRITE``, which carries neither ``DELETE`` nor ``WRITE_DAC``;
+#: ``GENERIC_ALL`` maps to everything, and is here.
+_ANCESTOR_REPLACEMENT_RIGHTS = (
+    DELETE | WRITE_DAC | WRITE_OWNER | FILE_DELETE_CHILD | GENERIC_ALL
+)
+#: The servicing stack, which owns much of what it installs. A default machine
+#: has it as the owner of directories in the chain a ``%TEMP%`` under ``C:\``
+#: hangs from, so leaving it out would refuse ordinary Windows. It is a virtual
+#: service account: no interactive login can assume it, and only components
+#: already running as the system can act as it.
+_TRUSTED_INSTALLER_SID = (
+    "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
+)
+#: Accounts whose control over a path this process is willing to inherit. An
+#: owner holds ``READ_CONTROL`` and ``WRITE_DAC`` with no ACE saying so, which
+#: is why ownership is a separate question from the DACL everywhere below.
+_TRUSTED_SYSTEM_SIDS = frozenset(
+    {
+        "S-1-5-18",  # LocalSystem
+        "S-1-5-32-544",  # BUILTIN\\Administrators
+        _TRUSTED_INSTALLER_SID,
+    }
+)
 
 FILE_PERSISTENT_ACLS = 0x00000008
 ERROR_FILE_EXISTS = 80
@@ -518,12 +556,25 @@ def _build_owner_only_acl(sid: _PSID, *, directory: bool) -> _PACL:
 def create_owner_only_directory(
     parent: Path, *, prefix: str
 ) -> tuple[Path, wintypes.HANDLE]:
-    """Create and pin a random child with its final owner-only ACL."""
+    """Create and pin a random child with its final owner-only ACL.
+
+    The whole chain from the drive root down to *parent* is pinned before any of
+    it is judged, and stays pinned until the child exists, has been verified and
+    has a pin of its own. What that buys is stated in :func:`pin_directory_chain`
+    and :func:`verify_ancestry_cannot_be_replaced`: a temporary parent that is
+    itself unimpeachable is worth nothing while a directory above it can hand an
+    untrusted account the right to delete what is created here.
+    """
     _advapi32, _kernel32 = _load()
-    parent_pin = pin_directory(parent)
+    pins = pin_directory_chain(parent)
     sid_buffer: ctypes.Array | None = None
     acl = _PACL()
     try:
+        verify_ancestry_cannot_be_replaced(parent)
+        # ``require_protected=False`` is what the ancestry walk pays for. A
+        # protected DACL on the temporary parent would answer this by itself,
+        # and demanding one would refuse every ordinary ``%TEMP%``, which
+        # inherits from the profile root by design.
         verify_children_cannot_be_replaced(parent, require_protected=False)
         _require_acl_capable_volume(parent)
         sid, sid_buffer = current_user_sid()
@@ -579,7 +630,9 @@ def create_owner_only_directory(
             _kernel32.LocalFree(acl)
         if sid_buffer is not None:
             del sid_buffer
-        close_directory_pin(parent_pin)
+        # Last, and only here: the child above is created, verified and pinned
+        # before its ancestry stops being held still.
+        _release_directory_pins(pins)
 
 
 def restrict_to_current_user(
@@ -760,21 +813,99 @@ def _can_replace_child(entry: AccessEntry) -> bool:
     )
 
 
-def verify_children_cannot_be_replaced(
-    path: Path, *, require_protected: bool = True
-) -> None:
-    """Refuse a parent that lets an unprivileged account replace its children."""
+def _trusted_sids() -> set[str]:
+    """This account plus the identities a local account cannot become."""
     sid, sid_buffer = current_user_sid()
     try:
         current_user = _sid_to_string(sid)
     finally:
         del sid_buffer
+    return {current_user, *_TRUSTED_SYSTEM_SIDS}
 
-    trusted = {
-        current_user,
-        "S-1-5-18",  # LocalSystem
-        "S-1-5-32-544",  # BUILTIN\\Administrators
-    }
+
+def _refuse_a_reparse_point(path: Path) -> None:
+    """Refuse a component whose name does not lead where its permissions do.
+
+    ``pin_directory`` opens with ``FILE_FLAG_OPEN_REPARSE_POINT`` and therefore
+    pins the link, while ``read_owner`` and ``describe_dacl`` follow it and
+    answer about the target. A junction in the chain would leave the pin holding
+    one object and the verdict describing another, and repointing it afterwards
+    needs neither of the rights the DACL check looks for.
+    """
+    details = path.lstat()
+    attributes = getattr(details, "st_file_attributes", None)
+    if attributes is None:
+        raise PrivateStateError(f"Windows did not report file attributes for {path}")
+    if stat.S_ISLNK(details.st_mode) or attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+        raise PrivateStateError(
+            f"{path} is a Windows reparse point, so what was pinned is the link "
+            f"rather than the directory whose permissions were read"
+        )
+    if not stat.S_ISDIR(details.st_mode):
+        raise PrivateStateError(f"Installer temporary path is not a directory: {path}")
+
+
+def _verify_ancestor(path: Path, trusted: set[str]) -> None:
+    """Refuse one container above the temporary parent."""
+    owner = read_owner(path)
+    if owner not in trusted:
+        raise PrivateStateError(
+            f"{path} is owned by {owner}, which can rewrite the permissions that "
+            f"every directory below it inherits"
+        )
+
+    for entry in describe_dacl(path).entries:
+        if entry.type == ACCESS_DENIED_ACE_TYPE:
+            continue
+        if entry.type != ACCESS_ALLOWED_ACE_TYPE:
+            raise PrivateStateError(
+                f"{path} carries an unsupported permission entry for {entry.sid}"
+            )
+        if entry.sid in trusted:
+            continue
+        # An inherit-only entry grants nothing on this directory. Where it does
+        # land is a directory this walk visits too, and it is judged there
+        # against what that directory actually carries rather than guessed at
+        # from here. ``C:\`` ships one of these, granting Modify to
+        # Authenticated Users, and every standard component below it is
+        # protected against exactly that.
+        if entry.flags & INHERIT_ONLY_ACE:
+            continue
+        if entry.mask & _ANCESTOR_REPLACEMENT_RIGHTS:
+            raise PrivateStateError(
+                f"{path} grants {entry.sid} permission to remove or re-permission "
+                f"the installer path below it"
+            )
+
+
+def verify_ancestry_cannot_be_replaced(path: Path) -> None:
+    """Refuse a directory whose ancestry an untrusted account can rewrite.
+
+    ``verify_children_cannot_be_replaced`` asks only about *path*, and a
+    temporary parent is almost never protected: ``%TEMP%`` inherits from the
+    profile root, which inherits from ``C:\\Users``. The DACL deciding who may
+    delete the installer root is therefore assembled from every directory above
+    it, and an account that can rewrite any of those propagates
+    ``FILE_DELETE_CHILD`` into a parent that passed its own check a moment
+    earlier, then replaces the root before its child pin is taken.
+
+    Protection higher up is not a stopping condition. Whoever can rewrite a
+    protected ancestor's DACL can also clear its protection, which makes Windows
+    re-propagate everything above it down to the first descendant that is still
+    protected. So the whole chain is walked, root first, and the question asked
+    of each container is narrower than the one asked of the parent: see
+    ``_ANCESTOR_REPLACEMENT_RIGHTS`` for why an ordinary ``C:\\`` passes it.
+    """
+    trusted = _trusted_sids()
+    for container in reversed(path.parents):
+        _verify_ancestor(container, trusted)
+
+
+def verify_children_cannot_be_replaced(
+    path: Path, *, require_protected: bool = True
+) -> None:
+    """Refuse a parent that lets an unprivileged account replace its children."""
+    trusted = _trusted_sids()
     owner = read_owner(path)
     if owner not in trusted:
         raise PrivateStateError(
@@ -830,6 +961,47 @@ def close_directory_pin(handle: wintypes.HANDLE) -> None:
     _, kernel32 = _load()
     if not kernel32.CloseHandle(handle):
         _fail("CloseHandle")
+
+
+def pin_directory_chain(path: Path) -> tuple[wintypes.HANDLE, ...]:
+    """Pin *path* and every directory above it, root first.
+
+    The pins are what make the verification worth anything. ``read_owner`` and
+    ``describe_dacl`` answer about a *name*, and between the answer and
+    ``CreateDirectoryW`` any component of that name can be renamed away and a
+    directory the attacker controls put in its place, so the check would have
+    described one object and the creation landed in another. A handle held
+    without ``FILE_SHARE_DELETE`` refuses both the rename and the delete for as
+    long as it is open, which is why every component is pinned before any of
+    them is judged rather than one at a time as the walk reaches it.
+    """
+    if not path.is_absolute():
+        raise PrivateStateError(f"Refusing to pin a relative installer path: {path}")
+    pins: list[wintypes.HANDLE] = []
+    try:
+        for component in (*reversed(path.parents), path):
+            pins.append(pin_directory(component))
+            _refuse_a_reparse_point(component)
+    except BaseException:
+        _release_directory_pins(pins)
+        raise
+    return tuple(pins)
+
+
+def _release_directory_pins(handles: Sequence[wintypes.HANDLE]) -> None:
+    """Close every pin, deepest first, and report the first failure afterwards.
+
+    Stopping on the first failure would leak every handle above it, and these
+    are held on directories as ordinary as ``C:\\Users``.
+    """
+    failure: BaseException | None = None
+    for handle in reversed(handles):
+        try:
+            close_directory_pin(handle)
+        except BaseException as exc:
+            failure = failure if failure is not None else exc
+    if failure is not None:
+        raise failure
 
 
 def read_owner(path: Path) -> str:
