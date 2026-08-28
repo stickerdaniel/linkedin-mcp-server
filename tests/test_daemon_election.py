@@ -3600,7 +3600,7 @@ class TestRealOwner:
     ):
         # The load-bearing one. Both descriptors refer to one locked open file
         # description, so a frontend that kept its copy would keep the daemon
-        # lock alive after the owner died — and every recovery afterwards would
+        # lock alive after the owner died. Every recovery afterwards would
         # be locked out by a process that is not the owner and does not know it
         # holds anything.
         profile = real_state_root
@@ -3620,7 +3620,7 @@ class TestRealOwner:
         # written this way. Both descriptors refer to one locked open file
         # description, so the lock lives as long as either is open. Every other
         # test here lets the frontend exit first, which closes its copy whether
-        # the code released it or not — verified by mutation: with the release
+        # the code released it or not. Mutation verifies this: with the release
         # removed, all of them still passed and this one fails.
         #
         # A frontend that leaked its copy would keep the daemon lock held after
@@ -3857,7 +3857,7 @@ class TestRealOwner:
         # ``/feed/`` validation, which is the traffic this exists to remove.
         #
         # Killed by process *group*, not by pid, because that is how a client
-        # shutdown reaches a server it spawned — and a child that merely had its
+        # shutdown reaches a server it spawned, while a child that merely had its
         # own pid would still be caught by it. ``start_new_session`` is what puts
         # the owner in a group of its own.
         import json
@@ -3898,7 +3898,7 @@ class TestRealOwner:
         # The turnover, end to end against a live owner rather than a mock. Both
         # halves have to hold: the old process actually exits, and a replacement
         # is elected. Getting only the first is worse than doing nothing, and it
-        # is what happened here twice while this was being built — the owner
+        # is what happened here twice while this was being built: the owner
         # stood down, and the frontend then spent its whole budget re-reading
         # the descriptor it had already rejected rather than taking the lock the
         # departing owner had just freed.
@@ -4058,7 +4058,7 @@ class TestRealOwner:
             names = asyncio.run(served())
 
             # The owner registers the full local set, so the proxy must show it
-            # all — including `close_session`, the one defined inline rather than
+            # all, including `close_session`, the one defined inline rather than
             # in a `register_*` call.
             assert "get_person_profile" in names
             assert "close_session" in names
@@ -4206,7 +4206,7 @@ class TestRealOwner:
 
             # Matched on the status rather than catching anything at all. A bare
             # `Exception` passed on any failure whatsoever, including one raised
-            # before a request ever left this process — so the test would have
+            # before a request ever left this process, so the test would have
             # gone green without the owner refusing anything. Measured: the real
             # refusal is `McpError: Client error '401 Unauthorized'`.
             with pytest.raises(Exception, match="401 Unauthorized"):
@@ -4309,8 +4309,8 @@ class TestVersionSkew:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
         # The control route is mounted outside fastmcp's authentication
-        # middleware — measured on 3.4.4, an unauthenticated POST to a custom
-        # route is served — so it checks the token itself. Without that, any
+        # middleware. Measured on 3.4.4, an unauthenticated POST to a custom
+        # route is served, so it checks the token itself. Without that, any
         # process on the machine, and any page the user's browser visits, could
         # stop the shared browser at will.
         import asyncio
@@ -4384,7 +4384,7 @@ class TestVersionSkew:
         # Every request the daemon makes carries the bearer token for a server
         # driving a logged-in LinkedIn session, and every one is addressed to
         # loopback. httpx honours HTTP_PROXY by default and does so even for
-        # 127.0.0.1 unless NO_PROXY happens to say otherwise — reproduced
+        # 127.0.0.1 unless NO_PROXY happens to say otherwise. This was reproduced
         # against a capture proxy, which received the absolute loopback URL and
         # `Authorization: Bearer <token>` in full.
         #
@@ -4552,7 +4552,7 @@ class TestVersionSkew:
         # a workspace containing linkedin_mcp_server/daemon_owner.py is imported
         # in preference to the installed package. That code would receive the
         # inherited lock descriptor and the whole configuration on standard
-        # input, proxy_password included — merely because an MCP client happened
+        # input, proxy_password included, merely because an MCP client happened
         # to be started in that directory.
         #
         # Exercised against a real interpreter rather than by inspecting the
@@ -4564,8 +4564,8 @@ class TestVersionSkew:
         (shadow / "daemon_owner.py").write_text("print('HIJACKED')\n")
 
         # The real command, with `-m <module>` swapped for a `-c` that reports
-        # which file that module resolved to. Everything before it — the
-        # interpreter and its flags — is exactly what production uses.
+        # which file that module resolved to. Everything before it, including the
+        # interpreter and its flags, is exactly what production uses.
         command = election_module._spawn_command(lock_fd=None)
         assert command[-2:] == ["-m", "linkedin_mcp_server.daemon_owner"], command
         monkeypatch.setenv("PYTHONPATH", ".")
@@ -4849,7 +4849,7 @@ class TestNotHoldingTheLockForever:
         # unbounded, so an unresponsive Chromium produces exactly this.
         #
         # Run as a real process, because what is being tested is that the
-        # process ends — which is precisely what an in-process test cannot see.
+        # process ends, which is precisely what an in-process test cannot see.
         # Not `tmp_path / "home"`, which the isolation fixture already made.
         home = tmp_path / "child-home"
         home.mkdir()
