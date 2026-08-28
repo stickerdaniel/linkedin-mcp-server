@@ -319,6 +319,8 @@ Keep the `-v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp` mount on every later `d
 
 **Configure Claude Desktop with Docker**
 
+**macOS / Linux (absolute path in JSON):**
+
 ```json
 {
   "mcpServers": {
@@ -334,7 +336,31 @@ Keep the `-v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp` mount on every later `d
 }
 ```
 
-Spell that first path out in full. A client runs `docker` directly rather than through a shell, so a leading `~` reaches Docker unexpanded and it refuses the mount. On Windows write it with forward slashes, `C:/Users/you/.linkedin-mcp`; a backslash opens an escape sequence in JSON and `C:\Users` is not one the client can read.
+Spell that first path out in full. A client runs `docker` directly rather than through a shell, so a leading `~` reaches Docker unexpanded and it refuses the mount.
+
+**PowerShell (Windows):** use a forward-slash JSON path. A backslash path like
+`C:\Users\Alice\.linkedin-mcp` fails JSON parsing because `\U` is an invalid
+escape. Replace `Alice` with your username.
+
+```json
+{
+  "mcpServers": {
+    "mcp-server-linkedin": {
+      "command": "docker",
+      "args": [
+        "run", "--rm", "-i",
+        "-v", "C:/Users/Alice/.linkedin-mcp:/home/pwuser/.linkedin-mcp",
+        "stickerdaniel/linkedin-mcp-server:latest"
+      ]
+    }
+  }
+}
+```
+
+> [!NOTE]
+> In PowerShell, `~` is not expanded inside a composite Docker `-v` argument.
+> Use `C:/Users/<you>/.linkedin-mcp` or build the path with
+> `$env:USERPROFILE\.linkedin-mcp` before passing it to Docker.
 
 > [!NOTE]
 > Sessions expire over time. When tool calls start asking for authentication, repeat the login command above, or run `uvx mcp-server-linkedin@latest --login` on the host.
@@ -376,11 +402,23 @@ Spell that first path out in full. A client runs `docker` directly rather than t
 
 **HTTP Mode Example (for web-based MCP clients):**
 
+Bash / macOS / Linux:
+
 ```bash
 docker run -it --rm \
   -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp \
   -p 127.0.0.1:8080:8080 \
   stickerdaniel/linkedin-mcp-server:latest \
+  --transport streamable-http --host 0.0.0.0 --port 8080 --path /mcp
+```
+
+PowerShell (Windows):
+
+```powershell
+docker run -it --rm `
+  -v C:/Users/Alice/.linkedin-mcp:/home/pwuser/.linkedin-mcp `
+  -p 127.0.0.1:8080:8080 `
+  stickerdaniel/linkedin-mcp-server:latest `
   --transport streamable-http --host 0.0.0.0 --port 8080 --path /mcp
 ```
 

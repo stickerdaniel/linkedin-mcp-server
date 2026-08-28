@@ -46,6 +46,8 @@ If an older rootful Docker run left that host directory owned by root, repair it
 
 **Configure Claude Desktop with Docker**
 
+**macOS / Linux (absolute path in JSON):**
+
 ```json
 {
   "mcpServers": {
@@ -61,7 +63,28 @@ If an older rootful Docker run left that host directory owned by root, repair it
 }
 ```
 
-Spell that first path out in full. A client runs `docker` directly rather than through a shell, so a leading `~` reaches Docker unexpanded and it refuses the mount. On Windows write it with forward slashes, `C:/Users/you/.linkedin-mcp`; a backslash opens an escape sequence in JSON and `C:\Users` is not one the client can read.
+Spell that first path out in full. A client runs `docker` directly rather than through a shell, so a leading `~` reaches Docker unexpanded and it refuses the mount.
+
+**PowerShell (Windows):** use a forward-slash JSON path. A backslash path like
+`C:\Users\Alice\.linkedin-mcp` fails JSON parsing because `\U` is an invalid
+escape. Replace `Alice` with your username.
+
+```json
+{
+  "mcpServers": {
+    "mcp-server-linkedin": {
+      "command": "docker",
+      "args": [
+        "run", "--rm", "-i",
+        "-v", "C:/Users/Alice/.linkedin-mcp:/home/pwuser/.linkedin-mcp",
+        "stickerdaniel/linkedin-mcp-server:latest"
+      ]
+    }
+  }
+}
+```
+
+Use `$env:USERPROFILE\.linkedin-mcp` when constructing the host path outside JSON.
 
 > **Note:** Plain `--login` does not publish a viewer. Use `--login --login-viewer` only for the one-shot login container, with port 6080 published to loopback.
 >
@@ -111,7 +134,7 @@ Spell that first path out in full. A client runs `docker` directly rather than t
 | `LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION` | `false` | Experimental: keep the container's derived profile across restarts instead of rebuilding it on each start |
 | `LINKEDIN_TRACE_MODE` | `on_error` | Trace retention: `on_error` keeps artifacts only from failed runs, `always` keeps every run, `off` keeps none |
 
-**Example with custom timeouts:**
+**Example with custom timeouts (macOS / Linux):**
 
 ```json
 {
@@ -121,6 +144,25 @@ Spell that first path out in full. A client runs `docker` directly rather than t
       "args": [
         "run", "-i", "--rm",
         "-v", "/absolute/path/to/.linkedin-mcp:/home/pwuser/.linkedin-mcp",
+        "-e", "TIMEOUT=10000",
+        "-e", "TOOL_TIMEOUT=300",
+        "stickerdaniel/linkedin-mcp-server"
+      ]
+    }
+  }
+}
+```
+
+**Example with custom timeouts (Windows):**
+
+```json
+{
+  "mcpServers": {
+    "mcp-server-linkedin": {
+      "command": "docker",
+      "args": [
+        "run", "-i", "--rm",
+        "-v", "C:/Users/Alice/.linkedin-mcp:/home/pwuser/.linkedin-mcp",
         "-e", "TIMEOUT=10000",
         "-e", "TOOL_TIMEOUT=300",
         "stickerdaniel/linkedin-mcp-server"
