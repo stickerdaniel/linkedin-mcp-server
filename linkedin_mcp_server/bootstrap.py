@@ -145,6 +145,12 @@ _MAX_RETAINED_LINES = 200
 _MAX_RETAINED_CHARS = 64 * 1024
 #: Read size for the installer's pipe.
 _READ_CHUNK = 64 * 1024
+#: How much of a supervisor's startup diagnostics reaches its failure message.
+#: Counted in characters and kept by ``_RedactedTail``, so the trim happens on
+#: redacted text: on raw bytes it cut through whatever had arrived, and a cut
+#: inside a long URL left a scheme-less remainder that no pattern here matches
+#: and that ``BrowserSetupFailedError`` then carried to an MCP client.
+_MAX_START_ERROR_CHARS = 8192
 #: A run of output this long with no newline in it is emitted as one line rather
 #: than buffered further. Bounds memory for output that never terminates a line.
 _MAX_LINE_CHARS = 64 * 1024
@@ -183,6 +189,38 @@ _URL_IN_TEXT = re.compile(r"(?i)\b(https?):[/\\]{2}(\S*)")
 #: Where an authority ends. Backslashes are normalised to slashes first, as Node
 #: does before resolving, so they are not in this class.
 _AUTHORITY_ENDS = re.compile(r"[/?#]")
+#: Where a redactable run opens. Both patterns above are represented, because a
+#: cut is unsafe from whichever of them starts earlier: ``_URL_IN_TEXT`` needs
+#: the scheme, so ``https:`` | ``//h/?token=SECRET`` leaves a remainder it
+#: cannot see, and ``_CREDENTIALS_IN_URL`` needs the ``//``, so ``//us`` |
+#: ``er:pw@h`` puts the ``@`` it matches on beyond the cut.
+#:
+#: The lookahead is the liveness test, and it is what keeps this off ordinary
+#: text: a URL run ends at whitespace and a userinfo ends at the first slash as
+#: well, so an opener with either of those between itself and the cut can no
+#: longer reach across it, and the cut in front of it is free.
+_SCHEME_OPENS = re.compile(r"(?i)\bhttps?:[/\\]{2}(?=\S*\Z)")
+_CREDENTIAL_OPENS = re.compile(r"[/\\]{2}(?=[^/\\\s]*\Z)")
+#: An opener that has not finished arriving, anchored at the cut. A buffer
+#: ending in ``h`` can be the first character of ``https://SECRET``, and a cut
+#: between them leaves neither half recognisable while no opener is in the text
+#: yet for anything above to find. Every proper prefix of one is here, which
+#: covers a cut inside a whole opener as the same case.
+_OPENER_PENDING = re.compile(r"(?i)(?:\b(?:h|ht|htt|https?:?[/\\]?)|[/\\])\Z")
+#: Where a run ends. The ``\S`` of ``_URL_IN_TEXT``, so the two agree on what
+#: one run is.
+_WHITESPACE = re.compile(r"\s")
+_NON_SPACE = re.compile(r"\S")
+#: Where a run begins, scanned backwards for rather than matched. ``\S*\Z``
+#: reads better and backtracks once per starting position, which is quadratic
+#: on exactly the runs this exists for: measured at 9.9 seconds against 0.09
+#: milliseconds on one 60 000-character token. Only the ASCII spaces are looked
+#: for, so a rarer one merely widens the window; that costs a longer scan and
+#: can hide nothing, because the searches above carry their own ``\S``.
+_ASCII_SPACES = (" ", "\t", "\n", "\r")
+#: Stands in for a run that was dropped or lost its head. Not an origin, because
+#: the part of a URL that names one is exactly the part that is not there.
+_OMITTED_RUN_HEAD = "***"
 #: C0 and C1 controls and escape sequences. The eight-bit C1 forms do the same
 #: work as their ESC pairs on terminals that accept them, so U+009B followed by
 #: "2J" clears a screen exactly as "\x1b[2J" does. Patchright quotes a whole non-200 response
@@ -1320,22 +1358,26 @@ async def _settle_installer_tasks(
 
 
 async def _supervisor_start_error(
-    proc: _InstallerProcess, first: bytes
+    proc: _InstallerProcess, captured: _RedactedTail
 ) -> BrowserSetupFailedError:
+    """Why the supervisor never answered, out of what it printed before that.
+
+    The tail arrives already redacted and already bounded, and both have to
+    happen in that order. Sanitising the last line of a raw 8 KiB window meant
+    sanitising whatever that window had left of a URL, and a credential-bearing
+    one longer than the window kept its secret suffix and lost the scheme that
+    would have identified it.
+    """
     assert proc.stderr is not None
-    captured = bytearray(first[-8192:])
     try:
         async with asyncio.timeout(1.0):
-            while chunk := await proc.stderr.read(8192):
-                captured.extend(chunk)
-                if len(captured) > 8192:
-                    del captured[:-8192]
+            while chunk := await proc.stderr.read(_READ_CHUNK):
+                captured.feed(chunk)
     except TimeoutError:
         pass
     await _stop_installer(proc)
-    lines = captured.decode("utf-8", "replace").splitlines()
+    lines = captured.finish().splitlines()
     detail = lines[-1] if lines else "the supervisor exited before it was ready"
-    detail = _safe_to_print(detail)
     return BrowserSetupFailedError(
         f"Patchright Chromium browser setup could not start: {detail}"
     )
@@ -1347,12 +1389,18 @@ async def _read_supervisor_frame(
     marker: bytes,
     accept: Callable[[bytes], bool],
     timeout: float,
-) -> tuple[bytes | None, bytes]:
-    """Extract one authenticated frame from bounded arbitrary startup bytes."""
+) -> tuple[bytes | None, _RedactedTail]:
+    """Extract one authenticated frame from bounded arbitrary startup bytes.
+
+    The frame is matched on the raw bytes, which is the only thing an
+    authenticated marker can be matched on. The diagnostics that come back
+    alongside it are redacted as they arrive instead, because the only use they
+    have is a failure message and the bound on them is a truncation.
+    """
     if not marker or len(marker) >= 128:
         raise ValueError("invalid supervisor status marker")
     deadline = asyncio.get_running_loop().time() + max(timeout, 0.0)
-    captured = bytearray()
+    captured = _RedactedTail(_MAX_START_ERROR_CHARS)
     buffered = bytearray()
     while True:
         remaining = deadline - asyncio.get_running_loop().time()
@@ -1360,10 +1408,8 @@ async def _read_supervisor_frame(
             raise TimeoutError
         chunk = await asyncio.wait_for(stream.read(_READ_CHUNK), remaining)
         if not chunk:
-            return None, bytes(captured)
-        captured.extend(chunk)
-        if len(captured) > 8192:
-            del captured[:-8192]
+            return None, captured
+        captured.feed(chunk)
         buffered.extend(chunk)
 
         while True:
@@ -1385,7 +1431,7 @@ async def _read_supervisor_frame(
 
             candidate = bytes(buffered[: newline + 1])
             if accept(candidate):
-                return candidate, bytes(captured)
+                return candidate, captured
             del buffered[0]
 
 
@@ -2629,6 +2675,160 @@ def _safe_to_print(text: str) -> str:
     return _CREDENTIALS_IN_URL.sub("//***@", text)
 
 
+def _run_opening(text: str, cut: int) -> re.Match[str] | None:
+    """The redactable run a cut at *cut* would split, or ``None``.
+
+    ``None`` means nothing a pattern here recognises reaches across that point.
+    A match is the one damage sanitation cannot repair afterwards, because it
+    only ever runs on a buffer: both halves of a split run print, the near one
+    as ``https://cdn.exa`` and the far one as ``mple/p?token=SECRET``, which
+    matches nothing at all.
+    """
+    if cut <= 0 or _NON_SPACE.match(text, cut) is None:
+        return None
+    # From the run's own start rather than from zero, so the lookaheads below
+    # never scan a stretch they can only fail on. That bound is what keeps this
+    # linear in the length of one fragment.
+    start = max(text.rfind(space, 0, cut) for space in _ASCII_SPACES) + 1
+    # Leftmost first: a whole opener earlier in the same run keeps more of it in
+    # the buffer than a prefix of one at the cut, and covers that prefix anyway.
+    return (
+        _SCHEME_OPENS.search(text, start, cut)
+        or _CREDENTIAL_OPENS.search(text, start, cut)
+        or _OPENER_PENDING.search(text, start, cut)
+    )
+
+
+def _is_a_url(opening: re.Match[str]) -> bool:
+    """Whether a run opener carries a scheme, rather than only a ``//``.
+
+    That difference decides what may be dropped. A scheme is patchright naming
+    a URL, and everything behind it is path, query or userinfo. A bare ``//``
+    is a coincidence as often as not: it occurs in base64, in a path list and
+    in a Windows share, and dropping a run that long on that evidence would
+    take ordinary output with it.
+    """
+    return opening.group()[:1].lower() == "h"
+
+
+def _run_end(text: str, start: int) -> int:
+    """Where the run at *start* ends: its first whitespace, or the whole text."""
+    found = _WHITESPACE.search(text, start)
+    return len(text) if found is None else found.start()
+
+
+def _dropped_run(text: str) -> tuple[str, bool]:
+    """Remove the rest of a run whose marker has already gone out.
+
+    Returns what is left of *text* and whether the run continues past it. The
+    closing marker of a response body is the one thing kept: sanitation holds
+    those one or two characters back for ``_installer_lines`` to read, and a
+    drop that swallowed them would elide every later line of the install.
+
+    The body's *opening* marker cannot be reached from here, and that is a
+    property of the marker rather than a check: it carries four spaces, so no
+    whitespace-free run holds more of it than the single word it starts with,
+    and patchright writes ``Download failed: `` in front of that word.
+    """
+    end = _run_end(text, 0)
+    held = _held_back_closer(text, end, text[:end])
+    return text[end - held :], end == len(text)
+
+
+def _forced_fragment(text: str, cut: int) -> tuple[str, str, bool]:
+    """One bounded piece of an over-long line, and what is left of the buffer.
+
+    Returns the piece to emit, the remaining buffer, and whether a redacted run
+    continues into what has not been read yet.
+
+    Cutting at *cut* is what leaks. Sanitation has already reduced every URL
+    whose authority is complete to an origin, so the one that can still be whole
+    in the buffer is the run the cut lands in, and cutting it prints both halves
+    verbatim. The cut therefore moves to where that run begins, which costs a
+    shorter fragment and nothing else.
+
+    A run already at the front of the buffer has no such point: it is a whole
+    cap long with its authority still unread, and holding it back would grow the
+    buffer without bound. A scheme in front of it says it is a URL, so the
+    marker goes out and the run is dropped for as long as it lasts. Without one
+    the cut stands, because a whitespace-free run of that length is ordinary
+    output far more often than it is a credential.
+    """
+    opening = _run_opening(text, cut)
+    if opening is None or (opening.start() == 0 and not _is_a_url(opening)):
+        return text[:cut], text[cut:], False
+    if opening.start() > 0:
+        return text[: opening.start()], text[opening.start() :], False
+    remaining, running = _dropped_run(text)
+    return _OMITTED_RUN_HEAD, remaining, running
+
+
+class _RedactedTail:
+    """A bounded, redacted view of a byte stream that is still arriving.
+
+    Truncation is the hazard this exists for. ``_safe_to_print`` recognises a
+    URL by its scheme, so a tail cut out of the middle of one carries a
+    remainder that matches nothing here and prints its path, its query and its
+    userinfo in full. Redaction therefore runs before every trim, while a URL is
+    still whole, and the trim itself moves off any run it would cut through.
+
+    Decoding is incremental for the same reason it is in
+    ``_split_installer_output``: a UTF-8 sequence split by a read is one
+    character, not two replacement marks.
+
+    Holds ``limit`` characters between reads plus whatever one read adds, and
+    ``limit`` plus the marker afterwards.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        self._limit = limit
+        self._text = ""
+        self._dropping = False
+
+    def feed(self, chunk: bytes) -> None:
+        self._append(self._decoder.decode(chunk))
+        if len(self._text) > self._limit:
+            self._bound()
+
+    def finish(self) -> str:
+        """The retained text, redacted, with a partial character resolved."""
+        self._append(self._decoder.decode(b"", final=True))
+        self._bound()
+        return self._text
+
+    def _append(self, decoded: str) -> None:
+        if self._dropping:
+            # The rest of a run this already dropped the head of. Its scheme
+            # went with that head, so keeping it would mean keeping a secret
+            # that nothing here can still recognise as one.
+            decoded, self._dropping = _dropped_run(decoded)
+        self._text += decoded
+
+    def _bound(self) -> None:
+        """Redact, then trim, and never in the other order.
+
+        Deferred until a trim is due or the text is asked for, because text only
+        ever grows at its end: a pass over the whole of it then sees every URL
+        that has arrived whole, which is the same set an eager pass per chunk
+        would have seen, and a startup that never overruns pays nothing for it.
+        """
+        self._text = _safe_to_print(self._text)
+        if len(self._text) <= self._limit:
+            return
+        cut = len(self._text) - self._limit
+        opening = _run_opening(self._text, cut)
+        if opening is None or not _is_a_url(opening):
+            self._text = self._text[cut:]
+            return
+        # Keeping a tail means dropping heads, and the head of a URL is the part
+        # that names it. What a cut here would leave prints as ordinary text, so
+        # the whole run goes and the marker says that something did.
+        end = _run_end(self._text, cut)
+        self._dropping = end == len(self._text)
+        self._text = _OMITTED_RUN_HEAD + self._text[end:]
+
+
 async def _installer_lines(stream: asyncio.StreamReader) -> AsyncIterator[str]:
     """The installer's lines, with any quoted response body dropped.
 
@@ -2711,11 +2911,18 @@ async def _split_installer_output(
     """
     decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     buffer = ""
+    dropping = False
     while True:
         chunk = await stream.read(_READ_CHUNK)
         if not chunk:
             break
         buffer += decoder.decode(chunk)
+        if dropping:
+            # The rest of a run whose marker went out with an earlier fragment.
+            # It has no scheme and no ``//`` of its own, so nothing below would
+            # recognise it a second time; printing it is what the marker was
+            # emitted instead of.
+            buffer, dropping = _dropped_run(buffer)
         # Sanitised here, on the buffer, while a credential is still whole. Per
         # fragment it would be too late: the cut below is a split point like
         # any other, and half a URL matches no pattern. Together with the tail
@@ -2740,24 +2947,17 @@ async def _split_installer_output(
             # fragment of twice the cap.
             #
             # A credential whole in the buffer was redacted above, before any
-            # of this. One whose "@" has not been read yet is split by the cut
-            # and prints in halves, and no window held back here changes that:
-            # the buffer is over the cap by definition, so holding the opener
-            # back only moves the same fragment one iteration later. Which no
-            # longer has an author: the only output patchright produced without
-            # newlines was the quoted response body, and that is dropped.
-            #
-            # A URL cut in half here loses its scheme with the near fragment,
-            # and the query the far one completes then matches no pattern: a
-            # token split across two reads at the cut printed whole, measured.
-            # Cutting at the last space instead would keep tokens together and
-            # cannot be done from here: the opener ends in one, so preferring a
-            # space splits *that* marker instead, systematically rather than by
-            # coincidence, and the body it opens then prints in full. Both ends
-            # want the same thing, which is a splitter that knows where the
-            # markers are, and that is its own change.
-            yield buffer[:_MAX_LINE_CHARS], False
-            buffer = buffer[_MAX_LINE_CHARS:]
+            # of this. One whose "@" has not been read yet used to be split by
+            # the cut and print in halves, because a URL cut here loses its
+            # scheme with the near fragment and the query the far one completes
+            # then matches no pattern: a token split across two reads at the cut
+            # printed whole, measured. ``_forced_fragment`` moves the cut off
+            # that run instead. Not to the last space, which would keep tokens
+            # together and split the body's opening marker instead, since that
+            # marker ends in one; the cut goes to where the run itself opens,
+            # which is inside the same token and in front of nothing else.
+            fragment, buffer, dropping = _forced_fragment(buffer, _MAX_LINE_CHARS)
+            yield fragment, False
     buffer += decoder.decode(b"", final=True)
     if buffer:
         yield buffer.rstrip(), True

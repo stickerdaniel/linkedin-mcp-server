@@ -2357,6 +2357,84 @@ class TestInstallerSupervisorLaunch:
         assert "\x1b" not in reported
         assert "https://***@example.test/***" in reported
 
+    async def _start_error(self, monkeypatch, *writes: bytes) -> str:
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.exceptions import BrowserSetupFailedError
+
+        proc = _FakeProc([], 1)
+        proc.stderr = _FakeProtocol(*writes)
+        monkeypatch.setattr(
+            asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)
+        )
+
+        with pytest.raises(BrowserSetupFailedError) as excinfo:
+            await bootstrap._start_installer_supervisor("--no-shell", {})
+        return str(excinfo.value)
+
+    async def test_a_url_longer_than_the_retained_tail_keeps_its_secret(
+        self, monkeypatch
+    ):
+        """The bound used to be applied to raw bytes, which is a cut like any
+        other: it took the scheme away and left the query behind, where nothing
+        recognises it. Redaction now happens before the trim, so the URL is an
+        origin long before the tail is short enough to need one.
+        """
+        from linkedin_mcp_server import bootstrap
+
+        long_url = "https://mirror.example/" + "a" * 9000 + "?key=s3cr3t"
+        reported = await self._start_error(
+            monkeypatch, f"sitecustomize: {long_url}\n".encode()
+        )
+
+        assert "s3cr3t" not in reported
+        assert len(reported) < bootstrap._MAX_START_ERROR_CHARS
+        assert "https://mirror.example/***" in reported
+
+    async def test_an_authority_longer_than_the_tail_is_dropped_whole(
+        self, monkeypatch
+    ):
+        """An authority that never ends cannot be reduced to an origin either.
+
+        It stays whole in the buffer while it is read, so the trim is the first
+        thing to reach it, and the head it would take is the part that names
+        it. The credential arrives after that head is gone and has to go with
+        it, scheme and all.
+        """
+        from linkedin_mcp_server import bootstrap
+
+        reported = await self._start_error(
+            monkeypatch,
+            b"https://" + b"u" * (bootstrap._MAX_START_ERROR_CHARS + 100),
+            b":s3cr3t@mirror.example/x\n",
+        )
+
+        assert "s3cr3t" not in reported
+        assert "uuuu" not in reported
+        assert bootstrap._OMITTED_RUN_HEAD in reported
+
+    async def test_no_read_boundary_leaks_into_the_start_error(self, monkeypatch):
+        """Every point a read can split the diagnostic at.
+
+        The tail is trimmed between reads, so a URL open at a read boundary has
+        to survive both the append that completes it and the trim that may run
+        in between.
+        """
+        line = (
+            "sitecustomize: https://ci-bot:s3cr3t@mirror.example/p?key=s3cr3t working\n"
+        )
+        filler = "warming up\n" * 800
+        leaking = []
+        for split in range(len(line) + 1):
+            reported = await self._start_error(
+                monkeypatch,
+                (filler + line[:split]).encode(),
+                line[split:].encode(),
+            )
+            if "s3cr3t" in reported:
+                leaking.append(split)
+
+        assert leaking == []
+
     @pytest.mark.parametrize(
         ("lines", "message", "written"),
         [
@@ -4295,6 +4373,166 @@ class TestAnApostropheDoesNotEndAUrl:
         await bootstrap._run_patchright_install("--no-shell", line_callback=seen.append)
 
         assert "s3cr3t" not in "".join(seen)
+
+
+class TestAForcedCutDoesNotSplitAUrl:
+    """A cut through a URL is the one thing sanitation cannot repair after it.
+
+    ``_safe_to_print`` runs on the buffer, so every URL that has arrived whole
+    is an origin before anything is emitted. A URL still arriving is not, and
+    the cut that bounds a line used to fall wherever the cap did: the near
+    fragment then carried a piece of the authority and the far one carried the
+    rest of it, scheme-less, past every pattern in this file and into the debug
+    log, the line callback and ``BrowserSetupFailedError``.
+
+    Two writes, because that is what makes the case: a pipe hands over what has
+    been written, and patchright's downloader writes its progress and its errors
+    separately. One write that completes the authority is redacted before any
+    cut and never reaches this.
+    """
+
+    #: Userinfo and a query parameter, so both sides of a cut carry something.
+    URL = "https://ci-bot:s3cr3t@mirror.example/p?key=s3cr3t"
+
+    async def _lines(self, *writes: bytes) -> list[str]:
+        from linkedin_mcp_server.bootstrap import _installer_lines
+
+        stream = cast(Any, _FakeStdout(list(writes)))
+        return [line async for line in _installer_lines(stream)]
+
+    def _writes(self, cap: int, offset: int, head: int) -> tuple[bytes, bytes]:
+        """The URL *offset* characters in front of the cut, split after *head*.
+
+        The space is the one patchright writes in front of a URL, and it is not
+        decoration: ``_URL_IN_TEXT`` opens on ``\\b``, so filler glued straight
+        onto the scheme measures that boundary rather than the cut.
+        """
+        first = "F" * (cap - offset - 1) + " " + self.URL[:head]
+        return first.encode(), self.URL[head:].encode() + b" done\n"
+
+    async def test_an_authority_still_arriving_at_the_cut_is_not_split(self):
+        """The reported shape, at the offset that produced it.
+
+        Ten characters in, so the cut falls inside the authority rather than in
+        front of it, and only the first half of the userinfo has been read when
+        the fragment is forced out.
+        """
+        from linkedin_mcp_server import bootstrap
+
+        cap = bootstrap._MAX_LINE_CHARS
+        printed = "".join(await self._lines(*self._writes(cap, offset=10, head=14)))
+
+        assert "s3cr3t" not in printed
+        assert "https://***@mirror.example/***" in printed
+        assert printed.count("F") == cap - 11, "the ordinary output still arrives"
+
+    async def test_no_offset_into_the_url_leaks_it(self, monkeypatch):
+        """Every cut position crossed with every read boundary, exhaustively.
+
+        Run against a small cap. Nothing in the splitter reads the cap's value
+        for anything but the comparison, and a 64 KiB one turns this into two
+        thousand copies of a 128 KiB buffer: the sweep took minutes and proved
+        the same thing. Small also puts the URL over the cap, which is the case
+        that has no cut point at all.
+        """
+        from linkedin_mcp_server import bootstrap
+
+        cap = 40
+        monkeypatch.setattr(bootstrap, "_MAX_LINE_CHARS", cap)
+        monkeypatch.setattr(bootstrap, "_READ_CHUNK", cap)
+        leaking = []
+        for offset in range(1, cap):
+            for head in range(offset + 1, len(self.URL) + 1):
+                printed = "".join(await self._lines(*self._writes(cap, offset, head)))
+                if "s3cr3t" in printed:
+                    leaking.append((offset, head))
+
+        assert leaking == []
+
+    async def test_a_url_longer_than_the_cap_is_dropped_rather_than_cut(self):
+        """No point in front of a run that is already a cap long.
+
+        Holding it back instead would grow the buffer without limit, which is
+        what the cap exists to prevent, so the marker goes out and the run does
+        not. The credential arrives after the drop has begun and has to be
+        dropped with it: it carries no scheme of its own by then.
+        """
+        from linkedin_mcp_server import bootstrap
+
+        cap = bootstrap._MAX_LINE_CHARS
+        printed = "".join(
+            await self._lines(
+                b"https://" + b"T" * cap,
+                b"more-s3cr3t@mirror.example/p?key=s3cr3t\n",
+                b"installing\n",
+            )
+        )
+
+        assert "s3cr3t" not in printed
+        assert "T" * 8 not in printed, "the unread authority is not printed either"
+        assert printed.startswith(bootstrap._OMITTED_RUN_HEAD)
+        assert "installing" in printed, "output after the run still arrives"
+
+    async def test_a_long_ordinary_token_with_slashes_still_arrives(self):
+        """The drop needs a scheme, and base64 is not one.
+
+        ``//`` occurs by coincidence in a base64 blob, in a path list and in a
+        Windows share, and a run over the cap is far more often one of those
+        than a scheme-less credential. Dropping on that evidence would delete
+        ordinary output, so the cut stands there.
+        """
+        from linkedin_mcp_server import bootstrap
+
+        cap = bootstrap._MAX_LINE_CHARS
+        blob = "//" + "N" * (2 * cap)
+        printed = "".join(await self._lines(blob.encode(), b"\ninstalling\n"))
+
+        assert printed.count("N") == 2 * cap, "nothing of it was dropped"
+        assert "installing" in printed
+
+    async def test_no_read_boundary_finishes_a_url_early(self):
+        """Every point a read can split this URL at, through the reader.
+
+        Sanitation runs per read, on a buffer that is still growing, so an open
+        run is redacted once per read and has to stay collapsible when the rest
+        of it lands. ``_redacted_origin`` keeps the delimiter behind the
+        authority for exactly that, and this measures the property through the
+        stream rather than through the function.
+        """
+        payload = f"Downloading Chromium from {self.URL} now\n"
+        leaking = []
+        for split in range(len(payload) + 1):
+            printed = "".join(
+                await self._lines(payload[:split].encode(), payload[split:].encode())
+            )
+            if "s3cr3t" in printed:
+                leaking.append(split)
+
+        assert leaking == []
+
+    async def test_a_dropped_run_keeps_the_markers_around_it(self):
+        """The drop is bounded by the body's markers on both sides.
+
+        The opening marker survives because the cut moves to where the run
+        opens, which is behind the quote that opens the body. The closing one
+        survives because sanitation holds its first characters back and the drop
+        leaves those where they are. Losing either would elide the rest of the
+        install.
+        """
+        from linkedin_mcp_server import bootstrap
+
+        cap = bootstrap._MAX_LINE_CHARS
+        opener = "Download failed: server returned code 403 body '"
+        lines = await self._lines(
+            (opener + "https://" + "T" * (2 * cap)).encode(),
+            b"'. URL: http://mirror.example/z.zip\ninstalling\n",
+        )
+        printed = "\n".join(lines)
+
+        assert "TTTT" not in printed, "the body is still dropped"
+        assert bootstrap._OMITTED_BODY in printed
+        assert "'. URL: http://mirror.example/***" in printed
+        assert "installing" in lines
 
 
 class TestQuotedResponseBodiesAreDropped:
