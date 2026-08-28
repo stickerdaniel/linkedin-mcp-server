@@ -25,10 +25,11 @@ import subprocess
 import sys
 import threading
 import time
+import weakref
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, TypeVar, cast
+from typing import Any, BinaryIO, TypeVar, cast
 
 from linkedin_mcp_server import (
     __version__,
@@ -1517,30 +1518,50 @@ def _detachment_flags() -> int:
     )
 
 
-def _release_handshake(child: subprocess.Popen[bytes]) -> None:
-    """Stop listening to the child, without waiting for it to stop talking.
+class _ActiveRead:
+    """Who may close a handshake pipe, so that exactly one side does.
 
-    ``child.stdout.close()`` is the obvious call and it is a trap. The reader
-    thread is parked inside iteration holding the buffered reader's I/O lock,
-    and ``BufferedReader.close()`` waits for that lock — so closing here blocks
-    for exactly as long as the child stays silent. Measured: a child that said
-    nothing for thirty seconds made this call block 29.27 of them, and one that
-    neither answers nor exits would block forever. That is the timeout above
-    being handed straight back, in the one case it exists for.
-
-    So the *descriptor* is closed instead. That is not held by the reader
-    thread: the pending read fails, the thread unwinds, and the caller is free.
-
-    ``detach()`` first, so the buffer gives up the descriptor instead of trying
-    to close it again later, and then close the raw file object it hands back
-    rather than the bare number. Closing the number directly leaves that raw
-    object owning a descriptor that no longer exists, and its finalizer prints
-    ``Bad file descriptor`` from a context nothing can catch. Both variants were
-    tried; this is the one that is quiet.
+    The reader owns the close while its read is in flight, the caller once that
+    read is over. Both answers are given under ``_active_reads_lock``.
     """
-    stream, child.stdout = child.stdout, None
-    if stream is None:
-        return
+
+    def __init__(self) -> None:
+        self._reading = True
+        self._abandoned = False
+
+    def finish(self, stream: Any) -> None:
+        """End the read, closing the pipe if the caller has already left it."""
+        with _active_reads_lock:
+            self._reading = False
+            abandoned = self._abandoned
+            if _active_reads.get(stream) is self:
+                del _active_reads[stream]
+        if abandoned:
+            _close_handshake_stream(stream)
+
+    def abandon(self) -> bool:
+        """Whether the caller may close: true once the read is over."""
+        with _active_reads_lock:
+            if not self._reading:
+                return True
+            self._abandoned = True
+            return False
+
+
+#: The read currently on a handshake pipe, keyed by that pipe and never more than
+#: one deep: a second read starts only after the first one has returned.
+_active_reads: weakref.WeakKeyDictionary[Any, _ActiveRead] = weakref.WeakKeyDictionary()
+_active_reads_lock = threading.Lock()
+
+
+def _close_handshake_stream(stream: Any) -> None:
+    """Close the descriptor rather than the buffer, which a parked reader holds.
+
+    ``BufferedReader.close()`` waits for that reader's I/O lock, so it blocks for
+    as long as the child stays silent: measured at 29.27 of thirty seconds.
+    ``detach()`` first, or the raw object's finalizer prints ``Bad file
+    descriptor`` from a context nothing can catch.
+    """
     # `Popen.stdout` is declared as a plain `IO`, which has no `detach`; the
     # object is a BufferedReader in practice, and the fallback covers a caller
     # that handed us something else rather than assuming.
@@ -1551,6 +1572,29 @@ def _release_handshake(child: subprocess.Popen[bytes]) -> None:
     except (OSError, ValueError):
         # Already gone, which is the ordinary case for a child that exited.
         logger.debug("The handshake pipe was already closed", exc_info=True)
+
+
+def _release_handshake(child: subprocess.Popen[bytes]) -> None:
+    """Stop listening to the child, without waiting for it to stop talking.
+
+    Closing the descriptor under a parked reader is what makes this prompt on
+    POSIX: the pending read fails and the thread unwinds. Windows closes through
+    the UCRT, which waits for the same handle lock the blocked ``ReadFile``
+    holds, so after a commit whose verdict timed out the close would wait for an
+    owner that keeps stdout open for as long as it runs. There a read still in
+    flight keeps its pipe and closes it itself at EOF, from the daemon thread
+    that is already parked on it. The pipe leaves ``Popen`` either way, so
+    nothing closes it behind that reader's back.
+    """
+    stream, child.stdout = child.stdout, None
+    if stream is None:
+        return
+    with _active_reads_lock:
+        active = _active_reads.get(stream)
+    if _IS_WINDOWS and active is not None and not active.abandon():
+        logger.debug("The handshake pipe stays with its reader until end of file")
+        return
+    _close_handshake_stream(stream)
 
 
 def _reap(child: subprocess.Popen[bytes]) -> None:
@@ -1615,6 +1659,9 @@ def _read_owner_verdict(
     stream = child.stdout
     assert stream is not None
     verdicts: queue.Queue[_OwnerVerdict | None] = queue.Queue()
+    active = _ActiveRead()
+    with _active_reads_lock:
+        _active_reads[stream] = active
 
     def collect() -> None:
         try:
@@ -1624,12 +1671,18 @@ def _read_owner_verdict(
                 marker=marker,
                 parse=lambda frame: _reported_owner_verdict(frame, handshake_nonce),
             )
-            verdicts.put(reported[1] if reported is not None else None)
+            verdict = reported[1] if reported is not None else None
         except OSError:  # pragma: no cover - the stream closed under us
-            verdicts.put(None)
+            verdict = None
+        finally:
+            # Before the verdict is handed over, so a caller that reads one and
+            # then releases the pipe finds a read that is over and closes it.
+            active.finish(stream)
+        verdicts.put(verdict)
 
     # A daemon thread: if the child neither answers nor exits, the frontend must
-    # still be able to shut down. It holds only this pipe, which the caller closes.
+    # still be able to shut down. It holds only this pipe, which it closes itself
+    # when the caller released it mid-read.
     reader = threading.Thread(target=collect, name=thread_name, daemon=True)
     reader.start()
     try:

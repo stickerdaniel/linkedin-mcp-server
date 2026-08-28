@@ -1602,6 +1602,125 @@ def test_owner_accepts_a_verdict_after_large_finite_startup_output():
     )
 
 
+#: A bound on every wait below, so a regression fails an assertion instead of
+#: hanging the suite.
+_PARKED = 5.0
+
+_NONCE = "0123456789abcdef" * 4
+_COMMITTED = f"owner {_NONCE} committed\n".encode()
+
+
+class _Pipe:
+    """A handshake pipe that parks its read until the child writes.
+
+    ``blocking_close`` is the Windows behaviour: a close waits for a read in
+    flight instead of ending it, which is what POSIX does.
+    """
+
+    def __init__(self, payload: bytes = b"", *, blocking_close: bool = False) -> None:
+        self._payload = io.BytesIO(payload)
+        self._parked = not payload
+        self._blocking_close = blocking_close
+        self.reading = threading.Event()
+        self.wrote = threading.Event()
+        self.shut = threading.Event()
+        self.closes = 0
+        self.detaches = 0
+
+    def readline(self, size: int = -1) -> bytes:
+        self.reading.set()
+        if self._parked:
+            self.wrote.wait(_PARKED)
+        return self._payload.readline(size)
+
+    def detach(self) -> _Pipe:
+        self.detaches += 1
+        return self
+
+    def close(self) -> None:
+        if self._blocking_close and self._parked:
+            self.wrote.wait(_PARKED)
+        self.closes += 1
+        self.wrote.set()
+        self.shut.set()
+
+
+def test_windows_release_leaves_a_parked_reader_holding_the_pipe(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A committed owner holds stdout open, so closing here would wait for it."""
+    monkeypatch.setattr(election_module, "_IS_WINDOWS", True)
+    pipe = _Pipe(blocking_close=True)
+    child = SimpleNamespace(stdout=pipe)
+
+    verdict = election_module._await_committed(
+        cast(Any, child), handshake_nonce=_NONCE, timeout=0.05
+    )
+
+    assert verdict is _Started.STILL_TRYING
+    assert pipe.reading.wait(_PARKED)
+
+    started = time.monotonic()
+    election_module._release_handshake(cast(Any, child))
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1.0
+    assert (pipe.detaches, pipe.closes) == (0, 0)
+    assert child.stdout is None
+
+    # The child stops writing, and the reader closes what it kept, exactly once.
+    pipe.wrote.set()
+    assert pipe.shut.wait(_PARKED)
+    assert pipe.closes == 1
+
+
+@pytest.mark.parametrize(
+    ("windows", "make_pipe", "expected"),
+    [
+        (True, lambda: _Pipe(_COMMITTED, blocking_close=True), _Started.YES),
+        (False, _Pipe, _Started.STILL_TRYING),
+    ],
+    ids=["windows-read-over", "posix-read-parked"],
+)
+def test_the_caller_closes_the_pipe_it_may_take(
+    windows: bool,
+    make_pipe: Callable[[], Any],
+    expected: _Started,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Only Windows keeps a read in flight; every other case closes here, once."""
+    monkeypatch.setattr(election_module, "_IS_WINDOWS", windows)
+    pipe = make_pipe()
+    child = SimpleNamespace(stdout=pipe)
+    before = set(threading.enumerate())
+
+    verdict = election_module._await_committed(
+        cast(Any, child), handshake_nonce=_NONCE, timeout=0.05
+    )
+    readers = [thread for thread in threading.enumerate() if thread not in before]
+
+    assert verdict is expected
+    assert pipe.reading.wait(_PARKED)
+
+    election_module._release_handshake(cast(Any, child))
+    for reader in readers:
+        reader.join(_PARKED)
+
+    assert (pipe.detaches, pipe.closes) == (1, 1)
+
+
+def test_a_read_that_ended_hands_its_pipe_back():
+    """The window the release tests cannot reach: a read ending as the caller
+    times out, where both sides walking away would leave the pipe open."""
+    pipe = _Pipe()
+    active = election_module._ActiveRead()
+
+    active.finish(pipe)
+
+    assert pipe.closes == 0
+    assert active.abandon() is True
+
+
 @_POSIX_ONLY
 class TestSaturatedControlQueue:
     """The child's rendezvous, already full when the child goes looking for it.
