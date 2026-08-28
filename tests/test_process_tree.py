@@ -6,6 +6,7 @@ import asyncio
 import importlib
 import io
 import json
+import logging
 import os
 import secrets
 import signal
@@ -15,7 +16,7 @@ import threading
 import time
 from pathlib import Path
 from collections.abc import Iterator
-from itertools import repeat
+from itertools import chain, repeat
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -1277,7 +1278,11 @@ def test_hard_exit_rescans_markers_for_later_browser_groups(
     process_tree._registered_posix_groups.clear()
     process_tree._registered_browser_markers.clear()
     process_tree._registered_browser_markers.add("launch-marker")
-    monkeypatch.setattr(process_tree, "_marked_posix_processes", lambda marker: (900,))
+    monkeypatch.setattr(
+        process_tree,
+        "_scan_marked_posix_processes",
+        lambda marker: process_tree._MarkerScan((900,), True),
+    )
     monkeypatch.setattr(
         process_tree,
         "_posix_process_rows",
@@ -1470,7 +1475,11 @@ class TestOneLaunchesResidualBrowser:
     def _registry(monkeypatch: pytest.MonkeyPatch, groups: dict) -> None:
         monkeypatch.setattr(process_tree, "_registered_browser_markers", {"browser"})
         monkeypatch.setattr(process_tree, "_registered_posix_groups", groups)
-        monkeypatch.setattr(process_tree, "_marked_posix_processes", lambda _m: ())
+        monkeypatch.setattr(
+            process_tree,
+            "_scan_marked_posix_processes",
+            lambda _m: process_tree._MarkerScan((), True),
+        )
         monkeypatch.setattr(process_tree, "_kernel_start_identity", lambda _p: None)
         monkeypatch.setattr(os, "getpgrp", lambda: 100)
 
@@ -1574,7 +1583,11 @@ class TestOneLaunchesResidualBrowser:
     ):
         """The kill works on groups; the proof is that nothing carries the marker."""
         self._registry(monkeypatch, {})
-        monkeypatch.setattr(process_tree, "_marked_posix_processes", lambda _m: (900,))
+        monkeypatch.setattr(
+            process_tree,
+            "_scan_marked_posix_processes",
+            lambda _m: process_tree._MarkerScan((900,), True),
+        )
         monkeypatch.setattr(
             process_tree,
             "_posix_process_rows",
@@ -1592,11 +1605,213 @@ class TestOneLaunchesResidualBrowser:
         monkeypatch.setattr(process_tree, "_registered_browser_markers", set())
         monkeypatch.setattr(
             process_tree,
-            "_marked_posix_processes",
+            "_scan_marked_posix_processes",
             lambda _m: pytest.fail("scanned for a marker no browser was given"),
         )
 
         assert process_tree.drain_browser_process_marker("browser") is True
+
+    def test_a_scan_that_could_not_look_never_ends_the_drain(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A broken ``ps`` reports an empty machine, and that is not a drain.
+
+        The registry is empty here, so nothing is killed and nothing is waited
+        for: the only thing standing between this and a confirmed shutdown is
+        whether the scan that found nothing was able to look.
+        """
+        self._registry(monkeypatch, {})
+        monkeypatch.setattr(
+            process_tree,
+            "_scan_marked_posix_processes",
+            lambda _m: process_tree._MarkerScan((), False),
+        )
+        monkeypatch.setattr(process_tree.time, "sleep", lambda _seconds: None)
+
+        assert (
+            process_tree.drain_browser_process_marker("browser", timeout=0.0) is False
+        )
+
+    def test_a_scan_that_looked_and_found_nothing_ends_the_drain(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The same empty result, from a scan that actually ran."""
+        self._registry(monkeypatch, {})
+        monkeypatch.setattr(process_tree.time, "sleep", lambda _seconds: None)
+
+        assert process_tree.drain_browser_process_marker("browser", timeout=0.0) is True
+
+
+@_POSIX_ONLY
+class TestTheMarkerScanSeparatesEmptyFromUnanswerable:
+    """Outside Linux the scan shells out, and a shell-out has a third outcome.
+
+    ``ps`` can be absent, hang or exit non-zero, and each of those produces the
+    same no rows as a browser that has gone. Only one of the four is proof, so
+    the scan reports whether it managed to look rather than leaving the caller
+    to read it out of an empty tuple.
+    """
+
+    @staticmethod
+    def _bsd(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Take the ``ps`` branch, which is the only one that can fail to answer."""
+        monkeypatch.setattr(process_tree.sys, "platform", "darwin")
+
+    def test_a_missing_ps_answers_nothing(self, monkeypatch: pytest.MonkeyPatch):
+        self._bsd(monkeypatch)
+        monkeypatch.setattr(process_tree.Path, "is_file", lambda _self: False)
+        monkeypatch.setattr(
+            process_tree.subprocess,
+            "run",
+            lambda *_args, **_kwargs: pytest.fail("ran a ps that is not installed"),
+        )
+
+        assert process_tree._scan_marked_posix_processes("marker") == (
+            process_tree._MarkerScan((), False)
+        )
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            subprocess.TimeoutExpired(cmd="ps", timeout=1.0),
+            subprocess.CalledProcessError(1, "ps"),
+            OSError("could not execute ps"),
+        ],
+        ids=["timeout", "non-zero", "oserror"],
+    )
+    def test_a_ps_that_fails_answers_nothing(
+        self, monkeypatch: pytest.MonkeyPatch, failure: Exception
+    ):
+        self._bsd(monkeypatch)
+        monkeypatch.setattr(process_tree.Path, "is_file", lambda _self: True)
+
+        def run(*_args: Any, **_kwargs: Any) -> Any:
+            raise failure
+
+        monkeypatch.setattr(process_tree.subprocess, "run", run)
+
+        assert process_tree._scan_marked_posix_processes("marker") == (
+            process_tree._MarkerScan((), False)
+        )
+
+    def test_a_ps_that_ran_and_saw_nothing_is_proof(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        self._bsd(monkeypatch)
+        monkeypatch.setattr(process_tree.Path, "is_file", lambda _self: True)
+        monkeypatch.setattr(
+            process_tree.subprocess,
+            "run",
+            lambda *_args, **_kwargs: SimpleNamespace(stdout=b""),
+        )
+
+        assert process_tree._scan_marked_posix_processes("marker") == (
+            process_tree._MarkerScan((), True)
+        )
+
+    def test_a_ps_that_ran_still_names_the_marked_processes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        self._bsd(monkeypatch)
+        monkeypatch.setattr(process_tree.Path, "is_file", lambda _self: True)
+        rows = (
+            b"  901 /chromium --headless\n"
+            b"  902 /chromium LINKEDIN_MCP_BROWSER_PROCESS_MARKER=marker --type=gpu\n"
+        )
+        monkeypatch.setattr(
+            process_tree.subprocess,
+            "run",
+            lambda *_args, **_kwargs: SimpleNamespace(stdout=rows),
+        )
+
+        assert process_tree._scan_marked_posix_processes("marker") == (
+            process_tree._MarkerScan((902,), True)
+        )
+
+    @pytest.mark.parametrize("mode", ["missing", "failing"])
+    def test_an_unusable_ps_is_reported_once_rather_than_once_per_poll(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, mode
+    ):
+        """The scan is the loop body, so its diagnosis may not be loud.
+
+        A drain polls every ``_JOB_POLL_SECONDS`` against a ten second budget
+        and scans twice a round, once to refresh the registry and once for the
+        proof. Warning on each of those buries the single line that says what to
+        do under about a thousand copies of the line that says it again. The
+        drain says it once, at its deadline, and that is the line the operator
+        needs.
+
+        The clock is driven here rather than slept through, so the round count
+        is the assertion rather than a timing accident.
+        """
+        self._bsd(monkeypatch)
+        monkeypatch.setattr(
+            process_tree.Path, "is_file", lambda _self: mode != "missing"
+        )
+        if mode == "failing":
+
+            def run(*_args: Any, **_kwargs: Any) -> Any:
+                raise subprocess.TimeoutExpired(cmd="ps", timeout=1.0)
+
+            monkeypatch.setattr(process_tree.subprocess, "run", run)
+
+        monkeypatch.setattr(process_tree, "_registered_browser_markers", {"browser"})
+        monkeypatch.setattr(process_tree, "_registered_posix_groups", {})
+        monkeypatch.setattr(process_tree, "_posix_process_rows", dict)
+        monkeypatch.setattr(os, "getpgrp", lambda: 100)
+        # A shim rather than a patch on the real module: ``process_tree.time``
+        # *is* ``time``, so replacing ``monotonic`` there hands a scripted clock
+        # to pytest and asyncio as well and the run never ends.
+        #
+        # One reading sets the deadline, then one per round decides whether to
+        # poll again. Three rounds of polling, then a clock past the deadline.
+        clock = chain([0.0] * 4, repeat(100.0))
+        monkeypatch.setattr(
+            process_tree,
+            "time",
+            SimpleNamespace(monotonic=lambda: next(clock), sleep=lambda _seconds: None),
+        )
+
+        # Counted around the real scan rather than around ``ps``, so a missing
+        # executable and a broken one are measured the same way.
+        scans = 0
+        real_scan = process_tree._scan_marked_posix_processes
+
+        def counting(marker: str) -> process_tree._MarkerScan:
+            nonlocal scans
+            scans += 1
+            return real_scan(marker)
+
+        monkeypatch.setattr(process_tree, "_scan_marked_posix_processes", counting)
+
+        with caplog.at_level(logging.DEBUG, logger=process_tree.__name__):
+            assert (
+                process_tree.drain_browser_process_marker("browser", timeout=1.0)
+                is False
+            )
+
+        assert scans > 2, "the loop did not poll, so quietness proves nothing"
+        assert any(record.levelno == logging.DEBUG for record in caplog.records), (
+            "the scan diagnosed nothing at all, so the demotion lost it"
+        )
+        loud = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelno >= logging.WARNING
+        ]
+        assert len(loud) == 1, loud
+        assert "unproven" in loud[0]
+
+    def test_the_real_scan_answers_for_a_marker_nobody_carries(self):
+        """Against the platform's own process table rather than a double.
+
+        Linux reads ``/proc`` and cannot be inconclusive; everywhere else this
+        is the one assertion that ``ps`` is where the code looks for it and
+        speaks the flags it is given.
+        """
+        assert process_tree._scan_marked_posix_processes(secrets.token_hex(32)) == (
+            process_tree._MarkerScan((), True)
+        )
 
 
 @_POSIX_ONLY

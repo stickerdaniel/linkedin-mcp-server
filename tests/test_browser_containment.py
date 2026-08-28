@@ -40,7 +40,7 @@ from patchright.async_api import async_playwright
 from linkedin_mcp_server.browser_launch import build_launch_options
 from linkedin_mcp_server.config.schema import BrowserConfig
 from linkedin_mcp_server.core.browser import BrowserManager
-from linkedin_mcp_server.process_tree import _marked_posix_processes
+from linkedin_mcp_server.process_tree import _scan_marked_posix_processes
 
 
 def _running_in_ci() -> bool:
@@ -145,7 +145,7 @@ async def test_a_real_browser_launch_is_attributed_and_provably_drained(tmp_path
             )
         else:
             assert manager._containment is None, "POSIX grew a Windows Job"
-            marked = _marked_posix_processes(manager._process_marker)
+            marked = _scan_marked_posix_processes(manager._process_marker).processes
             assert marked, "no process carried this launch's marker"
 
         closed = await manager.close()
@@ -156,7 +156,7 @@ async def test_a_real_browser_launch_is_attributed_and_provably_drained(tmp_path
             assert manager._containment.closed
             assert manager._containment.drained
         else:
-            assert not _marked_posix_processes(manager._process_marker)
+            assert not _scan_marked_posix_processes(manager._process_marker).processes
     finally:
         if not closed:
             await manager.close()

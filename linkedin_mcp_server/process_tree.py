@@ -15,7 +15,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, NamedTuple, NoReturn
 
 logger = logging.getLogger(__name__)
 
@@ -287,8 +287,27 @@ def _has_exited_unreaped(pid: int, state: str | None) -> bool:
     return state == _ZOMBIE_STATE
 
 
-def _marked_posix_processes(marker: str) -> tuple[int, ...]:
-    """Return processes carrying this browser launch's private environment marker."""
+class _MarkerScan(NamedTuple):
+    """One look for the processes carrying a browser launch marker.
+
+    ``conclusive`` is what separates "nothing carries this marker" from "the
+    scan could not tell". Outside Linux the scan shells out to ``ps``, and a
+    missing, hung or failing ``ps`` yields the same empty output as a browser
+    that has already gone. Reading emptiness as proof there would let a close
+    report a drained launch it never managed to look at, so every consumer that
+    turns this into a verdict checks the flag first.
+
+    Linux answers from ``/proc`` and is always conclusive: an unreadable
+    ``environ`` belongs to a process that exited or to another user, neither of
+    which is this launch's Chromium.
+    """
+
+    processes: tuple[int, ...]
+    conclusive: bool
+
+
+def _scan_marked_posix_processes(marker: str) -> _MarkerScan:
+    """Scan for processes carrying this browser launch's private environment marker."""
     expected = f"{_BROWSER_PROCESS_MARKER}={marker}".encode()
     if sys.platform.startswith("linux"):
         found: list[int] = []
@@ -301,7 +320,7 @@ def _marked_posix_processes(marker: str) -> tuple[int, ...]:
                 continue
             if expected in environment:
                 found.append(int(entry.name))
-        return tuple(found)
+        return _MarkerScan(tuple(found), True)
 
     ps = next(
         (
@@ -312,7 +331,15 @@ def _marked_posix_processes(marker: str) -> tuple[int, ...]:
         None,
     )
     if ps is None:
-        return ()
+        # Debug, like the failure below it. A drain polls this every
+        # ``_JOB_POLL_SECONDS`` and scans twice per round, so a machine with no
+        # usable ``ps`` would bury its one actionable line under a thousand
+        # copies of this one. The drain says it once, at its deadline.
+        logger.debug(
+            "No ps executable was found, so browser processes cannot be "
+            "identified by their launch marker on this platform."
+        )
+        return _MarkerScan((), False)
     try:
         snapshot = subprocess.run(
             [ps, "eww", "-A", "-o", "pid=", "-o", "command="],
@@ -320,8 +347,14 @@ def _marked_posix_processes(marker: str) -> tuple[int, ...]:
             capture_output=True,
             timeout=_POSIX_PROCESS_SNAPSHOT_SECONDS,
         ).stdout
-    except (OSError, subprocess.SubprocessError):
-        return ()
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.debug(
+            "The process snapshot for the browser launch marker failed (%s: %s), "
+            "so nothing can be concluded from it.",
+            type(exc).__name__,
+            exc,
+        )
+        return _MarkerScan((), False)
 
     found = []
     needle = expected + b" "
@@ -333,7 +366,7 @@ def _marked_posix_processes(marker: str) -> tuple[int, ...]:
             found.append(int(fields[0]))
         except ValueError:
             continue
-    return tuple(found)
+    return _MarkerScan(tuple(found), True)
 
 
 def _posix_detached_descendants(
@@ -394,7 +427,11 @@ def remember_detached_process_groups(marker: str | None = None) -> None:
     if marker is not None:
         _registered_browser_markers.add(marker)
         known = {process for process, _group, _identity in observed}
-        for process in _marked_posix_processes(marker):
+        # An inconclusive scan contributes nothing to ``marked``, so the
+        # registration below records no proved marker. That is the closed
+        # direction: a single close may then not kill this group, and the drain
+        # that ends the close cannot claim it is empty either.
+        for process in _scan_marked_posix_processes(marker).processes:
             marked.add(process)
             if process in known:
                 continue
@@ -449,7 +486,11 @@ def _refresh_marked_process_groups(
     grouped_markers: dict[int, set[str]] = {}
     scanned = tuple(_registered_browser_markers) if markers is None else markers
     for marker in scanned:
-        for process in _marked_posix_processes(marker):
+        # Only what a scan actually saw is added. An inconclusive one adds no
+        # group, which costs nothing here: the registrations already filed keep
+        # being checked against the process rows, and the proof that ends a
+        # drain is taken from its own scan rather than from this registry.
+        for process in _scan_marked_posix_processes(marker).processes:
             row = rows.get(process)
             if row is not None:
                 group = row[1]
@@ -622,7 +663,13 @@ def _kill_marked_process_groups(marker: str) -> tuple[int, ...]:
 
 
 def _drain_marked_posix_groups(marker: str, deadline: float) -> bool:
-    """Kill and bury every POSIX group carrying one browser launch marker."""
+    """Kill and bury every POSIX group carrying one browser launch marker.
+
+    The scan that supplies the proof can fail to run at all, and it reports an
+    empty machine when it does. Only a scan that answered may end this, so a
+    ``ps`` that is missing, hung or broken keeps the loop going and then reports
+    an unproven drain rather than a clean one.
+    """
     while True:
         groups = _kill_marked_process_groups(marker)
         if groups and not _wait_for_process_groups(
@@ -633,9 +680,15 @@ def _drain_marked_posix_groups(marker: str, deadline: float) -> bool:
         # process sharing the owner's own group. This is the proof rather than
         # the action: the drain is complete only once nothing carries the
         # marker, whichever group it sat in.
-        if not _marked_posix_processes(marker):
+        scan = _scan_marked_posix_processes(marker)
+        if scan.conclusive and not scan.processes:
             return True
         if time.monotonic() >= deadline:
+            if not scan.conclusive:
+                logger.error(
+                    "The browser launch marker could not be scanned for, so "
+                    "this shutdown stays unproven rather than assumed clean."
+                )
             return False
         time.sleep(_JOB_POLL_SECONDS)
 
