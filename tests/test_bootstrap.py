@@ -1587,9 +1587,7 @@ class TestTwoStageInstall:
         monkeypatch.setattr(bootstrap, "_browser_setup_ready", lambda: False)
         monkeypatch.setattr(bootstrap, "_run_browser_setup", progressing_setup)
         monkeypatch.setattr(bootstrap, "_BACKGROUND_BROWSER_SETUP_SECONDS", 0.02)
-        monkeypatch.setattr(
-            bootstrap, "_BACKGROUND_BROWSER_SETUP_LIFETIME_SECONDS", 30.0
-        )
+        monkeypatch.setattr(bootstrap, "_BROWSER_SETUP_LIFETIME_SECONDS", 30.0)
 
         await bootstrap._run_background_browser_setup()
 
@@ -1617,9 +1615,7 @@ class TestTwoStageInstall:
         monkeypatch.setattr(bootstrap, "_browser_setup_ready", lambda: False)
         monkeypatch.setattr(bootstrap, "_run_browser_setup", never_stops_moving)
         monkeypatch.setattr(bootstrap, "_BACKGROUND_BROWSER_SETUP_SECONDS", 30.0)
-        monkeypatch.setattr(
-            bootstrap, "_BACKGROUND_BROWSER_SETUP_LIFETIME_SECONDS", 0.05
-        )
+        monkeypatch.setattr(bootstrap, "_BROWSER_SETUP_LIFETIME_SECONDS", 0.05)
 
         with pytest.raises(BrowserSetupFailedError, match="absolute lifetime"):
             await asyncio.wait_for(bootstrap._run_background_browser_setup(), 5)
@@ -1656,9 +1652,7 @@ class TestTwoStageInstall:
             lambda reason: stood_down.append(reason),
         )
         monkeypatch.setattr(bootstrap, "_BACKGROUND_BROWSER_SETUP_SECONDS", 30.0)
-        monkeypatch.setattr(
-            bootstrap, "_BACKGROUND_BROWSER_SETUP_LIFETIME_SECONDS", 0.05
-        )
+        monkeypatch.setattr(bootstrap, "_BROWSER_SETUP_LIFETIME_SECONDS", 0.05)
 
         initialize_bootstrap("managed")
         await start_background_browser_setup_if_needed()
@@ -1668,6 +1662,9 @@ class TestTwoStageInstall:
             await asyncio.wait_for(task, 5)
 
         assert not bootstrap.browser_setup_in_progress()
+        assert get_bootstrap_state().setup_requires_stand_down, (
+            "the owner holds itself back rather than retrying into the same wall"
+        )
         liveness.background_activity_finished.assert_called_once()
 
     async def test_owner_setup_completion_resets_the_idle_clock(
@@ -2049,6 +2046,16 @@ class _FakeProc:
         self.returncode = -9
 
 
+class _NeverExitingProc(_FakeProc):
+    """Only the containment path reaps this one; it never exits itself."""
+
+    async def _wait(self) -> int:
+        while not self.stdin.closed:
+            await asyncio.sleep(0.001)
+        self.returncode = self._final
+        return self.returncode
+
+
 class _Spawned:
     """What the patched ``create_subprocess_exec`` was given, and handed back."""
 
@@ -2114,7 +2121,7 @@ class TestInstallerSupervisorLaunch:
         monkeypatch.setattr(bootstrap, "_INSTALLER_ACTIVITY_POLL_SECONDS", 0.001)
 
         watcher = asyncio.create_task(
-            bootstrap._watch_installer_activity(active.set, Path("private"), (), (), 0)
+            bootstrap._watch_installer_activity(active.set, Path("private"), (), ())
         )
         try:
             await asyncio.wait_for(active.wait(), timeout=1)
@@ -2123,18 +2130,16 @@ class TestInstallerSupervisorLaunch:
             with pytest.raises(asyncio.CancelledError):
                 await watcher
 
-    async def test_bytes_already_on_disk_are_not_charged_to_this_install(
+    async def test_a_footprint_under_the_ceiling_is_activity_and_not_a_failure(
         self, monkeypatch
     ):
-        """A previous attempt's extraction root must not spend this one's budget."""
+        """Growth is reported; only the total decides whether it is refused."""
         from linkedin_mcp_server import bootstrap
 
-        # 4 KiB is already there; this install then writes 512 bytes, which is
-        # under a 1 KiB ceiling only if the opening snapshot is the baseline.
-        opening = (("archive.zip", 4096, 1),)
+        opening = (("archive.zip", 256, 1),)
         scripted = [
-            (("archive.zip", 4096, 2),),
-            (("archive.zip", 4608, 3),),
+            (("archive.zip", 512, 2),),
+            (("archive.zip", 768, 3),),
         ]
         snapshots = iter(scripted)
         active = asyncio.Event()
@@ -2149,34 +2154,48 @@ class TestInstallerSupervisorLaunch:
 
         watcher = asyncio.create_task(
             bootstrap._watch_installer_activity(
-                active.set,
-                Path("private"),
-                (),
-                opening,
-                bootstrap._snapshot_bytes(opening),
+                active.set, Path("private"), (), opening
             )
         )
         try:
             await asyncio.wait_for(active.wait(), timeout=2)
             await asyncio.sleep(0.02)
-            assert not watcher.done(), "growth under the ceiling is not a failure"
+            assert not watcher.done(), "a footprint under the ceiling is not a failure"
         finally:
             watcher.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await watcher
 
-    async def test_a_runaway_download_stops_and_reaps_the_installer(self, monkeypatch):
+    async def test_a_tree_a_previous_attempt_left_still_counts(self, monkeypatch):
+        """Bytes this install did not write are still bytes it is answerable for.
+
+        The opposite rule, charging only growth, is what an attempt refused for
+        its size escapes on: patchright skips a cache directory it has already
+        marked complete, so the retry writes nothing and passes.
+        """
         from linkedin_mcp_server import bootstrap
         from linkedin_mcp_server.exceptions import BrowserSetupFailedError
 
-        class _NeverExitingProc(_FakeProc):
-            """Only the containment path reaps this one; it never exits itself."""
+        inherited = (("chromium-1217/chrome", 4096, 1),)
+        monkeypatch.setattr(
+            bootstrap,
+            "_installer_download_snapshot",
+            lambda temporary_root, extraction_paths: inherited,
+        )
+        monkeypatch.setattr(bootstrap, "_INSTALLER_ACTIVITY_POLL_SECONDS", 0.001)
+        monkeypatch.setattr(bootstrap, "_INSTALLER_MAX_WRITTEN_BYTES", 1024)
 
-            async def _wait(self) -> int:
-                while not self.stdin.closed:
-                    await asyncio.sleep(0.001)
-                self.returncode = self._final
-                return self.returncode
+        with pytest.raises(BrowserSetupFailedError, match="past its 1.0 KiB limit"):
+            await asyncio.wait_for(
+                bootstrap._watch_installer_activity(
+                    lambda: None, Path("private"), (), inherited
+                ),
+                timeout=2,
+            )
+
+    async def test_a_runaway_download_stops_and_reaps_the_installer(self, monkeypatch):
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.exceptions import BrowserSetupFailedError
 
         proc = _NeverExitingProc([], 0)
         overflowing = (("archive.zip", 5 * 1024**3, 1),)
@@ -2215,10 +2234,10 @@ class TestInstallerSupervisorLaunch:
     ):
         """A watcher bound the tree no longer shows does not fail the install.
 
-        The final snapshot is the one that decides, and here it finds nothing
-        above the baseline: whatever the watcher saw is gone from disk, so the
-        damage the ceiling exists to bound is gone with it. The install keeps
-        its own result and the breach stays a log line.
+        The final snapshot is the one that decides, and here it finds an empty
+        tree: whatever the watcher saw is gone from disk, so the damage the
+        ceiling exists to bound is gone with it. The install keeps its own
+        result and the breach stays a log line.
         """
         from linkedin_mcp_server import bootstrap
         from linkedin_mcp_server.exceptions import BrowserSetupFailedError
@@ -2230,13 +2249,12 @@ class TestInstallerSupervisorLaunch:
             _temporary_root: Path,
             _extraction_paths: tuple[Path, ...],
             _opening: tuple[tuple[str, int, int], ...],
-            _baseline: int,
         ) -> None:
             try:
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
                 raise BrowserSetupFailedError(
-                    "wrote 5.0 GiB, past its 4.0 GiB limit"
+                    "holds 5.0 GiB, past its 4.0 GiB limit"
                 ) from None
 
         async def delayed_lines(stream: object):
@@ -2259,24 +2277,14 @@ class TestInstallerSupervisorLaunch:
         assert "exceeded a setup bound" in caplog.text
 
     async def test_bytes_written_before_the_first_poll_are_charged(self, monkeypatch):
-        """The baseline is taken before the supervisor can write anything.
+        """Everything lands inside one poll interval and is still refused.
 
-        Measured against a baseline taken inside the watcher: an installer that
-        writes everything between its own start and the first poll has that
-        growth folded into its own baseline, and the ceiling then has nothing
-        left to refuse.
+        Nothing here ever grows between two polls, so a ceiling reading the
+        difference between them sees zero. It is the footprint the first poll
+        finds that decides.
         """
         from linkedin_mcp_server import bootstrap
         from linkedin_mcp_server.exceptions import BrowserSetupFailedError
-
-        class _NeverExitingProc(_FakeProc):
-            """Only the containment path reaps this one; it never exits itself."""
-
-            async def _wait(self) -> int:
-                while not self.stdin.closed:
-                    await asyncio.sleep(0.001)
-                self.returncode = self._final
-                return self.returncode
 
         proc = _NeverExitingProc([], 0)
         overflowing = (("archive.zip", 5 * 1024**3, 1),)
@@ -2309,7 +2317,7 @@ class TestInstallerSupervisorLaunch:
                 5,
             )
 
-        assert "wrote 5.0 GiB" in str(failure.value)
+        assert "holds 5.0 GiB" in str(failure.value)
         assert proc.waited, "the installer was reaped rather than left running"
 
     @staticmethod
@@ -2408,14 +2416,14 @@ class TestInstallerSupervisorLaunch:
     async def test_a_normal_install_passes_the_final_accounting(
         self, isolate_profile_dir, tmp_path, monkeypatch
     ):
-        """Growth under the ceiling, above bytes a previous attempt left."""
+        """A tree that stays under the ceiling is recorded as installed."""
         from linkedin_mcp_server import bootstrap
 
         _patch_targets_and_version(monkeypatch)
         monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "browsers"))
         monkeypatch.setattr(bootstrap, "_INSTALLER_MAX_WRITTEN_BYTES", 1024)
-        disk: list[tuple[tuple[str, int, int], ...]] = [(("chrome", 4096, 1),)]
-        self._exits_before_pipe_eof(monkeypatch, disk, (("chrome", 4608, 2),))
+        disk: list[tuple[tuple[str, int, int], ...]] = [()]
+        self._exits_before_pipe_eof(monkeypatch, disk, (("chrome", 512, 2),))
 
         await asyncio.wait_for(
             bootstrap._run_browser_setup(activity_callback=lambda: None), 5
@@ -2423,6 +2431,195 @@ class TestInstallerSupervisorLaunch:
 
         payload = json.loads(install_metadata_path().read_text())
         assert payload["installed_targets"]["chromium-"] is True
+
+    async def test_an_oversized_completed_target_cannot_pass_on_retry(
+        self, isolate_profile_dir, tmp_path, monkeypatch
+    ):
+        """A tree refused for its size stays refused when patchright skips it.
+
+        The first attempt leaves the extraction target complete, marker and
+        all, so the second one downloads nothing. Charging growth would then
+        find none and record the very tree the ceiling had just refused.
+        """
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.exceptions import BrowserSetupFailedError
+
+        _patch_targets_and_version(monkeypatch)
+        browsers = tmp_path / "browsers"
+        monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(browsers))
+        monkeypatch.setattr(bootstrap, "_INSTALLER_MAX_WRITTEN_BYTES", 4096)
+        target = browsers / "chromium-1217"
+        spawned: list[_FakeProc] = []
+
+        async def spawn(*_args: object, **_kwargs: object) -> _FakeProc:
+            if not target.exists():
+                target.mkdir(parents=True)
+                (target / "chrome").write_bytes(b"a" * 16384)
+                (target / "INSTALLATION_COMPLETE").write_text("")
+            proc = _FakeProc([], 0)
+            spawned.append(proc)
+            return proc
+
+        async def delayed_lines(stream: object):
+            await asyncio.sleep(0)
+            setattr(stream, "exhausted", True)
+            if False:  # pragma: no cover - makes this an async generator
+                yield ""
+
+        monkeypatch.setattr(bootstrap, "_installer_lines", delayed_lines)
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+
+        for attempt in range(2):
+            with pytest.raises(BrowserSetupFailedError, match="past its 4.0 KiB limit"):
+                await asyncio.wait_for(bootstrap._run_browser_setup(), 5)
+            assert not install_metadata_path().exists(), (
+                f"attempt {attempt} recorded a browser the ceiling refused"
+            )
+
+        assert (target / "INSTALLATION_COMPLETE").is_file(), (
+            "the refused tree is the completed one patchright would skip"
+        )
+        assert len(spawned) == 1, "and the retry was refused before it could run"
+
+    async def test_a_direct_install_watches_bytes_without_a_progress_callback(
+        self, monkeypatch
+    ):
+        """No progress callback is not a reason to install without a ceiling.
+
+        ``--login``, ``--status`` and ``--import-from-browser`` hold no
+        inactivity deadline and pass none, which is not an opinion about how
+        many bytes they may write.
+        """
+        from linkedin_mcp_server import bootstrap
+
+        proc = _FakeProc([], 0)
+        watched: list[Callable[[], None]] = []
+
+        async def watcher(
+            callback: Callable[[], None],
+            _temporary_root: Path,
+            _extraction_paths: tuple[Path, ...],
+            _opening: tuple[tuple[str, int, int], ...],
+        ) -> None:
+            watched.append(callback)
+            await asyncio.Event().wait()
+
+        async def delayed_lines(stream: object):
+            await asyncio.sleep(0)
+            setattr(stream, "exhausted", True)
+            if False:  # pragma: no cover - makes this an async generator
+                yield ""
+
+        monkeypatch.setattr(bootstrap, "_installer_lines", delayed_lines)
+        monkeypatch.setattr(
+            asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)
+        )
+        monkeypatch.setattr(bootstrap, "_watch_installer_activity", watcher)
+
+        await asyncio.wait_for(bootstrap._run_patchright_install("--no-shell"), 5)
+
+        assert len(watched) == 1, "the watcher ran for a caller that passed none"
+        assert watched[0]() is None, "and had somewhere to report progress to"
+
+    async def test_endless_growth_contains_a_direct_install(self, monkeypatch):
+        """The ceiling reaps the installer and its private root either way."""
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.exceptions import BrowserSetupFailedError
+
+        proc = _NeverExitingProc([], 0)
+        overflowing = (("archive.zip", 5 * 1024**3, 1),)
+        snapshots = iter([(), overflowing])
+        removed: list[Path] = []
+
+        def cleanup(temporary_root: bootstrap._InstallerTemporaryRoot) -> None:
+            removed.append(temporary_root.path)
+            bootstrap._remove_installer_temporary_root(temporary_root)
+
+        async def hanging_lines(stream: object):
+            await asyncio.Event().wait()
+            if False:  # pragma: no cover - makes this an async generator
+                yield ""
+
+        monkeypatch.setattr(bootstrap, "_installer_lines", hanging_lines)
+        monkeypatch.setattr(
+            asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)
+        )
+        monkeypatch.setattr(
+            bootstrap,
+            "_installer_download_snapshot",
+            lambda temporary_root, extraction_paths: next(snapshots, overflowing),
+        )
+        monkeypatch.setattr(bootstrap, "_INSTALLER_ACTIVITY_POLL_SECONDS", 0.001)
+        monkeypatch.setattr(
+            bootstrap, "_start_installer_temporary_root_cleanup", cleanup
+        )
+
+        with pytest.raises(BrowserSetupFailedError, match="past its 4.0 GiB limit"):
+            await asyncio.wait_for(bootstrap._run_patchright_install("--no-shell"), 5)
+
+        assert proc.waited, "the installer was reaped rather than left running"
+        assert removed and not removed[0].exists(), "and its private root is gone"
+
+    async def test_the_absolute_lifetime_stops_a_direct_install(self, monkeypatch):
+        """An install nothing else bounds still expires.
+
+        Nothing grows here, so the byte ceiling has nothing to refuse and no
+        caller is holding an inactivity deadline: the lifetime is the only
+        bound left, and without it this install runs forever.
+        """
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.exceptions import BrowserSetupFailedError
+
+        proc = _NeverExitingProc([], 0)
+
+        async def hanging_lines(stream: object):
+            await asyncio.Event().wait()
+            if False:  # pragma: no cover - makes this an async generator
+                yield ""
+
+        monkeypatch.setattr(bootstrap, "_installer_lines", hanging_lines)
+        monkeypatch.setattr(
+            asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)
+        )
+        monkeypatch.setattr(bootstrap, "_BROWSER_SETUP_LIFETIME_SECONDS", 0.05)
+
+        with pytest.raises(BrowserSetupFailedError, match="absolute lifetime"):
+            await asyncio.wait_for(bootstrap._run_patchright_install("--no-shell"), 5)
+
+        assert proc.waited, "the installer was reaped rather than left running"
+
+    async def test_the_background_path_arms_one_lifetime_and_not_two(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        """The installer must not re-arm a bound its caller already holds.
+
+        A second scope would restart the six hours from wherever the installer
+        happened to begin, so an attempt could outlive the ceiling by however
+        long the readiness check and the setup around it took.
+        """
+        from linkedin_mcp_server import bootstrap
+
+        armed = 0
+        real_timeout_at = asyncio.timeout_at
+
+        def counting_timeout_at(when: float) -> object:
+            nonlocal armed
+            armed += 1
+            return real_timeout_at(when)
+
+        async def setup(**_kwargs: object) -> None:
+            async with bootstrap._setup_lifetime():
+                await asyncio.sleep(0)
+
+        monkeypatch.setattr(bootstrap, "_browser_setup_ready", lambda: False)
+        monkeypatch.setattr(bootstrap, "_run_browser_setup", setup)
+        monkeypatch.setattr(asyncio, "timeout_at", counting_timeout_at)
+
+        await bootstrap._run_background_browser_setup()
+
+        # One lifetime and one inactivity deadline, and nothing from the layer
+        # underneath them.
+        assert armed == 2
 
     def test_real_activity_scanner_observes_private_archive_growth(self, tmp_path):
         from linkedin_mcp_server import bootstrap
@@ -2581,7 +2778,6 @@ class TestInstallerSupervisorLaunch:
             _temporary_root: Path,
             _extraction_paths: tuple[Path, ...],
             _opening: tuple[tuple[str, int, int], ...],
-            _baseline: int,
         ) -> None:
             raise RuntimeError("watcher unavailable")
 
@@ -2617,7 +2813,6 @@ class TestInstallerSupervisorLaunch:
             _temporary_root: Path,
             _extraction_paths: tuple[Path, ...],
             _opening: tuple[tuple[str, int, int], ...],
-            _baseline: int,
         ) -> None:
             try:
                 await asyncio.Event().wait()

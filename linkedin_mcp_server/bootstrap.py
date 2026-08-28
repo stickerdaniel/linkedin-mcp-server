@@ -7,6 +7,7 @@ import codecs
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 import contextlib
+from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import Enum
 import functools
@@ -975,7 +976,41 @@ _BACKGROUND_BROWSER_SETUP_SECONDS = 30 * 60.0
 #: one is armed once and expires. Six hours against a measured install of well
 #: under a minute, and against the 170 MiB download needing about five at
 #: 10 KiB/s, which is already below any link this server is usable on.
-_BACKGROUND_BROWSER_SETUP_LIFETIME_SECONDS = 6 * 60 * 60.0
+_BROWSER_SETUP_LIFETIME_SECONDS = 6 * 60 * 60.0
+
+#: Whether an outer scope already holds the lifetime, so one attempt arms one
+#: timer: the background task around the whole attempt, a direct install at the
+#: installer.
+_setup_lifetime_armed: ContextVar[bool] = ContextVar(
+    "linkedin_mcp_setup_lifetime_armed", default=False
+)
+
+
+class _SetupLifetimeExceeded(BrowserSetupFailedError):
+    """The lifetime, which no progress reschedules, not the inactivity deadline."""
+
+
+@contextlib.asynccontextmanager
+async def _setup_lifetime() -> AsyncIterator[None]:
+    """Bound one managed setup attempt, wherever that attempt is entered."""
+    if _setup_lifetime_armed.get():
+        yield
+        return
+    token = _setup_lifetime_armed.set(True)
+    scope = asyncio.timeout_at(
+        asyncio.get_running_loop().time() + _BROWSER_SETUP_LIFETIME_SECONDS
+    )
+    try:
+        async with scope:
+            yield
+    except TimeoutError as exc:
+        if scope.expired():
+            raise _SetupLifetimeExceeded(
+                "Patchright Chromium browser setup exceeded its absolute lifetime"
+            ) from exc
+        raise
+    finally:
+        _setup_lifetime_armed.reset(token)
 
 
 def _mark_background_setup_timed_out() -> None:
@@ -991,9 +1026,6 @@ async def _run_background_browser_setup(deadline_at: float | None = None) -> Non
     if checked is None:
         checked = asyncio.Event()
         _state.setup_check_complete = checked
-    lifetime = asyncio.timeout_at(
-        loop.time() + _BACKGROUND_BROWSER_SETUP_LIFETIME_SECONDS
-    )
     deadline = asyncio.timeout_at(deadline_at)
 
     def record_installer_activity() -> None:
@@ -1001,7 +1033,7 @@ async def _run_background_browser_setup(deadline_at: float | None = None) -> Non
             deadline.reschedule(loop.time() + _BACKGROUND_BROWSER_SETUP_SECONDS)
 
     try:
-        async with lifetime, deadline:
+        async with _setup_lifetime(), deadline:
             if await _run_in_daemon_thread(_owned_browser_setup_ready):
                 _schedule_retained_browser_revision_report()
                 _state.setup_state = SetupState.READY
@@ -1014,14 +1046,13 @@ async def _run_background_browser_setup(deadline_at: float | None = None) -> Non
             _mark_browser_setup_invalid()
             checked.set()
             await _run_browser_setup(activity_callback=record_installer_activity)
+    except _SetupLifetimeExceeded:
+        # First, because the lifetime cancels the inactivity scope on its way
+        # out and a caller that only asked the inner one would name the wrong
+        # bound. It arrives already told apart, from whichever layer armed it.
+        _mark_background_setup_timed_out()
+        raise
     except TimeoutError as exc:
-        # The lifetime first: it cancels the inactivity scope on its way out, so
-        # a caller that only asked the inner one would name the wrong bound.
-        if lifetime.expired():
-            _mark_background_setup_timed_out()
-            raise BrowserSetupFailedError(
-                "Patchright Chromium browser setup exceeded its absolute lifetime"
-            ) from exc
         if not deadline.expired():
             raise
         _mark_background_setup_timed_out()
@@ -1664,14 +1695,15 @@ async def _start_installer_supervisor(
 
 
 _INSTALLER_ACTIVITY_POLL_SECONDS = 5.0
-#: Ceiling on what one install may write, across its private download archive
+#: Ceiling on what one install may hold, across its private download archive
 #: and the cache directory it extracts into. Patchright enforces no byte limit
 #: of its own, so a successful chunked response that never ends is written until
 #: the disk is full. Measured on macOS arm64 at revision 1228: 344 MiB extracted
 #: beside a 170 MiB archive, about 515 MiB while both exist. Eight times that
 #: leaves room for a larger platform and a later revision and still bounds the
-#: damage. The counterpart bound is the setup lifetime; neither implies the
-#: other, because bytes can arrive slowly and time can pass without any.
+#: damage. A footprint rather than a delta, so a refused tree stays refused.
+#: The counterpart bound is the setup lifetime; neither implies the other,
+#: because bytes can arrive slowly and time can pass without any.
 _INSTALLER_MAX_WRITTEN_BYTES = 4 * 1024**3
 
 
@@ -1745,14 +1777,17 @@ def _snapshot_bytes(snapshot: tuple[tuple[str, int, int], ...]) -> int:
     return sum({name: size for name, size, _mtime in snapshot}.values())
 
 
-def _refuse_oversized_install(
-    snapshot: tuple[tuple[str, int, int], ...], baseline: int
-) -> None:
-    """Refuse an install whose growth above *baseline* passes the byte ceiling."""
-    written = _snapshot_bytes(snapshot) - baseline
-    if written > _INSTALLER_MAX_WRITTEN_BYTES:
+def _refuse_oversized_install(snapshot: tuple[tuple[str, int, int], ...]) -> None:
+    """Refuse an install whose attributable footprint passes the byte ceiling.
+
+    The footprint, never growth: a refused tree keeps its ``INSTALLATION_COMPLETE``
+    marker, so the retry patchright skips writes nothing. Only this install's own
+    targets and its private archive are counted.
+    """
+    held = _snapshot_bytes(snapshot)
+    if held > _INSTALLER_MAX_WRITTEN_BYTES:
         raise BrowserSetupFailedError(
-            f"Patchright Chromium browser setup wrote {_format_size(written)}, "
+            f"Patchright Chromium browser setup holds {_format_size(held)}, "
             f"past its {_format_size(_INSTALLER_MAX_WRITTEN_BYTES)} limit"
         )
 
@@ -1762,12 +1797,11 @@ async def _watch_installer_activity(
     temporary_root: Path,
     extraction_paths: tuple[Path, ...],
     opening: tuple[tuple[str, int, int], ...],
-    baseline: int,
 ) -> None:
     """Report installer progress and refuse an install that never stops growing.
 
-    The caller takes *opening* and its *baseline* total before anything can
-    write, or the bytes landing before the first poll are charged to nobody.
+    The caller takes *opening* before anything can write, so the first poll
+    already compares against a tree this install has not touched.
     """
     previous = opening
     while True:
@@ -1775,7 +1809,7 @@ async def _watch_installer_activity(
         current = await _run_in_daemon_thread(
             _installer_download_snapshot, temporary_root, extraction_paths
         )
-        _refuse_oversized_install(current, baseline)
+        _refuse_oversized_install(current)
         if current != previous:
             callback()
             previous = current
@@ -2007,13 +2041,36 @@ def _installer_bound_breached(activity: asyncio.Task[None]) -> bool:
     return isinstance(activity.exception(), BrowserSetupFailedError)
 
 
+def _no_installer_progress() -> None:
+    """Progress sink for an install nobody is holding a deadline open for."""
+
+
 async def _run_patchright_install(
     extra_arg: str,
     *,
     line_callback: Callable[[str], None] | None = None,
     activity_callback: Callable[[], None] | None = None,
 ) -> None:
-    """Run one ``patchright install chromium`` stage with the given flag.
+    """Run one ``patchright install chromium`` stage under both hard bounds.
+
+    Every managed install arrives here, so the byte ceiling and the lifetime
+    apply whether or not the caller passes a progress callback.
+    """
+    async with _setup_lifetime():
+        await _install_under_supervision(
+            extra_arg,
+            line_callback=line_callback,
+            activity_callback=activity_callback,
+        )
+
+
+async def _install_under_supervision(
+    extra_arg: str,
+    *,
+    line_callback: Callable[[str], None] | None = None,
+    activity_callback: Callable[[], None] | None = None,
+) -> None:
+    """Run the installer subprocess and account for what it puts on disk.
 
     The patchright registry lock serializes concurrent installs, so two
     processes reaching this at once queue on the same browsers path rather than
@@ -2039,13 +2096,14 @@ async def _run_patchright_install(
         extraction_paths = await _run_in_daemon_thread(
             _installer_extraction_paths, extra_arg, environment
         )
-        # Before the supervisor exists, so nothing this install writes lands in
-        # its own baseline, and only growth above a previous attempt's bytes is
-        # charged. The one opening walk; the watcher reuses this snapshot.
+        # Before the supervisor exists, so the watcher's first poll compares
+        # against a tree this install has not touched.
         opening = await _run_in_daemon_thread(
             _installer_download_snapshot, temporary_root, extraction_paths
         )
-        baseline = _snapshot_bytes(opening)
+        # And judged here, or a complete oversized target passes as a retry
+        # patchright skips and nothing had to write.
+        _refuse_oversized_install(opening)
         proc = _managed_installer(
             await _start_installer_supervisor(extra_arg, environment)
         )
@@ -2080,19 +2138,16 @@ async def _run_patchright_install(
                 if line_callback is not None:
                     line_callback(text)
 
-        activity = (
-            asyncio.create_task(
-                _watch_installer_activity(
-                    activity_callback,
-                    temporary_root,
-                    extraction_paths,
-                    opening,
-                    baseline,
-                ),
-                name="browser-installer-activity",
-            )
-            if activity_callback is not None
-            else None
+        # Unconditional: the progress callback is optional, the byte ceiling it
+        # rides along with is not.
+        activity = asyncio.create_task(
+            _watch_installer_activity(
+                activity_callback or _no_installer_progress,
+                temporary_root,
+                extraction_paths,
+                opening,
+            ),
+            name="browser-installer-activity",
         )
 
         async def wait_for_process() -> int:
@@ -2117,13 +2172,13 @@ async def _run_patchright_install(
                 # Before the wait, not after it: a watcher that has already
                 # refused this install would otherwise be read only once the
                 # installer it is trying to stop had exited on its own.
-                if activity is not None and _installer_bound_breached(activity):
+                if _installer_bound_breached(activity):
                     bound_raised = True
                     await activity
                 watched: set[asyncio.Task[Any]] = {waiting}
                 if not output.done():
                     watched.add(output)
-                if activity is not None and not activity.done():
+                if not activity.done():
                     watched.add(activity)
                 done, _pending = await asyncio.wait(
                     watched, return_when=asyncio.FIRST_COMPLETED
@@ -2186,7 +2241,7 @@ async def _run_patchright_install(
                 "\n".join(lines) or "Patchright Chromium browser setup failed."
             )
         try:
-            _refuse_oversized_install(final, baseline)
+            _refuse_oversized_install(final)
         except BrowserSetupFailedError:
             # The bound decided this install, so the watcher carrying the same
             # breach into the cleanup below is not a missed one to warn about.
