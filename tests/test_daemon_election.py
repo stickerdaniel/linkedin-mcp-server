@@ -2665,6 +2665,98 @@ class TestAtomicStartupCommit:
         def poll(self) -> int | None:
             return self.returncode
 
+    class _Job:
+        """The parent's kill-on-close Windows Job Object, as a double.
+
+        The required Windows CI job runs this whole class natively, where
+        ``os.name`` is "nt" with nothing patched, so ``_spawn`` creates a Job
+        and hands it the gate. A real one cannot serve these cases: ``_Child``
+        is not a process and exposes no ``_handle``, so ``assign_popen``
+        raises before a single startup assertion runs. Nor may one be created
+        here, because a real Job would contain this interpreter's own
+        descendants and terminate them.
+
+        So the contract is modelled instead, in the order ``_spawn`` and
+        ``_stop_child`` perform it: created by name, assigned the gate before
+        the gate is released, terminated or closed once, its process handle
+        released after the gate exits, and proved empty before it is done.
+        Every step is checked, so a production reordering fails here rather
+        than passing quietly.
+
+        Termination kills the assigned child, which is what
+        ``TerminateJobObject`` does to every member of the Job. That keeps the
+        ``child.killed`` assertions meaning the same thing on both platforms:
+        on POSIX the kill arrives through the ``terminate_process_group``
+        stand-in, and on Windows through the containment that replaces it.
+        """
+
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.child: Any = None
+            self.steps: list[str] = []
+            self.closed = False
+            self.drained = False
+            #: What the gate had been told when it was assigned. Bytes, so this
+            #: is a snapshot rather than a view of a stream that keeps growing.
+            self.gate_input_at_assignment: bytes | None = None
+
+        def assign_popen(self, child: Any) -> None:
+            assert not self.closed, "a released Job was handed the owner gate"
+            assert self.child is None, "the owner gate was assigned twice"
+            self.child = child
+            self.gate_input_at_assignment = getattr(child.stdin, "written", None)
+            self.steps.append("assign")
+
+        def terminate(self) -> None:
+            assert not self.closed, "a released Job was asked to terminate"
+            assert self.child is not None, "an unassigned Job was terminated"
+            self.steps.append("terminate")
+            self.child.kill()
+
+        def release_popen_handle(self, child: Any) -> None:
+            assert child is self.child, "a foreign process handle was released"
+            assert child.returncode is not None, (
+                "the gate handle was released before the gate exited"
+            )
+            self.steps.append("release-handle")
+
+        def wait_until_empty(self, *, timeout: float) -> None:
+            assert not self.closed, "a released Job was asked to prove it drained"
+            assert self.steps[-1] == "release-handle", (
+                "the Job was asked to prove it drained while the parent still "
+                "held the gate's process handle"
+            )
+            assert timeout <= election_module._STOP_CHILD_SECONDS
+            self.steps.append("drain")
+            self.drained = True
+            self.closed = True
+
+        def close(self) -> None:
+            if not self.closed:
+                self.steps.append("close")
+                self.closed = True
+
+    @pytest.fixture(autouse=True)
+    def owner_jobs(self, monkeypatch: pytest.MonkeyPatch) -> list[_Job]:
+        """Inject the Job double every case needs on native Windows.
+
+        Returns the Jobs ``_spawn`` created, which is empty on POSIX because
+        nothing there takes that branch. A case that wants to observe the
+        handoff takes this fixture and makes ``os.name`` answer "nt" itself.
+        """
+        created: list[TestAtomicStartupCommit._Job] = []
+
+        class _Injected(TestAtomicStartupCommit._Job):
+            @classmethod
+            def named(cls, purpose: str) -> TestAtomicStartupCommit._Job:
+                assert purpose == "owner"
+                job = cls(f"Local\\linkedin-mcp-{purpose}-double")
+                created.append(job)
+                return job
+
+        monkeypatch.setattr(election_module, "WindowsJob", _Injected)
+        return created
+
     def _spawn(
         self,
         tmp_path: Path,
@@ -3534,6 +3626,87 @@ class TestAtomicStartupCommit:
             control.host,
             control.port,
         )
+
+    def test_a_generic_case_is_given_a_job_before_the_owner_starts(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        owner_jobs: list[_Job],
+    ):
+        # What the required Windows CI job does to every case in this class:
+        # there `os.name` is "nt" already, so `_spawn` creates a Job, names it
+        # in the gate's command line and assigns the gate to it before letting
+        # any owner code run. This case takes that branch on any platform while
+        # asking for nothing beyond the defaults, so a double dropped from the
+        # fixture fails here rather than only on Windows, where it would fail
+        # seventeen cases at once.
+        monkeypatch.setattr(
+            election_module, "os", SimpleNamespace(name="nt", environ=os.environ)
+        )
+        commands: list[list[str]] = []
+        build = election_module._spawn_command
+        monkeypatch.setattr(
+            election_module,
+            "_spawn_command",
+            lambda **kwargs: commands.append(build(**kwargs)) or commands[-1],
+        )
+
+        outcome, child, events = self._spawn(
+            tmp_path, monkeypatch, validate=lambda *a, **k: None
+        )
+
+        assert outcome is election_module._Started.YES
+        assert events == []
+        assert len(owner_jobs) == 1
+        job = owner_jobs[0]
+        assert job.child is child, "the gate was never assigned to the owner Job"
+        # The name the parent created travels to the child, which is the only
+        # way the owner can find the Job it has to adopt.
+        assert commands[-1][-2:] == ["--job-name", job.name]
+        # Assignment comes first and the gate is still waiting, so no owner code
+        # exists until the parent owns the Job.
+        assert job.steps[0] == "assign"
+        assert job.gate_input_at_assignment == b"", (
+            "the gate was released before the parent owned its Job"
+        )
+        assert child.input.written.startswith(b"release ")
+        # A committed owner is left running, so the parent lets its handle go
+        # without terminating or draining anything.
+        assert job.steps == ["assign", "close"]
+        assert not child.killed
+
+    def test_a_generic_case_never_touches_a_real_job_object(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        owner_jobs: list[_Job],
+    ):
+        # The same branch on the fixture's own defaults. The genuine
+        # `WindowsJob` cannot serve this class at all: `_Child` is not a process
+        # and exposes no `_handle`, so the real `assign_popen` refuses it before
+        # any startup assertion runs. Asserted against the production method
+        # rather than a story about it, and without a Job Object: the handle
+        # lookup fails on the argument, so this never reaches `self`. The real
+        # Job path is covered separately in `tests/test_process_tree.py`.
+        from linkedin_mcp_server import process_tree as process_tree_module
+
+        monkeypatch.setattr(
+            election_module, "os", SimpleNamespace(name="nt", environ=os.environ)
+        )
+
+        outcome, child, _ = self._spawn(
+            tmp_path, monkeypatch, validate=lambda *a, **k: None
+        )
+
+        assert outcome is election_module._Started.YES
+        assert len(owner_jobs) == 1
+        assert not isinstance(owner_jobs[0], process_tree_module.WindowsJob)
+        with pytest.raises(
+            process_tree_module.ProcessTreeError, match="no process handle"
+        ):
+            process_tree_module.WindowsJob.assign_popen(
+                cast(Any, None), cast(Any, child)
+            )
 
 
 @pytest.mark.slow
