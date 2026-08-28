@@ -1140,23 +1140,64 @@ def _started_worker_pid(frame: bytes, nonce: str) -> int | None:
     return worker_pid if worker_pid > 0 else None
 
 
+def _installer_supervisor_command(worker_target: list[str]) -> list[str]:
+    """Start the supervisor so no interpreter startup hook precedes it.
+
+    On POSIX the supervisor is its own session leader while the worker leads a
+    separate process group, and each side drains only what it owns: the parent
+    signals the supervisor pid, the supervisor drains the worker group. A
+    ``sitecustomize`` or ``usercustomize`` hook runs before
+    :func:`installer_supervisor.main`, so anything it spawns lands in the
+    supervisor's own group, where it inherits the installer output pipes and
+    nothing ever reaps it. It would hold output EOF open after the supervisor
+    exits and survive cancellation.
+
+    ``-S`` is what closes that, and nothing weaker does. ``-P``,
+    ``PYTHONNOUSERSITE`` and a popped ``PYTHONPATH`` never touch
+    ``sitecustomize``, and ``-I`` only takes away the user-site copy: the one a
+    virtual environment or a system install ships still runs. ``-I`` earns its
+    place beside it because the file below re-adds an import root by hand, and
+    an inherited ``PYTHONPATH`` would otherwise be searched in front of it.
+
+    Because ``site`` is then gone, the module cannot be reached by name, so the
+    file runs by absolute path from next to this one and re-adds that one root
+    itself. ``-u`` matches :func:`windows_gate_command`, the other launcher that
+    starts a stdlib-only helper this way, and keeps the framed stderr the parent
+    parses independent of how the interpreter would buffer it. The worker keeps
+    ordinary startup: its whole group is contained.
+
+    Windows keeps the module form. There the supervisor runs under the gate
+    inside the parent-owned kill-on-close Job, which already contains whatever
+    a startup hook spawns, and the package import there probes the greenlet C
+    runtime through modules that ``-S`` would put out of reach.
+    """
+    if os.name == "nt":
+        return [
+            sys.executable,
+            "-P",
+            "-m",
+            "linkedin_mcp_server.installer_supervisor",
+            "--",
+            *worker_target,
+        ]
+    supervisor = Path(__file__).with_name("installer_supervisor.py").resolve()
+    return [sys.executable, "-I", "-S", "-u", str(supervisor), "--", *worker_target]
+
+
 async def _start_installer_supervisor(
     extra_arg: str,
 ) -> _InstallerProcess:
-    target = [
-        sys.executable,
-        "-P",
-        "-m",
-        "linkedin_mcp_server.installer_supervisor",
-        "--",
-        sys.executable,
-        "-P",
-        "-m",
-        "patchright",
-        "install",
-        "chromium",
-        extra_arg,
-    ]
+    target = _installer_supervisor_command(
+        [
+            sys.executable,
+            "-P",
+            "-m",
+            "patchright",
+            "install",
+            "chromium",
+            extra_arg,
+        ]
+    )
     windows_job = WindowsJob.anonymous() if os.name == "nt" else None
     gate_nonce = release_nonce() if windows_job is not None else None
     command = (

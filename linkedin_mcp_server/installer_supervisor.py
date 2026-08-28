@@ -8,13 +8,26 @@ import sys
 import threading
 from typing import BinaryIO
 
-from linkedin_mcp_server.process_protocol import (
+if not __package__:
+    # Production starts this file by absolute path under ``-I -S`` so that no
+    # interpreter startup hook runs before the code below claims the control
+    # pipes. ``site`` never ran, so the only import root is the one this file
+    # was loaded from, which the parent picked next to its own module rather
+    # than from anything the environment could redirect. Appended rather than
+    # inserted: ``site`` would place the same directory after the standard
+    # library, and going in front of it would let a sibling of this package
+    # shadow a standard-library module.
+    _PACKAGE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if _PACKAGE_ROOT not in sys.path:
+        sys.path.append(_PACKAGE_ROOT)
+
+from linkedin_mcp_server.process_protocol import (  # noqa: E402
     NONCE_LENGTH,
     new_nonce,
     read_authenticated_status,
     valid_nonce,
 )
-from linkedin_mcp_server.process_tree import (
+from linkedin_mcp_server.process_tree import (  # noqa: E402
     child_exited_without_reaping,
     terminate_process_group,
 )

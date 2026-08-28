@@ -1312,6 +1312,43 @@ class TestInstallerSupervisorLaunch:
 
         monkeypatch.setattr(bootstrap, "new_nonce", lambda: _SUPERVISOR_NONCE)
 
+    def test_posix_supervisor_runs_the_file_without_startup_hooks(self, monkeypatch):
+        from linkedin_mcp_server import bootstrap
+
+        monkeypatch.setattr(
+            bootstrap, "os", SimpleNamespace(name="posix", environ=os.environ)
+        )
+
+        command = bootstrap._installer_supervisor_command(["target", "arg"])
+
+        # ``-S`` is the flag that stops a system or virtual-environment
+        # ``sitecustomize``; ``-I`` alone leaves it running.
+        assert command[1:4] == ["-I", "-S", "-u"]
+        supervisor = Path(command[4])
+        assert supervisor.is_absolute()
+        assert supervisor.name == "installer_supervisor.py"
+        assert supervisor.is_file()
+        assert command[-3:] == ["--", "target", "arg"]
+
+    def test_windows_supervisor_keeps_the_module_form(self, monkeypatch):
+        from linkedin_mcp_server import bootstrap
+
+        monkeypatch.setattr(
+            bootstrap, "os", SimpleNamespace(name="nt", environ=os.environ)
+        )
+
+        command = bootstrap._installer_supervisor_command(["target", "arg"])
+
+        assert command == [
+            sys.executable,
+            "-P",
+            "-m",
+            "linkedin_mcp_server.installer_supervisor",
+            "--",
+            "target",
+            "arg",
+        ]
+
     async def test_launches_the_internal_supervisor_and_reads_its_target(
         self, monkeypatch
     ):
@@ -1336,12 +1373,12 @@ class TestInstallerSupervisorLaunch:
         )
         args = captured["args"]
         assert isinstance(args, tuple)
-        assert args[1:4] == (
-            "-P",
-            "-m",
-            "linkedin_mcp_server.installer_supervisor",
+        assert args[1:4] == ("-I", "-S", "-u")
+        assert args[4] == str(
+            Path(bootstrap.__file__).with_name("installer_supervisor.py").resolve()
         )
-        assert args[5:9] == (sys.executable, "-P", "-m", "patchright")
+        assert args[5] == "--"
+        assert args[6:10] == (sys.executable, "-P", "-m", "patchright")
         assert args[-2:] == ("chromium", "--no-shell")
         kwargs = cast(dict[str, object], captured["kwargs"])
         assert kwargs["stdin"] is asyncio.subprocess.PIPE
