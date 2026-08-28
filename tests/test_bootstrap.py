@@ -2668,6 +2668,11 @@ class TestInstallerSupervisorLaunch:
                 bootstrap._SHELL_DIR_PREFIX: "123",
             },
         )
+        # The auxiliary targets have their own tests below; this one is about
+        # which browser revision the poll is bound to.
+        monkeypatch.setattr(
+            bootstrap, "_installer_auxiliary_names", lambda browser_selected: ()
+        )
         extraction_paths = bootstrap._installer_extraction_paths(
             "--no-shell", environment
         )
@@ -7368,6 +7373,318 @@ class TestPatchrightInstallTargets:
             tmp_path,
         )
         assert _patchright_install_targets() is None
+
+
+def _installed_patchright_registry() -> dict[str, Any]:
+    """Read the browsers.json of the patchright actually installed here."""
+    import patchright
+
+    registry = Path(patchright.__file__).parent / "driver" / "package" / "browsers.json"
+    return cast(dict[str, Any], json.loads(registry.read_text()))
+
+
+def _registry_entry(name: str) -> dict[str, Any]:
+    for entry in _installed_patchright_registry()["browsers"]:
+        if entry.get("name") == name:
+            return cast(dict[str, Any], entry)
+    raise AssertionError(f"{name} is missing from the bundled browsers.json")
+
+
+class TestPatchrightCommandTargetContract:
+    """What ``patchright install chromium <flag>`` really extracts.
+
+    Every claim here is measured against the installed patchright rather than
+    modelled: the target list comes from its own ``--dry-run``, which resolves
+    the command exactly as an install would and prints each install location
+    without opening a socket, and the Windows-only condition comes from the
+    resolver in the shipped driver bundle, because it cannot be observed from
+    a POSIX host.
+    """
+
+    def _dry_run_locations(self, tmp_path, *flags: str) -> list[str]:
+        import subprocess
+
+        cache = tmp_path / "browsers"
+        environment = dict(os.environ)
+        environment["PLAYWRIGHT_BROWSERS_PATH"] = str(cache)
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "patchright",
+                "install",
+                "chromium",
+                *flags,
+                "--dry-run",
+            ],
+            capture_output=True,
+            text=True,
+            env=environment,
+            timeout=120,
+        )
+        assert completed.returncode == 0, completed.stderr
+        prefix = "Install location:"
+        locations = [
+            line.split(prefix, 1)[1].strip()
+            for line in completed.stdout.splitlines()
+            if prefix in line
+        ]
+        assert locations, completed.stdout
+        return [Path(location).name for location in locations]
+
+    def test_the_locked_release_is_the_one_this_contract_describes(self):
+        import importlib.metadata
+
+        assert importlib.metadata.version("patchright") == "1.61.2"
+
+    def _assert_is_an_ffmpeg_directory(self, name: str) -> None:
+        """Pin the kind, and the revision to one this browsers.json names.
+
+        Never the literal ``ffmpeg-<base>``: a host that ``revisionOverrides``
+        covers gets ``ffmpeg_<hostPlatform>_special-<override>`` instead, and
+        both are the current target where they occur. What no host may produce
+        is a revision the registry does not name at all.
+        """
+        entry = _registry_entry("ffmpeg")
+        assert name.startswith("ffmpeg")
+        assert name.rsplit("-", 1)[1] in {str(entry["revision"])} | {
+            str(revision) for revision in entry.get("revisionOverrides", {}).values()
+        }
+
+    def test_no_shell_installs_chromium_and_ffmpeg(self, tmp_path):
+        chromium = _registry_entry("chromium")
+
+        measured = self._dry_run_locations(tmp_path, "--no-shell")
+
+        # Two directories, in this order: the browser the flag names, at the
+        # revision browsers.json gives it, and then ffmpeg, which no flag names
+        # and which every browser argument pulls in regardless.
+        assert len(measured) == 2, measured
+        assert measured[0] == f"chromium-{chromium['revision']}"
+        self._assert_is_an_ffmpeg_directory(measured[1])
+        assert not any(
+            name.startswith(("firefox", "webkit", "winldd")) for name in measured
+        )
+
+    def test_only_shell_installs_the_shell_and_ffmpeg(self, tmp_path):
+        shell = _registry_entry("chromium-headless-shell")
+
+        measured = self._dry_run_locations(tmp_path, "--only-shell")
+
+        assert len(measured) == 2, measured
+        assert measured[0] == f"chromium_headless_shell-{shell['revision']}"
+        self._assert_is_an_ffmpeg_directory(measured[1])
+
+    def test_the_measured_command_targets_are_all_accounted_for(self, tmp_path):
+        from linkedin_mcp_server import bootstrap
+
+        cache = tmp_path / "browsers"
+        environment = {"PLAYWRIGHT_BROWSERS_PATH": str(cache)}
+
+        accounted = {
+            path.name
+            for path in bootstrap._installer_extraction_paths("--no-shell", environment)
+        }
+
+        measured = set(self._dry_run_locations(tmp_path, "--no-shell"))
+        assert measured <= accounted
+        # Over-approximation stays inside the registry: only ffmpeg's own
+        # revisionOverrides may appear beyond what this host resolves.
+        overrides = _registry_entry("ffmpeg").get("revisionOverrides", {})
+        assert accounted - measured <= {
+            f"ffmpeg_{host.replace('-', '_')}_special-{revision}"
+            for host, revision in overrides.items()
+        }
+
+    def test_winldd_is_pushed_only_on_windows(self):
+        """The condition a POSIX dry-run cannot show, read from the resolver."""
+        import patchright
+
+        bundle = (
+            Path(patchright.__file__).parent
+            / "driver"
+            / "package"
+            / "lib"
+            / "coreBundle.js"
+        ).read_text()
+
+        assert (
+            'if (process.platform === "win32")\n'
+            '          executables.push(this.findExecutable("winldd"));' in bundle
+        )
+        # And ffmpeg's condition beside it: any argument resolving to a browser.
+        assert (
+            "if (executable?.browserName)\n"
+            '            executables.push(this.findExecutable("ffmpeg"));' in bundle
+        )
+        # winldd carries no revisionOverrides, so its directory is the plain one.
+        assert "revisionOverrides" not in _registry_entry("winldd")
+
+
+class TestInstallerAuxiliaryAccounting:
+    def _stub_registry(self, monkeypatch, tmp_path, browsers):
+        package = tmp_path / "patchright_pkg"
+        (package / "driver" / "package").mkdir(parents=True)
+        (package / "driver" / "package" / "browsers.json").write_text(
+            json.dumps({"browsers": browsers})
+        )
+        module = MagicMock()
+        module.__file__ = str(package / "__init__.py")
+        monkeypatch.setitem(sys.modules, "patchright", module)
+
+    #: The shape of the locked registry, trimmed to what the accounting reads.
+    _BROWSERS = [
+        {"name": "chromium", "revision": "1228", "installByDefault": True},
+        {
+            "name": "chromium-headless-shell",
+            "revision": "1228",
+            "installByDefault": True,
+        },
+        {"name": "firefox", "revision": "1532", "installByDefault": True},
+        {
+            "name": "webkit",
+            "revision": "2311",
+            "installByDefault": True,
+            "revisionOverrides": {"mac14-arm64": "2251"},
+        },
+        {
+            "name": "ffmpeg",
+            "revision": "1011",
+            "installByDefault": True,
+            "revisionOverrides": {"mac12-arm64": "1010"},
+        },
+        {"name": "winldd", "revision": "1007", "installByDefault": False},
+    ]
+
+    def _paths(self, cache, extra_arg="--no-shell"):
+        from linkedin_mcp_server import bootstrap
+
+        return {
+            path.name
+            for path in bootstrap._installer_extraction_paths(
+                extra_arg, {"PLAYWRIGHT_BROWSERS_PATH": str(cache)}
+            )
+        }
+
+    def test_ffmpeg_is_accounted_for_alongside_chromium(self, monkeypatch, tmp_path):
+        self._stub_registry(monkeypatch, tmp_path, self._BROWSERS)
+
+        names = self._paths(tmp_path / "cache")
+
+        assert "chromium-1228" in names
+        assert "ffmpeg-1011" in names
+        # The override candidate too: only one of the two exists on any host and
+        # this side cannot tell which, so both are named.
+        assert "ffmpeg_mac12_arm64_special-1010" in names
+
+    def test_unrelated_browsers_and_stale_revisions_stay_out(
+        self, monkeypatch, tmp_path
+    ):
+        self._stub_registry(monkeypatch, tmp_path, self._BROWSERS)
+
+        names = self._paths(tmp_path / "cache")
+
+        assert not any(name.startswith(("firefox", "webkit")) for name in names)
+        assert "chromium_headless_shell-1228" not in names
+        assert all(name.endswith(("-1228", "-1011", "-1010")) for name in names), names
+
+    def test_winldd_is_accounted_for_on_windows_only(self, monkeypatch, tmp_path):
+        self._stub_registry(monkeypatch, tmp_path, self._BROWSERS)
+
+        assert "winldd-1007" not in self._paths(tmp_path / "posix")
+
+        monkeypatch.setattr(sys, "platform", "win32")
+
+        assert "winldd-1007" in self._paths(tmp_path / "windows")
+
+    def test_an_oversized_ffmpeg_is_refused(self, monkeypatch, tmp_path):
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.exceptions import BrowserSetupFailedError
+
+        self._stub_registry(monkeypatch, tmp_path, self._BROWSERS)
+        monkeypatch.setattr(bootstrap, "_INSTALLER_MAX_WRITTEN_BYTES", 1024)
+        cache = tmp_path / "cache"
+        temporary_root = tmp_path / "private"
+        temporary_root.mkdir()
+        oversized = cache / "ffmpeg-1011" / "ffmpeg"
+        oversized.parent.mkdir(parents=True)
+        oversized.write_bytes(b"a" * 4096)
+
+        paths = bootstrap._installer_extraction_paths(
+            "--no-shell", {"PLAYWRIGHT_BROWSERS_PATH": str(cache)}
+        )
+        snapshot = bootstrap._installer_download_snapshot(temporary_root, paths)
+
+        with pytest.raises(BrowserSetupFailedError, match="past its"):
+            bootstrap._refuse_oversized_install(snapshot)
+
+    def test_an_oversized_winldd_is_refused_on_windows(self, monkeypatch, tmp_path):
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.exceptions import BrowserSetupFailedError
+
+        self._stub_registry(monkeypatch, tmp_path, self._BROWSERS)
+        monkeypatch.setattr(bootstrap, "_INSTALLER_MAX_WRITTEN_BYTES", 1024)
+        cache = tmp_path / "cache"
+        temporary_root = tmp_path / "private"
+        temporary_root.mkdir()
+        oversized = cache / "winldd-1007" / "PrintDeps.exe"
+        oversized.parent.mkdir(parents=True)
+        oversized.write_bytes(b"a" * 4096)
+        environment = {"PLAYWRIGHT_BROWSERS_PATH": str(cache)}
+
+        on_posix = bootstrap._installer_download_snapshot(
+            temporary_root,
+            bootstrap._installer_extraction_paths("--no-shell", environment),
+        )
+        monkeypatch.setattr(sys, "platform", "win32")
+        on_windows = bootstrap._installer_download_snapshot(
+            temporary_root,
+            bootstrap._installer_extraction_paths("--no-shell", environment),
+        )
+
+        # Same tree, and only the Windows accounting can see the target in it.
+        bootstrap._refuse_oversized_install(on_posix)
+        with pytest.raises(BrowserSetupFailedError, match="past its"):
+            bootstrap._refuse_oversized_install(on_windows)
+
+    def test_an_oversized_unrelated_browser_is_not_this_installs_to_refuse(
+        self, monkeypatch, tmp_path
+    ):
+        from linkedin_mcp_server import bootstrap
+
+        self._stub_registry(monkeypatch, tmp_path, self._BROWSERS)
+        monkeypatch.setattr(bootstrap, "_INSTALLER_MAX_WRITTEN_BYTES", 1024)
+        cache = tmp_path / "cache"
+        temporary_root = tmp_path / "private"
+        temporary_root.mkdir()
+        for name in ("firefox-1532", "webkit-2311", "ffmpeg-999"):
+            stray = cache / name / "payload"
+            stray.parent.mkdir(parents=True)
+            stray.write_bytes(b"a" * 4096)
+
+        snapshot = bootstrap._installer_download_snapshot(
+            temporary_root,
+            bootstrap._installer_extraction_paths(
+                "--no-shell", {"PLAYWRIGHT_BROWSERS_PATH": str(cache)}
+            ),
+        )
+
+        bootstrap._refuse_oversized_install(snapshot)
+
+    def test_readiness_metadata_ignores_the_auxiliary_targets(
+        self, monkeypatch, tmp_path
+    ):
+        from linkedin_mcp_server import bootstrap
+
+        self._stub_registry(monkeypatch, tmp_path, self._BROWSERS)
+        monkeypatch.setattr(sys, "platform", "win32")
+
+        assert bootstrap._patchright_install_targets() == {
+            "chromium-": "1228",
+            "chromium_headless_shell-": "1228",
+        }
+        assert bootstrap._revision_dir_prefix("ffmpeg-1011") is None
+        assert bootstrap._revision_dir_prefix("winldd-1007") is None
 
 
 class TestInvalidateBrowserSetup:

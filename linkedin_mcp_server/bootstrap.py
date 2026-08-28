@@ -119,6 +119,12 @@ _REGISTRY_NAME_TO_DIR_PREFIX = {
     "chromium-headless-shell": "chromium_headless_shell-",
 }
 
+# Targets `patchright install chromium` writes beside the browser and never
+# launches: ffmpeg for any argument resolving to a browser, winldd on win32
+# only. Both land in this cache under the same byte ceiling (`resolveBrowsers`).
+_FFMPEG_REGISTRY_NAME = "ffmpeg"
+_WINDOWS_TOOL_REGISTRY_NAME = "winldd"
+
 # On-disk dir prefix of the headless shell. Nothing launches it any more —
 # every launch names ``channel="chromium"`` — but the prefix is still needed to
 # recognise one in an install written before that change.
@@ -399,9 +405,10 @@ def reset_bootstrap_for_testing() -> None:
     _auth_quiescent_generation = None
     os.environ.pop("PLAYWRIGHT_BROWSERS_PATH", None)
     # Tolerate monkeypatched stand-ins that lack `cache_clear`.
-    clear = getattr(_patchright_install_targets, "cache_clear", None)
-    if clear is not None:
-        clear()
+    for cached in (_patchright_install_targets, _patchright_registry_entries):
+        clear = getattr(cached, "cache_clear", None)
+        if clear is not None:
+            clear()
 
 
 def get_runtime_policy() -> RuntimePolicy:
@@ -448,17 +455,12 @@ def _patchright_pkg_version() -> str | None:
 
 
 @functools.cache
-def _patchright_install_targets() -> dict[str, str] | None:
-    """Resolve {dir_prefix: revision} from patchright's bundled browsers.json.
+def _patchright_registry_entries() -> tuple[Mapping[str, Any], ...] | None:
+    """Return the entries of patchright's bundled ``browsers.json``, or ``None``.
 
-    Reads ``<patchright>/driver/package/browsers.json`` — the authoritative
-    file patchright itself consults to know which revision it expects.
-    Returns ``None`` if the registry can't be read; callers treat ``None``
-    as "not ready" so the next gate triggers reinstall.
-
-    Cached for the process lifetime: the patchright revision only changes on
-    package upgrade, which requires a process restart. Tests reset the cache
-    via ``reset_bootstrap_for_testing()``.
+    The file patchright itself consults, so every revision and platform
+    override below is read from it rather than written down. Cached for the
+    process lifetime; tests reset it via ``reset_bootstrap_for_testing()``.
     """
     try:
         import patchright
@@ -471,16 +473,68 @@ def _patchright_install_targets() -> dict[str, str] | None:
         return None
     if not isinstance(payload, dict):
         return None
+    browsers = payload.get("browsers")
+    if not isinstance(browsers, list):
+        return None
+    return tuple(entry for entry in browsers if isinstance(entry, dict))
+
+
+@functools.cache
+def _patchright_install_targets() -> dict[str, str] | None:
+    """Resolve {dir_prefix: revision} for the browsers this server launches.
+
+    Readiness, install metadata and the retained-revision report are built on
+    this, so it names only launchable binaries; ffmpeg and winldd are accounted
+    for separately. ``None`` means "not ready", so the next gate reinstalls.
+    """
+    entries = _patchright_registry_entries()
+    if entries is None:
+        return None
 
     targets: dict[str, str] = {}
-    for entry in payload.get("browsers", []):
-        if not isinstance(entry, dict) or not entry.get("installByDefault"):
+    for entry in entries:
+        if not entry.get("installByDefault"):
             continue
-        prefix = _REGISTRY_NAME_TO_DIR_PREFIX.get(entry.get("name"))
+        name = entry.get("name")
+        if not isinstance(name, str):
+            continue
+        prefix = _REGISTRY_NAME_TO_DIR_PREFIX.get(name)
         if prefix is None or entry.get("revision") is None:
             continue
         targets[prefix] = str(entry["revision"])
     return targets or None
+
+
+def _installer_auxiliary_names(browser_selected: bool) -> tuple[str, ...]:
+    """Directory names of the non-browser targets one install also extracts.
+
+    ``readDescriptors`` names a target ``<name>-<revision>``, or
+    ``<name>_<hostPlatform>_special-<override>`` where ``revisionOverrides``
+    covers the host, dashes in that prefix rewritten to underscores.
+    ``hostPlatform`` is computed inside the driver, so every candidate the
+    entry allows is named: a wrong one is absent from disk and costs nothing,
+    while missing the real one is what lets an oversized target through.
+    """
+    wanted: list[str] = [_FFMPEG_REGISTRY_NAME] if browser_selected else []
+    if sys.platform == "win32":  # patchright's own `process.platform` check
+        wanted.append(_WINDOWS_TOOL_REGISTRY_NAME)
+    names: list[str] = []
+    for registry_name in wanted:
+        for entry in _patchright_registry_entries() or ():
+            if entry.get("name") != registry_name:
+                continue
+            revision = entry.get("revision")
+            if revision is not None:
+                names.append(f"{registry_name.replace('-', '_')}-{revision}")
+            overrides = entry.get("revisionOverrides")
+            if not isinstance(overrides, dict):
+                continue
+            for host, override in overrides.items():
+                if override is None:
+                    continue
+                prefix = f"{registry_name}_{host}_special".replace("-", "_")
+                names.append(f"{prefix}-{override}")
+    return tuple(dict.fromkeys(names))
 
 
 def _has_install_for(configured: Path, prefix: str, revision: str) -> bool:
@@ -1710,7 +1764,13 @@ _INSTALLER_MAX_WRITTEN_BYTES = 4 * 1024**3
 def _installer_extraction_paths(
     extra_arg: str, environment: Mapping[str, str]
 ) -> tuple[Path, ...]:
-    """Return the cache paths this Patchright command is locked to install."""
+    """Return the cache paths this Patchright command is locked to install.
+
+    More than the browser it names: ffmpeg rides along with a browser argument
+    and winldd is added on Windows, both extracting here under this
+    invocation's byte ceiling. Nothing beyond them, so an unrelated Firefox or
+    WebKit in the shared cache stays somebody else's install to answer for.
+    """
     targets = _patchright_install_targets() or {}
     if extra_arg == "--no-shell":
         prefixes = (_FULL_DIR_PREFIX,)
@@ -1718,12 +1778,10 @@ def _installer_extraction_paths(
         prefixes = (_SHELL_DIR_PREFIX,)
     else:
         prefixes = tuple(targets)
+    names = [f"{prefix}{targets[prefix]}" for prefix in prefixes if prefix in targets]
+    names.extend(_installer_auxiliary_names(browser_selected=bool(names)))
     configured = Path(environment.get("PLAYWRIGHT_BROWSERS_PATH") or browsers_path())
-    return tuple(
-        configured / f"{prefix}{targets[prefix]}"
-        for prefix in prefixes
-        if prefix in targets
-    )
+    return tuple(configured / name for name in dict.fromkeys(names))
 
 
 def _installer_download_snapshot(
