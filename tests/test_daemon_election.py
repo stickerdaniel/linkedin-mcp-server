@@ -5035,6 +5035,11 @@ class TestTheHardExitFreesTheElectionFirst:
             if process.poll() is None:
                 os.killpg(process.pid, signal.SIGKILL)
             process.wait(timeout=30)
+#: The Job Object handoff every generic ``_run_serve`` case carries. On
+#: Windows ``_serve`` refuses to publish without one, and the required Windows
+#: CI job runs this whole class natively, where ``os.name`` is "nt" with
+#: nothing patched. A case that means to exercise adoption names its own Job.
+_OWNER_JOB_NAME = "test-owner-job"
 
 
 class TestPublishingLast:
@@ -5101,7 +5106,8 @@ class TestPublishingLast:
         idle_timeout: float | None = None,
         track_cleanup: bool = False,
         server_factory: Callable[[Callable[[], None]], object] | None = None,
-        job_name: str | None = None,
+        job_name: str = _OWNER_JOB_NAME,
+        adopt: Callable[[str], None] | None = None,
         startup_protocol: int = daemon_config.STARTUP_PROTOCOL_VERSION,
         commit_implementation: Callable[[Path, str], object] | None = None,
     ) -> int:
@@ -5168,6 +5174,24 @@ class TestPublishingLast:
 
         monkeypatch.setattr(daemon_owner, "_probe", probe)
         monkeypatch.setattr(daemon_owner.daemon_descriptor, "prepare", prepare)
+
+        def no_adoption(name: str) -> None:
+            """Take the Windows branch without touching a real Job Object."""
+            return None
+
+        # Native Windows enters that branch for real, so every case here needs
+        # the adoption isolated as well as the handoff supplied. The genuine
+        # `adopt_current_process` opens a Job by name and keeps the handle in a
+        # module global that nothing resets: a failure would end the case as an
+        # abort, and a success would be worse, because the global then refuses
+        # the adoption the real Job tests perform later in the same process.
+        # This records nothing, so the order a case asserts reads identically
+        # on both platforms; a case about adoption passes its own `adopt`.
+        monkeypatch.setattr(
+            daemon_owner.WindowsJob,
+            "adopt_current_process",
+            staticmethod(no_adoption if adopt is None else adopt),
+        )
 
         def commit_prepared(root: Path, instance_id: str) -> None:
             order.append("commit")
@@ -5337,17 +5361,13 @@ class TestPublishingLast:
     ):
         order: list[str] = []
         monkeypatch.setattr(daemon_owner, "os", SimpleNamespace(name="nt"))
-        monkeypatch.setattr(
-            daemon_owner.WindowsJob,
-            "adopt_current_process",
-            lambda name: order.append(f"adopt:{name}"),
-        )
 
         self._run_serve(
             tmp_path,
             monkeypatch,
             order,
             job_name="named-owner-job",
+            adopt=lambda name: order.append(f"adopt:{name}"),
         )
 
         assert order == [
@@ -5371,17 +5391,12 @@ class TestPublishingLast:
             order.append(f"adopt:{name}")
             raise RuntimeError("Job adoption failed")
 
-        monkeypatch.setattr(
-            daemon_owner.WindowsJob,
-            "adopt_current_process",
-            reject,
-        )
-
         outcome = self._run_serve(
             tmp_path,
             monkeypatch,
             order,
             job_name="named-owner-job",
+            adopt=reject,
         )
 
         assert outcome == 1
@@ -5396,6 +5411,46 @@ class TestPublishingLast:
         assert "commit" not in order
         assert "committed" not in order
         assert "uncertain" not in order
+
+    def test_a_generic_case_hands_the_owner_the_job_it_needs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # What the required Windows CI job does to every case in this class:
+        # there `os.name` is "nt" already, so `_serve` reaches its Job branch
+        # and refuses to publish without a handoff. This case takes that branch
+        # on any platform while asking for nothing beyond the defaults, so a
+        # handoff dropped from `_run_serve` fails here rather than only on
+        # Windows, where it would fail twenty-one cases at once.
+        order: list[str] = []
+        adopted: list[str] = []
+        monkeypatch.setattr(daemon_owner, "os", SimpleNamespace(name="nt"))
+
+        outcome = self._run_serve(
+            tmp_path,
+            monkeypatch,
+            order,
+            adopt=adopted.append,
+        )
+
+        assert outcome == 0
+        assert adopted == [_OWNER_JOB_NAME]
+        assert order[-1] == "committed"
+
+    def test_a_generic_case_never_performs_a_real_job_adoption(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The same branch on the helper's own defaults, adoption included. The
+        # genuine `adopt_current_process` fails here for the platform and on
+        # Windows for the name, and both end this case as an abort rather than
+        # a publication, so the stub is what keeps it green.
+        order: list[str] = []
+        monkeypatch.setattr(daemon_owner, "os", SimpleNamespace(name="nt"))
+
+        outcome = self._run_serve(tmp_path, monkeypatch, order)
+
+        assert outcome == 0
+        assert "aborted" not in order
+        assert order[-1] == "committed"
 
     def test_parent_eof_before_commit_aborts_the_owner(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
