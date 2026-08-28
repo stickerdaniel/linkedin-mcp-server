@@ -4060,6 +4060,243 @@ class TestCredentialRedaction:
         assert "s3cr3t" not in "".join(seen)
 
 
+class TestAnApostropheDoesNotEndAUrl:
+    """A URL run used to stop at ``'``, and everything after it printed.
+
+    Node keeps a literal apostrophe in a path, a query and userinfo alike, and
+    patchright interpolates the location a redirect *ended* on into its timeout
+    and its error. ``https://cdn.example/browser's.zip?X-Amz-Signature=…`` was
+    therefore redacted as far as the quote and printed from there on, into the
+    debug log, into the line callback and into the retained failure that becomes
+    ``BrowserSetupFailedError``.
+
+    The apostrophe was there for one reason, which is that ``'. URL: `` closes a
+    quoted response body and sanitation runs before that marker is read. Only
+    those two characters are held back now.
+    """
+
+    @pytest.mark.parametrize(
+        ("url", "expected"),
+        [
+            # The finding's own URL: the signature sits behind the apostrophe.
+            (
+                "https://cdn.example/browser's.zip?X-Amz-Signature=s3cr3t",
+                "https://cdn.example/***",
+            ),
+            # An apostrophe inside userinfo, which is a credential by itself.
+            (
+                "https://ci'bot:s3cr3t@mirror.example/x",
+                "https://***@mirror.example/***",
+            ),
+            ("https://mirror.example/a'b/c?t=s3cr3t", "https://mirror.example/***"),
+            ("https://mirror.example?t=s3cr3t'&u=2", "https://mirror.example?***"),
+            ("https://mirror.example#f'g=s3cr3t", "https://mirror.example#***"),
+            # An apostrophe immediately after the delimiter, so the first thing
+            # the old pattern refused was also the first thing it kept.
+            ("https://mirror.example/'s3cr3t", "https://mirror.example/***"),
+            # Backslashes are the same URL to Node, and hold the same secret.
+            ("https:\\\\mirror.example\\a'b\\s3cr3t", "https://mirror.example/***"),
+        ],
+    )
+    def test_the_whole_url_goes_including_its_apostrophes(self, url, expected):
+        from linkedin_mcp_server.bootstrap import _safe_to_print
+
+        cleaned = _safe_to_print(f"from {url} now")
+
+        assert cleaned == f"from {expected} now"
+        assert "s3cr3t" not in cleaned
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://cdn.example/browser's.zip?X-Amz-Signature=s3cr3t",
+            "https://ci'bot:s3cr3t@mirror.example/x",
+            "https://mirror.example/a'b/c?t=s3cr3t",
+            "https://mirror.example/'s3cr3t",
+            "https://[2001:db8::1]:8443/a'b/s3cr3t",
+            "https://[unclosed/a'b/s3cr3t",
+        ],
+    )
+    def test_an_apostrophe_url_survives_no_split(self, url):
+        """The buffer grows between passes, so the output is the next input.
+
+        Every offset is swept because only some of them leave an apostrophe at
+        the end of the text, which is where the closing marker is held back.
+        """
+        from linkedin_mcp_server.bootstrap import _safe_to_print
+
+        text = f"Downloading Chromium from {url} now"
+        surviving = [
+            cut
+            for cut in range(len(text) + 1)
+            if "s3cr3t" in _safe_to_print(_safe_to_print(text[:cut]) + text[cut:])
+        ]
+
+        assert surviving == []
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # A body ending on a URL: the run reaches the marker's apostrophe.
+            "Download failed: server returned code 403 body 'go to "
+            "https://evil.example/tok'. URL: https://cdn.example/x.zip",
+            # And the same with the marker's full stop inside the run.
+            "server returned code 404 body 'https://evil.example/a'. URL: http://h/z",
+        ],
+    )
+    def test_the_closing_marker_survives_redaction(self, text):
+        """What the apostrophe boundary was protecting, protected precisely.
+
+        Losing the marker is not a cosmetic error: ``_installer_lines`` reads it
+        out of sanitised text, and without it the body never closes and every
+        later line of the install is dropped as body.
+        """
+        from linkedin_mcp_server import bootstrap
+
+        cleaned = bootstrap._safe_to_print(text)
+
+        assert bootstrap._RESPONSE_BODY_CLOSES in cleaned
+        assert bootstrap._RESPONSE_BODY_CLOSED.search(cleaned) is not None
+        assert "evil.example/***" in cleaned
+
+    @pytest.mark.parametrize("split", [1, 2])
+    def test_a_marker_split_by_a_read_is_still_held_back(self, split):
+        """Half a marker at the end of a buffer is still a marker.
+
+        The rest of it arrives on the next read, and sanitation runs again on
+        the joined text. Swallowing the apostrophe now would leave nothing for
+        that pass to find. Both offsets a URL run can reach are swept: the
+        marker's apostrophe alone, and its full stop with it.
+        """
+        from linkedin_mcp_server import bootstrap
+
+        marker = bootstrap._RESPONSE_BODY_CLOSES
+        head = (
+            "Download failed: server returned code 403 body 'go to "
+            f"https://evil.example/s3cr3t{marker[:split]}"
+        )
+        tail = f"{marker[split:]}https://cdn.example/x.zip"
+
+        joined = bootstrap._safe_to_print(bootstrap._safe_to_print(head) + tail)
+
+        assert "s3cr3t" not in joined
+        assert bootstrap._RESPONSE_BODY_CLOSED.search(joined) is not None
+
+    def test_an_apostrophe_outside_a_marker_is_still_redacted(self):
+        """Only a real marker earns the hold-back, not any trailing quote."""
+        from linkedin_mcp_server.bootstrap import _safe_to_print
+
+        assert _safe_to_print("from https://mirror.example/s3cr3t' now") == (
+            "from https://mirror.example/*** now"
+        )
+
+    async def test_sanitisation_runs_before_the_markers_are_read(self, monkeypatch):
+        """Measured, because the whole hold-back depends on the order.
+
+        ``_split_installer_output`` sanitises the buffer and ``_installer_lines``
+        then looks for the body markers in what it returns. So the sanitiser is
+        the only thing that ever sees the raw bytes, and the marker detection
+        never does.
+        """
+        from linkedin_mcp_server import bootstrap
+
+        original = bootstrap._safe_to_print
+        offered: list[str] = []
+
+        def spy(text: str) -> str:
+            offered.append(text)
+            return original(text)
+
+        monkeypatch.setattr(bootstrap, "_safe_to_print", spy)
+        lines: list[str] = []
+
+        async def fake_start(extra_arg: str, _environment: dict[str, str]):
+            return _FakeProc(
+                [
+                    b"Download failed: server returned code 403 body 'page'. URL: "
+                    b"https://cdn.example/browser's.zip?sig=s3cr3t\n"
+                    b"back to normal\n"
+                ],
+                0,
+            )
+
+        monkeypatch.setattr(bootstrap, "_start_installer_supervisor", fake_start)
+        await bootstrap._run_patchright_install(
+            "--no-shell", line_callback=lines.append
+        )
+
+        assert any("s3cr3t" in text for text in offered), "the raw URL reaches it"
+        assert not any("s3cr3t" in line for line in lines)
+        assert lines[-1] == "back to normal", "and the body still closed"
+
+    async def test_no_output_path_keeps_the_apostrophe_suffix(
+        self, monkeypatch, caplog
+    ):
+        """Every consumer of a line at once: log, callback and retained failure.
+
+        They share one producer, so a leak reaches all three, and a fix has to
+        be checked against all three rather than against the pattern alone.
+        """
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.exceptions import BrowserSetupFailedError
+
+        seen: list[str] = []
+
+        async def fake_start(extra_arg: str, _environment: dict[str, str]):
+            return _FakeProc(
+                [
+                    b"Downloading Chrome for Testing from "
+                    b"https://cdn.example/browser's.zip?X-Amz-Signature=s3cr3t\n"
+                ],
+                1,
+            )
+
+        monkeypatch.setattr(bootstrap, "_start_installer_supervisor", fake_start)
+        caplog.set_level(logging.DEBUG, logger="linkedin_mcp_server.bootstrap")
+
+        with pytest.raises(BrowserSetupFailedError) as raised:
+            await bootstrap._run_patchright_install("--no-shell")
+
+        assert "s3cr3t" not in str(raised.value), "the retained failure"
+        assert "cdn.example" in str(raised.value), "and the mirror is still named"
+        assert "s3cr3t" not in caplog.text, "the debug log"
+
+        seen.clear()
+        caplog.clear()
+        with pytest.raises(BrowserSetupFailedError):
+            await bootstrap._run_patchright_install(
+                "--no-shell", line_callback=seen.append
+            )
+
+        assert "s3cr3t" not in "".join(seen), "the line callback"
+
+    @pytest.mark.parametrize("straddle", [0, 1])
+    async def test_an_apostrophe_url_is_redacted_wherever_the_cut_falls(
+        self, monkeypatch, straddle
+    ):
+        """The fragment boundaries, for the shape that used to escape them.
+
+        The URL is preceded by the space patchright writes in front of one.
+        Gluing it to the filler instead would measure the ``\\b`` the pattern
+        opens on rather than the apostrophe this is about.
+        """
+        from linkedin_mcp_server import bootstrap
+
+        secret = " https://cdn.example/browser's.zip?X-Amz-Signature=s3cr3t"
+        cap = bootstrap._MAX_LINE_CHARS
+        offset = [cap, bootstrap._READ_CHUNK][straddle] - len(secret) // 2
+        payload = "F" * offset + secret + "F" * cap
+        seen: list[str] = []
+
+        async def fake_start(extra_arg: str, _environment: dict[str, str]):
+            return _FakeProc([payload.encode() + b"\n"], 0)
+
+        monkeypatch.setattr(bootstrap, "_start_installer_supervisor", fake_start)
+        await bootstrap._run_patchright_install("--no-shell", line_callback=seen.append)
+
+        assert "s3cr3t" not in "".join(seen)
+
+
 class TestQuotedResponseBodiesAreDropped:
     """The one part of this output a stranger writes is not printed at all.
 

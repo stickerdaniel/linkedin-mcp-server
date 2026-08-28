@@ -157,9 +157,9 @@ _MAX_LINE_CHARS = 64 * 1024
 #: the line. Backslashes too, which Node normalises to slashes before
 #: authenticating, so ``https:\\user:pw@host`` is a working credential.
 _CREDENTIALS_IN_URL = re.compile(r"[/\\]{2}[^/\\\s]*@")
-#: Any absolute HTTP(S) URL, from its scheme to the first whitespace or
-#: apostrophe. Everything the origin does not name is replaced, because nothing
-#: here can tell a public build path from a capability.
+#: Any absolute HTTP(S) URL, from its scheme to the first whitespace.
+#: Everything the origin does not name is replaced, because nothing here can
+#: tell a public build path from a capability.
 #:
 #: The configured mirror is not the only URL that reaches this output.
 #: Patchright's download client follows redirects and interpolates the location
@@ -172,11 +172,14 @@ _CREDENTIALS_IN_URL = re.compile(r"[/\\]{2}[^/\\\s]*@")
 #: ``?X-Amz-Signature=`` and bare path tokens are all in use. So the whole URL
 #: below the origin goes, and the part that says which mirror answered stays.
 #:
-#: Stopping at an apostrophe as well as at whitespace, because the run would
-#: otherwise reach past the quote that closes a response body and swallow the
-#: ``'. URL: `` that ends it, which is what ``_installer_lines`` looks for. A
-#: URL holding a literal apostrophe is not something patchright constructs.
-_URL_IN_TEXT = re.compile(r"(?i)\b(https?):[/\\]{2}([^\s']*)")
+#: Whitespace is the only boundary. An apostrophe used to end the run as well,
+#: to protect the ``'. URL: `` that closes a response body, and it cost the rest
+#: of every URL holding one: Node keeps an apostrophe in a path and in userinfo
+#: alike, and a redirect to ``https://cdn.example/browser's.zip?X-Amz-Signature=
+#: SECRET`` therefore printed everything from the quote onwards. What the closing
+#: marker actually needs is held back in ``_held_back_closer`` instead, which is
+#: two characters rather than the whole tail.
+_URL_IN_TEXT = re.compile(r"(?i)\b(https?):[/\\]{2}(\S*)")
 #: Where an authority ends. Backslashes are normalised to slashes first, as Node
 #: does before resolving, so they are not in this class.
 _AUTHORITY_ENDS = re.compile(r"[/?#]")
@@ -209,6 +212,15 @@ _RESPONSE_BODY_CLOSED = re.compile(r"'\. URL: \S*\Z")
 #: One short of the marker, which is the most of it that a forced cut can leave
 #: on the far side of a fragment boundary.
 _CLOSER_CARRY = len(_RESPONSE_BODY_CLOSES) - 1
+#: How far into the closing marker a URL run can reach, longest first. Sanitation
+#: runs on the raw buffer and ``_installer_lines`` reads the markers out of what
+#: it returns, so a redaction that eats the opening quote of ``'. URL: `` deletes
+#: the only evidence that a body ended and elides the rest of the stream. A run
+#: stops at whitespace and the marker's first space is its third character, so
+#: ``'.`` and ``'`` are the entire overlap. Derived from the marker rather than
+#: written out, so a reworded marker moves both together.
+_CLOSER_HEAD = _RESPONSE_BODY_CLOSES.split(" ", 1)[0]
+_CLOSER_HEADS = tuple(_CLOSER_HEAD[:size] for size in range(len(_CLOSER_HEAD), 0, -1))
 _OMITTED_BODY = "<response body omitted>"
 
 #: ``|■■■■    |  30% of 187.2 MiB``: the progress line patchright writes when
@@ -2523,8 +2535,37 @@ def _redacted_origin(scheme: str, rest: str) -> str:
     return f"{origin}{remainder[0]}***" if remainder else origin
 
 
+def _held_back_closer(text: str, end: int, tail: str) -> int:
+    """How many of a URL run's last characters begin the body's closing marker.
+
+    Sanitation runs on the raw buffer and ``_installer_lines`` looks for
+    ``'. URL: `` in what comes back, so a run that swallows the apostrophe
+    opening that marker deletes the only signal that a response body ended, and
+    every later line is elided as body. Those characters are therefore left
+    where they are and only the URL in front of them is redacted.
+
+    Both shapes are load-bearing. A whole marker follows the run when a body
+    ends on a URL; a bare ``'`` or ``'.`` at the end of the text is the same
+    marker split by a read, and ``_safe_to_print`` runs again on the joined
+    buffer, so holding it back once is what lets the next pass see it whole.
+    """
+    for head in _CLOSER_HEADS:
+        if not tail.endswith(head):
+            continue
+        following = text[end - len(head) :]
+        if following.startswith(
+            _RESPONSE_BODY_CLOSES
+        ) or _RESPONSE_BODY_CLOSES.startswith(following):
+            return len(head)
+    return 0
+
+
 def _redacted_url(found: re.Match[str]) -> str:
-    return _redacted_origin(found.group(1).lower(), found.group(2))
+    rest = found.group(2)
+    held = _held_back_closer(found.string, found.end(), rest)
+    if not held:
+        return _redacted_origin(found.group(1).lower(), rest)
+    return _redacted_origin(found.group(1).lower(), rest[:-held]) + rest[-held:]
 
 
 #: A configured mirror is not required to be HTTP, so its scheme is read as a
