@@ -240,7 +240,13 @@ _TERMINAL_CONTROLS = re.compile(
 #: The body is not one line: ``content += chunk`` collects an HTML error page
 #: with its newlines intact, so the closing marker can arrive thousands of lines
 #: later.
-_RESPONSE_BODY_OPENS = re.compile(r"server returned code \d{1,3} body '")
+#: Split into its literal halves so the pending form below is built from the
+#: same strings: a marker cut by a read has to be recognised out of its head.
+_OPENER_HEAD = "server returned code "
+_OPENER_TAIL = " body '"
+_RESPONSE_BODY_OPENS = re.compile(
+    re.escape(_OPENER_HEAD) + r"\d{1,3}" + re.escape(_OPENER_TAIL)
+)
 _RESPONSE_BODY_CLOSES = "'. URL: "
 #: The closing marker as patchright writes it: the marker, the download URL,
 #: end of line. A response body can forge that exact shape after it has emitted
@@ -260,6 +266,32 @@ _CLOSER_CARRY = len(_RESPONSE_BODY_CLOSES) - 1
 _CLOSER_HEAD = _RESPONSE_BODY_CLOSES.split(" ", 1)[0]
 _CLOSER_HEADS = tuple(_CLOSER_HEAD[:size] for size in range(len(_CLOSER_HEAD), 0, -1))
 _OMITTED_BODY = "<response body omitted>"
+
+
+def _prefixes_of(literal: str) -> str:
+    """A pattern for any prefix of *literal*, longest first."""
+    return "|".join(re.escape(literal[:size]) for size in range(len(literal), 0, -1))
+
+
+#: A marker that has not finished arriving, anchored at the end of the buffer.
+#: Sanitation runs on a buffer that is still growing, so a marker can be split by
+#: a read the way a URL can, and an edit to the half already folded sticks: the
+#: next pass joins the rest onto text the marker is gone from.
+_PENDING_MARKER = (
+    rf"(?:{_prefixes_of(_OPENER_HEAD)}"
+    rf"|{re.escape(_OPENER_HEAD)}\d{{1,3}}(?:{_prefixes_of(_OPENER_TAIL)})?"
+    rf"|{_prefixes_of(_RESPONSE_BODY_CLOSES)})\Z"
+)
+_MARKERS_HELD = re.compile(
+    rf"{_RESPONSE_BODY_OPENS.pattern}|{re.escape(_RESPONSE_BODY_CLOSES)}"
+    rf"|{_PENDING_MARKER}"
+)
+#: Stands in for a marker while a configured value is replaced. NUL is the one
+#: character that cannot collide: ``_TERMINAL_CONTROLS`` strips it out before any
+#: of this runs, and an environment value cannot carry one, so every NUL here was
+#: written by ``_held_markers`` and no configured value can match across it.
+_MARKER_HELD = "\x00"
+
 
 #: ``|■■■■    |  30% of 187.2 MiB``: the progress line patchright writes when
 #: its stdout is a pipe, which is always the case here. The digit counts are the
@@ -1671,7 +1703,11 @@ def _installer_download_snapshot(
             for name in files:
                 child = current_path / name
                 try:
-                    details = child.stat()
+                    # The link's own metadata, never its target's: ``os.walk``
+                    # refuses to descend through a directory symlink, and a
+                    # foreign file that grows would otherwise hold the
+                    # inactivity deadline open for as long as it is written to.
+                    details = child.lstat()
                 except OSError:
                     continue
                 entries.append((str(child), details.st_size, details.st_mtime_ns))
@@ -2738,6 +2774,23 @@ def _pending_value_start(text: str, cut: int) -> int | None:
     return earliest
 
 
+def _held_markers(text: str) -> tuple[str, list[str]]:
+    """The text with every structural marker swapped for a sentinel."""
+    held: list[str] = []
+
+    def _hold(found: re.Match[str]) -> str:
+        held.append(found.group())
+        return _MARKER_HELD
+
+    return _MARKERS_HELD.sub(_hold, text), held
+
+
+def _restored_markers(text: str, held: list[str]) -> str:
+    """The sentinels swapped back, in the order they were taken out."""
+    parts = text.split(_MARKER_HELD)
+    return "".join(part + marker for part, marker in zip(parts, held)) + parts[-1]
+
+
 def _safe_to_print(text: str) -> str:
     """Text with its terminal controls and its URL credentials taken out.
 
@@ -2757,10 +2810,22 @@ def _safe_to_print(text: str) -> str:
     any pattern here, and its path would print as ordinary text. That
     replacement is exact and therefore needs the whole value present, which is
     what ``_pending_value_start`` keeps true across a boundary.
+
+    The markers are held out of the way while that runs, because an operator
+    names the value and a stranger writes the body it would otherwise delete:
+    ``PLAYWRIGHT_DOWNLOAD_HOST=body`` took the ``body '`` out of the opener and
+    the whole quoted page printed. A value reaching across a marker's edge then
+    matches nothing and stays, which is the residue this accepts: the overlap
+    has to spell patchright's own constant, and a value carrying a scheme still
+    loses everything below its origin in the pass underneath.
     """
     text = _TERMINAL_CONTROLS.sub("", text)
-    for configured in _configured_download_hosts():
-        text = text.replace(configured, _redacted_download_host(configured))
+    configured_values = _configured_download_hosts()
+    if configured_values:
+        text, held = _held_markers(text)
+        for configured in configured_values:
+            text = text.replace(configured, _redacted_download_host(configured))
+        text = _restored_markers(text, held)
     text = _URL_IN_TEXT.sub(_redacted_url, text)
     # Last, for what is not an HTTP(S) URL: another scheme's userinfo, and the
     # scheme-relative ``//user@host`` form.
@@ -3105,10 +3170,10 @@ async def _split_installer_output(
             # which is inside the same token and in front of nothing else.
             fragment, buffer, dropping = _forced_fragment(buffer, _MAX_LINE_CHARS)
             yield fragment, False
-    # EOF is the last boundary, so it folds like any other. What is staged here
-    # stayed under the cap and carried no newline, which is why it never folded
-    # on its own; the final decode adds at most the replacement for a truncated
-    # character, and sanitation only ever shortens, so the line stays bounded.
+    # EOF is the last boundary, so it folds like any other and fragments like
+    # any other too. Sanitation is not only a shortening: an authority it cannot
+    # parse becomes a marker longer than the text it stood for, and 64 KiB of
+    # ``http://[ `` came back as about 109 000 characters, yielded whole.
     trailing = decoder.decode(b"", final=True)
     if dropping:
         trailing, dropping = _dropped_run(buffer + "".join(staged) + trailing)
@@ -3116,7 +3181,14 @@ async def _split_installer_output(
         staged.clear()
     if staged or trailing:
         buffer = _safe_to_print(buffer + "".join(staged) + trailing)
-    if buffer:
+    fragmented = False
+    while len(buffer) > _MAX_LINE_CHARS:
+        fragment, buffer, _running = _forced_fragment(buffer, _MAX_LINE_CHARS)
+        yield fragment, False
+        fragmented = True
+    # The remainder ends the physical line even when it is empty, so a consumer
+    # holding elision state sees that line end where the stream did.
+    if buffer or fragmented:
         yield buffer.rstrip(), True
 
 

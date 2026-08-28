@@ -2046,6 +2046,34 @@ class TestInstallerSupervisorLaunch:
         assert before != after
         assert after == ((str(archive), 2, archive.stat().st_mtime_ns),)
 
+    def test_a_symlinked_file_is_measured_as_the_link_it_is(self, tmp_path):
+        """The deadline is held open by this install's writes and no others.
+
+        ``os.walk`` refuses to descend through a directory symlink, and a file
+        symlink reaches as far by another name.
+        """
+        from linkedin_mcp_server import bootstrap
+
+        temporary_root = tmp_path / "private"
+        download = temporary_root / "playwright-download-current"
+        download.mkdir(parents=True)
+        foreign = tmp_path / "foreign.log"
+        foreign.write_bytes(b"a")
+        link = download / "archive.zip"
+        try:
+            link.symlink_to(foreign)
+        except (OSError, NotImplementedError):
+            pytest.skip("this platform does not allow creating a symlink here")
+
+        before = bootstrap._installer_download_snapshot(temporary_root, ())
+        foreign.write_bytes(b"a" * 4096)
+        after = bootstrap._installer_download_snapshot(temporary_root, ())
+
+        assert any(name == str(link) for name, _size, _mtime in after), (
+            "the link is still in the snapshot"
+        )
+        assert after == before, "and a foreign target's growth is not activity"
+
     def test_activity_scanner_matches_patchright_temp_layout(self):
         from importlib.metadata import distribution
 
@@ -4535,6 +4563,40 @@ class TestAForcedCutDoesNotSplitAUrl:
         assert "installing" in lines
 
 
+class TestEofFragmentsLikeEveryOtherBoundary:
+    """Sanitation lengthens what it cannot parse, and EOF used to emit it whole.
+
+    An authority ``urlsplit`` refuses becomes a marker longer than the text it
+    stood for, so a buffer under the cap on the way in can be well over it on
+    the way out. Every other boundary fragments what comes back; the last one
+    yielded an unterminated ``http://[`` line as one 109 000-character piece.
+    """
+
+    async def _pieces(self, *writes: bytes) -> list[tuple[str, bool]]:
+        from linkedin_mcp_server.bootstrap import _split_installer_output
+
+        stream = cast(Any, _FakeStdout(list(writes)))
+        return [piece async for piece in _split_installer_output(stream)]
+
+    async def test_what_sanitation_grows_at_eof_is_still_bounded(self):
+        """Exactly the cap, so the fold and the growth both land on EOF."""
+        from linkedin_mcp_server import bootstrap
+
+        cap = bootstrap._MAX_LINE_CHARS
+        payload = ("http://[ " * (cap // 9 + 1))[:cap]
+        pieces = await self._pieces(payload.encode())
+        printed = "".join(text for text, _ended in pieces)
+
+        assert len(printed) > cap, "sanitation grew this past the cap"
+        assert max(len(text) for text, _ended in pieces) <= cap
+        assert [ended for _text, ended in pieces] == [False] * (len(pieces) - 1) + [
+            True
+        ], "and only the last piece ends the physical line"
+        assert printed.count("http://***/***") == payload.count("http://"), (
+            "no fragment boundary fell inside a redaction"
+        )
+
+
 class TestAConfiguredMirrorSurvivesEveryBoundary:
     """A download host without an HTTP(S) scheme is still a secret.
 
@@ -4993,6 +5055,94 @@ class TestQuotedResponseBodiesAreDropped:
         assert bootstrap._RESPONSE_BODY_CLOSED.search(built) is not None, (
             "and the closer still runs to the end of its line"
         )
+
+
+class TestAConfiguredMirrorCannotDeleteTheMarkers:
+    """A value an operator names must not disarm the drop a stranger triggers.
+
+    ``_safe_to_print`` replaces a configured mirror and ``_installer_lines``
+    reads patchright's markers out of what comes back, in that order. With
+    ``PLAYWRIGHT_DOWNLOAD_HOST=body`` the opener stopped matching and the quoted
+    response body printed in full.
+    """
+
+    async def _lines(self, *writes: bytes) -> list[str]:
+        from linkedin_mcp_server.bootstrap import _installer_lines
+
+        stream = cast(Any, _FakeStdout(list(writes)))
+        return [line async for line in _installer_lines(stream)]
+
+    async def test_a_mirror_named_like_the_opener_still_drops_the_body(
+        self, monkeypatch
+    ):
+        """The reported configuration, against the message patchright writes."""
+        monkeypatch.setenv(
+            "PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST", "https://mirror.example"
+        )
+        monkeypatch.setenv("PLAYWRIGHT_DOWNLOAD_HOST", "body")
+        line = (
+            "Error: Download failed: server returned code 403 body "
+            "'SIGNED_SECRET'. URL: https://mirror.example/p?token=SIGNED_SECRET\n"
+        )
+        printed = "\n".join(await self._lines(line.encode()))
+
+        assert "SIGNED_SECRET" not in printed
+        assert "<response body omitted>" in printed
+        assert printed.endswith("'. URL: https://mirror.example/***"), (
+            "and the URL below the origin is still redacted"
+        )
+
+    async def test_a_mirror_named_like_the_closer_does_not_elide_the_install(
+        self, monkeypatch
+    ):
+        """A deleted closer leaves the body open, and open takes the rest."""
+        monkeypatch.setenv("PLAYWRIGHT_DOWNLOAD_HOST", "URL:")
+        stream = (
+            "Error: Download failed: server returned code 403 body "
+            "'<html>denied</html>'. URL: http://h/z.zip\n"
+            "    at IncomingMessage.handleError (/x/coreBundle.js:1:1)\n"
+        )
+        printed = "\n".join(await self._lines(stream.encode()))
+
+        assert "denied" not in printed
+        assert "<response body omitted>" in printed
+        assert "coreBundle.js" in printed, "and the installer's own trace comes back"
+
+    def test_a_marker_split_by_a_read_survives_the_replacement(self, monkeypatch):
+        """Sanitation runs per fold, so an edit to the folded half sticks."""
+        from linkedin_mcp_server.bootstrap import _RESPONSE_BODY_OPENS, _safe_to_print
+
+        monkeypatch.setenv("PLAYWRIGHT_DOWNLOAD_HOST", "bo")
+        head = _safe_to_print("Error: Download failed: server returned code 403 bo")
+        joined = _safe_to_print(head + "dy 'SIGNED_SECRET'. URL: http://h/z.zip")
+
+        assert _RESPONSE_BODY_OPENS.search(joined) is not None
+
+    def test_a_value_straddling_a_marker_leaves_the_marker_whole(self, monkeypatch):
+        """The overlap is kept, which is the documented edge of this guard.
+
+        A sentinel stands where the marker was and no value matches across it,
+        so an occurrence reaching over that edge is replaced nowhere. This
+        records the residue rather than claiming it away.
+        """
+        from linkedin_mcp_server.bootstrap import _RESPONSE_BODY_OPENS, _safe_to_print
+
+        monkeypatch.setenv("PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST", "403 body 'PRIVATE")
+        printed = _safe_to_print("server returned code 403 body 'PRIVATE/x.zip")
+
+        assert _RESPONSE_BODY_OPENS.search(printed) is not None
+        assert "PRIVATE" in printed, "the residue this design accepts"
+
+    def test_an_ordinary_mirror_is_still_replaced_whole(self, monkeypatch):
+        """Nothing about a value clear of the markers changed."""
+        from linkedin_mcp_server.bootstrap import _safe_to_print
+
+        monkeypatch.setenv("PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST", "mirror.example/s3cr3t")
+        printed = _safe_to_print(
+            "server returned code 403 body 'x'. URL: mirror.example/s3cr3t/x.zip"
+        )
+
+        assert printed == "server returned code 403 body 'x'. URL: ***/x.zip"
 
 
 class TestTerminalControlsAreStripped:
