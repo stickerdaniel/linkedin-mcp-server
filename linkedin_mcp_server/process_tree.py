@@ -58,6 +58,11 @@ _MARKER_DRAIN_SECONDS = 10.0
 #: the start timestamp all survive the exit unchanged, which is exactly why the
 #: identity checks in this module cannot see it on their own.
 _ZOMBIE_STATE = "Z"
+#: How often a settling process group is asked for its members' run states.
+#: The group-exists poll it guards runs ten times as often because it costs one
+#: signal, while a run-state answer costs a whole process snapshot: a procfs
+#: walk on Linux and a ``ps`` fork everywhere else.
+_GROUP_RUN_STATE_SECONDS = 0.1
 
 #: parent, process group, kernel start identity, kernel run state.
 _ProcessRow = tuple[int, int, str | None, str | None]
@@ -1295,6 +1300,44 @@ def process_group_exists(pgid: int) -> bool:
     return True
 
 
+def process_group_has_live_member(pgid: int) -> bool:
+    """Whether *pgid* still holds a process the kernel can schedule.
+
+    :func:`process_group_exists` cannot answer this. A process group exists for
+    as long as any member is in the process table, and an unreaped zombie is
+    still in it: measured in a plain Linux container, a target killed through
+    its group leaves one ``state=Z`` entry reparented to a PID 1 that never
+    reaps, and ``killpg(pgid, 0)`` then reports that group alive forever. A
+    settlement loop polling only the group's existence spends its whole budget
+    on a group in which no code can run, and the installer supervisor turns
+    that into exit status 70 for an install that actually succeeded.
+
+    This is the distinction :func:`_registered_group_still_matches` already
+    draws for browser drains, applied to plain group settlement. Only the
+    zombie is discounted: stopped, traced and uninterruptible members are
+    processes that can still be resumed and still hold what they opened, so
+    they keep blocking. So does anything the snapshot cannot answer, because
+    not knowing is not evidence that a group is empty.
+
+    Identity is deliberately not consulted here. The question is whether *any*
+    live process sits in this group number, which is true or false regardless
+    of who that process is; the PID and PGID identity checks in
+    :func:`_reap_and_wait_for_group` are what decide whose group it is, and
+    they are left alone.
+    """
+    try:
+        rows = _posix_process_rows()
+    except OSError:
+        return True
+    members = [(process, row) for process, row in rows.items() if row[1] == pgid]
+    if not members:
+        # An empty snapshot means the reader failed, and a group that ``killpg``
+        # still reports while no row names it is a snapshot taken mid-exit.
+        # Neither is proof of an empty group; let the caller keep polling.
+        return True
+    return any(not _has_exited_unreaped(process, row[3]) for process, row in members)
+
+
 def _darwin_child_exited_without_reaping(pid: int) -> bool:
     """Observe NOTE_EXIT without collecting the Darwin child."""
     kqueue = select.kqueue()
@@ -1343,7 +1386,21 @@ def _reap_and_wait_for_group(
     leader_identity: str | None,
 ) -> bool:
     child.wait(timeout=max(deadline - time.monotonic(), 0.0))
+    last_run_state_poll: float | None = None
     while process_group_exists(pgid):
+        now = time.monotonic()
+        if (
+            last_run_state_poll is None
+            or now - last_run_state_poll >= _GROUP_RUN_STATE_SECONDS
+        ):
+            last_run_state_poll = now
+            # A group holding nothing but unreaped entries has settled: nothing
+            # in it can run, open a file or take a lock again, and this owner
+            # cannot reap what a foreign parent holds. Without this the loop
+            # waits out its whole budget, because the group number outlives
+            # every process that ever ran in it.
+            if not process_group_has_live_member(pgid):
+                return True
         current_identity = _kernel_start_identity(pgid)
         if leader_identity is not None and current_identity not in (
             None,

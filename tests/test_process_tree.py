@@ -30,6 +30,76 @@ from linkedin_mcp_server.profile_lease import ProfileLease
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _POSIX_ONLY = pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
 _WINDOWS_ONLY = pytest.mark.skipif(os.name != "nt", reason="Windows Job Objects")
+_LINUX_ONLY = pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="PR_SET_CHILD_SUBREAPER is a Linux facility",
+)
+_ZOMBIE_STATE = "Z"
+
+#: ``PR_SET_CHILD_SUBREAPER``, from ``linux/prctl.h``. Never changed since it
+#: was added in 3.4, and reading it out of a header at runtime is not something
+#: a test can do portably.
+_PR_SET_CHILD_SUBREAPER = 36
+
+#: Reproduce a container's non-reaping PID 1 in one process, then time a real
+#: group settlement against it. The grandchild shares the leader's group, so
+#: killing the group orphans it; the subreaper below inherits it and never
+#: waits, which is what keeps its unreaped entry in the group indefinitely.
+_SUBREAPER_SETTLEMENT = f"""
+import ctypes
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+from linkedin_mcp_server.process_tree import terminate_process_group
+
+if ctypes.CDLL("libc.so.6", use_errno=True).prctl(
+    {_PR_SET_CHILD_SUBREAPER}, 1, 0, 0, 0
+) != 0:
+    raise SystemExit("prctl(PR_SET_CHILD_SUBREAPER) was refused")
+
+marker = Path(sys.argv[1])
+leader = subprocess.Popen(
+    [
+        sys.executable,
+        "-c",
+        "import os,subprocess,sys,time;"
+        "c=subprocess.Popen([sys.executable,'-c','import time; time.sleep(600)']);"
+        "Path=__import__('pathlib').Path;"
+        "Path(sys.argv[1]).write_text(f'{{os.getpid()}} {{c.pid}}');"
+        "time.sleep(600)",
+        str(marker),
+    ],
+    start_new_session=True,
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+for _ in range(1000):
+    if marker.exists() and len(marker.read_text().split()) == 2:
+        break
+    time.sleep(0.01)
+else:
+    raise SystemExit("the group leader never spawned its grandchild")
+
+grandchild = int(marker.read_text().split()[1])
+pgid = os.getpgid(leader.pid)
+if pgid != leader.pid or os.getpgid(grandchild) != pgid:
+    raise SystemExit("the grandchild did not land in the leader's group")
+
+started = time.monotonic()
+settled = terminate_process_group(pgid, timeout=10.0, child=leader)
+elapsed = time.monotonic() - started
+
+try:
+    raw = Path(f"/proc/{{grandchild}}/stat").read_text()
+    state = raw[raw.rfind(")") + 2:].split()[0]
+except OSError:
+    state = "reaped"
+print(settled, f"{{elapsed:.3f}}", state, flush=True)
+"""
 
 
 def _windows_alive(pid: int) -> bool:
@@ -751,6 +821,12 @@ class TestPosixProcessGroups:
         monkeypatch.setattr(process_tree.os, "killpg", lambda *a, **k: None)
         monkeypatch.setattr(process_tree.os, "getpgid", lambda pid: pid)
         monkeypatch.setattr(process_tree, "process_group_exists", lambda pgid: True)
+        # The group holds a live process, so only the identity comparison can
+        # end this wait. Pinned rather than left to the machine's real process
+        # table, which decides nothing here and could answer either way.
+        monkeypatch.setattr(
+            process_tree, "process_group_has_live_member", lambda pgid: True
+        )
         monkeypatch.setattr(
             process_tree, "_kernel_start_identity", lambda pid: next(identities)
         )
@@ -766,6 +842,145 @@ class TestPosixProcessGroups:
         assert process_tree.terminate_process_group(
             12345, timeout=1.0, child=cast(Any, _Child())
         )
+
+    @staticmethod
+    def _settle(
+        monkeypatch: pytest.MonkeyPatch,
+        rows: dict[int, tuple[int, int, str | None, str | None]],
+        *,
+        timeout: float,
+    ) -> tuple[bool, float]:
+        """Run one group settlement whose only exit is the kernel run state.
+
+        ``process_group_exists`` never goes false and no identity ever changes,
+        so the group's own members decide the result and nothing else can.
+        """
+        observations = iter([None, object()])
+        monkeypatch.setattr(
+            process_tree.os,
+            "waitid",
+            lambda *a, **k: next(observations),
+            raising=False,
+        )
+        monkeypatch.setattr(process_tree.os, "killpg", lambda *a, **k: None)
+        monkeypatch.setattr(process_tree, "process_group_exists", lambda pgid: True)
+        monkeypatch.setattr(process_tree, "_kernel_start_identity", lambda pid: None)
+        monkeypatch.setattr(process_tree, "_posix_process_rows", lambda: rows)
+
+        class _Child:
+            pid = 12345
+            returncode: int | None = None
+
+            def wait(self, timeout: float | None = None) -> int:
+                self.returncode = -signal.SIGKILL
+                return self.returncode
+
+        started = time.monotonic()
+        settled = process_tree.terminate_process_group(
+            12345, timeout=timeout, child=cast(Any, _Child())
+        )
+        return settled, time.monotonic() - started
+
+    @_POSIX_ONLY
+    def test_a_zombie_only_group_settles_without_waiting_out_the_budget(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The container shape: a reparented target nobody reaps.
+
+        Measured in a plain ``python:3.13-slim`` container: SIGKILL through the
+        group leaves the target as ``state=Z`` under a PID 1 that never waits,
+        and ``killpg(pgid, 0)`` keeps answering that the group is alive. The
+        installer supervisor turned that ten-second wait into exit status 70
+        for an install that had already finished.
+        """
+        settled, elapsed = self._settle(
+            monkeypatch,
+            {
+                12345: (1, 12345, "proc:100", "Z"),
+                12346: (1, 12345, "proc:101", "Z"),
+            },
+            timeout=5.0,
+        )
+
+        assert settled
+        assert elapsed < 1.0
+
+    @_POSIX_ONLY
+    @pytest.mark.parametrize("state", ["R", "S", "D", "T", "t"])
+    def test_any_live_member_keeps_the_group_blocking(
+        self, state: str, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Only the zombie is discounted.
+
+        Stopped, traced and uninterruptible members are processes that can be
+        resumed and still hold everything they opened, so a group carrying one
+        has not settled however many zombies stand next to it.
+        """
+        settled, _elapsed = self._settle(
+            monkeypatch,
+            {
+                12345: (1, 12345, "proc:100", "Z"),
+                12346: (1, 12345, "proc:101", state),
+            },
+            timeout=0.05,
+        )
+
+        assert not settled
+
+    @_POSIX_ONLY
+    @pytest.mark.parametrize("rows", [{}, {999: (1, 998, "proc:1", "Z")}])
+    def test_a_snapshot_that_names_no_member_keeps_the_group_blocking(
+        self,
+        rows: dict[int, tuple[int, int, str | None, str | None]],
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Not knowing is not evidence that a group is empty.
+
+        An unreadable process table and a snapshot taken while the group was
+        mid-exit look identical from here, and neither may release a caller
+        that ``killpg`` still reports a group for.
+        """
+        settled, _elapsed = self._settle(monkeypatch, rows, timeout=0.05)
+
+        assert not settled
+
+    @_POSIX_ONLY
+    def test_an_unreadable_process_table_keeps_the_group_blocking(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        def refuse() -> dict[int, tuple[int, int, str | None, str | None]]:
+            raise OSError("the process table could not be read")
+
+        monkeypatch.setattr(process_tree, "_posix_process_rows", refuse)
+
+        assert process_tree.process_group_has_live_member(12345)
+
+    @_LINUX_ONLY
+    def test_a_zombie_only_group_settles_under_a_reaper_that_never_waits(
+        self, tmp_path: Path
+    ):
+        """The same measurement against real processes rather than a fixture.
+
+        ``PR_SET_CHILD_SUBREAPER`` makes the helper the parent every orphan
+        below it reparents to, and it never waits for one: that is what a
+        container's PID 1 is, without needing a container. The helper reports
+        the grandchild's kernel state after the call, so a run that never
+        produced a zombie fails instead of passing for the wrong reason.
+        """
+        marker = tmp_path / "pids"
+        helper = subprocess.run(
+            [sys.executable, "-c", _SUBREAPER_SETTLEMENT, str(marker)],
+            cwd=_REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert helper.returncode == 0, helper.stderr
+        settled, elapsed, state = helper.stdout.split()
+
+        assert state == _ZOMBIE_STATE
+        assert settled == "True"
+        assert float(elapsed) < 2.0
 
     @_POSIX_ONLY
     def test_darwin_zombie_only_group_is_reaped_after_eperm(
