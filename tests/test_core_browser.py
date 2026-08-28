@@ -1086,3 +1086,270 @@ async def test_close_is_idempotent_and_resets_state(tmp_path):
     assert browser._context is None
     assert browser._page is None
     assert browser._playwright is None
+
+
+class TestStartingAgainAfterAClose:
+    """A second launch is a new launch, and an unproved one is refused.
+
+    ``start()`` tells callers to close first, which is only an instruction if
+    closing lets them open again. The hazard is the record the first launch
+    leaves: ``_close_proven`` answers a later ``close()`` without touching a
+    handle, so a restart that kept it would report a confirmed shutdown while
+    the new context and driver are still live, with no Patchright teardown and
+    no OS-level drain behind the answer.
+    """
+
+    @staticmethod
+    def _wired(tmp_path, monkeypatch, *, drains: bool = True):
+        """A manager whose launches, drains and marker traffic are observable."""
+        from linkedin_mcp_server.process_tree import _BROWSER_PROCESS_MARKER
+
+        manager = BrowserManager(user_data_dir=tmp_path / "profile", headless=True)
+        record: dict = {
+            "contexts": [],
+            "drivers": [],
+            "launch_markers": [],
+            "remembered": [],
+            "drained": [],
+            "forgotten": [],
+        }
+
+        class _Context:
+            def __init__(self) -> None:
+                self.pages = [MagicMock(name="startup-page")]
+                self.closes = 0
+                self.hangs = False
+                self.entered_close = asyncio.Event()
+
+            async def close(self) -> None:
+                self.closes += 1
+                self.entered_close.set()
+                if self.hangs:
+                    await asyncio.sleep(3600)
+
+        class _Chromium:
+            async def launch_persistent_context(self, user_data_dir, **kwargs):
+                record["launch_markers"].append(kwargs["env"][_BROWSER_PROCESS_MARKER])
+                context = _Context()
+                record["contexts"].append(context)
+                return context
+
+        class _Driver:
+            def __init__(self) -> None:
+                self.chromium = _Chromium()
+                self.stops = 0
+
+            async def stop(self) -> None:
+                self.stops += 1
+
+        async def start_driver():
+            driver = _Driver()
+            record["drivers"].append(driver)
+            return driver
+
+        def drain(marker: str, *, containment: object = None) -> bool:
+            record["drained"].append((marker, containment))
+            return drains
+
+        # A real ``ps`` scan per launch, twice over, for an answer no assertion
+        # here reads. The marker it is handed is the assertion instead.
+        monkeypatch.setattr(
+            "linkedin_mcp_server.core.browser.remember_detached_process_groups",
+            record["remembered"].append,
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.core.browser.drain_browser_process_marker", drain
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.core.browser.forget_browser_process_marker",
+            record["forgotten"].append,
+        )
+        # Real headless, so the launch does not go looking for a hidden target
+        # and the startup page is the page under test.
+        monkeypatch.setattr(
+            "linkedin_mcp_server.core.browser.hidden_target_is_supported",
+            lambda: False,
+        )
+        return manager, record, start_driver
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _driving(start_driver):
+        with mock.patch(
+            "linkedin_mcp_server.core.browser.async_playwright"
+        ) as playwright:
+            playwright.return_value.start = start_driver
+            yield
+
+    @pytest.mark.asyncio
+    async def test_the_second_cycle_launches_and_tears_down_its_own_browser(
+        self, tmp_path, monkeypatch
+    ):
+        """Two cycles, and everything the second one owns is its own."""
+        manager, record, start_driver = self._wired(tmp_path, monkeypatch)
+
+        with self._driving(start_driver):
+            await manager.start()
+            first_marker = manager._process_marker
+            assert await manager.close() is True
+
+            await manager.start()
+            second_marker = manager._process_marker
+            assert manager._context is record["contexts"][1]
+            assert manager.page is record["contexts"][1].pages[0]
+            assert await manager.close() is True
+
+        assert len(record["drivers"]) == 2
+        assert record["contexts"][0] is not record["contexts"][1]
+        # The teardown ran for the second launch as well. Without the reset the
+        # second close answers from the first launch's record and both of these
+        # stay at zero for the browser that is still up.
+        assert [context.closes for context in record["contexts"]] == [1, 1]
+        assert [driver.stops for driver in record["drivers"]] == [1, 1]
+        # A launch this process has already written off must not be what the
+        # second Chromium announces itself as.
+        assert second_marker != first_marker
+        assert record["launch_markers"] == [first_marker, second_marker]
+        assert record["remembered"] == [first_marker, second_marker]
+        assert record["drained"] == [(first_marker, None), (second_marker, None)]
+        assert record["forgotten"] == [first_marker, second_marker]
+
+    @pytest.mark.asyncio
+    async def test_a_new_launch_stops_claiming_the_previous_shutdown(
+        self, tmp_path, monkeypatch
+    ):
+        """``close_confirmed`` may never speak for a browser that is running."""
+        manager, _record, start_driver = self._wired(tmp_path, monkeypatch)
+
+        with self._driving(start_driver):
+            async with manager:
+                pass
+            assert manager.close_confirmed is True
+
+            await manager.start()
+            assert manager.close_confirmed is False
+            assert await manager.close() is True
+
+    @pytest.mark.asyncio
+    async def test_a_new_launch_is_not_authenticated_by_the_old_one(
+        self, tmp_path, monkeypatch
+    ):
+        """The flag lets ``validate_session`` skip its live check."""
+        manager, _record, start_driver = self._wired(tmp_path, monkeypatch)
+
+        with self._driving(start_driver):
+            await manager.start()
+            manager.is_authenticated = True
+            assert await manager.close() is True
+
+            await manager.start()
+            assert manager.is_authenticated is False
+            assert await manager.close() is True
+
+    @pytest.mark.asyncio
+    async def test_a_close_that_never_launched_still_permits_a_start(
+        self, tmp_path, monkeypatch
+    ):
+        """The other route into a proved close: nothing was ever started."""
+        manager, record, start_driver = self._wired(tmp_path, monkeypatch)
+        constructed_marker = manager._process_marker
+
+        assert await manager.close() is True
+        assert record["drained"] == [], "a manager that never launched was scanned"
+
+        with self._driving(start_driver):
+            await manager.start()
+            launch_marker = manager._process_marker
+            assert launch_marker != constructed_marker
+            assert record["launch_markers"] == [launch_marker]
+            assert await manager.close() is True
+
+        assert record["drained"] == [(launch_marker, None)]
+
+    @pytest.mark.asyncio
+    async def test_an_unproved_close_refuses_the_next_start(
+        self, tmp_path, monkeypatch
+    ):
+        """The first Chromium may still be on this profile."""
+        manager, record, start_driver = self._wired(tmp_path, monkeypatch, drains=False)
+
+        with self._driving(start_driver):
+            await manager.start()
+            first_marker = manager._process_marker
+            assert await manager.close() is False
+
+            with pytest.raises(BrowserShutdownUnconfirmedError, match="not proved"):
+                await manager.start()
+
+        assert len(record["drivers"]) == 1, "a second browser opened on the profile"
+        assert record["launch_markers"] == [first_marker]
+        assert manager._process_marker == first_marker
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_close_refuses_the_next_start(
+        self, tmp_path, monkeypatch
+    ):
+        """The emptiness a cancel leaves is not a shutdown.
+
+        ``close()`` takes the handles before its first await, so this manager
+        looks exactly like one that never launched: no context, no driver, and
+        a Chromium that may still be running.
+        """
+        manager, record, start_driver = self._wired(tmp_path, monkeypatch)
+
+        with self._driving(start_driver):
+            await manager.start()
+            first_marker = manager._process_marker
+            context = record["contexts"][0]
+            context.hangs = True
+            closing = asyncio.ensure_future(manager.close())
+            await context.entered_close.wait()
+            closing.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await closing
+
+            assert manager._context is None, "the cancel did not take the handles"
+            with pytest.raises(BrowserShutdownUnconfirmedError, match="not proved"):
+                await manager.start()
+
+        assert len(record["drivers"]) == 1, "a second browser opened on the profile"
+        assert manager._process_marker == first_marker
+
+    @pytest.mark.asyncio
+    async def test_a_failed_relaunch_does_not_drain_the_previous_containment(
+        self, tmp_path, monkeypatch
+    ):
+        """The containment describes this launch, and a spent one describes none.
+
+        On Windows it is the whole of the attribution, so a relaunch that dies
+        before it has one would otherwise take the drain through the previous
+        launch's Job: a question about a browser that was proved gone, asked on
+        behalf of one that never started.
+        """
+        from linkedin_mcp_server.process_tree import ProcessTreeError
+
+        manager, record, start_driver = self._wired(tmp_path, monkeypatch)
+        job = object()
+        containments: list[object] = []
+
+        def contain(playwright: object) -> object:
+            containments.append(playwright)
+            if len(containments) > 1:
+                raise ProcessTreeError("no Job for this launch")
+            return job
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.core.browser.contain_browser_launch", contain
+        )
+
+        with self._driving(start_driver):
+            await manager.start()
+            first_marker = manager._process_marker
+            assert await manager.close() is True
+
+            with pytest.raises(NetworkError, match="no Job for this launch"):
+                await manager.start()
+
+        assert manager._containment is None
+        assert record["drained"] == [(first_marker, job)]
+        assert record["drivers"][1].stops == 1, "the uncontained driver kept running"

@@ -149,6 +149,8 @@ class BrowserManager:
         self._no_window_available = False
         # False until a teardown proves Chromium exited. Pessimistic by default:
         # a launch that is cancelled before close runs must not read as clean.
+        # Cleared again by every new launch, so it never speaks for a browser
+        # that is currently running. See ``_begin_a_launch``.
         self._close_confirmed = False
         # The same answer, kept across calls rather than per call. ``close()``
         # takes the handles before its first await, so a cancel landing in the
@@ -156,7 +158,8 @@ class BrowserManager:
         # may still be running. Answering the retry from that emptiness is what
         # released the lease and deleted the runtime directory under a live
         # browser. These two say which emptiness it is: nothing was ever
-        # started, or a teardown began and never finished.
+        # started, or a teardown began and never finished. Both belong to one
+        # launch: ``_begin_a_launch`` decides what the next one may inherit.
         self._close_proven = False
         self._close_interrupted = False
 
@@ -288,10 +291,76 @@ class BrowserManager:
             raise
         return driver
 
+    def _begin_a_launch(self) -> None:
+        """Take this manager into a new launch, or refuse to.
+
+        A second ``start()`` is part of the contract: the error above tells
+        callers to close first, which is only an instruction if closing then
+        lets them open again. What the new launch may not do is inherit the
+        previous one's verdict. ``_close_proven`` answers every later
+        ``close()`` from its own record without touching a handle, so a restart
+        that left it standing would hand back ``True`` while the *new* context
+        and driver are still live: no Patchright teardown, no OS-level drain,
+        and a caller free to release or delete the profile with Chromium on it.
+
+        A teardown that was never proved is refused rather than reset. That is
+        the whole meaning of ``_close_interrupted``: the earlier browser may
+        still be sitting on this profile, and opening a second one there is the
+        concurrent-profile corruption this module exists to prevent. No state
+        cleared here can make the first browser gone, so the only safe answer
+        is to say so.
+
+        What crosses the boundary and what does not:
+
+        * The marker is minted fresh. The old one was handed to
+          ``forget_browser_process_marker`` on the strength of the proof, so a
+          second Chromium carrying it would announce itself under a launch this
+          process has already written off. A new one also re-registers with the
+          crash guardian, which is exactly what a new manager would do.
+        * The containment is dropped. A proved Windows drain empties the Job
+          and closes its handle (``WindowsJob.wait_until_empty``), so what is
+          left is spent, and this attribute is documented as describing *this*
+          launch.
+        * ``_is_authenticated`` goes back to false. It says startup
+          authentication succeeded for the page this manager hands out, and
+          ``drivers.browser.validate_session`` skips its live check while it is
+          true. Carried over, it would answer for a context nobody validated.
+        * ``_no_window_available`` deliberately survives. It records that this
+          machine refused a window, which a second launch on the same machine
+          would only rediscover by opening another doomed headed browser.
+        """
+        if self._close_interrupted:
+            raise BrowserShutdownUnconfirmedError(
+                "The previous browser on this profile was not proved to have "
+                "exited, so another one cannot be started on it. Restart the "
+                "server to recover."
+            )
+        if not self._close_proven:
+            # Nothing has closed here, so there is nothing to hand over: either
+            # this is the first launch or a previous ``start()`` is still live,
+            # and the caller met the already-started error before reaching this.
+            return
+
+        # Minted before anything is assigned. A guardian that has gone makes
+        # this raise, and a manager that keeps its proved-closed state is a
+        # better thing to leave behind than one that has half-entered a launch
+        # it never made.
+        marker, environment = new_browser_process_marker()
+        self._process_marker = marker
+        self._process_environment = environment
+        self._close_proven = False
+        self._close_confirmed = False
+        self._is_authenticated = False
+        self._containment = None
+
     async def start(self) -> None:
         """Start Patchright and launch persistent browser context."""
         if self._context is not None:
             raise RuntimeError("Browser already started. Call close() first.")
+        # Before the driver, and before anything that could spawn a process:
+        # every launch-specific answer this object carries is either replaced
+        # here or refuses the launch outright.
+        self._begin_a_launch()
         try:
             driver = await self._start_contained_driver()
 
@@ -558,10 +627,13 @@ class BrowserManager:
         both see the detached tree and end it, so a close that fails at the API
         is exactly the close that needs it most.
 
-        The answer is sticky in both directions. Once a teardown has been proved
-        complete every later call agrees, and until then no call may claim it:
-        an interrupted close is retried rather than believed, and a retry that
-        finds the handles already gone still has to prove the browser is.
+        The answer is sticky in both directions, for the launch it belongs to.
+        Once a teardown has been proved complete every later call agrees, and
+        until then no call may claim it: an interrupted close is retried rather
+        than believed, and a retry that finds the handles already gone still has
+        to prove the browser is. A ``start()`` after a proved close opens a new
+        launch and clears that record with everything else it owns; see
+        :meth:`_begin_a_launch`.
         """
         if self._close_proven:
             # Proved once, and the marker was forgotten on the strength of it.
@@ -676,7 +748,9 @@ class BrowserManager:
         """Whether the last ``async with`` exit proved Chromium had gone.
 
         False means cleanup timed out or failed and the browser may still be
-        running, so the profile must not be handed to anyone else.
+        running, so the profile must not be handed to anyone else. Also false
+        before the first exit and again from the moment a new launch begins, so
+        it never speaks for a browser that is currently up.
         """
         return self._close_confirmed
 
