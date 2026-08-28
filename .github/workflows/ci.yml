@@ -62,13 +62,28 @@ jobs:
 
       - run: uv cache prune --ci
 
+  # Branch protection on `main` requires `lint-and-check` and `test` only, and
+  # that list is a repository setting no workflow file can edit. So this job is
+  # where a contract that has to block a merge gets attached: it fails unless
+  # every job it names succeeded, which makes those jobs required without
+  # renaming anything. `if: always()` so a failure upstream still reaches the
+  # check below rather than skipping it, because a skipped required check is a
+  # green one.
   test:
-    needs: windows-daemon
+    needs: [windows-daemon, platform-behaviour]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Require the Windows daemon tests
         run: test '${{ needs.windows-daemon.result }}' = success
+
+      # Real browser containment on Windows and macOS runs nowhere else: the
+      # POSIX environment marker and the Windows Job a Chromium joins are
+      # facts only those platforms can confirm, and the lease and owner-only
+      # storage are a different implementation on each. Reading the result of
+      # the whole matrix, so one red leg fails this.
+      - name: Require the platform behaviour tests
+        run: test '${{ needs.platform-behaviour.result }}' = success
 
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
@@ -178,12 +193,12 @@ jobs:
       # headless mode like Linux does; that is true of one case in that file
       # and says nothing about the rest of them.
       #
-      # None of these three legs blocks a merge. Branch protection on `main`
-      # requires `lint-and-check` and `test` only, which is how this job has
-      # always stood, so a red leg here is visible on the pull request and does
-      # not stop anyone. The Linux x64 half of the gate is inside `test` and
-      # does block. Adding these names to the required list is a repository
-      # setting rather than anything this file can do.
+      # Every leg blocks a merge, through `test` rather than by name. Branch
+      # protection requires `lint-and-check` and `test`, and `test` fails
+      # unless this whole matrix succeeded, so the required list stays as it is
+      # while a red leg here stops the merge. Before that it did not: this job
+      # held the only real browser containment run on Windows and macOS and
+      # nothing depended on it, so those contracts were advisory.
       #
       # `shell: bash` because one of the legs is Windows, where the default is
       # PowerShell and none of the syntax below means anything.

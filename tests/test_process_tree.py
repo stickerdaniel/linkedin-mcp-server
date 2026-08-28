@@ -2576,43 +2576,138 @@ time.sleep(600)
                     )
 
     @_WINDOWS_ONLY
-    def test_a_compatible_outer_job_allows_the_managed_inner_job(self):
-        win32api = importlib.import_module("win32api")
-        win32job = importlib.import_module("win32job")
-        if not win32job.IsProcessInJob(win32api.GetCurrentProcess(), None):
-            pytest.skip("the Windows runner does not contain this test in an outer Job")
+    def test_a_compatible_outer_job_allows_the_managed_inner_job(self, tmp_path: Path):
+        """Nesting, proved against an outer Job this test owns.
 
-        job = process_tree.WindowsJob.anonymous()
+        Every managed Job this server creates is an inner one wherever the host
+        already contains the server: a CI runner, a service wrapper, a terminal
+        that groups its children. Whether Windows lets the browser and the
+        installer keep their own Job in there is not something the code can
+        decide, and it is the difference between contained and uncontained.
+
+        This used to ask the runner whether it happened to be in a Job and skip
+        when it was not, so the contract was only tested where nobody had
+        arranged for it. The outer Job is built here instead: the helper below
+        is assigned to it before it is released, so it always runs nested, and
+        anything that stops it running nested fails rather than skips.
+        """
+        script = r"""
+import importlib
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+from linkedin_mcp_server import process_tree
+
+win32api = importlib.import_module("win32api")
+win32job = importlib.import_module("win32job")
+
+print("pid", os.getpid(), flush=True)
+# The parent checks this pid against its own outer Job handle and drops the
+# file below once it holds, so everything after this point is nested and not
+# merely hoping to be.
+confirmed = Path(sys.argv[1])
+for _ in range(6000):
+    if confirmed.exists():
+        break
+    time.sleep(0.01)
+else:
+    raise SystemExit("the parent never confirmed the outer Job")
+if not win32job.IsProcessInJob(win32api.GetCurrentProcess(), None):
+    raise SystemExit("the helper is not contained in any Job")
+
+job = process_tree.WindowsJob.anonymous()
+nonce = process_tree.release_nonce()
+target = subprocess.Popen(
+    process_tree.windows_gate_command(
+        [sys.executable, "-c", "import time; time.sleep(600)"], nonce
+    ),
+    stdin=subprocess.PIPE,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+assigned = False
+try:
+    job.assign_popen(target)
+    assigned = True
+    handle = target._handle
+    if not win32job.IsProcessInJob(handle, job.job_handle):
+        raise SystemExit("the target did not join the managed inner Job")
+    if not win32job.IsProcessInJob(handle, None):
+        raise SystemExit("the target left the outer Job on the way in")
+    process_tree.release_windows_gate(target.stdin, nonce)
+    job.terminate()
+    if target.wait(timeout=30) == 0:
+        raise SystemExit("the inner Job did not terminate its target")
+    job.release_popen_handle(target)
+    job.wait_until_empty(timeout=30)
+    print("nested inner job drained", flush=True)
+finally:
+    if not job.closed:
+        if assigned:
+            job.terminate()
+            target.wait(timeout=30)
+            job.release_popen_handle(target)
+        elif target.poll() is None:
+            target.kill()
+            target.wait(timeout=5)
+        job.close()
+"""
+        win32api = importlib.import_module("win32api")
+        win32con = importlib.import_module("win32con")
+        win32job = importlib.import_module("win32job")
+
+        confirmed = tmp_path / "outer-job-confirmed"
+        outer = process_tree.WindowsJob.anonymous()
         nonce = process_tree.release_nonce()
-        process = subprocess.Popen(
+        helper = subprocess.Popen(
             process_tree.windows_gate_command(
-                [sys.executable, "-c", "import time; time.sleep(600)"], nonce
+                [sys.executable, "-c", script, str(confirmed)], nonce
             ),
+            cwd=_REPO_ROOT,
             stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
         assigned = False
         try:
-            job.assign_popen(process)
+            outer.assign_popen(helper)
             assigned = True
-            assert process.stdin is not None
-            process_tree.release_windows_gate(process.stdin, nonce)
-            job.terminate()
-            assert process.wait(timeout=30) != 0
-            job.release_popen_handle(process)
-            job.wait_until_empty(timeout=30)
+            assert helper.stdin is not None and helper.stdout is not None
+            process_tree.release_windows_gate(helper.stdin, nonce)
+
+            # The gate spawns the helper as its own child, so the helper is in
+            # this Job by inheritance rather than by assignment. Confirmed by
+            # pid against this Job's handle, because ``IsProcessInJob(_, None)``
+            # inside the helper would also answer yes to a Job the runner
+            # arranged, which is the ambient condition this test replaced.
+            reported = helper.stdout.readline().split()
+            assert reported[:1] == [b"pid"], reported
+            handle = win32api.OpenProcess(
+                win32con.PROCESS_QUERY_LIMITED_INFORMATION, False, int(reported[1])
+            )
+            try:
+                assert win32job.IsProcessInJob(handle, outer.job_handle)
+            finally:
+                handle.Close()
+
+            confirmed.write_text("go", encoding="ascii")
+            stdout, stderr = helper.communicate(timeout=180)
+            assert helper.returncode == 0, stderr.decode("utf-8", "replace")
+            assert b"nested inner job drained" in stdout
         finally:
-            if not job.closed and assigned:
-                job.terminate()
-                process.wait(timeout=30)
-                job.release_popen_handle(process)
-                job.wait_until_empty(timeout=30)
-            elif not job.closed:
-                if process.poll() is None:
-                    process.kill()
-                    process.wait(timeout=5)
-                job.close()
+            if helper.poll() is None:
+                helper.kill()
+                helper.wait(timeout=30)
+            if not outer.closed:
+                if assigned:
+                    outer.terminate()
+                    outer.release_popen_handle(helper)
+                    outer.wait_until_empty(timeout=30)
+                else:
+                    outer.close()
 
 
 # --------------------------------------------------------------------------
