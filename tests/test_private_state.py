@@ -1048,6 +1048,7 @@ class TestWindowsAcl:
         # And released, so nothing is left holding the tree open.
         (tmp_path / "ancestor").rename(tmp_path / "moved")
 
+    @windows_only
     def test_an_owned_child_directory_uses_the_same_acl_contract(self, tmp_path: Path):
         from linkedin_mcp_server.windows_acl import describe_dacl
 
