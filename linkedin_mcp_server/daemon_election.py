@@ -460,6 +460,14 @@ def _live_lookup(
         profile,
         config,
         wait_seconds=wait_seconds,
+        # Buried instances travel *into* the read, so a wait spends itself
+        # watching for a generation that could actually be used. Passing them
+        # only mattered once a wait was involved: a buried descriptor is still
+        # compatible on disk, so the read returned it instantly, the downgrade
+        # below turned it down, and the caller's retry loop came straight back
+        # with none of its budget spent. Snapshotted rather than shared, since
+        # the set is the caller's and this is the only thing here that reads it.
+        ignore_instances=frozenset(buried),
         _inspector=inspector,
     )
     if not lookup.worth_connecting:

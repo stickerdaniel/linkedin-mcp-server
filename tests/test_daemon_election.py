@@ -476,6 +476,142 @@ class TestSilenceIsNotDeath:
         assert elapsed < 15, f"the election ran {elapsed:.1f}s past a 1.0s budget"
 
 
+class TestRetryPacing:
+    """A buried generation must not turn the retry loop into a spin.
+
+    A descriptor stays compatible on disk after the owner behind it is found
+    unusable, so the read that the loop paces itself with answered instantly on
+    a file the election had already written off. Nothing slept, and the whole
+    start backoff was spent re-reading that file as fast as the filesystem
+    would answer.
+    """
+
+    def test_a_buried_descriptor_still_costs_the_wait_it_was_asked_for(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        profile = _profile(tmp_path)
+        config = _config(profile)
+        auth_root = profile.parent
+        _publish_stale_owner(auth_root, profile, config)
+
+        real_inspect = daemon_module._inspect
+        inspections = 0
+
+        def inspect(*args: object) -> OwnerLookup:
+            nonlocal inspections
+            inspections += 1
+            return real_inspect(*cast(Any, args))
+
+        real_look_up = election_module.look_up_owner
+        passes = 0
+
+        def look_up(*args: object, **kwargs: object) -> OwnerLookup:
+            nonlocal passes
+            passes += 1
+            return real_look_up(*cast(Any, args), **cast(Any, kwargs))
+
+        probes = 0
+
+        def refuse(_attachment: Attachment) -> Reach:
+            nonlocal probes
+            probes += 1
+            return Reach.REFUSED
+
+        monkeypatch.setattr(daemon_module, "_inspect", inspect)
+        monkeypatch.setattr(election_module, "look_up_owner", look_up)
+        monkeypatch.setattr(
+            election_module, "_start_owner", lambda *a, **k: _Attempt.FAILED
+        )
+        # One start, then nothing but backoff for the rest of the budget. That
+        # window is where the spin lived: no start is due, so every pass through
+        # the loop was pure observation.
+        monkeypatch.setattr(election_module, "_OWNER_START_BURST", 1)
+        monkeypatch.setattr(election_module, "_OWNER_START_RETRY_SECONDS", 30.0)
+        monkeypatch.setattr(election_module, "_MAX_OWNER_START_RETRY_SECONDS", 30.0)
+
+        began = time.monotonic()
+        outcome = obtain_owner(
+            auth_root, profile, config, deadline_seconds=0.6, connect=refuse
+        )
+        elapsed = time.monotonic() - began
+
+        assert not outcome.worth_connecting
+        assert outcome.attachment_lookup.state is OwnerState.INCOMPATIBLE
+        # The election still uses its budget rather than giving up early.
+        assert 0.55 <= elapsed < 5, f"the election ran {elapsed:.2f}s"
+        # The bound is the point. Each pass costs a descriptor read on its own
+        # thread and a touch of state storage. Measured on this tree against the
+        # numbers below: 10 inspections over 6 lookup passes with the pacing in
+        # place, and 676 inspections in the same 0.6s without it.
+        assert inspections < 40, (
+            f"{inspections} descriptor inspections in {elapsed:.2f}s"
+        )
+        assert passes < 20, f"{passes} lookup passes in {elapsed:.2f}s"
+        # And the buried endpoint is never contacted again, however long the
+        # loop keeps watching the file it left behind.
+        assert probes == 1, f"the buried owner was probed {probes} times"
+
+    def test_a_new_generation_is_still_picked_up_promptly(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Pacing must not become blindness.
+
+        The wait is spent watching the same file, so an owner that publishes
+        over the buried generation has to be seen inside it rather than after
+        it. Otherwise the fix would trade a spin for a stall.
+        """
+        profile = _profile(tmp_path)
+        config = _config(profile)
+        auth_root = profile.parent
+        stale = _publish_stale_owner(auth_root, profile, config)
+
+        published = threading.Event()
+        fresh: list[str] = []
+
+        def replace_after_burial(*_args: object, **_kwargs: object) -> _Attempt:
+            # Stands in for the owner a real start would have produced: the
+            # descriptor is replaced while the loop is inside its paced wait.
+            def publish_later() -> None:
+                time.sleep(0.1)
+                fresh.append(_publish_stale_owner(auth_root, profile, config))
+                published.set()
+
+            threading.Thread(target=publish_later, daemon=True).start()
+            return _Attempt.FAILED
+
+        seen: list[str] = []
+
+        def reach(attachment: Attachment) -> Reach:
+            seen.append(attachment.descriptor.instance_id)
+            return (
+                Reach.REFUSED
+                if attachment.descriptor.instance_id == stale
+                else (Reach.ANSWERED)
+            )
+
+        monkeypatch.setattr(election_module, "_start_owner", replace_after_burial)
+        monkeypatch.setattr(election_module, "_OWNER_START_BURST", 1)
+        monkeypatch.setattr(election_module, "_OWNER_START_RETRY_SECONDS", 30.0)
+        monkeypatch.setattr(election_module, "_MAX_OWNER_START_RETRY_SECONDS", 30.0)
+        # A long paced wait, so that the answer has to come from *inside* it.
+        # At the production 0.2s the loop would come round again on its own and
+        # a wait that simply slept would look identical to one that watched.
+        monkeypatch.setattr(election_module, "_RETRY_SECONDS", 4.0)
+
+        began = time.monotonic()
+        outcome = obtain_owner(
+            auth_root, profile, config, deadline_seconds=8.0, connect=reach
+        )
+        elapsed = time.monotonic() - began
+
+        assert published.is_set()
+        assert outcome.worth_connecting, "the replacement generation was never seen"
+        assert seen == [stale, fresh[0]]
+        # One poll interval past publication, not the whole of the wait it landed
+        # in. Sleeping the wait out instead of polling it lands at 4s here.
+        assert elapsed < 2.0, f"the replacement took {elapsed:.2f}s to be noticed"
+
+
 class TestFailingFast:
     def test_owner_start_backoff_begins_after_the_initial_burst(self):
         delay = election_module._OWNER_START_RETRY_SECONDS

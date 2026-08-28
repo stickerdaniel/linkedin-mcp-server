@@ -41,6 +41,7 @@ import math
 import queue
 import threading
 import time
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -265,12 +266,21 @@ class _DescriptorInspector:
         return result
 
 
+def _names_an_ignored_instance(lookup: OwnerLookup, ignored: AbstractSet[str]) -> bool:
+    """Whether this reading is of a generation the caller has already written off."""
+    if not ignored:
+        return False
+    attachment = lookup.attachment
+    return attachment is not None and attachment.descriptor.instance_id in ignored
+
+
 def look_up_owner(
     auth_root: Path,
     profile: Path,
     config: AppConfig,
     *,
     wait_seconds: float = 0.0,
+    ignore_instances: AbstractSet[str] = frozenset(),
     _inspector: _DescriptorInspector | None = None,
 ) -> OwnerLookup:
     """Read the descriptor until it is compatible or the budget runs out.
@@ -291,6 +301,20 @@ def look_up_owner(
     Callers pass a wait only when they have reason to think an owner is
     starting, which in practice means having just lost the lock race. With the
     default of no wait this is a single read.
+
+    *ignore_instances* names generations the caller has already judged unusable,
+    and it exists because ``ATTACHABLE`` alone made this function return
+    instantly on a file the caller was going to throw away. Only the caller can
+    know that: burial lives in :mod:`linkedin_mcp_server.daemon_election` and is
+    established by connecting, which nothing here does. Without it a caller that
+    asked for a wait got none, and its own retry loop spun through the whole
+    backoff at read speed, starting a descriptor inspection thread and touching
+    state storage on every pass. Named instances are therefore waited out like
+    any other unusable state: the poll keeps watching the same file, so a *new*
+    generation published over it is still picked up within one poll interval,
+    and the buried endpoint is never contacted again. When the budget ends with
+    nothing better, the reading is returned exactly as before, so the caller's
+    own downgrade is unchanged.
 
     Raises:
         ValueError: *wait_seconds* is not finite.
@@ -328,7 +352,9 @@ def look_up_owner(
             lookup = OwnerLookup(state=OwnerState.UNTRUSTED, reason=str(exc))
 
         last_lookup = lookup
-        if lookup.state is OwnerState.ATTACHABLE:
+        if lookup.state is OwnerState.ATTACHABLE and not _names_an_ignored_instance(
+            lookup, ignore_instances
+        ):
             return lookup
 
         # Never sleep past the deadline. A flat poll interval turned a 1 ms
@@ -339,7 +365,13 @@ def look_up_owner(
             # The state at INFO, the detail at DEBUG. A reason can quote a path
             # or host out of the descriptor, and "nothing usable was published"
             # is the part that belongs in a log a user pastes into a report.
-            logger.info("No daemon to attach to (%s)", lookup.state.value)
+            # An ignored generation is named as such rather than by its state,
+            # which would otherwise print the "attachable" this wait exists to
+            # disbelieve.
+            if _names_an_ignored_instance(lookup, ignore_instances):
+                logger.info("No daemon to attach to (the published one is unusable)")
+            else:
+                logger.info("No daemon to attach to (%s)", lookup.state.value)
             logger.debug("Daemon lookup detail: %s", lookup.reason)
             return lookup
         time.sleep(min(_ATTACH_POLL_SECONDS, remaining))
