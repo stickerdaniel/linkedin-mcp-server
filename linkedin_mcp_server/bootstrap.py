@@ -2624,6 +2624,17 @@ def _redacted_url(found: re.Match[str]) -> str:
 #: A configured mirror is not required to be HTTP, so its scheme is read as a
 #: scheme rather than matched against one.
 _CONFIGURED_SCHEME = re.compile(r"(?s)([A-Za-z][A-Za-z0-9+.\-]*):[/\\]{2}(.*)\Z")
+#: Every variable patchright reads a download mirror out of. Both spellings of
+#: both hosts, and the npm-config forms of each, because npm exports a
+#: ``.npmrc`` entry into the environment under those names.
+_DOWNLOAD_HOST_VARIABLES = (
+    "PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST",
+    "npm_config_playwright_chromium_download_host",
+    "npm_package_config_playwright_chromium_download_host",
+    "PLAYWRIGHT_DOWNLOAD_HOST",
+    "npm_config_playwright_download_host",
+    "npm_package_config_playwright_download_host",
+)
 
 
 def _redacted_download_host(configured: str) -> str:
@@ -2632,6 +2643,99 @@ def _redacted_download_host(configured: str) -> str:
     if found is None:
         return "***"
     return _redacted_origin(found.group(1).lower(), found.group(2))
+
+
+def _configured_download_hosts() -> tuple[str, ...]:
+    """Every mirror value configured now, each with the form patchright joins on.
+
+    Patchright strips a trailing slash before it builds a download URL, so the
+    configured string and its slash-less form are two different literals that
+    can both appear in the output, and both are secrets.
+
+    Read from the environment on every call rather than cached: tests set these
+    per case, and the cost is six lookups against a work unit that is already a
+    scan of the buffer.
+    """
+    values: list[str] = []
+    for variable in _DOWNLOAD_HOST_VARIABLES:
+        configured = os.getenv(variable, "").strip()
+        if not configured:
+            continue
+        values.append(configured)
+        without_slash = configured.rstrip("/")
+        # A value that is nothing but slashes leaves an empty string here, and
+        # an empty needle matches between every pair of characters: `str.replace`
+        # would splice the marker through the whole buffer, and the prefix scan
+        # below would call every position the start of a secret.
+        if without_slash and without_slash != configured:
+            values.append(without_slash)
+    return tuple(values)
+
+
+@functools.lru_cache(maxsize=32)
+def _configured_borders(value: str) -> tuple[int, ...]:
+    """The KMP prefix function of one configured value.
+
+    Cached on the value, which does not change within a process, so the table
+    is built once however many boundaries the stream produces.
+    """
+    table = [0] * len(value)
+    match = 0
+    for index in range(1, len(value)):
+        while match and value[index] != value[match]:
+            match = table[match - 1]
+        if value[index] == value[match]:
+            match += 1
+        table[index] = match
+    return tuple(table)
+
+
+def _pending_value_start(text: str, cut: int) -> int | None:
+    """Where a configured mirror value that has not finished arriving begins.
+
+    ``_safe_to_print`` removes a configured value by exact replacement, so it
+    can only act once the whole value sits in the buffer. A boundary drawn while
+    one is still arriving splits it: the head is emitted or trimmed away and the
+    tail that remains carries the private path past every pattern here, out
+    through the debug log, the line callback, the retained failure and the MCP
+    error it becomes.
+
+    The run machinery above cannot cover this, because it keys on an HTTP(S)
+    scheme. A download host is not required to have one: the loader accepts a
+    scheme-less ``mirror.example/TOKEN``, a scheme-relative ``//mirror.example``
+    and another scheme entirely, and dropping every over-long ``//`` run to
+    reach those would delete the base64 blobs and path lists that ``_is_a_url``
+    exists to keep.
+
+    So the known values are matched instead of guessed at. Returns the leftmost
+    position at or before *cut* where the buffer's tail is still a proper prefix
+    of one, or ``None`` when a boundary at *cut* cannot split any of them.
+
+    A value carrying whitespace is only partly covered, and that is a property
+    of the model rather than an oversight: a run ends at whitespace everywhere
+    in this file, so the drop that follows stops there too. No mirror URL has
+    any.
+    """
+    earliest: int | None = None
+    for value in _configured_download_hosts():
+        # Only the last ``len(value) - 1`` characters can begin an occurrence
+        # that is still arriving, since a whole one was replaced already. That
+        # window is what keeps this linear in the configured value's length
+        # instead of quadratic in the buffer's.
+        window = text[-(len(value) - 1) :] if len(value) > 1 else ""
+        table = _configured_borders(value)
+        match = 0
+        for char in window:
+            while match and char != value[match]:
+                match = table[match - 1]
+            if char == value[match]:
+                match += 1
+        if not match:
+            continue
+        start = len(text) - match
+        if start <= cut and (earliest is None or start < earliest):
+            earliest = start
+    return earliest
 
 
 def _safe_to_print(text: str) -> str:
@@ -2650,25 +2754,13 @@ def _safe_to_print(text: str) -> str:
 
     The configured mirror base is still handled separately, for the case that
     rule cannot reach: a download host given without a scheme is not a URL to
-    any pattern here, and its path would print as ordinary text.
+    any pattern here, and its path would print as ordinary text. That
+    replacement is exact and therefore needs the whole value present, which is
+    what ``_pending_value_start`` keeps true across a boundary.
     """
     text = _TERMINAL_CONTROLS.sub("", text)
-    for variable in (
-        "PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST",
-        "npm_config_playwright_chromium_download_host",
-        "npm_package_config_playwright_chromium_download_host",
-        "PLAYWRIGHT_DOWNLOAD_HOST",
-        "npm_config_playwright_download_host",
-        "npm_package_config_playwright_download_host",
-    ):
-        configured = os.getenv(variable, "").strip()
-        if not configured:
-            continue
-        redacted = _redacted_download_host(configured)
-        text = text.replace(configured, redacted)
-        without_slash = configured.rstrip("/")
-        if without_slash != configured:
-            text = text.replace(without_slash, _redacted_download_host(without_slash))
+    for configured in _configured_download_hosts():
+        text = text.replace(configured, _redacted_download_host(configured))
     text = _URL_IN_TEXT.sub(_redacted_url, text)
     # Last, for what is not an HTTP(S) URL: another scheme's userinfo, and the
     # scheme-relative ``//user@host`` form.
@@ -2753,14 +2845,24 @@ def _forced_fragment(text: str, cut: int) -> tuple[str, str, bool]:
     marker goes out and the run is dropped for as long as it lasts. Without one
     the cut stands, because a whitespace-free run of that length is ordinary
     output far more often than it is a credential.
+
+    A configured mirror value still arriving is the second thing a cut must not
+    split, and it is the one the scheme test cannot see: the loader takes a
+    download host with no scheme at all. It is recognised by name rather than by
+    shape, so an over-long ``//`` token that is not one still comes through
+    whole.
     """
+    pending = _pending_value_start(text, cut)
     opening = _run_opening(text, cut)
-    if opening is None or (opening.start() == 0 and not _is_a_url(opening)):
-        return text[:cut], text[cut:], False
-    if opening.start() > 0:
-        return text[: opening.start()], text[opening.start() :], False
-    remaining, running = _dropped_run(text)
-    return _OMITTED_RUN_HEAD, remaining, running
+    opened = None if opening is None else opening.start()
+    if pending == 0 or (opened == 0 and opening is not None and _is_a_url(opening)):
+        remaining, running = _dropped_run(text)
+        return _OMITTED_RUN_HEAD, remaining, running
+    # Whichever of the two opens first, and never at zero: an opener there that
+    # reached this line is the ordinary-output case, which keeps the plain cut.
+    stops = [start for start in (pending, opened) if start]
+    stop = min(stops) if stops else cut
+    return text[:stop], text[stop:], False
 
 
 class _RedactedTail:
@@ -2818,12 +2920,24 @@ class _RedactedTail:
             return
         cut = len(self._text) - self._limit
         opening = _run_opening(self._text, cut)
-        if opening is None or not _is_a_url(opening):
+        # A configured mirror value that is still arriving is a secret this trim
+        # would behead: the part that names it is in front of the cut and the
+        # private path is behind it, and the exact replacement above can never
+        # match either half afterwards. The value has no scheme to find it by,
+        # so it is looked up by name.
+        pending = _pending_value_start(self._text, cut)
+        if pending is None and (opening is None or not _is_a_url(opening)):
             self._text = self._text[cut:]
             return
         # Keeping a tail means dropping heads, and the head of a URL is the part
         # that names it. What a cut here would leave prints as ordinary text, so
         # the whole run goes and the marker says that something did.
+        #
+        # Measured from the cut in both cases, and never from where the value
+        # begins. This keeps ``self._text[end:]``, so the later end is the one
+        # that discards more, and a value still arriving reaches the end of the
+        # text: the two agree unless the value carries whitespace, where
+        # starting earlier would hand back the piece behind it.
         end = _run_end(self._text, cut)
         self._dropping = end == len(self._text)
         self._text = _OMITTED_RUN_HEAD + self._text[end:]

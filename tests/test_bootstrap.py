@@ -4535,6 +4535,160 @@ class TestAForcedCutDoesNotSplitAUrl:
         assert "installing" in lines
 
 
+class TestAConfiguredMirrorSurvivesEveryBoundary:
+    """A download host without an HTTP(S) scheme is still a secret.
+
+    ``_safe_to_print`` removes a configured value by exact replacement, so it
+    can only act with the whole value in the buffer. The machinery that carries
+    a URL across a boundary keys on the scheme instead, and the loader accepts
+    a mirror that has none: scheme-less, scheme-relative and under another
+    scheme are all configurations this server starts on. A boundary through one
+    of those emitted its head and kept its tail, and the private path left with
+    the tail through the debug log, the line callback, the retained failure and
+    the MCP error that failure becomes.
+
+    Both boundaries are swept, because they cut in opposite directions: the
+    forced fragment emits the head and holds the tail, and the retained tail
+    discards the head and keeps what a client is shown.
+    """
+
+    #: Long enough to cross either boundary from both sides, and shaped like a
+    #: mirror that authenticates by path rather than by userinfo, which is the
+    #: shape no pattern in that file recognises on its own.
+    FORMS = {
+        "scheme-less": "mirror.example/" + "P" * 30 + "/s3cr3t",
+        "scheme-relative": "//mirror.example/" + "P" * 30 + "/s3cr3t",
+        "non-http": "ftp://mirror.example/" + "P" * 30 + "/s3cr3t",
+    }
+
+    async def _lines(self, *writes: bytes) -> list[str]:
+        from linkedin_mcp_server.bootstrap import _installer_lines
+
+        stream = cast(Any, _FakeStdout(list(writes)))
+        return [line async for line in _installer_lines(stream)]
+
+    @pytest.mark.parametrize("form", sorted(FORMS))
+    async def test_no_read_boundary_splits_a_configured_mirror(self, monkeypatch, form):
+        """Every point a read can split the value at, through the reader.
+
+        Run against a small cap for the same reason the URL sweep is: nothing
+        in the splitter reads the cap for anything but a comparison, and a
+        64 KiB one turns this into hundreds of copies of a 128 KiB buffer. The
+        space in front of the value is the one patchright writes there.
+        """
+        from linkedin_mcp_server import bootstrap
+
+        configured = self.FORMS[form]
+        monkeypatch.setenv("PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST", configured)
+        cap = 40
+        monkeypatch.setattr(bootstrap, "_MAX_LINE_CHARS", cap)
+        monkeypatch.setattr(bootstrap, "_READ_CHUNK", cap)
+        payload = "F" * 10 + " " + configured + " done\n"
+        leaking = []
+        for split in range(1, len(payload)):
+            printed = "".join(
+                await self._lines(payload[:split].encode(), payload[split:].encode())
+            )
+            if "s3cr3t" in printed:
+                leaking.append(split)
+            assert "done" in printed, "and the stream is not elided to reach that"
+
+        assert leaking == []
+
+    @pytest.mark.parametrize("form", sorted(FORMS))
+    async def test_no_feed_boundary_beheads_a_configured_mirror(
+        self, monkeypatch, form
+    ):
+        """The retained tail trims from the front, which is where the name is.
+
+        Losing the head of a value ``_safe_to_print`` matches whole is what
+        makes the rest of it unrecognisable, so the trim has to move off it the
+        way it already moves off a URL.
+        """
+        from linkedin_mcp_server.bootstrap import _RedactedTail
+
+        configured = self.FORMS[form]
+        monkeypatch.setenv("PLAYWRIGHT_DOWNLOAD_HOST", configured)
+        payload = ("F" * 5 + " " + configured + " done").encode()
+        leaking = []
+        for split in range(1, len(payload)):
+            tail = _RedactedTail(20)
+            tail.feed(payload[:split])
+            tail.feed(payload[split:])
+            kept = tail.finish()
+            if "s3cr3t" in kept:
+                leaking.append(split)
+            assert kept.endswith("done"), "and later output still reaches the message"
+
+        assert leaking == []
+
+    async def test_the_captured_startup_tail_holds_no_configured_path(
+        self, monkeypatch
+    ):
+        """Through the consumer, not through the class on its own.
+
+        ``_read_supervisor_frame`` is what feeds every startup byte into the
+        tail, and ``_supervisor_start_error`` turns its last line into the
+        ``BrowserSetupFailedError`` an MCP client is shown.
+        """
+        from linkedin_mcp_server import bootstrap
+
+        configured = self.FORMS["scheme-less"]
+        monkeypatch.setenv("PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST", configured)
+        monkeypatch.setattr(bootstrap, "_MAX_START_ERROR_CHARS", 20)
+        noise = "F" * 5 + " " + configured + " refused to arm\n"
+        leaking = []
+        for split in range(1, len(noise)):
+            stream = cast(
+                Any, _FakeStdout([noise[:split].encode(), noise[split:].encode()])
+            )
+            frame, captured = await bootstrap._read_supervisor_frame(
+                stream, marker=b"armed ", accept=lambda _frame: False, timeout=5.0
+            )
+            assert frame is None, "the supervisor never armed"
+            detail = captured.finish().splitlines()[-1]
+            if "s3cr3t" in detail:
+                leaking.append(split)
+            assert "refused to arm" in detail, "and the reason still reaches the error"
+
+        assert leaking == []
+
+    async def test_a_long_ordinary_slash_token_is_still_printed_whole(
+        self, monkeypatch
+    ):
+        """The detection is by value, never by shape.
+
+        Dropping every over-long ``//`` run would close the same hole and take
+        the base64 blobs, the path lists and the Windows shares with it. A
+        mirror is configured here, so the check is live while the token that is
+        not one goes through untouched.
+        """
+        from linkedin_mcp_server import bootstrap
+
+        monkeypatch.setenv(
+            "PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST", self.FORMS["scheme-relative"]
+        )
+        cap = bootstrap._MAX_LINE_CHARS
+        blob = "//" + "N" * (2 * cap)
+        printed = "".join(await self._lines(blob.encode(), b"\ninstalling\n"))
+
+        assert printed.count("N") == 2 * cap, "nothing of it was dropped"
+        assert "installing" in printed
+
+    async def test_a_mirror_of_nothing_but_slashes_is_not_spliced_everywhere(
+        self, monkeypatch
+    ):
+        """``rstrip("/")`` can empty a value, and an empty needle matches between
+        every pair of characters. Left unguarded, the marker would be spliced
+        through the whole buffer and every position would read as the start of
+        a secret."""
+        from linkedin_mcp_server.bootstrap import _safe_to_print
+
+        monkeypatch.setenv("PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST", "///")
+
+        assert _safe_to_print("Downloading Chromium") == "Downloading Chromium"
+
+
 class TestQuotedResponseBodiesAreDropped:
     """The one part of this output a stranger writes is not printed at all.
 
