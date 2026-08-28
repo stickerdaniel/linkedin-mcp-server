@@ -797,6 +797,43 @@ class TestStateLocation:
         daemon_descriptor_module.reset_daemon_descriptor_for_testing()
         assert len(closed) == len(opened)
 
+    def test_windows_account_home_on_a_volume_root_needs_no_pin(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A home like ``D:\\`` has no parent edge, so nothing is pinned there."""
+        from linkedin_mcp_server import windows_acl
+
+        root = Path(tmp_path.anchor)
+        assert root.parent == root
+        real_lstat = Path.lstat
+        opened: list[Path] = []
+        inode = [2]
+
+        def windows_lstat(path: Path):
+            entry = real_lstat(path)
+            return SimpleNamespace(
+                st_mode=entry.st_mode,
+                st_dev=1,
+                st_ino=inode[0],
+                st_file_attributes=0,
+            )
+
+        monkeypatch.setattr(Path, "lstat", windows_lstat)
+        monkeypatch.setattr(
+            windows_acl, "pin_directory", lambda path: opened.append(path)
+        )
+
+        daemon_descriptor_module._pin_windows_account_home(root)
+        daemon_descriptor_module._pin_windows_account_home(root)
+
+        assert opened == []
+
+        # The root's own identity was recorded, so a volume swapped in behind
+        # the same letter is still caught.
+        inode[0] = 3
+        with pytest.raises(PrivateStateError, match="changed while daemon state"):
+            daemon_descriptor_module._pin_windows_account_home(root)
+
     @windows_only
     def test_windows_pins_the_account_home_against_replacement(self, tmp_path: Path):
         moved = tmp_path.with_name(f"{tmp_path.name}-moved")

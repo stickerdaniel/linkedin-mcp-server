@@ -589,7 +589,12 @@ def _pin_windows_account_home(home: Path) -> None:
 
     pins: list[Any] = []
     try:
-        home_identity: tuple[int, int] | None = None
+        # A volume root has no parent to be renamed inside, so the walk ends
+        # empty and there is no edge to pin; its identity still has to be read,
+        # or a home on `D:\` is refused as unusable on every start.
+        home_identity: tuple[int, int] | None = (
+            None if chain else _windows_directory_identity(home)
+        )
         for path in reversed(chain):
             before = _windows_directory_identity(path)
             pin = pin_directory(path)
