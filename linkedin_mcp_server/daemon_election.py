@@ -1098,6 +1098,8 @@ def _spawn(
         # publication. The configuration pipe was closed with its record, so a
         # child on a predecessor protocol has long since been released.
         control.close()
+        # Only a spawn that failed before the handover still holds this. Past
+        # it the writer owns the stream and this is ``None``.
         if child.stdin is not None:
             with contextlib.suppress(OSError, ValueError):
                 child.stdin.close()
@@ -1181,6 +1183,8 @@ def _stop_child(
         else:
             # Before assignment EOF is the only contained stop. If the isolated
             # gate does not accept it, stop and reap that direct child explicitly.
+            # Past the handover this is ``None``: the kill below is bounded, a
+            # close racing the writer's blocked write is not.
             if child.stdin is not None:
                 with contextlib.suppress(OSError, ValueError):
                     child.stdin.close()
@@ -1234,9 +1238,13 @@ def _hand_over_config(
     *control* instead, which no predecessor looks for and none of them needs.
 
     The close runs on the writing thread, so a pipe that cannot be closed is
-    bounded by the same wait as one that cannot be written.
+    bounded by the same wait as one that cannot be written. The stream leaves
+    ``Popen`` to get there, so the writer owns it from here: a blocked ``write``
+    holds the ``BufferedWriter`` lock ``close`` needs, and a cross-thread close
+    would wait for it without a timeout of its own. Nothing after the record
+    needs the pipe, because authorization travels on *control*.
     """
-    stream = child.stdin
+    stream, child.stdin = child.stdin, None
     assert stream is not None
     endpoint = daemon_config.ControlEndpoint(control.host, control.port)
     payload = (

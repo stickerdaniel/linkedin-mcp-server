@@ -2762,8 +2762,10 @@ class TestAtomicStartupCommit:
     class _Child:
         def __init__(self, instance_id: str, final: str = "committed") -> None:
             self.pid = 424242
+            #: Kept beside ``stdin`` because the handover takes the stream out
+            #: of the process object, leaving this the only handle on it.
             self.input = TestAtomicStartupCommit._Input()
-            self.stdin: io.BytesIO = self.input
+            self.stdin: io.BytesIO | None = self.input
             self.stdout = io.BytesIO(
                 (
                     f"owner {_HANDSHAKE_NONCE} prepared {instance_id}\n"
@@ -3130,7 +3132,11 @@ class TestAtomicStartupCommit:
             election_module._spawn(profile.parent, config, lock_fd=None, timeout=1.0)
 
         assert child.killed
-        assert child.stdin.closed
+        # Closed by the writer thread that took it, and gone from ``Popen``
+        # so nothing on the frontend's deadline path can close it a second
+        # time behind that thread's back.
+        assert child.stdin is None
+        assert child.input.closed
 
     def test_validation_failure_stops_the_precommit_child(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -3453,7 +3459,11 @@ class TestAtomicStartupCommit:
 
         assert outcome is election_module._Started.UNCERTAIN
         assert not child.killed
-        assert child.stdin.closed
+        # Closed by the writer thread that took it, and gone from ``Popen``
+        # so nothing on the frontend's deadline path can close it a second
+        # time behind that thread's back.
+        assert child.stdin is None
+        assert child.input.closed
         assert events == []
 
     def test_interrupt_after_commit_request_does_not_kill_the_child(
@@ -3487,7 +3497,11 @@ class TestAtomicStartupCommit:
 
         assert control_peers[-1].readline() == f"owner {_HANDSHAKE_NONCE} commit\n"
         assert not child.killed
-        assert child.stdin.closed
+        # Closed by the writer thread that took it, and gone from ``Popen``
+        # so nothing on the frontend's deadline path can close it a second
+        # time behind that thread's back.
+        assert child.stdin is None
+        assert child.input.closed
 
     def test_missing_commit_verdict_settles_from_canonical_state(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -3745,6 +3759,135 @@ class TestAtomicStartupCommit:
             control.host,
             control.port,
         )
+
+    class _StalledPipe:
+        """A configuration pipe whose ``close`` needs the lock its ``write`` holds.
+
+        What ``BufferedWriter`` does against a child that never reads, without a
+        real pipe or a platform's buffer size: the write parks holding the
+        buffer's own lock, and every other operation on that object waits for it
+        to finish. ``_close_handshake_stream`` documents the measured read-side
+        twin, 29.27 of thirty seconds.
+        """
+
+        def __init__(self) -> None:
+            self._lock = threading.Lock()
+            #: Set by the test to stand for the read end going away, which is
+            #: the only thing that ends a parked write.
+            self.read_end_died = threading.Event()
+            self.writing = threading.Event()
+            #: Every closer, by thread name, so both halves are observable: how
+            #: many closes there were and which thread made them.
+            self.closed_by: list[str] = []
+
+        def write(self, data: bytes) -> int:
+            with self._lock:
+                self.writing.set()
+                assert self.read_end_died.wait(timeout=30), (
+                    "the parked write was never released"
+                )
+                raise BrokenPipeError("the read end is gone")
+
+        def flush(self) -> None:  # pragma: no cover - the write never returns
+            with self._lock:
+                pass
+
+        def close(self) -> None:
+            with self._lock:
+                self.closed_by.append(threading.current_thread().name)
+
+    class _StalledChild:
+        """A child that stalls before its first read and survives the hard stop."""
+
+        def __init__(self, stdin: object) -> None:
+            self.pid = 424242
+            self.stdin: object | None = stdin
+            self.stdout = io.BytesIO()
+            self.stderr = io.BytesIO()
+            self.returncode: int | None = None
+            self.kills = 0
+
+        def kill(self) -> None:
+            # Signalled, and still alive: a process stuck in the kernel is
+            # collected whenever the kernel is done with it, not when asked.
+            self.kills += 1
+
+        def wait(self, timeout: float | None = None) -> int:
+            raise subprocess.TimeoutExpired("owner", timeout or 0.0)
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+    def test_a_stalled_configuration_write_never_pins_the_frontend(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The deadlock this ownership transfer exists to prevent. The child
+        # stalls before reading, so the writer thread parks in `write` holding
+        # the lock a `close` would need; the hard stop is bounded and the child
+        # outlives it, so nothing breaks that write. A `child.stdin.close()`
+        # from `_spawn`'s cleanup or from `_stop_child` would then wait on the
+        # writer with no deadline of its own, and the frontend would never
+        # return at all.
+        #
+        # Every wait here is bounded, so the mutation of leaving `child.stdin`
+        # attached fails this case rather than hanging the suite.
+        monkeypatch.setattr(
+            election_module, "os", SimpleNamespace(name="posix", environ=os.environ)
+        )
+        profile = _profile(tmp_path)
+        pipe = self._StalledPipe()
+        child = self._StalledChild(pipe)
+        monkeypatch.setattr(election_module.subprocess, "Popen", lambda *a, **k: child)
+        monkeypatch.setattr(
+            election_module.daemon_owner,
+            "daemon_log_path",
+            lambda root: tmp_path / "daemon.log",
+        )
+
+        finished: list[object] = []
+
+        def run() -> None:
+            try:
+                finished.append(
+                    election_module._spawn(
+                        profile.parent, _config(profile), lock_fd=None, timeout=0.5
+                    )
+                )
+            except BaseException as exc:  # noqa: BLE001 - reported by the assertions
+                finished.append(exc)
+
+        spawner = threading.Thread(target=run, name="spawn-under-test")
+        spawner.start()
+        try:
+            assert pipe.writing.wait(timeout=10), "the writer never reached its write"
+            spawner.join(timeout=20)
+            assert not spawner.is_alive(), (
+                "the frontend was pinned by a configuration write that never returned"
+            )
+            assert finished == [election_module._Started.NO]
+            # The stop ran, was bounded, and left the child alive: exactly the
+            # state in which nothing may close that stream from here.
+            assert child.kills == 1
+            assert child.poll() is None
+            # Handed to the writer, so neither `_stop_child` nor the cleanup in
+            # `_spawn` can reach it.
+            assert child.stdin is None
+            assert pipe.closed_by == [], (
+                "the configuration pipe was closed while the write still held it"
+            )
+        finally:
+            pipe.read_end_died.set()
+
+        # And the writer closes it once the read end is gone, from its own
+        # thread and exactly once.
+        for _ in range(1000):
+            if pipe.closed_by:
+                break
+            time.sleep(0.01)
+        for thread in threading.enumerate():
+            if thread.name == "daemon-config":
+                thread.join(timeout=5)
+        assert pipe.closed_by == ["daemon-config"]
 
     def test_a_generic_case_is_given_a_job_before_the_owner_starts(
         self,
