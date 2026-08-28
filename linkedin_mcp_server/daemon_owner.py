@@ -51,7 +51,7 @@ import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Protocol, TextIO
+from typing import Any, NoReturn, Protocol, TextIO
 
 import httpx
 
@@ -446,12 +446,17 @@ async def _serve(
         # matter what timeout it is given. `suppress` only helps once the await
         # returns. This process holds the daemon lock by now, so a failed
         # startup that never exits is a profile nothing can elect an owner for.
-        await _stop_within(serving, _FAILED_STARTUP_SHUTDOWN_SECONDS)
+        await _stop_within(serving, _FAILED_STARTUP_SHUTDOWN_SECONDS, lock=lock)
         raise
 
-    del lock  # held for the process lifetime; named to say so
+    # Held for the process lifetime, and handed down rather than dropped: the
+    # one path that skips interpreter cleanup frees it itself (`_exit_hard`).
     await _serve_until_stopped(
-        server, serving, turnover, config.browser.browser_idle_timeout_seconds
+        server,
+        serving,
+        turnover,
+        config.browser.browser_idle_timeout_seconds,
+        lock=lock,
     )
     return 0
 
@@ -478,6 +483,8 @@ async def _serve_until_stopped(
     serving: asyncio.Task[None],
     turnover: list[str],
     idle_timeout: float = 0.0,
+    *,
+    lock: DaemonLock | None,
 ) -> None:
     """Hold the endpoint open until it stops, or until asked to give way.
 
@@ -500,7 +507,7 @@ async def _serve_until_stopped(
             # disk rather than in this process.
             logger.warning("Standing down: %s", wedged)
             server.should_exit = True
-            await _stop_within(serving, _STAND_DOWN_SHUTDOWN_SECONDS)
+            await _stop_within(serving, _STAND_DOWN_SHUTDOWN_SECONDS, lock=lock)
             return
         if turnover:
             logger.info("A newer build asked for the browser; standing down")
@@ -515,9 +522,10 @@ async def _serve_until_stopped(
             # would hold the daemon lock forever, having already promised a
             # frontend that it was standing down — every later election would
             # find the position occupied by a process that is no longer serving.
-            # Giving up the wait and exiting is the lesser harm: the lock is
-            # freed by the exit either way.
-            await _stop_within(serving, _STAND_DOWN_SHUTDOWN_SECONDS)
+            # Giving up the wait and exiting is the lesser harm, and that exit
+            # frees the election on the way in rather than after its unbounded
+            # browser drain (`_exit_hard`).
+            await _stop_within(serving, _STAND_DOWN_SHUTDOWN_SECONDS, lock=lock)
             return
         # Cheap enough to do on the same tick as the two questions above: one
         # dictionary scan over the calls in flight, on a process that is already
@@ -538,7 +546,7 @@ async def _serve_until_stopped(
         if idle_timeout > 0 and quiet is not None and quiet >= idle_timeout:
             logger.info("Nothing has needed the browser in %.0fs; exiting", quiet)
             server.should_exit = True
-            await _stop_within(serving, _STAND_DOWN_SHUTDOWN_SECONDS)
+            await _stop_within(serving, _STAND_DOWN_SHUTDOWN_SECONDS, lock=lock)
             return
         await asyncio.sleep(_STAND_DOWN_POLL_SECONDS)
     try:
@@ -546,12 +554,15 @@ async def _serve_until_stopped(
     finally:
         if hard_exit_required():
             logger.error(
-                "Browser shutdown was not confirmed; exiting hard before locks are released"
+                "Browser shutdown was not confirmed; exiting hard so the "
+                "profile stays held until the browser is gone"
             )
-            _exit_hard()
+            _exit_hard(lock)
 
 
-async def _stop_within(serving: asyncio.Task[None], seconds: float) -> None:
+async def _stop_within(
+    serving: asyncio.Task[None], seconds: float, *, lock: DaemonLock | None
+) -> None:
     """Let the server finish shutting down, and stop the process if it will not.
 
     Ending the *wait* is not the same as ending the process, and the difference
@@ -568,18 +579,20 @@ async def _stop_within(serving: asyncio.Task[None], seconds: float) -> None:
     exactly the case where a stand-down must still end.
 
     So the last resort is a hard exit. It skips interpreter cleanup, which here
-    means skipping the very teardown that is already stuck; the kernel closes
-    the descriptors and frees the lock, which is what the next election needs.
-    Measured before this existed: the helper returned on time and the process
-    never came out of ``asyncio.run``.
+    means skipping the very teardown that is already stuck. Letting the kernel
+    free the descriptors is not enough on its own, because that exit drains the
+    browser first with no bound; *lock* is handed down so :func:`_exit_hard` can
+    free the election before the drain. Measured before this existed: the helper
+    returned on time and the process never came out of ``asyncio.run``.
     """
     try:
         await asyncio.wait_for(asyncio.shield(serving), seconds)
         if hard_exit_required():
             logger.error(
-                "Browser shutdown was not confirmed; exiting hard before locks are released"
+                "Browser shutdown was not confirmed; exiting hard so the "
+                "profile stays held until the browser is gone"
             )
-            _exit_hard()
+            _exit_hard(lock)
         return
     except TimeoutError:
         logger.error(
@@ -590,14 +603,29 @@ async def _stop_within(serving: asyncio.Task[None], seconds: float) -> None:
     except Exception:
         logger.warning("The daemon endpoint stopped with an error", exc_info=True)
         if hard_exit_required():
-            _exit_hard()
+            _exit_hard(lock)
         return
 
-    _exit_hard()
+    _exit_hard(lock)
 
 
-def _exit_hard() -> int:  # pragma: no cover - the process does not come back
-    """Leave immediately, containing descendants without interpreter cleanup."""
+def _exit_hard(lock: DaemonLock | None) -> NoReturn:
+    """Leave immediately, containing descendants without interpreter cleanup.
+
+    The election goes first and the profile does not. The drain below is
+    unbounded on purpose: it holds the profile until the browser groups are
+    provably gone, because releasing it earlier hands a live Chromium to
+    whoever opens that profile next. The daemon lock says only that an owner
+    exists, and this process has stopped being one, so spending that wait on
+    the lock too would block every election behind a drain none of them care
+    about. The replacement is elected at once and waits on the profile lease
+    instead: on this process, whose lease descriptor lives until ``os._exit``,
+    and on POSIX also on the crash guardian holding a copy of it.
+
+    Idempotent, so ``main``'s ``finally`` may still release defensively.
+    """
+    if lock is not None:
+        lock.release()
     hard_exit_process_tree(1)
 
 

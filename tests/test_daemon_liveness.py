@@ -623,7 +623,7 @@ class TestTheOwnersOwnLoop:
             await asyncio.sleep(0.35)
 
         serving = asyncio.create_task(serves())
-        await _serve_until_stopped(MagicMock(), serving, [])
+        await _serve_until_stopped(MagicMock(), serving, [], lock=None)
 
         assert abandoned.cancelled(), "the owner never expired an abandoned call"
         assert marker not in liveness._waiting
@@ -649,7 +649,7 @@ class TestGoingAwayWhenNobodyNeedsIt:
             await asyncio.sleep(ticks)
 
         serving = asyncio.create_task(serves())
-        await _serve_until_stopped(server, serving, [], idle_timeout)
+        await _serve_until_stopped(server, serving, [], idle_timeout, lock=None)
         return bool(server.should_exit)
 
     async def test_an_owner_nobody_ever_called_still_exits(self):
@@ -978,7 +978,9 @@ class TestAnAbandonedCallStillExpiresUnderTheLoop:
             await stop.wait()
 
         serving = asyncio.create_task(serves())
-        loop = asyncio.create_task(_serve_until_stopped(MagicMock(), serving, []))
+        loop = asyncio.create_task(
+            _serve_until_stopped(MagicMock(), serving, [], lock=None)
+        )
         try:
             # The first scan has to be behind us, so the decision is taken on a
             # later tick with a real and short gap in front of it.

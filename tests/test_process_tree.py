@@ -2060,7 +2060,7 @@ child = subprocess.Popen(
 )
 process_tree.remember_detached_process_groups()
 Path(sys.argv[1]).write_text(str(child.pid))
-daemon_owner._exit_hard()
+daemon_owner._exit_hard(None)
 """
     process = subprocess.Popen(
         [sys.executable, "-c", script, str(marker)],
@@ -2411,7 +2411,7 @@ process_tree.remember_detached_process_groups()
 Path(sys.argv[2]).touch()
 driver.wait(timeout=30)
 time.sleep(0.05)
-daemon_owner._exit_hard()
+daemon_owner._exit_hard(None)
 """
     process = subprocess.Popen(
         [sys.executable, "-c", script, str(marker), str(release)],

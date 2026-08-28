@@ -2744,7 +2744,7 @@ class TestNotHoldingTheLockForever:
             server = Serving()
             serving = asyncio.create_task(server.serve())
             loop = asyncio.create_task(
-                daemon_owner._serve_until_stopped(server, serving, [])
+                daemon_owner._serve_until_stopped(server, serving, [], lock=None)
             )
             try:
                 await asyncio.sleep(0.3)
@@ -2772,11 +2772,13 @@ class TestNotHoldingTheLockForever:
 
         exited: list[bool] = []
         monkeypatch.setattr(daemon_owner, "hard_exit_required", lambda: True)
-        monkeypatch.setattr(daemon_owner, "_exit_hard", lambda: exited.append(True))
+        monkeypatch.setattr(
+            daemon_owner, "_exit_hard", lambda _lock: exited.append(True)
+        )
 
         async def exercise() -> None:
             serving = asyncio.create_task(asyncio.sleep(0))
-            await daemon_owner._stop_within(serving, 1)
+            await daemon_owner._stop_within(serving, 1, lock=None)
 
         asyncio.run(exercise())
 
@@ -2791,12 +2793,14 @@ class TestNotHoldingTheLockForever:
 
         exited: list[bool] = []
         monkeypatch.setattr(daemon_owner, "hard_exit_required", lambda: True)
-        monkeypatch.setattr(daemon_owner, "_exit_hard", lambda: exited.append(True))
+        monkeypatch.setattr(
+            daemon_owner, "_exit_hard", lambda _lock: exited.append(True)
+        )
 
         async def exercise() -> None:
             serving = asyncio.create_task(asyncio.sleep(0))
             await serving
-            await daemon_owner._serve_until_stopped(object(), serving, [])
+            await daemon_owner._serve_until_stopped(object(), serving, [], lock=None)
 
         asyncio.run(exercise())
 
@@ -2826,14 +2830,18 @@ class TestNotHoldingTheLockForever:
         # ends the process is the separate real-process test below, which is the
         # only way to see that at all.
         exited: list[bool] = []
-        monkeypatch.setattr(daemon_owner, "_exit_hard", lambda: exited.append(True))
+        monkeypatch.setattr(
+            daemon_owner, "_exit_hard", lambda _lock: exited.append(True)
+        )
 
         async def exercise() -> float:
             server = NeverStops()
             serving = asyncio.create_task(server.serve())
             began = time.monotonic()
             try:
-                await daemon_owner._serve_until_stopped(server, serving, ["asked"])
+                await daemon_owner._serve_until_stopped(
+                    server, serving, ["asked"], lock=None
+                )
                 return time.monotonic() - began
             finally:
                 serving.cancel()
@@ -2888,7 +2896,8 @@ class TestNotHoldingTheLockForever:
             "async def main():\n"
             "    server = Stubborn()\n"
             "    serving = asyncio.create_task(server.serve())\n"
-            "    await daemon_owner._serve_until_stopped(server, serving, ['asked'])\n"
+            "    await daemon_owner._serve_until_stopped("
+            "server, serving, ['asked'], lock=lock)\n"
             "asyncio.run(main())\n"
             "print('THE PROCESS SURVIVED')\n"
         )
@@ -2913,6 +2922,137 @@ class TestNotHoldingTheLockForever:
         probe = DaemonLock(auth_root)
         assert probe.try_acquire(), "the wedged owner kept the lock"
         probe.release()
+
+
+class _ProcessEnded(BaseException):
+    """The process ending inside ``hard_exit_process_tree``.
+
+    Not an ``Exception``: ``_stop_within`` catches those around its own wait.
+    """
+
+
+class TestTheHardExitFreesTheElectionFirst:
+    """The drain is unbounded on both platforms and holds the profile until the
+    browser is provably gone. Spending the election on that wait too leaves a
+    profile no later election can replace."""
+
+    def test_the_drain_begins_with_the_election_already_free(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Driven through the whole owner rather than through ``_exit_hard``, so
+        # the lock reaching it is the production wiring and not the test's.
+        import asyncio
+
+        from linkedin_mcp_server import daemon_owner
+
+        profile = _profile(tmp_path)
+        config = _config(profile)
+        auth_root = profile.parent
+        lock = DaemonLock(auth_root)
+        assert lock.try_acquire(), "the test could not take the lock it means to free"
+        held_at_the_drain: list[bool] = []
+
+        def drain(status: int) -> None:
+            held_at_the_drain.append(lock.held)
+            raise _ProcessEnded
+
+        async def probe(url: str, token: str) -> None:
+            return None
+
+        class _StoppedServer:
+            started = True
+            should_exit = False
+
+            async def serve(self, sockets: object = None) -> None:
+                return None
+
+        monkeypatch.setattr(daemon_owner, "hard_exit_process_tree", drain)
+        monkeypatch.setattr(daemon_owner, "hard_exit_required", lambda: True)
+        monkeypatch.setattr(daemon_owner, "_probe", probe)
+        monkeypatch.setattr(
+            daemon_owner, "_bind_loopback", lambda: _FakeSocket(("127.0.0.1", 49152))
+        )
+        monkeypatch.setattr(
+            daemon_owner, "create_owner_server", lambda **kwargs: _StoppedServer()
+        )
+
+        served: list[int] = []
+        # The stand-in raises where the real call ends the process, so reaching
+        # the line after would be the owner resuming an event loop it had left.
+        with pytest.raises(_ProcessEnded):
+            served.append(
+                asyncio.run(
+                    daemon_owner._serve(
+                        lock=lock,
+                        auth_root=auth_root,
+                        profile=profile,
+                        config=config,
+                        log_path=auth_root / "daemon.log",
+                        ready=daemon_owner._Handshake(None, "0123456789abcdef" * 4),
+                    )
+                )
+            )
+
+        assert served == [], "the hard exit returned to its caller"
+        assert held_at_the_drain == [False], (
+            "the drain began while the election lock was still held"
+        )
+
+    @_POSIX_ONLY
+    def test_another_process_elects_while_the_drain_still_runs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The kernel half, which no in-process check can see: ``lock.held`` is
+        # bookkeeping, and only a different process asking proves the release.
+        home = tmp_path / "drain-home"
+        home.mkdir()
+        auth_root = tmp_path / "drain-auth"
+        auth_root.mkdir()
+        draining = tmp_path / "drain-began"
+
+        script = tmp_path / "draining_owner.py"
+        script.write_text(
+            "import sys, time\n"
+            "from pathlib import Path\n"
+            "import linkedin_mcp_server.daemon_descriptor as descriptor\n"
+            "descriptor._account_home = lambda: Path(sys.argv[1])\n"
+            "from linkedin_mcp_server import daemon_owner, process_tree\n"
+            "from linkedin_mcp_server.daemon_lock import DaemonLock\n"
+            "lock = DaemonLock(Path(sys.argv[2]))\n"
+            "assert lock.try_acquire()\n"
+            "def never_drains(groups, *, markers=None, deadline=None):\n"
+            "    Path(sys.argv[3]).touch()\n"
+            "    while True:\n"
+            "        time.sleep(0.05)\n"
+            "process_tree._wait_for_process_groups = never_drains\n"
+            "daemon_owner._exit_hard(lock)\n"
+        )
+        process = subprocess.Popen(
+            [sys.executable, str(script), str(home), str(auth_root), str(draining)],
+            cwd=_REPO_ROOT,
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            for _ in range(500):
+                if draining.exists() or process.poll() is not None:
+                    break
+                time.sleep(0.01)
+            assert draining.exists(), "the owner never reached its drain"
+            assert process.poll() is None, "the owner exited before its drain"
+
+            monkeypatch.setattr(daemon_descriptor_module, "_account_home", lambda: home)
+            probe = DaemonLock(auth_root)
+            assert probe.try_acquire(), (
+                "the election stayed occupied for the whole browser drain"
+            )
+            probe.release()
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=30)
 
 
 class TestPublishingLast:
