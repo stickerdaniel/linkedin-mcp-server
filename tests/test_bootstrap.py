@@ -4689,6 +4689,87 @@ class TestAConfiguredMirrorSurvivesEveryBoundary:
         assert _safe_to_print("Downloading Chromium") == "Downloading Chromium"
 
 
+class TestSanitationIsLinearInWhatArrives:
+    """A pipe hands over what is available, which is often a single byte.
+
+    Folding every read into one string and re-sanitising the result made the
+    work quadratic in the length of an unterminated line: the copies and the
+    rescans both grew with the buffer while the reads stayed tiny. That delays
+    the fragment which proves the installer is alive, and it can spend the
+    inactivity deadline while the child is writing continuously.
+
+    Counted rather than timed. A duration measures the machine, and this has to
+    fail on the algorithm.
+    """
+
+    class _OneByteStdout:
+        """A pipe at its worst: one byte per read, like a slow writer."""
+
+        def __init__(self, payload: bytes) -> None:
+            self._payload = payload
+            self._at = 0
+
+        async def read(self, n: int = -1) -> bytes:
+            if self._at >= len(self._payload):
+                return b""
+            self._at += 1
+            return self._payload[self._at - 1 : self._at]
+
+    async def _scanned(self, payload: bytes) -> int:
+        """Characters handed to ``_safe_to_print`` for the whole stream."""
+        from linkedin_mcp_server import bootstrap
+
+        original = bootstrap._safe_to_print
+        scanned = 0
+
+        def spy(text: str) -> str:
+            nonlocal scanned
+            scanned += len(text)
+            return original(text)
+
+        with pytest.MonkeyPatch.context() as patching:
+            patching.setattr(bootstrap, "_safe_to_print", spy)
+            stream = cast(Any, self._OneByteStdout(payload))
+            async for _ in bootstrap._installer_lines(stream):
+                pass
+        return scanned
+
+    async def test_an_unterminated_line_is_not_rescanned_per_read(self):
+        """Under the cap, one fold at the newline is all this needs.
+
+        Measured before the staging area: 4 000 bytes delivered one at a time
+        scanned 8.0 million characters, and 8 000 scanned 32.0 million.
+        """
+        size = 4000
+        scanned = await self._scanned(b"F" * size + b"\n")
+
+        assert scanned <= 2 * size
+
+    async def test_the_work_tracks_the_bytes_and_not_their_square(self):
+        """Doubling the line doubled the work; it used to quadruple it."""
+        small = await self._scanned(b"F" * 2000 + b"\n")
+        large = await self._scanned(b"F" * 4000 + b"\n")
+
+        assert large <= 3 * small
+
+    async def test_a_line_over_the_cap_stays_bounded_under_tiny_reads(
+        self, monkeypatch
+    ):
+        """The forced-cut path, which folds on size rather than on a newline.
+
+        Each fold has to be charged to the window it emits, so the total stays
+        proportional to the bytes that arrived rather than to their square.
+        """
+        from linkedin_mcp_server import bootstrap
+
+        cap = 64
+        monkeypatch.setattr(bootstrap, "_MAX_LINE_CHARS", cap)
+        size = 4000
+        scanned = await self._scanned(b"F" * size + b"\n")
+
+        assert scanned <= 4 * size
+
+
 class TestQuotedResponseBodiesAreDropped:
     """The one part of this output a stranger writes is not printed at all.
 

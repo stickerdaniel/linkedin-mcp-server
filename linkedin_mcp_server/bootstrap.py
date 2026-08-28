@@ -3022,28 +3022,61 @@ async def _split_installer_output(
     instead of the download failure. Measured: a 70 000-byte line raises
     ``Separator is found, but chunk is longer than limit`` and leaves the child
     alive.
+
+    Reads are staged rather than folded in one at a time. ``StreamReader.read``
+    answers with whatever has arrived, which is a single byte as readily as a
+    full chunk, and appending each one to a string and re-sanitising the result
+    made the work quadratic in the length of the line: measured on this
+    function, 2 000 bytes delivered one at a time scanned 2.0 million
+    characters, 4 000 scanned 8.0 million and 8 000 scanned 32.0 million, so a
+    64 KiB unterminated line would have scanned about 2.1 billion. Nothing is
+    emitted out of the staging area, so deferring costs no confidentiality: the
+    fold happens before every boundary that produces output, which is the same
+    set of points as before, and the buffer that reaches sanitation is the same
+    buffer.
     """
     decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    #: Sanitised, holding what has not reached a boundary yet. Never contains a
+    #: newline between reads: the loop below consumes every one it can reach.
     buffer = ""
+    #: Decoded reads not folded into ``buffer`` yet, and their total length.
+    staged: list[str] = []
+    staged_chars = 0
     dropping = False
     while True:
         chunk = await stream.read(_READ_CHUNK)
         if not chunk:
             break
-        buffer += decoder.decode(chunk)
+        decoded = decoder.decode(chunk)
+        if not decoded:
+            continue
         if dropping:
             # The rest of a run whose marker went out with an earlier fragment.
             # It has no scheme and no ``//`` of its own, so nothing below would
             # recognise it a second time; printing it is what the marker was
             # emitted instead of.
-            buffer, dropping = _dropped_run(buffer)
-        # Sanitised here, on the buffer, while a credential is still whole. Per
-        # fragment it would be too late: the cut below is a split point like
+            #
+            # Joining here is bounded rather than quadratic: a run still being
+            # dropped leaves only the held-back closer behind, so ``buffer`` is
+            # at most two characters and ``staged`` is empty, the fold below
+            # having just cleared it.
+            decoded, dropping = _dropped_run(buffer + "".join(staged) + decoded)
+            buffer = ""
+            staged.clear()
+            staged_chars = 0
+        staged.append(decoded)
+        staged_chars += len(decoded)
+        if "\n" not in decoded and len(buffer) + staged_chars <= _MAX_LINE_CHARS:
+            continue
+        # Sanitised here, on the whole buffer, while a credential is still whole.
+        # Per fragment it would be too late: the cut below is a split point like
         # any other, and half a URL matches no pattern. Together with the tail
         # held back, any userinfo shorter than that tail is either redacted
         # before anything is emitted or still sitting in the buffer when the
         # rest of it arrives.
-        buffer = _safe_to_print(buffer)
+        buffer = _safe_to_print(buffer + "".join(staged))
+        staged.clear()
+        staged_chars = 0
         while True:
             end = buffer.find("\n")
             if 0 <= end <= _MAX_LINE_CHARS:
@@ -3072,7 +3105,17 @@ async def _split_installer_output(
             # which is inside the same token and in front of nothing else.
             fragment, buffer, dropping = _forced_fragment(buffer, _MAX_LINE_CHARS)
             yield fragment, False
-    buffer += decoder.decode(b"", final=True)
+    # EOF is the last boundary, so it folds like any other. What is staged here
+    # stayed under the cap and carried no newline, which is why it never folded
+    # on its own; the final decode adds at most the replacement for a truncated
+    # character, and sanitation only ever shortens, so the line stays bounded.
+    trailing = decoder.decode(b"", final=True)
+    if dropping:
+        trailing, dropping = _dropped_run(buffer + "".join(staged) + trailing)
+        buffer = ""
+        staged.clear()
+    if staged or trailing:
+        buffer = _safe_to_print(buffer + "".join(staged) + trailing)
     if buffer:
         yield buffer.rstrip(), True
 
