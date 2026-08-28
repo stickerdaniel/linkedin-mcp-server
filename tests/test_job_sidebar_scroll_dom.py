@@ -196,12 +196,23 @@ async def dom_page():
 
 class TestSidebarScroll:
     async def test_loads_full_page_on_a_slow_connection(self, dom_page):
-        """A batch slower than the old fixed 0.5s sleep must not end the loop."""
-        await dom_page.set_content(sidebar(total=25, batch=5, delays=[800]))
+        """A batch slower than the old fixed 0.5s sleep must not end the loop.
 
-        await scroll_job_sidebar(dom_page, settle_timeout=0.6)
+        Every batch is slower than ``settle_timeout``, so the first wait of
+        each round has to miss and the confirmation round at the full timeout
+        is what buys the batch. The margin that leaves is what the numbers are
+        chosen for: the budget is wall-clock while the batch is a page timer,
+        so a runner that starves the page's event loop slips the timer without
+        slowing the budget. At 800ms against ``settle_timeout=0.6``, each
+        of four growth batches had 400ms of configured slack, which failed
+        once in CI. At 1200ms against 1.0, two growth batches still require
+        the confirmation round while doubling that slack.
+        """
+        await dom_page.set_content(sidebar(total=15, batch=5, delays=[1200]))
 
-        assert await cards(dom_page) == 25
+        await scroll_job_sidebar(dom_page, settle_timeout=1.0)
+
+        assert await cards(dom_page) == 15
 
     async def test_loads_full_page_on_a_fast_connection(self, dom_page):
         """Without scrolling the rail stays at its initial five cards."""
