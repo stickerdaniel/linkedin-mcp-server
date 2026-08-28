@@ -16,14 +16,17 @@ before it validates must not leave a child that publishes anyway.
 from __future__ import annotations
 
 import contextlib
+import os
 import socket
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from linkedin_mcp_server import daemon_election, process_control
+from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.process_control import ControlListener
 
 _NONCE = "0123456789abcdef" * 4
@@ -531,3 +534,222 @@ class TestRendezvous:
         finally:
             reader.join(timeout=5.0)
             child.close()
+
+
+def _park_a_reader(child: Any) -> tuple[threading.Thread, list[str]]:
+    """Put a thread inside ``readline`` and wait until it is really in the recv.
+
+    The sleep is the point rather than slack. A thread that has merely been
+    scheduled has not taken the buffer lock yet, and it is holding that lock
+    across a blocking ``recv`` that makes closing the wrapper deadlock.
+    """
+    entered = threading.Event()
+    received: list[str] = []
+
+    def read() -> None:
+        entered.set()
+        received.append(child.readline())
+
+    reader = threading.Thread(target=read, name="parked-control-read", daemon=True)
+    reader.start()
+    assert entered.wait(5.0)
+    time.sleep(0.2)
+    return reader, received
+
+
+class TestCloseUnderABlockedRead:
+    """Closing has to work while the read it is aborting is still in flight.
+
+    This is the ordinary shape of an abort, not a corner: the parent's
+    authorization deadline expires *while* the child sits in the read waiting
+    for a record that is never coming, and the child then tears the channel
+    down from a different thread than the one parked in it.
+    """
+
+    def test_closing_while_a_read_is_parked_returns_promptly(
+        self, listener: ControlListener
+    ):
+        # The peer stays open and sends nothing, so the parked ``recv`` has no
+        # reason of its own to return. Closing the wrapper first takes the lock
+        # that read holds and waits for it forever; the socket has to be made to
+        # end before the wrapper is closed.
+        child = _attach(listener)
+        _collect(listener, timeout=5.0)
+        reader, received = _park_a_reader(child)
+
+        closed = threading.Event()
+        threading.Thread(
+            target=lambda: (child.close(), closed.set()), daemon=True
+        ).start()
+
+        assert closed.wait(5.0), "close did not return while a read was parked"
+        reader.join(timeout=5.0)
+        assert not reader.is_alive(), "the parked read was never released"
+        # The abort semantics are unchanged: an interrupted read is end of file,
+        # exactly as a parent that closed without committing produces.
+        assert received == [""]
+
+    def test_closing_twice_and_from_two_threads_at_once_is_safe(
+        self, listener: ControlListener
+    ):
+        # A close that has to interrupt a socket first has more to get wrong when
+        # it runs twice, and both callers exist: the owner's ``finally`` closes
+        # the channel it opened, and a failure path above it may already have.
+        child = _attach(listener)
+        _collect(listener, timeout=5.0)
+        reader, received = _park_a_reader(child)
+
+        errors: list[BaseException] = []
+
+        def close() -> None:
+            try:
+                child.close()
+            except BaseException as exc:  # noqa: BLE001 - reported by the test
+                errors.append(exc)
+
+        closers = [
+            threading.Thread(target=close, name=f"closer-{index}", daemon=True)
+            for index in range(4)
+        ]
+        for closer in closers:
+            closer.start()
+        for closer in closers:
+            closer.join(timeout=5.0)
+
+        assert not [c for c in closers if c.is_alive()], "a concurrent close hung"
+        assert errors == []
+        child.close()
+        reader.join(timeout=5.0)
+        assert received == [""]
+        # A read after the close is still an abort rather than an exception.
+        assert child.readline() == ""
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="the owner entry point takes a Job Object handoff on Windows",
+)
+class TestOwnerFinalization:
+    """What the owner's ``finally`` owes the next election.
+
+    ``daemon_owner.main`` closes its control channel before it releases the
+    daemon lock. That order is deliberate, and it means a close that does not
+    return is a lock that is never released: the process has already decided it
+    is not going to serve, and every later election contends with a corpse that
+    still holds the position.
+    """
+
+    def test_an_unauthorized_owner_frees_the_lock_it_holds(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        listener: ControlListener,
+    ):
+        from linkedin_mcp_server import daemon_config, daemon_lock, daemon_owner
+
+        profile = tmp_path / "profile"
+        profile.mkdir()
+        config = AppConfig()
+        config.browser.user_data_dir = str(profile)
+
+        class SilentBootstrap:
+            def __init__(self, _stream: object) -> None:
+                pass
+
+            def report(self, code: str) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+        class SilentHandshake:
+            def __init__(self, _stream: object, _nonce: str) -> None:
+                pass
+
+            def retry(self) -> None:
+                pass
+
+            def abort(self) -> None:
+                pass
+
+            def fail(self) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+        # The real rendezvous, so the owner attaches over a real socket and this
+        # test is the parent that stays open and never commits.
+        listener.start_accepting(nonce=_NONCE, timeout=10.0)
+        handover = daemon_config.OwnerHandover(
+            config,
+            _NONCE,
+            control=daemon_config.ControlEndpoint(listener.host, listener.port),
+        )
+
+        held: list[daemon_lock.DaemonLock] = []
+
+        def take_lock(auth_root: Path, _fd: object) -> daemon_lock.DaemonLock:
+            lock = daemon_lock.DaemonLock(auth_root)
+            assert lock.try_acquire()
+            held.append(lock)
+            return lock
+
+        authorization_timed_out = threading.Event()
+
+        async def stalled_serve(**kwargs: Any) -> int:
+            # Production authorization, production read. The record never comes,
+            # so ``_read_control_until`` gives up with its reader thread still
+            # inside ``readline`` on the socket, which is the state the owner's
+            # own finalization then has to close through.
+            channel = kwargs["control"]
+            with pytest.raises(TimeoutError):
+                await daemon_owner._read_control_until(channel, time.monotonic() + 0.3)
+            authorization_timed_out.set()
+            return 1
+
+        monkeypatch.setattr(daemon_owner, "_BootstrapDiagnostics", SilentBootstrap)
+        monkeypatch.setattr(daemon_owner, "_Handshake", SilentHandshake)
+        monkeypatch.setattr(daemon_owner, "_claim_bootstrap_stream", lambda: None)
+        monkeypatch.setattr(daemon_owner, "_claim_handshake_stream", lambda: None)
+        monkeypatch.setattr(daemon_owner, "_read_handover", lambda: handover)
+        monkeypatch.setattr(daemon_owner, "auth_root_dir", lambda _profile: tmp_path)
+        monkeypatch.setattr(
+            daemon_owner, "_attach_daemon_log", lambda _root: tmp_path / "daemon.log"
+        )
+        monkeypatch.setattr(daemon_owner, "configure_logging", lambda **kwargs: None)
+        monkeypatch.setattr(daemon_owner, "_take_lock", take_lock)
+        monkeypatch.setattr(daemon_owner, "_serve", stalled_serve)
+
+        status: list[int] = []
+        runner = threading.Thread(
+            target=lambda: status.append(daemon_owner.main([])),
+            name="owner-main",
+            daemon=True,
+        )
+        runner.start()
+        runner.join(timeout=20.0)
+
+        # Bounded on purpose. Reverting the close order does not make this fail
+        # an assertion about ordering, it stops `main` from ever returning, and a
+        # test without a bound would hang the suite instead of reporting it.
+        assert not runner.is_alive(), (
+            "the owner never finished finalizing, so it still holds the lock"
+        )
+        assert authorization_timed_out.is_set()
+        assert status == [1]
+        assert held, "the test never took the lock it is asserting about"
+
+        acquired: list[bool] = []
+        contender = daemon_lock.DaemonLock(tmp_path)
+        successor = threading.Thread(
+            target=lambda: acquired.append(contender.try_acquire()), daemon=True
+        )
+        successor.start()
+        successor.join(timeout=10.0)
+        try:
+            assert acquired == [True], (
+                "the position is still held by an owner that gave up"
+            )
+        finally:
+            contender.release()

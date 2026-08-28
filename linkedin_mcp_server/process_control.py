@@ -373,6 +373,9 @@ class _AttachedControl:
     def __init__(self, connection: socket.socket) -> None:
         self._connection = connection
         self._stream = connection.makefile("r", encoding="ascii", newline="\n")
+        # Serializes the close sequence so a second caller cannot start closing
+        # the wrapper while the first is still interrupting the socket under it.
+        self._closing = threading.Lock()
 
     def readline(self) -> str:
         try:
@@ -386,10 +389,50 @@ class _AttachedControl:
             return ""
 
     def close(self) -> None:
-        with contextlib.suppress(OSError):
-            self._stream.close()
-        with contextlib.suppress(OSError):
-            self._connection.close()
+        """End the channel, even while another thread is parked in a read.
+
+        The shutdown is not tidiness, it is the whole of this method. Closing
+        the wrapper first deadlocks whenever a read is in flight: CPython's
+        buffered close takes the same lock :meth:`readline` holds for the
+        duration of its ``recv``, and that ``recv`` only returns when the peer
+        writes or hangs up. A parent that keeps its socket open and never
+        commits satisfies neither, so the close never returns. Measured on
+        CPython 3.13 (darwin): with a reader parked and the peer open, closing
+        the wrapper alone never came back, while a ``shutdown`` first let it
+        return in under a millisecond.
+
+        That matters here rather than in the abstract, because this is the
+        owner's teardown path. ``daemon_owner.main`` closes the control channel
+        in its ``finally``, *before* it releases the daemon lock, so a close
+        that never returns leaves a process that has already given up holding
+        the lock every future election needs.
+
+        ``shutdown`` rather than a close of the socket, because the descriptor
+        must stay valid while a reader is still inside it: closing it under a
+        blocked ``recv`` frees the number for reuse and the parked read can then
+        be answered by an unrelated socket in this process. ``shutdown`` leaves
+        the descriptor in place and only makes it end. The wrapper close that
+        follows is what proves nobody is inside the read any more, since it
+        cannot complete until the reader has released the buffer lock, so by the
+        time the socket itself is closed the descriptor is unused.
+
+        The abort semantics are unchanged: the interrupted read returns end of
+        file, which is what a parent that closed without committing produces,
+        and what the child already treats as "not authorized".
+
+        Safe to call twice and from two threads at once. The lock orders the
+        sequence, every step is idempotent, and a ``shutdown`` that arrives
+        after the socket is closed raises ``EBADF`` against a detached
+        descriptor (CPython sets its ``fileno`` to -1 on close) rather than
+        reaching whatever now holds that number.
+        """
+        with self._closing:
+            with contextlib.suppress(OSError):
+                self._connection.shutdown(socket.SHUT_RDWR)
+            with contextlib.suppress(OSError, ValueError):
+                self._stream.close()
+            with contextlib.suppress(OSError):
+                self._connection.close()
 
 
 def attach(host: str, port: int, *, nonce: str, timeout: float) -> ControlChannel:
