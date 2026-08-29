@@ -7,6 +7,7 @@ import codecs
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 import contextlib
+import errno
 from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import Enum
@@ -1784,6 +1785,29 @@ def _installer_extraction_paths(
     return tuple(configured / name for name in dict.fromkeys(names))
 
 
+#: Scan failures an ordinary install produces on its own. The first four are an
+#: entry the installer removed between two of this walk's syscalls. ``EACCES``
+#: is the same race on Windows, where ``stat`` on a delete-pending file answers
+#: ERROR_ACCESS_DENIED rather than reporting it gone; the installer's temporary
+#: root is owner-only, so a permission failure there has no other author.
+_TOLERABLE_SCAN_ERRNOS = frozenset(
+    {errno.ENOENT, errno.ENOTDIR, errno.ESTALE, errno.ELOOP, errno.EACCES}
+)
+
+
+def _refuse_unmeasurable_scan(error: OSError) -> None:
+    """Re-raise a scan failure that would silently shrink the measured tree.
+
+    Bytes this walk cannot see are bytes the ceiling does not count, so an
+    unreadable entry has to stop the install rather than read as an absent one.
+    """
+    if error.errno in _TOLERABLE_SCAN_ERRNOS:
+        return
+    raise BrowserSetupFailedError(
+        "Patchright Chromium browser setup could not be measured against its size limit"
+    ) from error
+
+
 def _installer_download_snapshot(
     temporary_root: Path, extraction_paths: tuple[Path, ...]
 ) -> tuple[tuple[str, int, int], ...]:
@@ -1791,8 +1815,8 @@ def _installer_download_snapshot(
     roots: list[Path] = []
     try:
         roots.extend(temporary_root.glob("playwright-download-*"))
-    except OSError:
-        pass
+    except OSError as error:
+        _refuse_unmeasurable_scan(error)
     roots.extend(extraction_paths)
 
     entries: list[tuple[str, int, int]] = []
@@ -1801,18 +1825,24 @@ def _installer_download_snapshot(
             continue
         try:
             root_details = root.stat()
-        except OSError:
+        except OSError as error:
+            _refuse_unmeasurable_scan(error)
             continue
         if stat.S_ISREG(root_details.st_mode):
             entries.append((str(root), root_details.st_size, root_details.st_mtime_ns))
             continue
         if not stat.S_ISDIR(root_details.st_mode):
             continue
-        for current, directories, files in os.walk(root, followlinks=False):
+        # onerror, or a directory this walk cannot open is simply not descended
+        # into and its subtree leaves the count without a trace.
+        for current, directories, files in os.walk(
+            root, followlinks=False, onerror=_refuse_unmeasurable_scan
+        ):
             current_path = Path(current)
             try:
                 details = current_path.stat()
-            except OSError:
+            except OSError as error:
+                _refuse_unmeasurable_scan(error)
                 directories.clear()
                 continue
             entries.append((current, details.st_size, details.st_mtime_ns))
@@ -1824,7 +1854,8 @@ def _installer_download_snapshot(
                     # foreign file that grows would otherwise hold the
                     # inactivity deadline open for as long as it is written to.
                     details = child.lstat()
-                except OSError:
+                except OSError as error:
+                    _refuse_unmeasurable_scan(error)
                     continue
                 entries.append((str(child), details.st_size, details.st_mtime_ns))
     return tuple(sorted(entries))

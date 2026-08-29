@@ -1,6 +1,7 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import contextlib
+import errno
 import io
 import json
 import logging
@@ -2739,6 +2740,42 @@ class TestInstallerSupervisorLaunch:
             "the link is still in the snapshot"
         )
         assert after == before, "and a foreign target's growth is not activity"
+
+    def test_an_unreadable_entry_refuses_the_measurement(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """An entry that cannot be read is not an entry that is not there.
+
+        A suppressed read error subtracts those bytes from the ceiling, so the
+        install it was meant to bound passes as a smaller one.
+        """
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.exceptions import BrowserSetupFailedError
+
+        target = tmp_path / "chromium-1234"
+        target.mkdir()
+        (target / "archive.zip").write_bytes(b"x" * 16)
+        # pathlib reaches the file through os.stat, with follow_symlinks off.
+        real_stat = os.stat
+
+        def failing(code):
+            def answer(path, **rest):
+                if str(path).endswith("archive.zip"):
+                    raise OSError(code, os.strerror(code))
+                return real_stat(path, **rest)
+
+            return answer
+
+        monkeypatch.setattr(bootstrap.os, "stat", failing(errno.EIO))
+        with pytest.raises(BrowserSetupFailedError, match="could not be measured"):
+            bootstrap._installer_download_snapshot(tmp_path, (target,))
+
+        monkeypatch.setattr(bootstrap.os, "stat", failing(errno.ENOENT))
+        measured = bootstrap._installer_download_snapshot(tmp_path, (target,))
+
+        assert not [entry for entry in measured if entry[0].endswith("archive.zip")], (
+            "and an entry the installer removed mid-walk is still ordinary"
+        )
 
     def test_activity_scanner_matches_patchright_temp_layout(self):
         from importlib.metadata import distribution
