@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import codecs
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping
@@ -1785,14 +1786,18 @@ def _installer_extraction_paths(
     return tuple(configured / name for name in dict.fromkeys(names))
 
 
-#: Scan failures an ordinary install produces on its own. The first four are an
-#: entry the installer removed between two of this walk's syscalls. ``EACCES``
-#: is the same race on Windows, where ``stat`` on a delete-pending file answers
-#: ERROR_ACCESS_DENIED rather than reporting it gone; the installer's temporary
-#: root is owner-only, so a permission failure there has no other author.
+#: Scan failures an ordinary install produces on its own: an entry it removed
+#: between two of this walk's syscalls.
 _TOLERABLE_SCAN_ERRNOS = frozenset(
-    {errno.ENOENT, errno.ENOTDIR, errno.ESTALE, errno.ELOOP, errno.EACCES}
+    {errno.ENOENT, errno.ENOTDIR, errno.ESTALE, errno.ELOOP}
 )
+#: And the same race on Windows, which has no way to say it. ``CreateFileW``
+#: answers ERROR_ACCESS_DENIED for a file whose delete is pending, and CPython
+#: maps that to ``EACCES`` like any other refusal, so an ordinary install would
+#: otherwise be refused for a file that is on its way out. The cost is that a
+#: genuinely unreadable entry stays uncounted there; both roots this walks are
+#: written by this account, so producing one takes an operator.
+_TOLERABLE_SCAN_ERRNOS |= {errno.EACCES} if os.name == "nt" else frozenset()
 
 
 def _refuse_unmeasurable_scan(error: OSError) -> None:
@@ -2111,25 +2116,69 @@ def _remove_installer_temporary_root(temporary_root: _InstallerTemporaryRoot) ->
         path.rmdir()
 
 
+_INSTALLER_CLEANUP_EXIT_SECONDS = 5.0
+_installer_cleanups: set[threading.Thread] = set()
+_installer_cleanups_lock = threading.Lock()
+_installer_cleanups_awaited = False
+
+
+def _await_installer_temporary_root_cleanups() -> None:
+    """Give the archive removals a bounded chance before the process leaves.
+
+    They run on daemon threads, which the interpreter does not wait for, and a
+    one-shot CLI mode reaches exit within milliseconds of a refused or
+    cancelled install. The root abandoned that way holds the download the
+    ceiling exists to bound, and nothing later looks for it.
+    """
+    deadline = time.monotonic() + _INSTALLER_CLEANUP_EXIT_SECONDS
+    with _installer_cleanups_lock:
+        pending = tuple(_installer_cleanups)
+    for cleanup in pending:
+        cleanup.join(max(deadline - time.monotonic(), 0.0))
+        if cleanup.is_alive():
+            logger.warning(
+                "Browser installer temp cleanup did not finish before exit; "
+                "its download stays until the temporary directory is cleared"
+            )
+            return
+
+
 def _start_installer_temporary_root_cleanup(
     temporary_root: _InstallerTemporaryRoot,
 ) -> None:
     """Remove an installer temp root without extending its process lifetime."""
+    global _installer_cleanups_awaited
     cleanup = threading.Thread(
-        target=_remove_installer_temporary_root,
+        target=_clean_installer_temporary_root,
         args=(temporary_root,),
         name="browser-installer-temp-cleanup",
         daemon=True,
     )
+    with _installer_cleanups_lock:
+        if not _installer_cleanups_awaited:
+            atexit.register(_await_installer_temporary_root_cleanups)
+            _installer_cleanups_awaited = True
+        _installer_cleanups.add(cleanup)
     try:
         cleanup.start()
     except RuntimeError:
+        with _installer_cleanups_lock:
+            _installer_cleanups.discard(cleanup)
         logger.warning(
             "Could not start browser installer temp cleanup; leaving %s for later removal",
             temporary_root.path,
             exc_info=True,
         )
         _close_installer_temporary_root_pin(temporary_root)
+
+
+def _clean_installer_temporary_root(temporary_root: _InstallerTemporaryRoot) -> None:
+    """Remove one root and stop the exit above from waiting for it again."""
+    try:
+        _remove_installer_temporary_root(temporary_root)
+    finally:
+        with _installer_cleanups_lock:
+            _installer_cleanups.discard(threading.current_thread())
 
 
 def _installer_bound_breached(activity: asyncio.Task[None]) -> bool:
@@ -2329,19 +2378,22 @@ async def _install_under_supervision(
                 raise settle_cancellation
             raise
         await _close_installer_lease(proc)
-        # Unconditional, because a poll can miss the final growth: CPython can
-        # publish returncode before pipe EOF, so the loop above leaves with the
-        # watcher parked between two sleeps. The tree has settled by here.
-        final = await _run_in_daemon_thread(
-            _installer_download_snapshot, temporary_root, extraction_paths
-        )
         # Precedence, deliberately in this order. A nonzero exit keeps its own
-        # message, which says what went wrong; a breach beats success, because
-        # accepting returncode 0 is what records an oversized tree as ready.
+        # message, which says what went wrong, and it is read before the scan
+        # below so an unreadable tree cannot answer in its place. A breach then
+        # beats success, because accepting returncode 0 is what records an
+        # oversized tree as ready.
         if returncode != 0:
             raise BrowserSetupFailedError(
                 "\n".join(lines) or "Patchright Chromium browser setup failed."
             )
+        # Taken whatever the watcher saw, because a poll can miss the final
+        # growth: CPython can publish returncode before pipe EOF, so the loop
+        # above leaves with the watcher parked between two sleeps. The tree has
+        # settled by here.
+        final = await _run_in_daemon_thread(
+            _installer_download_snapshot, temporary_root, extraction_paths
+        )
         try:
             _refuse_oversized_install(final)
         except BrowserSetupFailedError:

@@ -11,6 +11,7 @@ import stat
 import sys
 import tempfile
 import threading
+import time
 from types import SimpleNamespace
 from typing import IO, Any, Callable, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -2776,6 +2777,87 @@ class TestInstallerSupervisorLaunch:
         assert not [entry for entry in measured if entry[0].endswith("archive.zip")], (
             "and an entry the installer removed mid-walk is still ordinary"
         )
+
+        monkeypatch.setattr(bootstrap.os, "stat", failing(errno.EACCES))
+        if os.name == "nt":
+            # Windows says this instead of reporting a delete-pending file gone.
+            bootstrap._installer_download_snapshot(tmp_path, (target,))
+        else:
+            with pytest.raises(BrowserSetupFailedError, match="could not be measured"):
+                bootstrap._installer_download_snapshot(tmp_path, (target,))
+
+    async def test_a_failed_install_keeps_its_message_over_the_scan(self, monkeypatch):
+        """The installer named the cause, so the accounting may not answer for it.
+
+        Everything the scan can say here is that it could not measure a tree
+        the install already abandoned.
+        """
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.exceptions import BrowserSetupFailedError
+
+        proc = _FakeProc([b"ERROR: the mirror refused the archive\n"], 1)
+        scans = iter([()])
+
+        def snapshot(
+            _temporary_root: Path, _extraction_paths: tuple[Path, ...]
+        ) -> tuple[tuple[str, int, int], ...]:
+            for opening in scans:
+                return opening
+            raise BrowserSetupFailedError(
+                "Patchright Chromium browser setup could not be measured "
+                "against its size limit"
+            )
+
+        async def watcher(
+            _callback: Callable[[], None],
+            _temporary_root: Path,
+            _extraction_paths: tuple[Path, ...],
+            _opening: tuple[tuple[str, int, int], ...],
+        ) -> None:
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(bootstrap, "_watch_installer_activity", watcher)
+        monkeypatch.setattr(bootstrap, "_installer_download_snapshot", snapshot)
+        monkeypatch.setattr(
+            asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)
+        )
+
+        with pytest.raises(BrowserSetupFailedError) as failure:
+            await bootstrap._run_patchright_install("--no-shell")
+
+        assert "the mirror refused the archive" in str(failure.value)
+
+    def test_a_pending_temp_cleanup_is_waited_for_at_exit(self, monkeypatch):
+        """The removal runs on a daemon thread, which nothing else waits for.
+
+        A one-shot CLI mode reaches interpreter exit within milliseconds of a
+        refused install, and the root left behind holds its download.
+        """
+        from linkedin_mcp_server import bootstrap
+
+        registered: list[Callable[[], None]] = []
+        started = threading.Event()
+        removed = threading.Event()
+
+        def remove(_root: object) -> None:
+            started.set()
+            time.sleep(0.3)
+            removed.set()
+
+        monkeypatch.setattr(bootstrap, "_installer_cleanups_awaited", False)
+        monkeypatch.setattr(bootstrap.atexit, "register", registered.append)
+        monkeypatch.setattr(bootstrap, "_remove_installer_temporary_root", remove)
+
+        bootstrap._start_installer_temporary_root_cleanup(
+            cast(Any, SimpleNamespace(path=Path("unused"), device=0, inode=0, pin=None))
+        )
+
+        assert started.wait(5), "the cleanup thread ran"
+        assert bootstrap._await_installer_temporary_root_cleanups in registered
+        for hook in registered:
+            hook()
+
+        assert removed.is_set(), "and exit waited for it to finish"
 
     def test_activity_scanner_matches_patchright_temp_layout(self):
         from importlib.metadata import distribution
