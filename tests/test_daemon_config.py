@@ -330,6 +330,53 @@ class TestDaemonLogState:
 
         assert not daemon_owner.daemon_log_path(tmp_path / "auth").exists()
 
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX open flags decide this")
+    def test_a_lost_creation_race_leaves_the_winners_log_alone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Two candidates can both find the path absent, and one has to yield.
+
+        A candidate that did not create the file may not remove it again, or
+        its own failure unlinks the log the candidate that went on to win the
+        daemon lock is already writing to.
+        """
+        from linkedin_mcp_server import daemon_descriptor, daemon_owner
+        from linkedin_mcp_server.private_state import PrivateStateError
+
+        monkeypatch.setattr(daemon_descriptor, "_account_home", lambda: tmp_path)
+        monkeypatch.setattr(daemon_owner.os, "dup2", lambda *args: None)
+        stream = type("Stream", (), {"fileno": lambda self: 1})()
+        monkeypatch.setattr(
+            daemon_owner,
+            "sys",
+            type("Streams", (), {"stdout": stream, "stderr": stream})(),
+        )
+        monkeypatch.setattr(
+            daemon_owner,
+            "harden_created_file",
+            lambda _path: (_ for _ in ()).throw(PrivateStateError("ACL failure")),
+        )
+
+        log_path = daemon_owner.daemon_log_path(tmp_path / "auth")
+        real_open = os.open
+        raced: list[bool] = []
+
+        def racing_open(path, flags, mode=0o777, **rest):
+            if Path(path) == log_path and not raced:
+                raced.append(True)
+                # The other candidate creates the file between this one's
+                # absence check and its own open.
+                log_path.write_bytes(b"winner\n")
+            return real_open(path, flags, mode, **rest)
+
+        monkeypatch.setattr(daemon_owner.os, "open", racing_open)
+
+        attached = daemon_owner._attach_daemon_log(tmp_path / "auth")
+
+        assert raced, "the creation race was actually exercised"
+        assert attached == log_path
+        assert log_path.read_bytes() == b"winner\n"
+
     @pytest.mark.skipif(os.name == "nt", reason="POSIX symlink semantics are required")
     def test_a_planted_log_symlink_is_refused_before_open(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

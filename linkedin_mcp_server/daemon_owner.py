@@ -209,8 +209,17 @@ def _attach_daemon_log(auth_root: Path) -> Path:
         | getattr(os, "O_CLOEXEC", 0)
     )
     if created:
-        flags |= os.O_CREAT
-    descriptor = os.open(log_path, flags, 0o600)
+        try:
+            descriptor = os.open(log_path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            # A second candidate reached the same absent path. Only the process
+            # that created the file may remove it again below, or a failure here
+            # unlinks the log the candidate that won the lock is writing to.
+            created = False
+            harden_file(log_path)
+            descriptor = os.open(log_path, flags, 0o600)
+    else:
+        descriptor = os.open(log_path, flags, 0o600)
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             raise PrivateStateError(f"{log_path} is not a regular file")
