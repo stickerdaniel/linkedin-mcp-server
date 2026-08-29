@@ -2805,6 +2805,35 @@ class TestInstallerSupervisorLaunch:
 
         assert "activity watcher failed" in caplog.text
 
+    async def test_a_watcher_that_cannot_poll_refuses_the_install(
+        self, tmp_path, monkeypatch
+    ):
+        """Losing the poll is losing the ceiling, so the install goes with it.
+
+        A snapshot that cannot run leaves nothing able to stop a download
+        already in flight, and the final accounting only ever judges what a
+        finished installer left behind.
+        """
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.exceptions import BrowserSetupFailedError
+
+        async def unavailable(function, *args, **kwargs):
+            raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr(bootstrap, "_run_in_daemon_thread", unavailable)
+        monkeypatch.setattr(bootstrap, "_INSTALLER_ACTIVITY_POLL_SECONDS", 0.001)
+
+        watching = asyncio.create_task(
+            bootstrap._watch_installer_activity(lambda: None, tmp_path, (), ())
+        )
+        with pytest.raises(BrowserSetupFailedError) as failure:
+            await asyncio.wait_for(watching, 5)
+
+        assert isinstance(failure.value.__cause__, RuntimeError)
+        assert bootstrap._installer_bound_breached(watching), (
+            "and the supervision loop stops the installer over it"
+        )
+
     async def test_parent_cancellation_during_watcher_cleanup_is_preserved(
         self, monkeypatch
     ):

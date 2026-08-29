@@ -1860,17 +1860,30 @@ async def _watch_installer_activity(
 
     The caller takes *opening* before anything can write, so the first poll
     already compares against a tree this install has not touched.
+
+    Progress reporting is optional and the ceiling it rides along with is not,
+    so a poll that cannot run at all refuses the install too. Otherwise the one
+    bound that can stop a still-running installer disappears with the thread it
+    could not start, and the tree grows until the process ends on its own.
     """
     previous = opening
-    while True:
-        await asyncio.sleep(_INSTALLER_ACTIVITY_POLL_SECONDS)
-        current = await _run_in_daemon_thread(
-            _installer_download_snapshot, temporary_root, extraction_paths
-        )
-        _refuse_oversized_install(current)
-        if current != previous:
-            callback()
-            previous = current
+    try:
+        while True:
+            await asyncio.sleep(_INSTALLER_ACTIVITY_POLL_SECONDS)
+            current = await _run_in_daemon_thread(
+                _installer_download_snapshot, temporary_root, extraction_paths
+            )
+            _refuse_oversized_install(current)
+            if current != previous:
+                callback()
+                previous = current
+    except BrowserSetupFailedError:
+        raise
+    except Exception as unmeasurable:
+        raise BrowserSetupFailedError(
+            "Patchright Chromium browser setup can no longer be measured "
+            "against its size limit"
+        ) from unmeasurable
 
 
 @dataclass(frozen=True, slots=True)
