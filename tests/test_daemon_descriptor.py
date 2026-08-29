@@ -949,11 +949,22 @@ class TestStateLocation:
         monkeypatch.setattr(
             windows_acl, "restrict_to_current_user", lambda *args, **kwargs: None
         )
+        observed: list[bool] = []
+        real_ensure = daemon_descriptor_module._ensure_legacy_windows_tombstone
+
+        def ensure(home: Path, staging_root: Path) -> None:
+            observed.append(daemon_descriptor_module.windows_exclusion_established())
+            real_ensure(home, staging_root)
+
+        monkeypatch.setattr(
+            daemon_descriptor_module, "_ensure_legacy_windows_tombstone", ensure
+        )
 
         assert not daemon_descriptor_module.windows_exclusion_established()
 
         prepare_daemon_state(tmp_path / "auth")
 
+        assert observed == [False], "and not while the file was still being written"
         assert daemon_descriptor_module.windows_exclusion_established()
         assert (tmp_path / ".mcp-server-linkedin").is_file()
 
@@ -1053,14 +1064,15 @@ class TestStateLocation:
 
         assert not (tmp_path / ".mcp-server-linkedin").exists()
 
-    def test_windows_withdraws_a_tombstone_it_could_not_verify(
+    def test_windows_keeps_a_tombstone_it_could_not_verify(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        """A published marker this process cannot vouch for goes away again.
+        """Publication hands the marker over, so this start stops owning it.
 
-        Every later start reads the same path and refuses a marker that fails
-        verification, so leaving one behind turns a startup this run can retry
-        into a migration error only a hand can clear.
+        Another start can already have read this inode and recorded that the
+        exclusion exists. Withdrawing it leaves that process trusting a file
+        this one removed, while the marker itself is something every later
+        start verifies for itself anyway.
         """
         from linkedin_mcp_server import windows_acl
 
@@ -1089,10 +1101,12 @@ class TestStateLocation:
         with pytest.raises(PrivateStateError, match="unreadable marker"):
             prepare_daemon_state(tmp_path / "auth")
 
-        assert not legacy.exists()
+        assert legacy.read_bytes() == (
+            daemon_descriptor_module._LEGACY_WINDOWS_TOMBSTONE
+        )
         assert not list(
             (tmp_path / ".mcp-server-linkedin-v2").glob(".legacy-exclusion-*")
-        ), "and the staged marker went with it"
+        ), "and only the staged marker was withdrawn"
 
     def test_windows_refuses_an_invalid_legacy_tombstone(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

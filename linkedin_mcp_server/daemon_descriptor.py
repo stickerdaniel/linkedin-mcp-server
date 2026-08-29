@@ -514,7 +514,6 @@ def _ensure_legacy_windows_tombstone(home: Path, staging_root: Path) -> None:
         prefix=".legacy-exclusion-", dir=staging_root
     )
     staged = Path(staged_name)
-    created = os.fstat(descriptor)
     published = False
     try:
         try:
@@ -539,14 +538,12 @@ def _ensure_legacy_windows_tombstone(home: Path, staging_root: Path) -> None:
             return
         published = True
         _verify_legacy_tombstone(legacy)
-    except BaseException:
-        candidate = legacy if published else staged
-        with contextlib.suppress(OSError):
-            current = candidate.lstat()
-            if (current.st_dev, current.st_ino) == (created.st_dev, created.st_ino):
-                candidate.unlink()
-        raise
     finally:
+        # Only a staged marker is withdrawn. Once the rename lands, another
+        # startup can read this inode and record that the exclusion exists, and
+        # withdrawing it then leaves that process trusting a file this one took
+        # away. A marker a later start cannot verify is refused there, which is
+        # a decision that process gets to make with the object in front of it.
         if not published:
             with contextlib.suppress(OSError):
                 staged.unlink()
