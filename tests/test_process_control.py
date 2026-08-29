@@ -322,11 +322,23 @@ class TestSaturatedQueue:
         # the first stranger. Every slot holds a peer that says nothing at all,
         # and the queue is empty again well inside the drain's own budget.
         silent = self._saturate(listener)
+
+        def discarded(peer: socket.socket) -> bool:
+            # Bounded, or a drain that parks on the first stranger leaves this
+            # read waiting past every deadline the loop below could check, and
+            # the regression arrives as a hung run rather than a failure.
+            try:
+                return peer.recv(1) == b""
+            except TimeoutError:
+                return False
+
         try:
+            for peer in silent:
+                peer.settimeout(0.05)
             listener.start_accepting(nonce=_NONCE, timeout=2.0)
             deadline = time.monotonic() + 5.0
             while time.monotonic() < deadline:
-                if all(peer.recv(1) == b"" for peer in silent):
+                if all(discarded(peer) for peer in silent):
                     break
                 time.sleep(0.01)
             else:  # pragma: no cover - the drain kept a stranger

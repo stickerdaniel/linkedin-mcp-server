@@ -312,9 +312,41 @@ class TestDaemonLogState:
         assert verified == [log_path]
         assert log_path.is_file()
 
-    def test_failed_fresh_log_hardening_removes_the_file(
+    def test_a_published_windows_log_survives_a_failed_verification(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
+        """Publication hands the file over, so the publisher stops owning it.
+
+        Another candidate can open the published inode before the verification
+        below fails, and withdrawing the path then unlinks a log that is
+        already being written to.
+        """
+        from linkedin_mcp_server import daemon_owner
+        from linkedin_mcp_server.private_state import PrivateStateError
+
+        log_path = tmp_path / "daemon.log"
+        monkeypatch.setattr(
+            daemon_owner,
+            "harden_file",
+            lambda _path: (_ for _ in ()).throw(PrivateStateError("ACL failure")),
+        )
+
+        with pytest.raises(PrivateStateError, match="ACL failure"):
+            daemon_owner._publish_windows_daemon_log(log_path)
+
+        assert log_path.is_file()
+        assert not list(tmp_path.glob(".daemon-log-*")), "and nothing stayed staged"
+
+    def test_failed_fresh_log_hardening_leaves_the_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A candidate that fails does not take the log away from one that did not.
+
+        Its own creation may have lost the race by a syscall, in which case
+        another candidate is already appending to this inode and nothing here
+        can tell. The file was opened owner-only, so leaving it costs nothing
+        and the next attachment hardens it through the existing-file path.
+        """
         from linkedin_mcp_server import daemon_descriptor, daemon_owner
         from linkedin_mcp_server.private_state import PrivateStateError
 
@@ -328,7 +360,9 @@ class TestDaemonLogState:
         with pytest.raises(PrivateStateError, match="ACL failure"):
             daemon_owner._attach_daemon_log(tmp_path / "auth")
 
-        assert not daemon_owner.daemon_log_path(tmp_path / "auth").exists()
+        log_path = daemon_owner.daemon_log_path(tmp_path / "auth")
+        assert log_path.is_file()
+        assert stat.S_IMODE(log_path.stat().st_mode) & 0o077 == 0
 
     @pytest.mark.skipif(os.name == "nt", reason="POSIX open flags decide this")
     def test_a_lost_creation_race_leaves_the_winners_log_alone(

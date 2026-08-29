@@ -154,7 +154,6 @@ def _publish_windows_daemon_log(log_path: Path) -> None:
         prefix=".daemon-log-", dir=log_path.parent
     )
     staged = Path(staged_name)
-    created = os.fstat(descriptor)
     os.close(descriptor)
     published = False
     try:
@@ -166,14 +165,11 @@ def _publish_windows_daemon_log(log_path: Path) -> None:
             return
         published = True
         harden_file(log_path)
-    except BaseException:
-        candidate = log_path if published else staged
-        with contextlib.suppress(OSError):
-            current = candidate.lstat()
-            if (current.st_dev, current.st_ino) == (created.st_dev, created.st_ino):
-                candidate.unlink()
-        raise
     finally:
+        # A published log is left where it is, even when the verification after
+        # it failed. Another candidate may already have opened this inode and be
+        # writing its own startup into it, and this process cannot tell; an
+        # empty file hardened before publication is the cheaper thing to leave.
         if not published:
             with contextlib.suppress(OSError):
                 staged.unlink()
@@ -232,12 +228,10 @@ def _attach_daemon_log(auth_root: Path) -> Path:
             )
         os.dup2(descriptor, sys.stdout.fileno())
         os.dup2(descriptor, sys.stderr.fileno())
-    except BaseException:
-        if created and is_still_at(descriptor, log_path):
-            with contextlib.suppress(OSError):
-                log_path.unlink()
-        raise
     finally:
+        # No removal on failure, for the reason _publish_windows_daemon_log
+        # gives: the loser of the creation race above is already appending to
+        # this inode, and an owner-only empty file costs nothing to leave.
         os.close(descriptor)
     return log_path
 

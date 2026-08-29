@@ -1053,6 +1053,47 @@ class TestStateLocation:
 
         assert not (tmp_path / ".mcp-server-linkedin").exists()
 
+    def test_windows_withdraws_a_tombstone_it_could_not_verify(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A published marker this process cannot vouch for goes away again.
+
+        Every later start reads the same path and refuses a marker that fails
+        verification, so leaving one behind turns a startup this run can retry
+        into a migration error only a hand can clear.
+        """
+        from linkedin_mcp_server import windows_acl
+
+        monkeypatch.setattr(daemon_descriptor_module, "_WINDOWS", True)
+        monkeypatch.setattr(
+            daemon_descriptor_module,
+            "_APPLICATION_STATE_DIR",
+            ".mcp-server-linkedin-v2",
+        )
+        monkeypatch.setattr(
+            daemon_descriptor_module, "_pin_windows_account_home", lambda _path: None
+        )
+        monkeypatch.setattr(
+            windows_acl, "verify_children_cannot_be_replaced", lambda _path: None
+        )
+        legacy = tmp_path / ".mcp-server-linkedin"
+
+        def refuse(path: Path) -> None:
+            assert path == legacy, "only the published marker is verified here"
+            raise PrivateStateError("unreadable marker")
+
+        monkeypatch.setattr(
+            daemon_descriptor_module, "_verify_legacy_tombstone", refuse
+        )
+
+        with pytest.raises(PrivateStateError, match="unreadable marker"):
+            prepare_daemon_state(tmp_path / "auth")
+
+        assert not legacy.exists()
+        assert not list(
+            (tmp_path / ".mcp-server-linkedin-v2").glob(".legacy-exclusion-*")
+        ), "and the staged marker went with it"
+
     def test_windows_refuses_an_invalid_legacy_tombstone(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
