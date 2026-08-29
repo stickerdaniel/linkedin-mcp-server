@@ -340,7 +340,8 @@ Spell that first path out in full. A client runs `docker` directly rather than t
 
 **PowerShell (Windows):** use a forward-slash JSON path. A backslash path like
 `C:\Users\Alice\.linkedin-mcp` fails JSON parsing because `\U` is an invalid
-escape. Replace `Alice` with your username.
+escape. Use `C:/Users/Alice/.linkedin-mcp` instead, replacing `Alice` with your
+username.
 
 ```json
 {
