@@ -1041,6 +1041,26 @@ class TestRetainedRevisionReportCallSites:
 
         assert calls == [1]
 
+    async def test_a_failing_post_setup_report_stays_on_its_own_task(
+        self, isolate_profile_dir, monkeypatch, caplog
+    ):
+        """Nobody awaits this task, so an escape is only reported on drop."""
+        from linkedin_mcp_server import bootstrap
+
+        def explode() -> None:
+            raise json.JSONDecodeError("inventory", "", 0)
+
+        monkeypatch.setattr(bootstrap, "_report_retained_browser_revisions", explode)
+
+        with caplog.at_level(logging.WARNING, logger="linkedin_mcp_server.bootstrap"):
+            bootstrap._schedule_retained_browser_revision_report()
+            task = get_bootstrap_state().cache_report_task
+            assert task is not None
+            await task
+
+        assert task.exception() is None, "the escape was left for the loop to report"
+        assert "Could not inspect the retained browser cache" in caplog.text
+
 
 class TestSetupGate:
     """ensure_tool_ready_or_raise gates on the browser, not on the mode.
@@ -2074,6 +2094,116 @@ class _Spawned:
     def __init__(self) -> None:
         self.kwargs: dict[str, object] = {}
         self.proc: _FakeProc | None = None
+
+
+class TestDaemonThreadHandover:
+    """Who owns the answer when the awaiting task is cancelled around it."""
+
+    class _InlineThreads:
+        """The bootstrap module's threading, with Thread running its target."""
+
+        class Thread:
+            def __init__(self, *, target, name=None, daemon=None, args=()):
+                self._target = target
+                self._args = args
+
+            def start(self) -> None:
+                self._target(*self._args)
+
+        def __getattr__(self, name: str):
+            return getattr(threading, name)
+
+    async def test_a_cancel_after_the_answer_lands_still_discards_it(self, monkeypatch):
+        """The value was set on the future, and the task never accepted it.
+
+        A task cancelled while the future it awaits is already done resumes
+        with the cancellation rather than the value, so without a handover
+        here the installer root would keep its pin until the process exits.
+        """
+        from linkedin_mcp_server import bootstrap
+
+        monkeypatch.setattr(bootstrap, "threading", self._InlineThreads())
+        discarded: list[str] = []
+
+        task = asyncio.create_task(
+            bootstrap._run_in_daemon_thread(
+                lambda: "the installer root", discard=discarded.append
+            )
+        )
+        # One turn to reach the await and queue the completion, a second to let
+        # that completion set the result. Cancelling now finds the future done.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert discarded == ["the installer root"]
+
+    async def test_a_delivered_answer_is_not_discarded(self, monkeypatch):
+        from linkedin_mcp_server import bootstrap
+
+        monkeypatch.setattr(bootstrap, "threading", self._InlineThreads())
+        discarded: list[str] = []
+
+        answer = await bootstrap._run_in_daemon_thread(
+            lambda: "the installer root", discard=discarded.append
+        )
+
+        assert answer == "the installer root"
+        assert discarded == []
+
+
+class TestInstallerTemporaryRootRemoval:
+    """What the cleanup says when it cannot take the download away."""
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX permission semantics")
+    @pytest.mark.skipif(
+        getattr(os, "geteuid", lambda: 1)() == 0,
+        reason="root ignores directory modes",
+    )
+    def test_a_refused_entry_names_the_root_it_stays_in(self, tmp_path, caplog):
+        from linkedin_mcp_server import bootstrap
+
+        root = tmp_path / "linkedin-mcp-installer-x"
+        locked = root / "locked"
+        locked.mkdir(parents=True)
+        (locked / "chromium.zip").write_bytes(b"archive")
+        pin = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+        details = os.fstat(pin)
+        temporary = bootstrap._InstallerTemporaryRoot(
+            root, details.st_dev, details.st_ino, pin
+        )
+        locked.chmod(0o500)
+        try:
+            with caplog.at_level(
+                logging.WARNING, logger="linkedin_mcp_server.bootstrap"
+            ):
+                bootstrap._remove_installer_temporary_root(temporary)
+        finally:
+            locked.chmod(0o700)
+
+        assert (locked / "chromium.zip").exists(), "the archive is still there"
+        assert str(root) in caplog.text
+        assert "chromium.zip" in caplog.text
+
+    def test_a_cleared_root_says_nothing(self, tmp_path, caplog):
+        from linkedin_mcp_server import bootstrap
+
+        root = tmp_path / "linkedin-mcp-installer-y"
+        (root / "sub").mkdir(parents=True)
+        (root / "sub" / "chromium.zip").write_bytes(b"archive")
+        pin = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        details = os.fstat(pin)
+        temporary = bootstrap._InstallerTemporaryRoot(
+            root, details.st_dev, details.st_ino, pin
+        )
+
+        with caplog.at_level(logging.WARNING, logger="linkedin_mcp_server.bootstrap"):
+            bootstrap._remove_installer_temporary_root(temporary)
+
+        assert not root.exists()
+        assert caplog.text == ""
 
 
 class TestInstallerSupervisorLaunch:
@@ -4175,14 +4305,14 @@ class TestPatchrightInstallStreaming:
             path: str,
             *,
             dir_fd: int | None = None,
-            ignore_errors: bool = False,
+            onexc: Any = None,
         ) -> None:
             assert path == "."
             assert dir_fd is not None
             temporary_root.rename(moved)
             temporary_root.mkdir()
             victim.write_text("unrelated")
-            real_rmtree(path, dir_fd=dir_fd, ignore_errors=ignore_errors)
+            real_rmtree(path, dir_fd=dir_fd, onexc=onexc)
 
         monkeypatch.setattr(bootstrap.shutil, "rmtree", swap_then_remove)
 

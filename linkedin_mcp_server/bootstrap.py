@@ -767,7 +767,17 @@ async def _run_in_daemon_thread(
                 discard_safely(value)
 
     threading.Thread(target=run, name="browser-setup-io", daemon=True).start()
-    return await result
+    try:
+        return await result
+    except BaseException:
+        # A cancellation delivered after the thread set the result still throws
+        # here, because a task cancelled while its future is already done is
+        # resumed with the cancellation rather than the value. Without this the
+        # answer is dropped where nobody ever accepted ownership of it, which
+        # for the installer root means a pinned handle held to process exit.
+        if result.done() and not result.cancelled() and result.exception() is None:
+            discard_safely(result.result())
+        raise
 
 
 def _schedule_retained_browser_revision_report() -> None:
@@ -779,9 +789,22 @@ def _schedule_retained_browser_revision_report() -> None:
         return
     _state.cache_report_attempted = True
     _state.cache_report_task = asyncio.create_task(
-        _run_in_daemon_thread(_report_retained_browser_revisions),
+        _report_retained_browser_revisions_safely(),
         name="browser-cache-report",
     )
+
+
+async def _report_retained_browser_revisions_safely() -> None:
+    """Inventory the cache where an escape would go to nobody.
+
+    Same reason as the readiness variant below: this task is never awaited, so
+    an exception on it is reported by the loop when the task is dropped. The
+    attempt is already recorded, and a diagnostic is not worth a retry.
+    """
+    try:
+        await _run_in_daemon_thread(_report_retained_browser_revisions)
+    except Exception:
+        logger.warning("Could not inspect the retained browser cache", exc_info=True)
 
 
 def initialize_bootstrap(runtime_policy: RuntimePolicy | str | None = None) -> None:
@@ -2122,6 +2145,25 @@ def _remove_installer_temporary_root(temporary_root: _InstallerTemporaryRoot) ->
             path.rmdir()
         return
 
+    refused: list[str] = []
+
+    def record(function: Any, name: Any, error: BaseException) -> None:
+        """Note an entry this removal could not take, and carry on past it.
+
+        ``onexc`` rather than ``ignore_errors``, which cannot tell a tree that
+        is gone from one nothing could touch: the archive this bounds would
+        then be left behind in silence. Recording continues the walk exactly as
+        ignoring did, so one locked file does not strand the rest.
+        """
+        if function is os.rmdir and str(name) in (".", str(path)):
+            # Every run ends here, because rmtree finishes by removing its own
+            # start point and that is the one entry this keeps: POSIX cannot
+            # name it through the descriptor being walked, and the Windows
+            # handle refuses its deletion. The pathname rmdir below takes it
+            # once the pin is released.
+            return
+        refused.append(f"{name}: {error}")
+
     if os.name == "nt":
         try:
             try:
@@ -2135,7 +2177,7 @@ def _remove_installer_temporary_root(temporary_root: _InstallerTemporaryRoot) ->
                 return
             # The retained handle has denied replacement and root deletion since
             # creation. rmtree can remove only this directory's children.
-            shutil.rmtree(path, ignore_errors=True)
+            shutil.rmtree(path, onexc=record)
         finally:
             _close_installer_temporary_root_pin(temporary_root)
     else:
@@ -2148,7 +2190,7 @@ def _remove_installer_temporary_root(temporary_root: _InstallerTemporaryRoot) ->
                 return
             # Anchor traversal to the handle retained since creation. A rename or
             # pathname substitution cannot redirect recursive deletion elsewhere.
-            shutil.rmtree(".", dir_fd=pin, ignore_errors=True)
+            shutil.rmtree(".", dir_fd=pin, onexc=record)
         finally:
             _close_installer_temporary_root_pin(temporary_root)
 
@@ -2157,6 +2199,15 @@ def _remove_installer_temporary_root(temporary_root: _InstallerTemporaryRoot) ->
     # a last-moment substitution can therefore never delete unrelated contents.
     with contextlib.suppress(OSError):
         path.rmdir()
+    if refused:
+        # Named, because nothing later looks for this root: a retry measures a
+        # fresh one, so bytes stranded here are outside every ceiling.
+        logger.warning(
+            "Could not remove the browser installer temp root %s; its download "
+            "stays until the temporary directory is cleared (%s)",
+            path,
+            "; ".join(refused[:3]),
+        )
 
 
 _INSTALLER_CLEANUP_EXIT_SECONDS = 5.0
