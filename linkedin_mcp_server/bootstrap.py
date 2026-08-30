@@ -361,6 +361,7 @@ class BootstrapState:
     setup_task: asyncio.Task[None] | None = None
     setup_check_complete: asyncio.Event | None = None
     setup_requires_stand_down: bool = False
+    setup_stand_down_reason: str | None = None
     cache_report_task: asyncio.Task[None] | None = None
     cache_report_attempted: bool = False
     login_task: asyncio.Task[None] | None = None
@@ -1029,10 +1030,12 @@ _BACKGROUND_BROWSER_SETUP_SECONDS = 30 * 60.0
 #: Absolute ceiling on one setup attempt, which no activity can reschedule. The
 #: inactivity deadline above is pushed forward by every byte that lands, so a
 #: response that keeps trickling holds it open for as long as it wants to; this
-#: one is armed once and expires. Six hours against a measured install of well
-#: under a minute, and against the 170 MiB download needing about five at
-#: 10 KiB/s, which is already below any link this server is usable on.
-_BROWSER_SETUP_LIFETIME_SECONDS = 6 * 60 * 60.0
+#: one is armed once and expires. Twelve hours against a measured install of
+#: well under a minute. The 170 MiB download needs about five at 10 KiB/s,
+#: already below any link this server is usable on, and patchright answers a
+#: reset near the end of one by starting a clean attempt: six hours cancelled
+#: that recovery, which is the only thing this bound must not do.
+_BROWSER_SETUP_LIFETIME_SECONDS = 12 * 60 * 60.0
 
 #: Whether an outer scope already holds the lifetime, so one attempt arms one
 #: timer: the background task around the whole attempt, a direct install at the
@@ -1069,8 +1072,9 @@ async def _setup_lifetime() -> AsyncIterator[None]:
         _setup_lifetime_armed.reset(token)
 
 
-def _mark_background_setup_timed_out() -> None:
+def _mark_background_setup_timed_out(reason: str) -> None:
     _state.setup_requires_stand_down = process_role() is ServerRole.OWNER
+    _state.setup_stand_down_reason = reason
 
 
 async def _run_background_browser_setup(deadline_at: float | None = None) -> None:
@@ -1106,12 +1110,16 @@ async def _run_background_browser_setup(deadline_at: float | None = None) -> Non
         # First, because the lifetime cancels the inactivity scope on its way
         # out and a caller that only asked the inner one would name the wrong
         # bound. It arrives already told apart, from whichever layer armed it.
-        _mark_background_setup_timed_out()
+        _mark_background_setup_timed_out(
+            "managed browser setup exceeded its absolute lifetime"
+        )
         raise
     except TimeoutError as exc:
         if not deadline.expired():
             raise
-        _mark_background_setup_timed_out()
+        _mark_background_setup_timed_out(
+            "managed browser setup exceeded its background deadline"
+        )
         raise BrowserSetupFailedError(
             "Patchright Chromium browser setup exceeded its background deadline"
         ) from exc
@@ -1129,6 +1137,7 @@ def _start_browser_setup_task_locked(deadline_at: float) -> None:
     _state.last_error = None
     _state.setup_completed_at = None
     _state.setup_requires_stand_down = False
+    _state.setup_stand_down_reason = None
     _state.setup_check_complete = asyncio.Event()
     _state.setup_task = asyncio.create_task(
         _run_background_browser_setup(deadline_at), name="browser-setup"
@@ -1819,7 +1828,14 @@ def _installer_download_snapshot(
     """Return activity markers attributable to one Patchright invocation."""
     roots: list[Path] = []
     try:
-        roots.extend(temporary_root.glob("playwright-download-*"))
+        # scandir rather than Path.glob, which answers an unreadable directory
+        # with no matches: the archive would then weigh nothing at all.
+        with os.scandir(temporary_root) as entries:
+            roots.extend(
+                Path(entry.path)
+                for entry in entries
+                if entry.name.startswith("playwright-download-")
+            )
     except OSError as error:
         _refuse_unmeasurable_scan(error)
     roots.extend(extraction_paths)
@@ -1871,18 +1887,26 @@ def _snapshot_bytes(snapshot: tuple[tuple[str, int, int], ...]) -> int:
     return sum({name: size for name, size, _mtime in snapshot}.values())
 
 
-def _refuse_oversized_install(snapshot: tuple[tuple[str, int, int], ...]) -> None:
+def _refuse_oversized_install(
+    snapshot: tuple[tuple[str, int, int], ...], *, standing: Path | None = None
+) -> None:
     """Refuse an install whose attributable footprint passes the byte ceiling.
 
     The footprint, never growth: a refused tree keeps its ``INSTALLATION_COMPLETE``
     marker, so the retry patchright skips writes nothing. Only this install's own
     targets and its private archive are counted.
+
+    *standing* is the tree a retry will find exactly as it is, which is what the
+    caller judging one before the installer starts is looking at. Every later
+    attempt refuses it here again, so the message has to name the thing to
+    remove rather than leave the caller retrying an install that cannot begin.
     """
     held = _snapshot_bytes(snapshot)
     if held > _INSTALLER_MAX_WRITTEN_BYTES:
+        remedy = f"; remove {standing} to retry" if standing is not None else ""
         raise BrowserSetupFailedError(
             f"Patchright Chromium browser setup holds {_format_size(held)}, "
-            f"past its {_format_size(_INSTALLER_MAX_WRITTEN_BYTES)} limit"
+            f"past its {_format_size(_INSTALLER_MAX_WRITTEN_BYTES)} limit{remedy}"
         )
 
 
@@ -2253,8 +2277,9 @@ async def _install_under_supervision(
             _installer_download_snapshot, temporary_root, extraction_paths
         )
         # And judged here, or a complete oversized target passes as a retry
-        # patchright skips and nothing had to write.
-        _refuse_oversized_install(opening)
+        # patchright skips and nothing had to write. The private root is empty
+        # at this point, so everything counted is the cache the caller keeps.
+        _refuse_oversized_install(opening, standing=browsers_path())
         proc = _managed_installer(
             await _start_installer_supervisor(extra_arg, environment)
         )
@@ -3677,13 +3702,19 @@ def _consume_background_setup_failure() -> str | None:
         return None
     detail = _state.last_error or "Patchright Chromium browser setup failed"
     stand_down = _state.setup_requires_stand_down
+    # The bound that armed this, not the one that usually does: the lifetime and
+    # the inactivity deadline both stand an owner down, and the log is where
+    # anyone later asks which of them ran out.
+    reason = (
+        _state.setup_stand_down_reason
+        or "managed browser setup exceeded its background deadline"
+    )
     _state.setup_state = SetupState.IDLE
     _state.last_error = None
     _state.setup_requires_stand_down = False
+    _state.setup_stand_down_reason = None
     if stand_down:
-        ask_this_process_to_stand_down(
-            "managed browser setup exceeded its background deadline"
-        )
+        ask_this_process_to_stand_down(reason)
     return detail
 
 

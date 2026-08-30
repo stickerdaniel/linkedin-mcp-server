@@ -1560,12 +1560,12 @@ class TestTwoStageInstall:
             *, activity_callback: Callable[[], None], **_kwargs: object
         ) -> None:
             for _ in range(3):
-                await asyncio.sleep(0.015)
+                await asyncio.sleep(0.04)
                 activity_callback()
 
         monkeypatch.setattr(bootstrap, "_browser_setup_ready", lambda: False)
         monkeypatch.setattr(bootstrap, "_run_browser_setup", progressing_setup)
-        monkeypatch.setattr(bootstrap, "_BACKGROUND_BROWSER_SETUP_SECONDS", 0.02)
+        monkeypatch.setattr(bootstrap, "_BACKGROUND_BROWSER_SETUP_SECONDS", 0.06)
 
         await bootstrap._run_background_browser_setup()
 
@@ -1582,19 +1582,21 @@ class TestTwoStageInstall:
         ) -> None:
             nonlocal rounds
             for _ in range(6):
-                await asyncio.sleep(0.015)
+                await asyncio.sleep(0.04)
                 activity_callback()
                 rounds += 1
 
         monkeypatch.setattr(bootstrap, "_browser_setup_ready", lambda: False)
         monkeypatch.setattr(bootstrap, "_run_browser_setup", progressing_setup)
-        monkeypatch.setattr(bootstrap, "_BACKGROUND_BROWSER_SETUP_SECONDS", 0.02)
+        monkeypatch.setattr(bootstrap, "_BACKGROUND_BROWSER_SETUP_SECONDS", 0.06)
         monkeypatch.setattr(bootstrap, "_BROWSER_SETUP_LIFETIME_SECONDS", 30.0)
 
         await bootstrap._run_background_browser_setup()
 
-        # Six rounds of 15ms outlive a 20ms inactivity window only because each
-        # one rescheduled it.
+        # Six rounds of 40ms outlive a 60ms inactivity window only because each
+        # one rescheduled it. The margin is a third of the window rather than a
+        # quarter of it: at 15ms against 20ms an ordinary scheduling delay was
+        # enough to expire the deadline this test says cannot expire.
         assert rounds == 6
 
     async def test_continuous_activity_cannot_extend_the_absolute_lifetime(
@@ -1668,6 +1670,14 @@ class TestTwoStageInstall:
             "the owner holds itself back rather than retrying into the same wall"
         )
         liveness.background_activity_finished.assert_called_once()
+
+        await bootstrap._refresh_background_task_state()
+        detail = bootstrap._consume_background_setup_failure()
+
+        assert detail is not None and "absolute lifetime" in detail
+        assert stood_down == ["managed browser setup exceeded its absolute lifetime"], (
+            "and the owner log names the bound that ran out, not the other one"
+        )
 
     async def test_owner_setup_completion_resets_the_idle_clock(
         self, isolate_profile_dir, monkeypatch
@@ -2858,6 +2868,56 @@ class TestInstallerSupervisorLaunch:
             hook()
 
         assert removed.is_set(), "and exit waited for it to finish"
+
+    def test_an_unreadable_temporary_root_refuses_the_measurement(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """The archive lives in there, so a directory that will not open hides it.
+
+        A pattern match over the root answers an unreadable directory with no
+        matches, which reads exactly like an install that has written nothing.
+        """
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.exceptions import BrowserSetupFailedError
+
+        real_scandir = os.scandir
+
+        def unreadable(path, *rest):
+            if Path(path) == tmp_path:
+                raise OSError(errno.EIO, "I/O error")
+            return real_scandir(path, *rest)
+
+        monkeypatch.setattr(bootstrap.os, "scandir", unreadable)
+
+        with pytest.raises(BrowserSetupFailedError, match="could not be measured"):
+            bootstrap._installer_download_snapshot(tmp_path, ())
+
+    async def test_a_standing_oversized_cache_says_what_to_remove(self, monkeypatch):
+        """Every retry refuses the same tree, so the message has to name it.
+
+        Nothing the installer does can shrink a cache it is never started for,
+        and the guidance the client receives is to try again.
+        """
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.exceptions import BrowserSetupFailedError
+
+        spawned: list[object] = []
+        monkeypatch.setattr(
+            bootstrap,
+            "_installer_download_snapshot",
+            lambda *_args: (("chromium-1234", 5 * 1024**3, 1),),
+        )
+        monkeypatch.setattr(
+            asyncio,
+            "create_subprocess_exec",
+            AsyncMock(side_effect=lambda *args, **rest: spawned.append(args)),
+        )
+
+        with pytest.raises(BrowserSetupFailedError) as failure:
+            await bootstrap._run_patchright_install("--no-shell")
+
+        assert str(bootstrap.browsers_path()) in str(failure.value)
+        assert not spawned, "and the installer was never started for it"
 
     def test_activity_scanner_matches_patchright_temp_layout(self):
         from importlib.metadata import distribution
