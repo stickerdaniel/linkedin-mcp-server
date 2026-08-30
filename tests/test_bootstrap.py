@@ -2187,6 +2187,55 @@ class TestInstallerTemporaryRootRemoval:
         assert str(root) in caplog.text
         assert "chromium.zip" in caplog.text
 
+    def test_an_unidentifiable_windows_root_is_named(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """The Windows branch leaves before rmtree, so it reports for itself."""
+        from linkedin_mcp_server import bootstrap
+
+        root = tmp_path / "linkedin-mcp-installer-z"
+        root.mkdir()
+        (root / "chromium.zip").write_bytes(b"archive")
+        temporary = bootstrap._InstallerTemporaryRoot(root, 1, 2, object())
+        real_stat = bootstrap.os.stat
+
+        def refuse(target, *args, **kwargs):
+            # By string: with os.name forced to "nt", Path() builds a
+            # WindowsPath, which never compares equal to this PosixPath.
+            if str(target) == str(root):
+                raise PermissionError(errno.EACCES, "sharing violation")
+            return real_stat(target, *args, **kwargs)
+
+        monkeypatch.setattr(bootstrap.os, "name", "nt")
+        monkeypatch.setattr(bootstrap.os, "stat", refuse)
+        monkeypatch.setattr(
+            bootstrap, "_close_installer_temporary_root_pin", lambda _root: None
+        )
+
+        with caplog.at_level(logging.WARNING, logger="linkedin_mcp_server.bootstrap"):
+            bootstrap._remove_installer_temporary_root(temporary)
+
+        assert (root / "chromium.zip").exists()
+        assert str(root) in caplog.text
+        assert "sharing violation" in caplog.text
+
+    def test_a_windows_root_already_gone_says_nothing(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        from linkedin_mcp_server import bootstrap
+
+        root = tmp_path / "linkedin-mcp-installer-w"
+        temporary = bootstrap._InstallerTemporaryRoot(root, 1, 2, object())
+        monkeypatch.setattr(bootstrap.os, "name", "nt")
+        monkeypatch.setattr(
+            bootstrap, "_close_installer_temporary_root_pin", lambda _root: None
+        )
+
+        with caplog.at_level(logging.WARNING, logger="linkedin_mcp_server.bootstrap"):
+            bootstrap._remove_installer_temporary_root(temporary)
+
+        assert caplog.text == ""
+
     def test_a_cleared_root_says_nothing(self, tmp_path, caplog):
         from linkedin_mcp_server import bootstrap
 
@@ -2925,6 +2974,41 @@ class TestInstallerSupervisorLaunch:
         else:
             with pytest.raises(BrowserSetupFailedError, match="could not be measured"):
                 bootstrap._installer_download_snapshot(tmp_path, (target,))
+
+    async def test_a_vanished_peak_leaves_the_install_its_result(
+        self, monkeypatch, caplog
+    ):
+        """The ceiling bounds the footprint that stays, not the peak (#815).
+
+        A breach the watcher reports in the same turn the installer exits is
+        never consumed by the supervision loop, so what decides is the final
+        accounting. It runs on every success, which is why an install whose
+        archive is gone and whose tree fits is kept, and said out loud rather
+        than dropped.
+        """
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.exceptions import BrowserSetupFailedError
+
+        proc = _FakeProc([b"done\n"], 0)
+
+        async def breach(*_args: object) -> None:
+            raise BrowserSetupFailedError("Browser setup exceeded its size limit")
+
+        monkeypatch.setattr(bootstrap, "_watch_installer_activity", breach)
+        monkeypatch.setattr(
+            bootstrap,
+            "_installer_download_snapshot",
+            lambda *_args: (("kept", 1024, 1),),
+        )
+        monkeypatch.setattr(
+            asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)
+        )
+
+        with caplog.at_level(logging.WARNING, logger="linkedin_mcp_server.bootstrap"):
+            await asyncio.wait_for(bootstrap._run_patchright_install("--no-shell"), 5)
+
+        assert proc.returncode == 0, "the install kept its own result"
+        assert "exceeded a setup bound" in caplog.text
 
     async def test_a_failed_install_keeps_its_message_over_the_scan(self, monkeypatch):
         """The installer named the cause, so the accounting may not answer for it.

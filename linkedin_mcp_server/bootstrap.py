@@ -2168,7 +2168,17 @@ def _remove_installer_temporary_root(temporary_root: _InstallerTemporaryRoot) ->
         try:
             try:
                 details = path.stat()
-            except OSError:
+            except FileNotFoundError:
+                return
+            except OSError as error:
+                # Anything else and this leaves without reaching rmtree at all,
+                # so the refusal report below never sees the download it left.
+                logger.warning(
+                    "Could not identify the browser installer temp root %s; its "
+                    "download stays until the temporary directory is cleared (%s)",
+                    path,
+                    error,
+                )
                 return
             if (details.st_dev, details.st_ino) != (
                 temporary_root.device,
