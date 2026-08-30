@@ -801,14 +801,22 @@ def get_bootstrap_state() -> BootstrapState:
 async def _report_retained_browser_revisions_if_ready() -> None:
     try:
         ready = await _run_in_daemon_thread(_owned_browser_setup_ready)
+        if ready:
+            _state.cache_report_attempted = True
+            await _run_in_daemon_thread(_report_retained_browser_revisions)
     except ProfileRootRefusedError:
+        # Not attempted: a root that cannot be claimed now may be claimable
+        # later, and this is the only failure worth asking about again.
         logger.warning(
             "Refusing to inspect the browser cache under an unclaimed profile root"
         )
-        return
-    if ready:
+    except Exception:
+        # Nobody awaits this task. An exception left on it is reported by the
+        # loop when the task is dropped, and an unset flag would schedule the
+        # same unreadable file again at the next setup. Malformed JSON in either
+        # inventory arrives here.
         _state.cache_report_attempted = True
-        await _run_in_daemon_thread(_report_retained_browser_revisions)
+        logger.warning("Could not inspect the retained browser cache", exc_info=True)
 
 
 def report_retained_browser_revisions_if_ready() -> None:
@@ -1791,7 +1799,7 @@ def _installer_extraction_paths(
         prefixes = tuple(targets)
     names = [f"{prefix}{targets[prefix]}" for prefix in prefixes if prefix in targets]
     names.extend(_installer_auxiliary_names(browser_selected=bool(names)))
-    configured = Path(environment.get("PLAYWRIGHT_BROWSERS_PATH") or browsers_path())
+    configured = _configured_browsers_path(environment)
     return tuple(configured / name for name in dict.fromkeys(names))
 
 
@@ -1874,6 +1882,12 @@ def _installer_download_snapshot(
                     # refuses to descend through a directory symlink, and a
                     # foreign file that grows would otherwise hold the
                     # inactivity deadline open for as long as it is written to.
+                    # The cost is measured and accepted: an archive whose
+                    # entries are symlinks out of these roots writes bytes this
+                    # ceiling never counts. Producing one means substituting
+                    # patchright's download host, and that already ends in this
+                    # server launching a Chromium binary of the attacker's
+                    # choosing, which no size bound was ever going to answer.
                     details = child.lstat()
                 except OSError as error:
                     _refuse_unmeasurable_scan(error)
@@ -1885,6 +1899,11 @@ def _installer_download_snapshot(
 def _snapshot_bytes(snapshot: tuple[tuple[str, int, int], ...]) -> int:
     """Bytes one activity snapshot accounts for, counting each path once."""
     return sum({name: size for name, size, _mtime in snapshot}.values())
+
+
+def _configured_browsers_path(environment: Mapping[str, str]) -> Path:
+    """Where this install writes, which an operator can move away from default."""
+    return Path(environment.get("PLAYWRIGHT_BROWSERS_PATH") or browsers_path())
 
 
 def _refuse_oversized_install(
@@ -2208,8 +2227,10 @@ def _clean_installer_temporary_root(temporary_root: _InstallerTemporaryRoot) -> 
 def _installer_bound_breached(activity: asyncio.Task[None]) -> bool:
     """Whether the activity watcher stopped because a hard bound was exceeded.
 
-    Only a bound stops the installer. Any other watcher failure stays optional
-    diagnostics and leaves the installer's own result in place.
+    Only a bound stops the installer. The watcher converts everything it can
+    catch into one, so what is left here is a backstop for what it cannot: a
+    ``BaseException`` raised inside it leaves the installer's own result in
+    place rather than becoming a refusal nobody decided on.
     """
     if not activity.done() or activity.cancelled():
         return False
@@ -2279,7 +2300,9 @@ async def _install_under_supervision(
         # And judged here, or a complete oversized target passes as a retry
         # patchright skips and nothing had to write. The private root is empty
         # at this point, so everything counted is the cache the caller keeps.
-        _refuse_oversized_install(opening, standing=browsers_path())
+        _refuse_oversized_install(
+            opening, standing=_configured_browsers_path(environment)
+        )
         proc = _managed_installer(
             await _start_installer_supervisor(extra_arg, environment)
         )
@@ -2444,8 +2467,10 @@ async def _install_under_supervision(
                             "Browser installer exceeded a setup bound", exc_info=True
                         )
                 except Exception:
-                    # Progress monitoring is optional diagnostics for the inactivity
-                    # deadline. It must not replace the installer's own result.
+                    # The watcher converts its own failures into bounds, so this
+                    # is reached only through a substituted one. Left in place
+                    # because the alternative is an unhandled exception during
+                    # cleanup replacing the installer's own result.
                     logger.warning(
                         "Browser installer activity watcher failed", exc_info=True
                     )

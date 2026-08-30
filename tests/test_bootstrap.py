@@ -2919,6 +2919,66 @@ class TestInstallerSupervisorLaunch:
         assert str(bootstrap.browsers_path()) in str(failure.value)
         assert not spawned, "and the installer was never started for it"
 
+    async def test_a_scan_failure_mid_install_stops_the_installer(self, monkeypatch):
+        """The real watcher, whose poll fails once the installer is running.
+
+        Everything it cannot measure becomes a bound, so the install it can no
+        longer watch is stopped rather than left to finish unobserved.
+        """
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.exceptions import BrowserSetupFailedError
+
+        proc = _NeverExitingProc([], 0)
+        scans = iter([()])
+
+        def snapshot(
+            _temporary_root: Path, _extraction_paths: tuple[Path, ...]
+        ) -> tuple[tuple[str, int, int], ...]:
+            for opening in scans:
+                return opening
+            raise RuntimeError("the tree cannot be read")
+
+        async def hanging_lines(stream: object):
+            await asyncio.Event().wait()
+            if False:  # pragma: no cover - makes this an async generator
+                yield ""
+
+        monkeypatch.setattr(bootstrap, "_installer_lines", hanging_lines)
+        monkeypatch.setattr(bootstrap, "_installer_download_snapshot", snapshot)
+        monkeypatch.setattr(bootstrap, "_INSTALLER_ACTIVITY_POLL_SECONDS", 0.001)
+        monkeypatch.setattr(
+            asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)
+        )
+
+        with pytest.raises(BrowserSetupFailedError, match="can no longer be measured"):
+            await asyncio.wait_for(bootstrap._run_patchright_install("--no-shell"), 5)
+
+        assert proc.waited, "the installer it could not watch was reaped"
+
+    async def test_an_oversized_custom_cache_names_itself(self, monkeypatch, tmp_path):
+        """The operator moved the cache, so the default is not what to remove."""
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.exceptions import BrowserSetupFailedError
+
+        elsewhere = tmp_path / "browser-cache"
+        monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(elsewhere))
+        monkeypatch.setattr(
+            bootstrap,
+            "_installer_download_snapshot",
+            lambda *_args: (("chromium-1234", 5 * 1024**3, 1),),
+        )
+        monkeypatch.setattr(
+            asyncio,
+            "create_subprocess_exec",
+            AsyncMock(side_effect=lambda *args, **rest: pytest.fail("it started")),
+        )
+
+        with pytest.raises(BrowserSetupFailedError) as failure:
+            await bootstrap._run_patchright_install("--no-shell")
+
+        assert str(elsewhere) in str(failure.value)
+        assert str(bootstrap.browsers_path()) not in str(failure.value)
+
     def test_activity_scanner_matches_patchright_temp_layout(self):
         from importlib.metadata import distribution
 
@@ -2950,9 +3010,15 @@ class TestInstallerSupervisorLaunch:
         assert "env=get_driver_env()" in entrypoint
         assert "env = os.environ.copy()" in driver
 
-    async def test_failed_activity_watcher_does_not_replace_install_success(
+    async def test_a_substituted_watchers_failure_does_not_replace_success(
         self, monkeypatch, caplog
     ):
+        """The supervisor's backstop, which the real watcher never reaches.
+
+        It converts everything it can catch into a bound, so this drives a
+        replacement that raises something else. The production path is
+        `test_a_scan_failure_mid_install_stops_the_installer` below.
+        """
         from linkedin_mcp_server import bootstrap
 
         proc = _FakeProc([], 0)
