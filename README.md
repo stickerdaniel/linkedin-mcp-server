@@ -592,7 +592,7 @@ uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --por
 
 **Python/Patchright issues:**
 
-- Check Python version: `python --version` (should be 3.12+)
+- Check Python version: `python --version` (should be 3.12.4+)
 - Reinstall Patchright: `uv run patchright install chromium`
 - Reinstall dependencies: `uv sync --reinstall`
 

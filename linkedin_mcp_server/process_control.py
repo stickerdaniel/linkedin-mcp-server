@@ -122,6 +122,12 @@ def _peer_allowance(remaining: float) -> float:
     allowance: the child sends it immediately on connect, a whole endpoint
     startup before the parent begins this wait, so it is in the receive buffer
     before the connection is even accepted and the read only has to be scheduled.
+
+    The share cannot be widened to cover a child descheduled between its connect
+    and its send, which is the one honest case this refuses: at a share of an
+    eighth, sixteen silent peers take nine tenths of the wait, and spending the
+    owner's wait on strangers is the defect the share exists for. That child
+    loses its attachment and the election runs again.
     """
     if remaining <= 0.0:
         return 0.0

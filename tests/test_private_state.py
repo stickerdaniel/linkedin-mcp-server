@@ -2146,3 +2146,27 @@ class TestWindowsAclOffWindows:
 
         with pytest.raises(PrivateStateError, match="off Windows"):
             current_user_sid()
+
+    def test_the_declared_floor_can_create_windows_state(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A runtime the package accepts has to be one Windows state can use.
+
+        The refusal below is unconditional and arrives on a first ever start,
+        before anything exists to remove, so an installable interpreter that
+        trips it leaves the shared owner unavailable with nothing to undo.
+        """
+        import tomllib
+
+        manifest = Path(__file__).resolve().parents[1] / "pyproject.toml"
+        declared = tomllib.loads(manifest.read_text())["project"]["requires-python"]
+        floor = tuple(
+            int(part)
+            for part in declared.split(",")[0].strip().removeprefix(">=").split(".")
+        )
+        monkeypatch.setattr(private_state, "_WINDOWS", True)
+        monkeypatch.setattr(private_state.sys, "version_info", floor)
+
+        assert private_state._windows_private_creation_supported(), (
+            f"the package offers Python {declared}, which cannot create it"
+        )
