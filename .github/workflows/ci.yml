@@ -38,7 +38,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.12", "3.13", "3.14"]
+        # 3.12.4 exactly, because it is the declared floor and the one version
+        # where private state creation on Windows became possible at all. The
+        # others follow their newest patch, so nothing else here would notice a
+        # daemon path reaching for something added after it.
+        python-version: ["3.12.4", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 

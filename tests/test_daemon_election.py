@@ -6499,6 +6499,93 @@ class TestPublishingLast:
         assert exited == [lock], "the hard exit did not receive the owner lock"
         assert commits == [], "a dead endpoint was published during reconciliation"
 
+    @pytest.mark.parametrize(
+        "winerror,retryable",
+        [(5, True), (32, True), (33, True), (2, False), (183, False)],
+    )
+    def test_the_windows_replace_classifier_keeps_its_own_set(
+        self, winerror: int, retryable: bool, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Which replacement refusals are a reader that has not let go yet.
+
+        Losing one of the three turns an ordinary transient refusal into a
+        terminal publication failure, and every publication test that supplies
+        its own classifier stays green through that.
+        """
+        monkeypatch.setattr(daemon_owner.os, "name", "nt")
+        refusal = OSError("the descriptor could not be replaced")
+        # winerror exists on OSError only under a Windows build, and the
+        # classifier reads it with getattr for exactly that reason.
+        setattr(refusal, "winerror", winerror)  # noqa: B010
+
+        assert daemon_owner._retryable_windows_replace(refusal) is retryable
+
+    def test_a_read_that_cannot_start_does_not_end_the_owner(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A thread that will not start has not disproved publication.
+
+        Leaving here stops an endpoint the canonical descriptor may already
+        name and releases the election behind it, which is the one outcome this
+        loop exists to prevent.
+        """
+        import asyncio
+
+        class _Server:
+            should_exit = False
+
+        instance_id = new_instance_id()
+        starts = 0
+        exited: list[object] = []
+        lock = DaemonLock(tmp_path)
+
+        async def exercise() -> None:
+            async def serve() -> None:
+                await asyncio.Event().wait()
+
+            serving = asyncio.create_task(serve())
+
+            def start(root: Path) -> Any:
+                nonlocal starts
+                starts += 1
+                if starts == 1:
+                    raise RuntimeError("can't start new thread")
+                answer = asyncio.get_running_loop().create_future()
+                answer.set_result(SimpleNamespace(instance_id=instance_id))
+                return answer
+
+            async def commit(
+                root: Path,
+                identifier: str,
+                deadline: float,
+                *,
+                maintenance: Callable[[], None] | None = None,
+            ) -> None:
+                raise OSError("the replacement is still ambiguous")
+
+            monkeypatch.setattr(daemon_owner, "_start_canonical_read", start)
+            monkeypatch.setattr(daemon_owner, "_commit_prepared_until", commit)
+            monkeypatch.setattr(
+                daemon_owner, "_UNCERTAIN_PUBLICATION_RETRY_SECONDS", 0.0
+            )
+            monkeypatch.setattr(
+                daemon_owner, "_exit_hard", lambda received: exited.append(received)
+            )
+
+            await daemon_owner._reconcile_uncertain_publication(
+                tmp_path,
+                instance_id,
+                server=_Server(),
+                serving=serving,
+                lock=lock,
+            )
+            serving.cancel()
+
+        asyncio.run(exercise())
+
+        assert starts == 2, "the failed start was retried rather than raised"
+        assert exited == [], "and nothing ended the process over it"
+
     def test_endpoint_death_after_replacement_hard_exits_before_live(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):

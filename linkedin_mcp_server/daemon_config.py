@@ -22,7 +22,11 @@ because the reconstructed values decide which browser opens against a logged-in
 session.
 
 Three versions are understood, and an owner has to serve all three because the
-frontend on the other side is whatever was installed when it started:
+frontend on the other side is whatever was installed when it started. Windows
+is the exception and refuses the first of them: the predecessor there holds a
+legacy state directory this owner may not adopt, so it stops before touching
+any state rather than serving a frontend it cannot share a namespace with
+(#810):
 
 1. No commit boundary. The frontend closes the pipe once written and kills a
    child that stays silent, so the owner's only safe handoff is ``READY``

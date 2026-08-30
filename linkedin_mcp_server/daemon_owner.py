@@ -248,8 +248,12 @@ def _bind_loopback() -> socket.socket:
     the user did not choose.
     """
     for family, host in ((socket.AF_INET6, "::1"), (socket.AF_INET, "127.0.0.1")):
-        sock = socket.socket(family, socket.SOCK_STREAM)
+        sock: socket.socket | None = None
         try:
+            # Inside the guard with the bind: a kernel built without IPv6
+            # refuses the family here rather than at the bind, and that is the
+            # same answer, not a different failure.
+            sock = socket.socket(family, socket.SOCK_STREAM)
             # Deliberately no SO_REUSEADDR. On an ephemeral port there is
             # nothing to reuse, and on the BSDs, macOS among them, it would let
             # a second bind succeed against a live listener on some
@@ -257,7 +261,8 @@ def _bind_loopback() -> socket.socket:
             sock.bind((host, 0))
             sock.listen(128)
         except OSError as exc:
-            sock.close()
+            if sock is not None:
+                sock.close()
             if family is socket.AF_INET6 and exc.errno in (
                 errno.EAFNOSUPPORT,
                 errno.EADDRNOTAVAIL,
@@ -563,22 +568,6 @@ def _start_canonical_read(
     return result
 
 
-async def _await_canonical_read_until(
-    read: asyncio.Future[daemon_descriptor.DaemonDescriptor | None], deadline: float
-) -> daemon_descriptor.DaemonDescriptor | None:
-    """Wait within one deadline without cancelling the underlying read."""
-    return await asyncio.wait_for(
-        asyncio.shield(read), max(deadline - time.monotonic(), 0.0)
-    )
-
-
-async def _read_canonical_until(
-    auth_root: Path, deadline: float
-) -> daemon_descriptor.DaemonDescriptor | None:
-    """Bound an ordinary finite read while its native thread finishes alone."""
-    return await _await_canonical_read_until(_start_canonical_read(auth_root), deadline)
-
-
 def _exit_uncertain_publication(_reason: str, *, lock: DaemonLock | None) -> NoReturn:
     """Exit without I/O or unwinding after an already logged ambiguity.
 
@@ -717,30 +706,43 @@ async def _reconcile_uncertain_publication(
     while True:
         maintenance()
         deadline = time.monotonic() + _COMMIT_AUTH_SECONDS
+        canonical: daemon_descriptor.DaemonDescriptor | None = None
         if canonical_read is None:
-            canonical_read = _start_canonical_read(auth_root)
-        try:
-            canonical = await _await_uncertain_read_until(
-                canonical_read, deadline, maintenance
-            )
-        except asyncio.CancelledError:
-            _exit_uncertain_publication(
-                "Publication reconciliation was cancelled", lock=lock
-            )
-        except Exception:
-            # Retain a read that timed out: its native thread cannot be cancelled,
-            # and starting another on the next pass would leak one thread per retry.
-            if canonical_read.done():
-                with contextlib.suppress(BaseException):
-                    canonical_read.exception()
+            try:
+                canonical_read = _start_canonical_read(auth_root)
+            except Exception:
+                # Inside the loop, because a read that will not start is one more
+                # thing that has not proved publication, and no such thing may
+                # leave here: an escape from this line stops an endpoint the
+                # canonical descriptor may already name and releases its lock.
+                logger.warning(
+                    "Could not start a canonical descriptor read; retrying",
+                    exc_info=True,
+                )
+        if canonical_read is not None:
+            try:
+                canonical = await _await_uncertain_read_until(
+                    canonical_read, deadline, maintenance
+                )
+            except asyncio.CancelledError:
+                _exit_uncertain_publication(
+                    "Publication reconciliation was cancelled", lock=lock
+                )
+            except Exception:
+                # Retain a read that timed out: its native thread cannot be
+                # cancelled, and starting another on the next pass would leak one
+                # thread per retry.
+                if canonical_read.done():
+                    with contextlib.suppress(BaseException):
+                        canonical_read.exception()
+                    canonical_read = None
+                canonical = None
+            except BaseException:
+                _exit_uncertain_publication(
+                    "Publication reconciliation was interrupted", lock=lock
+                )
+            else:
                 canonical_read = None
-            canonical = None
-        except BaseException:
-            _exit_uncertain_publication(
-                "Publication reconciliation was interrupted", lock=lock
-            )
-        else:
-            canonical_read = None
         maintenance()
         if canonical is not None and canonical.instance_id == instance_id:
             return

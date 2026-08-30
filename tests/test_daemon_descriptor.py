@@ -1064,6 +1064,42 @@ class TestStateLocation:
 
         assert not (tmp_path / ".mcp-server-linkedin").exists()
 
+    def test_a_tombstone_from_this_release_is_accepted_by_the_next(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The bytes on disk outlive the constant that wrote them.
+
+        Written literally rather than through the constant, because a test that
+        writes what it reads passes whatever the marker is changed to, while a
+        machine upgrading over one from this release does not.
+        """
+        from linkedin_mcp_server import windows_acl
+
+        monkeypatch.setattr(daemon_descriptor_module, "_WINDOWS", True)
+        monkeypatch.setattr(
+            daemon_descriptor_module,
+            "_APPLICATION_STATE_DIR",
+            ".mcp-server-linkedin-v2",
+        )
+        monkeypatch.setattr(
+            daemon_descriptor_module, "_pin_windows_account_home", lambda _path: None
+        )
+        monkeypatch.setattr(
+            windows_acl, "verify_children_cannot_be_replaced", lambda _path: None
+        )
+        monkeypatch.setattr(
+            windows_acl, "restrict_to_current_user", lambda *args, **kwargs: None
+        )
+        legacy = tmp_path / ".mcp-server-linkedin"
+        legacy.write_bytes(b"mcp-server-linkedin-v2\n")
+        legacy.chmod(0o600)
+        before = legacy.stat().st_ino
+
+        prepare_daemon_state(tmp_path / "auth")
+
+        assert legacy.stat().st_ino == before, "it was accepted, not replaced"
+        assert daemon_descriptor_module.windows_exclusion_established()
+
     def test_windows_keeps_a_tombstone_it_could_not_verify(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):

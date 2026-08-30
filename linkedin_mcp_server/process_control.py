@@ -54,7 +54,7 @@ _ATTACH_PREFIX = "attach "
 _BACKLOG = 16
 
 #: The longest authorization record the child will assemble. The commit record
-#: is 79 bytes; this leaves room for a longer one without leaving the read
+#: is 78 bytes; this leaves room for a longer one without leaving the read
 #: unbounded.
 _MAX_RECORD_BYTES = 128
 
@@ -180,8 +180,12 @@ class ControlListener:
     def open(cls) -> ControlListener:
         """Bind an ephemeral loopback port, IPv6 first and IPv4 after it."""
         for family, host in ((socket.AF_INET6, "::1"), (socket.AF_INET, "127.0.0.1")):
-            sock = socket.socket(family, socket.SOCK_STREAM)
+            sock: socket.socket | None = None
             try:
+                # Inside the guard with the bind: a kernel built without IPv6
+                # refuses the family here rather than at the bind, and that is
+                # the same answer, not a different failure.
+                sock = socket.socket(family, socket.SOCK_STREAM)
                 # Deliberately no SO_REUSEADDR, for the reason
                 # ``daemon_owner._bind_loopback`` gives: a port the kernel just
                 # handed out is unused, and on the BSDs the option would let a
@@ -189,7 +193,8 @@ class ControlListener:
                 sock.bind((host, 0))
                 sock.listen(_BACKLOG)
             except OSError as exc:
-                sock.close()
+                if sock is not None:
+                    sock.close()
                 if family is socket.AF_INET6 and exc.errno in _NO_IPV6:
                     continue
                 raise
@@ -230,7 +235,21 @@ class ControlListener:
                 daemon=True,
             )
             self._drain = drain
-        drain.start()
+        try:
+            drain.start()
+        except BaseException:
+            # The listener left this object above and the worker never took it,
+            # so put it back rather than leave a published thread `close` would
+            # try to join and a socket nothing holds.
+            with self._lock:
+                self._drain = None
+                orphaned = self._closed
+                if not orphaned:
+                    self._listener = listener
+            if orphaned:
+                with contextlib.suppress(OSError):
+                    listener.close()
+            raise
 
     def attached_within(self, *, timeout: float) -> None:
         """Wait for the attachment the drain authenticated.

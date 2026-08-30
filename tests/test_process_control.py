@@ -16,6 +16,7 @@ before it validates must not leave a child that publishes anyway.
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
 import socket
 import threading
@@ -188,6 +189,78 @@ class TestAuthorization:
             listener.send(_RECORD)
 
 
+class TestWireContracts:
+    """What a peer of another version has to keep producing and accepting.
+
+    A frontend and the owner it starts can come from different installations,
+    so these two shapes are read by code that was compiled from other source.
+    Asserting them through their own constants would move with any edit.
+    """
+
+    def test_the_attachment_frame_is_the_literal_one(self):
+        nonce = "0" * 64
+
+        assert process_control._attach_frame(nonce) == b"attach " + b"0" * 64 + b"\n"
+
+    def test_a_frontend_of_another_version_is_refused_by_its_nonce_alone(
+        self, listener: ControlListener
+    ):
+        # The frame shape is shared; the nonce inside it is what separates one
+        # generation from the next, and it is compared whole.
+        listener.start_accepting(nonce=_NONCE, timeout=2.0)
+        stranger = _attach(listener, nonce=_OTHER_NONCE)
+        try:
+            with pytest.raises(TimeoutError):
+                listener.attached_within(timeout=1.0)
+        finally:
+            stranger.close()
+
+
+class TestAddressFamilyFallback:
+    """Which bind failures mean the host has no IPv6, and which mean take.
+
+    A host without IPv6 is ordinary and has to fall back; a port that is taken
+    or a permission that is refused has to be reported. Both directions are
+    asserted, or narrowing the set leaves an IPv6-less host unable to start
+    while the suite stays green.
+    """
+
+    @pytest.mark.parametrize(
+        "code",
+        [errno.EAFNOSUPPORT, errno.EADDRNOTAVAIL, errno.EPROTONOSUPPORT],
+    )
+    def test_a_host_without_ipv6_falls_back(
+        self, code: int, monkeypatch: pytest.MonkeyPatch
+    ):
+        real_socket = socket.socket
+
+        def refusing(family, *rest):
+            if family is socket.AF_INET6:
+                raise OSError(code, os.strerror(code))
+            return real_socket(family, *rest)
+
+        monkeypatch.setattr(socket, "socket", refusing)
+
+        channel = ControlListener.open()
+        try:
+            assert channel.host == "127.0.0.1"
+        finally:
+            channel.close()
+
+    def test_an_unrelated_bind_failure_is_reported(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        def refusing(*_args):
+            raise OSError(errno.EACCES, "permission denied")
+
+        monkeypatch.setattr(socket, "socket", refusing)
+
+        with pytest.raises(OSError) as failure:
+            ControlListener.open()
+
+        assert failure.value.errno == errno.EACCES
+
+
 class TestPeerAllowance:
     """What one unauthenticated peer is given, out of the wait that is left."""
 
@@ -355,6 +428,32 @@ class TestWorkerLifetime:
     questions are whether it can touch state the parent has finished with, and
     whether it can touch a descriptor the parent has reissued.
     """
+
+    def test_a_worker_that_never_starts_leaves_a_closable_channel(
+        self, listener: ControlListener, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A published worker that does not exist is one close cannot join.
+
+        The listener has already left this object by then, so the failure would
+        also take the socket with it and replace the caller's own error with a
+        second one raised while cleaning up after it.
+        """
+
+        def refuse(_self: threading.Thread) -> None:
+            raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr(threading.Thread, "start", refuse)
+
+        with pytest.raises(RuntimeError, match="can't start new thread"):
+            listener.start_accepting(nonce=_NONCE, timeout=5.0)
+
+        monkeypatch.undo()
+        assert listener._drain is None, "nothing was published for close to join"
+
+        listener.close()
+
+        with pytest.raises(OSError):
+            socket.create_connection((listener.host, listener.port), timeout=1.0)
 
     def test_a_worker_never_publishes_into_a_closed_channel(
         self, listener: ControlListener
