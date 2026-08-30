@@ -777,7 +777,12 @@ def _claim_handshake_stream() -> TextIO | None:
         os.close(duplicate)
         logger.debug("Standard output could not be redirected", exc_info=True)
         return None
-    return os.fdopen(duplicate, "w", encoding="utf-8")
+    # newline="\n" is load-bearing rather than tidy. The frontend authenticates
+    # this frame by comparing exact bytes, and the default translates the line
+    # ending to os.linesep, so on Windows a genuine READY arrives as CRLF and is
+    # refused. The frontend then waits out its startup deadline and terminates
+    # the Job around an owner that had already published itself.
+    return os.fdopen(duplicate, "w", encoding="utf-8", newline="\n")
 
 
 def _close_handshake_stream(stream: TextIO | None) -> None:

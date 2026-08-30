@@ -3299,3 +3299,57 @@ def _borrow_the_browser_cache(profile: Path) -> None:
     if not real.is_dir():
         pytest.skip("no patchright browser cache to borrow")
     (profile.parent / "patchright-browsers").symlink_to(real)
+
+
+class TestTheHandshakeFrameIsNotPlatformTranslated:
+    """The frontend authenticates this frame by comparing exact bytes."""
+
+    def test_the_stream_is_opened_without_newline_translation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Checked at the argument, because only Windows would translate.
+
+        There is no way to observe the difference on a POSIX host: the default
+        writes LF here too. What decides the Windows outcome is the argument
+        this passes, so that is what this asserts.
+        """
+        from linkedin_mcp_server import daemon_owner
+
+        opened: dict[str, object] = {}
+
+        class _Stream:
+            def close(self) -> None:
+                return None
+
+        def fdopen(_descriptor: int, mode: str, **kwargs: object) -> object:
+            opened.update(kwargs)
+            opened["mode"] = mode
+            return _Stream()
+
+        monkeypatch.setattr(daemon_owner.sys.stdout, "flush", lambda: None)
+        monkeypatch.setattr(daemon_owner.os, "dup", lambda _fd: 99)
+        monkeypatch.setattr(daemon_owner.os, "dup2", lambda _src, _dst: None)
+        monkeypatch.setattr(daemon_owner.os, "fdopen", fdopen)
+
+        stream = daemon_owner._claim_handshake_stream()
+
+        assert stream is not None
+        assert opened["newline"] == "\n", (
+            "a translated line ending makes a genuine READY unrecognisable"
+        )
+
+    def test_a_carriage_return_is_not_a_verdict(self):
+        """And the reader stays strict, so the writer has to be exact."""
+        from linkedin_mcp_server import daemon_owner
+
+        nonce = "0123456789abcdef" * 4
+        frame = f"{daemon_owner.HANDSHAKE} {nonce} {daemon_owner.READY}"
+
+        assert (
+            election_module._reported_owner_verdict(f"{frame}\n".encode(), nonce)
+            == daemon_owner.READY
+        )
+        assert (
+            election_module._reported_owner_verdict(f"{frame}\r\n".encode(), nonce)
+            is None
+        )

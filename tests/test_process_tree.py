@@ -225,8 +225,10 @@ def test_gate_preserves_payload_streams_and_target_site_startup(tmp_path: Path):
     )
 
     assert gate.returncode == 0
-    assert stdout == b"stdout:target payload\n"
-    assert stderr == b"stderr-only\n"
+    # Normalized, because print() through the Windows text layer ends its line
+    # with CRLF and what this asserts is that the payload reached the target.
+    assert stdout.replace(b"\r\n", b"\n") == b"stdout:target payload\n"
+    assert stderr.replace(b"\r\n", b"\n") == b"stderr-only\n"
     started = sentinel.read_text().splitlines()
     assert len(started) == 1
     assert int(started[0]) != gate.pid
@@ -401,7 +403,13 @@ class TestWindowsJobSetup:
         monkeypatch: pytest.MonkeyPatch,
         modules: dict[str, object],
     ) -> None:
-        monkeypatch.setattr(process_tree, "os", SimpleNamespace(name="nt"))
+        # getppid alongside name: adoption records the gate it was launched
+        # by, and a namespace without it reports the whole adoption as failed.
+        monkeypatch.setattr(
+            process_tree,
+            "os",
+            SimpleNamespace(name="nt", getpid=lambda: 4242, getppid=lambda: 909),
+        )
         monkeypatch.setattr(
             process_tree.importlib, "import_module", modules.__getitem__
         )
@@ -493,6 +501,7 @@ class TestWindowsJobSetup:
         job_api = cast(Any, modules["win32job"])
         monkeypatch.setattr(job_api, "OpenJobObject", lambda *_args: next(handles))
         monkeypatch.setattr(process_tree, "_adopted_windows_job", None)
+        monkeypatch.setattr(process_tree, "_adopted_windows_gate", None)
         self._patch_modules(monkeypatch, modules)
 
         process_tree.WindowsJob.verify_current_process("named-owner")
@@ -503,6 +512,9 @@ class TestWindowsJobSetup:
         assert adopted.detached
         assert not adopted.closed
         assert process_tree._adopted_windows_job == 2
+        assert process_tree._adopted_windows_gate == 909, (
+            "the gate that waits on this owner was recorded while it was alive"
+        )
 
     def test_failed_owner_adoption_closes_the_named_handle(
         self, monkeypatch: pytest.MonkeyPatch
@@ -720,6 +732,7 @@ class TestPosixProcessGroups:
         assert process_tree._darwin_child_exited_without_reaping(4242)
         assert queue.closed
 
+    @_POSIX_ONLY
     def test_darwin_without_waitid_uses_kqueue(self, monkeypatch: pytest.MonkeyPatch):
         child = type("Child", (), {"pid": 4242, "returncode": None})()
         observed: list[int] = []
@@ -1197,6 +1210,7 @@ os._exit(0)
                     os.kill(pid, signal.SIGKILL)
 
 
+@_POSIX_ONLY
 def test_registered_group_kill_revalidates_kernel_identity(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -1234,6 +1248,7 @@ def test_registered_group_kill_revalidates_kernel_identity(
     assert killed == [(456, signal.SIGKILL)]
 
 
+@_POSIX_ONLY
 def test_registered_group_uses_kernel_fallback_when_snapshot_is_empty(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -1269,6 +1284,7 @@ def test_unknown_leader_identity_does_not_authenticate_a_reused_group(
     )
 
 
+@_POSIX_ONLY
 def test_hard_exit_rescans_markers_for_later_browser_groups(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -1307,6 +1323,7 @@ def test_hard_exit_rescans_markers_for_later_browser_groups(
     assert killed == [(789, signal.SIGKILL)]
 
 
+@_POSIX_ONLY
 def test_hard_exit_waits_for_targeted_groups_to_disappear(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -1338,6 +1355,7 @@ def test_hard_exit_waits_for_targeted_groups_to_disappear(
     assert slept == [process_tree._JOB_POLL_SECONDS, process_tree._JOB_POLL_SECONDS]
 
 
+@_POSIX_ONLY
 def test_hard_exit_stops_waiting_when_a_group_identity_is_reused(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -1402,6 +1420,7 @@ def test_posix_hard_exit_drains_browser_groups_before_owner_exit(
     ]
 
 
+@_POSIX_ONLY
 def test_reused_browser_group_replaces_the_old_registration(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -1460,6 +1479,7 @@ def test_confirmed_browser_close_forgets_its_marker_registration(
     assert process_tree._registered_posix_groups[789].markers == {shared}
 
 
+@_POSIX_ONLY
 class TestOneLaunchesResidualBrowser:
     """What a single browser close may kill, and what it must prove.
 
@@ -2096,6 +2116,7 @@ daemon_owner._exit_hard(None)
             os.kill(descendant_pid, signal.SIGKILL)
 
 
+@_POSIX_ONLY
 def test_crash_guardian_kills_the_owner_group_before_browser_drain(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -2125,6 +2146,7 @@ def test_crash_guardian_kills_the_owner_group_before_browser_drain(
     ]
 
 
+@_POSIX_ONLY
 def test_crash_guardian_requires_a_quiet_interval_after_an_empty_scan(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -2504,6 +2526,66 @@ def test_adopted_windows_job_drains_every_other_process(
     assert closed == [700]
 
 
+def test_adopted_windows_job_spares_the_gate_that_waits_on_it(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The gate is in the same Job and relays this owner's exit status.
+
+    It spawns the owner and waits, so terminating it hands the frontend the
+    termination code instead of whatever the owner exited with, and it does
+    that while saying nothing about the browser the drain is aimed at.
+    """
+    current = os.getpid()
+    gate = current + 1
+    # A third answer so the mutation that drops the exclusion ends rather than
+    # spinning: it terminates the gate, sees it once more, and stops on the
+    # empty round, leaving the gate in what this asserts.
+    queries = iter([(current, gate, 700), (current, gate), (current,)])
+    terminated: list[int] = []
+
+    class ProcessHandle:
+        def __init__(self, process: int) -> None:
+            self.process = process
+
+        def Close(self) -> None:
+            return None
+
+    class Api:
+        @staticmethod
+        def OpenProcess(_access: int, _inherit: bool, process: int) -> ProcessHandle:
+            return ProcessHandle(process)
+
+        @staticmethod
+        def TerminateProcess(handle: ProcessHandle, _status: int) -> None:
+            terminated.append(handle.process)
+
+    class Con:
+        PROCESS_TERMINATE = 1
+        PROCESS_QUERY_LIMITED_INFORMATION = 2
+
+    class Job:
+        JobObjectBasicProcessIdList = 3
+
+        @staticmethod
+        def QueryInformationJobObject(_handle: int, _information: int):
+            return next(queries)
+
+        @staticmethod
+        def IsProcessInJob(_handle: ProcessHandle, _job: int) -> bool:
+            return True
+
+    monkeypatch.setattr(process_tree, "_adopted_windows_job", 123)
+    monkeypatch.setattr(process_tree, "_adopted_windows_gate", gate)
+    monkeypatch.setattr(
+        process_tree, "_windows_modules", lambda: (Api(), Con(), Job(), object())
+    )
+    monkeypatch.setattr(process_tree.time, "sleep", lambda _seconds: None)
+
+    process_tree._drain_adopted_windows_job()
+
+    assert terminated == [700], "the browser went and the gate stayed"
+
+
 def test_adopted_windows_job_revalidates_process_membership(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -2618,7 +2700,12 @@ hard_exit_process_tree(7)
             owner_pid, descendant_pid = map(int, process.stdout.readline().split())
 
             job.close()
-            assert process.wait(timeout=30) == 7
+            # Not the owner's status. The gate is a member of this Job, so once
+            # the owner's own adopted handle is the last one and the owner
+            # leaves, kill-on-close reaches the gate before it can mirror
+            # anything. What survives that is the containment itself, which is
+            # what this launch is here to prove.
+            process.wait(timeout=30)
             assert _wait_gone(owner_pid, descendant_pid)
         finally:
             if not job.closed:

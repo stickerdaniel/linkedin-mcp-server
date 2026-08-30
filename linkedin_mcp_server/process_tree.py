@@ -21,6 +21,13 @@ logger = logging.getLogger(__name__)
 
 _IS_WINDOWS = os.name == "nt"
 _adopted_windows_job: int | None = None
+#: The gate that launched this owner, which is a member of the same Job and must
+#: survive every drain below. It spawns the owner and waits, so it is the process
+#: the frontend reads an exit status from, and a drain that ends it replaces that
+#: status with the termination code. Recorded while it is provably the parent and
+#: provably alive, which is what makes the id safe to hold: Windows cannot reuse
+#: it while the gate is still waiting on this process.
+_adopted_windows_gate: int | None = None
 _retained_windows_jobs: list[WindowsJob] = []
 _BROWSER_PROCESS_MARKER = "LINKEDIN_MCP_BROWSER_PROCESS_MARKER"
 
@@ -693,12 +700,27 @@ def _drain_marked_posix_groups(marker: str, deadline: float) -> bool:
         time.sleep(_JOB_POLL_SECONDS)
 
 
+def _drain_exclusions() -> frozenset[int]:
+    """Process ids no adopted-Job drain may end.
+
+    This owner, which has to survive its own browser, and the gate that launched
+    it, which is in the same Job because that is how a frontend assigns the Job
+    before the owner exists. The gate then waits and mirrors the owner's exit
+    status, so ending it costs the frontend that status and says nothing about
+    the browser the drain was aimed at.
+    """
+    spared = {0, os.getpid()}
+    if _adopted_windows_gate is not None:
+        spared.add(_adopted_windows_gate)
+    return frozenset(spared)
+
+
 def _drain_adopted_windows_job() -> None:
     """Terminate every other Job member before this owner releases its locks."""
     if _adopted_windows_job is None:
         return
     win32api, win32con, win32job, _winerror = _windows_modules()
-    current = os.getpid()
+    spared = _drain_exclusions()
     while True:
         try:
             members = win32job.QueryInformationJobObject(
@@ -710,7 +732,7 @@ def _drain_adopted_windows_job() -> None:
         descendants = tuple(
             int(process)
             for process in members
-            if process is not None and int(process) not in (0, current)
+            if process is not None and int(process) not in spared
         )
         if not descendants:
             return
@@ -843,13 +865,13 @@ def _drain_adopted_windows_job_members(deadline: float) -> bool:
     Windows has no marker to scan for: an environment block belongs to its own
     process, and reading another one's takes the debugger APIs. The Job is the
     whole of the attribution there, so this drains what the Job still holds,
-    minus two exclusions that keep it from being a tree kill. The owner, which
-    has to survive its own browser. And every member of another Job this owner
-    still holds: the installer supervisor and its worker sit in one of those
+    minus the exclusions that keep it from being a tree kill. The owner and the
+    gate that launched it, both in :func:`_drain_exclusions`. And every member of
+    another Job this owner still holds: the installer supervisor and its worker sit in one of those
     (``WindowsJob.anonymous`` in ``bootstrap``), and so now does every *other*
     live browser launch (:func:`contain_browser_launch`).
 
-    That second exclusion is why this runs after the per-launch Job rather than
+    That last exclusion is why this runs after the per-launch Job rather than
     instead of it. A browser's own Job is closed by the time this is reached, so
     its escapees -- anything the Job never held -- are still in scope here,
     while a concurrent launch's contained processes are not. Attribution comes
@@ -859,7 +881,7 @@ def _drain_adopted_windows_job_members(deadline: float) -> bool:
     if _adopted_windows_job is None:
         return True
     win32api, win32con, win32job, _winerror = _windows_modules()
-    current = os.getpid()
+    spared = _drain_exclusions()
     while True:
         answered = True
         try:
@@ -871,7 +893,7 @@ def _drain_adopted_windows_job_members(deadline: float) -> bool:
             members = ()
         remaining = 0
         for process in (int(entry) for entry in members if entry is not None):
-            if process in (0, current):
+            if process in spared:
                 continue
             handle: Any | None = None
             try:
@@ -1246,7 +1268,7 @@ class WindowsJob:
     @staticmethod
     def adopt_current_process(name: str) -> None:
         """Retain a verified named Job handle until process teardown."""
-        global _adopted_windows_job
+        global _adopted_windows_job, _adopted_windows_gate
         if _adopted_windows_job is not None:
             raise ProcessTreeError("The owner already adopted a Windows Job")
         win32api, _win32con, win32job, _winerror = _windows_modules()
@@ -1258,6 +1280,7 @@ class WindowsJob:
                     "The owner is not a member of its named Windows Job"
                 )
             _adopted_windows_job = int(handle.Detach())
+            _adopted_windows_gate = os.getppid()
             handle = None
         except ProcessTreeError:
             raise
@@ -1391,15 +1414,27 @@ def process_group_has_live_member(pgid: int) -> bool:
     return any(not _has_exited_unreaped(process, row[3]) for process, row in members)
 
 
+def _kqueue_name(name: str) -> Any:
+    """Look up a kqueue name so a non-BSD type check cannot resolve it.
+
+    kqueue is a BSD facility and none of these names exist in the Linux
+    ``select``, which is the platform the type checker runs on in CI. A direct
+    reference is an error there for a function no Linux process can reach, and
+    pinning the checker to one platform only moves the error to the Windows
+    code next door.
+    """
+    return getattr(select, name)
+
+
 def _darwin_child_exited_without_reaping(pid: int) -> bool:
     """Observe NOTE_EXIT without collecting the Darwin child."""
-    kqueue = select.kqueue()
+    kqueue = _kqueue_name("kqueue")()
     try:
-        event = select.kevent(
+        event = _kqueue_name("kevent")(
             pid,
-            filter=select.KQ_FILTER_PROC,
-            flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE,
-            fflags=select.KQ_NOTE_EXIT,
+            filter=_kqueue_name("KQ_FILTER_PROC"),
+            flags=_kqueue_name("KQ_EV_ADD") | _kqueue_name("KQ_EV_ENABLE"),
+            fflags=_kqueue_name("KQ_NOTE_EXIT"),
         )
         try:
             kqueue.control([event], 0, 0)
