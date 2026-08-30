@@ -55,6 +55,9 @@ posix_only = pytest.mark.skipif(
 windows_only = pytest.mark.skipif(
     os.name != "nt", reason="Windows reparse points do not exist on POSIX"
 )
+account_database_only = pytest.mark.skipif(
+    os.name == "nt", reason="Windows has no pwd account database"
+)
 _REAL_ACCOUNT_HOME = daemon_descriptor_module._account_home
 
 
@@ -1360,6 +1363,7 @@ class TestStateLocation:
         assert root == root.resolve()
         assert real in (root, *root.parents)
 
+    @account_database_only
     def test_a_home_that_is_not_there_is_refused(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ):
@@ -1383,6 +1387,7 @@ class TestStateLocation:
             daemon_state_root()
         assert not missing.exists()
 
+    @account_database_only
     def test_an_account_without_an_absolute_home_is_refused(
         self, monkeypatch: pytest.MonkeyPatch
     ):

@@ -3074,6 +3074,9 @@ class TestAtomicStartupCommit:
         finally:
             release.set()
 
+    @pytest.mark.skipif(
+        os.name == "nt", reason="the group this stops exists only on POSIX"
+    )
     def test_production_stop_makes_a_real_unresponsive_child_terminal(
         self, monkeypatch: pytest.MonkeyPatch
     ):
