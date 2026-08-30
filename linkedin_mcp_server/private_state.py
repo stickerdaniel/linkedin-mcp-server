@@ -100,7 +100,7 @@ def harden_created_directory(path: Path) -> None:
                 )
             from linkedin_mcp_server.windows_acl import restrict_to_current_user
 
-            restrict_to_current_user(path, directory=True, created=True)
+            restrict_to_current_user(path, directory=True)
             return
         _harden_posix(path, _PRIVATE_DIR_MODE)
 

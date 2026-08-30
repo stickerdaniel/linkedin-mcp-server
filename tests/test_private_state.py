@@ -834,9 +834,15 @@ class TestWindowsAclOffWindows:
             | windows_acl.FILE_FLAG_OPEN_REPARSE_POINT
         ]
 
-    def test_created_default_owner_is_normalized_to_the_token_user(
+    def test_the_token_default_owner_is_normalized_to_the_token_user(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
+        """The Administrators-group owner policy, which GitHub's runners ship.
+
+        Objects this account creates are owned by that group there, so refusing
+        it would refuse this account its own daemon state. It is accepted and
+        the owner is written back to the user SID in the same call.
+        """
         from linkedin_mcp_server import windows_acl
 
         user_sid = object()
@@ -891,7 +897,7 @@ class TestWindowsAclOffWindows:
             windows_acl, "verify_owner_only", lambda *_args, **_kwargs: None
         )
 
-        windows_acl.restrict_to_current_user(tmp_path, directory=True, created=True)
+        windows_acl.restrict_to_current_user(tmp_path, directory=True)
 
         assert calls == [
             (
@@ -1360,11 +1366,23 @@ class TestWindowsAclOffWindows:
         monkeypatch.setattr(
             windows_acl, "_require_acl_capable_volume", lambda _path: None
         )
+        user_sid = object()
+        default_owner = object()
         monkeypatch.setattr(
-            windows_acl, "current_user_sid", lambda: (object(), object())
+            windows_acl, "current_user_sid", lambda: (user_sid, object())
+        )
+        # Stubbed with its own SID, so this stays the case the check exists for:
+        # a third account, refused while the token's own default owner is not.
+        monkeypatch.setattr(
+            windows_acl, "default_owner_sid", lambda: (default_owner, object())
         )
         monkeypatch.setattr(
-            windows_acl, "_sid_to_string", lambda _sid: "current-account"
+            windows_acl,
+            "_sid_to_string",
+            lambda sid: {
+                user_sid: "current-account",
+                default_owner: "default-owner",
+            }[sid],
         )
         monkeypatch.setattr(windows_acl, "read_owner", lambda _path: "another-account")
         monkeypatch.setattr(
