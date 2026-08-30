@@ -2698,6 +2698,75 @@ class TestPredecessorOwnerCompatibility:
         )
 
 
+class TestSpawnCleanupBoundary:
+    """Everything after Popen returns is the caller's to clean up."""
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX child stop path")
+    def test_a_diagnosis_that_cannot_start_stops_the_child(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A host out of threads must not be left holding a running owner.
+
+        The bootstrap diagnosis starts one, and it is created after the spawn,
+        so its failure is the first that can strand a child: nothing would send
+        the configuration record it waits its whole handover timeout for.
+        """
+        profile = _profile(tmp_path)
+        config = _config(profile)
+
+        class _Child:
+            pid = 515151
+            stdin = io.BytesIO()
+            stdout = io.BytesIO()
+            stderr = io.BytesIO()
+            returncode: int | None = None
+
+            def poll(self) -> int | None:
+                return self.returncode
+
+            def wait(self, timeout: float | None = None) -> int:
+                self.returncode = -9
+                return self.returncode
+
+            def kill(self) -> None:
+                self.returncode = -9
+
+        child = _Child()
+        stopped: list[int] = []
+        listeners: list[process_control.ControlListener] = []
+        opened = election_module.ControlListener.open
+
+        def remember() -> election_module.ControlListener:
+            listener = opened()
+            listeners.append(listener)
+            return listener
+
+        def refuse(_stream: object) -> object:
+            raise RuntimeError("can't start new thread")
+
+        def stop(pid: int, **_kwargs: object) -> bool:
+            stopped.append(pid)
+            return True
+
+        monkeypatch.setattr(
+            election_module.ControlListener, "open", staticmethod(remember)
+        )
+        monkeypatch.setattr(election_module.subprocess, "Popen", lambda *a, **k: child)
+        monkeypatch.setattr(election_module, "_BootstrapReport", refuse)
+        monkeypatch.setattr(election_module, "terminate_process_group", stop)
+
+        with pytest.raises(RuntimeError, match="start new thread"):
+            election_module._spawn(profile.parent, config, lock_fd=None, timeout=5.0)
+
+        assert stopped == [child.pid], "the child nobody could configure was stopped"
+        assert child.returncode is not None, "and collected"
+        assert len(listeners) == 1
+        with pytest.raises(OSError):
+            socket.create_connection(
+                (listeners[0].host, listeners[0].port), timeout=1.0
+            ).close()
+
+
 class TestAtomicStartupCommit:
     @pytest.fixture(autouse=True)
     def _stop_fake_groups(self, monkeypatch: pytest.MonkeyPatch):

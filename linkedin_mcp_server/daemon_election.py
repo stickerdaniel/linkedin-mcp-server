@@ -853,11 +853,22 @@ def _spawn(
             windows_job.close()
         raise
 
-    # Created only after Popen returns and carried only by the existing
-    # configuration pipe. Startup output written before that delivery cannot know
-    # the token the parent will accept.
-    handshake_nonce = new_nonce()
-    bootstrap = _BootstrapReport(getattr(child, "stderr", None))
+    try:
+        # Created only after Popen returns and carried only by the existing
+        # configuration pipe. Startup output written before that delivery cannot
+        # know the token the parent will accept.
+        handshake_nonce = new_nonce()
+        # Inside the same handler as the spawn: the diagnosis starts a thread,
+        # and a host that has run out of them would otherwise leave this child
+        # running with nothing holding it, waiting out its handover timeout for
+        # a configuration record no one is left to send.
+        bootstrap = _BootstrapReport(getattr(child, "stderr", None))
+    except BaseException:
+        _stop_child(child, windows_job=windows_job, assigned=False)
+        control.close()
+        if windows_job is not None:
+            windows_job.close()
+        raise
     prepared_instance_id: str | None = None
     #: Whether the child may already own itself, either because a commit record
     #: may have reached it or because it reported a publication a predecessor
