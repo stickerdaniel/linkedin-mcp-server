@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 import sys
@@ -119,9 +120,26 @@ def _reported_returncode(frame: bytes, nonce: str) -> int | None:
     return returncode
 
 
+def _write_frames_without_translation() -> None:
+    """Stop Windows turning this channel's line endings into CRLF.
+
+    The parent authenticates the armed frame by comparing exact bytes, and
+    ``print`` through the default text layer writes ``os.linesep``. Measured on
+    a Windows runner: a genuine frame arrived as CRLF, was refused, and the
+    supervisor was reported as never becoming ready.
+    """
+    reconfigure = getattr(sys.stderr, "reconfigure", None)
+    if reconfigure is None:
+        return
+    with contextlib.suppress(OSError, ValueError):
+        reconfigure(newline="\n")
+
+
 def main(argv: list[str] | None = None) -> int:
     """Wait until the parent owns our pipes, then start the leased worker."""
     argv = sys.argv if argv is None else argv
+
+    _write_frames_without_translation()
 
     # The parent may be cancelled while asyncio is still constructing its
     # subprocess transport. No managed target exists until it has delivered the

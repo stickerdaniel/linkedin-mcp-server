@@ -566,3 +566,38 @@ def test_an_inherited_path_cannot_answer_the_supervisor_import(tmp_path: Path):
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait(timeout=30)
+
+
+def test_the_armed_frame_is_not_platform_translated(monkeypatch: pytest.MonkeyPatch):
+    """The parent compares this frame byte for byte.
+
+    Checked at the argument, because a POSIX host writes LF either way. What
+    decides the Windows outcome is that the stream is reconfigured at all:
+    measured there, a genuine armed frame arrived as CRLF, was refused, and the
+    supervisor was reported as never becoming ready.
+    """
+    asked: list[object] = []
+
+    class _Stream:
+        @staticmethod
+        def reconfigure(**kwargs: object) -> None:
+            asked.append(kwargs.get("newline"))
+
+    monkeypatch.setattr(supervisor.sys, "stderr", _Stream())
+
+    supervisor._write_frames_without_translation()
+
+    assert asked == ["\n"]
+
+
+def test_a_stream_that_cannot_be_reconfigured_is_left_alone(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class _Stream:
+        @staticmethod
+        def reconfigure(**_kwargs: object) -> None:
+            raise ValueError("already detached")
+
+    monkeypatch.setattr(supervisor.sys, "stderr", _Stream())
+
+    supervisor._write_frames_without_translation()
