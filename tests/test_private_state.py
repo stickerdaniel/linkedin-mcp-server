@@ -554,6 +554,47 @@ class TestWindowsAcl:
             target.rmdir()
 
     @windows_only
+    def test_owner_rights_in_the_chain_is_still_accepted(self, tmp_path: Path):
+        """The entry Windows itself puts below ``%TEMP%``, granted explicitly.
+
+        Full control and inheritable, and still not a widening: ``S-1-3-4``
+        names whoever owns the object being checked rather than any account,
+        and each container's owner is judged one step before its permissions
+        are. Refusing it refused every ordinary temporary directory on the
+        machines these tests run on, which is how it was found.
+        """
+        from linkedin_mcp_server.windows_acl import (
+            close_directory_pin,
+            create_owner_only_directory,
+            describe_dacl,
+            verify_ancestry_cannot_be_replaced,
+        )
+
+        ancestor = tmp_path / "profile"
+        parent = ancestor / "temp"
+        parent.mkdir(parents=True)
+        subprocess.run(
+            ["icacls", str(ancestor), "/grant", "*S-1-3-4:(OI)(CI)F"],
+            check=True,
+            capture_output=True,
+        )
+        granted = {entry.sid for entry in describe_dacl(parent).entries}
+        assert "S-1-3-4" in granted, "the grant did not propagate to the parent"
+
+        verify_ancestry_cannot_be_replaced(parent)
+        target, pin = create_owner_only_directory(parent, prefix="installer-")
+        try:
+            # Gone again on the child, which is the other half of why an
+            # inheritable owner-rights entry above cannot reach what is created
+            # here: the child's protected DACL drops every inherited entry.
+            assert "S-1-3-4" not in {
+                entry.sid for entry in describe_dacl(target).entries
+            }
+        finally:
+            close_directory_pin(pin)
+            target.rmdir()
+
+    @windows_only
     @pytest.mark.parametrize(
         "rights",
         [
@@ -944,6 +985,44 @@ class TestWindowsAclOffWindows:
 
         with pytest.raises(PrivateStateError, match="replace private state"):
             windows_acl.verify_children_cannot_be_replaced(tmp_path)
+
+    def test_owner_rights_is_not_read_as_a_second_account(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Same mask, same flags, and the verdict turns on the SID alone.
+
+        The refusing half is the parametrized test above; this is the pair to
+        it. ``S-1-3-4`` grants to the owner of the directory being read, which
+        the same call accepted a line earlier, so it can widen nothing.
+        """
+        from linkedin_mcp_server import windows_acl
+
+        monkeypatch.setattr(
+            windows_acl, "current_user_sid", lambda: (object(), object())
+        )
+        monkeypatch.setattr(
+            windows_acl, "_sid_to_string", lambda _sid: "current-account"
+        )
+        monkeypatch.setattr(windows_acl, "read_owner", lambda _path: "current-account")
+        monkeypatch.setattr(
+            windows_acl,
+            "describe_dacl",
+            lambda _path: windows_acl.Dacl(
+                protected=True,
+                entries=(
+                    windows_acl.AccessEntry(
+                        sid="S-1-3-4",
+                        type=windows_acl.ACCESS_ALLOWED_ACE_TYPE,
+                        flags=windows_acl.CONTAINER_INHERIT_ACE
+                        | windows_acl.OBJECT_INHERIT_ACE,
+                        mask=windows_acl.GENERIC_ALL,
+                    ),
+                ),
+            ),
+        )
+
+        windows_acl.verify_children_cannot_be_replaced(tmp_path)
+        windows_acl.verify_ancestry_cannot_be_replaced(tmp_path / "child")
 
     def test_inheriting_temporary_parent_is_refused(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

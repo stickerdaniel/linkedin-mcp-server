@@ -105,6 +105,27 @@ _DIRECTORY_REPLACEMENT_RIGHTS = (
     FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_DELETE_CHILD | _FILE_REPLACEMENT_RIGHTS
 )
 _CREATOR_OWNER_SID = "S-1-3-0"
+#: OWNER RIGHTS, which is not a principal at all. An allow entry naming it
+#: grants its mask to whichever account owns the object being checked, decided
+#: at access-check time against that object's own security descriptor, and
+#: Windows documents no path by which a token failing that owner comparison
+#: takes anything from it. So the entry says nothing about who may act and only
+#: restates what the owner may do, which is why both walks below skip it *after*
+#: they have judged the owner of the same object and never before.
+#:
+#: An inherited copy lands in a child's DACL and is then read against that
+#: child's owner rather than against this one's. That is not a gap here: every
+#: directory this server goes on to create carries a protected DACL, so the copy
+#: is dropped at creation, and every one it accepts instead is put through
+#: ``verify_owner_only``. What the copy does grant is a foreign account rights
+#: over an object that same account created and already owns.
+#:
+#: Measured on the Windows Server 2025 image these tests run on: ``%TEMP%``
+#: carries the entry so that it takes effect one level down, and every directory
+#: created inside then carries an effective copy. Refusing it refused the
+#: ordinary temporary layout of an ordinary machine, which is how this was
+#: found.
+_OWNER_RIGHTS_SID = "S-1-3-4"
 #: What an ACE has to grant before an account can take an *existing, named*
 #: directory away from the path that sits on it: delete it, or rewrite who may.
 #:
@@ -871,6 +892,12 @@ def _verify_ancestor(path: Path, trusted: set[str]) -> None:
             )
         if entry.sid in trusted:
             continue
+        # Read against the owner this function judged a moment ago, so it adds
+        # no reach beyond what that verdict already accepted. See
+        # ``_OWNER_RIGHTS_SID``; the walk reaches every container in the chain,
+        # so each one's entry is skipped only on its own owner.
+        if entry.sid == _OWNER_RIGHTS_SID:
+            continue
         # An inherit-only entry grants nothing on this directory. Where it does
         # land is a directory this walk visits too, and it is judged there
         # against what that directory actually carries rather than guessed at
@@ -934,6 +961,12 @@ def verify_children_cannot_be_replaced(
                 f"{path} carries an unsupported permission entry for {entry.sid}"
             )
         if entry.sid in trusted:
+            continue
+        # Same reasoning as in ``_verify_ancestor`` and the same ordering: the
+        # owner of this directory was accepted above, and this entry names
+        # nobody else. See ``_OWNER_RIGHTS_SID`` for why an inheritable one is
+        # not a way around the question this function asks.
+        if entry.sid == _OWNER_RIGHTS_SID:
             continue
         if (
             entry.sid == _CREATOR_OWNER_SID

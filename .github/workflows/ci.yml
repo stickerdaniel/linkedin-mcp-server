@@ -59,6 +59,7 @@ jobs:
           tests/test_installer_supervisor.py
           tests/test_installer_worker.py
           tests/test_process_tree.py
+          tests/test_private_state.py
 
       - run: uv cache prune --ci
 
