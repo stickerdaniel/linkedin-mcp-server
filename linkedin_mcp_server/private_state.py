@@ -288,7 +288,7 @@ def harden_created_file(path: Path) -> None:
 
         from linkedin_mcp_server.windows_acl import restrict_to_current_user
 
-        restrict_to_current_user(path, directory=False, created=True)
+        restrict_to_current_user(path, directory=False)
         current = path.lstat()
         _refuse_windows_reparse_point(path, current)
         if not _same_entry(entry, current):

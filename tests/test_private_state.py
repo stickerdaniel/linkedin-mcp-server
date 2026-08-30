@@ -549,7 +549,7 @@ class TestRefusals:
         monkeypatch.setattr(
             windows_acl,
             "restrict_to_current_user",
-            lambda path, *, directory, created: restricted.append((path, directory)),
+            lambda path, *, directory: restricted.append((path, directory)),
         )
         monkeypatch.setattr(
             windows_acl,

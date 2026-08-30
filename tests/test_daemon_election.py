@@ -7274,11 +7274,10 @@ class TestTheHandshakeFrameIsNotPlatformTranslated:
         nonce = "0123456789abcdef" * 4
         frame = f"{daemon_owner.HANDSHAKE} {nonce} {daemon_owner.READY}"
 
-        assert (
-            election_module._reported_owner_verdict(f"{frame}\n".encode(), nonce)
-            == daemon_owner.READY
-        )
+        assert election_module._reported_owner_verdict(
+            f"{frame}\n".encode(), nonce
+        ) == (daemon_owner.READY, None)
         assert (
             election_module._reported_owner_verdict(f"{frame}\r\n".encode(), nonce)
             is None
-        )
+        ), "the carriage return stays part of the payload and matches no verdict"
