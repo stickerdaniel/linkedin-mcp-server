@@ -82,10 +82,11 @@ jobs:
           cat /tmp/xvfb.log >&2
           exit 1
 
-      # `--dist loadgroup` keeps the identity tests on one worker. They share
-      # two cached browser launches, and under plain `load` every worker that
-      # received one of them would pay for its own pair. Tests carrying no
-      # group mark are distributed exactly as before.
+      # `--dist loadgroup` keeps every test that launches Chromium on one
+      # worker. The identity cases share two cached launches; the DOM and auth
+      # contracts launch per case, and the DOM timers use wall-clock deadlines
+      # that concurrent browser startups made flaky. Tests without the group
+      # mark are distributed exactly as before.
       - name: Run tests
         env:
           DISPLAY: ":99"
