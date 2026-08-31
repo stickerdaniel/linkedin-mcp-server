@@ -26,7 +26,9 @@ A Model Context Protocol (MCP) server that connects AI assistants to LinkedIn. A
 
 ## Quick Start
 
-The image ships full Chromium. Log in once through a browser the container shows you in your own browser tab:
+The image ships full Chromium. Log in once through a browser the container shows you in your own browser tab.
+
+macOS / Linux:
 
 ```bash
 # Create the directory first so the container can save your session into it
@@ -38,13 +40,27 @@ docker run -it --rm \
   --login --login-viewer
 ```
 
+PowerShell (Windows):
+
+```powershell
+$sessionDir = Join-Path $env:USERPROFILE ".linkedin-mcp"
+New-Item -ItemType Directory -Force -Path $sessionDir | Out-Null
+docker run -it --rm `
+  -v "${sessionDir}:/home/pwuser/.linkedin-mcp" `
+  -p 127.0.0.1:6080:6080 `
+  stickerdaniel/linkedin-mcp-server:latest `
+  --login --login-viewer
+```
+
 Open the full URL the command prints (it carries the access token) and sign in. The viewer closes itself afterwards; let the command exit on its own so the session is stored completely. It gives up after 30 minutes.
 
-Keep the `-v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp` mount on every later `docker run`. A session created on the host with `uvx mcp-server-linkedin@latest --login` works too, and the container then rebuilds its own profile from those cookies on each start.
+Keep the same host directory mounted at `/home/pwuser/.linkedin-mcp` on every later `docker run`. A session created on the host with `uvx mcp-server-linkedin@latest --login` works too, and the container then rebuilds its own profile from those cookies on each start.
 
 If an older rootful Docker run left that host directory owned by root, repair it with `sudo chown -R "$(id -u):$(id -g)" ~/.linkedin-mcp`.
 
 **Configure Claude Desktop with Docker**
+
+**macOS / Linux (absolute path in JSON):**
 
 ```json
 {
@@ -61,7 +77,28 @@ If an older rootful Docker run left that host directory owned by root, repair it
 }
 ```
 
-Spell that first path out in full. A client runs `docker` directly rather than through a shell, so a leading `~` reaches Docker unexpanded and it refuses the mount. On Windows write it with forward slashes, `C:/Users/you/.linkedin-mcp`; a backslash opens an escape sequence in JSON and `C:\Users` is not one the client can read.
+Spell that first path out in full. A client runs `docker` directly rather than through a shell, so a leading `~` reaches Docker unexpanded and it refuses the mount.
+
+**PowerShell (Windows):** use a forward-slash JSON path. A backslash path like
+`C:\Users\Alice\.linkedin-mcp` fails JSON parsing because `\U` is an invalid
+escape. Replace `Alice` with your username.
+
+```json
+{
+  "mcpServers": {
+    "mcp-server-linkedin": {
+      "command": "docker",
+      "args": [
+        "run", "--rm", "-i",
+        "-v", "C:/Users/Alice/.linkedin-mcp:/home/pwuser/.linkedin-mcp",
+        "stickerdaniel/linkedin-mcp-server:latest"
+      ]
+    }
+  }
+}
+```
+
+Use `$env:USERPROFILE\.linkedin-mcp` when constructing the host path outside JSON.
 
 > **Note:** Plain `--login` does not publish a viewer. Use `--login --login-viewer` only for the one-shot login container, with port 6080 published to loopback.
 >
@@ -111,7 +148,7 @@ Spell that first path out in full. A client runs `docker` directly rather than t
 | `LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION` | `false` | Experimental: keep the container's derived profile across restarts instead of rebuilding it on each start |
 | `LINKEDIN_TRACE_MODE` | `on_error` | Trace retention: `on_error` keeps artifacts only from failed runs, `always` keeps every run, `off` keeps none |
 
-**Example with custom timeouts:**
+**Example with custom timeouts (macOS / Linux):**
 
 ```json
 {
@@ -121,6 +158,25 @@ Spell that first path out in full. A client runs `docker` directly rather than t
       "args": [
         "run", "-i", "--rm",
         "-v", "/absolute/path/to/.linkedin-mcp:/home/pwuser/.linkedin-mcp",
+        "-e", "TIMEOUT=10000",
+        "-e", "TOOL_TIMEOUT=300",
+        "stickerdaniel/linkedin-mcp-server"
+      ]
+    }
+  }
+}
+```
+
+**Example with custom timeouts (Windows):**
+
+```json
+{
+  "mcpServers": {
+    "mcp-server-linkedin": {
+      "command": "docker",
+      "args": [
+        "run", "-i", "--rm",
+        "-v", "C:/Users/Alice/.linkedin-mcp:/home/pwuser/.linkedin-mcp",
         "-e", "TIMEOUT=10000",
         "-e", "TOOL_TIMEOUT=300",
         "stickerdaniel/linkedin-mcp-server"
