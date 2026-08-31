@@ -477,6 +477,147 @@ class TestExtractPage:
                 section_name="search_results",
             )
 
+    async def test_the_search_redesign_redirect_is_not_a_replacement(self, mock_page):
+        """LinkedIn's 302 to `/jobs/search-results` must not end the page.
+
+        The route asked for is compared against the one the page ended on,
+        and a mismatch is fatal on purpose: an account picker served in place
+        of a search moves the route exactly this way. The redesign redirect
+        moves it too, so a migrated account raised here, before any of the
+        id extraction downstream could run, and the search returned nothing
+        while reporting that it had navigated away.
+
+        Driven through `_extract_search_page_once` rather than around it. A
+        test that mocks the extraction layer places the landing address after
+        this comparison has already happened and passes whatever it does.
+        """
+        mock_page.url = "https://www.linkedin.com/jobs/search/?keywords=python"
+
+        async def redirect_to_the_redesign(url, *args, **kwargs):
+            navigate(
+                mock_page,
+                "https://www.linkedin.com/jobs/search-results/?keywords=python",
+            )
+
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_navigate_to_page",
+                new_callable=AsyncMock,
+                side_effect=redirect_to_the_redesign,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            result = await extractor._extract_search_page_once(
+                "https://www.linkedin.com/jobs/search/?keywords=python",
+                section_name="search_results",
+            )
+
+        assert result.text == "Sample page text"
+        assert result.error is None
+
+    async def test_a_route_change_off_the_search_still_ends_the_page(self, mock_page):
+        """The loosening is between the two search routes and nowhere else.
+
+        `/feed/` is deliberately not an auth route. A checkpoint would be
+        rejected by the detector before the helper was tested, so a helper
+        accepting every same-host path could pass that fixture unchanged.
+        """
+        mock_page.url = "https://www.linkedin.com/jobs/search/?keywords=python"
+
+        async def redirect_to_the_feed(url, *args, **kwargs):
+            navigate(mock_page, "https://www.linkedin.com/feed/")
+
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_navigate_to_page",
+                new_callable=AsyncMock,
+                side_effect=redirect_to_the_feed,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            pytest.raises(RuntimeError, match="Page navigated to .*/feed/"),
+        ):
+            await extractor._extract_search_page_once(
+                "https://www.linkedin.com/jobs/search/?keywords=python",
+                section_name="search_results",
+            )
+
+    async def test_the_redesign_redirect_keeps_the_full_auth_check(self, mock_page):
+        """An account picker can be served at an otherwise allowed path.
+
+        Route equivalence cannot classify the document, so the full detector
+        must run before the helper suppresses the route-mismatch error.
+        """
+        requested = "https://www.linkedin.com/jobs/search/?keywords=python"
+        mock_page.url = requested
+
+        async def redirect_to_the_redesign(url, *args, **kwargs):
+            navigate(
+                mock_page,
+                "https://www.linkedin.com/jobs/search-results/?keywords=python",
+            )
+
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_navigate_to_page",
+                new_callable=AsyncMock,
+                side_effect=redirect_to_the_redesign,
+            ),
+            patch.object(
+                extractor,
+                "_raise_if_auth_barrier",
+                new_callable=AsyncMock,
+                side_effect=AuthenticationError("Run with --login"),
+            ) as check_auth,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            pytest.raises(AuthenticationError, match="--login"),
+        ):
+            await extractor._extract_search_page_once(
+                requested,
+                section_name="search_results",
+            )
+
+        check_auth.assert_awaited_once_with(requested)
+
     async def test_a_checkpoint_while_scrolling_raises_an_auth_error(self, mock_page):
         """A checkpoint reached mid-scroll must not come back as job results.
 
@@ -3548,6 +3689,101 @@ class TestSearchJobs:
         # search is diagnosable from the response itself.
         assert "python" in error["error_message"]
 
+    async def test_the_redesigned_search_route_still_yields_ids(self, mock_page):
+        """LinkedIn 302s `/jobs/search/` to its redesigned results route.
+
+        The guard accepted only the route the URL builder produces, so every
+        account already moved over ended the search on the first page with
+        `job_ids: []` while `search_results` listed real jobs. The redirect
+        keeps the query and honours `start`, so the destination is the search
+        and not a replacement of it.
+        """
+        extractor = LinkedInExtractor(mock_page)
+
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                side_effect=self._navigating(
+                    mock_page,
+                    [extracted("Job 1\nJob 2")],
+                    lands_on=(
+                        "https://www.linkedin.com/jobs/search-results/?keywords=python"
+                    ),
+                ),
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["111", "222"],
+            ) as mock_ids,
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_jobs("python", max_pages=1)
+
+        assert result["job_ids"] == ["111", "222"]
+        assert mock_ids.await_count == 1
+        assert "search_results" not in result.get("section_errors", {})
+
+    async def test_the_redesigned_route_still_reports_a_dropped_filter(self, mock_page):
+        """Reaching the guard is what lets the filter check run at all.
+
+        The redesigned route drops `location`, and the results then come back
+        for whatever place the account defaults to. That is reported rather
+        than retried, the way every other dropped filter is; before the guard
+        accepted this route the search raised first and said nothing about
+        the location.
+        """
+        extractor = LinkedInExtractor(mock_page)
+
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                side_effect=self._navigating(
+                    mock_page,
+                    [extracted("Job 1")],
+                    lands_on=(
+                        "https://www.linkedin.com/jobs/search-results/?keywords=python"
+                    ),
+                ),
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["111"],
+            ),
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_jobs(
+                "python", location="Berlin", max_pages=1
+            )
+
+        assert result["job_ids"] == ["111"]
+        error = result["section_errors"]["search_results"]
+        assert error["error_type"] == "filters_dropped"
+        assert "location" in error["error_message"]
+
     async def test_a_pane_job_is_not_a_search_result(self, mock_page):
         """The ids come from the rail and the references from the whole page.
 
@@ -4110,8 +4346,7 @@ class TestSearchJobs:
             patch.object(
                 extractor,
                 "_extract_search_page",
-                new_callable=AsyncMock,
-                return_value=extracted(""),
+                side_effect=self._navigating(mock_page, [extracted("")]),
             ),
             patch.object(
                 extractor,
@@ -4136,6 +4371,147 @@ class TestSearchJobs:
         assert result["sections"] == {}
         # Empty text should skip ID extraction to avoid stale DOM
         mock_ids.assert_not_awaited()
+
+    async def test_empty_redesign_page_reports_dropped_keywords(self, mock_page):
+        """An empty destination must still prove it answered the question.
+
+        `/jobs/search-results/` without the query can be a blank replacement
+        page. Accepting its empty text before comparing keywords reports a
+        successful search with no jobs, although LinkedIn answered no search
+        at all.
+        """
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                side_effect=self._navigating(
+                    mock_page,
+                    [extracted("")],
+                    lands_on="https://www.linkedin.com/jobs/search-results/",
+                ),
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=[],
+            ) as mock_ids,
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_jobs("python", max_pages=1)
+
+        assert result["job_ids"] == []
+        assert result["sections"] == {}
+        assert result["section_errors"]["search_results"]["error_type"] == (
+            "search_replaced"
+        )
+        mock_ids.assert_not_awaited()
+
+    async def test_empty_redesign_page_reports_a_dropped_filter(self, mock_page):
+        """A clean empty result cannot hide a location the redirect dropped."""
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                side_effect=self._navigating(
+                    mock_page,
+                    [extracted("")],
+                    lands_on=(
+                        "https://www.linkedin.com/jobs/search-results/?keywords=python"
+                    ),
+                ),
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=[],
+            ) as mock_ids,
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_jobs(
+                "python", location="Berlin", max_pages=1
+            )
+
+        error = result["section_errors"]["search_results"]
+        assert error["error_type"] == "filters_dropped"
+        assert "location" in error["error_message"]
+        mock_ids.assert_not_awaited()
+
+    async def test_empty_later_page_reports_a_dropped_offset(self, mock_page):
+        """A blank first page repeated later must not truncate pagination.
+
+        The first navigation yields one job. The second lands on a bare
+        redesign URL with no `start`; without validating before the empty
+        short-circuit, the search silently stops and presents page one as the
+        complete answer.
+        """
+        extractor = LinkedInExtractor(mock_page)
+        pages = iter([extracted("Page 1"), extracted("")])
+        calls = 0
+
+        async def navigate_page(url, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                navigate(mock_page, url)
+            else:
+                navigate(
+                    mock_page,
+                    "https://www.linkedin.com/jobs/search-results/?keywords=python",
+                )
+            return next(pages)
+
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                side_effect=navigate_page,
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["111"],
+            ) as mock_ids,
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_jobs("python", max_pages=2)
+
+        assert result["job_ids"] == ["111"]
+        assert result["sections"]["search_results"] == "Page 1"
+        error = result["section_errors"]["search_results"]
+        assert error["error_type"] == "pagination_stopped"
+        assert mock_ids.await_count == 1
 
     async def test_no_ids_on_first_page_captures_text(self, mock_page):
         """Non-empty text with zero job IDs should be returned in sections."""
@@ -4369,6 +4745,70 @@ class TestSearchJobs:
         assert result["job_ids"] == []
         assert result["sections"] == {}
         assert result["section_errors"]["search_results"]["error_type"] == "rate_limit"
+        mock_ids.assert_not_awaited()
+
+    async def test_rate_limit_wins_over_an_unexpected_landing(self, mock_page):
+        """The specific diagnosis survives a simultaneous route failure."""
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                side_effect=self._navigating(
+                    mock_page,
+                    [extracted(_RATE_LIMITED_MSG)],
+                    lands_on="https://www.linkedin.com/feed/",
+                ),
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["100"],
+            ) as mock_ids,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_jobs("python", max_pages=1)
+
+        assert result["section_errors"]["search_results"]["error_type"] == (
+            "rate_limit"
+        )
+        mock_ids.assert_not_awaited()
+
+    async def test_extraction_error_wins_over_a_dropped_query(self, mock_page):
+        """A classified extraction failure must not become a route warning."""
+        failure = {
+            "error_type": "navigation_error",
+            "error_message": "the search page did not load",
+        }
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                side_effect=self._navigating(
+                    mock_page,
+                    [extracted("", error=failure)],
+                    lands_on="https://www.linkedin.com/jobs/search-results/",
+                ),
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["100"],
+            ) as mock_ids,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_jobs("python", max_pages=1)
+
+        assert result["section_errors"]["search_results"] == failure
         mock_ids.assert_not_awaited()
 
 
