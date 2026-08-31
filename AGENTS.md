@@ -290,12 +290,36 @@ one pointing at it.
 
 ## PR Reviews
 
+Greptile reviews no draft on its own, so converting the PR out of draft is
+what starts the first pass. A session that opens a draft and then waits for
+the bot waits forever.
+
+A later push to a non-draft PR is reviewed again, but Greptile edits its
+existing comment instead of posting a new one. A check that looks for a new
+comment therefore finds nothing and reads exactly like a pass that never
+ran. Verify that its `Last reviewed commit` SHA equals the PR's current head;
+a timestamp cannot associate an edit with a pushed revision.
+
 Greptile posts initial reviews as PR review comments, but follow-ups as **issue comments**. Always check both.
 
 ```bash
 gh api repos/{owner}/{repo}/pulls/{pr}/reviews    # initial reviews
 gh api repos/{owner}/{repo}/pulls/{pr}/comments   # inline comments
 gh api repos/{owner}/{repo}/issues/{pr}/comments   # follow-up reviews
+
+# A re-review after a push edits the existing comment. Prove which head it saw.
+sha='^[0-9a-f]{40}$'
+head=$(gh pr view {pr} --json headRefOid --jq .headRefOid) &&
+reviewed=$(gh api repos/{owner}/{repo}/issues/{pr}/comments \
+  --jq '[.[]
+         | select(.user.login == "greptile-apps[bot]")
+         | select(.body | contains("Last reviewed commit:"))
+         | .body
+         | capture("Last reviewed commit:.*?/commit/(?<sha>[0-9a-f]{40})").sha]
+        | last') &&
+printf '%s\n' "$head" | grep -Eq "$sha" &&
+printf '%s\n' "$reviewed" | grep -Eq "$sha" &&
+test "$reviewed" = "$head"
 ```
 
 ## btca
