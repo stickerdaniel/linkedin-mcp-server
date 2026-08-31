@@ -397,12 +397,32 @@ _DIALOG_TEXTAREA_SELECTOR = '[role="dialog"] textarea, dialog textarea'
 _COMPOSER_EDITOR_SELECTOR = 'div[role="textbox"][contenteditable="true"]'
 # LinkedIn's modal close button carries this test hook in the composer.
 _COMPOSER_DISMISS_SELECTOR = "button[data-test-modal-close-btn]"
-# The composer's own "Post" submit button carries this stable class.
-_COMPOSER_PRIMARY_ACTION_SELECTOR = "button.share-actions__primary-action"
-# The "Post as" author-switch control, when the account admins one or more
-# organization pages. It renders as a button showing the current author's
-# name/avatar near the top of the composer dialog.
-_COMPOSER_AUTHOR_SWITCH_SELECTOR = "button.share-unified-settings-entry-button"
+# Every other actionable button in the composer (emoji, add-media, event,
+# celebrate, more, schedule) carries an `aria-label`; only two do not: the
+# "Post as" author-switch control near the top, and the primary "Post"
+# submit button in the footer. Attribute *presence* (not a class name tied
+# to LinkedIn's layout, and not locale-dependent label text) is what
+# distinguishes both from the rest of the dialog's buttons -- position then
+# tells them apart from each other, since the switch control is the first
+# such button and the submit button is the last.
+_COMPOSER_UNLABELLED_BUTTON_SELECTOR = "button:not([aria-label])"
+
+
+def _labels_match(candidate: str, target: str) -> bool:
+    """Case-insensitive *exact* match of ``target`` against a label's name line.
+
+    Composer author labels carry a trailing audience/action line (observed:
+    ``"Manik Khandelwal\\nPost to Anyone"`` for a profile, and an analogous
+    ``"<Page name>\\nPost to <audience>"`` shape for an organization page),
+    so only the first line is the author's actual name. That first line is
+    compared to ``target`` with exact (not substring) equality: a Page named
+    "Peacock Labs" must not match a request for "Labs", and a request for
+    "Peacock Labs" must not silently match some other label that merely
+    contains it.
+    """
+    name_line = candidate.splitlines()[0] if candidate else ""
+    return name_line.strip().casefold() == target.strip().casefold()
+
 
 _MESSAGING_COMPOSE_LINK_SELECTOR = 'main a[href*="/messaging/compose/"]'
 _MESSAGING_COMPOSE_SELECTOR = (
@@ -4893,14 +4913,18 @@ class LinkedInExtractor:
         Returns ``(switched, current_author)``. LinkedIn's composer defaults
         to the signed-in profile; accounts that admin one or more
         organization pages get an author-switch control near the top of the
-        dialog. ``post_as`` is matched case-insensitively against the visible
-        option text (e.g. a company page name). If the switcher cannot be
-        found or no option matches, ``switched`` is False and the composer is
-        left on whatever author it already had — callers must not publish in
-        that case, since publishing would go out under the wrong identity.
+        dialog. ``post_as`` is matched via an *exact* (case-insensitive,
+        whitespace-normalized) comparison against the full visible option
+        text, never substring containment — a substring match could pick the
+        wrong Page whenever one administered Page's name contains another's,
+        or falsely treat a not-yet-switched composer as already matching. If
+        the switcher cannot be found, or exactly one option does not match
+        ``post_as``, ``switched`` is False and the composer is left on
+        whatever author it already had — callers must not publish in that
+        case, since publishing would go out under the wrong identity.
         """
         dialog = self._composer_dialog()
-        switch_button = dialog.locator(_COMPOSER_AUTHOR_SWITCH_SELECTOR).first
+        switch_button = dialog.locator(_COMPOSER_UNLABELLED_BUTTON_SELECTOR).first
         try:
             await switch_button.wait_for(state="visible", timeout=3000)
         except Exception:
@@ -4910,7 +4934,7 @@ class LinkedInExtractor:
             current_label = (await switch_button.inner_text()).strip()
         except Exception:
             current_label = None
-        if current_label and post_as.lower() in current_label.lower():
+        if current_label and _labels_match(current_label, post_as):
             return True, current_label
 
         try:
@@ -4926,12 +4950,32 @@ class LinkedInExtractor:
 
             # The toggle swaps this same dialog's content in place to a
             # "Posting as" radio list (measured: same dialog element, not a
-            # new one) -- matched on the requested author's visible text,
-            # since post_as is an arbitrary page/profile name with no other
-            # stable identity here.
-            option = settings_dialog.locator(
-                '[role="radiogroup"] button[role="radio"]', has_text=post_as
-            ).first
+            # new one). Every option's full visible text is read and matched
+            # exactly (not via Playwright's substring `has_text`) against
+            # ``post_as``, since post_as is an arbitrary page/profile name
+            # with no other stable identity here; an ambiguous (more than
+            # one exact match) or absent (zero matches) result refuses the
+            # switch rather than guessing.
+            radio_options = settings_dialog.locator(
+                '[role="radiogroup"] button[role="radio"]'
+            )
+            option_count = await radio_options.count()
+            matched_index: int | None = None
+            for i in range(option_count):
+                option_label = (await radio_options.nth(i).inner_text()).strip()
+                if _labels_match(option_label, post_as):
+                    if matched_index is not None:
+                        logger.debug(
+                            "Author switch to %r is ambiguous: multiple options match",
+                            post_as,
+                        )
+                        return False, current_label
+                    matched_index = i
+            if matched_index is None:
+                logger.debug("Author switch to %r found no matching option", post_as)
+                return False, current_label
+
+            option = radio_options.nth(matched_index)
             await option.wait_for(state="visible", timeout=5000)
             await option.click(timeout=5000)
             await asyncio.sleep(0.3)
@@ -4954,7 +4998,7 @@ class LinkedInExtractor:
             logger.debug("Author switch to %r failed", post_as, exc_info=True)
             return False, current_label
 
-        return post_as.lower() in new_label.lower(), new_label
+        return _labels_match(new_label, post_as), new_label
 
     async def create_post(
         self,
@@ -5028,7 +5072,11 @@ class LinkedInExtractor:
                 composer_text=composer_text,
             )
 
-        primary = composer_dialog.locator(_COMPOSER_PRIMARY_ACTION_SELECTOR).first
+        # Same attribute-presence selector used for the author switch, scoped
+        # to *this* dialog and taking the last match: the switch control is
+        # the first unlabelled button in the dialog, the "Post" submit
+        # button is the last (see _COMPOSER_UNLABELLED_BUTTON_SELECTOR).
+        primary = composer_dialog.locator(_COMPOSER_UNLABELLED_BUTTON_SELECTOR).last
         try:
             if await primary.is_disabled():
                 await self._clear_and_dismiss_composer()

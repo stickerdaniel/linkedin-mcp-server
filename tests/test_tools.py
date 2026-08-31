@@ -39,6 +39,7 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.search_companies = AsyncMock(return_value=scrape_result)
     mock.search_posts = AsyncMock(return_value=scrape_result)
     mock.get_company_employees = AsyncMock(return_value=scrape_result)
+    mock.create_post = AsyncMock(return_value=scrape_result)
     mock.extract_page = AsyncMock(
         return_value=ExtractedSection(text="some text", references=[])
     )
@@ -1360,6 +1361,130 @@ class TestPostTools:
         with pytest.raises(ValidationError, match="max_pages"):
             await mcp.call_tool("search_posts", {"keywords": "python", "max_pages": 0})
 
+    async def test_create_post_dry_run_success(self, mock_context):
+        """confirm_post=False forwards through to the extractor as a dry run."""
+        expected = {
+            "url": "https://www.linkedin.com/feed/?shareActive=true",
+            "status": "confirmation_required",
+            "message": "Dry run complete. Set confirm_post=true to publish the post.",
+            "posted": False,
+            "author": "Peacock Labs",
+            "composer_text": "Peacock Labs\nHello world",
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "create_post")
+        result = await tool_fn(
+            "Hello world",
+            False,
+            mock_context,
+            post_as="Peacock Labs",
+            extractor=mock_extractor,
+        )
+
+        assert result["status"] == "confirmation_required"
+        assert result["posted"] is False
+        mock_extractor.create_post.assert_awaited_once_with(
+            "Hello world",
+            confirm_post=False,
+            post_as="Peacock Labs",
+        )
+
+    async def test_create_post_confirmed_publish(self, mock_context):
+        """confirm_post=True is forwarded unchanged, and a "posted" result passes through."""
+        expected = {
+            "url": "https://www.linkedin.com/feed/?shareActive=true",
+            "status": "posted",
+            "message": "Post published.",
+            "posted": True,
+            "author": "Peacock Labs",
+            "composer_text": "Peacock Labs\nHello world",
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "create_post")
+        result = await tool_fn(
+            "Hello world",
+            True,
+            mock_context,
+            post_as="Peacock Labs",
+            extractor=mock_extractor,
+        )
+
+        assert result == expected
+        mock_extractor.create_post.assert_awaited_once_with(
+            "Hello world",
+            confirm_post=True,
+            post_as="Peacock Labs",
+        )
+
+    async def test_create_post_without_post_as(self, mock_context):
+        """post_as is optional; omitting it still reaches the extractor as None."""
+        expected = {
+            "url": "https://www.linkedin.com/feed/?shareActive=true",
+            "status": "posted",
+            "message": "Post published.",
+            "posted": True,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "create_post")
+        await tool_fn("Hello world", True, mock_context, extractor=mock_extractor)
+
+        mock_extractor.create_post.assert_awaited_once_with(
+            "Hello world",
+            confirm_post=True,
+            post_as=None,
+        )
+
+    async def test_create_post_refuses_on_author_switch_failure(self, mock_context):
+        """An author-switch refusal from the extractor passes through untouched,
+        rather than being coerced into a publish."""
+        expected = {
+            "url": "https://www.linkedin.com/feed/?shareActive=true",
+            "status": "author_switch_failed",
+            "message": (
+                "Could not switch the composer's author to 'Peacock Labs'"
+                " (composer showed 'Manik Khandelwal'); refusing to post"
+                " under the wrong identity."
+            ),
+            "posted": False,
+            "author": "Manik Khandelwal",
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "create_post")
+        result = await tool_fn(
+            "Hello world",
+            True,
+            mock_context,
+            post_as="Peacock Labs",
+            extractor=mock_extractor,
+        )
+
+        assert result["status"] == "author_switch_failed"
+        assert result["posted"] is False
+
 
 class TestToolTimeouts:
     async def test_all_tools_have_global_timeout(self):
@@ -1384,6 +1509,7 @@ class TestToolTimeouts:
             "send_message",
             "get_feed",
             "search_posts",
+            "create_post",
             "close_session",
         )
 
@@ -1417,6 +1543,7 @@ class TestToolTimeouts:
             "send_message",
             "get_feed",
             "search_posts",
+            "create_post",
             "close_session",
         )
 
