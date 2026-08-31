@@ -169,6 +169,20 @@ ERROR_ALREADY_EXISTS = 183
 _PRIVATE_DIRECTORY_ATTEMPTS = 16
 
 FILE_READ_ATTRIBUTES = 0x00000080
+#: ``FILE_EXECUTE`` under its directory name: the right to pass through this
+#: directory to something below it. Requested for what it does to the *share*
+#: mode rather than for the access, and it is the whole reason the pin holds:
+#: Windows enters its sharing check only for an open whose desired access names
+#: one of ``FILE_READ_DATA``, ``FILE_EXECUTE``, ``FILE_WRITE_DATA``,
+#: ``FILE_APPEND_DATA`` or ``DELETE`` (MS-FSA 2.1.5.1.2.2). Attribute rights are
+#: in none of those categories, so withholding ``FILE_SHARE_DELETE`` beside them
+#: restricts nothing at all, and a handle opened for ``FILE_READ_ATTRIBUTES``
+#: alone let its own directory be renamed out from under it. Measured on
+#: Windows Server 2025 by the test named for it.
+#:
+#: The narrowest right that does the job. ``FILE_LIST_DIRECTORY`` would work
+#: equally and grants the contents as well, which this has no use for.
+FILE_TRAVERSE = 0x00000020
 FILE_SHARE_READ = 0x00000001
 FILE_SHARE_WRITE = 0x00000002
 OPEN_EXISTING = 3
@@ -981,11 +995,19 @@ def verify_children_cannot_be_replaced(
 
 
 def pin_directory(path: Path) -> wintypes.HANDLE:
-    """Open *path* while denying replacement until the handle is closed."""
+    """Open *path* while denying replacement until the handle is closed.
+
+    What the handle denies is an open asking for ``DELETE``, which is what a
+    rename of this directory and a removal of it both need. It denies nothing
+    about the contents, the permissions or the attributes, all of which stay
+    editable by whoever the DACL already allowed; this is a pin on the *name*
+    and on nothing else. See ``FILE_TRAVERSE`` for why the access mask decides
+    whether the share mode is consulted at all.
+    """
     _, kernel32 = _load()
     handle = kernel32.CreateFileW(
         str(path),
-        FILE_READ_ATTRIBUTES,
+        FILE_TRAVERSE | FILE_READ_ATTRIBUTES,
         FILE_SHARE_READ | FILE_SHARE_WRITE,
         None,
         OPEN_EXISTING,
@@ -1015,6 +1037,12 @@ def pin_directory_chain(path: Path) -> tuple[wintypes.HANDLE, ...]:
     without ``FILE_SHARE_DELETE`` refuses both the rename and the delete for as
     long as it is open, which is why every component is pinned before any of
     them is judged rather than one at a time as the walk reaches it.
+
+    It is a user-mode boundary. A kernel-mode filter opening with
+    ``IO_IGNORE_SHARE_ACCESS_CHECK`` is outside it, and so is anything that
+    happens after these handles close, including a rename registered for the
+    next boot. Neither is reachable by the unprivileged account this defends
+    against, and both are already able to do worse.
     """
     if not path.is_absolute():
         raise PrivateStateError(f"Refusing to pin a relative installer path: {path}")

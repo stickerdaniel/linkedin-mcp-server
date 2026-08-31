@@ -822,11 +822,44 @@ class TestWindowsAcl:
         try:
             with pytest.raises(OSError):
                 target.rename(replacement)
+            # Both, because a directory taken away by either route leaves the
+            # name free for one an attacker controls.
+            with pytest.raises(OSError):
+                target.rmdir()
         finally:
             close_directory_pin(pin)
 
         target.rename(replacement)
         assert replacement.is_dir()
+
+    @windows_only
+    def test_a_pinned_chain_holds_its_ancestors_too(self, tmp_path: Path):
+        """The component an attacker would actually move.
+
+        Replacing the temporary root itself is the obvious attack and the
+        useless one, since it is created and pinned in the same breath. Moving
+        a directory *above* it is what turns a verified chain into an
+        unverified one, and it is the reason the whole chain is held rather
+        than the leaf.
+        """
+        from linkedin_mcp_server.windows_acl import (
+            _release_directory_pins,
+            pin_directory_chain,
+        )
+
+        ancestor = tmp_path / "profile"
+        parent = ancestor / "temp"
+        parent.mkdir(parents=True)
+
+        pins = pin_directory_chain(parent)
+        try:
+            with pytest.raises(OSError):
+                ancestor.rename(tmp_path / "moved")
+        finally:
+            _release_directory_pins(pins)
+
+        ancestor.rename(tmp_path / "moved")
+        assert (tmp_path / "moved" / "temp").is_dir()
 
     @windows_only
     def test_the_struct_layouts_match_the_windows_headers(self):
