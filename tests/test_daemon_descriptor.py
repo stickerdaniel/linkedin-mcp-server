@@ -47,7 +47,10 @@ from linkedin_mcp_server.daemon_descriptor import (
     token_path,
     validate_prepared,
 )
-from linkedin_mcp_server.private_state import PrivateStateError
+from linkedin_mcp_server.private_state import (
+    PrivateStateError,
+    harden_created_file,
+)
 
 posix_only = pytest.mark.skipif(
     os.name == "nt", reason="POSIX permission bits do not exist on Windows"
@@ -336,6 +339,10 @@ class TestPreparedCommit:
     def test_a_junction_cannot_redirect_commit_or_pending_cleanup(self, tmp_path: Path):
         instance_id = new_instance_id()
         directory = _planted_daemon_dir(tmp_path)
+        # Removed again so the junction can take its name. It has to exist
+        # first, because what this test plants is a redirection of the state
+        # directory production would otherwise have made here.
+        directory.rmdir()
         redirected = tmp_path / "redirected-daemon-state"
         redirected.mkdir()
         published = redirected / "daemon.json"
@@ -490,6 +497,11 @@ class TestPreparedCommit:
         pending = pending_descriptor_path(tmp_path, instance_id)
         _planted_daemon_dir(tmp_path)
         pending.write_text("{ not json")
+        # Hardened the way production hardens what it writes here. A new file
+        # belongs to the token's default owner, which is not always this
+        # account, and the verification this test runs into refuses one it does
+        # not own before it ever looks at the contents that are the subject.
+        harden_created_file(pending)
 
         with pytest.raises(DescriptorError, match="not valid JSON"):
             validate_prepared(
@@ -507,6 +519,9 @@ class TestPreparedCommit:
         second_id = new_instance_id()
         _planted_daemon_dir(tmp_path)
         pending_descriptor_path(tmp_path, second_id).write_text(first.to_json())
+        # Same reason as above: hardened so the ownership check does not speak
+        # before the generation mismatch this is about.
+        harden_created_file(pending_descriptor_path(tmp_path, second_id))
 
         with pytest.raises(DescriptorError, match="another generation"):
             validate_prepared(

@@ -6285,7 +6285,10 @@ class TestPublishingLast:
             "_retryable_windows_replace",
             lambda exc: getattr(exc, "winerror", None) in {5, 32, 33},
         )
-        monkeypatch.setattr(daemon_owner, "_COMMIT_AUTH_SECONDS", 0.02)
+        # Above one Windows timer tick of about 15.6 ms. At 0.02 the startup
+        # handshake this helper drives timed out before the replace under test
+        # was ever attempted, and the failure read as a missing exception.
+        monkeypatch.setattr(daemon_owner, "_COMMIT_AUTH_SECONDS", 0.25)
         monkeypatch.setattr(
             daemon_owner.logger,
             "exception",
