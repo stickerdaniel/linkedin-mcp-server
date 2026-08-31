@@ -154,6 +154,12 @@ jobs:
   platform-behaviour:
     name: Platform behaviour (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # Long enough for a cold browser download and far short of the six hours
+    # a job without one is allowed to sit. These tests spawn real processes
+    # and wait on them, so a contract that stops holding turns into a wedged
+    # job rather than a red one, and a wedged job reads as work in progress
+    # for as long as anyone is willing to wait.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -178,8 +184,20 @@ jobs:
 
       - run: uv sync --group dev
 
+      # ``faulthandler_timeout`` rather than a plugin: it is pytest's own, and
+      # what it buys is the stack of every thread at the moment a test stops
+      # making progress. These tests wait on processes they started, so the
+      # difference between a slow one and a stuck one is not visible from the
+      # outside and the report is the only way to tell them apart.
       - name: Run platform behaviour tests
-        run: uv run pytest tests/test_profile_lease.py tests/test_profile_lease_integration.py tests/test_private_state.py tests/test_daemon_lock.py tests/test_process_tree.py tests/test_greenlet_runtime.py
+        run: >-
+          uv run pytest -v -o faulthandler_timeout=120
+          tests/test_profile_lease.py
+          tests/test_profile_lease_integration.py
+          tests/test_private_state.py
+          tests/test_daemon_lock.py
+          tests/test_process_tree.py
+          tests/test_greenlet_runtime.py
 
       # The identity gate runs on every leg, because every leg's browser is a
       # different one from the Ubuntu job's. macOS is the only platform with a
