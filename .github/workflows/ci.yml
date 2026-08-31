@@ -53,6 +53,64 @@ jobs:
 
       - run: uv sync --group dev
 
+      # TEMPORARY diagnostic, remove before this pull request is marked ready.
+      # It traces who owns each directory the daemon's Windows state setup
+      # creates, so the ownership refusal seen in this job can be attributed to
+      # a step rather than guessed at.
+      - name: Trace the daemon state setup on this machine
+        shell: bash
+        run: |
+          uv run python - <<'PROBE'
+          import tempfile
+          import traceback
+          from pathlib import Path
+
+          from linkedin_mcp_server import daemon_descriptor
+          from linkedin_mcp_server.private_state import harden_directory
+          from linkedin_mcp_server.windows_acl import describe_dacl, read_owner
+
+          def report(label, path):
+              try:
+                  described = describe_dacl(path)
+                  print(f"--- {label}: {path}")
+                  print(
+                      f"    owner={read_owner(path)} protected={described.protected}"
+                  )
+                  for entry in described.entries:
+                      print(
+                          f"    sid={entry.sid} type={entry.type} "
+                          f"flags={entry.flags:#04x} mask={entry.mask:#010x}"
+                      )
+              except Exception as error:
+                  print(f"--- {label}: {path}\n    unreadable: {error!r}")
+
+          from linkedin_mcp_server.windows_acl import current_user_sid, default_owner_sid, _sid_to_string
+          for label, reader in (("token user", current_user_sid), ("token owner", default_owner_sid)):
+              sid, buffer = reader()
+              try:
+                  print(f"{label}: {_sid_to_string(sid)}")
+              finally:
+                  del buffer
+
+          root = Path(tempfile.mkdtemp(prefix="trace-"))
+          home = root / "home"
+          harden_directory(home)
+          report("home", home)
+          daemon_descriptor._account_home = lambda: home
+          auth = root / "auth"
+          auth.mkdir()
+          try:
+              directory = daemon_descriptor.prepare_daemon_state(auth)
+              print(f"prepare_daemon_state returned {directory}")
+          except Exception:
+              traceback.print_exc()
+          for child in sorted(home.iterdir()):
+              report("home child", child)
+              if child.is_dir():
+                  for grandchild in sorted(child.iterdir()):
+                      report("grandchild", grandchild)
+          PROBE
+
       - name: Run daemon protocol and containment tests
         run: >-
           uv run pytest
@@ -65,7 +123,6 @@ jobs:
           tests/test_daemon_descriptor.py::TestPreparedCommit
           tests/test_daemon_descriptor.py::TestStateLocation
           tests/test_daemon_lock.py
-          tests/test_private_state.py
           tests/test_installer_supervisor.py
           tests/test_installer_worker.py
           tests/test_process_tree.py

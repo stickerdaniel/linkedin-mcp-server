@@ -61,6 +61,25 @@ account_database_only = pytest.mark.skipif(
 _REAL_ACCOUNT_HOME = daemon_descriptor_module._account_home
 
 
+def _stub_windows_hardening(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Take out the ACL write and the ACL read back together.
+
+    Stubbing only the write leaves the read back real, so it reads a DACL that
+    nothing wrote. On POSIX that is harmless because the simulated branch never
+    reaches it; on Windows it refuses whatever the test planted, and on a
+    machine whose token default owner is the Administrators group it refuses it
+    for the ownership rather than for the permissions. The tests that call this
+    assert the order of the namespace and tombstone steps, so neither half of
+    the pair is their subject.
+    """
+    from linkedin_mcp_server import windows_acl
+
+    monkeypatch.setattr(
+        windows_acl, "restrict_to_current_user", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(windows_acl, "verify_owner_only", lambda *args, **kwargs: None)
+
+
 @pytest.fixture(autouse=True)
 def _isolate_daemon_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     # Production state lives under the user's private application directory.
@@ -919,9 +938,7 @@ class TestStateLocation:
         monkeypatch.setattr(
             windows_acl, "verify_children_cannot_be_replaced", lambda _path: None
         )
-        monkeypatch.setattr(
-            windows_acl, "restrict_to_current_user", lambda *args, **kwargs: None
-        )
+        _stub_windows_hardening(monkeypatch)
 
         first = prepare_daemon_state(tmp_path / "auth")
         second = prepare_daemon_state(tmp_path / "auth")
@@ -949,9 +966,7 @@ class TestStateLocation:
         monkeypatch.setattr(
             windows_acl, "verify_children_cannot_be_replaced", lambda _path: None
         )
-        monkeypatch.setattr(
-            windows_acl, "restrict_to_current_user", lambda *args, **kwargs: None
-        )
+        _stub_windows_hardening(monkeypatch)
         observed: list[bool] = []
         real_ensure = daemon_descriptor_module._ensure_legacy_windows_tombstone
 
@@ -1028,9 +1043,7 @@ class TestStateLocation:
         monkeypatch.setattr(
             windows_acl, "verify_children_cannot_be_replaced", lambda _path: None
         )
-        monkeypatch.setattr(
-            windows_acl, "restrict_to_current_user", lambda *args, **kwargs: None
-        )
+        _stub_windows_hardening(monkeypatch)
         monkeypatch.setattr(daemon_descriptor_module, "harden_created_file", harden)
 
         prepare_daemon_state(tmp_path / "auth")
@@ -1090,9 +1103,7 @@ class TestStateLocation:
         monkeypatch.setattr(
             windows_acl, "verify_children_cannot_be_replaced", lambda _path: None
         )
-        monkeypatch.setattr(
-            windows_acl, "restrict_to_current_user", lambda *args, **kwargs: None
-        )
+        _stub_windows_hardening(monkeypatch)
         legacy = tmp_path / ".mcp-server-linkedin"
         legacy.write_bytes(b"mcp-server-linkedin-v2\n")
         legacy.chmod(0o600)
@@ -1188,9 +1199,7 @@ class TestStateLocation:
         monkeypatch.setattr(
             windows_acl, "verify_children_cannot_be_replaced", lambda _path: None
         )
-        monkeypatch.setattr(
-            windows_acl, "restrict_to_current_user", lambda *args, **kwargs: None
-        )
+        _stub_windows_hardening(monkeypatch)
 
         with pytest.raises(PrivateStateError, match="symbolic link"):
             prepare_daemon_state(tmp_path / "auth")

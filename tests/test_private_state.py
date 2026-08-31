@@ -1125,8 +1125,14 @@ class TestWindowsAcl:
             capture_output=True,
         )
 
+        # Three refusals mean the same thing here, and which one arrives first
+        # depends on the machine rather than on the code: where the token's
+        # default owner is the Administrators group, a directory planted by
+        # this test belongs to that group and the ownership check speaks before
+        # the permissions are ever read. What the test is about is the line
+        # below, that nothing was repaired on the way out.
         with pytest.raises(
-            PrivateStateError, match="grants access|inherits permissions"
+            PrivateStateError, match="grants access|inherits permissions|is owned by"
         ):
             harden_directory(target)
 
@@ -1146,8 +1152,14 @@ class TestWindowsAcl:
             capture_output=True,
         )
 
+        # Three refusals mean the same thing here, and which one arrives first
+        # depends on the machine rather than on the code: where the token's
+        # default owner is the Administrators group, a directory planted by
+        # this test belongs to that group and the ownership check speaks before
+        # the permissions are ever read. What the test is about is the line
+        # below, that nothing was repaired on the way out.
         with pytest.raises(
-            PrivateStateError, match="grants access|inherits permissions"
+            PrivateStateError, match="grants access|inherits permissions|is owned by"
         ):
             harden_file(target)
 

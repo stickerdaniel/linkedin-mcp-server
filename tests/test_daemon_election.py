@@ -15,6 +15,7 @@ would have wedged every recovery.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import importlib
 import io
@@ -57,6 +58,7 @@ from linkedin_mcp_server.daemon_descriptor import (
     publish,
 )
 from linkedin_mcp_server.daemon_lock import DaemonLock, daemon_is_running
+from linkedin_mcp_server.private_state import harden_directory
 from linkedin_mcp_server.process_tree import ProcessTreeError
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -66,6 +68,29 @@ _HANDSHAKE_NONCE = "0123456789abcdef" * 4
 _POSIX_ONLY = pytest.mark.skipif(
     os.name == "nt", reason="the lock is handed to the child only on POSIX"
 )
+
+
+async def _until(condition: Callable[[], bool], *, seconds: float) -> float:
+    """Poll *condition* for at most *seconds* and say how long that took.
+
+    A wall-clock budget rather than a loop count, because one ``asyncio.sleep``
+    of a millisecond costs a whole timer tick on Windows, about 15 ms, against
+    well under one here. A count calibrated on either platform measures a
+    different amount of real time on the other, and the tests that used one
+    were reading the timer rather than the behaviour under it.
+    """
+    started = time.monotonic()
+    deadline = started + seconds
+    while not condition() and time.monotonic() < deadline:
+        await asyncio.sleep(0.01)
+    return time.monotonic() - started
+
+
+def _outcome(task: Any) -> str:
+    """What a task that should still be running ended as."""
+    if task.cancelled():
+        return "cancelled"
+    return repr(task.exception())
 
 
 @pytest.fixture(autouse=True)
@@ -83,7 +108,12 @@ def _isolate_daemon_state(
     if "real_state_root" in request.fixturenames:
         return
     home = tmp_path / "home"
-    home.mkdir()
+    # Hardened rather than merely created, because on Windows this stands in
+    # for the account's profile root and the daemon refuses to key state under
+    # one whose permissions are still inherited. A real profile root carries
+    # its own protected access list; a plain directory under %TEMP% does not,
+    # so a plain one would be testing against a machine nobody has.
+    harden_directory(home)
     monkeypatch.setattr(daemon_descriptor_module, "_account_home", lambda: home)
     monkeypatch.setattr(daemon_module, "get_runtime_id", lambda: _RUNTIME)
     monkeypatch.setenv("HOME", str(home))
@@ -6317,7 +6347,15 @@ class TestPublishingLast:
             return None
 
         monkeypatch.setattr(daemon_owner.daemon_descriptor, "read", read)
-        monkeypatch.setattr(daemon_owner, "_COMMIT_AUTH_SECONDS", 0.01)
+        # Above one timer tick, which on Windows is about 15 ms. The same
+        # constant also bounds the startup handshake this helper drives, and at
+        # 0.01 that half timed out before the recovery read under test was ever
+        # reached. The bound is still short enough that an unbounded read shows
+        # up as the whole fallback below.
+        monkeypatch.setattr(daemon_owner, "_COMMIT_AUTH_SECONDS", 0.25)
+        # So a read that is never bounded ends the test instead of hanging it.
+        fallback = threading.Timer(5.0, release.set)
+        fallback.start()
         started = time.monotonic()
         try:
             outcome = self._run_serve(
@@ -6328,11 +6366,13 @@ class TestPublishingLast:
             )
         finally:
             release.set()
+            fallback.cancel()
 
+        elapsed = time.monotonic() - started
         assert outcome == 0
         assert order[-3:] == ["commit", "live", "committed"]
         assert blocked.is_set()
-        assert time.monotonic() - started < 0.1
+        assert elapsed < 2.0, f"the recovery read was not bounded ({elapsed:.2f}s)"
 
     def test_first_ambiguous_read_keeps_turnover_active(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -6731,9 +6771,16 @@ class TestPublishingLast:
             abandoned = asyncio.create_task(asyncio.sleep(3600))
             marker = daemon_liveness_module.new_call_id()
             daemon_owner.get_liveness().watch(marker, abandoned)
-            monkeypatch.setattr(daemon_liveness_module, "EXPIRY_SECONDS", 0.01)
-            monkeypatch.setattr(daemon_owner, "_STAND_DOWN_POLL_SECONDS", 0.001)
-            monkeypatch.setattr(daemon_owner, "_COMMIT_AUTH_SECONDS", 1.0)
+            # All three above one timer tick, which on Windows is about 15 ms
+            # against well under a millisecond here. Below it, the poll that
+            # drives the expiry scan does not run at the cadence these numbers
+            # describe, and the test measures the platform instead of the code.
+            monkeypatch.setattr(daemon_liveness_module, "EXPIRY_SECONDS", 0.05)
+            monkeypatch.setattr(daemon_owner, "_STAND_DOWN_POLL_SECONDS", 0.02)
+            # Long, on purpose: the canonical read has to stay held for the
+            # whole window below, so reaching the commit stub is a real failure
+            # rather than the deadline arriving first.
+            monkeypatch.setattr(daemon_owner, "_COMMIT_AUTH_SECONDS", 30.0)
             monkeypatch.setattr(daemon_owner, "stand_down_reason", lambda: None)
             monkeypatch.setattr(
                 daemon_owner, "_start_canonical_read", lambda root: canonical_read
@@ -6758,12 +6805,15 @@ class TestPublishingLast:
                 )
             )
             try:
-                for _ in range(200):
-                    if abandoned.cancelled():
-                        break
-                    await asyncio.sleep(0.001)
-                assert abandoned.cancelled(), "the abandoned call kept running"
-                assert not reconciling.done(), "publication reconciliation was not held"
+                # A wall-clock budget rather than an iteration count. One
+                # iteration is a whole timer tick on Windows, so a fixed count
+                # is a different amount of real time on each platform.
+                waited = await _until(lambda: abandoned.cancelled(), seconds=10.0)
+                if reconciling.done():
+                    pytest.fail(f"reconciliation ended early: {_outcome(reconciling)}")
+                assert abandoned.cancelled(), (
+                    f"the abandoned call kept running for {waited:.2f}s"
+                )
                 reconciling.cancel()
                 with pytest.raises(RuntimeError, match="hard exit returned"):
                     await reconciling
@@ -6972,7 +7022,10 @@ class TestPublishingLast:
             serving = asyncio.create_task(asyncio.sleep(3600))
             monkeypatch.setattr(daemon_owner.daemon_descriptor, "read", read)
             monkeypatch.setattr(daemon_owner, "_commit_prepared_until", commit)
-            monkeypatch.setattr(daemon_owner, "_COMMIT_AUTH_SECONDS", 0.01)
+            # Above one timer tick: this bounds each round's wait on the read
+            # that never finishes, and below a tick a round takes whatever the
+            # platform's timer happens to cost rather than what it asks for.
+            monkeypatch.setattr(daemon_owner, "_COMMIT_AUTH_SECONDS", 0.05)
             monkeypatch.setattr(daemon_owner, "_UNCERTAIN_PUBLICATION_RETRY_SECONDS", 0)
             monkeypatch.setattr(daemon_owner, "_exit_hard", lambda received: None)
             reconciling = asyncio.create_task(
@@ -6985,12 +7038,15 @@ class TestPublishingLast:
                 )
             )
             try:
-                for _ in range(1000):
-                    if blocked.is_set() and len(attempts) >= 3:
-                        break
-                    await asyncio.sleep(0.001)
+                waited = await _until(
+                    lambda: blocked.is_set() and len(attempts) >= 3, seconds=10.0
+                )
+                if reconciling.done():
+                    pytest.fail(f"reconciliation ended early: {_outcome(reconciling)}")
                 assert blocked.is_set()
-                assert len(attempts) >= 3
+                assert len(attempts) >= 3, (
+                    f"only {len(attempts)} commit attempts in {waited:.2f}s"
+                )
                 assert reads == [tmp_path]
                 reconciling.cancel()
                 with pytest.raises(RuntimeError, match="hard exit returned"):
