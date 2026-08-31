@@ -18,6 +18,7 @@ from linkedin_mcp_server.core.exceptions import LinkedInScraperException
 import linkedin_mcp_server.scraping.contracts as contracts
 from linkedin_mcp_server.scraping.identifiers import (
     normalize_person_identifier,
+    normalize_profile_urn,
     person_profile_url,
 )
 from linkedin_mcp_server.scraping.navigation import PageNavigator
@@ -1353,6 +1354,8 @@ class MessageSender:
         if refusal is not None:
             return refusal
         linkedin_username = normalize_person_identifier(linkedin_username)
+        if profile_urn is not None:
+            profile_urn = normalize_profile_urn(profile_urn)
         profile_url = person_profile_url(linkedin_username, "/")
 
         await self._navigator._navigate_to_page(profile_url)

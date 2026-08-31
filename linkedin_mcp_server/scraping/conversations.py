@@ -10,7 +10,10 @@ import re
 
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
-from linkedin_mcp_server.core.exceptions import LinkedInScraperException
+from linkedin_mcp_server.core.exceptions import (
+    InvalidReferenceError,
+    LinkedInScraperException,
+)
 from linkedin_mcp_server.scraping.content import PageContentReader
 from linkedin_mcp_server.scraping.identifiers import (
     messaging_thread_url,
@@ -435,7 +438,7 @@ class ConversationReader:
         to skip this enumeration.
         """
         if not linkedin_username and not thread_id:
-            raise LinkedInScraperException(
+            raise InvalidReferenceError(
                 "Provide at least one of linkedin_username or thread_id"
             )
 

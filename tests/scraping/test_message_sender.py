@@ -11,6 +11,7 @@ from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 import pytest
 
+from linkedin_mcp_server.core.exceptions import InvalidReferenceError
 from linkedin_mcp_server.scraping import message_sender as message_sender_module
 from linkedin_mcp_server.scraping.message_sender import (
     MessageSender,
@@ -209,6 +210,22 @@ class TestSendMessage:
         mock_page.evaluate.assert_not_awaited()
         keyboard.type.assert_not_called()
         keyboard.press.assert_not_called()
+
+    async def test_path_profile_urn_is_rejected_before_navigation(self, mock_page):
+        sender = _sender(mock_page)
+
+        with patch.object(
+            PageNavigator, "_navigate_to_page", new_callable=AsyncMock
+        ) as navigate:
+            with pytest.raises(InvalidReferenceError, match="profile_urn"):
+                await sender.send_message(
+                    "testuser",
+                    "Hello!",
+                    confirm_send=False,
+                    profile_urn="/feed/",
+                )
+
+        navigate.assert_not_awaited()
 
     @pytest.mark.parametrize(
         "message",

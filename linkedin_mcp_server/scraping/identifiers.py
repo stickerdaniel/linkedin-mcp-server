@@ -55,6 +55,7 @@ __all__ = [
     "normalize_job_id",
     "normalize_opaque_id",
     "normalize_person_identifier",
+    "normalize_profile_urn",
     "normalize_thread_id",
     "person_profile_url",
 ]
@@ -474,3 +475,12 @@ def normalize_job_id(value: str) -> str:
 def normalize_thread_id(value: str) -> str:
     """The id for a conversation, from the id or from a reference to it."""
     return normalize_opaque_id(value, field="thread_id", route=_THREAD_ROUTE)
+
+
+def normalize_profile_urn(value: str) -> str:
+    """A caller-supplied profile id, refused when it is a path or a URL.
+
+    ``send_message`` compares this after stripping a ``urn:li:fsd_profile:``
+    prefix, so that form stays intact here.
+    """
+    return normalize_opaque_id(value, field="profile_urn")
