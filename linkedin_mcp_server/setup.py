@@ -289,9 +289,14 @@ async def _login_into_fresh_profile(
     )
     viewer = LoginViewer() if login_viewer else None
     failure: BaseException | None = None
+    handed_over = False
     try:
         if viewer is not None:
             viewer.start_window_manager()
+        # ``_run_login`` opens the manager on its first line, so from here on
+        # the manager's verdict is an answer about this profile. Before here it
+        # is only its pessimistic default, which is not the same thing.
+        handed_over = True
         result = await _run_login(
             manager, user_data_dir, config, login_timeout_ms, viewer=viewer
         )
@@ -306,8 +311,13 @@ async def _login_into_fresh_profile(
         # teardown that did complete; otherwise an ordinary timeout would leave
         # the profile held for the rest of this process's life. Defaults to
         # confirmed for a manager that does not report it, so a stand-in cannot
-        # wedge the profile.
-        state.close_confirmed = bool(getattr(manager, "close_confirmed", True))
+        # wedge the profile, and for one never opened, which cannot be holding
+        # anything: a window manager that fails to come up ends the login
+        # before any browser exists, and reading the default off that manager
+        # would keep the profile over a Chromium that never ran.
+        state.close_confirmed = (
+            bool(getattr(manager, "close_confirmed", True)) if handed_over else True
+        )
         if viewer is not None:
             try:
                 viewer.stop_window_manager()

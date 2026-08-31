@@ -613,6 +613,12 @@ class TestTheHeadlessFallbackWaitsForTheFirstLaunchToGo:
         profile, so the launch reports the window failure it started with
         rather than holding the directory. It does not go back and open the
         browser it declined to open.
+
+        Freeing it is only half the job: the caller has to be able to see that
+        it is free. The failure leaves through ``__aenter__``, so there is no
+        ``__aexit__`` to record the verdict, and a caller reading
+        ``close_confirmed`` from a ``finally`` would otherwise keep a profile
+        this launch has proved it left.
         """
         recorder: dict = {}
         start, _ = self._fake_playwright(recorder, refuse_headed=True)
@@ -640,6 +646,7 @@ class TestTheHeadlessFallbackWaitsForTheFirstLaunchToGo:
 
         assert recorder["flags_at_driver_start"] == ["1"]
         assert recorder["events"] == ["driver-start", "stop", "drain", "drain"]
+        assert manager.close_confirmed is True
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")

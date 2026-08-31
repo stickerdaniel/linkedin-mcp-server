@@ -573,6 +573,17 @@ class BrowserManager:
             # landing on the shield would discard the very result that decides
             # whether the profile may be handed on.
             closed, _ = await await_deferring_cancels(self.close())
+            # The same field ``__aexit__`` writes, because this is the same
+            # answer and there is no exit to write it: a failing ``start()``
+            # means ``__aenter__`` raised, and Python then never calls
+            # ``__aexit__``. Without this the one close that *did* prove the
+            # profile free is invisible to the caller, which reads
+            # :attr:`close_confirmed` from a ``finally`` and keeps the profile
+            # on it. Measured against an unusable ``CHROME_PATH``: the drain
+            # proved no Chromium was left, and the login still kept the lease,
+            # skipped the guardian release and left the retired session in
+            # quarantine for the life of the process.
+            self._close_confirmed = closed
             if isinstance(e, BrowserDowngradeError):
                 # Through untouched, and ahead of the shutdown check rather than
                 # after it. Both wrappings below carry a recovery that would
@@ -749,8 +760,13 @@ class BrowserManager:
 
         False means cleanup timed out or failed and the browser may still be
         running, so the profile must not be handed to anyone else. Also false
-        before the first exit and again from the moment a new launch begins, so
-        it never speaks for a browser that is currently up.
+        before the first launch is torn down and again from the moment a new
+        one begins, so it never speaks for a browser that is currently up.
+
+        A ``start()`` that fails answers here too. It closes what it may have
+        launched and that close can prove the profile free, but the failure
+        propagates out of ``__aenter__`` and there is no ``__aexit__`` behind
+        it to record the verdict.
         """
         return self._close_confirmed
 
