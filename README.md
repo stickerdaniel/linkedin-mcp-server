@@ -301,7 +301,9 @@ On startup, the MCP Bundle starts preparing the shared Patchright Chromium brows
 
 ### Authentication
 
-Log in once. The container opens a LinkedIn login browser that you drive from your own browser tab:
+Log in once. The container opens a LinkedIn login browser that you drive from your own browser tab.
+
+macOS / Linux:
 
 ```bash
 # Create the directory first so the container can save your session into it
@@ -313,9 +315,21 @@ docker run -it --rm \
   --login --login-viewer
 ```
 
+PowerShell (Windows):
+
+```powershell
+$sessionDir = Join-Path $env:USERPROFILE ".linkedin-mcp"
+New-Item -ItemType Directory -Force -Path $sessionDir | Out-Null
+docker run -it --rm `
+  -v "${sessionDir}:/home/pwuser/.linkedin-mcp" `
+  -p 127.0.0.1:6080:6080 `
+  stickerdaniel/linkedin-mcp-server:latest `
+  --login --login-viewer
+```
+
 Open the full URL the command prints (it carries the access token) and sign in. The viewer closes itself afterwards; let the command exit on its own so the session is stored completely. It gives up after 30 minutes.
 
-Keep the `-v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp` mount on every later `docker run`, otherwise the server cannot find the session.
+Keep the same host directory mounted at `/home/pwuser/.linkedin-mcp` on every later `docker run`, otherwise the server cannot find the session.
 
 **Configure Claude Desktop with Docker**
 
@@ -416,8 +430,9 @@ docker run -it --rm \
 PowerShell (Windows):
 
 ```powershell
+$sessionDir = Join-Path $env:USERPROFILE ".linkedin-mcp"
 docker run -it --rm `
-  -v C:/Users/Alice/.linkedin-mcp:/home/pwuser/.linkedin-mcp `
+  -v "${sessionDir}:/home/pwuser/.linkedin-mcp" `
   -p 127.0.0.1:8080:8080 `
   stickerdaniel/linkedin-mcp-server:latest `
   --transport streamable-http --host 0.0.0.0 --port 8080 --path /mcp

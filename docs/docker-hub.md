@@ -26,7 +26,9 @@ A Model Context Protocol (MCP) server that connects AI assistants to LinkedIn. A
 
 ## Quick Start
 
-The image ships full Chromium. Log in once through a browser the container shows you in your own browser tab:
+The image ships full Chromium. Log in once through a browser the container shows you in your own browser tab.
+
+macOS / Linux:
 
 ```bash
 # Create the directory first so the container can save your session into it
@@ -38,9 +40,21 @@ docker run -it --rm \
   --login --login-viewer
 ```
 
+PowerShell (Windows):
+
+```powershell
+$sessionDir = Join-Path $env:USERPROFILE ".linkedin-mcp"
+New-Item -ItemType Directory -Force -Path $sessionDir | Out-Null
+docker run -it --rm `
+  -v "${sessionDir}:/home/pwuser/.linkedin-mcp" `
+  -p 127.0.0.1:6080:6080 `
+  stickerdaniel/linkedin-mcp-server:latest `
+  --login --login-viewer
+```
+
 Open the full URL the command prints (it carries the access token) and sign in. The viewer closes itself afterwards; let the command exit on its own so the session is stored completely. It gives up after 30 minutes.
 
-Keep the `-v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp` mount on every later `docker run`. A session created on the host with `uvx mcp-server-linkedin@latest --login` works too, and the container then rebuilds its own profile from those cookies on each start.
+Keep the same host directory mounted at `/home/pwuser/.linkedin-mcp` on every later `docker run`. A session created on the host with `uvx mcp-server-linkedin@latest --login` works too, and the container then rebuilds its own profile from those cookies on each start.
 
 If an older rootful Docker run left that host directory owned by root, repair it with `sudo chown -R "$(id -u):$(id -g)" ~/.linkedin-mcp`.
 
