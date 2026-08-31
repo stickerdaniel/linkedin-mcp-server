@@ -816,17 +816,32 @@ def _stop_child(
     deadline = time.monotonic() + _STOP_CHILD_SECONDS
     if windows_job is not None:
         if assigned:
-            windows_job.terminate()
             try:
-                child.wait(timeout=max(deadline - time.monotonic(), 0.0))
-            except subprocess.TimeoutExpired as exc:
-                raise ProcessTreeError(
-                    "The Windows owner gate did not exit after Job termination"
-                ) from exc
-            # ActiveProcesses includes an exited member until every process-handle
-            # reference is released. CPython retains this direct gate handle after
-            # wait(), so release it before asking the Job to prove it is empty.
-            windows_job.release_popen_handle(child)
+                windows_job.terminate()
+                try:
+                    child.wait(timeout=max(deadline - time.monotonic(), 0.0))
+                except subprocess.TimeoutExpired as exc:
+                    raise ProcessTreeError(
+                        "The Windows owner gate did not exit after Job termination"
+                    ) from exc
+                # ActiveProcesses includes an exited member until every
+                # process-handle reference is released. CPython retains this
+                # direct gate handle after wait(), so release it before asking
+                # the Job to prove it is empty.
+                windows_job.release_popen_handle(child)
+            except BaseException:
+                # Kill-on-close is the one containment that depends on none of
+                # the calls above. Without this the handle stays open and unheld
+                # by anyone: the caller cleared its own cleanup before calling,
+                # and only this branch still knows the Job exists. The tree would
+                # then live until this process exits, holding the daemon lock a
+                # failed owner was stopped to release. The installer keeps the
+                # same fallback in ``_cleanup_assigned_windows_job_once``.
+                windows_job.close()
+                raise
+            # Left to settle itself: it closes on a proved drain and retains the
+            # handle on an unproved one, and retention is the deliberate choice
+            # to keep containment authority rather than to abandon it.
             windows_job.wait_until_empty(timeout=max(deadline - time.monotonic(), 0.0))
         else:
             # Before assignment EOF is the only contained stop. If the isolated

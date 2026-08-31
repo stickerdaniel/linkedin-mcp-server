@@ -94,6 +94,13 @@ def start_browser_guardian(lease_fd: int) -> None:
     ready_read, ready_write = os.pipe()
     owner_pid = os.getpid()
     owner_group = os.getpgrp()
+    # Zero unless this process leads its own group, because the group it sits in
+    # otherwise belongs to whoever started it: a shell, an MCP client, a CI
+    # runner. Killing that on a crash would take processes this server never
+    # launched. The cost is that the guardian then ends only the marked Chromium
+    # groups, so an unmarked survivor of the same crash, most likely the Node
+    # driver, is left to exit on its own. That one holds no profile once its
+    # Chromium is gone, which is why the trade goes this way.
     protected_owner_group = owner_group if owner_group == owner_pid else 0
     guardian = Path(__file__).with_name("process_guardian.py").resolve()
     process: subprocess.Popen[Any] | None = None

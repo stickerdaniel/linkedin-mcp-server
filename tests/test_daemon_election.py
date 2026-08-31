@@ -51,6 +51,7 @@ from linkedin_mcp_server.daemon_descriptor import (
     publish,
 )
 from linkedin_mcp_server.daemon_lock import DaemonLock, daemon_is_running
+from linkedin_mcp_server.process_tree import ProcessTreeError
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _RUNTIME = "test-runtime"
@@ -1526,6 +1527,54 @@ class TestWindowsOwnerHandoff:
             "close-gate-handle",
             "drain-job",
         ]
+
+    @pytest.mark.parametrize("failing", ["terminate", "wait", "release"])
+    def test_a_failed_post_assignment_stop_still_closes_the_job(self, failing: str):
+        """Kill-on-close is the fallback, and nothing else is left to reach it.
+
+        The caller clears its own cleanup before calling this, so a Job left open
+        here is one nobody closes until this process exits, and the tree the stop
+        existed to end keeps the daemon lock for that whole time. Parametrised
+        rather than written once because each failing call leaves the Job in a
+        different state, and the close is the only thing all three share.
+        """
+        events: list[str] = []
+
+        class _Child:
+            pid = 4242
+            stdin = None
+            returncode: int | None = None
+
+            def wait(self, timeout: float) -> int:
+                if failing == "wait":
+                    raise subprocess.TimeoutExpired("gate", timeout)
+                events.append("reap-gate")
+                self.returncode = 1
+                return 1
+
+        class _Job:
+            def terminate(self) -> None:
+                if failing == "terminate":
+                    raise ProcessTreeError("Windows could not terminate the Job")
+                events.append("terminate-job")
+
+            def release_popen_handle(self, process: object) -> None:
+                if failing == "release":
+                    raise ProcessTreeError("Windows could not release the handle")
+                events.append("release-gate-handle")
+
+            def wait_until_empty(self, *, timeout: float) -> None:
+                raise AssertionError("a Job that never stopped was asked to drain")
+
+            def close(self) -> None:
+                events.append("close-job")
+
+        with pytest.raises(ProcessTreeError):
+            election_module._stop_child(
+                cast(Any, _Child()), windows_job=cast(Any, _Job()), assigned=True
+            )
+
+        assert events[-1] == "close-job"
 
 
 class TestRealOwner:
