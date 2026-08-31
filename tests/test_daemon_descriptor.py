@@ -61,6 +61,18 @@ account_database_only = pytest.mark.skipif(
 _REAL_ACCOUNT_HOME = daemon_descriptor_module._account_home
 
 
+def _planted_daemon_dir(auth_root: Path) -> Path:
+    """The per-auth state directory, made the way production makes it.
+
+    Not ``mkdir(parents=True)``. The application namespace above it is state
+    ``prepare_daemon_state`` creates and then verifies as its own, so one
+    planted by hand is foreign content to that verification: on Windows it
+    comes back owned by a different account and the ownership check refuses it,
+    which is the check working rather than a fixture detail.
+    """
+    return prepare_daemon_state(auth_root)
+
+
 def _stub_windows_hardening(monkeypatch: pytest.MonkeyPatch) -> None:
     """Take out the ACL write and the ACL read back together.
 
@@ -323,8 +335,7 @@ class TestPreparedCommit:
     @windows_only
     def test_a_junction_cannot_redirect_commit_or_pending_cleanup(self, tmp_path: Path):
         instance_id = new_instance_id()
-        directory = daemon_dir(tmp_path)
-        directory.parent.mkdir(parents=True)
+        directory = _planted_daemon_dir(tmp_path)
         redirected = tmp_path / "redirected-daemon-state"
         redirected.mkdir()
         published = redirected / "daemon.json"
@@ -436,7 +447,7 @@ class TestPreparedCommit:
     ):
         token = new_token()
         descriptor = _descriptor(tmp_path, token)
-        daemon_dir(tmp_path).mkdir(parents=True)
+        _planted_daemon_dir(tmp_path)
         descriptor_path(tmp_path).mkdir()
 
         with pytest.raises(IsADirectoryError):
@@ -477,7 +488,7 @@ class TestPreparedCommit:
     def test_validation_rejects_malformed_pending_json(self, tmp_path: Path):
         instance_id = new_instance_id()
         pending = pending_descriptor_path(tmp_path, instance_id)
-        pending.parent.mkdir(parents=True, exist_ok=True)
+        _planted_daemon_dir(tmp_path)
         pending.write_text("{ not json")
 
         with pytest.raises(DescriptorError, match="not valid JSON"):
@@ -494,9 +505,7 @@ class TestPreparedCommit:
         token = new_token()
         first = _descriptor(tmp_path, token)
         second_id = new_instance_id()
-        pending_descriptor_path(tmp_path, second_id).parent.mkdir(
-            parents=True, exist_ok=True
-        )
+        _planted_daemon_dir(tmp_path)
         pending_descriptor_path(tmp_path, second_id).write_text(first.to_json())
 
         with pytest.raises(DescriptorError, match="another generation"):
@@ -621,7 +630,7 @@ class TestRefusals:
         # have taken it for a first start and elected a second owner while the
         # first was still running. Absence and untrustworthy have to stay
         # distinguishable, because only one of them means "go ahead".
-        descriptor_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        _planted_daemon_dir(tmp_path)
         descriptor_path(tmp_path).symlink_to(tmp_path / "nowhere")
 
         with pytest.raises(DescriptorError, match="symbolic link"):
@@ -637,7 +646,7 @@ class TestRefusals:
         # whoever could write the link.
         elsewhere = tmp_path / "planted.json"
         elsewhere.write_text("{}")
-        descriptor_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        _planted_daemon_dir(tmp_path)
         descriptor_path(tmp_path).symlink_to(elsewhere)
 
         with pytest.raises(DescriptorError, match="symbolic link"):
@@ -652,7 +661,7 @@ class TestRefusals:
         # Discovery runs on every cold start, so a named pipe left at this path
         # would stall it inside open() with no timeout and no error, rather
         # than being reported as something the daemon did not write.
-        descriptor_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        _planted_daemon_dir(tmp_path)
         os.mkfifo(descriptor_path(tmp_path))
 
         with pytest.raises(DescriptorError, match="not something this daemon wrote"):
@@ -663,7 +672,7 @@ class TestRefusals:
         # fragment, and a fragment of JSON reads as malformed. That sends
         # whoever reads the message looking for a corrupt descriptor rather
         # than for whatever wrote something this size.
-        descriptor_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        _planted_daemon_dir(tmp_path)
         descriptor_path(tmp_path).write_text(json.dumps({"pad": "x" * 200_000}))
 
         with pytest.raises(DescriptorError, match="larger than anything"):
@@ -673,7 +682,7 @@ class TestRefusals:
         # A caller telling absence from untrusted state through DescriptorError
         # would otherwise meet a decoding error, which says nothing about which
         # of the two it is looking at.
-        descriptor_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        _planted_daemon_dir(tmp_path)
         descriptor_path(tmp_path).write_bytes(b"\xff\xfe")
 
         with pytest.raises(DescriptorError, match="not text this daemon wrote"):
@@ -1236,7 +1245,12 @@ class TestStateLocation:
             capture_output=True,
         )
 
-        with pytest.raises(PrivateStateError, match="grants access"):
+        # Either refusal is this test passing, and which one arrives first is a
+        # property of the machine: a namespace planted by hand is not this
+        # account's own state, so the ownership check can speak before the
+        # permissions are read. The line below is the subject, that nothing was
+        # repaired on the way out.
+        with pytest.raises(PrivateStateError, match="grants access|is owned by"):
             prepare_daemon_state(tmp_path / "auth")
 
         assert "S-1-1-0" in {entry.sid for entry in describe_dacl(application).entries}

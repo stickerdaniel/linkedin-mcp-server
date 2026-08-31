@@ -3774,7 +3774,11 @@ class TestAtomicStartupCommit:
             daemon_descriptor_module.pending_descriptor_path(auth_root, replacement),
             daemon_descriptor_module.token_path(auth_root, replacement),
         )
-        abandoned_paths[0].parent.mkdir(parents=True, exist_ok=True)
+        # Made the way production makes it, not with a bare mkdir: the
+        # application namespace above this is state prepare_daemon_state
+        # creates and then verifies as its own, and a planted one is foreign
+        # content to that check.
+        daemon_descriptor_module.prepare_daemon_state(auth_root)
         for path in abandoned_paths:
             path.write_text("abandoned")
 
