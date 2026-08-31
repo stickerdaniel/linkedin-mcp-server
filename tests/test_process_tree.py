@@ -2079,7 +2079,14 @@ child = subprocess.Popen(
     start_new_session=True,
 )
 process_tree.remember_detached_process_groups()
-Path(sys.argv[1]).write_text(str(child.pid))
+# Through a rename, because the test waits for this path to exist and then
+# reads it as an integer. A plain write creates the file before its bytes
+# land, and a reader winning that gap reads an empty file or a truncated
+# pid, which is still a valid integer naming some unrelated process.
+marker = Path(sys.argv[1])
+partial = marker.with_name(marker.name + ".partial")
+partial.write_text(str(child.pid))
+partial.replace(marker)
 daemon_owner._exit_hard(None)
 """
     process = subprocess.Popen(
@@ -2803,7 +2810,14 @@ child = subprocess.Popen(
     stdout=subprocess.DEVNULL,
     stderr=subprocess.DEVNULL,
 )
-Path(sys.argv[1]).write_text(f"{os.getpid()} {child.pid}")
+# Through a rename, for the reason given at the detached-group fixture
+# above: existence has to imply the whole line. Measured on Windows CI,
+# where the reader saw the file between its creation and its content and
+# failed unpacking two pids out of nothing.
+marker = Path(sys.argv[1])
+partial = marker.with_name(marker.name + ".partial")
+partial.write_text(f"{os.getpid()} {child.pid}")
+partial.replace(marker)
 time.sleep(600)
 """
         job = process_tree.WindowsJob.anonymous()
