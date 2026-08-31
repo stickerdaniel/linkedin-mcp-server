@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import os
 import signal
+import subprocess
+import sys
+import threading
 from typing import Any
 
 import pytest
@@ -143,3 +146,71 @@ def test_orphaned_worker_kills_its_own_installer_group(
         worker._stop_without_supervisor(1)
 
     assert signals == [(12345, signal.SIGKILL)]
+
+
+def test_the_target_does_not_inherit_the_supervisor_lease():
+    """The real worker, because the defect was in what it hands its target.
+
+    The lease thread holds a blocking read on this worker's stdin, and a target
+    that inherits the same handle waits behind it. On Windows that wait starts
+    before the target runs a line: measured on a runner, the process existed for
+    the whole run, wrote no marker and produced no output, and a real browser
+    install therefore never returned. On POSIX the target reaches its own first
+    read and blocks there instead. One handle, two shapes, and the same cause.
+
+    Asserted through the target's own stdout rather than through the call, so a
+    worker that goes back to handing the lease over fails here in bounded time
+    instead of hanging the suite.
+    """
+    reports_its_stdin = (
+        "import sys; print('stdin=' + repr(sys.stdin.read(1)), flush=True)"
+    )
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-P",
+            "-m",
+            "linkedin_mcp_server.installer_worker",
+            "--",
+            sys.executable,
+            "-P",
+            "-c",
+            reports_its_stdin,
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        # As the supervisor starts it, and not as a detail. Losing its lease
+        # makes this worker signal its own process group, so a worker left in
+        # the runner's group takes the test session with it: measured here, a
+        # first draft of this test killed pytest between two assertions.
+        start_new_session=os.name != "nt",
+    )
+    lease = process.stdin
+    spoken_by_the_target = process.stdout
+    assert lease is not None and spoken_by_the_target is not None
+    spoken: list[bytes] = []
+    try:
+        lease.write(f"{_NONCE}\n".encode("ascii"))
+        lease.flush()
+
+        # Held open on purpose: closing it is what ends the lease, and the point
+        # here is what the target sees while the lease is still live.
+        listener = threading.Thread(
+            target=lambda: spoken.append(spoken_by_the_target.readline()),
+            daemon=True,
+        )
+        listener.start()
+        listener.join(30)
+        assert not listener.is_alive(), "the target never reported its own stdin"
+        assert spoken[0].strip() == b"stdin=''"
+
+        lease.close()
+        assert process.wait(timeout=30) is not None
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=30)
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if stream is not None and not stream.closed:
+                stream.close()

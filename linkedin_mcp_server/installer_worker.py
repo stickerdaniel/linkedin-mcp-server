@@ -77,6 +77,16 @@ def main(argv: list[str] | None = None) -> int:
     try:
         target = subprocess.Popen(
             _command(argv),
+            # Never the lease. The thread above holds a blocking read on this
+            # process's stdin, and on Windows the parent's stdin is an asyncio
+            # named pipe whose child end is a synchronous handle: a target that
+            # inherits it queues its own first operation behind that read, which
+            # only ends when the parent lets go. Measured on a Windows runner,
+            # the target process existed for the whole run and never executed a
+            # line, writing no marker and no output. Withholding the handle
+            # fixes it, and so does dropping the read; the target has no use for
+            # a control channel either way.
+            stdin=subprocess.DEVNULL,
             stdout=None,
             stderr=subprocess.STDOUT,
             close_fds=True,
