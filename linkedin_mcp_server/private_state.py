@@ -78,6 +78,33 @@ def _as_private_state_error(path: Path, action: str) -> Iterator[None]:
         raise PrivateStateError(f"Could not {action} {path}: {exc}") from exc
 
 
+def harden_created_directory(path: Path) -> None:
+    """Harden a directory known to have been created by this process."""
+    with _as_private_state_error(path, "prepare the new private directory"):
+        entry = path.lstat()
+        if stat.S_ISLNK(entry.st_mode):
+            raise PrivateStateError(
+                f"{path} is a symbolic link rather than a private directory"
+            )
+        if not stat.S_ISDIR(entry.st_mode):
+            raise PrivateStateError(f"Not a directory: {path}")
+        if _WINDOWS:
+            attributes = getattr(entry, "st_file_attributes", None)
+            if attributes is None:
+                raise PrivateStateError(
+                    f"Windows did not report file attributes for {path}"
+                )
+            if attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                raise PrivateStateError(
+                    f"{path} is a reparse point rather than a private directory"
+                )
+            from linkedin_mcp_server.windows_acl import restrict_to_current_user
+
+            restrict_to_current_user(path, directory=True)
+            return
+        _harden_posix(path, _PRIVATE_DIR_MODE)
+
+
 def harden_directory(path: Path) -> None:
     """Create *path* if needed and leave it readable only by this account.
 
@@ -467,6 +494,12 @@ def _drop_extended_acl_via(
             )
     finally:
         library.acl_free(empty)
+
+
+def verify_no_extended_acl(path: Path) -> None:
+    """Refuse when an existing path carries access outside its mode bits."""
+    with _as_private_state_error(path, "verify the access list on"):
+        _verify_no_extended_acl(path)
 
 
 def _verify_no_extended_acl(path: Path) -> None:

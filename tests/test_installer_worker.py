@@ -7,7 +7,7 @@ import signal
 import subprocess
 import sys
 import threading
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -23,6 +23,27 @@ class _ImmediateThread:
 
     def start(self) -> None:
         self.target(*self.args)
+
+
+class _IdleThread:
+    def __init__(self, **kwargs: object):
+        pass
+
+    def start(self) -> None:
+        return None
+
+
+class _SupervisorEvent:
+    def is_set(self) -> bool:
+        return False
+
+    def wait(self, timeout: float | None = None) -> bool:
+        return timeout is None
+
+
+class _FinishedTarget:
+    def poll(self) -> int:
+        return 0
 
 
 def test_supervisor_lease_is_armed_before_patchright_creation(
@@ -99,25 +120,11 @@ def test_finished_frame_carries_the_stdin_nonce(
 def test_target_spawn_error_reaches_installer_output(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
-    class _LiveSupervisor:
-        def is_set(self) -> bool:
-            return False
-
-        def wait(self, timeout: float | None = None) -> bool:
-            return False
-
-    class _IdleThread:
-        def __init__(self, **_kwargs: object):
-            pass
-
-        def start(self) -> None:
-            return None
-
     def denied(*_args: object, **_kwargs: object) -> None:
         raise PermissionError("target access denied")
 
     monkeypatch.setattr(worker, "_await_nonce", lambda: _NONCE)
-    monkeypatch.setattr(worker.threading, "Event", _LiveSupervisor)
+    monkeypatch.setattr(worker.threading, "Event", _SupervisorEvent)
     monkeypatch.setattr(worker.threading, "Thread", _IdleThread)
     monkeypatch.setattr(worker.subprocess, "Popen", denied)
 
@@ -125,6 +132,37 @@ def test_target_spawn_error_reaches_installer_output(
     captured = capsys.readouterr()
     assert "Patchright target could not start: target access denied" in captured.out
     assert captured.err == ""
+
+
+def test_private_temp_environment_reaches_patchright(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    options: list[dict[str, object]] = []
+
+    def spawn(*args: object, **kwargs: object) -> _FinishedTarget:
+        options.append(kwargs)
+        return _FinishedTarget()
+
+    for name in ("TMPDIR", "TMP", "TEMP"):
+        monkeypatch.setenv(name, "/private/installer")
+    monkeypatch.setattr("builtins.print", lambda *a, **k: None)
+    monkeypatch.setattr(worker, "_await_nonce", lambda: _NONCE)
+    monkeypatch.setattr(worker.threading, "Event", _SupervisorEvent)
+    monkeypatch.setattr(worker.threading, "Thread", _IdleThread)
+    monkeypatch.setattr(worker.subprocess, "Popen", spawn)
+    monkeypatch.setattr(
+        worker,
+        "_stop_without_supervisor",
+        lambda returncode: (_ for _ in ()).throw(SystemExit(returncode)),
+    )
+
+    with pytest.raises(SystemExit, match="0"):
+        worker.main(["worker", "--", "target"])
+
+    environment = cast(dict[str, str], options[0]["env"])
+    assert {environment[name] for name in ("TMPDIR", "TMP", "TEMP")} == {
+        "/private/installer"
+    }
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")

@@ -137,6 +137,8 @@ def test_worker_status_preserves_target_result_and_command(
     monkeypatch.setenv("PYTHONPATH", ".")
     monkeypatch.setattr(supervisor, "_await_nonce", lambda: _NONCE)
     monkeypatch.setattr(supervisor, "_await_start", lambda nonce: nonce == _NONCE)
+    for name in ("TMPDIR", "TMP", "TEMP"):
+        monkeypatch.setenv(name, "/private/installer")
     monkeypatch.setattr(supervisor.threading, "Thread", _StatusThread)
     monkeypatch.setattr(supervisor.subprocess, "Popen", spawn)
     monkeypatch.setattr(
@@ -156,6 +158,9 @@ def test_worker_status_preserves_target_result_and_command(
     assert reports == [f"armed {_NONCE}", f"started {_NONCE} {spawned[0].pid}"]
     environment = cast(dict[str, str], options[0]["env"])
     assert "PYTHONPATH" not in environment
+    assert {environment[name] for name in ("TMPDIR", "TMP", "TEMP")} == {
+        "/private/installer"
+    }
 
 
 @pytest.mark.parametrize(
