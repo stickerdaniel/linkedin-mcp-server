@@ -679,8 +679,8 @@ def restrict_to_current_user(path: Path, *, directory: bool) -> None:
     always the token user: the policy "System objects: Default owner for
     objects created by members of the Administrators group" makes it the
     Administrators group instead, and GitHub's own Windows runners ship that
-    way. So the default owner is accepted here alongside the user SID, and the
-    owner is then normalized to the user SID together with the protected DACL.
+    way. So that owner is accepted here alongside the user SID, and the owner
+    is then normalized to the user SID together with the protected DACL.
 
     Accepting it is not a hole, because under that policy it is not a
     distinction Windows offers. Every administrator's objects are owned by the
@@ -690,6 +690,13 @@ def restrict_to_current_user(path: Path, *, directory: bool) -> None:
     anyway. What the check still refuses is the case it exists for: content
     owned by some *other*, non-administrative account, whose objects carry
     their own user SID and match neither of these.
+
+    Which is why the default owner is accepted only when it is one of the
+    identities in :data:`_TRUSTED_SYSTEM_SIDS`. A token's default owner is any
+    group it carries with the owner attribute, and the argument above holds for
+    an administrative one alone: taking a shared non-administrative group on
+    trust would hand every member of it the same directory, which is the
+    boundary this function exists to keep.
     """
     _advapi32, _kernel32 = _load()
     _require_acl_capable_volume(path)
@@ -699,17 +706,19 @@ def restrict_to_current_user(path: Path, *, directory: bool) -> None:
     accepted_owners = {expected_owner}
     default_sid, default_buffer = default_owner_sid()
     try:
-        accepted_owners.add(_sid_to_string(default_sid))
+        default_owner = _sid_to_string(default_sid)
     finally:
         del default_buffer
+    if default_owner in _TRUSTED_SYSTEM_SIDS:
+        accepted_owners.add(default_owner)
 
     actual_owner = read_owner(path)
     if actual_owner not in accepted_owners:
         del sid_buffer
         raise PrivateStateError(
-            f"{path} is owned by {actual_owner}, not by this account or this "
-            f"process's default owner. Refusing to convert another account's "
-            f"content into trusted private state."
+            f"{path} is owned by {actual_owner}, which is neither this account "
+            f"nor a trusted system owner. Refusing to convert another "
+            f"account's content into trusted private state."
         )
 
     replace_owner = actual_owner != expected_owner

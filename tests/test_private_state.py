@@ -916,6 +916,10 @@ class TestWindowsAclOffWindows:
         Objects this account creates are owned by that group there, so refusing
         it would refuse this account its own daemon state. It is accepted and
         the owner is written back to the user SID in the same call.
+
+        Named by its real SID rather than by a placeholder, because that is the
+        whole claim: the policy can only ever put this one group there, and a
+        stand-in string would pass a check that admits nothing else.
         """
         from linkedin_mcp_server import windows_acl
 
@@ -960,10 +964,10 @@ class TestWindowsAclOffWindows:
             "_sid_to_string",
             lambda sid: {
                 user_sid: "current-account",
-                default_owner_sid: "default-owner",
+                default_owner_sid: "S-1-5-32-544",
             }[sid],
         )
-        monkeypatch.setattr(windows_acl, "read_owner", lambda _path: "default-owner")
+        monkeypatch.setattr(windows_acl, "read_owner", lambda _path: "S-1-5-32-544")
         monkeypatch.setattr(
             windows_acl, "_build_owner_only_acl", lambda *_args, **_kwargs: acl
         )
@@ -980,6 +984,54 @@ class TestWindowsAclOffWindows:
                 user_sid,
             )
         ]
+
+    def test_a_default_owner_no_policy_can_produce_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The other half of the rule above, and the reason it is a set.
+
+        A token's default owner is whichever of its groups carries the owner
+        attribute, and Windows' own policy can only ever put Administrators
+        there. A token built by hand can name a shared ordinary group instead,
+        and a directory owned by that group is every member's directory. Taking
+        it as this account's own state is precisely the boundary crossing the
+        owner check exists to refuse.
+        """
+        from linkedin_mcp_server import windows_acl
+
+        user_sid = object()
+        default_owner_sid = object()
+        shared_group = "S-1-5-21-11-22-33-1007"
+        assert shared_group not in windows_acl._TRUSTED_SYSTEM_SIDS
+
+        def never(*_args: object, **_kwargs: object) -> object:
+            raise AssertionError("a refused owner reached the ACL construction")
+
+        monkeypatch.setattr(windows_acl, "_load", lambda: (object(), object()))
+        monkeypatch.setattr(
+            windows_acl, "_require_acl_capable_volume", lambda _path: None
+        )
+        monkeypatch.setattr(
+            windows_acl, "current_user_sid", lambda: (user_sid, object())
+        )
+        monkeypatch.setattr(
+            windows_acl,
+            "default_owner_sid",
+            lambda: (default_owner_sid, object()),
+        )
+        monkeypatch.setattr(
+            windows_acl,
+            "_sid_to_string",
+            lambda sid: {
+                user_sid: "current-account",
+                default_owner_sid: shared_group,
+            }[sid],
+        )
+        monkeypatch.setattr(windows_acl, "read_owner", lambda _path: shared_group)
+        monkeypatch.setattr(windows_acl, "_build_owner_only_acl", never)
+
+        with pytest.raises(PrivateStateError, match="is owned by"):
+            windows_acl.restrict_to_current_user(tmp_path, directory=True)
 
     @pytest.mark.parametrize(
         "right_name",
@@ -1483,8 +1535,10 @@ class TestWindowsAclOffWindows:
         monkeypatch.setattr(
             windows_acl, "current_user_sid", lambda: (user_sid, object())
         )
-        # Stubbed with its own SID, so this stays the case the check exists for:
-        # a third account, refused while the token's own default owner is not.
+        # Given a SID of its own so the owner under test is a third party
+        # rather than either accepted identity, which is the case this check
+        # exists for. Untrusted, so it is refused in its own right too; the
+        # test beside this one is the one that separates those two reasons.
         monkeypatch.setattr(
             windows_acl, "default_owner_sid", lambda: (default_owner, object())
         )
