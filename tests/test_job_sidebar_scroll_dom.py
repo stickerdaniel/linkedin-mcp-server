@@ -29,7 +29,13 @@ async def job_ids(page, *, scoped: bool = False) -> list[str]:
     return result["ids"]
 
 
-pytestmark = pytest.mark.browser_dom
+#: CI uses ``--dist loadgroup``. Keep every real Chromium test on one worker
+#: so browser startups cannot compete with the DOM cases' wall-clock timers.
+#: Without that distribution mode the group mark is inert.
+pytestmark = [
+    pytest.mark.browser_dom,
+    pytest.mark.xdist_group("browser_runtime"),
+]
 
 
 def sidebar(
