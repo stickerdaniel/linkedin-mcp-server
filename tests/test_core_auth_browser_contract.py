@@ -5,7 +5,14 @@ from patchright.async_api import async_playwright
 
 from linkedin_mcp_server.core.auth import _has_auth_cookie, wait_for_manual_login
 
-pytestmark = pytest.mark.browser_contract
+#: CI uses ``--dist loadgroup``. Keep every test that launches Chromium on one
+#: worker so browser startups cannot compete with the DOM cases' wall-clock
+#: timers.
+#: Without that distribution mode the group mark is inert.
+pytestmark = [
+    pytest.mark.browser_contract,
+    pytest.mark.xdist_group("browser_runtime"),
+]
 
 
 @pytest.fixture
