@@ -27,8 +27,9 @@ from linkedin_mcp_server.scraping.extractor import (
     _CLICK_INCOMING_ACCEPT_JS,
 )
 
-#: CI uses ``--dist loadgroup``. Keep every real Chromium test on one worker
-#: so browser startups cannot compete with the DOM cases' wall-clock timers.
+#: CI uses ``--dist loadgroup``. Keep every test that launches Chromium on one
+#: worker so browser startups cannot compete with the DOM cases' wall-clock
+#: timers.
 #: Without that distribution mode the group mark is inert.
 pytestmark = [
     pytest.mark.browser_dom,

@@ -51,10 +51,10 @@ from linkedin_mcp_server.config.schema import BrowserConfig
 from linkedin_mcp_server.core.browser import BrowserManager
 from browser_identity_harness import IdentityServer, describe_browser
 
-#: The group keeps every real Chromium test on one xdist worker. The identity
-#: cases reuse two cached launches, while the DOM and auth-contract fixtures
-#: launch per case. CI passes ``--dist loadgroup``; without it the mark is inert
-#: and the tests still pass, only with parallel browser startups.
+#: The group keeps every test that launches Chromium on one xdist worker. The
+#: identity cases reuse two cached launches, while the DOM and auth-contract
+#: fixtures launch per case. CI passes ``--dist loadgroup``; without it the mark
+#: is inert and the tests still pass, only with parallel browser startups.
 pytestmark = [
     pytest.mark.browser_identity,
     pytest.mark.xdist_group("browser_runtime"),
