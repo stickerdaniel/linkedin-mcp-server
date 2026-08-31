@@ -38,7 +38,10 @@ from __future__ import annotations
 import enum
 import logging
 import math
+import queue
+import threading
 import time
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -53,6 +56,11 @@ logger = logging.getLogger(__name__)
 #: that is nearly ready) does not feel like a stall. How *long* to wait belongs
 #: to the caller that lost the lock race, not here.
 _ATTACH_POLL_SECONDS = 0.1
+_DESCRIPTOR_READ_SECONDS = 1.0
+
+
+class _DescriptorReadTimeout(TimeoutError):
+    pass
 
 
 class OwnerState(enum.Enum):
@@ -178,12 +186,102 @@ def _inspect(auth_root: Path, profile: Path, config: AppConfig) -> OwnerLookup:
     )
 
 
+class _DescriptorInspector:
+    """Reuse one native descriptor inspection until it has actually finished."""
+
+    def __init__(self, auth_root: Path, profile: Path, config: AppConfig) -> None:
+        self._auth_root = auth_root
+        self._profile = profile
+        self._config = config
+        self._pending: queue.Queue[OwnerLookup | BaseException] | None = None
+        self._settled = threading.Event()
+
+    @property
+    def settled(self) -> bool:
+        """Whether an inspection here has reached an outcome, of either kind.
+
+        An outcome and never a verdict: a reader that raised has finished
+        touching state storage just as much as one that returned, and this
+        question is only ever asked about what the reader may still be doing.
+        Stays true once an inspection completes, because what a later caller
+        needs to know is that this inspector is no longer the first to touch
+        that state, not which of its reads is currently in flight.
+        """
+        return self._settled.is_set()
+
+    def inspect_until(self, *, timeout: float) -> OwnerLookup:
+        """Wait within one budget without abandoning a blocked native reader."""
+        pending = self._begin()
+        try:
+            value = pending.get(timeout=max(timeout, 0.0))
+        except queue.Empty:
+            raise _DescriptorReadTimeout(
+                "Daemon descriptor state could not be read in time"
+            ) from None
+        self._pending = None
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+    def settle_within(self, *, timeout: float) -> bool:
+        """Wait for the inspection in flight to finish, without consuming it.
+
+        The reading itself belongs to :meth:`inspect_until`; this is for a caller
+        that must know the reader is no longer inside state storage before it
+        does something of its own. It reuses the one pending inspection rather
+        than starting a reader of its own, so waiting for the answer can never be
+        what makes a second process touch that state.
+        """
+        self._begin()
+        return self._settled.wait(max(timeout, 0.0))
+
+    def _begin(self) -> queue.Queue[OwnerLookup | BaseException]:
+        pending = self._pending
+        if pending is not None:
+            return pending
+        result: queue.Queue[OwnerLookup | BaseException] = queue.Queue(maxsize=1)
+        self._pending = result
+
+        def inspect() -> None:
+            try:
+                try:
+                    value: OwnerLookup | BaseException = _inspect(
+                        self._auth_root, self._profile, self._config
+                    )
+                except BaseException as exc:  # noqa: BLE001 - re-raised by the caller
+                    value = exc
+                result.put(value)
+            finally:
+                # In the finally, so a reader that could not even hand its answer
+                # back still reports that it has stopped. A waiter that hung on
+                # such a reader would be waiting for something that has already
+                # happened.
+                self._settled.set()
+
+        threading.Thread(
+            target=inspect,
+            name="daemon-descriptor-read",
+            daemon=True,
+        ).start()
+        return result
+
+
+def _names_an_ignored_instance(lookup: OwnerLookup, ignored: AbstractSet[str]) -> bool:
+    """Whether this reading is of a generation the caller has already written off."""
+    if not ignored:
+        return False
+    attachment = lookup.attachment
+    return attachment is not None and attachment.descriptor.instance_id in ignored
+
+
 def look_up_owner(
     auth_root: Path,
     profile: Path,
     config: AppConfig,
     *,
     wait_seconds: float = 0.0,
+    ignore_instances: AbstractSet[str] = frozenset(),
+    _inspector: _DescriptorInspector | None = None,
 ) -> OwnerLookup:
     """Read the descriptor until it is compatible or the budget runs out.
 
@@ -204,6 +302,20 @@ def look_up_owner(
     starting, which in practice means having just lost the lock race. With the
     default of no wait this is a single read.
 
+    *ignore_instances* names generations the caller has already judged unusable,
+    and it exists because ``ATTACHABLE`` alone made this function return
+    instantly on a file the caller was going to throw away. Only the caller can
+    know that: burial lives in :mod:`linkedin_mcp_server.daemon_election` and is
+    established by connecting, which nothing here does. Without it a caller that
+    asked for a wait got none, and its own retry loop spun through the whole
+    backoff at read speed, starting a descriptor inspection thread and touching
+    state storage on every pass. Named instances are therefore waited out like
+    any other unusable state: the poll keeps watching the same file, so a *new*
+    generation published over it is still picked up within one poll interval,
+    and the buried endpoint is never contacted again. When the budget ends with
+    nothing better, the reading is returned exactly as before, so the caller's
+    own downgrade is unchanged.
+
     Raises:
         ValueError: *wait_seconds* is not finite.
     """
@@ -215,10 +327,23 @@ def look_up_owner(
     if not math.isfinite(wait_seconds):
         raise ValueError(f"wait_seconds must be a finite number, got {wait_seconds}")
 
-    deadline = time.monotonic() + max(wait_seconds, 0.0)
+    wait_budget = max(wait_seconds, 0.0)
+    deadline = time.monotonic() + wait_budget
+    inspector = _inspector or _DescriptorInspector(auth_root, profile, config)
+    last_lookup: OwnerLookup | None = None
     while True:
+        remaining = deadline - time.monotonic()
+        read_timeout = (
+            _DESCRIPTOR_READ_SECONDS
+            if wait_budget == 0.0
+            else min(_DESCRIPTOR_READ_SECONDS, max(remaining, 0.0))
+        )
         try:
-            lookup = _inspect(auth_root, profile, config)
+            lookup = inspector.inspect_until(timeout=read_timeout)
+        except _DescriptorReadTimeout as exc:
+            return last_lookup or OwnerLookup(
+                state=OwnerState.UNTRUSTED, reason=str(exc)
+            )
         except DescriptorError as exc:
             # Distinct from absence so the file is preserved rather than
             # cleaned up: beside a held lock it belongs to a live daemon. It
@@ -226,7 +351,10 @@ def look_up_owner(
             # this state still allows an election attempt.
             lookup = OwnerLookup(state=OwnerState.UNTRUSTED, reason=str(exc))
 
-        if lookup.state is OwnerState.ATTACHABLE:
+        last_lookup = lookup
+        if lookup.state is OwnerState.ATTACHABLE and not _names_an_ignored_instance(
+            lookup, ignore_instances
+        ):
             return lookup
 
         # Never sleep past the deadline. A flat poll interval turned a 1 ms
@@ -237,7 +365,13 @@ def look_up_owner(
             # The state at INFO, the detail at DEBUG. A reason can quote a path
             # or host out of the descriptor, and "nothing usable was published"
             # is the part that belongs in a log a user pastes into a report.
-            logger.info("No daemon to attach to (%s)", lookup.state.value)
+            # An ignored generation is named as such rather than by its state,
+            # which would otherwise print the "attachable" this wait exists to
+            # disbelieve.
+            if _names_an_ignored_instance(lookup, ignore_instances):
+                logger.info("No daemon to attach to (the published one is unusable)")
+            else:
+                logger.info("No daemon to attach to (%s)", lookup.state.value)
             logger.debug("Daemon lookup detail: %s", lookup.reason)
             return lookup
         time.sleep(min(_ATTACH_POLL_SECONDS, remaining))

@@ -1,31 +1,17 @@
 """Getting an owner started, from the side of the process that wants one.
 
 The counterpart to :mod:`linkedin_mcp_server.daemon`, which only reads. This is
-where a process acts: it takes the lock, starts a detached owner, and waits for
-the endpoint to exist. It never becomes the owner itself, because it cannot —
-``cli_main`` runs the stdio server blocking, so a process that served the owner's
-HTTP could not also serve its own client.
+where a process acts: it starts a detached owner and waits for the endpoint to
+exist. It never becomes the owner itself, because it cannot: ``cli_main`` runs
+the stdio server blocking, so a process that served the owner's HTTP could not
+also serve its own client.
 
-**Election is two sides, and one function cannot be both.** The process that wins
-the lock is not the process that serves. What that means splits by platform, and
-the split is measured rather than stylistic:
-
-*POSIX.* The frontend takes the lock first, then hands the descriptor to the
-child (``DaemonLock.inheritable_copy``). Taking it first is what removes the
-window: between releasing a lock and a child taking it, another client would see
-the position free and start a second browser against the same profile.
-
-*Windows.* A held lock cannot be handed over there at all — measured, 20 of 20
-(``daemon_lock.py:54-71``) — so the frontend takes no lock and the child competes
-for it. Every frontend then waits for whoever wins to publish. Trying to hand a
-lock over anyway would produce a child that believes it owns a browser while the
-lock sits free behind it.
-
-**The parent must let go of the lock before it serves anything.** Both
-descriptors refer to one locked open file description, so the lock lives as long
-as *either* is open. A frontend that kept its original would keep the daemon lock
-alive after the owner died, and every recovery afterwards would be locked out by
-a process that is not the owner and does not know it is holding anything.
+The child owns every operation that may mutate daemon state. It opens the log,
+takes the lock, starts the endpoint, and publishes while holding that lock. This
+subprocess boundary is also the frontend's timeout boundary: if state storage is
+stuck in the kernel, the parent can kill the child and prove that no abandoned
+worker can later acquire the lock or publish over an in-process fallback. A
+thread cannot provide that proof because it cannot be killed.
 """
 
 from __future__ import annotations
@@ -39,14 +25,16 @@ import subprocess
 import sys
 import threading
 import time
+import weakref
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, cast
+from typing import Any, BinaryIO, TypeVar, cast
 
 from linkedin_mcp_server import (
     __version__,
     daemon_config,
+    daemon_descriptor,
     daemon_owner,
     daemon_version,
 )
@@ -55,9 +43,11 @@ from linkedin_mcp_server.daemon import (
     Attachment,
     OwnerLookup,
     OwnerState,
+    _DescriptorInspector,
     look_up_owner,
 )
-from linkedin_mcp_server.daemon_lock import DaemonLock, DaemonLockError
+from linkedin_mcp_server.daemon_lock import DaemonLockError
+from linkedin_mcp_server.process_control import ControlListener
 from linkedin_mcp_server.process_protocol import new_nonce, read_authenticated_status
 from linkedin_mcp_server.process_tree import (
     ProcessTreeError,
@@ -76,12 +66,11 @@ _IS_WINDOWS = os.name == "nt"
 #: and reporting what it last saw. It is what bounds the delay a user sees when
 #: something goes wrong rather than when it goes right.
 #:
-#: At least twice the owner's own startup allowance
-#: (``daemon_owner._STARTUP_PROBE_SECONDS``), which a test enforces. A frontend
-#: stops a child that has said nothing by the time this runs out, so an owner
-#: permitted to take longer would be killed on a slow machine while still inside
-#: its own rules. The remainder covers what is spent before the owner's clock
-#: starts: handing the configuration over, and the lock attempts before that.
+#: Longer than the owner's endpoint and commit allowances combined, which a test
+#: enforces. A frontend stops a child that has said nothing by the time this runs
+#: out, so an owner permitted to take longer would be killed on a slow machine
+#: while still inside its own rules. The remainder covers configuration handover
+#: and lock attempts before the owner's clocks start.
 DEFAULT_ELECTION_SECONDS = 90.0
 
 #: How long a published owner has to answer before it is treated as *silent*.
@@ -102,6 +91,121 @@ _STAND_DOWN_SECONDS = 5.0
 #: disk is readable but known unusable. Short, because the thing being waited for
 #: is an owner finishing its shutdown, and long enough not to spin.
 _RETRY_SECONDS = 0.2
+_FAILURE_VERDICT_SECONDS = 0.2
+_PREPARED_READ_SECONDS = 1.0
+_PREPARED_CLEANUP_SECONDS = 1.0
+
+#: How long one pass waits for the Windows exclusion namespace before looking
+#: again. The election deadline is what bounds the whole wait; this only keeps
+#: the loop observing the descriptor while it waits.
+_EXCLUSION_SETTLE_SECONDS = 1.0
+
+#: Retry quickly through the initial race, then back off so a later lock release
+#: remains discoverable without creating one short-lived child per polling pass.
+_OWNER_START_BURST = 3
+_OWNER_START_RETRY_SECONDS = 0.5
+_MAX_OWNER_START_RETRY_SECONDS = 8.0
+
+
+def _owner_start_delay_after(starts: int, current: float) -> float:
+    if starts < _OWNER_START_BURST:
+        return current
+    return min(
+        max(current * 2, _OWNER_START_RETRY_SECONDS),
+        _MAX_OWNER_START_RETRY_SECONDS,
+    )
+
+
+class _Exclusion(enum.Enum):
+    """What the legacy Windows exclusion permits an election to do right now."""
+
+    #: The tombstone exists. A child started now cannot take that name.
+    READY = "ready"
+
+    #: The inspection that would establish it is still running. Nothing may be
+    #: started yet, and waiting is the thing to do.
+    PENDING = "pending"
+
+    #: The inspection stopped without establishing it. Waiting changes nothing,
+    #: and starting anything is the hazard itself.
+    UNAVAILABLE = "unavailable"
+
+
+def _settled_exclusion(inspector: _DescriptorInspector) -> _Exclusion:
+    """Read the exclusion's state without waiting for anything.
+
+    ``READY`` comes only from the tombstone being known to exist, never from the
+    inspection having stopped. Those are not the same claim and treating them as
+    one is the whole defect: a reader can settle on a transient failure, an ACL
+    that answered once, a descriptor that ran out, with no legacy directory
+    anywhere, and a child started on the strength of that creates the very
+    directory this guard exists to keep out of existence.
+
+    The tombstone rather than the inspector is also what survives an election
+    replacing its inspector, because it is a fact about a file and not about a
+    thread.
+    """
+    if daemon_descriptor.windows_exclusion_established():
+        return _Exclusion.READY
+    if inspector.settled:
+        return _Exclusion.UNAVAILABLE
+    return _Exclusion.PENDING
+
+
+def _exclusion_state(inspector: _DescriptorInspector, *, deadline: float) -> _Exclusion:
+    """Whether an owner may be spawned yet, on this platform, right now.
+
+    Only Windows has anything to wait for. There, ``prepare_daemon_state`` pins
+    the account home and publishes the exclusion object that keeps every pre-v2
+    release out of ``.mcp-server-linkedin``, and it does that inside the
+    inspector's reader thread. A one second read budget expiring does not stop
+    that thread; it only stops the *frontend* from hearing about it, and the old
+    loop went straight on to spawn a child. Under a package rolled back on disk
+    that child is a predecessor, which creates the legacy directory for itself
+    and blocks the v2 namespace for good, invisibly to every current frontend.
+
+    So the spawn waits for the reader instead of racing it, bounded by the
+    caller's own deadline. A reader that stops having established nothing is not
+    a reason to go ahead: it is a reason to stop, because this election cannot
+    tell a transient failure from a permanent one and only one of those is safe
+    to spawn against. The frontend falls back to its own browser and a later
+    election, with private state readable again, elects an owner normally.
+    """
+    if not _IS_WINDOWS:
+        return _Exclusion.READY
+    state = _settled_exclusion(inspector)
+    if state is not _Exclusion.PENDING:
+        return state
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return _Exclusion.PENDING
+    logger.debug("Waiting for private daemon state before starting an owner")
+    inspector.settle_within(timeout=min(remaining, _EXCLUSION_SETTLE_SECONDS))
+    return _settled_exclusion(inspector)
+
+
+def _report_unusable_exclusion(inspector: _DescriptorInspector) -> None:
+    """Say why no owner can be started, in the reader's own words.
+
+    The settled inspection is consumed here purely for its diagnosis. On Windows
+    a reader that returns normally has already published the tombstone, so this
+    state means it raised, and that exception names the thing to fix: a legacy
+    directory to remove, or a permission that answered once and may not next
+    time.
+    """
+    try:
+        inspector.inspect_until(timeout=0.0)
+    except Exception:
+        logger.warning(
+            "Private daemon state could not be established, so no shared owner "
+            "can be started safely; this client will use its own browser",
+            exc_info=True,
+        )
+        return
+    logger.warning(  # pragma: no cover - a normal return publishes the tombstone
+        "Private daemon state was read without establishing the exclusion a "
+        "shared owner needs; this client will use its own browser"
+    )
 
 
 class Reach(enum.Enum):
@@ -183,7 +287,11 @@ def obtain_owner(
     """
     deadline = time.monotonic() + max(deadline_seconds, 0.0)
     started = False
+    starts = 0
+    next_start = 0.0
+    start_retry_seconds = _OWNER_START_RETRY_SECONDS
     reach = connect or _reachable
+    inspector = _DescriptorInspector(auth_root, profile, config)
     # Instances that answered *wrongly* — a refused connection, a rejected
     # token, a stranger on the port — so a corpse is not handed back a second
     # time. The descriptor stays on disk until a live owner overwrites it, and
@@ -212,6 +320,7 @@ def obtain_owner(
             config,
             reach,
             buried,
+            inspector=inspector,
             may_ask_for_turnover=not asked_for_turnover,
             wait_seconds=wait_seconds,
         )
@@ -227,30 +336,82 @@ def obtain_owner(
         if remaining <= 0:
             return ElectionOutcome(lookup, started_owner=started)
 
-        try:
-            attempt = _start_owner(auth_root, profile, config, timeout=remaining)
-        except DaemonLockError:
-            # The lock could not be used at all, which is not contention: a
-            # filesystem without usable locking, or state this account cannot
-            # write. Waiting would never resolve it.
-            logger.warning("The daemon lock is unusable", exc_info=True)
-            return ElectionOutcome(lookup, started_owner=started)
-        except OSError:
-            logger.warning("The daemon could not be started", exc_info=True)
-            return ElectionOutcome(lookup, started_owner=started)
+        # Asked only where a start is otherwise due, so the retry pacing is
+        # unchanged, and asked before the clock is read for that pacing, because
+        # the answer can involve waiting for an inspector still inside state
+        # storage and a start scheduled off a stale reading would be paced from
+        # before that wait.
+        may_start = time.monotonic() >= next_start
+        if may_start:
+            exclusion = _exclusion_state(inspector, deadline=deadline)
+            if exclusion is _Exclusion.UNAVAILABLE:
+                # Nothing can be started against state this process cannot
+                # establish, and nothing later in this election changes that.
+                # Returning now is the fallback; the next election gets a fresh
+                # reader and may find the same state perfectly usable.
+                _report_unusable_exclusion(inspector)
+                return ElectionOutcome(lookup, started_owner=started)
+            may_start = exclusion is _Exclusion.READY
+        now = time.monotonic()
+        remaining = deadline - now
+        if may_start and remaining > 0:
+            starts += 1
+            start_retry_seconds = _owner_start_delay_after(starts, start_retry_seconds)
+            next_start = now + start_retry_seconds
+            try:
+                attempt = _start_owner(
+                    auth_root,
+                    profile,
+                    config,
+                    timeout=remaining,
+                    inspector=inspector,
+                )
+            except DaemonLockError:
+                # Not contention: a filesystem without usable locking, or state
+                # this account cannot write. Waiting would never resolve it.
+                logger.warning("The daemon lock is unusable", exc_info=True)
+                return ElectionOutcome(lookup, started_owner=started)
+            except OSError:
+                # From the control listener, the Job, the command or the spawn
+                # itself, and ``_spawn`` takes no lock on this path. Usually
+                # before a child exists, though not always: ``Popen`` can raise
+                # after the operating system made the process, when the parent's
+                # own pipe cleanup fails. It makes no difference here, because
+                # such a child is never handed its configuration and inherits no
+                # lock, and this owner reads neither profile state nor the lock
+                # before that handover. So the reasoning under ``_Attempt.FAILED``
+                # does not reach this either way: nothing served, and nothing was
+                # freed for a sibling frontend to pick up. Pacing retries here
+                # would only spend the caller's whole election budget before it
+                # can fall back to a direct browser, which is what the
+                # predecessor avoided and what this had quietly given up.
+                logger.warning("The daemon could not be started", exc_info=True)
+                return ElectionOutcome(lookup, started_owner=started)
+        else:
+            # A delayed attempt remains scheduled, or private state is not ready
+            # to have a child started against it. Descriptor observation continues
+            # in the meantime without one process per polling pass.
+            attempt = _Attempt.CONTENDED
 
-        if attempt is _Attempt.FAILED:
-            # This process held the lock and its child did not become an owner.
-            # `_spawn` has issued a hard stop and a bounded wait, so no descriptor
-            # will come from this attempt. If the kernel could not finish the
-            # stop, that condition was logged there; waiting here still cannot
-            # turn this failed child into an owner.
-            logger.warning("The daemon could not start; see %s", _log_hint(auth_root))
+        if attempt is _Attempt.ABORTED:
+            logger.warning("A daemon child reported a permanent startup failure")
             return ElectionOutcome(look(), started_owner=started)
-        started = started or attempt is _Attempt.STARTED
+        if attempt is _Attempt.FAILED:
+            # A local child failure proves only that child is gone. Another
+            # frontend may already have a child holding the lock this one freed,
+            # so falling back now could put two browsers on the profile.
+            logger.warning(
+                "A daemon child failed; waiting for any concurrent election winner"
+            )
+        if attempt is _Attempt.STARTED:
+            started = True
+            # A timed-out inspection may still be resolving a descriptor that this
+            # child just replaced. The committed generation needs one fresh read.
+            inspector = _DescriptorInspector(auth_root, profile, config)
 
-        # A started owner has already published by the time it reports ready, so
-        # this re-read normally succeeds at once. The wait is for the other
+        # A STARTED attempt returned only after this process atomically published
+        # its prepared generation, so this re-read normally succeeds at once.
+        # The wait is for the other
         # branch: this process lost the lock race, so somebody else is coming up
         # and the descriptor is not there yet.
         #
@@ -276,6 +437,7 @@ def _live_lookup(
     reach: Reachable,
     buried: set[str],
     *,
+    inspector: _DescriptorInspector | None = None,
     may_ask_for_turnover: bool = True,
     wait_seconds: float = 0.0,
 ) -> tuple[OwnerLookup, bool]:
@@ -309,7 +471,21 @@ def _live_lookup(
     those, because asking twice in one election means telling a freshly elected
     owner to stand down as well, and that does not terminate.
     """
-    lookup = look_up_owner(auth_root, profile, config, wait_seconds=wait_seconds)
+    lookup = look_up_owner(
+        auth_root,
+        profile,
+        config,
+        wait_seconds=wait_seconds,
+        # Buried instances travel *into* the read, so a wait spends itself
+        # watching for a generation that could actually be used. Passing them
+        # only mattered once a wait was involved: a buried descriptor is still
+        # compatible on disk, so the read returned it instantly, the downgrade
+        # below turned it down, and the caller's retry loop came straight back
+        # with none of its budget spent. Snapshotted rather than shared, since
+        # the set is the caller's and this is the only thing here that reads it.
+        ignore_instances=frozenset(buried),
+        _inspector=inspector,
+    )
     if not lookup.worth_connecting:
         return lookup, False
 
@@ -488,24 +664,8 @@ def _reachable(attachment: Attachment) -> Reach:
         return Reach.REFUSED
 
 
-def _log_hint(auth_root: Path) -> Path:
-    """Where a user should look when an owner refused to start.
-
-    The owner is detached, so its failure is not on anyone's terminal. Without
-    this the whole diagnosis a user gets is that nothing happened.
-    """
-    return daemon_owner.daemon_log_path(auth_root)
-
-
 class _Started(enum.Enum):
-    """What the startup handshake said.
-
-    Silence is a third answer while the wait is running, and ``_spawn`` resolves
-    it rather than passing it on: a child that has said nothing by the end of
-    the budget is stopped, so what reaches the caller is only ever "it serves"
-    or "it does not". Leaving silence as an outcome is what let a child keep the
-    inherited lock while never serving.
-    """
+    """What the startup protocol established at the frontend boundary."""
 
     #: The endpoint answered and the descriptor is published.
     YES = "yes"
@@ -514,9 +674,82 @@ class _Started(enum.Enum):
     #: having said nothing at all.
     NO = "no"
 
-    #: Neither, within the budget — used only inside ``_spawn``, which decides
-    #: what to do about it before returning.
+    #: The child proved a permanent error or could not publish safely.
+    ABORTED = "aborted"
+
+    #: This generation ended safely after releasing its position. Try again while
+    #: the frontend's election budget remains.
+    RETRY = "retry"
+
+    #: Neither, within the budget, before a prepared generation exists.
     STILL_TRYING = "still_trying"
+
+    #: The commit record may have reached the lock holder, which settles its own
+    #: lifetime and must not be killed by the parent.
+    UNCERTAIN = "uncertain"
+
+
+class _BootstrapReport:
+    """Collect one bounded, fixed diagnostic from the child's bootstrap pipe."""
+
+    def __init__(self, stream: BinaryIO | None) -> None:
+        self._result: queue.Queue[str | None] = queue.Queue(maxsize=1)
+        if stream is None:
+            self._result.put(None)
+            return
+
+        def collect() -> None:
+            code: str | None = None
+            remaining = 4096
+            try:
+                with stream:
+                    while line := stream.readline(512):
+                        if remaining <= 0:
+                            continue
+                        sample = line[:remaining]
+                        remaining -= len(sample)
+                        text = sample.decode("ascii", "ignore").strip()
+                        prefix = f"{daemon_owner.BOOTSTRAP_PREFIX} "
+                        if text.startswith(prefix):
+                            candidate = text.removeprefix(prefix)
+                            if candidate in {
+                                daemon_owner.BOOTSTRAP_CONFIGURATION,
+                                daemon_owner.BOOTSTRAP_STATE,
+                                daemon_owner.BOOTSTRAP_LOG,
+                                daemon_owner.BOOTSTRAP_ATTACHED,
+                            }:
+                                code = candidate
+            except OSError:
+                pass
+            self._result.put(code)
+
+        threading.Thread(
+            target=collect,
+            name="daemon-bootstrap",
+            daemon=True,
+        ).start()
+
+    def read(self, *, timeout: float = _FAILURE_VERDICT_SECONDS) -> str | None:
+        """Return the fixed record without letting diagnostics pin fallback."""
+        try:
+            return self._result.get(timeout=max(timeout, 0.0))
+        except queue.Empty:
+            return None
+
+
+def _report_child_failure(report: _BootstrapReport) -> None:
+    """Log the most actionable safe diagnosis available from the child."""
+    code = report.read()
+    if code == daemon_owner.BOOTSTRAP_CONFIGURATION:
+        logger.warning("The daemon rejected its startup configuration")
+    elif code == daemon_owner.BOOTSTRAP_STATE:
+        logger.warning("The daemon could not resolve its profile state")
+    elif code == daemon_owner.BOOTSTRAP_LOG:
+        logger.warning("The daemon log could not be opened")
+    elif code == daemon_owner.BOOTSTRAP_ATTACHED:
+        logger.warning("The daemon could not start; inspect the daemon log")
+    else:
+        logger.warning("The daemon stopped before its diagnostic log became available")
 
 
 class _Attempt(enum.Enum):
@@ -541,246 +774,375 @@ class _Attempt(enum.Enum):
     #: ``_stop_child`` logs that the profile may remain locked.
     FAILED = "failed"
 
+    #: The child proved a permanent startup or publication failure. Retrying the
+    #: same state would only spend the remaining election budget.
+    ABORTED = "aborted"
+
 
 def _start_owner(
-    auth_root: Path, profile: Path, config: AppConfig, *, timeout: float
+    auth_root: Path,
+    profile: Path,
+    config: AppConfig,
+    *,
+    timeout: float,
+    inspector: _DescriptorInspector | None = None,
 ) -> _Attempt:
-    """Get an owner running, if this process is the one that may."""
+    """Start a child that owns all potentially blocking state mutations."""
     del profile  # the owner derives it from the configuration it is handed
-    if _hands_over_locks():
-        return _start_holding_the_lock(auth_root, config, timeout=timeout)
-    return _start_contending_for_the_lock(auth_root, config, timeout=timeout)
-
-
-def _hands_over_locks() -> bool:
-    """Whether a held lock can be given to a child on this platform.
-
-    Read from the lock module rather than from ``os.name`` again, so the
-    measurement that established it lives in one place.
-    """
-    from linkedin_mcp_server import daemon_lock
-
-    return daemon_lock._INHERITED_LOCKS_TRANSFER
-
-
-def _start_holding_the_lock(
-    auth_root: Path, config: AppConfig, *, timeout: float
-) -> _Attempt:
-    """POSIX: take the lock, hand it over, then let go of it entirely."""
-    lock = DaemonLock(auth_root)
-    if not lock.try_acquire():
-        return _Attempt.CONTENDED
-
-    outcome = _Attempt.FAILED
-    try:
-        duplicate = lock.inheritable_copy()
-        try:
-            if _spawn(auth_root, config, lock_fd=duplicate, timeout=timeout) is (
-                _Started.YES
-            ):
-                outcome = _Attempt.STARTED
-        finally:
-            # Closed whether or not the child got going. It shares the kernel
-            # lock, so a leaked copy would hold the daemon lock for this
-            # frontend's whole life with nothing able to release it.
-            with contextlib.suppress(OSError):
-                os.close(duplicate)
-    finally:
-        # Released in every case, and this is the load-bearing line. The child
-        # holds the lock through its own copy by now; this descriptor is the
-        # parent's share of the same open file description, and keeping it would
-        # mean the lock outlives the owner. Measured on this tree: with the
-        # parent's copy left open, killing the owner freed nothing and no
-        # replacement could be elected until the frontend exited too.
-        lock.release()
-
-    return outcome
+    return _start_contending_for_the_lock(
+        auth_root,
+        config,
+        timeout=timeout,
+        inspector=inspector,
+    )
 
 
 def _start_contending_for_the_lock(
-    auth_root: Path, config: AppConfig, *, timeout: float
+    auth_root: Path,
+    config: AppConfig,
+    *,
+    timeout: float,
+    inspector: _DescriptorInspector | None = None,
 ) -> _Attempt:
-    """Windows: start a child that competes for the lock itself.
-
-    The frontend takes no lock here, so it cannot tell "my child lost the race"
-    from "my child could not serve": both arrive as a failed handshake. So a
-    failure here is reported as contention, which costs a wait when nothing is
-    coming and avoids giving up while a rival owner is still starting. The
-    frontend on this platform has no better information to act on.
-    """
-    if _spawn(auth_root, config, lock_fd=None, timeout=timeout) is _Started.YES:
+    """Start one child that competes for the lock and reports the outcome."""
+    started = _spawn(
+        auth_root,
+        config,
+        lock_fd=None,
+        timeout=timeout,
+        inspector=inspector,
+    )
+    if started is _Started.YES:
         return _Attempt.STARTED
+    if started is _Started.NO:
+        return _Attempt.FAILED
+    if started is _Started.ABORTED:
+        return _Attempt.ABORTED
     return _Attempt.CONTENDED
 
 
 def _spawn(
-    auth_root: Path, config: AppConfig, *, lock_fd: int | None, timeout: float
+    auth_root: Path,
+    config: AppConfig,
+    *,
+    lock_fd: int | None,
+    timeout: float,
+    on_spawned: Callable[[], None] | None = None,
+    inspector: _DescriptorInspector | None = None,
 ) -> _Started:
-    """Start the detached owner and wait for its ready handshake.
+    """Start a detached owner and atomically commit its prepared descriptor.
 
-    The owner has to outlive the client that caused it to start, or the whole
-    feature degrades to a slower version of what it replaces. ``start_new_session``
-    is what buys that: the child leads its own session and process group, so a
-    signal aimed at the client's group does not reach it.
-
-    Measured on this tree rather than assumed, because the issue claims otherwise
-    — that only a double-forked child survives and ``start_new_session`` is not
-    enough. On macOS it is: after ``SIGKILL`` to the frontend's entire process
-    group, the owner was still running and had reparented to pid 1. A double fork
-    would add a layer whose only job is to be exited, so it is not done here.
-
-    Not measured: Windows, and Linux under a supervisor that kills a whole
-    cgroup rather than a process group. The second is the one that could still
-    take the owner down, and it is worth revisiting if a Linux user reports the
-    daemon dying with their client.
+    Standard error carries one bounded bootstrap diagnosis until the child opens
+    its own log. Every operation against state storage remains inside the process
+    that a timed-out frontend can kill.
     """
-    log_path = daemon_owner.daemon_log_path(auth_root)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-
+    # Bound before the child exists, because its address travels in the
+    # configuration record and a bind that fails here has no child to stop.
+    control = ControlListener.open()
     windows_job = WindowsJob.named("owner") if os.name == "nt" else None
-    nonce = release_nonce() if windows_job is not None else None
-    target = _spawn_command(
-        lock_fd=lock_fd,
-        job_name=windows_job.name if windows_job is not None else None,
-    )
-    command = (
-        windows_gate_command(target, nonce)
-        if windows_job is not None and nonce is not None
-        else target
-    )
-
-    # Opened append, so a restart adds to the record rather than erasing the
-    # reason the last owner died.
     try:
-        with open(log_path, "a", encoding="utf-8") as log:
-            child = subprocess.Popen(
-                command,
-                env=_owner_environment(),
-                stdin=subprocess.PIPE,
-                # The handshake channel. Not a separate inherited descriptor,
-                # because ``pass_fds`` is POSIX-only (``subprocess.py:1464``) and
-                # this path has to work on Windows, where the child competes for the
-                # lock and the frontend has nothing *but* the handshake to go on.
-                stdout=subprocess.PIPE,
-                # To the log file from the first instruction, so an interpreter that
-                # dies during imports still leaves its traceback somewhere. A
-                # detached process has no terminal to write it to.
-                stderr=log,
-                # Empty on Windows, which refuses the argument outright. The lock is
-                # only ever handed over where that works.
-                pass_fds=() if lock_fd is None else (lock_fd,),
-                # Its own session, so a signal aimed at the client's process group
-                # does not take the owner with it. POSIX-only, which is why the
-                # Windows equivalent is passed separately below rather than assumed.
-                start_new_session=True,
-                close_fds=True,
-                # Zero on POSIX, where `subprocess` ignores it, and the real
-                # detachment on Windows, where `start_new_session` is what gets
-                # ignored. Passed positionally rather than unpacked from a mapping,
-                # which would defeat the overload the type checker resolves against.
-                creationflags=_detachment_flags(),
-            )
+        nonce = release_nonce() if windows_job is not None else None
+        target = _spawn_command(
+            lock_fd=lock_fd,
+            job_name=windows_job.name if windows_job is not None else None,
+        )
+        command = (
+            windows_gate_command(target, nonce)
+            if windows_job is not None and nonce is not None
+            else target
+        )
+        child = subprocess.Popen(
+            command,
+            env=_owner_environment(),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            pass_fds=() if lock_fd is None else (lock_fd,),
+            start_new_session=True,
+            close_fds=True,
+            creationflags=_detachment_flags(),
+        )
     except BaseException:
+        control.close()
         if windows_job is not None:
             windows_job.close()
         raise
 
-    # Created only after Popen returns and carried only by the existing
-    # configuration pipe. Startup output written before that delivery cannot know
-    # the token the parent will accept.
-    handshake_nonce = new_nonce()
-    assigned = False
-    cleanup_needed = True
     try:
-        assert child.stdin is not None
+        # Created only after Popen returns and carried only by the existing
+        # configuration pipe. Startup output written before that delivery cannot
+        # know the token the parent will accept.
+        handshake_nonce = new_nonce()
+        # Inside the same handler as the spawn: the diagnosis starts a thread,
+        # and a host that has run out of them would otherwise leave this child
+        # running with nothing holding it, waiting out its handover timeout for
+        # a configuration record no one is left to send.
+        bootstrap = _BootstrapReport(getattr(child, "stderr", None))
+    except BaseException:
+        _stop_child(child, windows_job=windows_job, assigned=False)
+        control.close()
+        if windows_job is not None:
+            windows_job.close()
+        raise
+    prepared_instance_id: str | None = None
+    #: Whether the child may already own itself, either because a commit record
+    #: may have reached it or because it reported a publication a predecessor
+    #: protocol performs on its own authority. Past this, no exception licenses a
+    #: kill.
+    owner_may_be_adopted = False
+    assigned = False
+    job_settled = False
+
+    def stop_child() -> None:
+        nonlocal job_settled
+        try:
+            _stop_child(child, windows_job=windows_job, assigned=assigned)
+        finally:
+            if windows_job is not None:
+                windows_job.close()
+                job_settled = True
+
+    def release_job() -> None:
+        nonlocal job_settled
+        if windows_job is not None:
+            windows_job.close()
+            job_settled = True
+
+    try:
+        assert child.stdin is not None and child.stdout is not None
+        # Before the configuration record, and therefore before the child can
+        # reach the port at all. The rendezvous has been bound since before the
+        # spawn, so anything running as this account may already be sitting in
+        # its queue; a parent that only accepts once the child has reported a
+        # prepared generation waits for a report the child cannot make, because
+        # the child is blocked connecting into a queue nobody is emptying.
+        control.start_accepting(nonce=handshake_nonce, timeout=timeout)
         if windows_job is not None and nonce is not None:
             windows_job.assign_popen(child)
             assigned = True
-            # No target code exists until the parent owns the Job.
+            # No owner code exists until the parent owns the Job.
             release_windows_gate(child.stdin, nonce)
-        assert child.stdin is not None and child.stdout is not None
+        if on_spawned is not None:
+            try:
+                on_spawned()
+            except BaseException:
+                stop_child()
+                raise
         started = time.monotonic()
         try:
             _hand_over_config(
-                child, config, handshake_nonce=handshake_nonce, timeout=timeout
+                child,
+                config,
+                handshake_nonce=handshake_nonce,
+                control=control,
+                timeout=timeout,
             )
         except TimeoutError:
-            # Killed rather than left to itself, and the difference is a wedge
-            # that never heals. A child still waiting on its configuration is
-            # inside ``sys.stdin.read()``, which comes *before* it adopts the
-            # lock — but on POSIX it already inherited the descriptor, so the
-            # kernel lock is alive through it. Walking away leaves that child
-            # holding the daemon lock forever while never serving anything, and
-            # every later election contends against it.
-            #
-            # Safe precisely because of that ordering: a child that has not
-            # finished reading cannot have reached ``_take_lock``, so nothing is
-            # being interrupted mid-adoption. Waiting longer is not an option
-            # either, since the thing being waited on is a process that is not
-            # reading.
             logger.warning(
                 "The daemon never read its configuration; stopping it so the "
                 "lock is not held by a process that cannot serve"
             )
-            cleanup_needed = False
-            _stop_child(child, windows_job=windows_job, assigned=assigned)
+            verdict = _await_prepared(
+                child,
+                handshake_nonce=handshake_nonce,
+                timeout=_FAILURE_VERDICT_SECONDS,
+            )
+            if isinstance(verdict, str):
+                prepared_instance_id = verdict
+            stop_child()
+            _report_child_failure(bootstrap)
+            return _Started.RETRY if verdict is _Started.RETRY else _Started.NO
+        except Exception:
+            logger.warning(
+                "The daemon could not receive its configuration", exc_info=True
+            )
+            verdict = _await_prepared(
+                child,
+                handshake_nonce=handshake_nonce,
+                timeout=_FAILURE_VERDICT_SECONDS,
+            )
+            if isinstance(verdict, str):
+                prepared_instance_id = verdict
+            stop_child()
+            _report_child_failure(bootstrap)
+            return _Started.RETRY if verdict is _Started.RETRY else _Started.NO
+        except BaseException:
+            stop_child()
+            raise
+
+        try:
+            verdict = _await_prepared(
+                child,
+                handshake_nonce=handshake_nonce,
+                timeout=timeout - (time.monotonic() - started),
+            )
+        except BaseException:
+            # Still pre-commit. EOF is only a lease once the child has armed its
+            # prepared-state wait; an interrupted or suspended child may never
+            # observe it, so the parent must end the lock holder itself.
+            stop_child()
+            raise
+        if verdict is _Started.STILL_TRYING:
+            logger.warning(
+                "The daemon did not prepare an endpoint; stopping it so the lock "
+                "is not held by a process that never served"
+            )
+            stop_child()
+            _report_child_failure(bootstrap)
             return _Started.NO
-        # One budget across both halves. Handing the configuration over and
-        # waiting for the verdict are two ways of waiting on the same child, and
-        # giving each the full budget would let a slow one spend twice what the
-        # caller allowed.
-        verdict = _await_ready(
+        if verdict is _Started.NO:
+            stop_child()
+            _report_child_failure(bootstrap)
+            return _Started.NO
+        if verdict is _Started.ABORTED:
+            stop_child()
+            _report_child_failure(bootstrap)
+            return _Started.ABORTED
+        if verdict is _Started.RETRY:
+            stop_child()
+            return _Started.RETRY
+        if verdict is _Started.YES:
+            # A predecessor owner, started by this current frontend after the
+            # package was replaced on disk. Its protocol has no commit record and
+            # no prepared generation to validate: it published on its own
+            # authority and says so, and this process no longer gets to stop it.
+            # The election's own read of the published descriptor is what decides
+            # whether that owner is usable.
+            logger.info("The daemon published on the predecessor startup protocol")
+            owner_may_be_adopted = True
+            return _Started.YES
+
+        if not isinstance(verdict, str):  # pragma: no cover - handled above
+            raise AssertionError(f"Unexpected startup verdict: {verdict}")
+        prepared_instance_id = verdict
+        prepared_deadline = time.monotonic() + min(
+            _PREPARED_READ_SECONDS,
+            max(timeout - (time.monotonic() - started), 0.0),
+        )
+        try:
+            # Already collected: the child attaches before it prepares anything
+            # and the queue has been drained since before the child could reach
+            # it, so a prepared generation means the authenticated connection is
+            # in hand. Still required before commit, because nothing may be
+            # authorized until a peer has presented the post-spawn nonce.
+            control.attached_within(timeout=prepared_deadline - time.monotonic())
+        except (TimeoutError, OSError):
+            # Nothing was authorized, so this child cannot publish and stopping it
+            # frees the lock for the next attempt. Not terminal: another election
+            # pass may reach a child that can be authorized.
+            logger.warning(
+                "The daemon did not attach to its control channel", exc_info=True
+            )
+            stop_child()
+            return _Started.NO
+        except BaseException:
+            stop_child()
+            raise
+
+        try:
+            profile = _resolve_profile_until(
+                Path(config.browser.user_data_dir),
+                timeout=prepared_deadline - time.monotonic(),
+            )
+            _validate_prepared_until(
+                auth_root,
+                prepared_instance_id,
+                profile=profile,
+                config=config,
+                timeout=prepared_deadline - time.monotonic(),
+            )
+        except TimeoutError:
+            # No commit record was sent, so this child cannot become canonical.
+            # Waiting for a verdict would leave it holding the lock until its own
+            # authorization timeout expires.
+            stop_child()
+            return _Started.NO
+        except Exception:
+            logger.warning("The daemon prepared unusable startup state", exc_info=True)
+            verdict = _await_committed(
+                child,
+                handshake_nonce=handshake_nonce,
+                timeout=_FAILURE_VERDICT_SECONDS,
+            )
+            stop_child()
+            return _Started.RETRY if verdict is _Started.RETRY else _Started.ABORTED
+        except BaseException:
+            stop_child()
+            raise
+
+        # The child owns the daemon lock and therefore owns publication. Once the
+        # commit record may have reached it, no exception authorizes a kill: the
+        # child either commits and serves or observes EOF and discards its state.
+        owner_may_be_adopted = True
+        try:
+            _send_commit(control, handshake_nonce=handshake_nonce)
+        except Exception:
+            logger.warning(
+                "The daemon commit request could not be delivered", exc_info=True
+            )
+            return _settle_commit_result(
+                auth_root,
+                prepared_instance_id,
+                child,
+                timeout=timeout - (time.monotonic() - started),
+                inspector=inspector,
+            )
+
+        committed = _await_committed(
             child,
             handshake_nonce=handshake_nonce,
             timeout=timeout - (time.monotonic() - started),
         )
-        if verdict is _Started.STILL_TRYING:
-            # Stopped, not left to itself, and this is the last of the lock
-            # wedges. "Still trying" reads as generous — the child may yet come
-            # up — but by now it has had the whole budget and said nothing, and
-            # on POSIX it holds the inherited lock descriptor. Left alone it
-            # keeps that lock while never serving, and every later election
-            # contends against a process that will never publish.
-            #
-            # Measured with an ordinary configuration and a child that only
-            # sleeps: the lock was still held afterwards. The kill path added
-            # for the configuration timeout only covered the case where the
-            # *write* blocked, which needs a configuration large enough to fill
-            # a pipe; this is the same wedge reached by the ordinary route.
-            #
-            # This existing timeout chooses the observed lock wedge over an
-            # unbounded wait. Publication precedes the private ready verdict, so
-            # it can race a newly attachable owner; #790 tracks the commit
-            # protocol needed to distinguish those states atomically.
-            logger.warning(
-                "The daemon did not finish starting; stopping it so the lock is "
-                "not held by a process that never served"
-            )
-            cleanup_needed = False
-            _stop_child(child, windows_job=windows_job, assigned=assigned)
-            return _Started.NO
-        if verdict is _Started.NO:
-            # A failure verdict is terminal. The real owner has already run its
-            # bounded shutdown before sending it; EOF means the child exited.
-            # Stop a nonconforming child that reports failure and stays alive,
-            # or its inherited descriptor keeps the profile locked forever.
-            cleanup_needed = False
-            _stop_child(child, windows_job=windows_job, assigned=assigned)
-        else:
-            # READY means the owner detached its own handle immediately before
-            # publication. Closing the parent's handle now leaves it independent.
-            if windows_job is not None:
-                windows_job.close()
-        cleanup_needed = False
-        return verdict
-    except BaseException:
-        if cleanup_needed:
-            cleanup_needed = False
-            _stop_child(child, windows_job=windows_job, assigned=assigned)
-        raise
+        if committed is _Started.YES:
+            return _Started.YES
+        if committed is _Started.ABORTED:
+            stop_child()
+            _report_child_failure(bootstrap)
+            return _Started.ABORTED
+        if committed is _Started.RETRY:
+            stop_child()
+            return _Started.RETRY
+        if committed is _Started.UNCERTAIN:
+            return _Started.UNCERTAIN
+        return _settle_commit_result(
+            auth_root,
+            prepared_instance_id,
+            child,
+            timeout=timeout - (time.monotonic() - started),
+            inspector=inspector,
+        )
     finally:
+        if windows_job is not None and not job_settled:
+            if owner_may_be_adopted:
+                # The exact COMMIT frame precedes owner adoption. Closing this copy
+                # cannot revoke an adopted owner, and kills one that never adopted.
+                release_job()
+            else:
+                stop_child()
+        # End of file aborts a prepared child that never received the commit
+        # record. After that record it is only a lease: the lock holder settles
+        # publication. The configuration pipe was closed with its record, so a
+        # child on a predecessor protocol has long since been released.
+        control.close()
+        # Only a spawn that failed before the handover still holds this. Past
+        # it the writer owns the stream and this is ``None``.
+        if child.stdin is not None:
+            with contextlib.suppress(OSError, ValueError):
+                child.stdin.close()
         _release_handshake(child)
         _reap(child)
+        if prepared_instance_id is not None and not owner_may_be_adopted:
+            try:
+                _discard_prepared_until(
+                    auth_root,
+                    prepared_instance_id,
+                    timeout=_PREPARED_CLEANUP_SECONDS,
+                )
+            except Exception:
+                logger.warning(
+                    "The daemon's abandoned prepared state could not be removed",
+                    exc_info=True,
+                )
 
 
 #: How long to wait for a killed child to be collected. Short by design: this
@@ -801,8 +1163,9 @@ def _stop_child(
 
     Called after a configuration timeout, an exhausted startup budget, or a
     terminal non-ready verdict. A reported failure has already run ``_serve``'s
-    bounded endpoint shutdown, and EOF means the child already exited. The
-    timeout cases cannot be left holding the inherited lock indefinitely.
+    bounded endpoint shutdown, and EOF means the child already exited. A timed-out
+    child may be blocked in log or lock I/O, so it must be made terminal before the
+    frontend can fall back to an in-process browser.
 
     The contained tree is killed outright rather than asked politely first. A
     ``SIGTERM`` grace period is time added after the caller's budget is already
@@ -846,6 +1209,8 @@ def _stop_child(
         else:
             # Before assignment EOF is the only contained stop. If the isolated
             # gate does not accept it, stop and reap that direct child explicitly.
+            # Past the handover this is ``None``: the kill below is bounded, a
+            # close racing the writer's blocked write is not.
             if child.stdin is not None:
                 with contextlib.suppress(OSError, ValueError):
                     child.stdin.close()
@@ -886,44 +1251,43 @@ def _hand_over_config(
     config: AppConfig,
     *,
     handshake_nonce: str,
+    control: ControlListener,
     timeout: float,
 ) -> None:
-    """Write the configuration to the child, without waiting on it forever.
+    """Write one config record and end the pipe on it.
 
-    The obvious ``child.stdin.write(...)`` blocks once the pipe buffer is full,
-    and the buffer is small — 64 KiB on Linux, less on some platforms — while
-    the configuration has no size limit at all: ``proxy_bypass`` and the paths
-    are free-form strings. A child that neither reads nor exits
-    therefore blocks this write indefinitely, *before* the handshake timeout is
-    ever reached. Reproduced with a 10 MiB user agent and a child that only
-    sleeps: the outer process timeout fired and the wait below was never
-    entered. Both processes hold the daemon lock while that happens.
+    Closed with the record rather than held open, and that is the whole of the
+    rollback fix. Every owner older than the commit protocol frames its
+    configuration by reading to end of file, so a pipe kept open for a later
+    commit record leaves such a child blocked in its very first read while this
+    process waits for a verdict it will never send. Authorization is on
+    *control* instead, which no predecessor looks for and none of them needs.
 
-    Written on a thread for the same reason the verdict is read on one: it is
-    the one mechanism that bounds a blocking pipe operation on every platform.
-    The thread is a daemon, so a write that never completes cannot keep the
-    frontend from exiting.
-
-    Nothing outside closes the descriptor it holds. The thread's own ``with``
-    below does, as it unwinds, and on a timeout that is a moment after this
-    function has already returned: the writer stays blocked inside ``write``
-    until the child dies and breaks the pipe. ``_release_handshake`` closes
-    ``stdout`` and only ``stdout``.
-
-    So a caller that wants the write side gone ends the child, rather than
-    closing the stream under a thread that is writing to it.
+    The close runs on the writing thread, so a pipe that cannot be closed is
+    bounded by the same wait as one that cannot be written. The stream leaves
+    ``Popen`` to get there, so the writer owns it from here: a blocked ``write``
+    holds the ``BufferedWriter`` lock ``close`` needs, and a cross-thread close
+    would wait for it without a timeout of its own. Nothing after the record
+    needs the pipe, because authorization travels on *control*.
     """
-    stream = child.stdin
+    stream, child.stdin = child.stdin, None
     assert stream is not None
-    payload = daemon_config.encode_handover(config, handshake_nonce).encode()
+    endpoint = daemon_config.ControlEndpoint(control.host, control.port)
+    payload = (
+        daemon_config.encode_handover(config, handshake_nonce, endpoint).encode()
+        + b"\n"
+    )
 
     done: queue.Queue[BaseException | None] = queue.Queue()
 
     def hand_over() -> None:
         try:
-            with stream:
-                stream.write(payload)
+            stream.write(payload)
+            stream.flush()
+            stream.close()
         except BaseException as exc:  # noqa: BLE001 - reported to the caller
+            with contextlib.suppress(OSError, ValueError):
+                stream.close()
             done.put(exc)
         else:
             done.put(None)
@@ -938,6 +1302,158 @@ def _hand_over_config(
         ) from None
     if failure is not None:
         raise failure
+
+
+_FilesystemResult = TypeVar("_FilesystemResult")
+
+
+def _filesystem_until(
+    operation: Callable[[], _FilesystemResult],
+    *,
+    timeout: float,
+    thread_name: str,
+    timeout_message: str,
+) -> _FilesystemResult:
+    """Run one parent-side filesystem operation within the caller's wait."""
+    result: queue.Queue[_FilesystemResult | BaseException] = queue.Queue(maxsize=1)
+
+    def run() -> None:
+        try:
+            value = operation()
+        except BaseException as exc:  # noqa: BLE001 - re-raised in the caller
+            result.put(exc)
+        else:
+            result.put(value)
+
+    threading.Thread(target=run, name=thread_name, daemon=True).start()
+    try:
+        value = result.get(timeout=max(timeout, 0.0))
+    except queue.Empty:
+        raise TimeoutError(timeout_message) from None
+    if isinstance(value, BaseException):
+        raise value
+    return value
+
+
+def _resolve_profile_until(profile: Path, *, timeout: float) -> Path:
+    """Resolve the configured profile without pinning a lock-holding child."""
+    return _filesystem_until(
+        lambda: profile.expanduser().resolve(),
+        timeout=timeout,
+        thread_name="daemon-profile-resolve",
+        timeout_message="The daemon profile could not be resolved in time",
+    )
+
+
+def _validate_prepared_until(
+    auth_root: Path,
+    instance_id: str,
+    *,
+    profile: Path,
+    config: AppConfig,
+    timeout: float,
+) -> None:
+    """Validate prepared state without letting a blocked filesystem pin the caller."""
+    _filesystem_until(
+        lambda: daemon_descriptor.validate_prepared(
+            auth_root, instance_id, profile=profile, config=config
+        ),
+        timeout=timeout,
+        thread_name="daemon-prepared-read",
+        timeout_message="Prepared daemon state could not be read in time",
+    )
+
+
+def _discard_prepared_until(
+    auth_root: Path, instance_id: str, *, timeout: float
+) -> None:
+    """Bound cleanup that can only finish against this abandoned generation.
+
+    The worker may complete after the frontend gives up waiting. That is safe only
+    because ``discard_prepared`` names the unique instance's pending descriptor and
+    token directly; it never removes canonical state or scans generations belonging
+    to a later lock holder.
+    """
+    _filesystem_until(
+        lambda: daemon_descriptor.discard_prepared(auth_root, instance_id),
+        timeout=timeout,
+        thread_name="daemon-prepared-cleanup",
+        timeout_message="Prepared daemon state could not be removed in time",
+    )
+
+
+def _send_commit(control: ControlListener, *, handshake_nonce: str) -> None:
+    """Tell the lock-holding child to publish its validated generation."""
+    control.send(f"{daemon_owner.HANDSHAKE} {handshake_nonce} {daemon_owner.COMMIT}\n")
+
+
+def _read_canonical_until(
+    auth_root: Path, *, timeout: float
+) -> daemon_descriptor.DaemonDescriptor | None:
+    """Read canonical state without letting filesystem I/O exceed the caller's wait."""
+    return _filesystem_until(
+        lambda: daemon_descriptor.read(auth_root),
+        timeout=timeout,
+        thread_name="daemon-canonical-read",
+        timeout_message="Canonical daemon state could not be read in time",
+    )
+
+
+def _settle_commit_result(
+    auth_root: Path,
+    instance_id: str,
+    child: subprocess.Popen[bytes],
+    *,
+    timeout: float,
+    inspector: _DescriptorInspector | None = None,
+) -> _Started:
+    """Settle a missing commit verdict through the election's shared inspection."""
+    del child  # process state cannot disambiguate an attempted remote rename
+    try:
+        if inspector is None:
+            canonical = _read_canonical_until(auth_root, timeout=timeout)
+            committed_instance = None if canonical is None else canonical.instance_id
+        else:
+            lookup = inspector.inspect_until(timeout=timeout)
+            attachment = lookup.attachment
+            committed_instance = (
+                None if attachment is None else attachment.descriptor.instance_id
+            )
+    except Exception:
+        return _Started.UNCERTAIN
+    if committed_instance == instance_id:
+        return _Started.YES
+    # After the commit record may have arrived, a dead child is not proof of an
+    # uncommitted generation. NFS may report a failed rename and keep returning a
+    # stale canonical entry until after that child exits. The next successful
+    # owner removes abandoned pending files and superseded tokens while holding
+    # the lock.
+    return _Started.UNCERTAIN
+
+
+def _await_committed(
+    child: subprocess.Popen[bytes], *, handshake_nonce: str, timeout: float
+) -> _Started:
+    """Wait for the lock holder's authenticated final commit verdict."""
+    verdict = _read_owner_verdict(
+        child,
+        handshake_nonce=handshake_nonce,
+        timeout=timeout,
+        thread_name="daemon-commit",
+    )
+    if isinstance(verdict, _Started):
+        return verdict
+
+    status, _ = verdict
+    if status in (daemon_owner.READY, daemon_owner.COMMITTED):
+        return _Started.YES
+    if status == daemon_owner.ABORTED:
+        return _Started.ABORTED
+    if status == daemon_owner.RETRY:
+        return _Started.RETRY
+    if status == daemon_owner.UNCERTAIN:
+        return _Started.UNCERTAIN
+    return _Started.NO
 
 
 def _spawn_command(*, lock_fd: int | None, job_name: str | None = None) -> list[str]:
@@ -1036,30 +1552,50 @@ def _detachment_flags() -> int:
     )
 
 
-def _release_handshake(child: subprocess.Popen[bytes]) -> None:
-    """Stop listening to the child, without waiting for it to stop talking.
+class _ActiveRead:
+    """Who may close a handshake pipe, so that exactly one side does.
 
-    ``child.stdout.close()`` is the obvious call and it is a trap. The reader
-    thread is parked inside iteration holding the buffered reader's I/O lock,
-    and ``BufferedReader.close()`` waits for that lock — so closing here blocks
-    for exactly as long as the child stays silent. Measured: a child that said
-    nothing for thirty seconds made this call block 29.27 of them, and one that
-    neither answers nor exits would block forever. That is the timeout above
-    being handed straight back, in the one case it exists for.
-
-    So the *descriptor* is closed instead. That is not held by the reader
-    thread: the pending read fails, the thread unwinds, and the caller is free.
-
-    ``detach()`` first, so the buffer gives up the descriptor instead of trying
-    to close it again later, and then close the raw file object it hands back
-    rather than the bare number. Closing the number directly leaves that raw
-    object owning a descriptor that no longer exists, and its finalizer prints
-    ``Bad file descriptor`` from a context nothing can catch. Both variants were
-    tried; this is the one that is quiet.
+    The reader owns the close while its read is in flight, the caller once that
+    read is over. Both answers are given under ``_active_reads_lock``.
     """
-    stream, child.stdout = child.stdout, None
-    if stream is None:
-        return
+
+    def __init__(self) -> None:
+        self._reading = True
+        self._abandoned = False
+
+    def finish(self, stream: Any) -> None:
+        """End the read, closing the pipe if the caller has already left it."""
+        with _active_reads_lock:
+            self._reading = False
+            abandoned = self._abandoned
+            if _active_reads.get(stream) is self:
+                del _active_reads[stream]
+        if abandoned:
+            _close_handshake_stream(stream)
+
+    def abandon(self) -> bool:
+        """Whether the caller may close: true once the read is over."""
+        with _active_reads_lock:
+            if not self._reading:
+                return True
+            self._abandoned = True
+            return False
+
+
+#: The read currently on a handshake pipe, keyed by that pipe and never more than
+#: one deep: a second read starts only after the first one has returned.
+_active_reads: weakref.WeakKeyDictionary[Any, _ActiveRead] = weakref.WeakKeyDictionary()
+_active_reads_lock = threading.Lock()
+
+
+def _close_handshake_stream(stream: Any) -> None:
+    """Close the descriptor rather than the buffer, which a parked reader holds.
+
+    ``BufferedReader.close()`` waits for that reader's I/O lock, so it blocks for
+    as long as the child stays silent: measured at 29.27 of thirty seconds.
+    ``detach()`` first, or the raw object's finalizer prints ``Bad file
+    descriptor`` from a context nothing can catch.
+    """
     # `Popen.stdout` is declared as a plain `IO`, which has no `detach`; the
     # object is a BufferedReader in practice, and the fallback covers a caller
     # that handed us something else rather than assuming.
@@ -1070,6 +1606,29 @@ def _release_handshake(child: subprocess.Popen[bytes]) -> None:
     except (OSError, ValueError):
         # Already gone, which is the ordinary case for a child that exited.
         logger.debug("The handshake pipe was already closed", exc_info=True)
+
+
+def _release_handshake(child: subprocess.Popen[bytes]) -> None:
+    """Stop listening to the child, without waiting for it to stop talking.
+
+    Closing the descriptor under a parked reader is what makes this prompt on
+    POSIX: the pending read fails and the thread unwinds. Windows closes through
+    the UCRT, which waits for the same handle lock the blocked ``ReadFile``
+    holds, so after a commit whose verdict timed out the close would wait for an
+    owner that keeps stdout open for as long as it runs. There a read still in
+    flight keeps its pipe and closes it itself at EOF, from the daemon thread
+    that is already parked on it. The pipe leaves ``Popen`` either way, so
+    nothing closes it behind that reader's back.
+    """
+    stream, child.stdout = child.stdout, None
+    if stream is None:
+        return
+    with _active_reads_lock:
+        active = _active_reads.get(stream)
+    if _IS_WINDOWS and active is not None and not active.abandon():
+        logger.debug("The handshake pipe stays with its reader until end of file")
+        return
+    _close_handshake_stream(stream)
 
 
 def _reap(child: subprocess.Popen[bytes]) -> None:
@@ -1090,43 +1649,53 @@ def _reap(child: subprocess.Popen[bytes]) -> None:
         child.poll()
 
 
-def _reported_owner_verdict(frame: bytes, handshake_nonce: str) -> str | None:
-    ready = f"{daemon_owner.HANDSHAKE} {handshake_nonce} {daemon_owner.READY}\n".encode(
-        "ascii"
-    )
-    failed = (
-        f"{daemon_owner.HANDSHAKE} {handshake_nonce} {daemon_owner.FAILED}\n".encode(
-            "ascii"
-        )
-    )
-    if frame == ready:
-        return daemon_owner.READY
-    if frame == failed:
-        return daemon_owner.FAILED
+_OwnerVerdict = tuple[str, str | None]
+
+
+def _reported_owner_verdict(frame: bytes, handshake_nonce: str) -> _OwnerVerdict | None:
+    marker = f"{daemon_owner.HANDSHAKE} {handshake_nonce} ".encode("ascii")
+    if not frame.startswith(marker) or not frame.endswith(b"\n"):
+        return None
+    try:
+        payload = frame[len(marker) : -1].decode("ascii")
+    except UnicodeDecodeError:
+        return None
+    if payload in (
+        daemon_owner.READY,
+        daemon_owner.COMMITTED,
+        daemon_owner.FAILED,
+        daemon_owner.ABORTED,
+        daemon_owner.RETRY,
+        daemon_owner.UNCERTAIN,
+    ):
+        return payload, None
+    prefix = f"{daemon_owner.PREPARED} "
+    if payload.startswith(prefix):
+        instance_id = payload.removeprefix(prefix)
+        if instance_id and not any(character.isspace() for character in instance_id):
+            return daemon_owner.PREPARED, instance_id
     return None
 
 
-def _await_ready(
-    child: subprocess.Popen[bytes], *, handshake_nonce: str, timeout: float
-) -> _Started:
-    """Wait for the child's authenticated verdict, or for it to die trying.
+def _read_owner_verdict(
+    child: subprocess.Popen[bytes],
+    *,
+    handshake_nonce: str,
+    timeout: float,
+    thread_name: str,
+) -> _OwnerVerdict | _Started:
+    """Read one authenticated owner record within the caller's deadline.
 
-    End of file without a valid frame covers a crash during imports, a config-read
-    failure and a kill from outside. Startup hooks may write arbitrary bytes first,
-    including plain ``ready`` or ``failed`` and an unterminated prefix. They ran
-    before the post-spawn nonce existed, so bounded scanning can discard them and
-    extract only the exact frame written by the owner module.
-
-    Read on a thread rather than with a readiness check on the descriptor.
-    ``select`` accepts only sockets on Windows, so the obvious portable-looking
-    loop would block inside ``readline`` well past the deadline on exactly the
-    platform where this handshake is the *only* thing the frontend has to go on.
-    A thread bounds the wait everywhere with one mechanism.
+    Startup hooks may write arbitrary bytes first, including plain status-shaped
+    lines and an unterminated prefix. They ran before the post-spawn nonce existed,
+    so bounded scanning can discard them and extract only the exact owner frame.
     """
     stream = child.stdout
     assert stream is not None
-
-    verdicts: queue.Queue[str | None] = queue.Queue()
+    verdicts: queue.Queue[_OwnerVerdict | None] = queue.Queue()
+    active = _ActiveRead()
+    with _active_reads_lock:
+        _active_reads[stream] = active
 
     def collect() -> None:
         try:
@@ -1136,27 +1705,61 @@ def _await_ready(
                 marker=marker,
                 parse=lambda frame: _reported_owner_verdict(frame, handshake_nonce),
             )
-            verdicts.put(reported[1] if reported is not None else None)
+            verdict = reported[1] if reported is not None else None
         except OSError:  # pragma: no cover - the stream closed under us
-            verdicts.put(None)
+            verdict = None
+        finally:
+            # Before the verdict is handed over, so a caller that reads one and
+            # then releases the pipe finds a read that is over and closes it.
+            active.finish(stream)
+        verdicts.put(verdict)
 
     # A daemon thread: if the child neither answers nor exits, the frontend must
-    # still be able to shut down. It holds only this pipe, which the caller closes.
-    reader = threading.Thread(target=collect, name="daemon-handshake", daemon=True)
+    # still be able to shut down. It holds only this pipe, which it closes itself
+    # when the caller released it mid-read.
+    reader = threading.Thread(target=collect, name=thread_name, daemon=True)
     reader.start()
-
     try:
         verdict = verdicts.get(timeout=max(timeout, 0.0))
     except queue.Empty:
-        # Kept distinct from ``NO`` so ``_spawn`` can diagnose silence at the
-        # point where it enforces the startup budget. The child has not proved it
-        # can serve, so that function still owns and stops it.
         return _Started.STILL_TRYING
+    return _Started.NO if verdict is None else verdict
 
-    if verdict is None:
-        logger.info("The daemon exited before it was ready")
-        return _Started.NO
-    if verdict == daemon_owner.FAILED:
+
+def _await_prepared(
+    child: subprocess.Popen[bytes], *, handshake_nonce: str, timeout: float
+) -> str | _Started:
+    """Wait for a prepared generation id, a publication, failure, or silence.
+
+    ``READY`` is the one verdict that is not about this protocol at all. It comes
+    from an owner whose build predates the prepare/commit boundary, started by
+    this current frontend because the package on disk was replaced under it, and
+    it means the descriptor is already published. There is nothing left to
+    authorize and nothing this process may still stop.
+    """
+    verdict = _read_owner_verdict(
+        child,
+        handshake_nonce=handshake_nonce,
+        timeout=timeout,
+        thread_name="daemon-handshake",
+    )
+    if isinstance(verdict, _Started):
+        if verdict is _Started.NO:
+            logger.info("The daemon exited before it prepared an endpoint")
+        return verdict
+
+    status, instance_id = verdict
+    if status == daemon_owner.PREPARED and instance_id is not None:
+        return instance_id
+    if status == daemon_owner.READY:
+        return _Started.YES
+    if status == daemon_owner.FAILED:
         logger.info("The daemon reported that it could not start")
         return _Started.NO
-    return _Started.YES
+    if status == daemon_owner.ABORTED:
+        logger.info("The daemon reported a terminal startup failure")
+        return _Started.ABORTED
+    if status == daemon_owner.RETRY:
+        logger.info("The daemon released its startup position for another attempt")
+        return _Started.RETRY
+    return _Started.NO

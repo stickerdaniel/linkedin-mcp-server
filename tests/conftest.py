@@ -8,6 +8,9 @@ def reset_singletons():
     """Reset global state for test isolation."""
     from linkedin_mcp_server.bootstrap import reset_bootstrap_for_testing
     from linkedin_mcp_server.config import reset_config
+    from linkedin_mcp_server.daemon_descriptor import (
+        reset_daemon_descriptor_for_testing,
+    )
     from linkedin_mcp_server.daemon_liveness import reset_liveness_for_testing
     from linkedin_mcp_server.debug_trace import reset_trace_state_for_testing
     from linkedin_mcp_server.logging_config import teardown_trace_logging
@@ -16,6 +19,7 @@ def reset_singletons():
     from linkedin_mcp_server.server_role import reset_process_role_for_testing
 
     reset_bootstrap_for_testing()
+    reset_daemon_descriptor_for_testing()
     # The owner's call tracker is process state like the rest. Left standing, a
     # call one test watched is still in flight for the next, which reads as an
     # owner that is never idle, and the moment of one test's last expiry scan
@@ -40,6 +44,7 @@ def reset_singletons():
     reset_trace_state_for_testing()
     yield
     reset_bootstrap_for_testing()
+    reset_daemon_descriptor_for_testing()
     reset_browser_for_testing()
     # After the browser, so a lease the browser still held is released by its
     # own bookkeeping first rather than yanked out from under it.

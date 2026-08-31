@@ -14,13 +14,16 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from linkedin_mcp_server import private_state
 from linkedin_mcp_server.private_state import (
     PrivateStateError,
+    harden_created_file,
     harden_directory,
+    harden_directory_entry,
     harden_file,
 )
 
@@ -89,6 +92,36 @@ class TestHardeningOnPosix:
         harden_directory(target)
 
         assert _mode(target) == 0o700
+
+    @posix_only
+    def test_an_owned_child_directory_is_created_private_under_umask_zero(
+        self, tmp_path: Path
+    ):
+        target = tmp_path / "state" / "per-auth"
+        target.parent.mkdir()
+        previous = os.umask(0)
+        try:
+            harden_directory_entry(target)
+        finally:
+            os.umask(previous)
+
+        assert _mode(target) == 0o700
+
+    @posix_only
+    def test_an_owned_child_directory_refuses_a_planted_symlink(self, tmp_path: Path):
+        parent = tmp_path / "state"
+        parent.mkdir(mode=0o777)
+        parent.chmod(0o777)
+        target = parent / "per-auth"
+        elsewhere = tmp_path / "attacker-state"
+        elsewhere.mkdir(mode=0o777)
+        elsewhere.chmod(0o777)
+        target.symlink_to(elsewhere, target_is_directory=True)
+
+        with pytest.raises(PrivateStateError, match="symbolic link"):
+            harden_directory_entry(target)
+
+        assert _mode(elsewhere) == 0o777
 
 
 class TestExtendedAcls:
@@ -391,6 +424,287 @@ class TestRefusals:
 
         with pytest.raises(PrivateStateError, match="Not a directory"):
             harden_directory(occupied)
+        with pytest.raises(PrivateStateError, match="Not a directory"):
+            harden_directory_entry(occupied)
+
+    def test_a_windows_reparse_directory_is_refused_before_acl_hardening(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import windows_acl
+
+        target = tmp_path / "per-auth"
+        target.mkdir()
+        entry = SimpleNamespace(
+            st_mode=stat.S_IFDIR | 0o700,
+            st_dev=1,
+            st_ino=2,
+            st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT,
+            st_reparse_tag=0x8000001B,
+        )
+        monkeypatch.setattr(private_state, "_WINDOWS", True)
+        monkeypatch.setattr(Path, "lstat", lambda path: entry)
+        monkeypatch.setattr(
+            windows_acl,
+            "restrict_to_current_user",
+            lambda *args, **kwargs: pytest.fail("a reparse target was hardened"),
+        )
+
+        with pytest.raises(PrivateStateError, match="Windows reparse point"):
+            harden_directory_entry(target)
+
+    def test_windows_directory_replacement_during_acl_hardening_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import windows_acl
+
+        target = tmp_path / "per-auth"
+        target.mkdir()
+        entries = iter(
+            [
+                SimpleNamespace(
+                    st_mode=stat.S_IFDIR | 0o700,
+                    st_dev=1,
+                    st_ino=2,
+                    st_file_attributes=0,
+                ),
+                SimpleNamespace(
+                    st_mode=stat.S_IFDIR | 0o700,
+                    st_dev=1,
+                    st_ino=3,
+                    st_file_attributes=0,
+                ),
+            ]
+        )
+        monkeypatch.setattr(private_state, "_WINDOWS", True)
+        monkeypatch.setattr(Path, "lstat", lambda path: next(entries))
+        monkeypatch.setattr(windows_acl, "verify_owner_only", lambda *a, **k: None)
+
+        with pytest.raises(PrivateStateError, match="was replaced"):
+            harden_directory_entry(target)
+
+    def test_existing_windows_directory_is_verified_without_acl_replacement(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import windows_acl
+
+        target = tmp_path / "daemon"
+        target.mkdir()
+        verified: list[tuple[Path, bool]] = []
+        monkeypatch.setattr(private_state, "_WINDOWS", True)
+        monkeypatch.setattr(
+            windows_acl,
+            "verify_owner_only",
+            lambda path, *, directory: verified.append((path, directory)),
+        )
+        monkeypatch.setattr(
+            windows_acl,
+            "restrict_to_current_user",
+            lambda *args, **kwargs: pytest.fail("an existing DACL was replaced"),
+        )
+
+        harden_directory(target)
+
+        assert verified == [(target, True)]
+
+    def test_existing_windows_file_is_verified_without_acl_replacement(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import windows_acl
+
+        target = tmp_path / "token"
+        target.touch()
+        verified: list[tuple[Path, bool]] = []
+        monkeypatch.setattr(private_state, "_WINDOWS", True)
+        monkeypatch.setattr(
+            windows_acl,
+            "verify_owner_only",
+            lambda path, *, directory: verified.append((path, directory)),
+        )
+        monkeypatch.setattr(
+            windows_acl,
+            "restrict_to_current_user",
+            lambda *args, **kwargs: pytest.fail("an existing DACL was replaced"),
+        )
+
+        harden_file(target)
+
+        assert verified == [(target, False)]
+
+    def test_new_windows_file_replaces_its_inherited_acl(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import windows_acl
+
+        target = tmp_path / "token"
+        target.touch()
+        entry = SimpleNamespace(
+            st_mode=stat.S_IFREG | 0o600,
+            st_dev=1,
+            st_ino=2,
+            st_file_attributes=0,
+        )
+        restricted: list[tuple[Path, bool]] = []
+        monkeypatch.setattr(private_state, "_WINDOWS", True)
+        monkeypatch.setattr(Path, "lstat", lambda path: entry)
+        monkeypatch.setattr(
+            windows_acl,
+            "restrict_to_current_user",
+            lambda path, *, directory: restricted.append((path, directory)),
+        )
+        monkeypatch.setattr(
+            windows_acl,
+            "verify_owner_only",
+            lambda *args, **kwargs: pytest.fail("a created file used verify-only"),
+        )
+
+        harden_created_file(target)
+
+        assert restricted == [(target, False)]
+
+    def test_new_windows_file_replacement_during_acl_hardening_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import windows_acl
+
+        target = tmp_path / "token"
+        target.touch()
+        entries = iter(
+            [
+                SimpleNamespace(
+                    st_mode=stat.S_IFREG | 0o600,
+                    st_dev=1,
+                    st_ino=2,
+                    st_file_attributes=0,
+                ),
+                SimpleNamespace(
+                    st_mode=stat.S_IFREG | 0o600,
+                    st_dev=1,
+                    st_ino=3,
+                    st_file_attributes=0,
+                ),
+            ]
+        )
+        monkeypatch.setattr(private_state, "_WINDOWS", True)
+        monkeypatch.setattr(Path, "lstat", lambda path: next(entries))
+        monkeypatch.setattr(
+            windows_acl, "restrict_to_current_user", lambda *a, **k: None
+        )
+
+        with pytest.raises(PrivateStateError, match="was replaced"):
+            harden_created_file(target)
+
+    def test_new_windows_child_is_hardened_before_publication(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        target = tmp_path / "per-auth"
+        hardened: list[Path] = []
+
+        def harden(path: Path) -> None:
+            assert path != target
+            assert path.parent == target.parent
+            assert not target.exists()
+            hardened.append(path)
+
+        monkeypatch.setattr(private_state, "_WINDOWS", True)
+        monkeypatch.setattr(private_state, "harden_created_directory", harden)
+
+        harden_directory_entry(target)
+
+        assert len(hardened) == 1
+        assert target.is_dir()
+        assert not hardened[0].exists()
+
+    def test_concurrent_windows_child_publication_verifies_the_winner(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import windows_acl
+
+        target = tmp_path / "per-auth"
+        verified: list[Path] = []
+
+        def harden(_path: Path) -> None:
+            target.mkdir()
+
+        real_rename = Path.rename
+
+        def windows_rename(path: Path, destination: Path) -> Path:
+            if destination == target and target.exists():
+                raise FileExistsError(destination)
+            return real_rename(path, destination)
+
+        monkeypatch.setattr(private_state, "_WINDOWS", True)
+        monkeypatch.setattr(Path, "rename", windows_rename)
+        monkeypatch.setattr(private_state, "harden_created_directory", harden)
+        monkeypatch.setattr(
+            private_state, "_refuse_windows_reparse_point", lambda *args: None
+        )
+        monkeypatch.setattr(
+            windows_acl,
+            "verify_owner_only",
+            lambda path, *, directory: verified.append(path),
+        )
+
+        harden_directory_entry(target)
+
+        assert verified == [target]
+        assert target.is_dir()
+        assert list(tmp_path.glob(".private-*")) == []
+
+    def test_failed_windows_child_hardening_removes_the_fresh_directory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        target = tmp_path / "per-auth"
+        monkeypatch.setattr(private_state, "_WINDOWS", True)
+        monkeypatch.setattr(
+            private_state, "_refuse_windows_reparse_point", lambda *args: None
+        )
+        monkeypatch.setattr(
+            private_state,
+            "harden_created_directory",
+            lambda _path: (_ for _ in ()).throw(PrivateStateError("ACL failure")),
+        )
+
+        with pytest.raises(PrivateStateError, match="ACL failure"):
+            harden_directory_entry(target)
+
+        assert not target.exists()
+        assert list(tmp_path.glob(".private-*")) == []
+
+    def test_old_windows_python_refuses_before_creating_a_directory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        target = tmp_path / "per-auth"
+        monkeypatch.setattr(private_state, "_WINDOWS", True)
+        monkeypatch.setattr(private_state.sys, "version_info", (3, 12, 3))
+
+        with pytest.raises(PrivateStateError, match="3.12.4 or newer"):
+            harden_directory_entry(target)
+
+        assert not target.exists()
+
+    def test_windows_missing_reparse_attributes_fail_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        target = tmp_path / "per-auth"
+        target.mkdir()
+        entry = SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_dev=1, st_ino=2)
+        monkeypatch.setattr(private_state, "_WINDOWS", True)
+        monkeypatch.setattr(Path, "lstat", lambda path: entry)
+
+        with pytest.raises(PrivateStateError, match="did not report file attributes"):
+            harden_directory_entry(target)
+
+    @posix_only
+    def test_an_owned_child_directory_refuses_another_account_s_entry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        target = tmp_path / "per-auth"
+        target.mkdir(mode=0o777)
+        target.chmod(0o777)
+        monkeypatch.setattr(os, "geteuid", lambda: target.stat().st_uid + 1)
+
+        with pytest.raises(PrivateStateError, match="is owned by uid"):
+            harden_directory_entry(target)
 
     @pytest.mark.skipif(
         sys.platform != "darwin", reason="macOS is where an access list needs libc"
@@ -735,17 +1049,121 @@ class TestWindowsAcl:
         (tmp_path / "ancestor").rename(tmp_path / "moved")
 
     @windows_only
+    def test_an_owned_child_directory_uses_the_same_acl_contract(self, tmp_path: Path):
+        from linkedin_mcp_server.windows_acl import describe_dacl
+
+        parent = tmp_path / "state"
+        harden_directory(parent)
+        target = parent / "per-auth"
+
+        harden_directory_entry(target)
+
+        described = describe_dacl(target)
+        assert described.protected is True
+        assert len(described.entries) == 1
+
+    @windows_only
+    def test_an_owned_child_directory_refuses_an_ntfs_junction(self, tmp_path: Path):
+        from linkedin_mcp_server.windows_acl import describe_dacl
+
+        parent = tmp_path / "state"
+        harden_directory(parent)
+        elsewhere = tmp_path / "redirected-state"
+        elsewhere.mkdir()
+        subprocess.run(
+            ["icacls", str(elsewhere), "/grant", "*S-1-1-0:(OI)(CI)F"],
+            check=True,
+            capture_output=True,
+        )
+        junction = parent / "per-auth"
+        subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/J", str(junction), str(elsewhere)],
+            check=True,
+            capture_output=True,
+        )
+        try:
+            assert junction.is_junction()
+            assert "S-1-1-0" in {
+                entry.sid for entry in describe_dacl(elsewhere).entries
+            }
+
+            with pytest.raises(PrivateStateError, match="Windows reparse point"):
+                harden_directory_entry(junction)
+
+            assert "S-1-1-0" in {
+                entry.sid for entry in describe_dacl(elsewhere).entries
+            }
+        finally:
+            junction.rmdir()
+
+    @windows_only
     def test_a_file_grants_only_this_account_and_inherits_nothing(self, tmp_path: Path):
         from linkedin_mcp_server.windows_acl import describe_dacl
 
-        target = tmp_path / "token"
+        parent = tmp_path / "state"
+        harden_directory(parent)
+        target = parent / "token"
         target.touch()
-        harden_file(target)
+        harden_created_file(target)
 
         described = describe_dacl(target)
         assert described.protected is True
         assert len(described.entries) == 1
         assert described.entries[0].flags == 0
+
+    @windows_only
+    def test_an_existing_permissive_directory_is_refused_without_repair(
+        self, tmp_path: Path
+    ):
+        from linkedin_mcp_server.windows_acl import describe_dacl
+
+        target = tmp_path / "legacy-state"
+        target.mkdir()
+        subprocess.run(
+            ["icacls", str(target), "/grant", "*S-1-1-0:(OI)(CI)F"],
+            check=True,
+            capture_output=True,
+        )
+
+        # Three refusals mean the same thing here, and which one arrives first
+        # depends on the machine rather than on the code: where the token's
+        # default owner is the Administrators group, a directory planted by
+        # this test belongs to that group and the ownership check speaks before
+        # the permissions are ever read. What the test is about is the line
+        # below, that nothing was repaired on the way out.
+        with pytest.raises(
+            PrivateStateError, match="grants access|inherits permissions|is owned by"
+        ):
+            harden_directory(target)
+
+        assert "S-1-1-0" in {entry.sid for entry in describe_dacl(target).entries}
+
+    @windows_only
+    def test_an_existing_permissive_file_is_refused_without_repair(
+        self, tmp_path: Path
+    ):
+        from linkedin_mcp_server.windows_acl import describe_dacl
+
+        target = tmp_path / "legacy-token"
+        target.touch()
+        subprocess.run(
+            ["icacls", str(target), "/grant", "*S-1-1-0:F"],
+            check=True,
+            capture_output=True,
+        )
+
+        # Three refusals mean the same thing here, and which one arrives first
+        # depends on the machine rather than on the code: where the token's
+        # default owner is the Administrators group, a directory planted by
+        # this test belongs to that group and the ownership check speaks before
+        # the permissions are ever read. What the test is about is the line
+        # below, that nothing was repaired on the way out.
+        with pytest.raises(
+            PrivateStateError, match="grants access|inherits permissions|is owned by"
+        ):
+            harden_file(target)
+
+        assert "S-1-1-0" in {entry.sid for entry in describe_dacl(target).entries}
 
     @windows_only
     def test_a_permissive_parent_does_not_leak_in(self, tmp_path: Path):
@@ -772,6 +1190,34 @@ class TestWindowsAcl:
         assert "S-1-1-0" not in granted  # Everyone
         assert "S-1-5-32-545" not in granted  # BUILTIN\Users
         assert "S-1-5-11" not in granted  # Authenticated Users
+
+    @windows_only
+    def test_a_private_parent_prevents_child_replacement(self, tmp_path: Path):
+        from linkedin_mcp_server.windows_acl import (
+            verify_children_cannot_be_replaced,
+        )
+
+        parent = tmp_path / "account-home"
+        harden_directory(parent)
+
+        verify_children_cannot_be_replaced(parent)
+
+    @windows_only
+    def test_a_parent_granting_delete_child_is_refused(self, tmp_path: Path):
+        from linkedin_mcp_server.windows_acl import (
+            verify_children_cannot_be_replaced,
+        )
+
+        parent = tmp_path / "account-home"
+        harden_directory(parent)
+        subprocess.run(
+            ["icacls", str(parent), "/grant", "*S-1-1-0:(DC)"],
+            check=True,
+            capture_output=True,
+        )
+
+        with pytest.raises(PrivateStateError, match="replace private state"):
+            verify_children_cannot_be_replaced(parent)
 
     @windows_only
     def test_hardening_preserves_current_ownership(self, tmp_path: Path):
@@ -908,8 +1354,12 @@ class TestWindowsAclOffWindows:
             | windows_acl.FILE_FLAG_OPEN_REPARSE_POINT
         ]
 
+    @pytest.mark.parametrize("directory", [False, True])
     def test_the_token_default_owner_is_normalized_to_the_token_user(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        directory: bool,
     ):
         """The Administrators-group owner policy, which GitHub's runners ship.
 
@@ -975,7 +1425,7 @@ class TestWindowsAclOffWindows:
             windows_acl, "verify_owner_only", lambda *_args, **_kwargs: None
         )
 
-        windows_acl.restrict_to_current_user(tmp_path, directory=True)
+        windows_acl.restrict_to_current_user(tmp_path, directory=directory)
 
         assert calls == [
             (
@@ -1108,6 +1558,143 @@ class TestWindowsAclOffWindows:
 
         windows_acl.verify_children_cannot_be_replaced(tmp_path)
         windows_acl.verify_ancestry_cannot_be_replaced(tmp_path / "child")
+
+    @pytest.mark.parametrize(
+        ("inheritance", "right_name"),
+        [
+            ("OBJECT_INHERIT_ACE", "FILE_WRITE_DATA"),
+            ("OBJECT_INHERIT_ACE", "FILE_APPEND_DATA"),
+            ("OBJECT_INHERIT_ACE", "DELETE"),
+            ("OBJECT_INHERIT_ACE", "WRITE_DAC"),
+            ("CONTAINER_INHERIT_ACE", "DELETE"),
+            ("CONTAINER_INHERIT_ACE", "WRITE_DAC"),
+        ],
+    )
+    def test_inherit_only_child_replacement_permission_is_refused(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        inheritance: str,
+        right_name: str,
+    ):
+        from linkedin_mcp_server import windows_acl
+
+        monkeypatch.setattr(
+            windows_acl, "current_user_sid", lambda: (object(), object())
+        )
+        monkeypatch.setattr(
+            windows_acl, "_sid_to_string", lambda _sid: "current-account"
+        )
+        monkeypatch.setattr(windows_acl, "read_owner", lambda _path: "current-account")
+        monkeypatch.setattr(
+            windows_acl,
+            "describe_dacl",
+            lambda _path: windows_acl.Dacl(
+                protected=True,
+                entries=(
+                    windows_acl.AccessEntry(
+                        sid="another-account",
+                        type=windows_acl.ACCESS_ALLOWED_ACE_TYPE,
+                        flags=(
+                            windows_acl.INHERIT_ONLY_ACE
+                            | getattr(windows_acl, inheritance)
+                        ),
+                        mask=getattr(windows_acl, right_name),
+                    ),
+                ),
+            ),
+        )
+
+        with pytest.raises(PrivateStateError, match="replace private state"):
+            windows_acl.verify_children_cannot_be_replaced(tmp_path)
+
+    def test_inheriting_home_permissions_are_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import windows_acl
+
+        monkeypatch.setattr(
+            windows_acl, "current_user_sid", lambda: (object(), object())
+        )
+        monkeypatch.setattr(
+            windows_acl, "_sid_to_string", lambda _sid: "current-account"
+        )
+        monkeypatch.setattr(windows_acl, "read_owner", lambda _path: "current-account")
+        monkeypatch.setattr(
+            windows_acl,
+            "describe_dacl",
+            lambda _path: windows_acl.Dacl(protected=False, entries=()),
+        )
+
+        with pytest.raises(PrivateStateError, match="inherits permissions"):
+            windows_acl.verify_children_cannot_be_replaced(tmp_path)
+
+    def test_inherit_only_creator_owner_is_not_a_foreign_principal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import windows_acl
+
+        monkeypatch.setattr(
+            windows_acl, "current_user_sid", lambda: (object(), object())
+        )
+        monkeypatch.setattr(
+            windows_acl, "_sid_to_string", lambda _sid: "current-account"
+        )
+        monkeypatch.setattr(windows_acl, "read_owner", lambda _path: "current-account")
+        monkeypatch.setattr(
+            windows_acl,
+            "describe_dacl",
+            lambda _path: windows_acl.Dacl(
+                protected=True,
+                entries=(
+                    windows_acl.AccessEntry(
+                        sid="S-1-3-0",
+                        type=windows_acl.ACCESS_ALLOWED_ACE_TYPE,
+                        flags=(
+                            windows_acl.INHERIT_ONLY_ACE
+                            | windows_acl.OBJECT_INHERIT_ACE
+                            | windows_acl.CONTAINER_INHERIT_ACE
+                        ),
+                        mask=windows_acl.GENERIC_ALL,
+                    ),
+                ),
+            ),
+        )
+
+        windows_acl.verify_children_cannot_be_replaced(tmp_path)
+
+    def test_file_inheritance_does_not_treat_read_ea_as_delete_child(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import windows_acl
+
+        monkeypatch.setattr(
+            windows_acl, "current_user_sid", lambda: (object(), object())
+        )
+        monkeypatch.setattr(
+            windows_acl, "_sid_to_string", lambda _sid: "current-account"
+        )
+        monkeypatch.setattr(windows_acl, "read_owner", lambda _path: "current-account")
+        monkeypatch.setattr(
+            windows_acl,
+            "describe_dacl",
+            lambda _path: windows_acl.Dacl(
+                protected=True,
+                entries=(
+                    windows_acl.AccessEntry(
+                        sid="another-account",
+                        type=windows_acl.ACCESS_ALLOWED_ACE_TYPE,
+                        flags=(
+                            windows_acl.INHERIT_ONLY_ACE
+                            | windows_acl.OBJECT_INHERIT_ACE
+                        ),
+                        mask=windows_acl.FILE_DELETE_CHILD,
+                    ),
+                ),
+            ),
+        )
+
+        windows_acl.verify_children_cannot_be_replaced(tmp_path)
 
     def test_inheriting_temporary_parent_is_refused(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1571,3 +2158,27 @@ class TestWindowsAclOffWindows:
 
         with pytest.raises(PrivateStateError, match="off Windows"):
             current_user_sid()
+
+    def test_the_declared_floor_can_create_windows_state(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A runtime the package accepts has to be one Windows state can use.
+
+        The refusal below is unconditional and arrives on a first ever start,
+        before anything exists to remove, so an installable interpreter that
+        trips it leaves the shared owner unavailable with nothing to undo.
+        """
+        import tomllib
+
+        manifest = Path(__file__).resolve().parents[1] / "pyproject.toml"
+        declared = tomllib.loads(manifest.read_text())["project"]["requires-python"]
+        floor = tuple(
+            int(part)
+            for part in declared.split(",")[0].strip().removeprefix(">=").split(".")
+        )
+        monkeypatch.setattr(private_state, "_WINDOWS", True)
+        monkeypatch.setattr(private_state.sys, "version_info", floor)
+
+        assert private_state._windows_private_creation_supported(), (
+            f"the package offers Python {declared}, which cannot create it"
+        )

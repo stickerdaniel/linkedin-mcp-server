@@ -38,7 +38,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.12", "3.13", "3.14"]
+        # 3.12.4 exactly, because it is the declared floor and the one version
+        # where private state creation on Windows became possible at all. The
+        # others follow their newest patch, so nothing else here would notice a
+        # daemon path reaching for something added after it.
+        python-version: ["3.12.4", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
@@ -49,13 +53,18 @@ jobs:
 
       - run: uv sync --group dev
 
-      - name: Run daemon containment tests
+      - name: Run daemon protocol and containment tests
         run: >-
           uv run pytest
+          tests/test_daemon_election.py::TestAtomicStartupCommit
+          tests/test_daemon_election.py::TestPublishingLast
           tests/test_daemon_election.py::TestRealOwner::test_an_owner_is_started_and_answers
           tests/test_daemon_election.py::TestRealOwner::test_a_crashed_owner_is_replaced
           tests/test_daemon_election.py::TestRealOwner::test_many_clients_starting_at_once_elect_exactly_one_owner
           tests/test_bootstrap.py::TestInstallerSupervisorLaunch::test_real_cpython_wait_unregister_contract
+          tests/test_daemon_descriptor.py::TestPreparedCommit
+          tests/test_daemon_descriptor.py::TestStateLocation
+          tests/test_daemon_lock.py
           tests/test_installer_supervisor.py
           tests/test_installer_worker.py
           tests/test_process_tree.py

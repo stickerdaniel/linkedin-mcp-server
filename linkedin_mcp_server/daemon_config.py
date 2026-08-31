@@ -15,10 +15,28 @@ anything running as this account (``/proc/<pid>/environ`` and ``ps``), and what
 travels here includes ``proxy_password``. A pipe is read once by one process and
 never lands anywhere.
 
-Both ends are the same installation: the frontend starts the owner with its own
-interpreter and its own package, so this codec never crosses versions. It is
-still a parse of untrusted-shaped input rather than a restore, because the thing
-being reconstructed decides which browser opens against a logged-in session.
+A long-running frontend can start an owner after the package was replaced on
+disk, so the handover carries a startup-protocol version. Missing means the
+pre-commit predecessor protocol. Input is still parsed as untrusted-shaped data
+because the reconstructed values decide which browser opens against a logged-in
+session.
+
+Three versions are understood, and an owner has to serve all three because the
+frontend on the other side is whatever was installed when it started. Windows
+is the exception and refuses the first of them: the predecessor there holds a
+legacy state directory this owner may not adopt, so it stops before touching
+any state rather than serving a frontend it cannot share a namespace with
+(#810):
+
+1. No commit boundary. The frontend closes the pipe once written and kills a
+   child that stays silent, so the owner's only safe handoff is ``READY``
+   before it publishes.
+2. Commit authorization on the configuration pipe, which the frontend holds
+   open past the record for exactly that purpose.
+3. Commit authorization on a separate loopback channel named here, so the
+   configuration pipe can be closed at once and a predecessor owner started by
+   a current frontend still reaches its end of file. See
+   :mod:`linkedin_mcp_server.process_control`.
 """
 
 from __future__ import annotations
@@ -47,6 +65,32 @@ if TYPE_CHECKING:
 #: *frontend's* invocation, and an owner that adopted them would try to run the
 #: client's transport or re-run its ``--login``.
 _SERVER_FIELDS = ("tool_timeout_seconds", "log_level")
+STARTUP_PROTOCOL_VERSION = 3
+_PREDECESSOR_STARTUP_PROTOCOL_VERSION = 1
+_PIPE_COMMIT_STARTUP_PROTOCOL_VERSION = 2
+_SUPPORTED_STARTUP_PROTOCOLS = (
+    _PREDECESSOR_STARTUP_PROTOCOL_VERSION,
+    _PIPE_COMMIT_STARTUP_PROTOCOL_VERSION,
+    STARTUP_PROTOCOL_VERSION,
+)
+
+
+def authorizes_commit(startup_protocol: int) -> bool:
+    """Whether a frontend speaking *startup_protocol* can authorize a commit.
+
+    The one distinction the owner acts on. Which channel carries the record is
+    the handover's business; whether there is a record at all decides between
+    publishing on the parent's authority and publishing on its own.
+    """
+    return startup_protocol >= _PIPE_COMMIT_STARTUP_PROTOCOL_VERSION
+
+
+@dataclass(frozen=True)
+class ControlEndpoint:
+    """Where the parent is listening for its child's commit channel."""
+
+    host: str
+    port: int
 
 
 @dataclass(frozen=True)
@@ -55,6 +99,8 @@ class OwnerHandover:
 
     config: AppConfig
     handshake_nonce: str
+    startup_protocol: int = STARTUP_PROTOCOL_VERSION
+    control: ControlEndpoint | None = None
 
 
 def _encoded(config: AppConfig) -> dict[str, object]:
@@ -77,12 +123,24 @@ def encode(config: AppConfig) -> str:
     return json.dumps(_encoded(config))
 
 
-def encode_handover(config: AppConfig, handshake_nonce: str) -> str:
-    """Serialise owner settings with a nonce created after its process exists."""
+def encode_handover(
+    config: AppConfig, handshake_nonce: str, control: ControlEndpoint
+) -> str:
+    """Serialise owner settings with a nonce created after its process exists.
+
+    The version and the rendezvous are separate top-level names rather than a
+    nested section, and that is what makes a predecessor owner able to read this
+    record at all: every version of :func:`_decoded` reads ``browser`` and
+    ``server`` by name and ignores what it has never heard of, while an unknown
+    name *inside* one of those sections is refused.
+    """
     if not valid_nonce(handshake_nonce):
         raise ValueError("The owner handshake nonce is invalid")
     payload = _encoded(config)
     payload["handshake_nonce"] = handshake_nonce
+    payload["startup_protocol"] = STARTUP_PROTOCOL_VERSION
+    payload["control_host"] = control.host
+    payload["control_port"] = control.port
     return json.dumps(payload)
 
 
@@ -126,7 +184,45 @@ def decode_handover(raw: str) -> OwnerHandover:
     if not valid_nonce(handshake_nonce):
         raise ValueError("The owner configuration has no valid handshake nonce")
     assert isinstance(handshake_nonce, str)
-    return OwnerHandover(_decoded(parsed), handshake_nonce)
+    startup_protocol = parsed.get(
+        "startup_protocol", _PREDECESSOR_STARTUP_PROTOCOL_VERSION
+    )
+    if (
+        not isinstance(startup_protocol, int)
+        or isinstance(startup_protocol, bool)
+        or startup_protocol not in _SUPPORTED_STARTUP_PROTOCOLS
+    ):
+        raise ValueError(
+            "The owner configuration names an unsupported startup protocol"
+        )
+    control = _control_endpoint(parsed, startup_protocol)
+    return OwnerHandover(_decoded(parsed), handshake_nonce, startup_protocol, control)
+
+
+def _control_endpoint(
+    parsed: dict[str, object], startup_protocol: int
+) -> ControlEndpoint | None:
+    """The rendezvous this protocol version requires, and no other version may name.
+
+    Refused both ways round. A current record without an address would leave the
+    owner with no way to be authorized, and an older version naming one would be
+    a frontend asking for a channel its own protocol never establishes; neither
+    is a version difference, because the value comes from one function.
+    """
+    host = parsed.get("control_host")
+    port = parsed.get("control_port")
+    if startup_protocol != STARTUP_PROTOCOL_VERSION:
+        if host is not None or port is not None:
+            raise ValueError(
+                "The owner configuration names a control channel its startup "
+                "protocol does not use"
+            )
+        return None
+    if not isinstance(host, str) or not host or any(c.isspace() for c in host):
+        raise ValueError("The owner configuration has no valid control host")
+    if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+        raise ValueError("The owner configuration has no valid control port")
+    return ControlEndpoint(host, port)
 
 
 def _apply(
