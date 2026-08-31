@@ -365,6 +365,16 @@ class TestPreparedCommit:
         except OSError as exc:
             pytest.skip(f"directory symlinks are unavailable: {exc}")
 
+        if os.name == "nt":
+            # Windows refuses to rename over a link naming a directory, so the
+            # link survives and the commit reports the structural refusal that
+            # a real directory in that place reports.
+            with pytest.raises(IsADirectoryError):
+                commit_prepared(tmp_path, descriptor.instance_id)
+            assert published.is_symlink()
+            assert target.is_dir()
+            return
+
         commit_prepared(tmp_path, descriptor.instance_id)
 
         assert target.is_dir()
@@ -946,7 +956,15 @@ class TestStateLocation:
 
         assert first == second
         assert legacy.read_bytes() == daemon_descriptor_module._LEGACY_WINDOWS_TOMBSTONE
-        with pytest.raises(NotADirectoryError):
+        # Windows reports a path whose parent is a file as ERROR_PATH_NOT_FOUND
+        # rather than as a directory error, so the exception differs while the
+        # refusal this asserts is the same on both.
+        refusals = (
+            (NotADirectoryError, FileNotFoundError)
+            if os.name == "nt"
+            else NotADirectoryError
+        )
+        with pytest.raises(refusals):
             secure_mkdir(legacy / "daemon")
 
     def test_windows_records_the_exclusion_only_once_it_exists(

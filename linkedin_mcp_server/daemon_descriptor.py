@@ -1088,7 +1088,15 @@ def commit_prepared(auth_root: Path, instance_id: str) -> Path:
             published_mode = published.stat(follow_symlinks=False).st_mode
         except FileNotFoundError:
             published_mode = None
-        if published_mode is not None and stat.S_ISDIR(published_mode):
+        structural = published_mode is not None and stat.S_ISDIR(published_mode)
+        if published_mode is not None and not structural and os.name == "nt":
+            # A link naming a directory is refused by ``os.replace`` on Windows
+            # with the same WinError 5, so it is the same structural problem
+            # there and is normalized with it. POSIX replaces the link itself
+            # and never reaches this, which is why the question is asked of the
+            # running platform rather than of the flag the tests simulate with.
+            structural = stat.S_ISLNK(published_mode) and published.is_dir()
+        if structural:
             raise IsADirectoryError(
                 f"The daemon descriptor path {published} is a directory"
             )

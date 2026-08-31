@@ -202,10 +202,22 @@ class DaemonLock:
                     "being established"
                 )
         except BaseException:
-            if not existed and is_still_at(fd, self._path):
+            remove = not existed and is_still_at(fd, self._path)
+            closed = False
+            if remove and os.name == "nt":
+                # Windows refuses to unlink a file this process still holds
+                # open, so there the descriptor goes first and the file this
+                # just created is left behind otherwise. What the removal rests
+                # on is the identity check above, and that was made while the
+                # descriptor still held the file. POSIX keeps the stronger
+                # order, where nothing at all can come between the two.
+                os.close(fd)
+                closed = True
+            if remove:
                 with contextlib.suppress(OSError):
                     self._path.unlink()
-            os.close(fd)
+            if not closed:
+                os.close(fd)
             raise
 
         self._fd = fd
