@@ -69,6 +69,14 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 _RUNTIME = "test-runtime"
 _HANDSHAKE_NONCE = "0123456789abcdef" * 4
 
+#: What a call given a 0.01s bound may take before the bound is not the thing
+#: deciding. A hundred times the argument, and still two orders below the
+#: multi-second defaults these paths would otherwise use, so it fails an
+#: implementation that ignores its timeout without failing a busy machine. Ten
+#: times was too tight: a Windows runner spent 0.141s on thread scheduling
+#: alone and failed a bound that had worked correctly.
+_BOUNDED_CALL_SECONDS = 1.0
+
 _POSIX_ONLY = pytest.mark.skipif(
     os.name == "nt", reason="the lock is handed to the child only on POSIX"
 )
@@ -1387,9 +1395,16 @@ class TestFailingFast:
 # `ruff format` did exactly that to an earlier version of this file and every
 # process test failed with an IndentationError from the child.
 _INSPECT_OWNER = """
+import faulthandler
 import json
 import sys
 from pathlib import Path
+
+# A frontend that dies natively says nothing otherwise. Measured on a Windows
+# runner at the declared floor: one of eight exited 0xC0000005 with an empty
+# stderr, and the assertion could only report the number. This turns the next
+# one into a stack that names where it happened.
+faulthandler.enable()
 
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon_election import obtain_owner
@@ -3112,17 +3127,46 @@ class TestAtomicStartupCommit:
         assert message in caplog.text
         assert secret not in caplog.text
 
-    def test_a_blocked_bootstrap_pipe_cannot_pin_fallback(self):
+    def test_a_blocked_bootstrap_pipe_cannot_pin_fallback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The one bounded call here with somewhere else to fall back to.
+
+        The others take a required timeout, so an implementation that ignores
+        it has nothing to use instead and blocks. This one has a module
+        constant behind it, ``_FAILURE_VERDICT_SECONDS``, and at its real 0.2s
+        an implementation reading that instead of its argument returns well
+        inside any ceiling a busy runner can also meet. So the constant is made
+        expensive for the length of this test: reading it now costs thirty
+        seconds. The signature default is bound at definition and cannot move,
+        which is why the constant is the lever and not that.
+
+        The timer covers the other shape, an unbounded wait, by closing the
+        write end from outside. It sits above the ceiling, so it ends the test
+        rather than rescuing the implementation.
+        """
+        monkeypatch.setattr(election_module, "_FAILURE_VERDICT_SECONDS", 30.0)
         reader_fd, writer_fd = os.pipe()
+        closed = threading.Lock()
+        opened = [writer_fd]
+
+        def close_the_write_end() -> None:
+            with closed:
+                if opened:
+                    os.close(opened.pop())
+
         stream = os.fdopen(reader_fd, "rb", buffering=0)
         report = election_module._BootstrapReport(stream)
+        fallback = threading.Timer(_BOUNDED_CALL_SECONDS * 2, close_the_write_end)
+        fallback.start()
         started = time.monotonic()
         try:
             assert report.read(timeout=0.01) is None
         finally:
-            os.close(writer_fd)
+            fallback.cancel()
+            close_the_write_end()
 
-        assert time.monotonic() - started < 0.1
+        assert time.monotonic() - started < _BOUNDED_CALL_SECONDS
 
     def test_bootstrap_limit_keeps_draining_the_live_child(self):
         release = threading.Event()
@@ -3746,15 +3790,22 @@ class TestAtomicStartupCommit:
             return None
 
         monkeypatch.setattr(election_module.daemon_descriptor, "read", read)
+        # So a bound that never fires fails this test instead of hanging the
+        # run: the release below is only reached once the call returns, which
+        # is exactly what an unbounded one never does. Above the ceiling, so it
+        # cannot rescue the implementation it is there to catch.
+        fallback = threading.Timer(_BOUNDED_CALL_SECONDS * 2, release.set)
+        fallback.start()
         started = time.monotonic()
         try:
             with pytest.raises(TimeoutError, match="could not be read in time"):
                 election_module._read_canonical_until(tmp_path, timeout=0.01)
         finally:
             release.set()
+            fallback.cancel()
 
         assert blocked.is_set()
-        assert time.monotonic() - started < 0.1
+        assert time.monotonic() - started < _BOUNDED_CALL_SECONDS
 
     def test_prepared_state_validation_is_bounded(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -3769,6 +3820,11 @@ class TestAtomicStartupCommit:
         monkeypatch.setattr(
             election_module.daemon_descriptor, "validate_prepared", validate
         )
+        # For the reason the read above has one: without it an unbounded call
+        # never returns, the release never runs, and the failure arrives as a
+        # hung suite rather than as a failing test.
+        fallback = threading.Timer(_BOUNDED_CALL_SECONDS * 2, release.set)
+        fallback.start()
         started = time.monotonic()
         try:
             with pytest.raises(TimeoutError, match="could not be read in time"):
@@ -3781,9 +3837,10 @@ class TestAtomicStartupCommit:
                 )
         finally:
             release.set()
+            fallback.cancel()
 
         assert blocked.is_set()
-        assert time.monotonic() - started < 0.1
+        assert time.monotonic() - started < _BOUNDED_CALL_SECONDS
 
     def test_profile_resolution_is_bounded(self, tmp_path: Path):
         blocked = threading.Event()
@@ -3798,7 +3855,10 @@ class TestAtomicStartupCommit:
                 release.wait()
                 return tmp_path / "resolved-profile"
 
-        fallback = threading.Timer(0.2, release.set)
+        # Above the ceiling asserted below on purpose: it exists only so a bound
+        # that never fires cannot hang the run, and releasing the block sooner
+        # would let an unbounded call return inside the ceiling and pass.
+        fallback = threading.Timer(_BOUNDED_CALL_SECONDS * 2, release.set)
         fallback.start()
         started = time.monotonic()
         try:
@@ -3811,7 +3871,7 @@ class TestAtomicStartupCommit:
             fallback.cancel()
 
         assert blocked.is_set()
-        assert time.monotonic() - started < 0.1
+        assert time.monotonic() - started < _BOUNDED_CALL_SECONDS
 
     def test_late_prepared_cleanup_cannot_touch_a_new_generation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -3847,7 +3907,10 @@ class TestAtomicStartupCommit:
         monkeypatch.setattr(
             election_module.daemon_descriptor, "discard_prepared", delayed
         )
-        fallback = threading.Timer(0.2, release.set)
+        # Above the ceiling asserted below on purpose: it exists only so a bound
+        # that never fires cannot hang the run, and releasing the block sooner
+        # would let an unbounded call return inside the ceiling and pass.
+        fallback = threading.Timer(_BOUNDED_CALL_SECONDS * 2, release.set)
         fallback.start()
         started = time.monotonic()
         bounded_elapsed = float("inf")
