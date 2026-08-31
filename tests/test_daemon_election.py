@@ -4451,6 +4451,15 @@ class TestRealOwner:
         finally:
             _stop(recovered.get("pid"))
 
+    @pytest.mark.skipif(
+        os.name == "nt"
+        and sys.implementation.name == "cpython"
+        and sys.version_info[:3] == (3, 12, 4),
+        reason=(
+            "CPython 3.12.4 intermittently access-violates under this "
+            "daemon-thread I/O stress"
+        ),
+    )
     def test_many_clients_starting_at_once_elect_exactly_one_owner(
         self, real_state_root: Path
     ):
