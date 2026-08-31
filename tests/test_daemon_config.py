@@ -11,12 +11,15 @@ from __future__ import annotations
 
 import json
 from dataclasses import fields
+from typing import Any, cast
 
 import pytest
 
 from linkedin_mcp_server import daemon_config
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon_descriptor import config_fingerprint
+
+_NONCE = "0123456789abcdef" * 4
 
 
 def _config(**browser: object) -> AppConfig:
@@ -50,6 +53,20 @@ class TestRoundTrip:
         assert config_fingerprint(restored, key=key) == config_fingerprint(
             original, key=key
         )
+
+    def test_owner_handover_carries_the_post_spawn_nonce(self):
+        original = _config(headless=False)
+
+        handover = daemon_config.decode_handover(
+            daemon_config.encode_handover(original, _NONCE)
+        )
+
+        assert handover.handshake_nonce == _NONCE
+        assert handover.config.browser.headless is False
+
+    def test_owner_handover_requires_a_valid_nonce(self):
+        with pytest.raises(ValueError, match="handshake nonce"):
+            daemon_config.decode_handover(daemon_config.encode(_config()))
 
     def test_every_browser_setting_crosses_unchanged(self):
         # The fingerprint check above is necessary and not sufficient: it only
@@ -234,7 +251,7 @@ class TestRefusing:
         original = browser_module.current_headless()
         stdin = sys.stdin
         browser_module.set_headless(True)
-        sys.stdin = io.StringIO(daemon_config.encode(visible))
+        sys.stdin = io.StringIO(daemon_config.encode_handover(visible, _NONCE))
         try:
             # It gets as far as taking the lock, which fails on the deliberately
             # invalid descriptor and is reported rather than raised. That is
@@ -248,29 +265,53 @@ class TestRefusing:
             sys.stdin = stdin
             browser_module.set_headless(original)
 
-    def test_a_configuration_failure_is_logged_before_its_verdict(
+    def test_owner_verdict_carries_the_handed_over_nonce(self):
+        from linkedin_mcp_server import daemon_owner
+
+        class RecordingStream:
+            def __init__(self) -> None:
+                self.written = ""
+                self.flushed = False
+                self.closed = False
+
+            def write(self, value: str) -> int:
+                self.written += value
+                return len(value)
+
+            def flush(self) -> None:
+                self.flushed = True
+
+            def close(self) -> None:
+                self.closed = True
+
+        stream = RecordingStream()
+        daemon_owner._Handshake(cast(Any, stream), _NONCE).succeed()
+
+        assert stream.written == f"owner {_NONCE} ready\n"
+        assert stream.flushed
+        assert stream.closed
+
+    def test_a_configuration_failure_logs_then_closes_without_a_verdict(
         self, monkeypatch: pytest.MonkeyPatch
     ):
-        # A frontend that receives ``failed`` owns the child only long enough to
-        # stop it. Anything logged after that verdict races the hard stop, so the
-        # order here is part of preserving the actual startup diagnosis.
+        # Startup output can already contain plain ``ready`` or ``failed``. Until
+        # the configuration yields the post-spawn nonce, the owner has no frame it
+        # can authenticate, so failure is represented only by closing the pipe.
         from linkedin_mcp_server import daemon_owner
 
         events: list[str] = []
 
-        class RecordingHandshake:
-            def __init__(self, _stream: object) -> None:
-                pass
+        class RecordingStream:
+            def close(self) -> None:
+                events.append("closed")
 
-            def fail(self) -> None:
-                events.append("failed")
-
-        def reject() -> AppConfig:
+        def reject() -> daemon_config.OwnerHandover:
             raise ValueError("invalid handed-over configuration")
 
-        monkeypatch.setattr(daemon_owner, "_Handshake", RecordingHandshake)
-        monkeypatch.setattr(daemon_owner, "_claim_handshake_stream", lambda: None)
-        monkeypatch.setattr(daemon_owner, "_read_config", reject)
+        monkeypatch.setattr(
+            daemon_owner, "_claim_handshake_stream", lambda: RecordingStream()
+        )
+        monkeypatch.setattr(daemon_owner, "_read_handover", reject)
         monkeypatch.setattr(
             daemon_owner.logger,
             "exception",
@@ -280,7 +321,7 @@ class TestRefusing:
         with pytest.raises(ValueError, match="invalid handed-over configuration"):
             daemon_owner.main([])
 
-        assert events == ["logged", "failed"]
+        assert events == ["logged", "closed"]
 
     def test_the_owner_refuses_to_start_without_a_configuration(self):
         # The owner reads its settings from standard input and must not fall

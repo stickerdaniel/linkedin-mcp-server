@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import subprocess
 import sys
 import time
 from typing import Any, NoReturn
@@ -55,6 +56,14 @@ from linkedin_mcp_server.exceptions import (
     BrowserSetupFailedError,
     BrowserSetupInProgressError,
     DockerHostLoginRequiredError,
+)
+from linkedin_mcp_server.process_protocol import new_nonce
+from linkedin_mcp_server.process_tree import (
+    ProcessTreeError,
+    WindowsJob,
+    release_nonce,
+    release_windows_gate,
+    windows_gate_command,
 )
 from linkedin_mcp_server.profile_lease import (
     ProfileLeaseUnavailableError,
@@ -686,6 +695,605 @@ def _start_browser_setup_task_locked() -> None:
     _state.setup_task = asyncio.create_task(_run_browser_setup(), name="browser-setup")
 
 
+_INSTALLER_START_SECONDS = 30.0
+_INSTALLER_STOP_SECONDS = 10.0
+
+
+@dataclass(slots=True)
+class _InstallerProcess:
+    process: asyncio.subprocess.Process
+    windows_job: WindowsJob | None = None
+    windows_popen: subprocess.Popen[Any] | None = None
+    windows_wait: asyncio.Future[Any] | None = None
+    assigned: bool = False
+    windows_cleanup: asyncio.Task[None] | None = None
+
+    @property
+    def pid(self) -> int:
+        return self.process.pid
+
+    @property
+    def stdin(self) -> asyncio.StreamWriter | None:
+        return self.process.stdin
+
+    @property
+    def stdout(self) -> asyncio.StreamReader | None:
+        return self.process.stdout
+
+    @property
+    def stderr(self) -> asyncio.StreamReader | None:
+        return self.process.stderr
+
+    @property
+    def returncode(self) -> int | None:
+        return self.process.returncode
+
+    async def wait(self) -> int:
+        return await self.process.wait()
+
+    def kill(self) -> None:
+        self.process.kill()
+
+
+def _managed_installer(proc: Any) -> _InstallerProcess:
+    if isinstance(proc, _InstallerProcess):
+        return proc
+    return _InstallerProcess(proc)
+
+
+def _capture_windows_process_wait(
+    process: asyncio.subprocess.Process, popen: subprocess.Popen[Any]
+) -> asyncio.Future[Any]:
+    """Pin CPython's registered wait for the process handle we will release."""
+    transport = getattr(process, "_transport", None)
+    loop = getattr(transport, "_loop", None)
+    proactor = getattr(loop, "_proactor", None)
+    cache = getattr(proactor, "_cache", None)
+    process_handle = getattr(popen, "_handle", None)
+    if proactor is None or not isinstance(cache, dict) or process_handle is None:
+        raise ProcessTreeError(
+            "Windows asyncio exposed no registered process wait contract"
+        )
+    try:
+        expected_handle = int(process_handle)
+    except (TypeError, ValueError) as exc:
+        raise ProcessTreeError(
+            "Windows asyncio exposed an invalid process wait handle"
+        ) from exc
+
+    matches: list[asyncio.Future[Any]] = []
+    for address, entry in cache.items():
+        if not isinstance(entry, tuple) or len(entry) < 2:
+            continue
+        future, overlapped = entry[:2]
+        if (
+            getattr(future, "_handle", None) == expected_handle
+            and getattr(future, "_proactor", None) is proactor
+            and getattr(future, "_ov", None) is overlapped
+            and getattr(overlapped, "address", None) == address
+            and hasattr(future, "_event_fut")
+        ):
+            matches.append(future)
+    if len(matches) != 1:
+        raise ProcessTreeError(
+            "Windows asyncio did not expose one registered process wait"
+        )
+
+    future = matches[0]
+    if (
+        future.done()
+        or getattr(future, "_registered", None) is not True
+        or getattr(future, "_event_fut", None) is not None
+    ):
+        raise ProcessTreeError(
+            "Windows asyncio process wait was not pending at assignment"
+        )
+    return future
+
+
+def _windows_wait_unregistered(future: asyncio.Future[Any]) -> bool:
+    """Whether CPython's UnregisterWaitEx completion callback has finished."""
+    return (
+        future.done()
+        and getattr(future, "_registered", None) is False
+        and getattr(future, "_wait_handle", object()) is None
+        and getattr(future, "_event", object()) is None
+        and getattr(future, "_event_fut", object()) is None
+        and getattr(future, "_proactor", object()) is None
+        and getattr(future, "_ov", object()) is None
+    )
+
+
+async def _prove_windows_wait_unregistered(
+    proc: _InstallerProcess, deadline: float
+) -> None:
+    """Wait within the stop deadline for CPython's OS unregister completion."""
+    future = proc.windows_wait
+    if future is None:
+        raise ProcessTreeError("Windows asyncio process wait was not retained")
+    if _windows_wait_unregistered(future):
+        return
+    if not future.done():
+        raise ProcessTreeError(
+            "Windows published process exit before completing its registered wait"
+        )
+
+    event_fut = getattr(future, "_event_fut", None)
+    proactor = getattr(future, "_proactor", None)
+    overlapped = getattr(future, "_ov", None)
+    callback = getattr(event_fut, "_done_callback", None)
+    if (
+        not isinstance(event_fut, asyncio.Future)
+        or proactor is None
+        or overlapped is None
+        or getattr(callback, "__self__", None) is not future
+    ):
+        raise ProcessTreeError(
+            "Windows asyncio process wait unregister contract was incomplete"
+        )
+
+    remaining = _installer_stop_remaining(deadline)
+    if remaining <= 0:
+        raise ProcessTreeError(
+            "Windows process wait unregister exceeded the cleanup deadline"
+        )
+    done, _pending = await asyncio.wait({event_fut}, timeout=remaining)
+    if event_fut not in done:
+        raise ProcessTreeError(
+            "Windows process wait unregister exceeded the cleanup deadline"
+        )
+    # CPython 3.12-3.14 invokes the owner callback synchronously from
+    # _WaitCancelFuture.set_result. Yield once as well so a callback already
+    # queued when the future completed cannot be mistaken for OS completion.
+    await asyncio.sleep(0)
+    if not _windows_wait_unregistered(future):
+        raise ProcessTreeError(
+            "Windows process wait unregister completion could not be proved"
+        )
+
+
+async def _close_installer_lease(proc: _InstallerProcess) -> None:
+    stream = proc.stdin
+    if stream is None or stream.is_closing():
+        return
+    stream.close()
+    with contextlib.suppress(BrokenPipeError, ConnectionError, OSError):
+        await stream.wait_closed()
+
+
+async def _wait_for_direct_process_exit(proc: _InstallerProcess) -> int:
+    """Observe the proactor exit callback without waiting for inherited pipe EOF."""
+    while proc.returncode is None:
+        await asyncio.sleep(0.01)
+    return proc.returncode
+
+
+async def _wait_for_direct_process_exit_within(
+    proc: _InstallerProcess, seconds: float
+) -> int | None:
+    if proc.returncode is not None:
+        return proc.returncode
+    if seconds <= 0:
+        return None
+    try:
+        return await asyncio.wait_for(_wait_for_direct_process_exit(proc), seconds)
+    except TimeoutError:
+        return None
+
+
+async def _cleanup_assigned_windows_job_once(
+    proc: _InstallerProcess, deadline: float
+) -> None:
+    """Terminate, release, and drain one assigned Windows process tree."""
+    job = proc.windows_job
+    popen = proc.windows_popen
+    if job is None or popen is None or not proc.assigned:
+        return
+
+    try:
+        await asyncio.to_thread(job.terminate)
+    except BaseException:
+        # Kill-on-close is the independent containment mechanism. If the explicit
+        # API refuses termination, closing the owner handle is the last
+        # deterministic action that can still end the tree.
+        await asyncio.to_thread(job.close)
+        proc.assigned = False
+        raise
+    returncode = await _wait_for_direct_process_exit_within(
+        proc, _installer_stop_remaining(deadline)
+    )
+    if returncode is None:
+        raise ProcessTreeError(
+            "The browser installer supervisor did not exit after Job termination"
+        )
+
+    # CPython 3.12-3.14 publishes Process.returncode from the registered wait's
+    # result callback before the UnregisterWaitEx completion callback clears its
+    # proactor and Overlapped ownership. The handle stays live through that proof.
+    await _prove_windows_wait_unregistered(proc, deadline)
+    job.release_popen_handle(popen)
+    proc.windows_popen = None
+    proc.windows_wait = None
+    await asyncio.to_thread(
+        job.wait_until_empty,
+        timeout=_installer_stop_remaining(deadline),
+    )
+    proc.assigned = False
+
+
+def _assigned_windows_cleanup(
+    proc: _InstallerProcess, deadline: float
+) -> asyncio.Task[None]:
+    cleanup = proc.windows_cleanup
+    if cleanup is None:
+        cleanup = asyncio.create_task(
+            _cleanup_assigned_windows_job_once(proc, deadline),
+            name="drain-browser-installer-job",
+        )
+        proc.windows_cleanup = cleanup
+    return cleanup
+
+
+async def _wait_for_installer_exit(proc: _InstallerProcess, seconds: float) -> bool:
+    try:
+        await asyncio.wait_for(proc.wait(), seconds)
+    except TimeoutError:
+        return False
+    return True
+
+
+async def _drain_installer_stream(
+    stream: asyncio.StreamReader | None,
+) -> None:
+    if stream is None:
+        return
+    try:
+        while await stream.read(_READ_CHUNK):
+            pass
+    except (BrokenPipeError, ConnectionError, OSError, ValueError):
+        return
+
+
+def _installer_stop_remaining(deadline: float) -> float:
+    return max(deadline - asyncio.get_running_loop().time(), 0.0)
+
+
+async def _stop_installer_once(proc: _InstallerProcess | Any) -> None:
+    proc = _managed_installer(proc)
+    deadline = asyncio.get_running_loop().time() + _INSTALLER_STOP_SECONDS
+    drains = [
+        asyncio.create_task(
+            _drain_installer_stream(stream), name="drain-browser-installer"
+        )
+        for stream in (proc.stdout, proc.stderr)
+        if stream is not None
+    ]
+    try:
+        if proc.windows_job is not None and proc.assigned:
+            # Shield one shared cleanup task. A cancellation during to_thread does
+            # not stop that worker; starting a second drain would race the same Job
+            # handle while the first still owns it.
+            await asyncio.shield(_assigned_windows_cleanup(proc, deadline))
+        else:
+            try:
+                await asyncio.wait_for(
+                    _close_installer_lease(proc),
+                    _installer_stop_remaining(deadline),
+                )
+            except TimeoutError:
+                pass
+            if not await _wait_for_installer_exit(
+                proc, _installer_stop_remaining(deadline)
+            ):
+                with contextlib.suppress(ProcessLookupError, OSError):
+                    proc.kill()
+                if not await _wait_for_installer_exit(
+                    proc, _installer_stop_remaining(deadline)
+                ):
+                    logger.warning(
+                        "The browser installer supervisor did not exit after kill"
+                    )
+            if proc.windows_job is not None and not proc.windows_job.closed:
+                proc.windows_job.close()
+    finally:
+        for drain in drains:
+            try:
+                await asyncio.wait_for(drain, _installer_stop_remaining(deadline))
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                if not drain.done():
+                    drain.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await drain
+                logger.warning(
+                    "The browser installer worker streams did not close after cleanup"
+                )
+
+
+async def _stop_installer(proc: _InstallerProcess | Any) -> None:
+    """End and reap a supervised installer tree before cancellation continues."""
+    proc = _managed_installer(proc)
+    cleanup = asyncio.create_task(
+        _stop_installer_once(proc), name="stop-browser-installer"
+    )
+    cancellation: asyncio.CancelledError | None = None
+    while not cleanup.done():
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+
+    if cancellation is not None:
+        cleanup_error = cleanup.exception()
+        if cleanup_error is not None:
+            logger.error(
+                "Browser installer cleanup failed while cancellation was pending",
+                exc_info=cleanup_error,
+            )
+        raise cancellation
+    cleanup.result()
+
+
+async def _settle_installer_tasks(
+    tasks: tuple[asyncio.Task[Any], ...],
+) -> asyncio.CancelledError | None:
+    """Cancel and retrieve installer tasks without letting another cancel skip them."""
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    settling = asyncio.gather(*tasks, return_exceptions=True)
+    cancellation: asyncio.CancelledError | None = None
+    while not settling.done():
+        try:
+            await asyncio.shield(settling)
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+    settling.result()
+    return cancellation
+
+
+async def _supervisor_start_error(
+    proc: _InstallerProcess, first: bytes
+) -> BrowserSetupFailedError:
+    assert proc.stderr is not None
+    captured = bytearray(first[-8192:])
+    try:
+        async with asyncio.timeout(1.0):
+            while chunk := await proc.stderr.read(8192):
+                captured.extend(chunk)
+                if len(captured) > 8192:
+                    del captured[:-8192]
+    except TimeoutError:
+        pass
+    await _stop_installer(proc)
+    lines = captured.decode("utf-8", "replace").splitlines()
+    detail = lines[-1] if lines else "the supervisor exited before it was ready"
+    detail = _safe_to_print(detail)
+    return BrowserSetupFailedError(
+        f"Patchright Chromium browser setup could not start: {detail}"
+    )
+
+
+async def _read_supervisor_frame(
+    stream: asyncio.StreamReader,
+    *,
+    marker: bytes,
+    accept: Callable[[bytes], bool],
+    timeout: float,
+) -> tuple[bytes | None, bytes]:
+    """Extract one authenticated frame from bounded arbitrary startup bytes."""
+    if not marker or len(marker) >= 128:
+        raise ValueError("invalid supervisor status marker")
+    deadline = asyncio.get_running_loop().time() + max(timeout, 0.0)
+    captured = bytearray()
+    buffered = bytearray()
+    while True:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise TimeoutError
+        chunk = await asyncio.wait_for(stream.read(_READ_CHUNK), remaining)
+        if not chunk:
+            return None, bytes(captured)
+        captured.extend(chunk)
+        if len(captured) > 8192:
+            del captured[:-8192]
+        buffered.extend(chunk)
+
+        while True:
+            start = buffered.find(marker)
+            if start < 0:
+                keep = min(len(buffered), len(marker) - 1)
+                if len(buffered) > keep:
+                    del buffered[: len(buffered) - keep]
+                break
+            if start:
+                del buffered[:start]
+
+            newline = buffered.find(b"\n", len(marker))
+            if newline < 0:
+                if len(buffered) <= 128:
+                    break
+                del buffered[0]
+                continue
+
+            candidate = bytes(buffered[: newline + 1])
+            if accept(candidate):
+                return candidate, bytes(captured)
+            del buffered[0]
+
+
+def _armed_supervisor(frame: bytes, nonce: str) -> bool:
+    return frame == f"armed {nonce}\n".encode("ascii")
+
+
+def _started_worker_pid(frame: bytes, nonce: str) -> int | None:
+    if not frame.endswith(b"\n"):
+        return None
+    try:
+        label, reported_nonce, value = frame.decode("ascii").strip().split(maxsplit=2)
+        worker_pid = int(value)
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if label != "started" or reported_nonce != nonce:
+        return None
+    return worker_pid if worker_pid > 0 else None
+
+
+def _installer_supervisor_command(worker_target: list[str]) -> list[str]:
+    """Start the supervisor so no interpreter startup hook precedes it.
+
+    On POSIX the supervisor is its own session leader while the worker leads a
+    separate process group, and each side drains only what it owns: the parent
+    signals the supervisor pid, the supervisor drains the worker group. A
+    ``sitecustomize`` or ``usercustomize`` hook runs before
+    :func:`installer_supervisor.main`, so anything it spawns lands in the
+    supervisor's own group, where it inherits the installer output pipes and
+    nothing ever reaps it. It would hold output EOF open after the supervisor
+    exits and survive cancellation.
+
+    ``-S`` is what closes that, and nothing weaker does. ``-P``,
+    ``PYTHONNOUSERSITE`` and a popped ``PYTHONPATH`` never touch
+    ``sitecustomize``, and ``-I`` only takes away the user-site copy: the one a
+    virtual environment or a system install ships still runs. ``-I`` earns its
+    place beside it because the file below re-adds an import root by hand, and
+    an inherited ``PYTHONPATH`` would otherwise be searched in front of it.
+
+    Because ``site`` is then gone, the module cannot be reached by name, so the
+    file runs by absolute path from next to this one and re-adds that one root
+    itself. ``-u`` matches :func:`windows_gate_command`, the other launcher that
+    starts a stdlib-only helper this way, and keeps the framed stderr the parent
+    parses independent of how the interpreter would buffer it. The worker keeps
+    ordinary startup: its whole group is contained.
+
+    Windows keeps the module form. There the supervisor runs under the gate
+    inside the parent-owned kill-on-close Job, which already contains whatever
+    a startup hook spawns, and the package import there probes the greenlet C
+    runtime through modules that ``-S`` would put out of reach.
+    """
+    if os.name == "nt":
+        return [
+            sys.executable,
+            "-P",
+            "-m",
+            "linkedin_mcp_server.installer_supervisor",
+            "--",
+            *worker_target,
+        ]
+    supervisor = Path(__file__).with_name("installer_supervisor.py").resolve()
+    return [sys.executable, "-I", "-S", "-u", str(supervisor), "--", *worker_target]
+
+
+async def _start_installer_supervisor(
+    extra_arg: str,
+) -> _InstallerProcess:
+    target = _installer_supervisor_command(
+        [
+            sys.executable,
+            "-P",
+            "-m",
+            "patchright",
+            "install",
+            "chromium",
+            extra_arg,
+        ]
+    )
+    windows_job = WindowsJob.anonymous() if os.name == "nt" else None
+    gate_nonce = release_nonce() if windows_job is not None else None
+    command = (
+        windows_gate_command(target, gate_nonce)
+        if windows_job is not None and gate_nonce is not None
+        else target
+    )
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+    # The supervisor creates no target until the `start` reply below. If this
+    # await is cancelled while asyncio is still constructing its transports,
+    # direct-process teardown or stdin EOF ends an empty supervisor.
+    try:
+        raw_proc = await asyncio.create_subprocess_exec(
+            *command,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=environment,
+            # The cleanup process must survive an ordinary parent-group death long
+            # enough to consume lease EOF. This also means terminal Ctrl+Z pauses
+            # the parent rather than the installer tree; #792 tracks coordinated
+            # suspend/resume forwarding without weakening containment.
+            start_new_session=os.name != "nt",
+        )
+    except BaseException:
+        if windows_job is not None:
+            windows_job.close()
+        raise
+    proc = _InstallerProcess(raw_proc, windows_job=windows_job)
+    assert proc.stdin is not None and proc.stderr is not None
+    supervisor_nonce = new_nonce()
+    waiting_for = "become ready"
+    try:
+        if windows_job is not None and gate_nonce is not None:
+            proc.windows_popen = windows_job.assign_asyncio_process(raw_proc)
+            proc.assigned = True
+            proc.windows_wait = _capture_windows_process_wait(
+                raw_proc, proc.windows_popen
+            )
+            # The supervisor cannot import or spawn until assignment is verified.
+            release_windows_gate(proc.stdin, gate_nonce)
+            await proc.stdin.drain()
+
+        # This nonce exists only after Popen returns. Interpreter startup hooks can
+        # write diagnostics before the supervisor imports, but cannot pre-frame an
+        # acknowledgement carrying a value absent from argv and the environment.
+        proc.stdin.write(f"{supervisor_nonce}\n".encode("ascii"))
+        await proc.stdin.drain()
+        armed_marker = f"armed {supervisor_nonce}".encode("ascii")
+        armed, startup_output = await _read_supervisor_frame(
+            proc.stderr,
+            marker=armed_marker,
+            accept=lambda frame: _armed_supervisor(frame, supervisor_nonce),
+            timeout=_INSTALLER_START_SECONDS,
+        )
+        if armed is None:
+            raise await _supervisor_start_error(proc, startup_output)
+
+        proc.stdin.write(f"start {supervisor_nonce}\n".encode("ascii"))
+        await proc.stdin.drain()
+
+        waiting_for = "start its worker"
+        started_marker = f"started {supervisor_nonce} ".encode("ascii")
+        started, startup_output = await _read_supervisor_frame(
+            proc.stderr,
+            marker=started_marker,
+            accept=lambda frame: (
+                _started_worker_pid(frame, supervisor_nonce) is not None
+            ),
+            timeout=_INSTALLER_START_SECONDS,
+        )
+        if started is None:
+            raise await _supervisor_start_error(proc, startup_output)
+        worker_pid = _started_worker_pid(started, supervisor_nonce)
+        if worker_pid is None:  # pragma: no cover - predicate proved it above
+            raise ValueError("invalid worker pid")
+    except BrowserSetupFailedError:
+        raise
+    except TimeoutError as exc:
+        await _stop_installer(proc)
+        raise BrowserSetupFailedError(
+            "Patchright Chromium browser setup supervisor did not "
+            f"{waiting_for} before its startup deadline"
+        ) from exc
+    except ValueError as exc:
+        await _stop_installer(proc)
+        raise BrowserSetupFailedError(
+            "Patchright Chromium browser setup returned an invalid process id"
+        ) from exc
+    except BaseException:
+        await _stop_installer(proc)
+        raise
+    return proc
+
+
 async def _run_patchright_install(
     extra_arg: str, *, line_callback: Callable[[str], None] | None = None
 ) -> None:
@@ -703,20 +1311,13 @@ async def _run_patchright_install(
     *line_callback* (``print`` for the CLI modes) receives each line too, so
     those modes show progress regardless of the log level.
     """
-    proc = await asyncio.create_subprocess_exec(
-        sys.executable,
-        "-m",
-        "patchright",
-        "install",
-        "chromium",
-        extra_arg,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-    )
+    proc = _managed_installer(await _start_installer_supervisor(extra_arg))
     assert proc.stdout is not None
     lines: deque[str] = deque()
-    retained = 0
-    try:
+
+    async def collect_output() -> None:
+        retained = 0
+        assert proc.stdout is not None
         async for raw in _installer_lines(proc.stdout):
             text = raw
             if not text:
@@ -739,15 +1340,71 @@ async def _run_patchright_install(
                 retained -= len(lines.popleft())
             if line_callback is not None:
                 line_callback(text)
-        await proc.wait()
-    except BaseException:
-        # Cancellation included, which is how shutdown and a failed peer reach
-        # here. Reaps what this call started rather than leaving a process
-        # behind for the lifetime of the server; the Node processes under it
-        # survive, which ``_stop_installer`` records and this cannot fix.
-        _stop_installer(proc)
+
+    output = asyncio.create_task(collect_output(), name="browser-installer-output")
+    stderr = asyncio.create_task(
+        _drain_installer_stream(proc.stderr), name="browser-installer-control"
+    )
+    wait_for_exit = (
+        _wait_for_direct_process_exit(proc)
+        if proc.windows_job is not None and proc.assigned
+        else proc.wait()
+    )
+    waiting = asyncio.create_task(wait_for_exit, name="browser-installer-process")
+    tasks = (output, stderr, waiting)
+    try:
+        while not waiting.done():
+            watched: set[asyncio.Task[Any]] = {waiting}
+            if not output.done():
+                watched.add(output)
+            done, _pending = await asyncio.wait(
+                watched, return_when=asyncio.FIRST_COMPLETED
+            )
+            if output in done:
+                await output
+        returncode = await waiting
+        if proc.windows_job is not None and proc.assigned:
+            # On CPython 3.12, Process.wait() registered before exit resolves only
+            # after pipe EOF. Direct returncode observation lets the Job end
+            # descendants that still hold those pipes before awaiting them.
+            deadline = asyncio.get_running_loop().time() + _INSTALLER_STOP_SECONDS
+            await asyncio.shield(_assigned_windows_cleanup(proc, deadline))
+        await output
+        await stderr
+    except BaseException as original:
+        # Request task cancellation first so no reader keeps competing for the
+        # same pipes. Start tree cleanup before awaiting task settlement: a second
+        # cancellation can interrupt either await, while _stop_installer keeps its
+        # own cleanup task shielded until the containment work is done.
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        cleanup_error: BaseException | None = None
+        cleanup_cancellation: asyncio.CancelledError | None = None
+        try:
+            await _stop_installer(proc)
+        except asyncio.CancelledError as exc:
+            cleanup_cancellation = exc
+        except BaseException as exc:
+            cleanup_error = exc
+
+        settle_cancellation = await _settle_installer_tasks(tasks)
+        if isinstance(original, asyncio.CancelledError):
+            if cleanup_error is not None:
+                logger.error(
+                    "Browser installer cleanup failed while cancellation was pending",
+                    exc_info=cleanup_error,
+                )
+            raise original
+        if cleanup_error is not None:
+            raise cleanup_error
+        if cleanup_cancellation is not None:
+            raise cleanup_cancellation
+        if settle_cancellation is not None:
+            raise settle_cancellation
         raise
-    if proc.returncode != 0:
+    await _close_installer_lease(proc)
+    if returncode != 0:
         raise BrowserSetupFailedError(
             "\n".join(lines) or "Patchright Chromium browser setup failed."
         )
@@ -1208,26 +1865,6 @@ def _cli_progress() -> Iterator[Callable[[str], None]]:
         # stale, and the bar this context opens would then pulse under
         # "Browser installed." as its last frame.
         _finish(progress, task)
-
-
-def _stop_installer(proc: asyncio.subprocess.Process) -> None:
-    """Kill the installer process. Never raises.
-
-    This reaches ``python -m patchright`` and nothing below it. Measured: the
-    wrapper runs a Node CLI which runs a second Node process for the download,
-    and after the wrapper is killed both were still alive, still downloading,
-    and still refreshing the cache lock's heartbeat. So a cancelled install can
-    keep the lock until it finishes on its own, and an install started in the
-    meantime queues behind it.
-
-    That is what ``main`` already did, and it is left alone deliberately.
-    Reaching the whole tree means giving the installer its own session, which
-    is a session the terminal's signals no longer reach; that was tried here
-    and cost a crash on Windows, a race against the spawn, and a terminal left
-    without its cursor. Closing this properly is worth its own change.
-    """
-    with contextlib.suppress(ProcessLookupError, OSError):
-        proc.kill()
 
 
 def _safe_to_print(text: str) -> str:

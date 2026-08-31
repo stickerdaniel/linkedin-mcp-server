@@ -51,7 +51,7 @@ import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Protocol, TextIO
+from typing import Any, NoReturn, Protocol, TextIO
 
 import httpx
 
@@ -67,8 +67,10 @@ from linkedin_mcp_server.daemon_liveness import (
 )
 from linkedin_mcp_server.drivers.browser import set_headless
 from linkedin_mcp_server.logging_config import configure_logging
+from linkedin_mcp_server.process_tree import WindowsJob, hard_exit_process_tree
 from linkedin_mcp_server.server_role import (
     ServerRole,
+    hard_exit_required,
     set_process_role,
     stand_down_reason,
 )
@@ -76,8 +78,9 @@ from linkedin_mcp_server.session_state import auth_root_dir, get_runtime_id
 
 logger = logging.getLogger(__name__)
 
-#: What the frontend reads from the handshake pipe. One line, so a partially
-#: written message cannot be mistaken for a complete one.
+#: What the frontend reads from the handshake pipe. The nonce is handed over
+#: only after this process exists, so interpreter startup output cannot forge it.
+HANDSHAKE = "owner"
 READY = "ready"
 FAILED = "failed"
 
@@ -368,6 +371,7 @@ async def _serve(
     config: AppConfig,
     log_path: Path,
     ready: Handshake,
+    job_name: str | None = None,
 ) -> int:
     """Run the endpoint, publish it, and hold it until shutdown."""
     instance_id = daemon_descriptor.new_instance_id()
@@ -416,6 +420,12 @@ async def _serve(
             _probe(descriptor.url, token), max(deadline - time.monotonic(), 0.0)
         )
 
+        # The parent keeps termination authority until READY. Adopt immediately
+        # before publication so an adopted owner is already committed to serving.
+        if os.name == "nt":
+            if job_name is None:
+                raise RuntimeError("The Windows owner has no Job Object handoff")
+            WindowsJob.adopt_current_process(job_name)
         daemon_descriptor.publish(auth_root, descriptor, token)
         # The idle clock starts here rather than at startup: before the
         # descriptor is published nobody can reach this owner, and counting the
@@ -436,12 +446,17 @@ async def _serve(
         # matter what timeout it is given. `suppress` only helps once the await
         # returns. This process holds the daemon lock by now, so a failed
         # startup that never exits is a profile nothing can elect an owner for.
-        await _stop_within(serving, _FAILED_STARTUP_SHUTDOWN_SECONDS)
+        await _stop_within(serving, _FAILED_STARTUP_SHUTDOWN_SECONDS, lock=lock)
         raise
 
-    del lock  # held for the process lifetime; named to say so
+    # Held for the process lifetime, and handed down rather than dropped: the
+    # one path that skips interpreter cleanup frees it itself (`_exit_hard`).
     await _serve_until_stopped(
-        server, serving, turnover, config.browser.browser_idle_timeout_seconds
+        server,
+        serving,
+        turnover,
+        config.browser.browser_idle_timeout_seconds,
+        lock=lock,
     )
     return 0
 
@@ -468,6 +483,8 @@ async def _serve_until_stopped(
     serving: asyncio.Task[None],
     turnover: list[str],
     idle_timeout: float = 0.0,
+    *,
+    lock: DaemonLock | None,
 ) -> None:
     """Hold the endpoint open until it stops, or until asked to give way.
 
@@ -490,7 +507,7 @@ async def _serve_until_stopped(
             # disk rather than in this process.
             logger.warning("Standing down: %s", wedged)
             server.should_exit = True
-            await _stop_within(serving, _STAND_DOWN_SHUTDOWN_SECONDS)
+            await _stop_within(serving, _STAND_DOWN_SHUTDOWN_SECONDS, lock=lock)
             return
         if turnover:
             logger.info("A newer build asked for the browser; standing down")
@@ -505,9 +522,10 @@ async def _serve_until_stopped(
             # would hold the daemon lock forever, having already promised a
             # frontend that it was standing down — every later election would
             # find the position occupied by a process that is no longer serving.
-            # Giving up the wait and exiting is the lesser harm: the lock is
-            # freed by the exit either way.
-            await _stop_within(serving, _STAND_DOWN_SHUTDOWN_SECONDS)
+            # Giving up the wait and exiting is the lesser harm, and that exit
+            # frees the election on the way in rather than after its unbounded
+            # browser drain (`_exit_hard`).
+            await _stop_within(serving, _STAND_DOWN_SHUTDOWN_SECONDS, lock=lock)
             return
         # Cheap enough to do on the same tick as the two questions above: one
         # dictionary scan over the calls in flight, on a process that is already
@@ -528,13 +546,23 @@ async def _serve_until_stopped(
         if idle_timeout > 0 and quiet is not None and quiet >= idle_timeout:
             logger.info("Nothing has needed the browser in %.0fs; exiting", quiet)
             server.should_exit = True
-            await _stop_within(serving, _STAND_DOWN_SHUTDOWN_SECONDS)
+            await _stop_within(serving, _STAND_DOWN_SHUTDOWN_SECONDS, lock=lock)
             return
         await asyncio.sleep(_STAND_DOWN_POLL_SECONDS)
-    await serving
+    try:
+        await serving
+    finally:
+        if hard_exit_required():
+            logger.error(
+                "Browser shutdown was not confirmed; exiting hard so the "
+                "profile stays held until the browser is gone"
+            )
+            _exit_hard(lock)
 
 
-async def _stop_within(serving: asyncio.Task[None], seconds: float) -> None:
+async def _stop_within(
+    serving: asyncio.Task[None], seconds: float, *, lock: DaemonLock | None
+) -> None:
     """Let the server finish shutting down, and stop the process if it will not.
 
     Ending the *wait* is not the same as ending the process, and the difference
@@ -551,13 +579,20 @@ async def _stop_within(serving: asyncio.Task[None], seconds: float) -> None:
     exactly the case where a stand-down must still end.
 
     So the last resort is a hard exit. It skips interpreter cleanup, which here
-    means skipping the very teardown that is already stuck; the kernel closes
-    the descriptors and frees the lock, which is what the next election needs.
-    Measured before this existed: the helper returned on time and the process
-    never came out of ``asyncio.run``.
+    means skipping the very teardown that is already stuck. Letting the kernel
+    free the descriptors is not enough on its own, because that exit drains the
+    browser first with no bound; *lock* is handed down so :func:`_exit_hard` can
+    free the election before the drain. Measured before this existed: the helper
+    returned on time and the process never came out of ``asyncio.run``.
     """
     try:
         await asyncio.wait_for(asyncio.shield(serving), seconds)
+        if hard_exit_required():
+            logger.error(
+                "Browser shutdown was not confirmed; exiting hard so the "
+                "profile stays held until the browser is gone"
+            )
+            _exit_hard(lock)
         return
     except TimeoutError:
         logger.error(
@@ -567,18 +602,31 @@ async def _stop_within(serving: asyncio.Task[None], seconds: float) -> None:
         )
     except Exception:
         logger.warning("The daemon endpoint stopped with an error", exc_info=True)
+        if hard_exit_required():
+            _exit_hard(lock)
         return
 
-    _exit_hard()
+    _exit_hard(lock)
 
 
-def _exit_hard() -> int:  # pragma: no cover - the process does not come back
-    """Leave immediately, without running interpreter cleanup.
+def _exit_hard(lock: DaemonLock | None) -> NoReturn:
+    """Leave immediately, containing descendants without interpreter cleanup.
 
-    Separated so a test can substitute it. Nothing after this returns.
+    The election goes first and the profile does not. The drain below is
+    unbounded on purpose: it holds the profile until the browser groups are
+    provably gone, because releasing it earlier hands a live Chromium to
+    whoever opens that profile next. The daemon lock says only that an owner
+    exists, and this process has stopped being one, so spending that wait on
+    the lock too would block every election behind a drain none of them care
+    about. The replacement is elected at once and waits on the profile lease
+    instead: on this process, whose lease descriptor lives until ``os._exit``,
+    and on POSIX also on the crash guardian holding a copy of it.
+
+    Idempotent, so ``main``'s ``finally`` may still release defensively.
     """
-    logging.shutdown()  # flush the log file; the traceback above is the record
-    os._exit(1)
+    if lock is not None:
+        lock.release()
+    hard_exit_process_tree(1)
 
 
 async def _await_started(
@@ -664,8 +712,9 @@ class _Handshake:
     reaches a verdict is reported as a failed election rather than waited out.
     """
 
-    def __init__(self, stream: TextIO | None) -> None:
+    def __init__(self, stream: TextIO | None, handshake_nonce: str) -> None:
         self._stream = stream
+        self._nonce = handshake_nonce
 
     def succeed(self) -> None:
         self._write(READY)
@@ -678,7 +727,7 @@ class _Handshake:
         if stream is None:
             return
         try:
-            stream.write(f"{message}\n")
+            stream.write(f"{HANDSHAKE} {self._nonce} {message}\n")
             stream.flush()
         except (OSError, ValueError):
             logger.debug("The startup handshake could not be written", exc_info=True)
@@ -728,7 +777,19 @@ def _claim_handshake_stream() -> TextIO | None:
         os.close(duplicate)
         logger.debug("Standard output could not be redirected", exc_info=True)
         return None
-    return os.fdopen(duplicate, "w", encoding="utf-8")
+    # newline="\n" is load-bearing rather than tidy. The frontend authenticates
+    # this frame by comparing exact bytes, and the default translates the line
+    # ending to os.linesep, so on Windows a genuine READY arrives as CRLF and is
+    # refused. The frontend then waits out its startup deadline and terminates
+    # the Job around an owner that had already published itself.
+    return os.fdopen(duplicate, "w", encoding="utf-8", newline="\n")
+
+
+def _close_handshake_stream(stream: TextIO | None) -> None:
+    """End an unarmed handshake without making any startup claim."""
+    if stream is not None:
+        with contextlib.suppress(OSError, ValueError):
+            stream.close()
 
 
 def _take_lock(auth_root: Path, inherited_fd: int | None) -> DaemonLock | None:
@@ -751,24 +812,29 @@ def main(argv: list[str] | None = None) -> int:
         description="Serve one shared LinkedIn browser to local MCP clients.",
     )
     parser.add_argument("--lock-fd", type=int, default=None)
+    parser.add_argument("--job-name", default=None)
     args = parser.parse_args(argv)
 
-    # Before anything else can write to it.
-    handshake = _Handshake(_claim_handshake_stream())
+    # Before anything else can write to it. The token that authenticates this
+    # stream arrives in the configuration, so a failure before that read closes
+    # the pipe without emitting a verdict startup code could have forged.
+    handshake_stream = _claim_handshake_stream()
     try:
+        if os.name == "nt":
+            if args.job_name is None:
+                raise RuntimeError("The Windows owner has no Job Object handoff")
+            WindowsJob.verify_current_process(args.job_name)
         # Read before anything else touches the configuration: the frontend
         # holds the pipe open only until it has written, and the settings decide
         # how this process logs.
-        config = _read_config()
+        handover = _read_handover()
     except BaseException:
-        # A failed verdict is terminal to the frontend, which may hard-stop this
-        # process as soon as it reads one. Put the diagnosis in the daemon log
-        # before making that verdict visible rather than relying on the
-        # interpreter to print an unhandled traceback afterwards.
         logger.exception("The daemon could not read its configuration")
-        handshake.fail()
+        _close_handshake_stream(handshake_stream)
         raise
 
+    config = handover.config
+    handshake = _Handshake(handshake_stream, handover.handshake_nonce)
     set_config(config)
     # Installing the configuration is not enough: the browser mode lives in a
     # module global that defaults to headless (``drivers/browser.py:63``), and
@@ -807,6 +873,7 @@ def main(argv: list[str] | None = None) -> int:
                 config=config,
                 log_path=daemon_log_path(auth_root),
                 ready=handshake,
+                job_name=args.job_name,
             )
         )
     except DaemonLockError:
@@ -825,8 +892,8 @@ def main(argv: list[str] | None = None) -> int:
             lock.release()
 
 
-def _read_config() -> AppConfig:
-    """Read the handed-over configuration from standard input.
+def _read_handover() -> daemon_config.OwnerHandover:
+    """Read the handed-over configuration and startup nonce from standard input.
 
     Read to end of file rather than one line, and the frontend closes its end
     once written. That is the whole framing: a short read cannot be mistaken for
@@ -835,7 +902,7 @@ def _read_config() -> AppConfig:
     raw = sys.stdin.read()
     if not raw.strip():
         raise ValueError("The daemon was started without a configuration")
-    return daemon_config.decode(raw)
+    return daemon_config.decode_handover(raw)
 
 
 if __name__ == "__main__":  # pragma: no cover - process entry point

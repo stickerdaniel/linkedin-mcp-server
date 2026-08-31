@@ -657,6 +657,9 @@ class TestAWedgeFromAnywhereFreesTheOwner:
                 self.refs += 1
                 return True
 
+            def guardian_fd(self):
+                return 7
+
             def mark_browser_open(self):
                 self.browser_open = True
 
@@ -676,6 +679,7 @@ class TestAWedgeFromAnywhereFreesTheOwner:
                 "linkedin_mcp_server.profile_lease.get_profile_lease",
                 return_value=lease,
             ),
+            patch.object(drv, "start_browser_guardian"),
             patch.object(
                 drv, "_create_browser_locked", teardown_that_could_not_be_confirmed
             ),
@@ -925,6 +929,57 @@ class TestAWedgeFromAnywhereFreesTheOwner:
         assert stand_down_reason() is None, "a healthy owner was told to exit"
 
 
+def test_browser_activation_applies_the_default_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from linkedin_mcp_server.drivers import browser as drv
+
+    browser = MagicMock()
+    config = MagicMock()
+    config.browser.default_timeout = 30_000
+    monkeypatch.setattr(drv, "get_config", lambda: config)
+
+    drv._apply_browser_settings(browser)
+
+    browser.page.set_default_timeout.assert_called_once_with(30_000)
+
+
+def test_confirmed_shutdown_retains_other_detached_process_groups():
+    from linkedin_mcp_server import process_tree
+    from linkedin_mcp_server.drivers import browser as drv
+
+    original = dict(process_tree._registered_posix_groups)
+    registration = process_tree._PosixGroupRegistration("leader", {124: "member"})
+    process_tree._registered_posix_groups[123] = registration
+    drv._browser_lease = None
+    try:
+        drv._settle_the_profile(confirmed=True)
+        assert process_tree._registered_posix_groups[123] is registration
+    finally:
+        process_tree._registered_posix_groups.clear()
+        process_tree._registered_posix_groups.update(original)
+
+
+def test_unconfirmed_shutdown_without_local_lease_requires_hard_exit(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from linkedin_mcp_server.drivers import browser as drv
+    from linkedin_mcp_server import server_role
+
+    lease = MagicMock()
+    lease.browser_open = True
+    monkeypatch.setattr(
+        "linkedin_mcp_server.profile_lease.get_profile_lease", lambda: lease
+    )
+    drv._browser_lease = None
+    server_role.set_process_role(server_role.ServerRole.OWNER)
+    try:
+        drv._settle_the_profile(confirmed=False)
+        assert server_role.hard_exit_required()
+    finally:
+        server_role.reset_process_role_for_testing()
+
+
 class TestTheBrowserKeepsItsOwnLease:
     """Ownership as an object it holds, rather than a fact it remembers.
 
@@ -1040,6 +1095,7 @@ class TestTheBrowserKeepsItsOwnLease:
         from linkedin_mcp_server.server_role import (
             ServerRole,
             a_held_profile_means_this_owner_must_go,
+            hard_exit_required,
             set_process_role,
             stand_down_reason,
         )
@@ -1053,6 +1109,7 @@ class TestTheBrowserKeepsItsOwnLease:
 
         looked_up.assert_not_called()
         assert stand_down_reason() is not None
+        assert hard_exit_required()
 
     async def test_a_startup_that_could_not_tear_down_keeps_its_extra_reference(
         self, tmp_path
@@ -1085,6 +1142,9 @@ class TestTheBrowserKeepsItsOwnLease:
                 self.refs += 1
                 return True
 
+            def guardian_fd(self):
+                return 7
+
             def mark_browser_open(self):
                 self.browser_open = True
 
@@ -1105,6 +1165,7 @@ class TestTheBrowserKeepsItsOwnLease:
                 "linkedin_mcp_server.profile_lease.get_profile_lease",
                 return_value=lease,
             ),
+            patch.object(drv, "start_browser_guardian"),
             patch.object(
                 drv, "_create_browser_locked", teardown_that_could_not_be_confirmed
             ),

@@ -2,6 +2,7 @@ import asyncio
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, call
 
@@ -286,7 +287,7 @@ class TestTheRoleAsProcessState:
         `configure_logging` is the first thing after the claim, so it serves as a
         checkpoint to observe the role at and abort from.
         """
-        from linkedin_mcp_server import daemon_owner
+        from linkedin_mcp_server import daemon_config, daemon_owner
         from linkedin_mcp_server.config.schema import AppConfig
 
         class Checkpoint(Exception):
@@ -298,7 +299,11 @@ class TestTheRoleAsProcessState:
             seen.append(process_role())
             raise Checkpoint
 
-        monkeypatch.setattr(daemon_owner, "_read_config", lambda: AppConfig())
+        monkeypatch.setattr(
+            daemon_owner,
+            "_read_handover",
+            lambda: daemon_config.OwnerHandover(AppConfig(), "0123456789abcdef" * 4),
+        )
         monkeypatch.setattr(daemon_owner, "set_headless", lambda _headless: None)
         monkeypatch.setattr(daemon_owner, "configure_logging", at_checkpoint)
         monkeypatch.setattr(
@@ -309,6 +314,34 @@ class TestTheRoleAsProcessState:
             daemon_owner.main([])
 
         assert seen == [ServerRole.OWNER]
+
+    def test_the_windows_owner_verifies_membership_before_reading_config(
+        self, monkeypatch
+    ):
+        from linkedin_mcp_server import daemon_owner
+
+        class Checkpoint(BaseException):
+            pass
+
+        events: list[str] = []
+
+        def read_config():
+            assert events == ["verified:named-job"]
+            raise Checkpoint
+
+        monkeypatch.setattr(daemon_owner, "os", SimpleNamespace(name="nt"))
+        monkeypatch.setattr(
+            daemon_owner.WindowsJob,
+            "verify_current_process",
+            lambda name: events.append(f"verified:{name}"),
+        )
+        monkeypatch.setattr(daemon_owner, "_read_handover", read_config)
+        monkeypatch.setattr(
+            daemon_owner, "_claim_handshake_stream", lambda: MagicMock()
+        )
+
+        with pytest.raises(Checkpoint):
+            daemon_owner.main(["--job-name", "named-job"])
 
     def test_the_state_is_readable_without_importing_the_server(self):
         # Same reason the enum lives here: `bootstrap` reads this, and `server`

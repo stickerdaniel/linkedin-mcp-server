@@ -9,6 +9,7 @@ import pytest
 
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.core.exceptions import ProxyConnectionError
+from linkedin_mcp_server.exceptions import BrowserShutdownUnconfirmedError
 from linkedin_mcp_server.drivers.browser import (
     _feed_auth_succeeds,
     get_or_create_browser,
@@ -899,6 +900,103 @@ async def test_concurrent_get_or_create_creates_single_browser(monkeypatch):
     )
     assert first is sentinel and second is sentinel
     assert calls["n"] == 1
+
+
+class TestRepeatedCancelsDuringStartupCleanup:
+    """A second cancel must not walk out of a cleanup carrying no verdict.
+
+    ``BrowserManager.close()`` takes its handles before its first await, so a
+    cancel landing inside it leaves the manager empty with Chromium possibly
+    still on the profile. The startup cleanups used to await it bare: the first
+    cancel failed the startup and entered the cleanup, the second escaped it,
+    ``_create_browser`` released the crash guardian and the profile lease on the
+    way out, and the next launch was free to open a second browser on a profile
+    the first may still have been holding. One cancel is a tool timeout, the
+    second is server shutdown racing it; neither is exotic.
+    """
+
+    @staticmethod
+    def _wire(tmp_path, monkeypatch, *, close_proves: bool):
+        _write_source_state(tmp_path, runtime_id="macos-arm64-host")
+        browser = _make_mock_browser()
+        in_cleanup = asyncio.Event()
+        may_finish = asyncio.Event()
+        closes: list[bool] = []
+
+        async def close() -> bool:
+            in_cleanup.set()
+            await may_finish.wait()
+            closes.append(close_proves)
+            return close_proves
+
+        browser.close = AsyncMock(side_effect=close)
+
+        async def cancelled_feed_check(*_args, **_kwargs) -> bool:
+            raise asyncio.CancelledError
+
+        released: list[str] = []
+        monkeypatch.setattr(browser_module, "start_browser_guardian", lambda _fd: None)
+        monkeypatch.setattr(
+            browser_module, "release_browser_guardian", lambda: released.append("go")
+        )
+        monkeypatch.setattr(browser_module, "_feed_auth_succeeds", cancelled_feed_check)
+        monkeypatch.setattr(
+            browser_module, "get_runtime_id", lambda: "macos-arm64-host"
+        )
+        monkeypatch.setattr(browser_module, "BrowserManager", lambda **_kw: browser)
+        return browser, in_cleanup, may_finish, closes, released
+
+    @staticmethod
+    async def _two_cancels(task: asyncio.Task, may_finish: asyncio.Event) -> None:
+        """Land two cancels inside the cleanup and prove neither got out."""
+        for _ in range(2):
+            task.cancel()
+            for _ in range(4):
+                await asyncio.sleep(0)
+            assert not task.done(), "a cancel escaped the cleanup"
+        may_finish.set()
+
+    async def test_an_unproven_close_keeps_the_lease_and_the_guardian(
+        self, tmp_path, monkeypatch
+    ):
+        browser, in_cleanup, may_finish, closes, released = self._wire(
+            tmp_path, monkeypatch, close_proves=False
+        )
+
+        task = asyncio.ensure_future(get_or_create_browser())
+        await in_cleanup.wait()
+        await self._two_cancels(task, may_finish)
+
+        with pytest.raises(BrowserShutdownUnconfirmedError):
+            await task
+
+        assert closes == [False], "the close verdict was never obtained"
+        assert browser_module._browser is None, "the manager became the singleton"
+        assert released == [], "the crash guardian was released without a verdict"
+        lease = browser_module._browser_lease
+        assert lease is not None, "the profile was handed back unproven"
+        assert lease.browser_open is True
+
+    async def test_a_proved_close_still_re_raises_the_original_failure(
+        self, tmp_path, monkeypatch
+    ):
+        """Nothing is swallowed: the cancellation that failed the startup is it."""
+        browser, in_cleanup, may_finish, closes, released = self._wire(
+            tmp_path, monkeypatch, close_proves=True
+        )
+
+        task = asyncio.ensure_future(get_or_create_browser())
+        await in_cleanup.wait()
+        await self._two_cancels(task, may_finish)
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert closes == [True]
+        assert browser_module._browser is None
+        # Proved gone, so the profile may go back -- and only now.
+        assert released == ["go"]
+        assert browser_module._browser_lease is None
 
 
 class TestProxyLaunchOptions:
