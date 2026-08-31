@@ -367,11 +367,21 @@ def obtain_owner(
                     inspector=inspector,
                 )
             except DaemonLockError:
+                # Not contention: a filesystem without usable locking, or state
+                # this account cannot write. Waiting would never resolve it.
                 logger.warning("The daemon lock is unusable", exc_info=True)
-                attempt = _Attempt.FAILED
+                return ElectionOutcome(lookup, started_owner=started)
             except OSError:
+                # Raised only before a child exists, from the control listener,
+                # the Job, the command or the spawn itself, and ``_spawn`` takes
+                # no lock on this path. So the reasoning under ``_Attempt.FAILED``
+                # does not reach it: nothing ran, and nothing was freed for a
+                # sibling frontend to pick up. Pacing retries here would only
+                # spend the caller's whole election budget before it can fall
+                # back to a direct browser, which is what the predecessor
+                # avoided and what this had quietly given up.
                 logger.warning("The daemon could not be started", exc_info=True)
-                attempt = _Attempt.FAILED
+                return ElectionOutcome(lookup, started_owner=started)
         else:
             # A delayed attempt remains scheduled, or private state is not ready
             # to have a child started against it. Descriptor observation continues

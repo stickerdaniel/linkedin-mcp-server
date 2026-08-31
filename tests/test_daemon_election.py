@@ -57,7 +57,11 @@ from linkedin_mcp_server.daemon_descriptor import (
     new_token,
     publish,
 )
-from linkedin_mcp_server.daemon_lock import DaemonLock, daemon_is_running
+from linkedin_mcp_server.daemon_lock import (
+    DaemonLock,
+    DaemonLockError,
+    daemon_is_running,
+)
 from linkedin_mcp_server.private_state import harden_directory
 from linkedin_mcp_server.process_tree import ProcessTreeError
 
@@ -689,6 +693,55 @@ class TestFailingFast:
         assert 2 <= attempts <= 4
         assert elapsed >= 0.65, f"the election gave up after {elapsed:.2f}s"
         assert elapsed < 2, elapsed
+
+    @pytest.mark.parametrize(
+        "refusal",
+        [OSError("no loopback listener is available"), DaemonLockError("unusable")],
+        ids=["pre-spawn", "unusable-lock"],
+    )
+    def test_a_start_that_never_ran_hands_back_at_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refusal: Exception
+    ):
+        """The pair to the paced retry above, and the reason it is not one case.
+
+        Pacing exists for a child that ran and failed, which can have freed a
+        lock a sibling frontend now holds. Neither of these ever created one:
+        an OSError leaves ``_start_owner`` before ``Popen`` returns and while
+        ``_spawn`` holds no lock, and an unusable lock is a filesystem or an
+        account, which no amount of waiting changes. Retrying them spends the
+        caller's whole budget before it can fall back to a direct browser.
+        """
+        profile = _profile(tmp_path)
+        config = _config(profile)
+        auth_root = profile.parent
+
+        attempts = 0
+
+        def refuse(*args: object, **kwargs: object) -> _Attempt:
+            nonlocal attempts
+            attempts += 1
+            raise refusal
+
+        monkeypatch.setattr(election_module, "_start_owner", refuse)
+        # Paced as the neighbouring test paces it, so a version that retried
+        # would get several attempts inside this budget rather than one.
+        monkeypatch.setattr(election_module, "_OWNER_START_BURST", 1)
+        monkeypatch.setattr(election_module, "_OWNER_START_RETRY_SECONDS", 0.05)
+        monkeypatch.setattr(election_module, "_MAX_OWNER_START_RETRY_SECONDS", 0.2)
+
+        started = time.monotonic()
+        outcome = obtain_owner(
+            auth_root,
+            profile,
+            config,
+            deadline_seconds=1.0,
+            connect=lambda attachment: Reach.REFUSED,
+        )
+        elapsed = time.monotonic() - started
+
+        assert not outcome.worth_connecting
+        assert attempts == 1
+        assert elapsed < 0.5, f"the caller waited {elapsed:.2f}s for its fallback"
 
     def test_one_blocked_descriptor_inspection_spans_the_whole_election(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
