@@ -7214,10 +7214,9 @@ class TestGetConversation:
 
         assert result["sections"]["conversation"] == "Hello!"
 
-    async def test_raises_when_no_identifier(self, mock_page):
-        """get_conversation raises LinkedInScraperException with no args."""
+    async def test_raises_invalid_reference_when_no_identifier(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
-        with pytest.raises(LinkedInScraperException):
+        with pytest.raises(InvalidReferenceError, match="at least one"):
             await extractor.get_conversation()
 
     async def test_by_username_default_index_picks_first_thread(self, mock_page):
@@ -7789,6 +7788,23 @@ class TestSendMessage:
 
         assert result["status"] == "message_unavailable"
         assert result["sent"] is False
+
+    async def test_invalid_profile_urn_is_rejected_before_navigation(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        navigate = AsyncMock()
+
+        with (
+            patch.object(extractor, "_navigate_to_page", navigate),
+            pytest.raises(InvalidReferenceError, match="profile_urn"),
+        ):
+            await extractor.send_message(
+                "testuser",
+                "Hello!",
+                confirm_send=False,
+                profile_urn="/feed/",
+            )
+
+        navigate.assert_not_awaited()
 
     async def test_uses_profile_urn_when_provided(self, mock_page):
         """send_message builds compose URL from profile_urn without Message-button lookup."""

@@ -46,6 +46,119 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     return mock
 
 
+@pytest.mark.parametrize(
+    ("module_name", "tool_name", "arguments", "error_match"),
+    [
+        (
+            "person",
+            "get_person_profile",
+            {"linkedin_username": "/feed/"},
+            "not a personal profile",
+        ),
+        (
+            "person",
+            "connect_with_person",
+            {"linkedin_username": "/feed/"},
+            "not a personal profile",
+        ),
+        (
+            "person",
+            "get_sidebar_profiles",
+            {"linkedin_username": "/feed/"},
+            "not a personal profile",
+        ),
+        (
+            "person",
+            "search_people",
+            {"keywords": "engineer", "current_company": "SAP"},
+            "numeric LinkedIn company URN id",
+        ),
+        (
+            "company",
+            "get_company_profile",
+            {"company_name": "/feed/"},
+            "not a company page",
+        ),
+        (
+            "company",
+            "get_company_posts",
+            {"company_name": "/feed/"},
+            "not a company page",
+        ),
+        (
+            "company",
+            "get_company_employees",
+            {"company_name": "/feed/"},
+            "not a company page",
+        ),
+        (
+            "job",
+            "get_job_details",
+            {"job_id": "/feed/"},
+            "job_id is not a LinkedIn id",
+        ),
+        (
+            "messaging",
+            "get_conversation",
+            {"linkedin_username": "/feed/"},
+            "not a personal profile",
+        ),
+        (
+            "messaging",
+            "get_conversation",
+            {"thread_id": "/feed/"},
+            "thread_id is not a LinkedIn id",
+        ),
+        (
+            "messaging",
+            "send_message",
+            {
+                "linkedin_username": "/feed/",
+                "message": "Hello",
+                "confirm_send": False,
+            },
+            "not a personal profile",
+        ),
+        (
+            "messaging",
+            "send_message",
+            {
+                "linkedin_username": "alice",
+                "profile_urn": "/feed/",
+                "message": "Hello",
+                "confirm_send": False,
+            },
+            "profile_urn is not a LinkedIn id",
+        ),
+    ],
+)
+async def test_invalid_reference_is_rejected_before_extractor(
+    module_name, tool_name, arguments, error_match
+):
+    from fastmcp.exceptions import ToolError
+
+    from linkedin_mcp_server.tools.company import register_company_tools
+    from linkedin_mcp_server.tools.job import register_job_tools
+    from linkedin_mcp_server.tools.messaging import register_messaging_tools
+    from linkedin_mcp_server.tools.person import register_person_tools
+
+    register_by_module = {
+        "company": register_company_tools,
+        "job": register_job_tools,
+        "messaging": register_messaging_tools,
+        "person": register_person_tools,
+    }
+    mcp = FastMCP("test")
+    register_by_module[module_name](mcp)
+    ready = AsyncMock(side_effect=AssertionError("get_ready_extractor was called"))
+
+    with patch(f"linkedin_mcp_server.tools.{module_name}.get_ready_extractor", ready):
+        with pytest.raises(ToolError, match=error_match):
+            await mcp.call_tool(tool_name, arguments)
+
+    ready.assert_not_awaited()
+
+
 class TestPersonTool:
     async def test_get_person_profile_success(self, mock_context):
         expected = {
@@ -60,11 +173,16 @@ class TestPersonTool:
         register_person_tools(mcp)
 
         tool_fn = await get_tool_fn(mcp, "get_person_profile")
-        result = await tool_fn("test-user", mock_context, extractor=mock_extractor)
+        result = await tool_fn(
+            "https://de.linkedin.com/in/test-user/",
+            mock_context,
+            extractor=mock_extractor,
+        )
         assert result["url"] == "https://www.linkedin.com/in/test-user/"
         assert "main_profile" in result["sections"]
         assert "pages_visited" not in result
         assert "sections_requested" not in result
+        assert mock_extractor.scrape_person.await_args.args[0] == "test-user"
 
     async def test_get_person_profile_with_sections(self, mock_context):
         """Verify sections parameter is passed through."""
@@ -328,7 +446,7 @@ class TestPersonTool:
             await tool_fn(
                 "engineer",
                 mock_context,
-                current_company="SAP",
+                current_company="1115",
                 extractor=mock_extractor,
             )
 
@@ -348,7 +466,7 @@ class TestPersonTool:
 
         tool_fn = await get_tool_fn(mcp, "connect_with_person")
         result = await tool_fn(
-            "test-user",
+            "https://www.linkedin.com/in/test-user/",
             mock_context,
             note="Let us connect.",
             extractor=mock_extractor,
@@ -486,9 +604,14 @@ class TestCompanyTools:
         register_company_tools(mcp)
 
         tool_fn = await get_tool_fn(mcp, "get_company_profile")
-        result = await tool_fn("testcorp", mock_context, extractor=mock_extractor)
+        result = await tool_fn(
+            "https://uk.linkedin.com/company/testcorp/",
+            mock_context,
+            extractor=mock_extractor,
+        )
         assert "about" in result["sections"]
         assert "pages_visited" not in result
+        assert mock_extractor.scrape_company.await_args.args[0] == "testcorp"
 
     async def test_get_company_posts_normalizes_a_pasted_link(self, mock_context):
         """get_company_posts builds its URL in the tool, not in the extractor.
@@ -663,9 +786,14 @@ class TestJobTools:
         register_job_tools(mcp)
 
         tool_fn = await get_tool_fn(mcp, "get_job_details")
-        result = await tool_fn("12345", mock_context, extractor=mock_extractor)
+        result = await tool_fn(
+            "https://www.linkedin.com/jobs/view/12345/",
+            mock_context,
+            extractor=mock_extractor,
+        )
         assert "job_posting" in result["sections"]
         assert "pages_visited" not in result
+        mock_extractor.scrape_job.assert_awaited_once_with("12345")
 
     async def test_search_jobs(self, mock_context):
         expected = {
@@ -792,7 +920,11 @@ class TestGetSidebarProfilesTool:
         register_person_tools(mcp)
 
         tool_fn = await get_tool_fn(mcp, "get_sidebar_profiles")
-        result = await tool_fn("test-user", mock_context, extractor=mock_extractor)
+        result = await tool_fn(
+            "https://www.linkedin.com/in/test-user/",
+            mock_context,
+            extractor=mock_extractor,
+        )
 
         assert result["url"] == "https://www.linkedin.com/in/test-user/"
         assert "more_profiles_for_you" in result["sidebar_profiles"]
@@ -868,13 +1000,75 @@ class TestMessagingTools:
 
         tool_fn = await get_tool_fn(mcp, "get_conversation")
         result = await tool_fn(
-            mock_context, linkedin_username="testuser", extractor=mock_extractor
+            mock_context,
+            linkedin_username="https://www.linkedin.com/in/testuser/",
+            extractor=mock_extractor,
         )
 
         assert result["sections"]["conversation"] == "Hello!\nHi there!"
         mock_extractor.get_conversation.assert_awaited_once_with(
             linkedin_username="testuser", thread_id=None, index=0
         )
+
+    async def test_get_conversation_normalizes_a_thread_url(self, mock_context):
+        mock_extractor = _make_mock_extractor(
+            {
+                "url": "https://www.linkedin.com/messaging/thread/abc123/",
+                "sections": {"conversation": "Hello!"},
+            }
+        )
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_conversation")
+        await tool_fn(
+            mock_context,
+            thread_id="https://www.linkedin.com/messaging/thread/abc123/",
+            extractor=mock_extractor,
+        )
+
+        mock_extractor.get_conversation.assert_awaited_once_with(
+            linkedin_username=None, thread_id="abc123", index=0
+        )
+
+    async def test_get_conversation_rejects_both_identifiers_before_extractor(self):
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+        ready = AsyncMock(side_effect=AssertionError("get_ready_extractor was called"))
+
+        with patch("linkedin_mcp_server.tools.messaging.get_ready_extractor", ready):
+            with pytest.raises(ToolError, match="not both"):
+                await mcp.call_tool(
+                    "get_conversation",
+                    {"linkedin_username": "alice", "thread_id": "abc123"},
+                )
+
+        ready.assert_not_awaited()
+
+    async def test_get_conversation_rejects_missing_identifier_before_extractor(self):
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+        ready = AsyncMock(side_effect=AssertionError("get_ready_extractor was called"))
+
+        with patch("linkedin_mcp_server.tools.messaging.get_ready_extractor", ready):
+            with pytest.raises(ToolError) as raised:
+                await mcp.call_tool("get_conversation", {})
+
+        assert str(raised.value) == (
+            "Provide at least one of linkedin_username or thread_id"
+        )
+        ready.assert_not_awaited()
 
     async def test_search_conversations_success(self, mock_context):
         expected = {
@@ -911,7 +1105,7 @@ class TestMessagingTools:
 
         tool_fn = await get_tool_fn(mcp, "send_message")
         result = await tool_fn(
-            "testuser",
+            "https://www.linkedin.com/in/testuser/",
             "Hello!",
             True,
             mock_context,
@@ -945,7 +1139,7 @@ class TestMessagingTools:
             "Hello!",
             True,
             mock_context,
-            profile_urn="ACoAAB1IelEB",
+            profile_urn=" ACoAAB1IelEB ",
             extractor=mock_extractor,
         )
 
@@ -1123,7 +1317,11 @@ class TestGetCompanyEmployeesTool:
         register_company_tools(mcp)
 
         tool_fn = await get_tool_fn(mcp, "get_company_employees")
-        result = await tool_fn("anthropic", mock_context, extractor=mock_extractor)
+        result = await tool_fn(
+            "https://www.linkedin.com/company/anthropic/",
+            mock_context,
+            extractor=mock_extractor,
+        )
         assert "employees" in result["sections"]
         mock_extractor.get_company_employees.assert_awaited_once_with(
             "anthropic", keywords=None
