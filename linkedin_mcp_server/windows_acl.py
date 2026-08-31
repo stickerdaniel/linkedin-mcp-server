@@ -120,11 +120,13 @@ _CREATOR_OWNER_SID = "S-1-3-0"
 #: ``verify_owner_only``. What the copy does grant is a foreign account rights
 #: over an object that same account created and already owns.
 #:
-#: Measured on the Windows Server 2025 image these tests run on: ``%TEMP%``
-#: carries the entry so that it takes effect one level down, and every directory
-#: created inside then carries an effective copy. Refusing it refused the
-#: ordinary temporary layout of an ordinary machine, which is how this was
-#: found.
+#: Measured on Windows Server 2025, and the source is CPython rather than
+#: Windows: a directory created with ``mode=0o700`` carries SYSTEM,
+#: Administrators and this entry, and nothing naming the user at all, because
+#: this is how the restricted access list added in 3.12.4 grants the creator its
+#: own directory. ``%TEMP%`` itself carries no such entry. So every private
+#: directory this server creates has one, inheritable, and refusing it refused
+#: the server its own state.
 _OWNER_RIGHTS_SID = "S-1-3-4"
 #: What an ACE has to grant before an account can take an *existing, named*
 #: directory away from the path that sits on it: delete it, or rewrite who may.

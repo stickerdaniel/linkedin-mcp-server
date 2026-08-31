@@ -555,13 +555,13 @@ class TestWindowsAcl:
 
     @windows_only
     def test_owner_rights_in_the_chain_is_still_accepted(self, tmp_path: Path):
-        """The entry Windows itself puts below ``%TEMP%``, granted explicitly.
+        """The entry CPython puts on every directory it creates for us.
 
-        Full control and inheritable, and still not a widening: ``S-1-3-4``
-        names whoever owns the object being checked rather than any account,
-        and each container's owner is judged one step before its permissions
-        are. Refusing it refused every ordinary temporary directory on the
-        machines these tests run on, which is how it was found.
+        Granted explicitly here so the case does not depend on which Python
+        made the fixture. Full control and inheritable, and still not a
+        widening: ``S-1-3-4`` names whoever owns the object being checked
+        rather than any account, and each container's owner is judged one step
+        before its permissions are.
         """
         from linkedin_mcp_server.windows_acl import (
             close_directory_pin,
