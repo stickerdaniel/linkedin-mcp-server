@@ -6696,6 +6696,97 @@ class TestGetSidebarProfiles:
         assert result["sidebar_profiles"]["explore_premium_profiles"] == ["/in/carol/"]
         assert result["sidebar_profiles"]["people_you_may_know"] == ["/in/dave/"]
 
+    @pytest.mark.parametrize(
+        ("error_type", "message"),
+        [
+            pytest.param(
+                AuthenticationError,
+                "Run with --login",
+                id="authentication-error",
+            ),
+            pytest.param(
+                ProxyConnectionError,
+                "Proxy unavailable",
+                id="proxy-connection-error",
+            ),
+        ],
+    )
+    async def test_scraper_exception_from_show_all_propagates(
+        self,
+        mock_page,
+        error_type: type[LinkedInScraperException],
+        message: str,
+    ):
+        sidebar_js_result = {
+            "sections": {"more_profiles_for_you": ["/in/alice/"]},
+            "showAllUrls": {
+                "more_profiles_for_you": "https://www.linkedin.com/search/results/people/?keywords=test"
+            },
+        }
+        mock_page.evaluate = AsyncMock(return_value=sidebar_js_result)
+        mock_page.url = "https://www.linkedin.com/in/testuser/"
+
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_navigate_to_page",
+                new_callable=AsyncMock,
+                side_effect=[None, error_type(message)],
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            pytest.raises(error_type, match=message),
+        ):
+            await extractor.get_sidebar_profiles("testuser")
+
+    async def test_raw_exception_from_show_all_keeps_inline_profiles(self, mock_page):
+        show_all_url = "https://www.linkedin.com/search/results/people/?keywords=test"
+        sidebar_js_result = {
+            "sections": {"more_profiles_for_you": ["/in/alice/"]},
+            "showAllUrls": {"more_profiles_for_you": show_all_url},
+        }
+        mock_page.evaluate = AsyncMock(return_value=sidebar_js_result)
+        mock_page.url = "https://www.linkedin.com/in/testuser/"
+
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_navigate_to_page",
+                new_callable=AsyncMock,
+                side_effect=[None, RuntimeError("navigation failed")],
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch.object(extractor_module.logger, "debug") as debug_mock,
+        ):
+            result = await extractor.get_sidebar_profiles("testuser")
+
+        assert result == {
+            "url": "https://www.linkedin.com/in/testuser/",
+            "sidebar_profiles": {"more_profiles_for_you": ["/in/alice/"]},
+        }
+        debug_mock.assert_called_once_with(
+            "Failed to navigate to Show all for section %s: %s",
+            "more_profiles_for_you",
+            show_all_url,
+        )
+
     async def test_skips_show_all_when_url_contains_premium(self, mock_page):
         """Show all URL containing /premium is skipped without navigation."""
         sidebar_js_result = {

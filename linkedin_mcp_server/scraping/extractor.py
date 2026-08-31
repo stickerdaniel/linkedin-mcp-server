@@ -2675,6 +2675,8 @@ class LinkedInExtractor:
 
             try:
                 await self._navigate_to_page(show_all_url)
+            except LinkedInScraperException:
+                raise
             except Exception:
                 logger.debug(
                     "Failed to navigate to Show all for section %s: %s",
