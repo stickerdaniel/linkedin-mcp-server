@@ -69,7 +69,8 @@ leader = subprocess.Popen(
         "import os,subprocess,sys,time;"
         "c=subprocess.Popen([sys.executable,'-c','import time; time.sleep(600)']);"
         "Path=__import__('pathlib').Path;"
-        "Path(sys.argv[1]).write_text(f'{{os.getpid()}} {{c.pid}}');"
+        "p=Path(sys.argv[1]);q=p.with_name(p.name+'.partial');"
+        "q.write_text(f'{{os.getpid()}} {{c.pid}}');q.replace(p);"
         "time.sleep(600)",
         str(marker),
     ],
@@ -2280,7 +2281,10 @@ browser = subprocess.Popen(
     start_new_session=True,
     env=dict(os.environ),
 )
-Path(sys.argv[1]).write_text(str(browser.pid))
+marker = Path(sys.argv[1])
+partial = marker.with_name(marker.name + ".partial")
+partial.write_text(str(browser.pid))
+partial.replace(marker)
 time.sleep(600)
 """
     owner_code = r"""
@@ -2428,7 +2432,10 @@ browser = subprocess.Popen(
     stderr=subprocess.DEVNULL,
     start_new_session=True,
 )
-Path(sys.argv[1]).write_text(str(browser.pid))
+marker = Path(sys.argv[1])
+partial = marker.with_name(marker.name + ".partial")
+partial.write_text(str(browser.pid))
+partial.replace(marker)
 while not Path(sys.argv[2]).exists():
     time.sleep(0.01)
 '''
