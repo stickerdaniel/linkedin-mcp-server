@@ -1341,9 +1341,9 @@ class TestFailingFast:
             # Five, which is ten times the budget and catches only the 29s
             # cleanup defect above. It is not a check on `_spawn`'s
             # one-budget-across-both-halves rule, though it sits close enough to
-            # read as one: measured, handing `_await_ready` a fresh 0.5s instead
-            # of the remainder takes the call to 0.98s and passes this. Nothing
-            # covers that rule; #780 is where it is written down.
+            # read as one: measured, handing `_await_prepared` a fresh 0.5s instead
+            # of the remainder takes the call to 0.98s and passes this. The
+            # budget test below controls that distinction directly.
             assert elapsed < 5, f"the bounded wait took {elapsed:.1f}s"
         finally:
             for child in started:
@@ -5299,6 +5299,134 @@ class TestVersionSkew:
 
 
 class TestBudgets:
+    @pytest.mark.parametrize("platform", ["posix", "nt"])
+    def test_handover_and_ready_wait_share_one_budget(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str
+    ):
+        profile = _profile(tmp_path)
+        config = _config(profile)
+        budget = 0.5
+        handover_time = 0.4
+        handshake_nonce = "0123456789abcdef" * 4
+        ready_timeouts: list[float] = []
+
+        class _Clock:
+            now = 100.0
+
+            @classmethod
+            def monotonic(cls) -> float:
+                return cls.now
+
+        class _Child:
+            pid = 4242
+
+            def __init__(self) -> None:
+                self.stdin: io.BytesIO | None = io.BytesIO()
+                self.stdout: io.BytesIO | None = io.BytesIO()
+                self.stderr = None
+                self.returncode: int | None = None
+
+            def kill(self) -> None:
+                self.returncode = -9
+
+            def wait(self, timeout: float | None = None) -> int:
+                if self.returncode is None:
+                    raise subprocess.TimeoutExpired("owner", timeout or 0)
+                return self.returncode
+
+            def poll(self) -> int | None:
+                return self.returncode
+
+        child = _Child()
+        spawn_kwargs: dict[str, object] = {}
+
+        class _Job(TestAtomicStartupCommit._Job):
+            @classmethod
+            def named(cls, purpose: str) -> _Job:
+                assert purpose == "owner"
+                return cls("Local\\linkedin-mcp-owner-budget-double")
+
+        class _Control:
+            host = "127.0.0.1"
+            port = 4321
+
+            @classmethod
+            def open(cls) -> _Control:
+                return cls()
+
+            def start_accepting(self, *, nonce: str, timeout: float) -> None:
+                assert nonce == handshake_nonce
+                assert timeout == budget
+
+            def close(self) -> None:
+                pass
+
+        def hand_over(
+            process: object,
+            handed_config: AppConfig,
+            *,
+            handshake_nonce: str,
+            control: object,
+            timeout: float,
+        ) -> None:
+            assert process is child
+            assert handed_config is config
+            assert handshake_nonce == "0123456789abcdef" * 4
+            assert isinstance(control, _Control)
+            assert timeout == budget
+            _Clock.now += handover_time
+
+        def await_ready(
+            process: object, *, handshake_nonce: str, timeout: float
+        ) -> election_module._Started:
+            assert process is child
+            assert handshake_nonce == "0123456789abcdef" * 4
+            ready_timeouts.append(timeout)
+            return election_module._Started.YES
+
+        monkeypatch.setattr(
+            election_module,
+            "os",
+            SimpleNamespace(name=platform, environ=os.environ),
+        )
+        monkeypatch.setattr(election_module, "_IS_WINDOWS", platform == "nt")
+        if platform == "nt":
+            monkeypatch.setattr(
+                election_module.subprocess,
+                "CREATE_NEW_PROCESS_GROUP",
+                0x1,
+                raising=False,
+            )
+            monkeypatch.setattr(
+                election_module.subprocess, "DETACHED_PROCESS", 0x2, raising=False
+            )
+            monkeypatch.setattr(
+                election_module.subprocess,
+                "CREATE_BREAKAWAY_FROM_JOB",
+                0x4,
+                raising=False,
+            )
+        monkeypatch.setattr(election_module, "time", _Clock)
+        monkeypatch.setattr(election_module, "WindowsJob", _Job)
+        monkeypatch.setattr(election_module, "ControlListener", _Control)
+        monkeypatch.setattr(election_module, "new_nonce", lambda: handshake_nonce)
+
+        def popen(*args: object, **kwargs: object) -> _Child:
+            spawn_kwargs.update(kwargs)
+            return child
+
+        monkeypatch.setattr(election_module.subprocess, "Popen", popen)
+        monkeypatch.setattr(election_module, "_hand_over_config", hand_over)
+        monkeypatch.setattr(election_module, "_await_prepared", await_ready)
+
+        verdict = election_module._spawn(
+            profile.parent, config, lock_fd=None, timeout=budget
+        )
+
+        assert verdict is election_module._Started.YES
+        assert spawn_kwargs["creationflags"] == (0x7 if platform == "nt" else 0)
+        assert ready_timeouts == pytest.approx([budget - handover_time])
+
     def test_the_owner_may_not_take_longer_than_the_frontend_will_wait(self):
         # The frontend now stops a child that has said nothing by the end of its
         # budget, which makes the relationship between the two numbers load
