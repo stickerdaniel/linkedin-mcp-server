@@ -372,14 +372,19 @@ def obtain_owner(
                 logger.warning("The daemon lock is unusable", exc_info=True)
                 return ElectionOutcome(lookup, started_owner=started)
             except OSError:
-                # Raised only before a child exists, from the control listener,
-                # the Job, the command or the spawn itself, and ``_spawn`` takes
-                # no lock on this path. So the reasoning under ``_Attempt.FAILED``
-                # does not reach it: nothing ran, and nothing was freed for a
-                # sibling frontend to pick up. Pacing retries here would only
-                # spend the caller's whole election budget before it can fall
-                # back to a direct browser, which is what the predecessor
-                # avoided and what this had quietly given up.
+                # From the control listener, the Job, the command or the spawn
+                # itself, and ``_spawn`` takes no lock on this path. Usually
+                # before a child exists, though not always: ``Popen`` can raise
+                # after the operating system made the process, when the parent's
+                # own pipe cleanup fails. It makes no difference here, because
+                # such a child is never handed its configuration and inherits no
+                # lock, and this owner reads neither profile state nor the lock
+                # before that handover. So the reasoning under ``_Attempt.FAILED``
+                # does not reach this either way: nothing served, and nothing was
+                # freed for a sibling frontend to pick up. Pacing retries here
+                # would only spend the caller's whole election budget before it
+                # can fall back to a direct browser, which is what the
+                # predecessor avoided and what this had quietly given up.
                 logger.warning("The daemon could not be started", exc_info=True)
                 return ElectionOutcome(lookup, started_owner=started)
         else:
