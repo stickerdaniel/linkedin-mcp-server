@@ -1,8 +1,13 @@
 """Tests for auth barrier detection helpers."""
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from patchright.async_api import (
+    Error as PlaywrightError,
+    TimeoutError as PlaywrightTimeoutError,
+)
 
 from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.core.auth import (
@@ -293,12 +298,11 @@ async def test_resolve_remember_me_prompt_returns_false_when_absent():
 
 
 @pytest.mark.asyncio
-async def test_resolve_remember_me_prompt_returns_false_when_container_has_no_button():
+async def test_resolve_remember_me_prompt_returns_false_when_button_is_not_visible():
     page = MagicMock()
     target = MagicMock()
-    target.wait_for = AsyncMock()
+    target.wait_for = AsyncMock(side_effect=PlaywrightTimeoutError("not visible"))
     locator = MagicMock()
-    locator.count = AsyncMock(return_value=0)
     locator.first = target
     page.locator.return_value = locator
     page.wait_for_selector = AsyncMock()
@@ -306,27 +310,43 @@ async def test_resolve_remember_me_prompt_returns_false_when_container_has_no_bu
     result = await resolve_remember_me_prompt(page)
 
     assert result is False
-    target.wait_for.assert_not_awaited()
+    target.wait_for.assert_awaited_once()
+
+
+def _linkedin_cookie() -> dict[str, str]:
+    return {
+        "name": "li_at",
+        "value": "session",
+        "domain": ".linkedin.com",
+    }
+
+
+def _manual_login_page() -> MagicMock:
+    page = MagicMock()
+    page.url = "https://www.linkedin.com/login"
+    page.is_closed.return_value = False
+    page.context.cookies = AsyncMock(return_value=[])
+    return page
 
 
 @pytest.mark.asyncio
 async def test_wait_for_manual_login_clicks_saved_account(monkeypatch):
-    page = MagicMock()
+    page = _manual_login_page()
     clicked = {"value": False}
 
-    async def fake_resolve(_page):
+    async def fake_cookies(_url):
+        return [_linkedin_cookie()] if clicked["value"] else []
+
+    async def fake_resolve(_page, **_kwargs):
         if not clicked["value"]:
             clicked["value"] = True
             return True
         return False
 
-    async def fake_is_logged_in(_page):
-        return clicked["value"]
-
+    page.context.cookies = AsyncMock(side_effect=fake_cookies)
     monkeypatch.setattr(
         "linkedin_mcp_server.core.auth.resolve_remember_me_prompt", fake_resolve
     )
-    monkeypatch.setattr("linkedin_mcp_server.core.auth.is_logged_in", fake_is_logged_in)
 
     await wait_for_manual_login(page, timeout=1000)
 
@@ -335,19 +355,19 @@ async def test_wait_for_manual_login_clicks_saved_account(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_wait_for_manual_login_times_out_when_remember_me_repeats(monkeypatch):
-    page = MagicMock()
+    page = _manual_login_page()
 
     # 120000ms = 2 minutes so the rendered "N minutes" is a clean integer.
     class _FakeLoop:
         def __init__(self):
-            self._times = iter([0.0, 130.0])
+            self._times = iter([0.0, 0.0, 0.0, 0.0, 0.0, 130.0])
 
         def time(self):
             return next(self._times)
 
+    resolve_prompt = AsyncMock(return_value=True)
     monkeypatch.setattr(
-        "linkedin_mcp_server.core.auth.resolve_remember_me_prompt",
-        AsyncMock(return_value=True),
+        "linkedin_mcp_server.core.auth.resolve_remember_me_prompt", resolve_prompt
     )
     monkeypatch.setattr(
         "linkedin_mcp_server.core.auth.asyncio.get_running_loop",
@@ -360,35 +380,284 @@ async def test_wait_for_manual_login_times_out_when_remember_me_repeats(monkeypa
     message = str(exc_info.value)
     assert "LOGIN_TIMEOUT" in message
     assert "2 minutes" in message
+    resolve_prompt.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_wait_for_manual_login_unlimited_when_timeout_zero(monkeypatch):
-    page = MagicMock()
-    calls = {"value": 0}
-
-    async def fake_is_logged_in(_page):
-        calls["value"] += 1
-        return calls["value"] >= 2
+    page = _manual_login_page()
+    page.context.cookies = AsyncMock(side_effect=[[], [_linkedin_cookie()]])
 
     class _FakeLoop:
-        """Time jumps far beyond any positive bound to prove 0 disables it."""
+        """Elapsed time jumps far beyond any positive timeout."""
+
+        def __init__(self):
+            self._times = iter([0.0, 10**12])
 
         def time(self):
-            return 10**12
+            return next(self._times, 10**12)
 
     monkeypatch.setattr(
         "linkedin_mcp_server.core.auth.resolve_remember_me_prompt",
         AsyncMock(return_value=False),
     )
-    monkeypatch.setattr("linkedin_mcp_server.core.auth.is_logged_in", fake_is_logged_in)
     monkeypatch.setattr(
         "linkedin_mcp_server.core.auth.asyncio.get_running_loop",
         lambda: _FakeLoop(),
     )
     monkeypatch.setattr("linkedin_mcp_server.core.auth.asyncio.sleep", AsyncMock())
 
-    # timeout=0 means unlimited: the elapsed check never fires even though the
-    # fake clock is enormous, so it returns once is_logged_in becomes True.
     await wait_for_manual_login(page, timeout=0)
-    assert calls["value"] == 2
+
+    assert page.context.cookies.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_wait_for_manual_login_accepts_context_cookie():
+    page = _manual_login_page()
+    page.context.cookies = AsyncMock(return_value=[_linkedin_cookie()])
+
+    await wait_for_manual_login(page, timeout=1000)
+
+    page.context.cookies.assert_awaited_once_with("https://www.linkedin.com/feed/")
+
+
+@pytest.mark.asyncio
+async def test_wait_for_manual_login_waits_for_applicable_cookie(monkeypatch):
+    page = _manual_login_page()
+    page.context.cookies = AsyncMock(side_effect=[[], [_linkedin_cookie()]])
+    monkeypatch.setattr(
+        "linkedin_mcp_server.core.auth.resolve_remember_me_prompt",
+        AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr("linkedin_mcp_server.core.auth.asyncio.sleep", AsyncMock())
+
+    await wait_for_manual_login(page, timeout=1000)
+
+    assert page.context.cookies.await_count == 2
+    assert all(
+        call.args == ("https://www.linkedin.com/feed/",)
+        for call in page.context.cookies.await_args_list
+    )
+
+
+@pytest.mark.asyncio
+async def test_wait_for_manual_login_survives_tracked_tab_closing(monkeypatch):
+    page = _manual_login_page()
+    page.is_closed.return_value = True
+    page.context.pages = [MagicMock()]
+    page.context.cookies = AsyncMock(side_effect=[[], [_linkedin_cookie()]])
+    monkeypatch.setattr(
+        "linkedin_mcp_server.core.auth.resolve_remember_me_prompt",
+        AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr("linkedin_mcp_server.core.auth.asyncio.sleep", AsyncMock())
+
+    await wait_for_manual_login(page, timeout=0)
+
+    assert page.context.cookies.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_wait_for_manual_login_stops_when_last_page_closes():
+    page = _manual_login_page()
+    page.is_closed.return_value = True
+    page.context.pages = []
+
+    with pytest.raises(AuthenticationError, match="browser was closed"):
+        await wait_for_manual_login(page, timeout=0)
+
+
+@pytest.mark.asyncio
+async def test_wait_for_manual_login_stops_when_browser_closes():
+    page = _manual_login_page()
+    page.context.cookies = AsyncMock(
+        side_effect=PlaywrightError("Target page, context or browser has been closed")
+    )
+
+    with pytest.raises(AuthenticationError, match="browser was closed"):
+        await wait_for_manual_login(page, timeout=0)
+
+
+@pytest.mark.asyncio
+async def test_wait_for_manual_login_logs_while_waiting(monkeypatch, caplog):
+    page = _manual_login_page()
+    page.context.cookies = AsyncMock(side_effect=[[], [_linkedin_cookie()]])
+
+    class _FakeLoop:
+        def __init__(self):
+            self._times = iter([0.0, 31.0])
+
+        def time(self):
+            return next(self._times, 31.0)
+
+    monkeypatch.setattr(
+        "linkedin_mcp_server.core.auth.resolve_remember_me_prompt",
+        AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.core.auth.asyncio.get_running_loop",
+        lambda: _FakeLoop(),
+    )
+    monkeypatch.setattr("linkedin_mcp_server.core.auth.asyncio.sleep", AsyncMock())
+
+    with caplog.at_level("INFO"):
+        await wait_for_manual_login(page, timeout=0)
+
+    assert "Complete sign-in in any LinkedIn tab" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_wait_for_manual_login_checks_cookie_before_repeated_prompt(monkeypatch):
+    page = _manual_login_page()
+    page.context.cookies = AsyncMock(side_effect=[[], [_linkedin_cookie()]])
+    resolve_prompt = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "linkedin_mcp_server.core.auth.resolve_remember_me_prompt", resolve_prompt
+    )
+
+    await wait_for_manual_login(page, timeout=1000)
+
+    assert resolve_prompt.await_count == 1
+    await_args = resolve_prompt.await_args
+    assert await_args is not None
+    assert await_args.args == (page,)
+    assert 0 < await_args.kwargs["timeout"] <= 1000
+
+
+@pytest.mark.asyncio
+async def test_wait_for_manual_login_does_not_poll_other_tabs(monkeypatch):
+    page = _manual_login_page()
+    page.context.pages = [page, MagicMock(), MagicMock()]
+    resolve_prompt = AsyncMock(return_value=True)
+
+    class _FakeLoop:
+        def __init__(self):
+            self._times = iter([0.0, 0.0, 0.0, 0.0, 0.0, 2.0])
+
+        def time(self):
+            return next(self._times)
+
+    monkeypatch.setattr(
+        "linkedin_mcp_server.core.auth.resolve_remember_me_prompt", resolve_prompt
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.core.auth.asyncio.get_running_loop",
+        lambda: _FakeLoop(),
+    )
+
+    with pytest.raises(AuthenticationError, match="Manual login timeout"):
+        await wait_for_manual_login(page, timeout=1000)
+
+    assert resolve_prompt.await_count == 1
+    await_args = resolve_prompt.await_args
+    assert await_args is not None
+    assert await_args.args == (page,)
+    assert 0 < await_args.kwargs["timeout"] <= 1000
+
+
+@pytest.mark.asyncio
+async def test_wait_for_manual_login_rejects_cookie_after_deadline(monkeypatch):
+    page = _manual_login_page()
+    page.context.cookies = AsyncMock(return_value=[_linkedin_cookie()])
+
+    class _FakeLoop:
+        def __init__(self):
+            self._times = iter([0.0, 0.0, 0.0, 4.0])
+
+        def time(self):
+            return next(self._times)
+
+    monkeypatch.setattr(
+        "linkedin_mcp_server.core.auth.asyncio.get_running_loop",
+        lambda: _FakeLoop(),
+    )
+
+    with pytest.raises(AuthenticationError, match="Manual login timeout"):
+        await wait_for_manual_login(page, timeout=3500)
+
+    page.context.cookies.assert_awaited_once_with("https://www.linkedin.com/feed/")
+
+
+@pytest.mark.asyncio
+async def test_wait_for_manual_login_bounds_prompt_by_deadline():
+    page = _manual_login_page()
+
+    async def slow_selector(_selector, *, timeout):
+        await asyncio.sleep(timeout / 1000)
+        raise PlaywrightTimeoutError("selector timed out")
+
+    page.wait_for_selector = AsyncMock(side_effect=slow_selector)
+
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(AuthenticationError, match="Manual login timeout"):
+        await wait_for_manual_login(page, timeout=50)
+
+    assert asyncio.get_running_loop().time() - started < 0.5
+
+
+@pytest.mark.asyncio
+async def test_wait_for_manual_login_bounds_cookie_query():
+    page = _manual_login_page()
+
+    async def slow_cookies(_url):
+        await asyncio.sleep(0.2)
+        return []
+
+    page.context.cookies = AsyncMock(side_effect=slow_cookies)
+
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(AuthenticationError, match="Manual login timeout"):
+        await wait_for_manual_login(page, timeout=10)
+
+    assert asyncio.get_running_loop().time() - started < 0.1
+
+
+@pytest.mark.asyncio
+async def test_resolve_remember_me_prompt_does_not_count_buttons():
+    page = MagicMock()
+    page.url = "https://www.linkedin.com/feed/"
+    page.wait_for_selector = AsyncMock()
+    target = MagicMock()
+    target.wait_for = AsyncMock(side_effect=PlaywrightTimeoutError("not visible"))
+    locator = MagicMock()
+
+    async def slow_count():
+        await asyncio.sleep(0.2)
+        return 1
+
+    locator.count = AsyncMock(side_effect=slow_count)
+    locator.first = target
+    page.locator.return_value = locator
+
+    started = asyncio.get_running_loop().time()
+    result = await resolve_remember_me_prompt(page, timeout=10)
+
+    assert result is False
+    assert asyncio.get_running_loop().time() - started < 0.1
+    locator.count.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_wait_for_manual_login_does_not_log_waiting_after_cookie(
+    monkeypatch, caplog
+):
+    page = _manual_login_page()
+    page.context.cookies = AsyncMock(return_value=[_linkedin_cookie()])
+
+    class _FakeLoop:
+        def __init__(self):
+            self._times = iter([0.0, 31.0, 31.0])
+
+        def time(self):
+            return next(self._times)
+
+    monkeypatch.setattr(
+        "linkedin_mcp_server.core.auth.asyncio.get_running_loop",
+        lambda: _FakeLoop(),
+    )
+
+    with caplog.at_level("INFO"):
+        await wait_for_manual_login(page, timeout=0)
+
+    assert "Still waiting for manual login" not in caplog.text
