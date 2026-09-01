@@ -3357,6 +3357,187 @@ class TestSearchJobs:
             ]
         }
 
+    async def test_componentkey_jobs_without_anchors_get_fallback_references(
+        self, mock_page
+    ):
+        extractor = LinkedInExtractor(mock_page)
+        page = extracted(
+            "Redesigned job cards",
+            [
+                {
+                    "kind": "company",
+                    "url": "/company/acme/",
+                    "text": "Acme",
+                    "context": "search result",
+                }
+            ],
+        )
+
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                side_effect=self._navigating(mock_page, [page]),
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["222", "111"],
+            ),
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_jobs("python", max_pages=1)
+
+        assert result["job_ids"] == ["222", "111"]
+        assert result["references"]["search_results"] == [
+            {
+                "kind": "company",
+                "url": "/company/acme/",
+                "text": "Acme",
+                "context": "search result",
+            },
+            {"kind": "job", "url": "/jobs/view/222/"},
+            {"kind": "job", "url": "/jobs/view/111/"},
+        ]
+
+    async def test_reconciles_uncapped_raw_references_in_dom_order(self, mock_page):
+        """Rail jobs survive the page cap without losing DOM interleaving."""
+        extractor = LinkedInExtractor(mock_page)
+        ancillary = [
+            {
+                "href": f"https://www.linkedin.com/company/company-{index}/",
+                "text": f"Company {index}",
+            }
+            for index in range(13)
+        ]
+        raw_references = [
+            {
+                "href": "https://www.linkedin.com/jobs/view/999/",
+                "text": "Detail pane job",
+            },
+            ancillary[0],
+            {
+                "href": "https://www.linkedin.com/jobs/view/111/",
+                "text": "Rail job 111",
+            },
+            ancillary[1],
+            ancillary[2],
+            {
+                "href": "https://www.linkedin.com/jobs/view/222/",
+                "text": "Rail job 222",
+            },
+            *ancillary[3:12],
+            {
+                "href": "https://www.linkedin.com/jobs/view/333/",
+                "text": "Rail job 333 after the old cap",
+            },
+            ancillary[12],
+        ]
+        raw_page = {
+            "source": "root",
+            "text": "Job results",
+            "references": raw_references,
+        }
+
+        async def navigate_page(url, *args, **kwargs):
+            navigate(mock_page, url)
+
+        with (
+            patch.object(extractor, "_navigate_to_page", side_effect=navigate_page),
+            patch.object(
+                extractor,
+                "_extract_root_content",
+                new_callable=AsyncMock,
+                return_value=raw_page,
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["111", "222", "111", "333"],
+            ),
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            result = await extractor.search_jobs("python", max_pages=1)
+
+        assert result["job_ids"] == ["111", "222", "333"]
+        assert result["references"]["search_results"] == [
+            {
+                "kind": "company",
+                "url": "/company/company-0/",
+                "text": "Company 0",
+                "context": "search result",
+            },
+            {
+                "kind": "job",
+                "url": "/jobs/view/111/",
+                "text": "Rail job 111",
+                "context": "job result",
+            },
+            {
+                "kind": "company",
+                "url": "/company/company-1/",
+                "text": "Company 1",
+                "context": "search result",
+            },
+            {
+                "kind": "company",
+                "url": "/company/company-2/",
+                "text": "Company 2",
+                "context": "search result",
+            },
+            {
+                "kind": "job",
+                "url": "/jobs/view/222/",
+                "text": "Rail job 222",
+                "context": "job result",
+            },
+            *[
+                {
+                    "kind": "company",
+                    "url": f"/company/company-{index}/",
+                    "text": f"Company {index}",
+                    "context": "search result",
+                }
+                for index in range(3, 12)
+            ],
+            {
+                "kind": "job",
+                "url": "/jobs/view/333/",
+                "text": "Rail job 333 after the old cap",
+                "context": "job result",
+            },
+        ]
+
     async def test_a_slashless_search_url_still_yields_job_ids(self, mock_page):
         """`/jobs/search?keywords=x` is the same route as `/jobs/search/`.
 
@@ -3489,6 +3670,94 @@ class TestSearchJobs:
         # start=30, which is exactly what a stride regression would produce.
         page2 = parse_qs(urlparse(urls_visited[1]).query)
         assert page2["start"] == ["3"]  # page 1 rendered three cards
+
+    async def test_references_keep_all_jobs_beyond_the_per_section_cap(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        id_pages = [
+            [str(1000 + index) for index in range(11)],
+            [str(2000 + index) for index in range(11)],
+        ]
+        raw_pages = [
+            {
+                "source": "root",
+                "text": f"Page {page_number}",
+                "references": [
+                    {
+                        "href": f"https://www.linkedin.com/jobs/view/{job_id}/",
+                        "text": f"Job {job_id}",
+                    }
+                    for job_id in page_ids
+                ]
+                + [
+                    {
+                        "href": (
+                            "https://www.linkedin.com/company/"
+                            f"page-{page_number}-{index}/"
+                        ),
+                        "text": f"Company {page_number}-{index}",
+                    }
+                    for index in range(6)
+                ],
+            }
+            for page_number, page_ids in enumerate(id_pages, start=1)
+        ]
+
+        async def navigate_page(url, *args, **kwargs):
+            navigate(mock_page, url)
+
+        with (
+            patch.object(extractor, "_navigate_to_page", side_effect=navigate_page),
+            patch.object(
+                extractor,
+                "_extract_root_content",
+                new_callable=AsyncMock,
+                side_effect=raw_pages,
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                side_effect=id_pages,
+            ),
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_jobs("python", max_pages=2)
+
+        expected_ids = [job_id for page_ids in id_pages for job_id in page_ids]
+        references = result["references"]["search_results"]
+        job_references = [ref for ref in references if ref["kind"] == "job"]
+        ancillary = [ref for ref in references if ref["kind"] != "job"]
+
+        assert result["job_ids"] == expected_ids
+        assert [ref["url"] for ref in job_references] == [
+            f"/jobs/view/{job_id}/" for job_id in expected_ids
+        ]
+        assert len(job_references) == 22
+        assert len(ancillary) == 8
+        assert len(references) == 30
 
     async def test_deduplication_across_pages(self, mock_page):
         """Duplicate job IDs across pages should be deduplicated."""
@@ -3881,10 +4150,9 @@ class TestSearchJobs:
             == "pagination_stopped"
         )
 
-    async def test_early_stop_no_new_ids(self, mock_page):
-        """Should stop early when a page yields no new job IDs."""
+    async def test_no_new_id_page_can_upgrade_duplicate_metadata(self, mock_page):
+        """The stopping page still contributes richer duplicate metadata."""
         extractor = LinkedInExtractor(mock_page)
-        # Page 2 returns same IDs as page 1
         id_pages = iter([["100", "200"], ["100", "200"]])
         extract_call_count = 0
 
@@ -3897,11 +4165,29 @@ class TestSearchJobs:
             if extract_call_count == 1:
                 return extracted(
                     "text",
-                    [{"kind": "job", "url": "/jobs/view/100/", "text": "Job 100"}],
+                    [
+                        {
+                            "kind": "job",
+                            "url": "/jobs/view/100/",
+                            "text": "Job 100",
+                        },
+                        {
+                            "kind": "job",
+                            "url": "/jobs/view/200/",
+                            "text": "Job",
+                        },
+                    ],
                 )
             return extracted(
                 "text",
-                [{"kind": "job", "url": "/jobs/view/200/", "text": "Job 200"}],
+                [
+                    {
+                        "kind": "job",
+                        "url": "/jobs/view/200/",
+                        "text": "Senior Software Engineer",
+                        "context": "job result",
+                    }
+                ],
             )
 
         with (
@@ -3930,7 +4216,12 @@ class TestSearchJobs:
         assert result["references"] == {
             "search_results": [
                 {"kind": "job", "url": "/jobs/view/100/", "text": "Job 100"},
-                {"kind": "job", "url": "/jobs/view/200/", "text": "Job 200"},
+                {
+                    "kind": "job",
+                    "url": "/jobs/view/200/",
+                    "text": "Senior Software Engineer",
+                    "context": "job result",
+                },
             ]
         }
 

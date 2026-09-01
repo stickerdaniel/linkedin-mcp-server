@@ -53,6 +53,7 @@ from linkedin_mcp_server.scraping.identifiers import (
 from linkedin_mcp_server.scraping.link_metadata import (
     JOB_PATH_RE,
     Reference,
+    _SEARCH_RESULTS_REFERENCE_CAP,
     build_references,
     dedupe_references,
 )
@@ -91,30 +92,42 @@ _RATE_LIMIT_RETRY_DELAY = 5.0
 _RATE_LIMITED_MSG = "[Rate limited] LinkedIn blocked this section. Try again later or request fewer sections."
 
 
-def _references_within(references: list[Reference], ids: list[str]) -> list[Reference]:
-    """Drop job references the rail did not render.
+def _reconcile_search_references(
+    references: list[Reference], ids: list[str]
+) -> list[Reference]:
+    """Align one page's references with the job ids read from its rail.
 
-    The ids are read from the selected rail; the references come from the
-    whole `<main>`, which also holds the detail pane. So a job the pane had
-    loaded was emitted as a search result while `job_ids` correctly left it
-    out, and a caller following the references acts on a job the search never
-    returned. Filtering rather than re-extracting, because the rail is a pick
-    made in the page and not a selector the reference reader could be given.
-
-    Only job references are judged. Everything else on the page is unrelated
-    to which rail was picked.
+    References come from the whole `<main>`, which also holds the detail pane;
+    ids come from the selected results rail. The rail therefore decides which
+    jobs exist, while the DOM references supply richer labels when available.
+    Non-job references share the search-results cap's remaining allowance.
     """
-    kept = set(ids)
+    ordered_ids = list(dict.fromkeys(ids))
+    kept_ids = set(ordered_ids)
+    emitted_ids: set[str] = set()
+    ancillary_left = max(0, _SEARCH_RESULTS_REFERENCE_CAP - len(ordered_ids))
     out: list[Reference] = []
+
     for ref in references:
-        if ref.get("kind") != "job":
+        if ref.get("kind") == "job":
+            match = JOB_PATH_RE.match(str(ref.get("url", "")))
+            if match is None:
+                continue
+            job_id = match.group(1)
+            if job_id not in kept_ids or job_id in emitted_ids:
+                continue
             out.append(ref)
+            emitted_ids.add(job_id)
             continue
-        # The same pattern that produced the reference, so a form one accepts
-        # and the other does not cannot arise.
-        match = JOB_PATH_RE.match(str(ref.get("url", "")))
-        if match is None or match.group(1) in kept:
+
+        if ancillary_left:
             out.append(ref)
+            ancillary_left -= 1
+
+    for job_id in ordered_ids:
+        if job_id not in emitted_ids:
+            out.append({"kind": "job", "url": f"/jobs/view/{job_id}/"})
+
     return out
 
 
@@ -3636,7 +3649,9 @@ class LinkedInExtractor:
         cleaned = _filter_linkedin_noise_lines(truncated)
         return ExtractedSection(
             text=cleaned,
-            references=build_references(raw_result["references"], section_name),
+            references=build_references(
+                raw_result["references"], section_name, apply_cap=False
+            ),
         )
 
     async def _get_total_search_pages(self) -> int | None:
@@ -3973,9 +3988,9 @@ class LinkedInExtractor:
                         if total_pages is not None:
                             logger.debug("LinkedIn reports %d total pages", total_pages)
 
-                page_ids = await self._extract_job_ids(scoped=True)
-                # Advance by what this navigation rendered, duplicates
-                # included: the next unseen result sits right behind them.
+                page_ids = list(dict.fromkeys(await self._extract_job_ids(scoped=True)))
+                # Advance by what this navigation rendered, including ids seen
+                # on earlier pages: the next unseen result sits right behind them.
                 #
                 # This counts the whole document because everything the page
                 # holds also sits in the rail. That is only true while the
@@ -3987,7 +4002,7 @@ class LinkedInExtractor:
                 offset += len(page_ids)
                 new_ids = [jid for jid in page_ids if jid not in seen_ids]
 
-                page_refs = _references_within(extracted.references, page_ids)
+                page_refs = _reconcile_search_references(extracted.references, page_ids)
 
                 if not new_ids:
                     page_texts.append(extracted.text)
@@ -4025,7 +4040,7 @@ class LinkedInExtractor:
         }
         if page_references:
             result["references"] = {
-                "search_results": dedupe_references(page_references, cap=15)
+                "search_results": dedupe_references(page_references)
             }
         if filters_warning is not None:
             existing = section_errors.get("search_results")
