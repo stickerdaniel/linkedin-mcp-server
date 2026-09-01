@@ -144,6 +144,7 @@ Optional additional keys:
 - `section_errors: {section_name: {error_type, error_message, issue_template_path, runtime, ...}}`
 - `unknown_sections: [name, ...]`
 - `job_ids: [id, ...]` (search_jobs and get_saved_jobs)
+- `references[section]` entries with `kind: "image"` — the subject of the page: the member on a profile, the company on a company page. Selected by LinkedIn's CDN path, where the subject is always the largest variant of its kind — `profile-displayphoto-*` or `company-logo_*` at `_200_200` or larger — while the `_100_100` thumbnails used for post authors, mutual connections, suggested profiles and other companies are filtered out, along with `profile-displaybackgroundimage-*`, `articleshare-*` and `feedshare-*`. `context` is `profile photo` or `company logo`. At most one entry per kind, so a profile carries the member's photo and — only where a company logo is rendered larger than every other logo on the page — that too; a tie for largest yields nothing, since neither candidate is identifiable as the subject. Rendered size is deliberately not used as a signal — extraction runs before layout, so the subject's own image often measures 0x0.
 - `references["feed"]` (get_feed only) — every entry is `kind: "feed_post"`; non-post anchors (sidebar profiles, employer logos) are filtered. URLs may carry either `/feed/update/<urn>/` (DOM-anchor-derived) or `/posts/<slug>` (SDUI-derived) form; both are valid LinkedIn permalinks. Cap is 50 entries, matching `get_feed`'s `num_posts` ceiling.
 
 ## Tests
