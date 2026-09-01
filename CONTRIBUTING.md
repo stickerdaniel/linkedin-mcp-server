@@ -71,7 +71,7 @@ When adding a section to an existing tool (e.g., adding "certifications" to `get
 ### Code
 
 - [ ] Add entry to `PERSON_SECTIONS` or `COMPANY_SECTIONS` with `(url_suffix, is_overlay)` (`scraping/fields.py`)
-- [ ] Add entry to `_SECTION_CONTEXTS` and `_REFERENCE_CAPS` (`scraping/link_metadata.py`)
+- [ ] Add context handling and an explicit reference cap (`scraping/link_metadata.py`)
 - [ ] Update tool docstring with new section name (`tools/person.py` or `tools/company.py`)
 
 ### Tests
