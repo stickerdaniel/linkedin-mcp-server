@@ -69,6 +69,8 @@ _SAVED_JOBS_URL = "https://www.linkedin.com/my-items/saved-jobs/"
 
 _JOB_ALERTS_URL = "https://www.linkedin.com/jobs/jam/"
 
+_NOTIFICATIONS_URL = "https://www.linkedin.com/notifications/"
+
 # The my-items lists page in 10s, unlike job search. Verified live: ?start=10
 # returns the 11th saved job, while ?start=25 lands past the end of a two-page
 # list and yields nothing.
@@ -3635,6 +3637,222 @@ class LinkedInExtractor:
             "url": _JOB_ALERTS_URL,
             "sections": sections,
             "alerts": alerts,
+        }
+        if references:
+            result["references"] = references
+        if section_errors:
+            result["section_errors"] = section_errors
+        return result
+
+    async def _expand_notifications_feed(self, target_count: int) -> None:
+        """Click "Show more results" until ``target_count`` articles are loaded.
+
+        NOTE: Deliberate DOM exception, like ``_expand_job_alerts_list``. Unlike
+        the job-alerts dialog's "Show N more" (a numeric, locale-neutral
+        count), this button's label carries no count to match generically, so
+        this matches the fixed English string "Show more results". If
+        LinkedIn changes the copy or removes the control, this stops early
+        and callers just get whatever was already loaded.
+        """
+        for _ in range(10):
+            count = await self._page.evaluate(
+                "() => document.querySelectorAll('main article').length"
+            )
+            if count >= target_count:
+                break
+            clicked = await self._page.evaluate(
+                """() => {
+                    const button = Array.from(document.querySelectorAll('button')).find(
+                        (b) => /show more results/i.test(b.textContent || '')
+                    );
+                    if (!button) return false;
+                    button.click();
+                    return true;
+                }"""
+            )
+            if not clicked:
+                break
+            await asyncio.sleep(1.0)
+
+    async def _extract_job_alert_notification_items(self) -> list[dict[str, Any]]:
+        """Extract job-alert notifications from the notifications feed.
+
+        NOTE: Deliberate DOM exception. Job-alert notification links are
+        identified by the ``alertAction=viewjobs`` query param, which
+        (verified live) appears only on genuine "your alert has new
+        results" links, not on LinkedIn's other job-notification types
+        (similar-jobs recommendations, network-hiring posts, qualification-
+        board emails). Read/unread state comes from each card's
+        ``aria-label`` ("Unread notification." vs "Notification"), an
+        English string and therefore locale-dependent — it is the only
+        signal LinkedIn exposes for this, with no attribute-presence
+        alternative available.
+        """
+        return await self._page.evaluate(
+            """() => {
+                const main = document.querySelector('main') || document.body;
+                const articles = Array.from(main.querySelectorAll('article'));
+                const seen = new Set();
+                const results = [];
+                for (const article of articles) {
+                    const link = Array.from(
+                        article.querySelectorAll('a[href*="alertAction=viewjobs"]')
+                    ).find((a) => a.querySelector('strong'));
+                    if (!link) continue;
+                    const href = link.href;
+                    if (seen.has(href)) continue;
+                    seen.add(href);
+
+                    const strong = link.querySelector('strong');
+                    const alertName = strong ? strong.textContent.trim() : '';
+
+                    const unread = /^unread/i.test(
+                        article.getAttribute('aria-label') || ''
+                    );
+
+                    const timeNode = Array.from(
+                        article.querySelectorAll('p, span, time')
+                    ).find((el) =>
+                        /^\\d+\\s*[hdwmy]$/i.test((el.textContent || '').trim())
+                    );
+                    const postedAt = timeNode ? timeNode.textContent.trim() : null;
+
+                    results.push({
+                        alert_name: alertName,
+                        url: href,
+                        unread,
+                        posted_at: postedAt,
+                    });
+                }
+                return results;
+            }"""
+        )
+
+    async def _extract_job_alert_notifications_page_once(
+        self, limit: int
+    ) -> ExtractedSection:
+        """Single attempt: navigate to notifications and extract innerText."""
+        await self._navigate_to_page(_NOTIFICATIONS_URL)
+        await detect_rate_limit(self._page)
+
+        main_found = True
+        try:
+            await self._page.wait_for_selector("main")
+        except PlaywrightTimeoutError:
+            logger.debug("No <main> element found on %s", _NOTIFICATIONS_URL)
+            main_found = False
+
+        await handle_modal_close(self._page)
+        if main_found:
+            await self._expand_notifications_feed(limit)
+
+        raw_result = await self._extract_root_content(["main"])
+        raw = raw_result["text"]
+        if raw_result["source"] == "body":
+            logger.debug(
+                "No <main> at evaluation time on %s, using body fallback",
+                _NOTIFICATIONS_URL,
+            )
+        elif not main_found:
+            logger.debug(
+                "<main> appeared after wait timeout on %s, expand was skipped",
+                _NOTIFICATIONS_URL,
+            )
+
+        if not raw:
+            return ExtractedSection(text="", references=[])
+        truncated = _truncate_linkedin_noise(raw)
+        if not truncated and raw.strip():
+            logger.warning(
+                "Notifications page %s returned only LinkedIn chrome "
+                "(likely rate-limited)",
+                _NOTIFICATIONS_URL,
+            )
+            return ExtractedSection(text=_RATE_LIMITED_MSG, references=[])
+        cleaned = _filter_linkedin_noise_lines(truncated)
+        return ExtractedSection(
+            text=cleaned,
+            references=build_references(raw_result["references"], "notifications"),
+        )
+
+    async def _extract_job_alert_notifications_page(
+        self, limit: int
+    ) -> ExtractedSection:
+        """Extract notifications page text with soft rate-limit retry."""
+        try:
+            result = await self._extract_job_alert_notifications_page_once(limit)
+            if result.text != _RATE_LIMITED_MSG:
+                return result
+
+            logger.info(
+                "Retrying notifications page after %.0fs backoff",
+                _RATE_LIMIT_RETRY_DELAY,
+            )
+            await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
+            result = await self._extract_job_alert_notifications_page_once(limit)
+            if result.text == _RATE_LIMITED_MSG:
+                logger.warning("Notifications page still rate-limited after retry")
+            return result
+
+        except LinkedInScraperException:
+            raise
+        except Exception as e:
+            logger.warning("Failed to extract notifications page: %s", e)
+            return ExtractedSection(
+                text="",
+                references=[],
+                error=build_issue_diagnostics(
+                    e,
+                    context="extract_job_alert_notifications_page",
+                    target_url=_NOTIFICATIONS_URL,
+                    section_name="notifications",
+                ),
+            )
+
+    async def get_job_alert_notifications(
+        self, unread_only: bool = False, limit: int = 20
+    ) -> dict[str, Any]:
+        """List job-alert notifications from LinkedIn's notifications feed.
+
+        Filters to notifications LinkedIn generated because one of your job
+        alerts has new results, excluding other notification types
+        (connection requests, post reactions, similar-jobs recommendations,
+        etc). Each item's ``url`` is the alert's delta-filtered
+        search-results link (``f_TPR=a<timestamp>-``, marking new results
+        since that alert last fired) — pass it to ``get_job_alert_results``
+        to fetch those jobs.
+
+        Args:
+            unread_only: Only return notifications not yet marked read.
+            limit: Maximum number of job-alert notifications to return
+                (1-50, default 20).
+
+        Returns:
+            {url, sections: {notifications: text},
+             alerts: [{alert_name, url, unread, posted_at}, ...]}
+        """
+        extracted = await self._extract_job_alert_notifications_page(limit)
+
+        sections: dict[str, str] = {}
+        references: dict[str, list[Reference]] = {}
+        section_errors: dict[str, dict[str, Any]] = {}
+        items: list[dict[str, Any]] = []
+
+        if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+            sections["notifications"] = extracted.text
+            if extracted.references:
+                references["notifications"] = extracted.references
+            items = await self._extract_job_alert_notification_items()
+            if unread_only:
+                items = [item for item in items if item["unread"]]
+            items = items[:limit]
+        elif extracted.error:
+            section_errors["notifications"] = extracted.error
+
+        result: dict[str, Any] = {
+            "url": _NOTIFICATIONS_URL,
+            "sections": sections,
+            "alerts": items,
         }
         if references:
             result["references"] = references

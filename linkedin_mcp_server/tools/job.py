@@ -269,6 +269,69 @@ def register_job_tools(
 
     @mcp.tool(
         timeout=tool_timeout,
+        title="Get Job Alert Notifications",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"job", "search"},
+        exclude_args=["extractor"],
+    )
+    async def get_job_alert_notifications(
+        ctx: Context,
+        unread_only: bool = False,
+        limit: Annotated[int, Field(ge=1, le=50)] = 20,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        List job-alert notifications from LinkedIn's notifications feed.
+
+        Filters to notifications LinkedIn generated because one of your job
+        alerts has new results, excluding other notification types
+        (connection requests, post reactions, similar-jobs recommendations,
+        etc). Each item's url is the alert's delta-filtered search-results
+        link (new results since that alert last fired) — pass it to
+        get_job_alert_results to fetch those jobs.
+
+        Args:
+            ctx: FastMCP context for progress reporting
+            unread_only: Only return notifications not yet marked read
+            limit: Maximum number of job-alert notifications to return
+                (1-50, default 20)
+
+        Returns:
+            Dict with url, sections (notifications: raw text), alerts (list of
+            {alert_name, url, unread, posted_at}), and optional references.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="get_job_alert_notifications"
+            )
+            logger.info(
+                "Fetching job alert notifications: unread_only=%s, limit=%d",
+                unread_only,
+                limit,
+            )
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Loading notifications"
+            )
+
+            result = await extractor.get_job_alert_notifications(
+                unread_only=unread_only, limit=limit
+            )
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_job_alert_notifications")
+        except Exception as e:
+            raise_tool_error(e, "get_job_alert_notifications")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
         title="Get Saved Jobs",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"job", "scraping"},

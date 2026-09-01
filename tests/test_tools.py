@@ -30,6 +30,7 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.get_saved_jobs = AsyncMock(return_value=scrape_result)
     mock.get_job_alert_results = AsyncMock(return_value=scrape_result)
     mock.get_job_alerts = AsyncMock(return_value=scrape_result)
+    mock.get_job_alert_notifications = AsyncMock(return_value=scrape_result)
     mock.search_people = AsyncMock(return_value=scrape_result)
     mock.get_sidebar_profiles = AsyncMock(return_value=scrape_result)
     mock.get_inbox = AsyncMock(return_value=scrape_result)
@@ -740,6 +741,36 @@ class TestJobTools:
         assert result["alerts"] == expected["alerts"]
         mock_extractor.get_job_alerts.assert_awaited_once_with()
 
+    async def test_get_job_alert_notifications(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/notifications/",
+            "sections": {"notifications": "software engineer: new opportunities"},
+            "alerts": [
+                {
+                    "alert_name": "software engineer",
+                    "url": "https://www.linkedin.com/jobs/search-results/?keywords=software+engineer&alertAction=viewjobs",
+                    "unread": True,
+                    "posted_at": "5h",
+                },
+            ],
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.job import register_job_tools
+
+        mcp = FastMCP("test")
+        register_job_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_job_alert_notifications")
+        result = await tool_fn(
+            mock_context, unread_only=True, limit=10, extractor=mock_extractor
+        )
+        assert "notifications" in result["sections"]
+        assert result["alerts"] == expected["alerts"]
+        mock_extractor.get_job_alert_notifications.assert_awaited_once_with(
+            unread_only=True, limit=10
+        )
+
 
 class TestGetSidebarProfilesTool:
     async def test_get_sidebar_profiles_success(self, mock_context):
@@ -1269,6 +1300,7 @@ class TestToolTimeouts:
             "get_saved_jobs",
             "get_job_alert_results",
             "get_job_alerts",
+            "get_job_alert_notifications",
             "get_inbox",
             "get_conversation",
             "search_conversations",
@@ -1303,6 +1335,7 @@ class TestToolTimeouts:
             "get_saved_jobs",
             "get_job_alert_results",
             "get_job_alerts",
+            "get_job_alert_notifications",
             "get_inbox",
             "get_conversation",
             "search_conversations",

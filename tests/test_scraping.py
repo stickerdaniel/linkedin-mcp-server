@@ -2221,6 +2221,119 @@ class TestGetJobAlerts:
         mock_links.assert_not_awaited()
 
 
+class TestGetJobAlertNotifications:
+    """Tests for get_job_alert_notifications listing and filtering notifications."""
+
+    ITEMS = [
+        {
+            "alert_name": "software engineer",
+            "url": (
+                "https://www.linkedin.com/jobs/search-results/?keywords=software"
+                "+engineer&f_TPR=a1788119314-&alertAction=viewjobs"
+            ),
+            "unread": True,
+            "posted_at": "5h",
+        },
+        {
+            "alert_name": "Junior AI Engineer",
+            "url": (
+                "https://www.linkedin.com/jobs/search-results/?keywords=Junior"
+                "+AI+Engineer&f_TPR=a1788074921-&alertAction=viewjobs"
+            ),
+            "unread": False,
+            "posted_at": "18h",
+        },
+    ]
+
+    async def test_returns_all_by_default(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_extract_job_alert_notifications_page",
+                new_callable=AsyncMock,
+                return_value=extracted("software engineer: new opportunities"),
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_alert_notification_items",
+                new_callable=AsyncMock,
+                return_value=self.ITEMS,
+            ) as mock_items,
+        ):
+            result = await extractor.get_job_alert_notifications()
+
+        assert result["url"] == "https://www.linkedin.com/notifications/"
+        assert result["alerts"] == self.ITEMS
+        assert "notifications" in result["sections"]
+        mock_items.assert_awaited_once()
+
+    async def test_unread_only_filters(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_extract_job_alert_notifications_page",
+                new_callable=AsyncMock,
+                return_value=extracted("software engineer: new opportunities"),
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_alert_notification_items",
+                new_callable=AsyncMock,
+                return_value=self.ITEMS,
+            ),
+        ):
+            result = await extractor.get_job_alert_notifications(unread_only=True)
+
+        assert result["alerts"] == [self.ITEMS[0]]
+
+    async def test_limit_caps_results(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_extract_job_alert_notifications_page",
+                new_callable=AsyncMock,
+                return_value=extracted("text"),
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_alert_notification_items",
+                new_callable=AsyncMock,
+                return_value=self.ITEMS,
+            ),
+        ):
+            result = await extractor.get_job_alert_notifications(limit=1)
+
+        assert result["alerts"] == [self.ITEMS[0]]
+
+    async def test_empty_when_rate_limited(self, mock_page):
+        """Should not attempt item extraction when the page text is empty/rate-limited."""
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_extract_job_alert_notifications_page",
+                new_callable=AsyncMock,
+                return_value=extracted(
+                    "", error={"error_type": "RateLimit", "error_message": "x"}
+                ),
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_alert_notification_items",
+                new_callable=AsyncMock,
+            ) as mock_items,
+        ):
+            result = await extractor.get_job_alert_notifications()
+
+        assert result["alerts"] == []
+        assert result["sections"] == {}
+        assert "notifications" in result["section_errors"]
+        mock_items.assert_not_awaited()
+
+
 class TestSearchJobs:
     """Tests for search_jobs with job ID extraction and pagination."""
 

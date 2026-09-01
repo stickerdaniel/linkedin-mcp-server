@@ -52,6 +52,7 @@ This MCP server is **free** and **open source**, supported by [**Unipile**](http
 | `search_jobs` | Search for jobs with keywords and location filters | working |
 | `get_saved_jobs` | List job postings saved by the authenticated user | working |
 | `get_job_alerts` | List the authenticated user's configured job alerts (name + search-results URL for each) | working |
+| `get_job_alert_notifications` | List job-alert notifications from the notifications feed (name, delta-filtered URL, unread state, timestamp), filterable to unread-only | working |
 | `get_job_alert_results` | Fetch job results from a specific job-alert or saved-search URL (LinkedIn's personalized/AI-ranked feed, which `search_jobs` cannot reproduce) | working |
 | `search_people` | Search for people by keywords, location, connection degree (1st/2nd/3rd), and current company | [#526](https://github.com/stickerdaniel/linkedin-mcp-server/issues/526) |
 | `get_job_details` | Get detailed information about a specific job posting | working |
