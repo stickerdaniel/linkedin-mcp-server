@@ -1068,7 +1068,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "cryptography", specifier = ">=48.0.1" },
-    { name = "fastmcp", specifier = ">=3.4.4" },
+    { name = "fastmcp", specifier = ">=3.4.4,<4" },
     { name = "inquirer", specifier = ">=3.4.0" },
     { name = "packaging", specifier = ">=26.2" },
     { name = "patchright", specifier = ">=1.55.0" },

@@ -41,7 +41,7 @@ classifiers = [
 ]
 dependencies = [
     "cryptography>=48.0.1",
-    "fastmcp>=3.4.4",
+    "fastmcp>=3.4.4,<4",
     "inquirer>=3.4.0",
     "packaging>=26.2",
     "patchright>=1.55.0",
