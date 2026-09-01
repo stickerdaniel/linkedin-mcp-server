@@ -2113,6 +2113,66 @@ class TestScrapeJob:
         assert "references" not in result
 
 
+class TestGetJobAlerts:
+    """Tests for get_job_alerts listing configured alerts."""
+
+    async def test_returns_alerts_and_text(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        alert_links = [
+            {
+                "name": "python developer",
+                "url": "https://www.linkedin.com/jobs/search-results/?keywords=python",
+            },
+            {
+                "name": "AI Engineer",
+                "url": "https://www.linkedin.com/jobs/search-results/?keywords=AI+Engineer",
+            },
+        ]
+        with (
+            patch.object(
+                extractor,
+                "_extract_job_alerts_page",
+                new_callable=AsyncMock,
+                return_value=extracted("Manage job alerts\npython developer"),
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_alert_links",
+                new_callable=AsyncMock,
+                return_value=alert_links,
+            ) as mock_links,
+        ):
+            result = await extractor.get_job_alerts()
+
+        assert result["url"] == "https://www.linkedin.com/jobs/jam/"
+        assert result["alerts"] == alert_links
+        assert "job_alerts" in result["sections"]
+        mock_links.assert_awaited_once()
+
+    async def test_empty_alerts_when_rate_limited(self, mock_page):
+        """Should not attempt link extraction when the page text is empty/rate-limited."""
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_extract_job_alerts_page",
+                new_callable=AsyncMock,
+                return_value=extracted(
+                    "", error={"error_type": "RateLimit", "error_message": "x"}
+                ),
+            ),
+            patch.object(
+                extractor, "_extract_job_alert_links", new_callable=AsyncMock
+            ) as mock_links,
+        ):
+            result = await extractor.get_job_alerts()
+
+        assert result["alerts"] == []
+        assert result["sections"] == {}
+        assert "job_alerts" in result["section_errors"]
+        mock_links.assert_not_awaited()
+
+
 class TestSearchJobs:
     """Tests for search_jobs with job ID extraction and pagination."""
 

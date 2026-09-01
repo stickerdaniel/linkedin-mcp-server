@@ -210,6 +210,55 @@ def register_job_tools(
 
     @mcp.tool(
         timeout=tool_timeout,
+        title="Get Job Alerts",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"job", "search"},
+        exclude_args=["extractor"],
+    )
+    async def get_job_alerts(
+        ctx: Context,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        List the authenticated user's configured job alerts.
+
+        Returns each alert's name and its canonical search-results URL.
+        Pass that URL to get_job_alert_results to fetch the alert's
+        current results.
+
+        Args:
+            ctx: FastMCP context for progress reporting
+
+        Returns:
+            Dict with url, sections (job_alerts: raw text), alerts (list of
+            {name, url}), and optional references.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="get_job_alerts"
+            )
+            logger.info("Fetching job alerts")
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Loading job alerts"
+            )
+
+            result = await extractor.get_job_alerts()
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_job_alerts")
+        except Exception as e:
+            raise_tool_error(e, "get_job_alerts")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
         title="Get Saved Jobs",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"job", "scraping"},

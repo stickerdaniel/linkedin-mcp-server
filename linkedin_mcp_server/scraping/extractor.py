@@ -60,6 +60,8 @@ _PAGE_SIZE = 25
 
 _SAVED_JOBS_URL = "https://www.linkedin.com/my-items/saved-jobs/"
 
+_JOB_ALERTS_URL = "https://www.linkedin.com/jobs/jam/"
+
 # The my-items lists page in 10s, unlike job search. Verified live: ?start=10
 # returns the 11th saved job, while ?start=25 lands past the end of a two-page
 # list and yields nothing.
@@ -3414,6 +3416,173 @@ class LinkedInExtractor:
             result["references"] = {
                 "alert_results": dedupe_references(page_references, cap=15)
             }
+        if section_errors:
+            result["section_errors"] = section_errors
+        return result
+
+    async def _expand_job_alerts_list(self) -> None:
+        """Click the "Show N more" toggle in the job-alerts dialog, if present.
+
+        NOTE: This is a deliberate DOM exception, like ``_get_total_search_pages``.
+        The button's exact wording is locale-dependent, so this matches a numeric
+        pattern rather than a fixed string. If LinkedIn changes the copy or
+        removes the control, this is a no-op and ``get_job_alerts`` just returns
+        whatever was already rendered.
+        """
+        try:
+            clicked = await self._page.evaluate(
+                """(dialogSelector) => {
+                    const dialog = document.querySelector(dialogSelector);
+                    if (!dialog) return false;
+                    const button = Array.from(dialog.querySelectorAll('button')).find(
+                        (b) => /show\\s+\\d+\\s+more/i.test(b.textContent || '')
+                    );
+                    if (!button) return false;
+                    button.click();
+                    return true;
+                }""",
+                _DIALOG_SELECTOR,
+            )
+            if clicked:
+                await asyncio.sleep(0.5)
+        except Exception as e:
+            logger.debug("Could not expand job alerts list: %s", e)
+
+    async def _extract_job_alert_links(self) -> list[dict[str, str]]:
+        """Extract ``{name, url}`` for each alert in the job-alerts dialog.
+
+        NOTE: Deliberate DOM exception. Alert entries are plain
+        ``<a href="/jobs/search-results/?...">`` inside the dialog, a path
+        ``classify_link`` doesn't recognize (it only maps ``/jobs/view/<id>``
+        to a "job" reference), so this reads them directly rather than going
+        through the generic reference pipeline.
+        """
+        return await self._page.evaluate(
+            """(dialogSelector) => {
+                const dialog = document.querySelector(dialogSelector);
+                if (!dialog) return [];
+                const anchors = Array.from(
+                    dialog.querySelectorAll('a[href*="/jobs/search-results/"]')
+                );
+                const seen = new Set();
+                const alerts = [];
+                for (const a of anchors) {
+                    const url = a.href;
+                    const name = (a.textContent || '').replace(/\\s+/g, ' ').trim();
+                    if (!name || seen.has(url)) continue;
+                    seen.add(url);
+                    alerts.push({ name, url });
+                }
+                return alerts;
+            }""",
+            _DIALOG_SELECTOR,
+        )
+
+    async def _extract_job_alerts_page_once(self) -> ExtractedSection:
+        """Single attempt: navigate to the job-alerts dialog and extract innerText."""
+        await self._navigate_to_page(_JOB_ALERTS_URL)
+        await detect_rate_limit(self._page)
+
+        dialog_found = True
+        try:
+            await self._page.wait_for_selector(_DIALOG_SELECTOR)
+        except PlaywrightTimeoutError:
+            logger.debug("No job-alerts dialog found on %s", _JOB_ALERTS_URL)
+            dialog_found = False
+
+        await self._expand_job_alerts_list()
+
+        raw_result = await self._extract_root_content([_DIALOG_SELECTOR, "main"])
+        raw = raw_result["text"]
+        if raw_result["source"] == "body":
+            logger.debug(
+                "No job-alerts dialog at evaluation time on %s, using body fallback",
+                _JOB_ALERTS_URL,
+            )
+        elif not dialog_found:
+            logger.debug(
+                "Job-alerts dialog appeared after wait timeout on %s", _JOB_ALERTS_URL
+            )
+
+        if not raw:
+            return ExtractedSection(text="", references=[])
+        truncated = _truncate_linkedin_noise(raw)
+        if not truncated and raw.strip():
+            logger.warning(
+                "Job alerts page %s returned only LinkedIn chrome (likely rate-limited)",
+                _JOB_ALERTS_URL,
+            )
+            return ExtractedSection(text=_RATE_LIMITED_MSG, references=[])
+        cleaned = _filter_linkedin_noise_lines(truncated)
+        return ExtractedSection(
+            text=cleaned,
+            references=build_references(raw_result["references"], "job_alerts"),
+        )
+
+    async def _extract_job_alerts_page(self) -> ExtractedSection:
+        """Extract job-alerts dialog text with soft rate-limit retry."""
+        try:
+            result = await self._extract_job_alerts_page_once()
+            if result.text != _RATE_LIMITED_MSG:
+                return result
+
+            logger.info(
+                "Retrying job alerts page after %.0fs backoff", _RATE_LIMIT_RETRY_DELAY
+            )
+            await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
+            result = await self._extract_job_alerts_page_once()
+            if result.text == _RATE_LIMITED_MSG:
+                logger.warning("Job alerts page still rate-limited after retry")
+            return result
+
+        except LinkedInScraperException:
+            raise
+        except Exception as e:
+            logger.warning("Failed to extract job alerts page: %s", e)
+            return ExtractedSection(
+                text="",
+                references=[],
+                error=build_issue_diagnostics(
+                    e,
+                    context="extract_job_alerts_page",
+                    target_url=_JOB_ALERTS_URL,
+                    section_name="job_alerts",
+                ),
+            )
+
+    async def get_job_alerts(self) -> dict[str, Any]:
+        """List the authenticated user's configured job alerts.
+
+        Navigates to LinkedIn's job-alerts management dialog
+        (``linkedin.com/jobs/jam/``) and returns each alert's name and its
+        canonical ``jobs/search-results/`` URL. Pass that URL to
+        ``get_job_alert_results`` to fetch the alert's current results.
+
+        Returns:
+            {url, sections: {job_alerts: text}, alerts: [{name, url}, ...]}
+        """
+        extracted = await self._extract_job_alerts_page()
+
+        sections: dict[str, str] = {}
+        references: dict[str, list[Reference]] = {}
+        section_errors: dict[str, dict[str, Any]] = {}
+        alerts: list[dict[str, str]] = []
+
+        if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+            sections["job_alerts"] = extracted.text
+            if extracted.references:
+                references["job_alerts"] = extracted.references
+            alerts = await self._extract_job_alert_links()
+        elif extracted.error:
+            section_errors["job_alerts"] = extracted.error
+
+        result: dict[str, Any] = {
+            "url": _JOB_ALERTS_URL,
+            "sections": sections,
+            "alerts": alerts,
+        }
+        if references:
+            result["references"] = references
         if section_errors:
             result["section_errors"] = section_errors
         return result
