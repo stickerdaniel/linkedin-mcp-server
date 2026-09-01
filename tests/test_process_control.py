@@ -161,9 +161,13 @@ class TestAuthorization:
             listener.send(_RECORD)
 
             assert child.readline() == _RECORD
-            # And with room to spare rather than by a hair, so a loaded machine
-            # reaches the same verdict.
-            assert elapsed < daemon_election._PREPARED_READ_SECONDS / 2, (
+            # Keep a quarter of the production wait for the owner. The peer
+            # allowances consume about three eighths; requiring the complete
+            # drain below one half left only one eighth for thread scheduling
+            # and socket cleanup, and a loaded runner spent 0.535s on a correct
+            # handoff. Three quarters still fails any peer that can spend the
+            # whole wait while leaving realistic scheduler margin.
+            assert elapsed < daemon_election._PREPARED_READ_SECONDS * 3 / 4, (
                 "a full queue of silent peers spent the production wait"
             )
         finally:
