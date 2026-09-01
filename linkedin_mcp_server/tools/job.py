@@ -178,11 +178,13 @@ def register_job_tools(
             url: A linkedin.com/jobs/search/ or jobs/search-results/ URL
             ctx: FastMCP context for progress reporting
             max_pages: Maximum number of result pages to load (1-10, default 3)
-            date_posted: Filter by posting date (past_hour, past_24_hours,
-                past_week, past_month), replacing any date filter already in
-                the URL. A job-alert URL's own filter marks when that alert
-                last fired, not a chosen range, so pass this to actually
-                narrow results (e.g. "just show me the last week").
+            date_posted: Filter by posting date. Must be one of past_hour,
+                past_24_hours, past_week, past_month (LinkedIn silently
+                ignores other values rather than applying them), replacing
+                any date filter already in the URL. A job-alert URL's own
+                filter marks when that alert last fired, not a chosen range,
+                so pass this to actually narrow results (e.g. "just show me
+                the last week").
 
         Returns:
             Dict with url, sections (alert_results: raw text), job_ids (list of

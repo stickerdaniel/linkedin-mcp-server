@@ -86,21 +86,32 @@ _DATE_POSTED_MAP = {
 def _with_date_posted(url: str, date_posted: str) -> str:
     """Return ``url`` with its ``f_TPR`` date filter set, replacing any existing one.
 
-    ``date_posted`` is normalized through ``_DATE_POSTED_MAP`` (same presets as
-    ``search_jobs``); unrecognized values pass through unchanged, matching
-    ``_build_job_search_url``. A job-alert URL's own ``f_TPR`` (an absolute
-    timestamp marking when that alert last fired, e.g. ``a1788038570-``) is
-    replaced outright rather than combined, since LinkedIn's date filter is
-    single-valued.
+    ``date_posted`` must be one of ``_DATE_POSTED_MAP``'s keys (the same
+    presets ``search_jobs`` exposes). Unlike ``_build_job_search_url``, this
+    does NOT pass unrecognized values through as raw ``f_TPR`` values:
+    verified live, LinkedIn silently ignores an arbitrary ``r<seconds>`` that
+    doesn't match one of its own UI presets rather than applying it, so a
+    passthrough here would produce a URL that looks filtered but isn't. A job
+    alert's own ``f_TPR`` (an absolute timestamp marking when that alert last
+    fired, e.g. ``a1788038570-``) is replaced outright rather than combined,
+    since LinkedIn's date filter is single-valued.
+
+    Raises:
+        ValueError: If ``date_posted`` is not a recognized preset.
     """
-    mapped = _DATE_POSTED_MAP.get(date_posted.strip(), date_posted)
+    key = date_posted.strip()
+    if key not in _DATE_POSTED_MAP:
+        raise ValueError(
+            "date_posted must be one of "
+            f"{sorted(_DATE_POSTED_MAP)}, got: {date_posted!r}"
+        )
     parsed = urlparse(url)
     pairs = [
         (k, v)
         for k, v in parse_qsl(parsed.query, keep_blank_values=True)
         if k != "f_TPR"
     ]
-    pairs.append(("f_TPR", mapped))
+    pairs.append(("f_TPR", _DATE_POSTED_MAP[key]))
     return parsed._replace(query=urlencode(pairs)).geturl()
 
 
@@ -3344,13 +3355,17 @@ class LinkedInExtractor:
                 past_week, past_month), replacing any date filter already
                 present in ``url`` — including a job-alert URL's own
                 timestamp, which reflects when that alert last fired, not a
-                selectable range. Unrecognized values pass through as-is.
+                selectable range. Must be one of these four presets; verified
+                live, LinkedIn silently ignores other ``f_TPR`` values rather
+                than applying them, so other values are rejected up front
+                instead of producing a URL that looks filtered but isn't.
 
         Returns:
             {url, sections: {alert_results: text}, job_ids: [str]}
 
         Raises:
-            ValueError: If ``url`` is not a linkedin.com ``/jobs/...`` URL.
+            ValueError: If ``url`` is not a linkedin.com ``/jobs/...`` URL, or
+                ``date_posted`` is not a recognized preset.
         """
         parsed = urlparse(url)
         if (

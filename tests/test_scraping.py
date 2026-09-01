@@ -133,12 +133,20 @@ class TestWithDatePosted:
         assert "f_TPR=r604800" in url
         assert "keywords=python" in url
 
-    def test_passthrough_for_unrecognized_value(self):
-        url = _with_date_posted(
-            "https://www.linkedin.com/jobs/search-results/?keywords=python",
-            "r172800",
-        )
-        assert "f_TPR=r172800" in url
+    def test_rejects_unrecognized_value(self):
+        """Verified live: LinkedIn silently ignores an f_TPR it doesn't recognize
+        rather than applying it, so passthrough would be misleading."""
+        with pytest.raises(ValueError, match="past_hour"):
+            _with_date_posted(
+                "https://www.linkedin.com/jobs/search-results/?keywords=python",
+                "r172800",
+            )
+
+    def test_rejects_empty_value(self):
+        with pytest.raises(ValueError):
+            _with_date_posted(
+                "https://www.linkedin.com/jobs/search-results/?keywords=python", ""
+            )
 
     def test_replaces_existing_absolute_timestamp(self):
         """A job-alert URL's own f_TPR (when it last fired) must be replaced, not combined."""
@@ -2748,6 +2756,19 @@ class TestGetJobAlertResults:
 
         assert "f_TPR=r604800" in urls_visited[0]
         assert result["url"] == urls_visited[0]
+
+    async def test_rejects_unrecognized_date_posted_before_navigating(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor, "_extract_search_page", new_callable=AsyncMock
+            ) as mock_extract,
+            pytest.raises(ValueError, match="past_hour"),
+        ):
+            await extractor.get_job_alert_results(
+                self.ALERT_URL, max_pages=1, date_posted="last 2 days"
+            )
+        mock_extract.assert_not_awaited()
 
     async def test_returns_job_ids_via_alert_extraction(self, mock_page):
         """Should use the componentkey-based alert extraction when it finds cards."""
