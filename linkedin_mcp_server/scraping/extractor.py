@@ -227,21 +227,30 @@ _JOB_IDS_JS = (
     + r"""
     const picked = scoped ? pickRail() : null;
     const scope = picked || document;
-    const links = scope.querySelectorAll(selector);
+    const cards = scope.querySelectorAll(selector);
     const seen = new Set();
     const ids = [];
-    for (const a of links) {
-        const match = (a.href || '').match(
-            /\/jobs\/view\/(?:[^/?#]*-)?(\d+)(?=[/?#]|$)/
-        );
-        if (match && !seen.has(match[1])) {
-            seen.add(match[1]);
-            ids.push(match[1]);
+    for (const card of cards) {
+        // `idOf` from the rail rule above, rather than a second copy of the
+        // pattern: the rail is picked by counting ids, so a card shape one
+        // side understands and the other does not would have extraction read
+        // a container the pick never considered.
+        const id = idOf(card);
+        if (id && !seen.has(id)) {
+            seen.add(id);
+            ids.push(id);
         }
     }
     return {ids: ids, scoped: Boolean(picked)};
 }"""
 )
+
+# The routes a job search may legitimately end on. `/jobs/search` is what the
+# URL builder produces; `/jobs/search-results` is where LinkedIn's redesigned
+# experience redirects it. Compared as parsed paths rather than as a prefix,
+# because `/jobs/search?keywords=x` is the same route and puts a `?` where a
+# prefix test wants the slash.
+_JOB_SEARCH_PATHS = frozenset({"/jobs/search", "/jobs/search-results"})
 
 # How long to let `page.url` catch up with a navigation the sidebar scroll
 # suppressed. The lag itself measured 6ms across ten runs, min and max alike;
@@ -282,6 +291,26 @@ def _route(target: str) -> tuple[str, str]:
     """
     parsed = urlparse(target)
     return parsed.netloc, parsed.path.rstrip("/")
+
+
+def _same_job_search(before: tuple[str, str], after: tuple[str, str]) -> bool:
+    """Whether a route change is LinkedIn moving a search to its redesign.
+
+    `/jobs/search/` 302s to `/jobs/search-results/` for accounts on the new
+    experience. The destination is the same search: it keeps the keywords,
+    honours `start`, and renders the same results, so treating the hop as a
+    page replacement ended every such search on its first page.
+
+    Only between those two, and only on one host. The point of the comparison
+    around it is that a search which ends up somewhere else is not a search,
+    and an account picker served in place of one moves the route exactly like
+    this redirect does.
+    """
+    return (
+        before[0] == after[0]
+        and before[1] in _JOB_SEARCH_PATHS
+        and after[1] in _JOB_SEARCH_PATHS
+    )
 
 
 # Scrolling is bounded per navigation and across a whole search, because
@@ -3565,7 +3594,7 @@ class LinkedInExtractor:
             # missed: an exhausted search renders no `<main>` either, which is
             # why the check has to decide it rather than the absence alone.
             await self._raise_if_auth_barrier(url)
-        if before != after:
+        if before != after and not _same_job_search(before, after):
             # An expired session lands here as often as a layout change does,
             # and the two need different answers. A plain error is caught by
             # the generic handler above and returned as a section diagnostic,
@@ -3807,29 +3836,21 @@ class LinkedInExtractor:
                 slowest_page = max(slowest_page, time.monotonic() - page_started)
                 scroll_budget_left = max(0.0, scroll_budget_left - self._scroll_seconds)
 
-                if not extracted.text or extracted.text == _RATE_LIMITED_MSG:
-                    # Rate limit first: it is the more specific diagnosis, and a
-                    # page that was throttled may carry a generic error too.
-                    if extracted.text == _RATE_LIMITED_MSG:
-                        section_errors["search_results"] = rate_limited_section_error()
-                    elif extracted.error:
-                        section_errors["search_results"] = extracted.error
-                    # Navigation failed or rate-limited; skip ID extraction.
-                    # Pages gathered so far are kept and returned.
+                # Rate limits and extraction failures are already classified;
+                # they win over route diagnostics. A clean empty page is not
+                # accepted yet, because a redirect that dropped the keywords,
+                # filters or offset can render empty too. Calling that "no jobs"
+                # is a successful answer to a different search.
+                if extracted.text == _RATE_LIMITED_MSG:
+                    section_errors["search_results"] = rate_limited_section_error()
+                    break
+                if not extracted.text and extracted.error:
+                    section_errors["search_results"] = extracted.error
                     break
 
-                # Read total pages from pagination state (once only, best-effort)
-                if not total_pages_queried:
-                    total_pages_queried = True
-                    try:
-                        total_pages = await self._get_total_search_pages()
-                    except Exception as e:
-                        logger.debug("Could not read total pages: %s", e)
-                    else:
-                        if total_pages is not None:
-                            logger.debug("LinkedIn reports %d total pages", total_pages)
-
-                # Extract job IDs from hrefs (page is already loaded)
+                # Prove the destination still represents the requested search
+                # before accepting even an empty result. The id extraction is
+                # later, after a clean empty page has stopped the loop.
                 #
                 # The parsed path, like the redirect check above, and not a
                 # prefix: `/jobs/search?keywords=x` is the same route, and the
@@ -3839,10 +3860,16 @@ class LinkedInExtractor:
                 # so the search returned `job_ids: []` with nothing to say
                 # why. LinkedIn was not observed serving the slashless form,
                 # but a same-document `replaceState` can produce it.
+                #
+                # Both routes, because LinkedIn 302s `/jobs/search/` to
+                # `/jobs/search-results` for the redesigned experience. The
+                # destination is the search, serves the same results and
+                # honours `start`, so refusing it skipped extraction on every
+                # account already moved over.
                 parsed_url = urlparse(self._page.url)
                 if (
                     parsed_url.netloc != "www.linkedin.com"
-                    or parsed_url.path.rstrip("/") != "/jobs/search"
+                    or parsed_url.path.rstrip("/") not in _JOB_SEARCH_PATHS
                 ):
                     logger.debug(
                         "Unexpected page URL after extraction: %s — "
@@ -3928,6 +3955,23 @@ class LinkedInExtractor:
                         offset, self._page.url
                     )
                     break
+
+                if not extracted.text:
+                    # The route and query survived, so this is a real empty
+                    # result rather than a redirect that silently replaced the
+                    # search. Do not read ids from a DOM that supplied no text.
+                    break
+
+                # Read total pages from pagination state (once only, best-effort)
+                if not total_pages_queried:
+                    total_pages_queried = True
+                    try:
+                        total_pages = await self._get_total_search_pages()
+                    except Exception as e:
+                        logger.debug("Could not read total pages: %s", e)
+                    else:
+                        if total_pages is not None:
+                            logger.debug("LinkedIn reports %d total pages", total_pages)
 
                 page_ids = await self._extract_job_ids(scoped=True)
                 # Advance by what this navigation rendered, duplicates

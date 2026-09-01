@@ -10,7 +10,12 @@ from .exceptions import RateLimitError
 
 logger = logging.getLogger(__name__)
 
-_JOB_CARD_SELECTOR = 'a[href*="/jobs/view/"]'
+# Both card shapes. The classic result is an anchor to the job permalink;
+# the redesigned search at `/jobs/search-results` renders cards that carry no
+# permalink at all and keep the id only in `componentkey`. A selector matching
+# just the anchor finds nothing there, which is what made the search return an
+# empty `job_ids` while its text listed real jobs.
+_JOB_CARD_SELECTOR = 'a[href*="/jobs/view/"], [componentkey^="job-card-component-ref-"]'
 
 # The rule that decides which container holds the search results. Shared
 # verbatim by the scroll and by id extraction, because extraction re-runs it
@@ -23,10 +28,18 @@ _JOB_CARD_SELECTOR = 'a[href*="/jobs/view/"]'
 # showed. Expects `selector` in scope.
 _RAIL_PICK_JS = r"""
             const idOf = (node) => {
-                const match = (node.getAttribute('href') || '').match(
+                const href = (node.getAttribute('href') || '').match(
                     /\/jobs\/view\/(?:[^/?#]*-)?(\d+)(?=[/?#]|$)/
                 );
-                return match ? match[1] : null;
+                if (href) return href[1];
+                // The redesigned card has no permalink, so the attribute is
+                // the only place the id exists. Anchored at the start, since
+                // the selector already matched that prefix and a bare
+                // `includes` would accept an unrelated key holding it.
+                const key = (node.getAttribute('componentkey') || '').match(
+                    /^job-card-component-ref-(\d+)/
+                );
+                return key ? key[1] : null;
             };
             const idsIn = (scope) => {
                 const ids = new Set();
