@@ -2600,6 +2600,170 @@ class TestSearchJobs:
         mock_ids.assert_not_awaited()
 
 
+class TestGetJobAlertResults:
+    """Tests for get_job_alert_results with alert-card ID extraction and pagination."""
+
+    ALERT_URL = (
+        "https://www.linkedin.com/jobs/search-results/?currentJobId=111"
+        "&keywords=python&origin=SEMANTIC_SEARCH_JOB_ALERT_IN_APP_NOTIFICATION"
+    )
+
+    async def test_rejects_non_linkedin_url(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with pytest.raises(ValueError, match="linkedin.com"):
+            await extractor.get_job_alert_results("https://evil.example.com/jobs/x")
+
+    async def test_rejects_non_jobs_path(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with pytest.raises(ValueError, match="linkedin.com"):
+            await extractor.get_job_alert_results("https://www.linkedin.com/feed/?x=1")
+
+    async def test_returns_job_ids_via_alert_extraction(self, mock_page):
+        """Should use the componentkey-based alert extraction when it finds cards."""
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                new_callable=AsyncMock,
+                return_value=extracted("Job 1\nJob 2\nJob 3"),
+            ),
+            patch.object(
+                extractor,
+                "_extract_alert_job_ids",
+                new_callable=AsyncMock,
+                return_value=["111", "222", "333"],
+            ) as mock_alert_ids,
+            patch.object(
+                extractor, "_extract_job_ids", new_callable=AsyncMock
+            ) as mock_fallback_ids,
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.get_job_alert_results(self.ALERT_URL, max_pages=1)
+
+        assert result["job_ids"] == ["111", "222", "333"]
+        assert "alert_results" in result["sections"]
+        mock_alert_ids.assert_awaited_once()
+        mock_fallback_ids.assert_not_awaited()
+
+    async def test_falls_back_to_extract_job_ids_when_alert_extraction_empty(
+        self, mock_page
+    ):
+        """If componentkey-based extraction finds nothing, fall back to anchors."""
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                new_callable=AsyncMock,
+                return_value=extracted("Job 1"),
+            ),
+            patch.object(
+                extractor,
+                "_extract_alert_job_ids",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["999"],
+            ),
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.get_job_alert_results(self.ALERT_URL, max_pages=1)
+
+        assert result["job_ids"] == ["999"]
+
+    async def test_pagination_uses_fixed_page_size_and_preserves_query(self, mock_page):
+        """Pages use &start= appended to the original alert URL, filters intact."""
+        extractor = LinkedInExtractor(mock_page)
+        id_pages = iter([["100", "200", "300"], ["400", "500"]])
+        urls_visited: list[str] = []
+
+        async def mock_extract(url, *args, **kwargs):
+            urls_visited.append(url)
+            return extracted("text")
+
+        with (
+            patch.object(extractor, "_extract_search_page", side_effect=mock_extract),
+            patch.object(
+                extractor,
+                "_extract_alert_job_ids",
+                new_callable=AsyncMock,
+                side_effect=lambda: next(id_pages),
+            ),
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.get_job_alert_results(self.ALERT_URL, max_pages=2)
+
+        assert result["job_ids"] == ["100", "200", "300", "400", "500"]
+        assert len(urls_visited) == 2
+        assert urls_visited[0] == self.ALERT_URL
+        assert urls_visited[1] == f"{self.ALERT_URL}&start=25"
+
+    async def test_early_stop_no_new_ids(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        id_pages = iter([["100"], ["100"]])
+
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                new_callable=AsyncMock,
+                return_value=extracted("text"),
+            ) as mock_extract,
+            patch.object(
+                extractor,
+                "_extract_alert_job_ids",
+                new_callable=AsyncMock,
+                side_effect=lambda: next(id_pages),
+            ),
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.get_job_alert_results(self.ALERT_URL, max_pages=5)
+
+        assert result["job_ids"] == ["100"]
+        assert mock_extract.await_count == 2
+
+
 class TestGetSavedJobs:
     """Tests for get_saved_jobs with job ID extraction and pagination."""
 

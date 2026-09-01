@@ -28,6 +28,7 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.scrape_job = AsyncMock(return_value=scrape_result)
     mock.search_jobs = AsyncMock(return_value=scrape_result)
     mock.get_saved_jobs = AsyncMock(return_value=scrape_result)
+    mock.get_job_alert_results = AsyncMock(return_value=scrape_result)
     mock.search_people = AsyncMock(return_value=scrape_result)
     mock.get_sidebar_profiles = AsyncMock(return_value=scrape_result)
     mock.get_inbox = AsyncMock(return_value=scrape_result)
@@ -661,6 +662,33 @@ class TestJobTools:
         assert result["job_ids"] == ["111", "222"]
         mock_extractor.get_saved_jobs.assert_awaited_once_with(max_pages=2)
 
+    async def test_get_job_alert_results(self, mock_context):
+        alert_url = (
+            "https://www.linkedin.com/jobs/search-results/?currentJobId=111"
+            "&keywords=python&origin=SEMANTIC_SEARCH_JOB_ALERT_IN_APP_NOTIFICATION"
+        )
+        expected = {
+            "url": alert_url,
+            "sections": {"alert_results": "Job 1\nJob 2"},
+            "job_ids": ["111", "222"],
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.job import register_job_tools
+
+        mcp = FastMCP("test")
+        register_job_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_job_alert_results")
+        result = await tool_fn(
+            alert_url, mock_context, max_pages=2, extractor=mock_extractor
+        )
+        assert "alert_results" in result["sections"]
+        assert result["job_ids"] == ["111", "222"]
+        mock_extractor.get_job_alert_results.assert_awaited_once_with(
+            alert_url, max_pages=2
+        )
+
 
 class TestGetSidebarProfilesTool:
     async def test_get_sidebar_profiles_success(self, mock_context):
@@ -1188,6 +1216,7 @@ class TestToolTimeouts:
             "get_job_details",
             "search_jobs",
             "get_saved_jobs",
+            "get_job_alert_results",
             "get_inbox",
             "get_conversation",
             "search_conversations",
@@ -1220,6 +1249,7 @@ class TestToolTimeouts:
             "get_job_details",
             "search_jobs",
             "get_saved_jobs",
+            "get_job_alert_results",
             "get_inbox",
             "get_conversation",
             "search_conversations",

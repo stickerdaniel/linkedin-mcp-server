@@ -152,6 +152,64 @@ def register_job_tools(
 
     @mcp.tool(
         timeout=tool_timeout,
+        title="Get Job Alert Results",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"job", "search"},
+        exclude_args=["extractor"],
+    )
+    async def get_job_alert_results(
+        url: str,
+        ctx: Context,
+        max_pages: Annotated[int, Field(ge=1, le=10)] = 3,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        Fetch job results from a LinkedIn job-alert or saved-search URL.
+
+        Use this instead of search_jobs when you have a specific URL copied
+        from a LinkedIn job-alert notification, e.g. a
+        "jobs/search-results/?...origin=SEMANTIC_SEARCH_JOB_ALERT..." link.
+        search_jobs always builds its own classic search and cannot
+        reproduce LinkedIn's personalized/AI-ranked alert feed; this
+        navigates to the exact URL you provide instead.
+
+        Args:
+            url: A linkedin.com/jobs/search/ or jobs/search-results/ URL
+            ctx: FastMCP context for progress reporting
+            max_pages: Maximum number of result pages to load (1-10, default 3)
+
+        Returns:
+            Dict with url, sections (alert_results: raw text), job_ids (list of
+            numeric job ID strings usable with get_job_details), and optional references.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="get_job_alert_results"
+            )
+            logger.info(
+                "Fetching job alert results: url='%s', max_pages=%d", url, max_pages
+            )
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Starting alert fetch"
+            )
+
+            result = await extractor.get_job_alert_results(url, max_pages=max_pages)
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_job_alert_results")
+        except Exception as e:
+            raise_tool_error(e, "get_job_alert_results")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
         title="Get Saved Jobs",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"job", "scraping"},

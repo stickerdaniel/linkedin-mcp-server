@@ -3246,6 +3246,178 @@ class LinkedInExtractor:
             result["section_errors"] = section_errors
         return result
 
+    async def _extract_alert_job_ids(self) -> list[str]:
+        """Extract job IDs from LinkedIn's AI-ranked job-alert sidebar.
+
+        Unlike classic search results, cards on the semantic/AI search feed
+        (``origin=SEMANTIC_SEARCH_JOB_ALERT_IN_APP_NOTIFICATION`` and similar
+        ``jobs/search-results/`` pages) have no per-card
+        ``<a href="/jobs/view/...">`` — only the currently open job's detail
+        pane does. Each card's job ID instead lives on an ancestor's
+        ``componentkey="job-card-component-ref-<id>"`` attribute, reached by
+        climbing up from that card's "Dismiss <title> job" button.
+
+        NOTE: This is a deliberate DOM exception, like ``_get_total_search_pages``.
+        If LinkedIn renames ``componentkey`` or the dismiss button's aria-label
+        pattern, this returns an empty list and ``get_job_alert_results`` falls
+        back to ``_extract_job_ids`` (which still finds the one open job's ID).
+        """
+        return await self._page.evaluate(
+            """() => {
+                const buttons = document.querySelectorAll(
+                    'button[aria-label^="Dismiss "][aria-label$=" job"]'
+                );
+                const seen = new Set();
+                const ids = [];
+                for (const btn of buttons) {
+                    let el = btn;
+                    let jobId = null;
+                    for (let i = 0; i < 8 && el; i++) {
+                        el = el.parentElement;
+                        if (!el) break;
+                        const ck = el.getAttribute && el.getAttribute('componentkey');
+                        if (ck && ck.startsWith('job-card-component-ref-')) {
+                            jobId = ck.slice('job-card-component-ref-'.length);
+                            break;
+                        }
+                    }
+                    if (jobId && !seen.has(jobId)) {
+                        seen.add(jobId);
+                        ids.push(jobId);
+                    }
+                }
+                return ids;
+            }"""
+        )
+
+    async def get_job_alert_results(
+        self, url: str, max_pages: int = 3
+    ) -> dict[str, Any]:
+        """Fetch job results from a LinkedIn job-alert or saved-search URL.
+
+        Unlike ``search_jobs``, which builds its own classic search URL, this
+        navigates directly to a URL the caller already has — typically copied
+        from a job-alert notification link (``jobs/search-results/?...
+        origin=SEMANTIC_SEARCH_JOB_ALERT...``). ``search_jobs`` cannot
+        reproduce LinkedIn's personalized/AI-ranked alert feed because it
+        always builds a fresh classic search; this is the only way to reach
+        the exact feed the user sees.
+
+        Args:
+            url: A ``linkedin.com/jobs/search/`` or ``jobs/search-results/`` URL
+            max_pages: Maximum pages to load (1-10, default 3)
+
+        Returns:
+            {url, sections: {alert_results: text}, job_ids: [str]}
+
+        Raises:
+            ValueError: If ``url`` is not a linkedin.com ``/jobs/...`` URL.
+        """
+        parsed = urlparse(url)
+        if (
+            parsed.scheme != "https"
+            or not parsed.netloc.endswith("linkedin.com")
+            or not parsed.path.startswith("/jobs/")
+        ):
+            raise ValueError(
+                "get_job_alert_results requires a linkedin.com/jobs/... URL, "
+                f"got: {url}"
+            )
+
+        base_url = url
+        all_job_ids: list[str] = []
+        seen_ids: set[str] = set()
+        page_texts: list[str] = []
+        page_references: list[Reference] = []
+        section_errors: dict[str, dict[str, Any]] = {}
+        total_pages: int | None = None
+        total_pages_queried = False
+
+        for page_num in range(max_pages):
+            if total_pages is not None and page_num >= total_pages:
+                logger.debug("All %d alert pages fetched, stopping", total_pages)
+                break
+
+            if page_num > 0:
+                await asyncio.sleep(_NAV_DELAY)
+
+            page_url = (
+                base_url
+                if page_num == 0
+                else f"{base_url}&start={page_num * _PAGE_SIZE}"
+            )
+
+            try:
+                extracted = await self._extract_search_page(
+                    page_url, section_name="alert_results"
+                )
+
+                if not extracted.text or extracted.text == _RATE_LIMITED_MSG:
+                    if extracted.error:
+                        section_errors["alert_results"] = extracted.error
+                    break
+
+                if not total_pages_queried:
+                    total_pages_queried = True
+                    try:
+                        total_pages = await self._get_total_search_pages()
+                    except Exception as e:
+                        logger.debug("Could not read total alert pages: %s", e)
+                    else:
+                        if total_pages is not None:
+                            logger.debug(
+                                "LinkedIn reports %d total alert pages", total_pages
+                            )
+
+                page_ids = await self._extract_alert_job_ids()
+                if not page_ids:
+                    page_ids = await self._extract_job_ids()
+                new_ids = [jid for jid in page_ids if jid not in seen_ids]
+
+                if not new_ids:
+                    page_texts.append(extracted.text)
+                    if extracted.references:
+                        page_references.extend(extracted.references)
+                    logger.debug(
+                        "No new job IDs on alert page %d, stopping", page_num + 1
+                    )
+                    break
+
+                for jid in new_ids:
+                    seen_ids.add(jid)
+                    all_job_ids.append(jid)
+
+                page_texts.append(extracted.text)
+                if extracted.references:
+                    page_references.extend(extracted.references)
+
+            except LinkedInScraperException:
+                raise
+            except Exception as e:
+                logger.warning("Error on alert page %d: %s", page_num + 1, e)
+                section_errors["alert_results"] = build_issue_diagnostics(
+                    e,
+                    context="get_job_alert_results",
+                    target_url=page_url,
+                    section_name="alert_results",
+                )
+                break
+
+        result: dict[str, Any] = {
+            "url": base_url,
+            "sections": {"alert_results": "\n---\n".join(page_texts)}
+            if page_texts
+            else {},
+            "job_ids": all_job_ids,
+        }
+        if page_references:
+            result["references"] = {
+                "alert_results": dedupe_references(page_references, cap=15)
+            }
+        if section_errors:
+            result["section_errors"] = section_errors
+        return result
+
     async def _extract_saved_jobs_page(
         self,
         url: str,
