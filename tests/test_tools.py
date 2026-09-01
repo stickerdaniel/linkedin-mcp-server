@@ -687,7 +687,33 @@ class TestJobTools:
         assert "alert_results" in result["sections"]
         assert result["job_ids"] == ["111", "222"]
         mock_extractor.get_job_alert_results.assert_awaited_once_with(
-            alert_url, max_pages=2
+            alert_url, max_pages=2, date_posted=None
+        )
+
+    async def test_get_job_alert_results_with_date_posted(self, mock_context):
+        alert_url = "https://www.linkedin.com/jobs/search-results/?keywords=python"
+        expected = {
+            "url": alert_url,
+            "sections": {"alert_results": "Job 1"},
+            "job_ids": ["111"],
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.job import register_job_tools
+
+        mcp = FastMCP("test")
+        register_job_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_job_alert_results")
+        await tool_fn(
+            alert_url,
+            mock_context,
+            max_pages=1,
+            date_posted="past_week",
+            extractor=mock_extractor,
+        )
+        mock_extractor.get_job_alert_results.assert_awaited_once_with(
+            alert_url, max_pages=1, date_posted="past_week"
         )
 
     async def test_get_job_alerts(self, mock_context):

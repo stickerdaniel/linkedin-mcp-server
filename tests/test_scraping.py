@@ -19,6 +19,7 @@ from linkedin_mcp_server.scraping.extractor import (
     _RATE_LIMITED_MSG,
     _build_feed_references,
     _truncate_linkedin_noise,
+    _with_date_posted,
     strip_conversation_chrome,
     strip_linkedin_noise,
 )
@@ -119,6 +120,45 @@ class TestBuildJobSearchUrl:
         assert "f_WT=2" in url
         assert "f_EA=true" in url
         assert "sortBy=DD" in url
+
+
+class TestWithDatePosted:
+    """Tests for _with_date_posted URL rewriting."""
+
+    def test_adds_preset_filter(self):
+        url = _with_date_posted(
+            "https://www.linkedin.com/jobs/search-results/?keywords=python",
+            "past_week",
+        )
+        assert "f_TPR=r604800" in url
+        assert "keywords=python" in url
+
+    def test_passthrough_for_unrecognized_value(self):
+        url = _with_date_posted(
+            "https://www.linkedin.com/jobs/search-results/?keywords=python",
+            "r172800",
+        )
+        assert "f_TPR=r172800" in url
+
+    def test_replaces_existing_absolute_timestamp(self):
+        """A job-alert URL's own f_TPR (when it last fired) must be replaced, not combined."""
+        url = _with_date_posted(
+            "https://www.linkedin.com/jobs/search-results/?keywords=python&f_TPR=a1788038570-",
+            "past_24_hours",
+        )
+        assert url.count("f_TPR=") == 1
+        assert "f_TPR=r86400" in url
+        assert "a1788038570" not in url
+
+    def test_preserves_other_query_params(self):
+        url = _with_date_posted(
+            "https://www.linkedin.com/jobs/search-results/?keywords=python&geoId=102890719&origin=SEMANTIC_SEARCH_JOB_ALERT_IN_APP_NOTIFICATION",
+            "past_month",
+        )
+        assert "keywords=python" in url
+        assert "geoId=102890719" in url
+        assert "origin=SEMANTIC_SEARCH_JOB_ALERT_IN_APP_NOTIFICATION" in url
+        assert "f_TPR=r2592000" in url
 
 
 @pytest.fixture
@@ -2677,6 +2717,37 @@ class TestGetJobAlertResults:
         extractor = LinkedInExtractor(mock_page)
         with pytest.raises(ValueError, match="linkedin.com"):
             await extractor.get_job_alert_results("https://www.linkedin.com/feed/?x=1")
+
+    async def test_date_posted_rewrites_url_before_navigation(self, mock_page):
+        """date_posted should replace the alert's own f_TPR before the first page load."""
+        extractor = LinkedInExtractor(mock_page)
+        urls_visited: list[str] = []
+
+        async def mock_extract(url, *args, **kwargs):
+            urls_visited.append(url)
+            return extracted("text")
+
+        with (
+            patch.object(extractor, "_extract_search_page", side_effect=mock_extract),
+            patch.object(
+                extractor,
+                "_extract_alert_job_ids",
+                new_callable=AsyncMock,
+                return_value=["111"],
+            ),
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+        ):
+            result = await extractor.get_job_alert_results(
+                self.ALERT_URL, max_pages=1, date_posted="past_week"
+            )
+
+        assert "f_TPR=r604800" in urls_visited[0]
+        assert result["url"] == urls_visited[0]
 
     async def test_returns_job_ids_via_alert_extraction(self, mock_page):
         """Should use the componentkey-based alert extraction when it finds cards."""

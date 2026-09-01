@@ -161,6 +161,7 @@ def register_job_tools(
         url: str,
         ctx: Context,
         max_pages: Annotated[int, Field(ge=1, le=10)] = 3,
+        date_posted: str | None = None,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
@@ -177,6 +178,11 @@ def register_job_tools(
             url: A linkedin.com/jobs/search/ or jobs/search-results/ URL
             ctx: FastMCP context for progress reporting
             max_pages: Maximum number of result pages to load (1-10, default 3)
+            date_posted: Filter by posting date (past_hour, past_24_hours,
+                past_week, past_month), replacing any date filter already in
+                the URL. A job-alert URL's own filter marks when that alert
+                last fired, not a chosen range, so pass this to actually
+                narrow results (e.g. "just show me the last week").
 
         Returns:
             Dict with url, sections (alert_results: raw text), job_ids (list of
@@ -194,7 +200,9 @@ def register_job_tools(
                 progress=0, total=100, message="Starting alert fetch"
             )
 
-            result = await extractor.get_job_alert_results(url, max_pages=max_pages)
+            result = await extractor.get_job_alert_results(
+                url, max_pages=max_pages, date_posted=date_posted
+            )
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 

@@ -8,7 +8,14 @@ import json
 import logging
 import re
 from typing import TYPE_CHECKING, Any, Literal
-from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
+from urllib.parse import (
+    parse_qs,
+    parse_qsl,
+    quote_plus,
+    urlencode,
+    urljoin,
+    urlparse,
+)
 
 from patchright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
@@ -74,6 +81,28 @@ _DATE_POSTED_MAP = {
     "past_week": "r604800",
     "past_month": "r2592000",
 }
+
+
+def _with_date_posted(url: str, date_posted: str) -> str:
+    """Return ``url`` with its ``f_TPR`` date filter set, replacing any existing one.
+
+    ``date_posted`` is normalized through ``_DATE_POSTED_MAP`` (same presets as
+    ``search_jobs``); unrecognized values pass through unchanged, matching
+    ``_build_job_search_url``. A job-alert URL's own ``f_TPR`` (an absolute
+    timestamp marking when that alert last fired, e.g. ``a1788038570-``) is
+    replaced outright rather than combined, since LinkedIn's date filter is
+    single-valued.
+    """
+    mapped = _DATE_POSTED_MAP.get(date_posted.strip(), date_posted)
+    parsed = urlparse(url)
+    pairs = [
+        (k, v)
+        for k, v in parse_qsl(parsed.query, keep_blank_values=True)
+        if k != "f_TPR"
+    ]
+    pairs.append(("f_TPR", mapped))
+    return parsed._replace(query=urlencode(pairs)).geturl()
+
 
 _EXPERIENCE_LEVEL_MAP = {
     "internship": "1",
@@ -3293,7 +3322,10 @@ class LinkedInExtractor:
         )
 
     async def get_job_alert_results(
-        self, url: str, max_pages: int = 3
+        self,
+        url: str,
+        max_pages: int = 3,
+        date_posted: str | None = None,
     ) -> dict[str, Any]:
         """Fetch job results from a LinkedIn job-alert or saved-search URL.
 
@@ -3308,6 +3340,11 @@ class LinkedInExtractor:
         Args:
             url: A ``linkedin.com/jobs/search/`` or ``jobs/search-results/`` URL
             max_pages: Maximum pages to load (1-10, default 3)
+            date_posted: Optional date filter (past_hour, past_24_hours,
+                past_week, past_month), replacing any date filter already
+                present in ``url`` — including a job-alert URL's own
+                timestamp, which reflects when that alert last fired, not a
+                selectable range. Unrecognized values pass through as-is.
 
         Returns:
             {url, sections: {alert_results: text}, job_ids: [str]}
@@ -3325,6 +3362,9 @@ class LinkedInExtractor:
                 "get_job_alert_results requires a linkedin.com/jobs/... URL, "
                 f"got: {url}"
             )
+
+        if date_posted:
+            url = _with_date_posted(url, date_posted)
 
         base_url = url
         all_job_ids: list[str] = []
