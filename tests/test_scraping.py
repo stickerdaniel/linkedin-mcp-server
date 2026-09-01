@@ -2263,7 +2263,9 @@ class TestGetJobAlertNotifications:
         ):
             result = await extractor.get_job_alert_notifications()
 
-        assert result["url"] == "https://www.linkedin.com/notifications/"
+        assert (
+            result["url"] == "https://www.linkedin.com/notifications/?filter=jobs_all"
+        )
         assert result["alerts"] == self.ITEMS
         assert "notifications" in result["sections"]
         mock_items.assert_awaited_once()

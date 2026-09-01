@@ -69,7 +69,7 @@ _SAVED_JOBS_URL = "https://www.linkedin.com/my-items/saved-jobs/"
 
 _JOB_ALERTS_URL = "https://www.linkedin.com/jobs/jam/"
 
-_NOTIFICATIONS_URL = "https://www.linkedin.com/notifications/"
+_JOB_ALERT_NOTIFICATIONS_URL = "https://www.linkedin.com/notifications/?filter=jobs_all"
 
 # The my-items lists page in 10s, unlike job search. Verified live: ?start=10
 # returns the 11th saved job, while ?start=25 lands past the end of a two-page
@@ -3732,14 +3732,14 @@ class LinkedInExtractor:
         self, limit: int
     ) -> ExtractedSection:
         """Single attempt: navigate to notifications and extract innerText."""
-        await self._navigate_to_page(_NOTIFICATIONS_URL)
+        await self._navigate_to_page(_JOB_ALERT_NOTIFICATIONS_URL)
         await detect_rate_limit(self._page)
 
         main_found = True
         try:
             await self._page.wait_for_selector("main")
         except PlaywrightTimeoutError:
-            logger.debug("No <main> element found on %s", _NOTIFICATIONS_URL)
+            logger.debug("No <main> element found on %s", _JOB_ALERT_NOTIFICATIONS_URL)
             main_found = False
 
         await handle_modal_close(self._page)
@@ -3751,12 +3751,12 @@ class LinkedInExtractor:
         if raw_result["source"] == "body":
             logger.debug(
                 "No <main> at evaluation time on %s, using body fallback",
-                _NOTIFICATIONS_URL,
+                _JOB_ALERT_NOTIFICATIONS_URL,
             )
         elif not main_found:
             logger.debug(
                 "<main> appeared after wait timeout on %s, expand was skipped",
-                _NOTIFICATIONS_URL,
+                _JOB_ALERT_NOTIFICATIONS_URL,
             )
 
         if not raw:
@@ -3766,7 +3766,7 @@ class LinkedInExtractor:
             logger.warning(
                 "Notifications page %s returned only LinkedIn chrome "
                 "(likely rate-limited)",
-                _NOTIFICATIONS_URL,
+                _JOB_ALERT_NOTIFICATIONS_URL,
             )
             return ExtractedSection(text=_RATE_LIMITED_MSG, references=[])
         cleaned = _filter_linkedin_noise_lines(truncated)
@@ -3804,7 +3804,7 @@ class LinkedInExtractor:
                 error=build_issue_diagnostics(
                     e,
                     context="extract_job_alert_notifications_page",
-                    target_url=_NOTIFICATIONS_URL,
+                    target_url=_JOB_ALERT_NOTIFICATIONS_URL,
                     section_name="notifications",
                 ),
             )
@@ -3814,13 +3814,17 @@ class LinkedInExtractor:
     ) -> dict[str, Any]:
         """List job-alert notifications from LinkedIn's notifications feed.
 
-        Filters to notifications LinkedIn generated because one of your job
-        alerts has new results, excluding other notification types
-        (connection requests, post reactions, similar-jobs recommendations,
-        etc). Each item's ``url`` is the alert's delta-filtered
-        search-results link (``f_TPR=a<timestamp>-``, marking new results
-        since that alert last fired) — pass it to ``get_job_alert_results``
-        to fetch those jobs.
+        Loads the notifications page's "Jobs" tab (``?filter=jobs_all``)
+        rather than "All", so every loaded item is job-related before any
+        client-side filtering — cheaper than scrolling through unrelated
+        connection/post/mention notifications to find the job ones. Within
+        that, further filters to notifications LinkedIn generated because
+        one of your job alerts specifically has new results, excluding
+        other job-notification types the Jobs tab still mixes in (similar-jobs
+        recommendations, network-hiring posts, qualification-board emails).
+        Each item's ``url`` is the alert's delta-filtered search-results link
+        (``f_TPR=a<timestamp>-``, marking new results since that alert last
+        fired) — pass it to ``get_job_alert_results`` to fetch those jobs.
 
         Args:
             unread_only: Only return notifications not yet marked read.
@@ -3850,7 +3854,7 @@ class LinkedInExtractor:
             section_errors["notifications"] = extracted.error
 
         result: dict[str, Any] = {
-            "url": _NOTIFICATIONS_URL,
+            "url": _JOB_ALERT_NOTIFICATIONS_URL,
             "sections": sections,
             "alerts": items,
         }

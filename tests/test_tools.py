@@ -743,7 +743,7 @@ class TestJobTools:
 
     async def test_get_job_alert_notifications(self, mock_context):
         expected = {
-            "url": "https://www.linkedin.com/notifications/",
+            "url": "https://www.linkedin.com/notifications/?filter=jobs_all",
             "sections": {"notifications": "software engineer: new opportunities"},
             "alerts": [
                 {

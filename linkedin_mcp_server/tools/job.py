@@ -281,13 +281,15 @@ def register_job_tools(
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
-        List job-alert notifications from LinkedIn's notifications feed.
+        List job-alert notifications from the notifications page's Jobs tab.
 
-        Filters to notifications LinkedIn generated because one of your job
-        alerts has new results, excluding other notification types
-        (connection requests, post reactions, similar-jobs recommendations,
-        etc). Each item's url is the alert's delta-filtered search-results
-        link (new results since that alert last fired) — pass it to
+        Loads the notifications page filtered to Jobs (not All), then
+        further filters to notifications LinkedIn generated because one of
+        your job alerts specifically has new results, excluding other
+        job-notification types the Jobs tab still mixes in (similar-jobs
+        recommendations, network-hiring posts, qualification-board emails).
+        Each item's url is the alert's delta-filtered search-results link
+        (new results since that alert last fired) — pass it to
         get_job_alert_results to fetch those jobs.
 
         Args:
