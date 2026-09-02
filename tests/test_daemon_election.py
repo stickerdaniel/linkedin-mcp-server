@@ -6370,7 +6370,23 @@ class TestPublishingLast:
             assert not release.is_set()
             order.append("logged")
 
-        monkeypatch.setattr(daemon_owner, "_COMMIT_AUTH_SECONDS", _BOUNDED_CALL_SECONDS)
+        real_thread = threading.Thread
+
+        class _SynchronizedThread(real_thread):
+            def start(self) -> None:
+                real_thread.start(self)
+                if self.name == "daemon-control":
+                    assert control_read.wait(_BOUNDED_CALL_SECONDS), (
+                        "the daemon-control reader never entered the blocking "
+                        "parent-pipe read"
+                    )
+
+        monkeypatch.setattr(daemon_owner, "_COMMIT_AUTH_SECONDS", 0.1)
+        monkeypatch.setattr(
+            daemon_owner,
+            "threading",
+            SimpleNamespace(Thread=_SynchronizedThread),
+        )
         monkeypatch.setattr(daemon_owner.logger, "warning", log_timeout)
 
         def run() -> None:
