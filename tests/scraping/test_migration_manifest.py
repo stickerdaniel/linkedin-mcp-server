@@ -34,6 +34,7 @@ def test_manifest_matches_every_current_extractor_seam():
         "string_patch",
         "module_alias",
         "direct_import",
+        "permanent_alias_import",
         "private_patch_object",
     } <= {seam["kind"] for seam in current["seams"]}
     assert all(seam["canonical_owner"] for seam in current["seams"])
@@ -42,7 +43,57 @@ def test_manifest_matches_every_current_extractor_seam():
         "extractor compatibility surface",
         "extractor migration owner",
     } & {seam["canonical_owner"] for seam in current["seams"]}
-    assert all(seam["migration_stage"] >= 1 for seam in current["seams"])
+    assert all(
+        seam["migration_stage"] is None or seam["migration_stage"] >= 1
+        for seam in current["seams"]
+    )
+
+
+def test_manifest_covers_production_callers_not_only_tests():
+    current = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    production = {
+        seam["path"]
+        for seam in current["seams"]
+        if seam["path"].startswith("linkedin_mcp_server/")
+    }
+
+    assert production == {
+        "linkedin_mcp_server/tools/company.py",
+        "linkedin_mcp_server/tools/feed.py",
+        "linkedin_mcp_server/tools/person.py",
+        "linkedin_mcp_server/tools/post.py",
+    }
+    assert {
+        seam["target"]
+        for seam in current["seams"]
+        if seam["path"].startswith("linkedin_mcp_server/")
+    } == {"_RATE_LIMITED_MSG", "rate_limited_section_error", "FilterValidationError"}
+
+
+def test_permanent_aliases_never_go_obsolete():
+    current = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    permanent = [
+        seam for seam in current["seams"] if seam["kind"] == "permanent_alias_import"
+    ]
+
+    assert {seam["target"] for seam in permanent} == {
+        "ExtractedSection",
+        "FilterValidationError",
+        "rate_limited_section_error",
+        "strip_linkedin_noise",
+        "strip_conversation_chrome",
+    }
+    assert all(seam["migration_stage"] is None for seam in permanent)
+
+    result = subprocess.run(
+        [sys.executable, str(CHECKER), "--check", "--stage", "15"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert "permanent_alias_import" not in result.stderr
 
 
 def test_manifest_is_canonical_portable_json():

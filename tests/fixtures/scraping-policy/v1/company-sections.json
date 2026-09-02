@@ -103,6 +103,7 @@
       "call": "scrape_company",
       "kind": "evaluate",
       "operation": "root_content",
+      "program_digest": "3b4491f2f7c9",
       "seq": 12
     },
     {
@@ -192,6 +193,7 @@
       "call": "scrape_company",
       "kind": "wait_for_function",
       "operation": "main_text_200",
+      "program_digest": "574db38c5f8a",
       "seq": 24,
       "timeout_ms": 10000
     },
@@ -212,6 +214,7 @@
       "call": "scrape_company",
       "kind": "evaluate",
       "operation": "root_content",
+      "program_digest": "3b4491f2f7c9",
       "seq": 26
     },
     {
@@ -313,6 +316,7 @@
       "call": "scrape_company",
       "kind": "evaluate",
       "operation": "root_content",
+      "program_digest": "3b4491f2f7c9",
       "seq": 39
     },
     {

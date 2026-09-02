@@ -91,6 +91,7 @@
       "call": "scrape_job",
       "kind": "evaluate",
       "operation": "root_content",
+      "program_digest": "3b4491f2f7c9",
       "seq": 11
     }
   ],

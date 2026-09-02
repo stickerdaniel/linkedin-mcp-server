@@ -96,6 +96,7 @@
       "call": "extract_feed",
       "kind": "wait_for_function",
       "operation": "main_text_200",
+      "program_digest": "574db38c5f8a",
       "section": "feed",
       "seq": 11,
       "timeout_ms": 10000
@@ -293,6 +294,7 @@
       "call": "extract_feed",
       "kind": "evaluate",
       "operation": "root_content",
+      "program_digest": "3b4491f2f7c9",
       "section": "feed",
       "seq": 35
     },

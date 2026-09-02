@@ -87,6 +87,7 @@
       "call": "get_sidebar_profiles",
       "kind": "evaluate",
       "operation": "sidebar_profiles",
+      "program_digest": "4c21bc1ca711",
       "section": "sidebar",
       "seq": 10
     }

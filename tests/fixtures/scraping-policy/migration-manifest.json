@@ -3,6 +3,54 @@
   "schema_version": 1,
   "seams": [
     {
+      "canonical_owner": "contracts.RATE_LIMITED_SECTION_TEXT",
+      "kind": "direct_import",
+      "line": 19,
+      "migration_stage": 1,
+      "path": "linkedin_mcp_server/tools/company.py",
+      "target": "_RATE_LIMITED_MSG"
+    },
+    {
+      "canonical_owner": "contracts.rate_limited_section_error",
+      "kind": "permanent_alias_import",
+      "line": 19,
+      "migration_stage": null,
+      "path": "linkedin_mcp_server/tools/company.py",
+      "target": "rate_limited_section_error"
+    },
+    {
+      "canonical_owner": "contracts.RATE_LIMITED_SECTION_TEXT",
+      "kind": "direct_import",
+      "line": 21,
+      "migration_stage": 1,
+      "path": "linkedin_mcp_server/tools/feed.py",
+      "target": "_RATE_LIMITED_MSG"
+    },
+    {
+      "canonical_owner": "contracts.rate_limited_section_error",
+      "kind": "permanent_alias_import",
+      "line": 21,
+      "migration_stage": null,
+      "path": "linkedin_mcp_server/tools/feed.py",
+      "target": "rate_limited_section_error"
+    },
+    {
+      "canonical_owner": "contracts.FilterValidationError",
+      "kind": "permanent_alias_import",
+      "line": 21,
+      "migration_stage": null,
+      "path": "linkedin_mcp_server/tools/person.py",
+      "target": "FilterValidationError"
+    },
+    {
+      "canonical_owner": "contracts.FilterValidationError",
+      "kind": "permanent_alias_import",
+      "line": 22,
+      "migration_stage": null,
+      "path": "linkedin_mcp_server/tools/post.py",
+      "target": "FilterValidationError"
+    },
+    {
       "canonical_owner": "owner-local scraping modules",
       "kind": "module_alias",
       "line": 18,
@@ -67,14 +115,6 @@
       "target": "extractor_module"
     },
     {
-      "canonical_owner": "contracts.ExtractedSection",
-      "kind": "direct_import",
-      "line": 26,
-      "migration_stage": 1,
-      "path": "tests/test_scraping.py",
-      "target": "ExtractedSection"
-    },
-    {
       "canonical_owner": "facade.LinkedInExtractor",
       "kind": "direct_import",
       "line": 26,
@@ -115,18 +155,26 @@
       "target": "_truncate_linkedin_noise"
     },
     {
-      "canonical_owner": "text.strip_conversation_chrome",
-      "kind": "direct_import",
+      "canonical_owner": "contracts.ExtractedSection",
+      "kind": "permanent_alias_import",
       "line": 26,
-      "migration_stage": 1,
+      "migration_stage": null,
+      "path": "tests/test_scraping.py",
+      "target": "ExtractedSection"
+    },
+    {
+      "canonical_owner": "text.strip_conversation_chrome",
+      "kind": "permanent_alias_import",
+      "line": 26,
+      "migration_stage": null,
       "path": "tests/test_scraping.py",
       "target": "strip_conversation_chrome"
     },
     {
       "canonical_owner": "text.strip_linkedin_noise",
-      "kind": "direct_import",
+      "kind": "permanent_alias_import",
       "line": 26,
-      "migration_stage": 1,
+      "migration_stage": null,
       "path": "tests/test_scraping.py",
       "target": "strip_linkedin_noise"
     },
@@ -5659,14 +5707,6 @@
       "target": "_navigate_to_page"
     },
     {
-      "canonical_owner": "contracts.ExtractedSection",
-      "kind": "direct_import",
-      "line": 10,
-      "migration_stage": 1,
-      "path": "tests/test_tools.py",
-      "target": "ExtractedSection"
-    },
-    {
       "canonical_owner": "contracts.RATE_LIMITED_SECTION_TEXT",
       "kind": "direct_import",
       "line": 10,
@@ -5675,18 +5715,26 @@
       "target": "_RATE_LIMITED_MSG"
     },
     {
+      "canonical_owner": "contracts.ExtractedSection",
+      "kind": "permanent_alias_import",
+      "line": 10,
+      "migration_stage": null,
+      "path": "tests/test_tools.py",
+      "target": "ExtractedSection"
+    },
+    {
       "canonical_owner": "contracts.FilterValidationError",
-      "kind": "direct_import",
+      "kind": "permanent_alias_import",
       "line": 315,
-      "migration_stage": 1,
+      "migration_stage": null,
       "path": "tests/test_tools.py",
       "target": "FilterValidationError"
     },
     {
       "canonical_owner": "contracts.FilterValidationError",
-      "kind": "direct_import",
+      "kind": "permanent_alias_import",
       "line": 1329,
-      "migration_stage": 1,
+      "migration_stage": null,
       "path": "tests/test_tools.py",
       "target": "FilterValidationError"
     }

@@ -74,6 +74,7 @@
       "call": "get_inbox",
       "kind": "wait_for_function",
       "operation": "main_text_minimum",
+      "program_digest": "0b8813cf182c",
       "section": "conversation",
       "seq": 8,
       "timeout_ms": 10000
@@ -92,6 +93,7 @@
       "call": "get_inbox",
       "kind": "evaluate",
       "operation": "scroll_main_region",
+      "program_digest": "cd00c3b162ff",
       "section": "conversation",
       "seq": 10
     },
@@ -112,6 +114,7 @@
       "call": "get_inbox",
       "kind": "evaluate",
       "operation": "root_content",
+      "program_digest": "3b4491f2f7c9",
       "section": "conversation",
       "seq": 12
     },

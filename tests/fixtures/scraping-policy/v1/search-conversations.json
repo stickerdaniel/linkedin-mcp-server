@@ -82,6 +82,7 @@
       "call": "search_conversations",
       "kind": "wait_for_function",
       "operation": "main_text_minimum",
+      "program_digest": "0b8813cf182c",
       "section": "conversation",
       "seq": 9,
       "timeout_ms": 10000
@@ -95,6 +96,7 @@
       "call": "search_conversations",
       "kind": "evaluate",
       "operation": "root_content",
+      "program_digest": "3b4491f2f7c9",
       "section": "conversation",
       "seq": 10
     },

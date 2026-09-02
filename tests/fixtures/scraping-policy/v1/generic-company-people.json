@@ -90,6 +90,7 @@
       "call": "extract_page",
       "kind": "wait_for_function",
       "operation": "company_people_ready",
+      "program_digest": "0ce9917e16da",
       "section": "section",
       "seq": 10,
       "timeout_ms": 5000
@@ -112,6 +113,7 @@
       "call": "extract_page",
       "kind": "evaluate",
       "operation": "root_content",
+      "program_digest": "3b4491f2f7c9",
       "section": "section",
       "seq": 12
     }
