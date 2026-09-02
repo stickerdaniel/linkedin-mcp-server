@@ -6352,36 +6352,82 @@ class TestPublishingLast:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
         release = threading.Event()
+        control_read = threading.Event()
+        finished = threading.Event()
         order: list[str] = []
+        outcomes: list[int] = []
+        errors: list[BaseException] = []
 
         class _SuspendedParent:
             def readline(self) -> str:
                 order.append("control")
+                control_read.set()
                 release.wait()
                 return "commit\n"
 
+        def log_timeout(*args: object, **kwargs: object) -> None:
+            assert control_read.is_set()
+            assert not release.is_set()
+            order.append("logged")
+
+        real_thread = threading.Thread
+
+        class _SynchronizedThread(real_thread):
+            def start(self) -> None:
+                real_thread.start(self)
+                if self.name == "daemon-control":
+                    assert control_read.wait(_BOUNDED_CALL_SECONDS), (
+                        "the daemon-control reader never entered the blocking "
+                        "parent-pipe read"
+                    )
+
         monkeypatch.setattr(daemon_owner, "_COMMIT_AUTH_SECONDS", 0.1)
         monkeypatch.setattr(
-            daemon_owner.logger,
-            "warning",
-            lambda *args, **kwargs: order.append("logged"),
+            daemon_owner,
+            "threading",
+            SimpleNamespace(Thread=_SynchronizedThread),
         )
+        monkeypatch.setattr(daemon_owner.logger, "warning", log_timeout)
+
+        def run() -> None:
+            try:
+                outcomes.append(
+                    self._run_serve(
+                        tmp_path,
+                        monkeypatch,
+                        order,
+                        control=_SuspendedParent(),
+                    )
+                )
+            except BaseException as exc:  # noqa: BLE001 - asserted by this test
+                errors.append(exc)
+            finally:
+                finished.set()
+
+        child = threading.Thread(target=run, daemon=True)
+        child.start()
         try:
-            outcome = self._run_serve(
-                tmp_path,
-                monkeypatch,
-                order,
-                control=_SuspendedParent(),
+            assert control_read.wait(_BOUNDED_CALL_SECONDS), (
+                "the owner never started reading the open parent pipe"
+            )
+            assert finished.wait(_BOUNDED_CALL_SECONDS), (
+                "the blocked parent pipe outlived the authorization deadline"
             )
         finally:
             release.set()
+            child.join(timeout=5)
 
-        assert outcome == 1
-        assert order == [
+        assert not child.is_alive()
+        assert errors == []
+        assert outcomes == [1]
+        # `control` is appended on the reader thread `_read_control_until` starts.
+        # Once that read is known to be blocked, the main flow reaches its deadline
+        # independently. Only the main flow's sequence is ordered across threads.
+        assert order.count("control") == 1
+        assert [event for event in order if event != "control"] == [
             "probe",
             "prepare",
             "prepared",
-            "control",
             "logged",
             "retry",
         ]
