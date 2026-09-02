@@ -935,3 +935,23 @@ class TestWhatTheToolsPromise:
             "these tools mark conversations as read, so they cannot be replayed "
             f"unattended: {sorted(marks_things_read & claiming)}"
         )
+
+    async def test_state_changing_messaging_tools_do_not_claim_read_only(self):
+        mcp = create_mcp_server()
+        state_changing = {
+            "archive_conversation",
+            "unarchive_conversation",
+            "mark_conversation_read",
+            "mark_conversation_unread",
+        }
+        claiming = set()
+        for name in state_changing:
+            tool = await mcp.get_tool(name)
+            assert tool is not None, f"{name} is not registered any more"
+            if tool.annotations and tool.annotations.readOnlyHint:
+                claiming.add(name)
+
+        assert not claiming, (
+            "these tools change conversation state and cannot be replayed "
+            f"unattended: {sorted(claiming)}"
+        )
