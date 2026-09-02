@@ -5128,8 +5128,12 @@ class TestVersionSkew:
         assert user_site_result.returncode == 0, user_site_result.stderr
         user_site = Path(user_site_result.stdout.strip())
         user_site.mkdir(parents=True)
-        (user_site / "sitecustomize.py").write_text(
+        hook_module = "_linkedin_mcp_test_user_site_hook"
+        (user_site / f"{hook_module}.py").write_text(
             "import builtins\nbuiltins.OWNER_USER_SITE_STARTED = True\n"
+        )
+        (user_site / "linkedin-mcp-test-user-site.pth").write_text(
+            f"import {hook_module}\n"
         )
 
         startup_probe = (
