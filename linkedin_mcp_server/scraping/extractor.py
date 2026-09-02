@@ -1844,6 +1844,7 @@ class LinkedInExtractor:
         # panel loads asynchronously. Wait until the panel replaces the sidebar.
         # The sidebar placeholder starts with "Load more" or "More profiles for you".
         is_details = "/details/" in url
+        is_job = "/jobs/view/" in url
         if is_details:
             try:
                 await self._page.wait_for_function(
@@ -1884,6 +1885,23 @@ class LinkedInExtractor:
                 except Exception as e:
                     logger.debug("Show more click failed: %s", e)
                     break
+
+        if is_job:
+            # Expand the collapsed job description by clicking the "See more" button.
+            # Uses a text-based selector scoped to <main> — no class names tied to
+            # LinkedIn's CSS bundle (per project scraping rules in CLAUDE.md).
+            button = self._page.locator("main button").filter(
+                has_text=re.compile(r"^See more\b", re.IGNORECASE)
+            )
+            try:
+                if await button.count() > 0:
+                    target = button.first
+                    await target.scroll_into_view_if_needed(timeout=2000)
+                    if await target.is_visible():
+                        await target.click(timeout=3000)
+                        await asyncio.sleep(0.5)
+            except Exception as e:
+                logger.debug("Job description 'See more' click failed: %s", e)
 
         # Scroll to trigger lazy loading
         if is_activity:
