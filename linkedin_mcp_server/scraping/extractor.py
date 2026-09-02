@@ -5124,6 +5124,9 @@ class LinkedInExtractor:
         except PlaywrightTimeoutError:
             logger.debug("Messaging inbox did not fully load for %s", thread_id)
 
+        # DOM dependency: Voyager calls need fetch() inside the page context so
+        # the session cookies and CSRF token match the browser. URL navigation
+        # alone cannot flip read/archive state.
         if action == "mark_read":
             result = await self._page.evaluate(
                 """async ({ threadId }) => {
@@ -5272,9 +5275,7 @@ class LinkedInExtractor:
     ) -> dict[str, Any]:
         """Mark a conversation as unread without opening it."""
         thread_id = normalize_thread_id(thread_id)
-        return await self._voyager_conversation_action(
-            thread_id, action="mark_unread"
-        )
+        return await self._voyager_conversation_action(thread_id, action="mark_unread")
 
     async def _extract_root_content(
         self,
