@@ -103,6 +103,7 @@
       "call": "extract_page",
       "kind": "evaluate",
       "operation": "root_content",
+      "program_digest": "3b4491f2f7c9",
       "section": "section",
       "seq": 11
     }

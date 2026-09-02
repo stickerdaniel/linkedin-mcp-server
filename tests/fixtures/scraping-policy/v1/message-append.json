@@ -91,6 +91,7 @@
       "call": "send_message",
       "kind": "evaluate",
       "operation": "profile_display_name",
+      "program_digest": "dddb5ee4d04d",
       "section": "message",
       "seq": 10
     },
@@ -247,6 +248,7 @@
       "call": "send_message",
       "kind": "evaluate",
       "operation": "compose_matches_recipient",
+      "program_digest": "b384412d5444",
       "section": "message",
       "seq": 28
     },
@@ -254,6 +256,7 @@
       "call": "send_message",
       "kind": "evaluate",
       "operation": "focus_message_composer",
+      "program_digest": "3d6403eb60d9",
       "section": "message",
       "seq": 29
     },
@@ -293,6 +296,7 @@
       "call": "send_message",
       "kind": "evaluate",
       "operation": "click_send_button",
+      "program_digest": "361bc1509ac7",
       "section": "message",
       "seq": 34
     },
@@ -303,6 +307,7 @@
       "call": "send_message",
       "kind": "wait_for_function",
       "operation": "body_marker",
+      "program_digest": "6a651feb6c31",
       "section": "message",
       "seq": 35,
       "timeout_ms": null

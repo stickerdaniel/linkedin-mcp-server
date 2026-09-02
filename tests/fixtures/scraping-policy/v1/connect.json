@@ -101,6 +101,7 @@
       "call": "connect_with_person",
       "kind": "evaluate",
       "operation": "root_content",
+      "program_digest": "3b4491f2f7c9",
       "section": "main_profile",
       "seq": 11
     },
@@ -108,6 +109,7 @@
       "call": "connect_with_person",
       "kind": "evaluate",
       "operation": "profile_urn",
+      "program_digest": "6f5d854427e8",
       "section": "main_profile",
       "seq": 12
     },
@@ -116,6 +118,7 @@
       "call": "connect_with_person",
       "kind": "evaluate",
       "operation": "connection_action_signals",
+      "program_digest": "0876d823d192",
       "section": "main_profile",
       "seq": 13
     }

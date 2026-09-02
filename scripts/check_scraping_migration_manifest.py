@@ -16,8 +16,21 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 TESTS = ROOT / "tests"
+PACKAGE = ROOT / "linkedin_mcp_server"
 MANIFEST = TESTS / "fixtures" / "scraping-policy" / "migration-manifest.json"
 EXTRACTOR_MODULE = "linkedin_mcp_server.scraping.extractor"
+
+# Public-named contracts that keep a permanent identity alias in
+# scraping.extractor. An import through the alias reaches the same object as an
+# import from the canonical owner, so it never goes obsolete. A *patch* against
+# the alias still does, which is why only direct imports are exempted here.
+PERMANENT_ALIASES = {
+    "ExtractedSection": "contracts.ExtractedSection",
+    "FilterValidationError": "contracts.FilterValidationError",
+    "rate_limited_section_error": "contracts.rate_limited_section_error",
+    "strip_linkedin_noise": "text.strip_linkedin_noise",
+    "strip_conversation_chrome": "text.strip_conversation_chrome",
+}
 
 _PRIVATE_OWNERS: dict[str, tuple[str, int]] = {
     "_navigate_to_page": ("navigation.PageNavigator", 3),
@@ -100,12 +113,8 @@ _STRING_OWNERS = {
 
 _IMPORT_OWNERS = {
     "LinkedInExtractor": ("facade.LinkedInExtractor", 14),
-    "ExtractedSection": ("contracts.ExtractedSection", 1),
-    "FilterValidationError": ("contracts.FilterValidationError", 1),
     "_RATE_LIMITED_MSG": ("contracts.RATE_LIMITED_SECTION_TEXT", 1),
     "_truncate_linkedin_noise": ("text.truncate_linkedin_noise", 1),
-    "strip_linkedin_noise": ("text.strip_linkedin_noise", 1),
-    "strip_conversation_chrome": ("text.strip_conversation_chrome", 1),
     "_build_feed_references": ("feed_payload.build_feed_references", 1),
     "_CONTENT_DATE_POSTED_MAP": ("search_urls.CONTENT_DATE_POSTED_MAP", 2),
     "_ACTION_SIGNALS_JS": ("connection_actions.ACTION_SIGNALS_JS", 7),
@@ -121,7 +130,7 @@ class Seam:
     line: int
     target: str
     canonical_owner: str
-    migration_stage: int
+    migration_stage: int | None
 
 
 def _stage_for_context(classes: list[str], default: int) -> int:
@@ -139,7 +148,12 @@ class Scanner(ast.NodeVisitor):
         self.seams: list[Seam] = []
 
     def _add(
-        self, kind: str, node: ast.expr | ast.stmt, target: str, owner: str, stage: int
+        self,
+        kind: str,
+        node: ast.expr | ast.stmt,
+        target: str,
+        owner: str,
+        stage: int | None,
     ) -> None:
         self.seams.append(
             Seam(
@@ -173,6 +187,15 @@ class Scanner(ast.NodeVisitor):
     def visit_ImportFrom(self, node: ast.ImportFrom) -> Any:
         if node.module == EXTRACTOR_MODULE:
             for alias in node.names:
+                if alias.name in PERMANENT_ALIASES:
+                    self._add(
+                        "permanent_alias_import",
+                        node,
+                        alias.name,
+                        PERMANENT_ALIASES[alias.name],
+                        None,
+                    )
+                    continue
                 owner, stage = _IMPORT_OWNERS.get(
                     alias.name, ("extractor compatibility surface", 14)
                 )
@@ -215,7 +238,8 @@ class Scanner(ast.NodeVisitor):
 
 def scan() -> dict[str, Any]:
     seams: list[Seam] = []
-    for path in sorted(TESTS.rglob("*.py")):
+    sources = sorted(TESTS.rglob("*.py")) + sorted(PACKAGE.rglob("*.py"))
+    for path in sources:
         scanner = Scanner(path)
         scanner.visit(ast.parse(path.read_text(encoding="utf-8"), filename=str(path)))
         seams.extend(scanner.seams)
@@ -254,7 +278,9 @@ def main() -> int:
         )
 
     obsolete = [
-        seam for seam in current["seams"] if seam["migration_stage"] <= args.stage
+        seam
+        for seam in current["seams"]
+        if seam["migration_stage"] is not None and seam["migration_stage"] <= args.stage
     ]
     if obsolete:
         failed = True

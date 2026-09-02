@@ -91,6 +91,7 @@
       "call": "send_message",
       "kind": "evaluate",
       "operation": "profile_display_name",
+      "program_digest": "dddb5ee4d04d",
       "section": "message",
       "seq": 10
     },
@@ -247,6 +248,7 @@
       "call": "send_message",
       "kind": "evaluate",
       "operation": "compose_matches_recipient",
+      "program_digest": "b384412d5444",
       "section": "message",
       "seq": 28
     },

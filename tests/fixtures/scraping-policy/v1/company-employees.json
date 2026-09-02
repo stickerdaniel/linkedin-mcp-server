@@ -80,6 +80,7 @@
       "call": "get_company_employees",
       "kind": "wait_for_function",
       "operation": "company_people_ready",
+      "program_digest": "0ce9917e16da",
       "seq": 10,
       "timeout_ms": 5000
     },
@@ -100,6 +101,7 @@
       "call": "get_company_employees",
       "kind": "evaluate",
       "operation": "root_content",
+      "program_digest": "3b4491f2f7c9",
       "seq": 12
     }
   ],

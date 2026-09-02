@@ -79,6 +79,7 @@
       "call": "search_companies",
       "kind": "wait_for_function",
       "operation": "main_text_100",
+      "program_digest": "44e10d4e43ed",
       "seq": 10,
       "timeout_ms": 10000
     },
@@ -99,6 +100,7 @@
       "call": "search_companies",
       "kind": "evaluate",
       "operation": "root_content",
+      "program_digest": "3b4491f2f7c9",
       "seq": 12
     }
   ],

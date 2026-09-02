@@ -6,6 +6,7 @@ from collections import defaultdict, deque
 from collections.abc import Callable, Coroutine, Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
+from hashlib import sha256
 from types import SimpleNamespace
 from typing import Any
 
@@ -363,7 +364,11 @@ class ScriptedPage:
     ) -> None:
         operation = semantic_program_id(expression)
         self.recorder.record(
-            "wait_for_function", operation=operation, arg=arg, timeout_ms=timeout
+            "wait_for_function",
+            operation=operation,
+            program_digest=program_digest(expression),
+            arg=arg,
+            timeout_ms=timeout,
         )
         self._take(f"wait_for_function:{operation}", default=None)
 
@@ -375,7 +380,10 @@ class ScriptedPage:
 
     async def evaluate(self, expression: str, arg: Any = _MISSING) -> Any:
         operation = semantic_program_id(expression)
-        values: dict[str, Any] = {"operation": operation}
+        values: dict[str, Any] = {
+            "operation": operation,
+            "program_digest": program_digest(expression),
+        }
         if arg is not _MISSING:
             values["arg"] = arg
         self.recorder.record("evaluate", **values)
@@ -444,6 +452,19 @@ def semantic_selector_id(selector: str) -> str:
     if "dialog" in selector:
         return "dialog"
     raise AssertionError(f"unrecognized selector program: {selector!r}")
+
+
+def program_digest(program: str) -> str:
+    """Fingerprint a JavaScript program, ignoring only whitespace layout.
+
+    The operation name alone is matched from a single marker substring, so a
+    program can be rewritten around that marker and keep its label. Relocating
+    a program between modules changes its indentation and nothing else, which
+    is why the fingerprint collapses whitespace before hashing.
+    """
+
+    compact = " ".join(program.split())
+    return sha256(compact.encode("utf-8")).hexdigest()[:12]
 
 
 def semantic_program_id(program: str) -> str:
