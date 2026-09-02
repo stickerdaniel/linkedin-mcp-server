@@ -6365,12 +6365,13 @@ class TestPublishingLast:
                 release.wait()
                 return "commit\n"
 
+        def log_timeout(*args: object, **kwargs: object) -> None:
+            assert control_read.is_set()
+            assert not release.is_set()
+            order.append("logged")
+
         monkeypatch.setattr(daemon_owner, "_COMMIT_AUTH_SECONDS", 0.1)
-        monkeypatch.setattr(
-            daemon_owner.logger,
-            "warning",
-            lambda *args, **kwargs: order.append("logged"),
-        )
+        monkeypatch.setattr(daemon_owner.logger, "warning", log_timeout)
 
         def run() -> None:
             try:
