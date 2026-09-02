@@ -998,6 +998,24 @@ def strip_conversation_chrome(text: str, locale: str = "en") -> str:
     return "\n".join(lines[start:end]).strip()
 
 
+# Job-view (/jobs/view/<id>/) description-panel heading, keyed by locale. The
+# panel has no URL or attribute signal marking it hydrated, so — per AGENTS.md
+# Scraping Rules — the text-based check is guarded behind this explicit table
+# rather than a single hardcoded string. Best-effort and non-exhaustive, same
+# as _MESSAGING_CHROME_STRINGS above: the browser context locale is forced to
+# en-US (core/browser.py), so "en" is the entry that fires in practice today;
+# the rest are defense-in-depth for accounts LinkedIn renders in another
+# language regardless of browser locale. An unlisted locale simply falls
+# through to the original fixed-scroll-budget race, same as before this table
+# existed.
+_JOB_DESCRIPTION_HEADINGS: dict[str, str] = {
+    "en": "About the job",
+    "de": "Über den Job",
+    "es": "Sobre el empleo",
+    "fr": "À propos de l'offre",
+}
+
+
 class LinkedInExtractor:
     """Extracts LinkedIn page content via navigate-scroll-innerText pattern."""
 
@@ -1884,6 +1902,31 @@ class LinkedInExtractor:
                 except Exception as e:
                     logger.debug("Show more click failed: %s", e)
                     break
+
+        # Job detail pages (/jobs/view/<id>/) initially render the header,
+        # apply/save chrome, and boilerplate into <main> while the description
+        # panel hydrates asynchronously. Wait for one of the known-locale
+        # description headings (_JOB_DESCRIPTION_HEADINGS) to actually appear
+        # before extracting, rather than relying on the fixed scroll budget
+        # below — otherwise a page whose description hydrates late is
+        # extracted without it. The table mitigates but does not eliminate
+        # the locale gap: an unlisted locale still falls through to the fixed
+        # scroll budget, same as before this table existed.
+        is_job = "/jobs/view/" in path
+        if is_job:
+            try:
+                await self._page.wait_for_function(
+                    """({ headings }) => {
+                        const main = document.querySelector('main');
+                        if (!main) return false;
+                        const text = main.innerText;
+                        return headings.some((heading) => text.includes(heading));
+                    }""",
+                    arg={"headings": list(_JOB_DESCRIPTION_HEADINGS.values())},
+                    timeout=10000,
+                )
+            except PlaywrightTimeoutError:
+                logger.debug("Job description content did not appear on %s", url)
 
         # Scroll to trigger lazy loading
         if is_activity:
