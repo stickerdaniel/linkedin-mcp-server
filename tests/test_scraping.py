@@ -8707,8 +8707,12 @@ class TestResolveMessageComposeBox:
 class TestSendMessageComposerInteraction:
     """Tests for the page.evaluate + keyboard.type send path (patchright workaround)."""
 
-    def _patch_send_message_to_compose(self, extractor, mock_page):
+    def _patch_send_message_to_compose(
+        self, extractor, mock_page, *, focus_result=True, pre_send_count=0
+    ):
         """Return a context manager that patches send_message up to the compose step."""
+        compose_box = MagicMock()
+        compose_box.evaluate = AsyncMock(return_value=focus_result)
         return (
             patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
             patch(
@@ -8741,7 +8745,7 @@ class TestSendMessageComposerInteraction:
                 extractor,
                 "_resolve_message_compose_box",
                 new_callable=AsyncMock,
-                return_value=MagicMock(),
+                return_value=compose_box,
             ),
             patch.object(
                 extractor,
@@ -8758,6 +8762,12 @@ class TestSendMessageComposerInteraction:
                 "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
+            patch.object(
+                extractor,
+                "_message_text_occurrences_outside_composer",
+                new_callable=AsyncMock,
+                return_value=pre_send_count,
+            ),
         )
 
     async def test_focus_and_type_via_evaluate_and_keyboard(self, mock_page):
@@ -8767,8 +8777,8 @@ class TestSendMessageComposerInteraction:
         mock_keyboard.type = AsyncMock()
         mock_keyboard.press = AsyncMock()
         mock_page.keyboard = mock_keyboard
-        # evaluate returns: True (focus), True (send button click)
-        mock_page.evaluate = AsyncMock(side_effect=[True, True])
+        # evaluate returns: True (send button click), False (no share prompt)
+        mock_page.evaluate = AsyncMock(side_effect=[True, False])
         patches = self._patch_send_message_to_compose(extractor, mock_page)
 
         with (
@@ -8782,9 +8792,10 @@ class TestSendMessageComposerInteraction:
             patches[7],
             patches[8],
             patches[9],
+            patches[10],
             patch.object(
                 extractor,
-                "_message_text_visible",
+                "_message_text_visible_outside_composer",
                 new_callable=AsyncMock,
                 return_value=True,
             ),
@@ -8797,6 +8808,10 @@ class TestSendMessageComposerInteraction:
         assert result["sent"] is True
         # Verify keyboard.type was used (not press_sequentially)
         mock_keyboard.type.assert_awaited_once_with("Hello!", delay=15)
+        send_js = mock_page.evaluate.await_args_list[0].args[0]
+        assert 'button[type="submit"]' in send_js
+        assert 'button[data-control-name="send"]' in send_js
+        assert "aria-label" not in send_js
 
     async def test_compose_interact_failed_when_focus_fails(self, mock_page):
         """send_message returns compose_interact_failed when JS focus fails."""
@@ -8804,9 +8819,10 @@ class TestSendMessageComposerInteraction:
         mock_keyboard = MagicMock()
         mock_keyboard.type = AsyncMock()
         mock_page.keyboard = mock_keyboard
-        # evaluate returns False (focus failed)
         mock_page.evaluate = AsyncMock(return_value=False)
-        patches = self._patch_send_message_to_compose(extractor, mock_page)
+        patches = self._patch_send_message_to_compose(
+            extractor, mock_page, focus_result=False
+        )
 
         with (
             patches[0],
@@ -8819,6 +8835,7 @@ class TestSendMessageComposerInteraction:
             patches[7],
             patches[8],
             patches[9],
+            patches[10],
         ):
             result = await extractor.send_message(
                 "testuser", "Hello!", confirm_send=True
@@ -8834,8 +8851,8 @@ class TestSendMessageComposerInteraction:
         mock_keyboard.type = AsyncMock()
         mock_keyboard.press = AsyncMock()
         mock_page.keyboard = mock_keyboard
-        # evaluate returns: True (focus), False (no send button found)
-        mock_page.evaluate = AsyncMock(side_effect=[True, False])
+        # evaluate returns: False (no send button found), False (no share prompt)
+        mock_page.evaluate = AsyncMock(side_effect=[False, False])
         patches = self._patch_send_message_to_compose(extractor, mock_page)
 
         with (
@@ -8849,9 +8866,10 @@ class TestSendMessageComposerInteraction:
             patches[7],
             patches[8],
             patches[9],
+            patches[10],
             patch.object(
                 extractor,
-                "_message_text_visible",
+                "_message_text_visible_outside_composer",
                 new_callable=AsyncMock,
                 return_value=True,
             ),
@@ -8863,6 +8881,254 @@ class TestSendMessageComposerInteraction:
         assert result["status"] == "sent"
         # Enter was pressed as fallback
         mock_keyboard.press.assert_awaited_once_with("Enter")
+
+    async def test_does_not_confirm_sent_when_text_only_in_composer(self, mock_page):
+        """A sent result requires the message outside the editable composer."""
+        extractor = LinkedInExtractor(mock_page)
+        mock_keyboard = MagicMock()
+        mock_keyboard.type = AsyncMock()
+        mock_keyboard.press = AsyncMock()
+        mock_page.keyboard = mock_keyboard
+        mock_page.evaluate = AsyncMock(return_value=True)
+        patches = self._patch_send_message_to_compose(
+            extractor, mock_page, pre_send_count=2
+        )
+
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patches[7],
+            patches[8],
+            patches[9],
+            patches[10],
+            patch.object(
+                extractor,
+                "_handle_profile_info_share_prompt",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch.object(
+                extractor,
+                "_message_text_visible_outside_composer",
+                new_callable=AsyncMock,
+                return_value=False,
+            ) as visible_check,
+        ):
+            result = await extractor.send_message(
+                "testuser", "Hello!", confirm_send=True
+            )
+
+        assert result["status"] == "send_unavailable"
+        assert result["sent"] is False
+        visible_check.assert_awaited_with("Hello!", after_count=2)
+
+    async def test_existing_text_plus_new_occurrence_confirms_sent(self, mock_page):
+        """Existing matching thread text is OK only when a new occurrence appears."""
+        extractor = LinkedInExtractor(mock_page)
+        mock_keyboard = MagicMock()
+        mock_keyboard.type = AsyncMock()
+        mock_keyboard.press = AsyncMock()
+        mock_page.keyboard = mock_keyboard
+        mock_page.evaluate = AsyncMock(return_value=True)
+        patches = self._patch_send_message_to_compose(
+            extractor, mock_page, pre_send_count=2
+        )
+
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patches[7],
+            patches[8],
+            patches[9],
+            patches[10],
+            patch.object(
+                extractor,
+                "_message_text_visible_outside_composer",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as visible_check,
+        ):
+            result = await extractor.send_message(
+                "testuser", "Hello!", confirm_send=True
+            )
+
+        assert result["status"] == "sent"
+        assert result["sent"] is True
+        visible_check.assert_awaited_with("Hello!", after_count=2)
+
+    async def test_profile_info_share_prompt_can_be_dismissed_before_confirmation(
+        self, mock_page
+    ):
+        """The send path dismisses LinkedIn's optional share-info prompt."""
+        extractor = LinkedInExtractor(mock_page)
+        mock_keyboard = MagicMock()
+        mock_keyboard.type = AsyncMock()
+        mock_keyboard.press = AsyncMock()
+        mock_page.keyboard = mock_keyboard
+        mock_page.evaluate = AsyncMock(return_value=True)
+        patches = self._patch_send_message_to_compose(extractor, mock_page)
+
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patches[7],
+            patches[8],
+            patches[9],
+            patches[10],
+            patch.object(
+                extractor,
+                "_handle_profile_info_share_prompt",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as prompt_handler,
+            patch.object(
+                extractor,
+                "_message_text_visible_outside_composer",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+        ):
+            result = await extractor.send_message(
+                "testuser", "Hello!", confirm_send=True
+            )
+
+        assert result["status"] == "sent"
+        prompt_handler.assert_awaited_once()
+
+    async def test_late_share_prompt_uses_short_confirmation_retry(self, mock_page):
+        """A late prompt must not trigger a second full confirmation timeout."""
+        extractor = LinkedInExtractor(mock_page)
+        mock_keyboard = MagicMock()
+        mock_keyboard.type = AsyncMock()
+        mock_keyboard.press = AsyncMock()
+        mock_page.keyboard = mock_keyboard
+        mock_page.evaluate = AsyncMock(return_value=True)
+        patches = self._patch_send_message_to_compose(extractor, mock_page)
+
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patches[7],
+            patches[8],
+            patches[9],
+            patches[10],
+            patch.object(
+                extractor,
+                "_handle_profile_info_share_prompt",
+                new_callable=AsyncMock,
+                side_effect=[False, True],
+            ),
+            patch.object(
+                extractor,
+                "_message_text_visible_outside_composer",
+                new_callable=AsyncMock,
+                side_effect=[False, False],
+            ) as visible_check,
+        ):
+            result = await extractor.send_message(
+                "testuser", "Hello!", confirm_send=True
+            )
+
+        assert result["status"] == "send_unavailable"
+        assert visible_check.await_count == 2
+        assert visible_check.await_args_list[0].kwargs == {"after_count": 0}
+        assert visible_check.await_args_list[1].kwargs == {
+            "after_count": 0,
+            "timeout_ms": 5_000,
+        }
+
+    async def test_profile_info_share_prompt_handler_clicks_negative_option(
+        self, mock_page
+    ):
+        """The prompt handler only looks for negative share-info actions."""
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.evaluate = AsyncMock(return_value=True)
+
+        with patch(
+            "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+            new_callable=AsyncMock,
+        ) as sleep_mock:
+            handled = await extractor._handle_profile_info_share_prompt()
+
+        assert handled is True
+        sleep_mock.assert_awaited_once_with(1.0)
+        evaluate_call = mock_page.evaluate.await_args
+        assert evaluate_call is not None
+        js, args = evaluate_call.args
+        assert "locale.prompts" in js
+        assert "locale.negative_actions" in js
+        assert "don't share" in args["localeTable"]["en"]["negative_actions"]
+        assert "not now" in args["localeTable"]["en"]["negative_actions"]
+        assert ".artdeco-modal" not in js
+
+    async def test_profile_info_share_prompt_uses_explicit_common_locale_table(
+        self, mock_page
+    ):
+        """Prompt matching stays conservative while covering common locales."""
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.evaluate = AsyncMock(return_value=False)
+
+        await extractor._handle_profile_info_share_prompt()
+
+        evaluate_call = mock_page.evaluate.await_args
+        assert evaluate_call is not None
+        js, args = evaluate_call.args
+        assert "document.documentElement.lang" in js
+        locale_table = args["localeTable"]
+        assert set(locale_table) == {"de", "en", "es", "fr", "pl", "pt"}
+        assert all(config["prompts"] for config in locale_table.values())
+        assert all(config["negative_actions"] for config in locale_table.values())
+
+    async def test_message_visible_outside_composer_excludes_editable_text(
+        self, mock_page
+    ):
+        """Confirmation ignores text that is still inside the composer."""
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.wait_for_function = AsyncMock()
+
+        assert await extractor._message_text_visible_outside_composer("Hello!") is True
+
+        wait_call = mock_page.wait_for_function.await_args
+        assert wait_call is not None
+        js = wait_call.args[0]
+        assert '[contenteditable="true"], [role="textbox"]' in js
+
+    async def test_message_occurrence_helpers_share_one_browser_predicate(
+        self, mock_page
+    ):
+        """Baseline counting and confirmation must use identical DOM rules."""
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.evaluate = AsyncMock(return_value=0)
+        mock_page.wait_for_function = AsyncMock()
+
+        await extractor._message_text_occurrences_outside_composer("Hello!")
+        await extractor._message_text_visible_outside_composer("Hello!")
+
+        evaluate_call = mock_page.evaluate.await_args
+        wait_call = mock_page.wait_for_function.await_args
+        assert evaluate_call is not None
+        assert wait_call is not None
+        assert evaluate_call.args[0] == wait_call.args[0]
 
 
 class TestBuildFeedReferences:
