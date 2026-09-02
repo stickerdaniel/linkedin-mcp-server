@@ -455,6 +455,55 @@ _MESSAGING_CLOSE_SELECTOR = (
     'button[aria-label*="Close"]'
 )
 
+# Counts visible occurrences of a message *outside* every open composer.
+# The composer holds the message before it is sent, so plain body text is no
+# evidence of delivery: a Send button whose handler does nothing leaves the
+# text standing in the editor and the page still "contains" it. Occurrences
+# inside visible contenteditable editors are therefore subtracted, and the
+# send path compares a baseline taken before the click with the count after
+# it. Visibility is pure geometry and the match is on normalized text, so no
+# LinkedIn class name or localized label enters the decision.
+_MESSAGE_OCCURRENCES_JS = r"""
+({ expected }) => {
+    const normalize = value => (value || '').replace(/\s+/g, ' ').trim();
+    const needle = normalize(expected);
+    if (!needle) return 0;
+
+    const countIn = value => {
+        const haystack = normalize(value);
+        let count = 0;
+        let index = haystack.indexOf(needle);
+        while (index !== -1) {
+            count += 1;
+            index = haystack.indexOf(needle, index + needle.length);
+        }
+        return count;
+    };
+
+    const isVisible = element =>
+        !!(
+            element &&
+            (element.offsetWidth ||
+                element.offsetHeight ||
+                element.getClientRects().length)
+        );
+
+    let total = countIn(document.body?.innerText || '');
+    for (const editor of document.querySelectorAll('[contenteditable="true"]')) {
+        if (isVisible(editor)) {
+            total -= countIn(editor.innerText);
+        }
+    }
+    return total > 0 ? total : 0;
+}
+"""
+
+# The post-send predicate is the same counting routine, so the baseline and
+# the confirmation can never disagree about what counts as an occurrence.
+_MESSAGE_OCCURRENCES_INCREASED_JS = (
+    f"(arg) => ({_MESSAGE_OCCURRENCES_JS})(arg) > arg.previous"
+)
+
 # Shared JS function that walks up from any /messaging/compose/ anchor
 # inside <main> to find the smallest ancestor that satisfies the
 # action-root predicate (>=2 interactive children, >=1 button). This is
@@ -3013,20 +3062,29 @@ class LinkedInExtractor:
         )
         return bool(matched)
 
-    async def _message_text_visible(self, message: str) -> bool:
-        """Wait until the compose page visibly contains the just-sent message text.
+    async def _message_text_occurrences(self, message: str) -> int:
+        """Count visible occurrences of the message outside any open composer."""
+        occurrences = await self._page.evaluate(
+            _MESSAGE_OCCURRENCES_JS, {"expected": message}
+        )
+        return int(occurrences or 0)
+
+    async def _message_text_visible(
+        self, message: str, *, previous_occurrences: int
+    ) -> bool:
+        """Wait until a *new* copy of the message appears outside the composer.
+
+        ``previous_occurrences`` is the baseline taken after typing and before
+        the send attempt, so the requirement is strictly more occurrences than
+        before: the typed text sitting in the composer cannot confirm itself,
+        and neither can an identical message already in the thread.
 
         Uses the page-level default timeout (``BrowserConfig.default_timeout``).
         """
         try:
             await self._page.wait_for_function(
-                """({ expected }) => {
-                    const normalize = value =>
-                        (value || '').replace(/\\s+/g, ' ').trim();
-                    const bodyText = normalize(document.body?.innerText || '');
-                    return bodyText.includes(normalize(expected));
-                }""",
-                arg={"expected": message},
+                _MESSAGE_OCCURRENCES_INCREASED_JS,
+                arg={"expected": message, "previous": previous_occurrences},
             )
             return True
         except PlaywrightTimeoutError:
@@ -5048,6 +5106,13 @@ class LinkedInExtractor:
         await asyncio.sleep(0.1)
         await self._page.keyboard.type(message, delay=15)
         await asyncio.sleep(0.3)
+        await asyncio.sleep(1.0)  # allow React to process keyboard input
+
+        # Baseline immediately before the send attempt: how often the message
+        # is already visible outside the composer. The click below only tries
+        # to send; delivery is proven by this count growing, never by the text
+        # the composer still holds.
+        previous_occurrences = await self._message_text_occurrences(message)
 
         # patchright actionability also blocks send_button.click(). Use JS click
         # on any visible, enabled send button; fall back to Enter key which
@@ -5056,7 +5121,6 @@ class LinkedInExtractor:
         # DOM dependency: we need btn.click() on the element reference — not
         # achievable via innerText or URL navigation. Selectors use only type,
         # aria-label, and data attributes (no layout class names).
-        await asyncio.sleep(1.0)  # allow React to process keyboard input
         sent_via_js = await self._page.evaluate(
             """() => {
                 const btn = Array.from(document.querySelectorAll(
@@ -5071,7 +5135,9 @@ class LinkedInExtractor:
         if not sent_via_js:
             await self._page.keyboard.press("Enter")
 
-        if not await self._message_text_visible(message):
+        if not await self._message_text_visible(
+            message, previous_occurrences=previous_occurrences
+        ):
             await self._dismiss_message_ui()
             return self._message_action_result(
                 self._page.url,
