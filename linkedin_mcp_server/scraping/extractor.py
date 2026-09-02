@@ -26,6 +26,7 @@ from linkedin_mcp_server.core import (
 )
 from linkedin_mcp_server.core.exceptions import (
     AuthenticationError,
+    InvalidReferenceError,
     LinkedInScraperException,
 )
 from linkedin_mcp_server.debug_trace import record_page_trace
@@ -46,8 +47,9 @@ from linkedin_mcp_server.scraping.identifiers import (
     messaging_thread_url,
     normalize_company_identifier,
     normalize_job_id,
-    normalize_thread_id,
     normalize_person_identifier,
+    normalize_profile_urn,
+    normalize_thread_id,
     person_profile_url,
 )
 from linkedin_mcp_server.scraping.link_metadata import (
@@ -855,6 +857,17 @@ class FilterValidationError(ValueError):
     letting the MCP tool wrapper catch this case precisely and surface the
     actionable message past ``mask_error_details``.
     """
+
+
+def validate_current_company_filter(current_company: str | None) -> None:
+    """Require the numeric company URN used by LinkedIn's people-search facet."""
+    if current_company and not re.fullmatch(r"[0-9]+", current_company):
+        raise FilterValidationError(
+            f"current_company must be a numeric LinkedIn company URN id "
+            f"(e.g. '1115' for SAP); got {current_company!r}. Plain-text "
+            f"company names are silently ignored by LinkedIn. Look up the "
+            f'URN via get_company_profile -> references["about"].'
+        )
 
 
 def strip_linkedin_noise(text: str) -> str:
@@ -4435,13 +4448,7 @@ class LinkedInExtractor:
                     f"{invalid!r}; expected any of {list(_NETWORK_TOKENS)!r}"
                 )
 
-        if current_company and not re.fullmatch(r"[0-9]+", current_company):
-            raise FilterValidationError(
-                f"current_company must be a numeric LinkedIn company URN id "
-                f"(e.g. '1115' for SAP); got {current_company!r}. Plain-text "
-                f"company names are silently ignored by LinkedIn. Look up the "
-                f'URN via get_company_profile -> references["about"].'
-            )
+        validate_current_company_filter(current_company)
 
         params = f"keywords={quote_plus(keywords)}"
         if location:
@@ -4795,7 +4802,7 @@ class LinkedInExtractor:
         to skip this enumeration.
         """
         if not linkedin_username and not thread_id:
-            raise LinkedInScraperException(
+            raise InvalidReferenceError(
                 "Provide at least one of linkedin_username or thread_id"
             )
 
@@ -4900,6 +4907,8 @@ class LinkedInExtractor:
                 compose URL directly, bypassing the Message-button lookup.
         """
         linkedin_username = normalize_person_identifier(linkedin_username)
+        if profile_urn is not None:
+            profile_urn = normalize_profile_urn(profile_urn)
         profile_url = person_profile_url(linkedin_username, "/")
         await self._navigate_to_page(profile_url)
         await detect_rate_limit(self._page)
