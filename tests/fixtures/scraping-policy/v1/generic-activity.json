@@ -74,6 +74,7 @@
       "kind": "wait_for_selector",
       "operation": "main",
       "section": "section",
+      "selector": "main",
       "seq": 8,
       "state": "visible",
       "timeout_ms": null
@@ -90,7 +91,7 @@
       "call": "extract_page",
       "kind": "wait_for_function",
       "operation": "main_text_200",
-      "program_digest": "574db38c5f8a",
+      "program_digest": "24943facf9de",
       "section": "section",
       "seq": 10,
       "timeout_ms": 10000
@@ -113,7 +114,7 @@
       "call": "extract_page",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "3b4491f2f7c9",
+      "program_digest": "e8a0e21ac6f5",
       "section": "section",
       "seq": 12
     }

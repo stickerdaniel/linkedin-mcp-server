@@ -73,6 +73,27 @@ _PRIVATE_OWNERS: dict[str, tuple[str, int]] = {
     "_compose_page_matches_recipient": ("message_sender.MessageSender", 12),
     "_message_text_visible": ("message_sender.MessageSender", 12),
     "_dismiss_message_ui": ("message_sender.MessageSender", 12),
+    "_drain_listener_tasks": ("feed.FeedScraper", 5),
+    "_build_feed_references": ("feed_payload.build_feed_references", 1),
+    "_truncate_linkedin_noise": ("text.truncate_linkedin_noise", 1),
+}
+
+# Module-level names reached through ``patch.object(<extractor alias>, ...)``.
+# A patch here stops intercepting once the caller lives in another module and
+# imports the name for itself, so each one is real migration work.
+_BOUNDARY_OWNERS: dict[str, tuple[str, int]] = {
+    "record_page_trace": ("navigation.PageNavigator", 3),
+    "detect_auth_barrier": ("navigation.PageNavigator", 3),
+    "detect_auth_barrier_quick": ("navigation.PageNavigator", 3),
+    "resolve_remember_me_prompt": ("navigation.PageNavigator", 3),
+    "stabilize_navigation": ("navigation.PageNavigator", 3),
+    "detect_rate_limit": ("session.ScrapingSession.check_rate_limit", 3),
+    "handle_modal_close": ("session.ScrapingSession.dismiss_modal", 3),
+    "scroll_to_bottom": ("session.ScrapingSession.scroll_body", 3),
+    "scroll_job_sidebar": ("session.ScrapingSession.scroll_job_sidebar", 3),
+    "build_issue_diagnostics": ("owning service diagnostic boundary", 14),
+    "strip_linkedin_noise": ("text.strip_linkedin_noise", 1),
+    "build_references": ("link_metadata.build_references", 1),
 }
 
 _CLASS_STAGES = {
@@ -142,10 +163,18 @@ def _stage_for_context(classes: list[str], default: int) -> int:
 
 
 class Scanner(ast.NodeVisitor):
-    def __init__(self, path: Path):
+    def __init__(
+        self, path: Path, module_aliases: set[str], facade_privates: frozenset[str]
+    ):
         self.path = path
         self.classes: list[str] = []
         self.seams: list[Seam] = []
+        self.facade_privates = facade_privates
+        # Every local name bound to the extractor module. ``patch.object``
+        # against any of them is the same seam, so recognizing only the literal
+        # name ``extractor`` would miss a file that imported it as something
+        # else and leave that seam out of the inventory entirely.
+        self.module_aliases = module_aliases
 
     def _add(
         self,
@@ -222,26 +251,94 @@ class Scanner(ast.NodeVisitor):
         )
         if is_patch_object and len(node.args) >= 2:
             target, attribute = node.args[:2]
-            if (
-                isinstance(target, ast.Name)
-                and target.id == "extractor"
-                and isinstance(attribute, ast.Constant)
-                and isinstance(attribute.value, str)
-                and attribute.value.startswith("_")
+            if not (
+                isinstance(attribute, ast.Constant) and isinstance(attribute.value, str)
             ):
-                owner, stage = _PRIVATE_OWNERS.get(
-                    attribute.value, ("owner-local service", 14)
+                self.generic_visit(node)
+                return None
+            name = attribute.value
+            if isinstance(target, ast.Name) and name in self.facade_privates:
+                owner, stage = _PRIVATE_OWNERS.get(name, ("owner-local service", 14))
+                self._add("private_patch_object", node, name, owner, stage)
+            elif isinstance(target, ast.Name) and target.id in self.module_aliases:
+                if name.startswith("_"):
+                    owner, stage = _PRIVATE_OWNERS.get(
+                        name, ("owner-local service", 14)
+                    )
+                    kind = "private_patch_object"
+                else:
+                    owner, stage = _BOUNDARY_OWNERS.get(
+                        name, ("owner-local service boundary", 14)
+                    )
+                    kind = "boundary_patch_object"
+                self._add(kind, node, name, owner, stage)
+            elif (
+                isinstance(target, ast.Attribute)
+                and isinstance(target.value, ast.Name)
+                and target.value.id in self.module_aliases
+            ):
+                # ``patch.object(extractor.asyncio, "sleep")`` reaches the
+                # standard-library module itself, so relocation cannot break
+                # it and it carries no migration stage.
+                self._add(
+                    "imported_module_patch",
+                    node,
+                    f"{target.attr}.{name}",
+                    "global stdlib module, unaffected by relocation",
+                    None,
                 )
-                self._add("private_patch_object", node, attribute.value, owner, stage)
         self.generic_visit(node)
+
+
+def extractor_private_methods() -> frozenset[str]:
+    """Read the private method names of ``LinkedInExtractor`` from source.
+
+    A ``patch.object`` seam is identified by the *name* it patches, not by what
+    the first argument happens to be called: the extractor is bound to a local
+    named ``extractor`` in most tests and to something else in others, and a
+    module alias shadows neither. Matching on the class's own method names
+    catches all three.
+    """
+
+    tree = ast.parse(
+        (PACKAGE / "scraping" / "extractor.py").read_text(encoding="utf-8")
+    )
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == "LinkedInExtractor":
+            return frozenset(
+                item.name
+                for item in node.body
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and item.name.startswith("_")
+            )
+    raise AssertionError("LinkedInExtractor not found in scraping/extractor.py")
+
+
+def module_aliases(tree: ast.AST) -> set[str]:
+    """Collect every local name bound to the extractor module in one file."""
+
+    aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if node.module == "linkedin_mcp_server.scraping":
+                for alias in node.names:
+                    if alias.name == "extractor":
+                        aliases.add(alias.asname or alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == EXTRACTOR_MODULE and alias.asname:
+                    aliases.add(alias.asname)
+    return aliases
 
 
 def scan() -> dict[str, Any]:
     seams: list[Seam] = []
+    privates = extractor_private_methods()
     sources = sorted(TESTS.rglob("*.py")) + sorted(PACKAGE.rglob("*.py"))
     for path in sources:
-        scanner = Scanner(path)
-        scanner.visit(ast.parse(path.read_text(encoding="utf-8"), filename=str(path)))
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        scanner = Scanner(path, module_aliases(tree), privates)
+        scanner.visit(tree)
         seams.extend(scanner.seams)
     seams.sort(key=lambda seam: (seam.path, seam.line, seam.kind, seam.target))
     return {

@@ -80,6 +80,7 @@
       "kind": "wait_for_selector",
       "operation": "main",
       "section": "feed",
+      "selector": "main",
       "seq": 9,
       "state": "visible",
       "timeout_ms": null
@@ -96,7 +97,7 @@
       "call": "extract_feed",
       "kind": "wait_for_function",
       "operation": "main_text_200",
-      "program_digest": "574db38c5f8a",
+      "program_digest": "24943facf9de",
       "section": "feed",
       "seq": 11,
       "timeout_ms": 10000
@@ -164,7 +165,7 @@
       "call": "extract_feed",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "3b4491f2f7c9",
+      "program_digest": "e8a0e21ac6f5",
       "section": "feed",
       "seq": 19
     },
@@ -175,6 +176,13 @@
       "kind": "listener.remove",
       "section": "feed",
       "seq": 20
+    },
+    {
+      "call": "extract_feed",
+      "kind": "boundary.drain",
+      "pending": 0,
+      "section": "feed",
+      "seq": 21
     }
   ],
   "result": {

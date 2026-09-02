@@ -81,6 +81,7 @@
       "kind": "wait_for_selector",
       "operation": "main",
       "section": "search_results",
+      "selector": "main",
       "seq": 9,
       "state": "visible",
       "timeout_ms": null
@@ -378,7 +379,7 @@
       "call": "search_jobs",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "3b4491f2f7c9",
+      "program_digest": "e8a0e21ac6f5",
       "section": "search_results",
       "seq": 45
     },
@@ -394,7 +395,7 @@
       "call": "search_jobs",
       "kind": "evaluate",
       "operation": "job_total_pages",
-      "program_digest": "cafecf40e134",
+      "program_digest": "5c4f77b0e1cd",
       "section": "search_results",
       "seq": 47
     },
@@ -406,7 +407,7 @@
       "call": "search_jobs",
       "kind": "evaluate",
       "operation": "job_ids",
-      "program_digest": "0e4d14dd0bb1",
+      "program_digest": "a9a17a1764bd",
       "section": "search_results",
       "seq": 48
     }

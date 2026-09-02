@@ -74,6 +74,7 @@
       "kind": "wait_for_selector",
       "operation": "main",
       "section": "section",
+      "selector": "main",
       "seq": 8,
       "state": "visible",
       "timeout_ms": null
@@ -103,7 +104,7 @@
       "call": "extract_page",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "3b4491f2f7c9",
+      "program_digest": "e8a0e21ac6f5",
       "section": "section",
       "seq": 11
     }

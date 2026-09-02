@@ -84,6 +84,7 @@
       "call": "scrape_person",
       "kind": "wait_for_selector",
       "operation": "main",
+      "selector": "main",
       "seq": 9,
       "state": "visible",
       "timeout_ms": null
@@ -111,14 +112,14 @@
       "call": "scrape_person",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "3b4491f2f7c9",
+      "program_digest": "e8a0e21ac6f5",
       "seq": 12
     },
     {
       "call": "scrape_person",
       "kind": "evaluate",
       "operation": "profile_urn",
-      "program_digest": "6f5d854427e8",
+      "program_digest": "adf1074697a7",
       "seq": 13
     },
     {
@@ -193,6 +194,7 @@
       "call": "scrape_person",
       "kind": "wait_for_selector",
       "operation": "main",
+      "selector": "main",
       "seq": 23,
       "state": "visible",
       "timeout_ms": null
@@ -208,7 +210,7 @@
       "call": "scrape_person",
       "kind": "wait_for_function",
       "operation": "profile_details_ready",
-      "program_digest": "d9bf73e8b7e0",
+      "program_digest": "652e003606ba",
       "seq": 25,
       "timeout_ms": 10000
     },
@@ -224,7 +226,7 @@
       "call": "scrape_person",
       "kind": "locator.derive",
       "locator": "show_more.filtered",
-      "operation": "filter:^Show (more|all)\\b",
+      "operation": "filter:^Show (more|all)\\b/re.IGNORECASE|re.UNICODE",
       "parent": "show_more",
       "seq": 27
     },
@@ -251,7 +253,7 @@
       "call": "scrape_person",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "3b4491f2f7c9",
+      "program_digest": "e8a0e21ac6f5",
       "seq": 30
     },
     {
@@ -326,6 +328,7 @@
       "call": "scrape_person",
       "kind": "wait_for_selector",
       "operation": "main",
+      "selector": "main",
       "seq": 40,
       "state": "visible",
       "timeout_ms": null
@@ -341,7 +344,7 @@
       "call": "scrape_person",
       "kind": "wait_for_function",
       "operation": "profile_details_ready",
-      "program_digest": "d9bf73e8b7e0",
+      "program_digest": "652e003606ba",
       "seq": 42,
       "timeout_ms": 10000
     },
@@ -357,7 +360,7 @@
       "call": "scrape_person",
       "kind": "locator.derive",
       "locator": "show_more.filtered",
-      "operation": "filter:^Show (more|all)\\b",
+      "operation": "filter:^Show (more|all)\\b/re.IGNORECASE|re.UNICODE",
       "parent": "show_more",
       "seq": 44
     },
@@ -384,7 +387,7 @@
       "call": "scrape_person",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "3b4491f2f7c9",
+      "program_digest": "e8a0e21ac6f5",
       "seq": 47
     },
     {
@@ -459,6 +462,7 @@
       "call": "scrape_person",
       "kind": "wait_for_selector",
       "operation": "main",
+      "selector": "main",
       "seq": 57,
       "state": "visible",
       "timeout_ms": null
@@ -474,7 +478,7 @@
       "call": "scrape_person",
       "kind": "wait_for_function",
       "operation": "profile_details_ready",
-      "program_digest": "d9bf73e8b7e0",
+      "program_digest": "652e003606ba",
       "seq": 59,
       "timeout_ms": 10000
     },
@@ -490,7 +494,7 @@
       "call": "scrape_person",
       "kind": "locator.derive",
       "locator": "show_more.filtered",
-      "operation": "filter:^Show (more|all)\\b",
+      "operation": "filter:^Show (more|all)\\b/re.IGNORECASE|re.UNICODE",
       "parent": "show_more",
       "seq": 61
     },
@@ -517,7 +521,7 @@
       "call": "scrape_person",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "3b4491f2f7c9",
+      "program_digest": "e8a0e21ac6f5",
       "seq": 64
     },
     {
@@ -592,6 +596,7 @@
       "call": "scrape_person",
       "kind": "wait_for_selector",
       "operation": "main",
+      "selector": "main",
       "seq": 74,
       "state": "visible",
       "timeout_ms": null
@@ -607,7 +612,7 @@
       "call": "scrape_person",
       "kind": "wait_for_function",
       "operation": "profile_details_ready",
-      "program_digest": "d9bf73e8b7e0",
+      "program_digest": "652e003606ba",
       "seq": 76,
       "timeout_ms": 10000
     },
@@ -623,7 +628,7 @@
       "call": "scrape_person",
       "kind": "locator.derive",
       "locator": "show_more.filtered",
-      "operation": "filter:^Show (more|all)\\b",
+      "operation": "filter:^Show (more|all)\\b/re.IGNORECASE|re.UNICODE",
       "parent": "show_more",
       "seq": 78
     },
@@ -650,7 +655,7 @@
       "call": "scrape_person",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "3b4491f2f7c9",
+      "program_digest": "e8a0e21ac6f5",
       "seq": 81
     },
     {
@@ -725,6 +730,7 @@
       "call": "scrape_person",
       "kind": "wait_for_selector",
       "operation": "main",
+      "selector": "main",
       "seq": 91,
       "state": "visible",
       "timeout_ms": null
@@ -740,7 +746,7 @@
       "call": "scrape_person",
       "kind": "wait_for_function",
       "operation": "profile_details_ready",
-      "program_digest": "d9bf73e8b7e0",
+      "program_digest": "652e003606ba",
       "seq": 93,
       "timeout_ms": 10000
     },
@@ -756,7 +762,7 @@
       "call": "scrape_person",
       "kind": "locator.derive",
       "locator": "show_more.filtered",
-      "operation": "filter:^Show (more|all)\\b",
+      "operation": "filter:^Show (more|all)\\b/re.IGNORECASE|re.UNICODE",
       "parent": "show_more",
       "seq": 95
     },
@@ -783,7 +789,7 @@
       "call": "scrape_person",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "3b4491f2f7c9",
+      "program_digest": "e8a0e21ac6f5",
       "seq": 98
     },
     {
@@ -858,6 +864,7 @@
       "call": "scrape_person",
       "kind": "wait_for_selector",
       "operation": "main",
+      "selector": "main",
       "seq": 108,
       "state": "visible",
       "timeout_ms": null
@@ -873,7 +880,7 @@
       "call": "scrape_person",
       "kind": "wait_for_function",
       "operation": "profile_details_ready",
-      "program_digest": "d9bf73e8b7e0",
+      "program_digest": "652e003606ba",
       "seq": 110,
       "timeout_ms": 10000
     },
@@ -889,7 +896,7 @@
       "call": "scrape_person",
       "kind": "locator.derive",
       "locator": "show_more.filtered",
-      "operation": "filter:^Show (more|all)\\b",
+      "operation": "filter:^Show (more|all)\\b/re.IGNORECASE|re.UNICODE",
       "parent": "show_more",
       "seq": 112
     },
@@ -916,7 +923,7 @@
       "call": "scrape_person",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "3b4491f2f7c9",
+      "program_digest": "e8a0e21ac6f5",
       "seq": 115
     },
     {
@@ -991,6 +998,7 @@
       "call": "scrape_person",
       "kind": "wait_for_selector",
       "operation": "main",
+      "selector": "main",
       "seq": 125,
       "state": "visible",
       "timeout_ms": null
@@ -1006,7 +1014,7 @@
       "call": "scrape_person",
       "kind": "wait_for_function",
       "operation": "profile_details_ready",
-      "program_digest": "d9bf73e8b7e0",
+      "program_digest": "652e003606ba",
       "seq": 127,
       "timeout_ms": 10000
     },
@@ -1022,7 +1030,7 @@
       "call": "scrape_person",
       "kind": "locator.derive",
       "locator": "show_more.filtered",
-      "operation": "filter:^Show (more|all)\\b",
+      "operation": "filter:^Show (more|all)\\b/re.IGNORECASE|re.UNICODE",
       "parent": "show_more",
       "seq": 129
     },
@@ -1049,7 +1057,7 @@
       "call": "scrape_person",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "3b4491f2f7c9",
+      "program_digest": "e8a0e21ac6f5",
       "seq": 132
     },
     {
@@ -1124,6 +1132,7 @@
       "call": "scrape_person",
       "kind": "wait_for_selector",
       "operation": "main",
+      "selector": "main",
       "seq": 142,
       "state": "visible",
       "timeout_ms": null
@@ -1139,7 +1148,7 @@
       "call": "scrape_person",
       "kind": "wait_for_function",
       "operation": "profile_details_ready",
-      "program_digest": "d9bf73e8b7e0",
+      "program_digest": "652e003606ba",
       "seq": 144,
       "timeout_ms": 10000
     },
@@ -1155,7 +1164,7 @@
       "call": "scrape_person",
       "kind": "locator.derive",
       "locator": "show_more.filtered",
-      "operation": "filter:^Show (more|all)\\b",
+      "operation": "filter:^Show (more|all)\\b/re.IGNORECASE|re.UNICODE",
       "parent": "show_more",
       "seq": 146
     },
@@ -1182,7 +1191,7 @@
       "call": "scrape_person",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "3b4491f2f7c9",
+      "program_digest": "e8a0e21ac6f5",
       "seq": 149
     },
     {
@@ -1257,6 +1266,7 @@
       "call": "scrape_person",
       "kind": "wait_for_selector",
       "operation": "dialog",
+      "selector": "dialog[open], .artdeco-modal__content",
       "seq": 159,
       "state": "visible",
       "timeout_ms": null
@@ -1272,7 +1282,7 @@
       "call": "scrape_person",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "3b4491f2f7c9",
+      "program_digest": "e8a0e21ac6f5",
       "seq": 160
     },
     {
@@ -1347,6 +1357,7 @@
       "call": "scrape_person",
       "kind": "wait_for_selector",
       "operation": "main",
+      "selector": "main",
       "seq": 170,
       "state": "visible",
       "timeout_ms": null
@@ -1362,7 +1373,7 @@
       "call": "scrape_person",
       "kind": "wait_for_function",
       "operation": "main_text_200",
-      "program_digest": "574db38c5f8a",
+      "program_digest": "24943facf9de",
       "seq": 172,
       "timeout_ms": 10000
     },
@@ -1383,7 +1394,7 @@
       "call": "scrape_person",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "3b4491f2f7c9",
+      "program_digest": "e8a0e21ac6f5",
       "seq": 174
     },
     {
@@ -1403,6 +1414,82 @@
   ],
   "result": {
     "profile_urn": "ACoAA-policy",
+    "references": {
+      "experience": [
+        {
+          "context": "experience",
+          "kind": "company",
+          "text": "Employer 0",
+          "url": "/company/policy-employer-0/"
+        },
+        {
+          "context": "experience",
+          "kind": "company",
+          "text": "Employer 1",
+          "url": "/company/policy-employer-1/"
+        },
+        {
+          "context": "experience",
+          "kind": "company",
+          "text": "Employer 2",
+          "url": "/company/policy-employer-2/"
+        },
+        {
+          "context": "experience",
+          "kind": "company",
+          "text": "Employer 3",
+          "url": "/company/policy-employer-3/"
+        },
+        {
+          "context": "experience",
+          "kind": "company",
+          "text": "Employer 4",
+          "url": "/company/policy-employer-4/"
+        },
+        {
+          "context": "experience",
+          "kind": "company",
+          "text": "Employer 5",
+          "url": "/company/policy-employer-5/"
+        },
+        {
+          "context": "experience",
+          "kind": "company",
+          "text": "Employer 6",
+          "url": "/company/policy-employer-6/"
+        },
+        {
+          "context": "experience",
+          "kind": "company",
+          "text": "Employer 7",
+          "url": "/company/policy-employer-7/"
+        },
+        {
+          "context": "experience",
+          "kind": "company",
+          "text": "Employer 8",
+          "url": "/company/policy-employer-8/"
+        },
+        {
+          "context": "experience",
+          "kind": "company",
+          "text": "Employer 9",
+          "url": "/company/policy-employer-9/"
+        },
+        {
+          "context": "experience",
+          "kind": "company",
+          "text": "Employer 10",
+          "url": "/company/policy-employer-10/"
+        },
+        {
+          "context": "experience",
+          "kind": "company",
+          "text": "Employer 11",
+          "url": "/company/policy-employer-11/"
+        }
+      ]
+    },
     "section_names": [
       "main_profile",
       "experience",
@@ -1415,7 +1502,20 @@
       "projects",
       "contact_info",
       "posts"
-    ]
+    ],
+    "sections": {
+      "certifications": "certifications content",
+      "contact_info": "contact_info content",
+      "education": "education content",
+      "experience": "experience content",
+      "honors": "honors content",
+      "interests": "interests content",
+      "languages": "languages content",
+      "main_profile": "main_profile content",
+      "posts": "posts content",
+      "projects": "projects content",
+      "skills": "skills content"
+    }
   },
   "scenario": "scrape_person__all_sections",
   "schema_version": 1

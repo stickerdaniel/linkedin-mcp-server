@@ -153,7 +153,10 @@ class ScriptedLocator:
             raise AssertionError(
                 f"{self.page.recorder.scenario}: unsupported locator filter {kwargs!r}"
             )
-        text = has_text.pattern if isinstance(has_text, re.Pattern) else has_text
+        if isinstance(has_text, re.Pattern):
+            text = f"{has_text.pattern}/{re.RegexFlag(has_text.flags)}"
+        else:
+            text = has_text
         return self.page._derived_locator(self.semantic_id, f"filter:{text}")
 
     async def _operation(self, name: str, **values: Any) -> Any:
@@ -317,9 +320,11 @@ class ScriptedPage:
         self,
         url: str,
         *,
-        wait_until: str = "domcontentloaded",
-        timeout: int = 30000,
+        wait_until: str | None = None,
+        timeout: int | None = None,
     ) -> None:
+        # Playwright's own defaults, so dropping either argument in production
+        # shows up as a changed trace instead of matching the fake by accident.
         landing = self.goto_landings.popleft() if self.goto_landings else url
         self.url = landing
         self.main_frame.url = landing
@@ -350,6 +355,7 @@ class ScriptedPage:
         self.recorder.record(
             "wait_for_selector",
             operation=operation,
+            selector=selector,
             state=state,
             timeout_ms=timeout,
         )
@@ -455,16 +461,19 @@ def semantic_selector_id(selector: str) -> str:
 
 
 def program_digest(program: str) -> str:
-    """Fingerprint a JavaScript program, ignoring only whitespace layout.
+    """Fingerprint a JavaScript program, ignoring only its indentation.
 
     The operation name alone is matched from a single marker substring, so a
     program can be rewritten around that marker and keep its label. Relocating
     a program between modules changes its indentation and nothing else, which
-    is why the fingerprint collapses whitespace before hashing.
+    is why leading and trailing whitespace per line is dropped before hashing.
+    Whitespace inside a line is kept: a literal that collapses runs of
+    whitespace to one space behaves differently from one that collapses them
+    to two, and both are single-line literals here.
     """
 
-    compact = " ".join(program.split())
-    return sha256(compact.encode("utf-8")).hexdigest()[:12]
+    normalized = "\n".join(line.strip() for line in program.splitlines())
+    return sha256(normalized.encode("utf-8")).hexdigest()[:12]
 
 
 def semantic_program_id(program: str) -> str:

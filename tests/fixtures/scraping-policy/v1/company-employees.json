@@ -65,6 +65,7 @@
       "call": "get_company_employees",
       "kind": "wait_for_selector",
       "operation": "main",
+      "selector": "main",
       "seq": 8,
       "state": "visible",
       "timeout_ms": null
@@ -80,7 +81,7 @@
       "call": "get_company_employees",
       "kind": "wait_for_function",
       "operation": "company_people_ready",
-      "program_digest": "0ce9917e16da",
+      "program_digest": "6615c14bd135",
       "seq": 10,
       "timeout_ms": 5000
     },
@@ -101,7 +102,7 @@
       "call": "get_company_employees",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "3b4491f2f7c9",
+      "program_digest": "e8a0e21ac6f5",
       "seq": 12
     }
   ],

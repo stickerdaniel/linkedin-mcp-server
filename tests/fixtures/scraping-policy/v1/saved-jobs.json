@@ -88,6 +88,7 @@
       "kind": "wait_for_selector",
       "operation": "main",
       "section": "saved_jobs",
+      "selector": "main",
       "seq": 10,
       "state": "visible",
       "timeout_ms": null
@@ -117,7 +118,7 @@
       "call": "get_saved_jobs",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "3b4491f2f7c9",
+      "program_digest": "e8a0e21ac6f5",
       "section": "saved_jobs",
       "seq": 13
     },
@@ -141,7 +142,7 @@
       "call": "get_saved_jobs",
       "kind": "evaluate",
       "operation": "saved_job_total_pages",
-      "program_digest": "92057cf08267",
+      "program_digest": "e1521bdd818a",
       "section": "saved_jobs",
       "seq": 16
     },
@@ -153,7 +154,7 @@
       "call": "get_saved_jobs",
       "kind": "evaluate",
       "operation": "job_ids",
-      "program_digest": "0e4d14dd0bb1",
+      "program_digest": "a9a17a1764bd",
       "section": "saved_jobs",
       "seq": 17
     },
@@ -247,6 +248,7 @@
       "kind": "wait_for_selector",
       "operation": "main",
       "section": "saved_jobs",
+      "selector": "main",
       "seq": 28,
       "state": "visible",
       "timeout_ms": null
@@ -276,7 +278,7 @@
       "call": "get_saved_jobs",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "3b4491f2f7c9",
+      "program_digest": "e8a0e21ac6f5",
       "section": "saved_jobs",
       "seq": 31
     },
@@ -304,7 +306,7 @@
       "call": "get_saved_jobs",
       "kind": "evaluate",
       "operation": "job_ids",
-      "program_digest": "0e4d14dd0bb1",
+      "program_digest": "a9a17a1764bd",
       "section": "saved_jobs",
       "seq": 34
     }

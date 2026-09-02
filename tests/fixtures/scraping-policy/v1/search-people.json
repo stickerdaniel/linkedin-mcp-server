@@ -67,6 +67,7 @@
       "call": "search_people",
       "kind": "wait_for_selector",
       "operation": "main",
+      "selector": "main",
       "seq": 8,
       "state": "visible",
       "timeout_ms": null
@@ -82,7 +83,7 @@
       "call": "search_people",
       "kind": "wait_for_function",
       "operation": "main_text_100",
-      "program_digest": "44e10d4e43ed",
+      "program_digest": "5a4a89d4de2a",
       "seq": 10,
       "timeout_ms": 10000
     },
@@ -103,7 +104,7 @@
       "call": "search_people",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "3b4491f2f7c9",
+      "program_digest": "e8a0e21ac6f5",
       "seq": 12
     }
   ],

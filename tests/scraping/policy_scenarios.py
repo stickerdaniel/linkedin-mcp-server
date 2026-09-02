@@ -32,6 +32,7 @@ TRACE_ROOT = Path(__file__).parents[1] / "fixtures" / "scraping-policy" / "v1"
 
 _COMMON_ALLOWED = {
     "boundary.auth_quick",
+    "boundary.drain",
     "boundary.modal",
     "boundary.rate_limit",
     "boundary.scroll_body",
@@ -83,6 +84,7 @@ class TraceCallbacks(ProgressCallback):
 async def boundaries(recorder: TraceRecorder, clock: FakeClock) -> AsyncIterator[None]:
     real_scroll_body = extractor_module.scroll_to_bottom
     real_scroll_sidebar = extractor_module.scroll_job_sidebar
+    real_drain = extractor_module._drain_listener_tasks
 
     async def trace(_page: Any, label: str, *, extra: Any = None) -> None:
         recorder.record("boundary.trace", label=label, extra=extra)
@@ -122,6 +124,12 @@ async def boundaries(recorder: TraceRecorder, clock: FakeClock) -> AsyncIterator
         clock.advance(0.4)
         return False
 
+    async def drain(tasks: list[Any]) -> None:
+        # The real drain is what runs; the event only marks where it happens,
+        # so swapping it with listener removal shows up as a reordered trace.
+        recorder.record("boundary.drain", pending=len(tasks))
+        await real_drain(tasks)
+
     def diagnostics(error: Exception, **values: Any) -> dict[str, Any]:
         return {
             "error_type": type(error).__name__,
@@ -140,6 +148,7 @@ async def boundaries(recorder: TraceRecorder, clock: FakeClock) -> AsyncIterator
         patch.object(extractor_module, "scroll_to_bottom", scroll_body),
         patch.object(extractor_module, "scroll_job_sidebar", scroll_sidebar),
         patch.object(extractor_module, "build_issue_diagnostics", diagnostics),
+        patch.object(extractor_module, "_drain_listener_tasks", drain),
         patch.object(extractor_module.asyncio, "sleep", clock.sleep),
         patch.object(extractor_module.time, "monotonic", clock.monotonic),
     ):
@@ -193,7 +202,22 @@ async def _person_sections_scenario() -> dict[str, Any]:
     recorder = TraceRecorder(name, _COMMON_ALLOWED)
     clock = FakeClock(recorder)
     page = _page(recorder)
-    roots = [_root(f"{section} content") for section in PERSON_SECTIONS]
+    # 13 valid company anchors against the documented cap of 12 for a section,
+    # so dropping the cap shows up as a fourteenth reference in the trace.
+    overflowing = [
+        {
+            "href": f"https://www.linkedin.com/company/policy-employer-{index}/",
+            "text": f"Employer {index}",
+        }
+        for index in range(13)
+    ]
+    roots = [
+        _root(
+            f"{section} content",
+            overflowing if section == "experience" else None,
+        )
+        for section in PERSON_SECTIONS
+    ]
     page.script("evaluate:root_content", *roots)
     page.script(
         "evaluate:profile_urn",
@@ -201,7 +225,9 @@ async def _person_sections_scenario() -> dict[str, Any]:
     )
     page.declare_locator("main button", "show_more")
     page.declare_derived(
-        "show_more", "filter:^Show (more|all)\\b", "show_more.filtered"
+        "show_more",
+        "filter:^Show (more|all)\\b/re.IGNORECASE|re.UNICODE",
+        "show_more.filtered",
     )
     page.script("show_more.filtered.count", *([0] * 8))
     extractor = _extractor(page)
@@ -222,6 +248,10 @@ async def _person_sections_scenario() -> dict[str, Any]:
         },
         {
             "section_names": list(result["sections"]),
+            # Keep the values, not only the keys: without them, serving every
+            # section the first section's text leaves the trace unchanged.
+            "sections": result["sections"],
+            "references": result.get("references"),
             "profile_urn": result.get("profile_urn"),
         },
     )
@@ -251,7 +281,10 @@ async def _company_sections_scenario() -> dict[str, Any]:
                 "requested": list(COMPANY_SECTIONS),
             },
         },
-        {"section_names": list(result["sections"])},
+        {
+            "section_names": list(result["sections"]),
+            "sections": result["sections"],
+        },
     )
 
 

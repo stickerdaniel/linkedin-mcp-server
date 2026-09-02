@@ -70,6 +70,7 @@
       "kind": "wait_for_selector",
       "operation": "main",
       "section": "main_profile",
+      "selector": "main",
       "seq": 8,
       "state": "visible",
       "timeout_ms": null
@@ -99,7 +100,7 @@
       "call": "get_my_profile",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "3b4491f2f7c9",
+      "program_digest": "e8a0e21ac6f5",
       "section": "main_profile",
       "seq": 11
     },
@@ -107,7 +108,7 @@
       "call": "get_my_profile",
       "kind": "evaluate",
       "operation": "profile_urn",
-      "program_digest": "6f5d854427e8",
+      "program_digest": "adf1074697a7",
       "section": "main_profile",
       "seq": 12
     }
