@@ -76,6 +76,7 @@
       "kind": "wait_for_selector",
       "operation": "main",
       "section": "message",
+      "selector": "main",
       "seq": 8,
       "state": "visible",
       "timeout_ms": null
@@ -91,7 +92,7 @@
       "call": "send_message",
       "kind": "evaluate",
       "operation": "profile_display_name",
-      "program_digest": "dddb5ee4d04d",
+      "program_digest": "a6e221fb7a22",
       "section": "message",
       "seq": 10
     },
@@ -161,6 +162,7 @@
       "kind": "wait_for_selector",
       "operation": "main",
       "section": "message",
+      "selector": "main",
       "seq": 18,
       "state": "visible",
       "timeout_ms": null
@@ -248,7 +250,7 @@
       "call": "send_message",
       "kind": "evaluate",
       "operation": "compose_matches_recipient",
-      "program_digest": "b384412d5444",
+      "program_digest": "72e8cfe97aec",
       "section": "message",
       "seq": 28
     },
@@ -256,7 +258,7 @@
       "call": "send_message",
       "kind": "evaluate",
       "operation": "focus_message_composer",
-      "program_digest": "3d6403eb60d9",
+      "program_digest": "01421825590d",
       "section": "message",
       "seq": 29
     },
@@ -296,7 +298,7 @@
       "call": "send_message",
       "kind": "evaluate",
       "operation": "click_send_button",
-      "program_digest": "361bc1509ac7",
+      "program_digest": "cabf522492be",
       "section": "message",
       "seq": 34
     },
@@ -307,7 +309,7 @@
       "call": "send_message",
       "kind": "wait_for_function",
       "operation": "body_marker",
-      "program_digest": "6a651feb6c31",
+      "program_digest": "67e47cd98bf4",
       "section": "message",
       "seq": 35,
       "timeout_ms": null

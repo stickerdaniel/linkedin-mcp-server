@@ -72,6 +72,7 @@
       "kind": "wait_for_selector",
       "operation": "main",
       "section": "sidebar",
+      "selector": "main",
       "seq": 8,
       "state": "visible",
       "timeout_ms": 5000
@@ -87,7 +88,7 @@
       "call": "get_sidebar_profiles",
       "kind": "evaluate",
       "operation": "sidebar_profiles",
-      "program_digest": "4c21bc1ca711",
+      "program_digest": "ea217564aa26",
       "section": "sidebar",
       "seq": 10
     }

@@ -84,12 +84,16 @@ async def test_registered_tools_and_extractor_delegates_are_counted_separately()
 
 def test_facade_methods_are_exactly_the_frozen_coroutine_surface():
     expected = TOOL_FACADE_METHODS | COMPATIBILITY_METHODS
-
-    assert expected == {
+    # Enumerate the class, not the expectation: iterating over `expected` would
+    # let a newly added public coroutine pass unnoticed.
+    actual = {
         name
-        for name in expected
-        if inspect.iscoroutinefunction(getattr(LinkedInExtractor, name))
+        for name in dir(LinkedInExtractor)
+        if not name.startswith("_")
+        and inspect.iscoroutinefunction(getattr(LinkedInExtractor, name))
     }
+
+    assert actual == expected
     assert len(TOOL_FACADE_METHODS) == 18
     assert len(COMPATIBILITY_METHODS) == 2
 
@@ -109,7 +113,9 @@ async def test_compatibility_helpers_keep_their_browser_behavior():
     page.declare_locator(
         "button, a, [role='button']", "click-candidates", parent="main-scope"
     )
-    page.declare_derived("click-candidates", "filter:^Connect$", "exact-connect")
+    page.declare_derived(
+        "click-candidates", "filter:^Connect$/re.UNICODE", "exact-connect"
+    )
     page.declare_derived("exact-connect", "first", "connect-target")
     page.script("exact-connect.count", 1)
     page.script("connect-target.scroll_into_view", None)

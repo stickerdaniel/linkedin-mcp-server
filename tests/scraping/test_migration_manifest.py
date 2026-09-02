@@ -36,6 +36,7 @@ def test_manifest_matches_every_current_extractor_seam():
         "direct_import",
         "permanent_alias_import",
         "private_patch_object",
+        "boundary_patch_object",
     } <= {seam["kind"] for seam in current["seams"]}
     assert all(seam["canonical_owner"] for seam in current["seams"])
     assert not {
@@ -68,6 +69,37 @@ def test_manifest_covers_production_callers_not_only_tests():
         for seam in current["seams"]
         if seam["path"].startswith("linkedin_mcp_server/")
     } == {"_RATE_LIMITED_MSG", "rate_limited_section_error", "FilterValidationError"}
+
+
+def test_module_boundary_patches_carry_their_own_owner():
+    current = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    boundary = {
+        seam["target"]: seam
+        for seam in current["seams"]
+        if seam["kind"] == "boundary_patch_object"
+    }
+
+    # The trace harness patches these on the extractor module. Each one stops
+    # intercepting once its caller moves, so each needs its own stage rather
+    # than hiding inside the single generic module-alias entry.
+    assert {
+        "record_page_trace",
+        "detect_auth_barrier",
+        "detect_rate_limit",
+        "handle_modal_close",
+        "scroll_to_bottom",
+        "scroll_job_sidebar",
+    } <= set(boundary)
+    assert boundary["detect_rate_limit"]["migration_stage"] == 3
+    assert all(seam["migration_stage"] is not None for seam in boundary.values())
+
+    # A patch reaching a standard-library module through the extractor is
+    # unaffected by relocation and carries no stage.
+    stdlib = [
+        seam for seam in current["seams"] if seam["kind"] == "imported_module_patch"
+    ]
+    assert stdlib
+    assert all(seam["migration_stage"] is None for seam in stdlib)
 
 
 def test_permanent_aliases_never_go_obsolete():

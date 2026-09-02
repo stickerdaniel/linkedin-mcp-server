@@ -74,7 +74,7 @@
       "call": "get_conversation",
       "kind": "wait_for_function",
       "operation": "main_text_minimum",
-      "program_digest": "0b8813cf182c",
+      "program_digest": "9ab4343bf5cb",
       "section": "conversation",
       "seq": 8,
       "timeout_ms": 10000
@@ -93,7 +93,7 @@
       "call": "get_conversation",
       "kind": "evaluate",
       "operation": "scroll_main_region",
-      "program_digest": "cd00c3b162ff",
+      "program_digest": "2a74f7f069d9",
       "section": "conversation",
       "seq": 10
     },
@@ -112,7 +112,7 @@
       "call": "get_conversation",
       "kind": "evaluate",
       "operation": "scroll_main_region",
-      "program_digest": "cd00c3b162ff",
+      "program_digest": "2a74f7f069d9",
       "section": "conversation",
       "seq": 12
     },
@@ -131,7 +131,7 @@
       "call": "get_conversation",
       "kind": "evaluate",
       "operation": "scroll_main_region",
-      "program_digest": "cd00c3b162ff",
+      "program_digest": "2a74f7f069d9",
       "section": "conversation",
       "seq": 14
     },
@@ -152,7 +152,7 @@
       "call": "get_conversation",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "3b4491f2f7c9",
+      "program_digest": "e8a0e21ac6f5",
       "section": "conversation",
       "seq": 16
     }

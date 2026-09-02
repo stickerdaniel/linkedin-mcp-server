@@ -76,6 +76,7 @@
       "call": "scrape_company",
       "kind": "wait_for_selector",
       "operation": "main",
+      "selector": "main",
       "seq": 9,
       "state": "visible",
       "timeout_ms": null
@@ -103,7 +104,7 @@
       "call": "scrape_company",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "3b4491f2f7c9",
+      "program_digest": "e8a0e21ac6f5",
       "seq": 12
     },
     {
@@ -178,6 +179,7 @@
       "call": "scrape_company",
       "kind": "wait_for_selector",
       "operation": "main",
+      "selector": "main",
       "seq": 22,
       "state": "visible",
       "timeout_ms": null
@@ -193,7 +195,7 @@
       "call": "scrape_company",
       "kind": "wait_for_function",
       "operation": "main_text_200",
-      "program_digest": "574db38c5f8a",
+      "program_digest": "24943facf9de",
       "seq": 24,
       "timeout_ms": 10000
     },
@@ -214,7 +216,7 @@
       "call": "scrape_company",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "3b4491f2f7c9",
+      "program_digest": "e8a0e21ac6f5",
       "seq": 26
     },
     {
@@ -289,6 +291,7 @@
       "call": "scrape_company",
       "kind": "wait_for_selector",
       "operation": "main",
+      "selector": "main",
       "seq": 36,
       "state": "visible",
       "timeout_ms": null
@@ -316,7 +319,7 @@
       "call": "scrape_company",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "3b4491f2f7c9",
+      "program_digest": "e8a0e21ac6f5",
       "seq": 39
     },
     {
@@ -339,7 +342,12 @@
       "about",
       "posts",
       "jobs"
-    ]
+    ],
+    "sections": {
+      "about": "about content",
+      "jobs": "jobs content",
+      "posts": "posts content"
+    }
   },
   "scenario": "scrape_company__all_sections",
   "schema_version": 1
