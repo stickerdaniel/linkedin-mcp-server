@@ -429,6 +429,43 @@ _DIALOG_PREMIUM_LINK_SELECTOR = (
 )
 _DIALOG_TEXTAREA_SELECTOR = '[role="dialog"] textarea, dialog textarea'
 
+# --- Share composer (immediate feed post creation) --------------------------
+#
+# The composer renders inside an open shadow root (LinkedIn's SDUI interop
+# surface). Patchright locators pierce shadow roots, so plain CSS works here;
+# `page.evaluate` + `querySelectorAll` does not. Opened by URL
+# (`/feed/?shareActive=true`) rather than by clicking the "Start a post"
+# trigger, whose only stable identity is its label text.
+_COMPOSER_EDITOR_SELECTOR = 'div[role="textbox"][contenteditable="true"]'
+# LinkedIn's modal close button carries this test hook in the composer.
+_COMPOSER_DISMISS_SELECTOR = "button[data-test-modal-close-btn]"
+# Every other actionable button in the composer (emoji, add-media, event,
+# celebrate, more, schedule) carries an `aria-label`; only two do not: the
+# "Post as" author-switch control near the top, and the primary "Post"
+# submit button in the footer. Attribute *presence* (not a class name tied
+# to LinkedIn's layout, and not locale-dependent label text) is what
+# distinguishes both from the rest of the dialog's buttons -- position then
+# tells them apart from each other, since the switch control is the first
+# such button and the submit button is the last.
+_COMPOSER_UNLABELLED_BUTTON_SELECTOR = "button:not([aria-label])"
+
+
+def _labels_match(candidate: str, target: str) -> bool:
+    """Case-insensitive *exact* match of ``target`` against a label's name line.
+
+    Composer author labels carry a trailing audience/action line (observed:
+    ``"Manik Khandelwal\\nPost to Anyone"`` for a profile, and an analogous
+    ``"<Page name>\\nPost to <audience>"`` shape for an organization page),
+    so only the first line is the author's actual name. That first line is
+    compared to ``target`` with exact (not substring) equality: a Page named
+    "Peacock Labs" must not match a request for "Labs", and a request for
+    "Peacock Labs" must not silently match some other label that merely
+    contains it.
+    """
+    name_line = candidate.splitlines()[0] if candidate else ""
+    return name_line.strip().casefold() == target.strip().casefold()
+
+
 _MESSAGING_COMPOSE_LINK_SELECTOR = 'main a[href*="/messaging/compose/"]'
 _MESSAGING_COMPOSE_SELECTOR = (
     'div[role="textbox"][contenteditable="true"][aria-label*="Write a message"]'
@@ -4880,6 +4917,256 @@ class LinkedInExtractor:
             "search_results",
             cleaned,
             references=references,
+        )
+
+    @staticmethod
+    def _post_result(
+        url: str,
+        status: str,
+        message: str,
+        *,
+        posted: bool = False,
+        author: str | None = None,
+        composer_text: str | None = None,
+    ) -> dict[str, Any]:
+        """Build a structured response for the create_post tool."""
+        result: dict[str, Any] = {
+            "url": url,
+            "status": status,
+            "message": message,
+            "posted": posted,
+        }
+        if author is not None:
+            result["author"] = author
+        if composer_text is not None:
+            result["composer_text"] = composer_text
+        return result
+
+    def _composer_dialog(self) -> Any:
+        """The dialog that holds the share composer's editor."""
+        return self._page.locator(_DIALOG_SELECTOR).filter(
+            has=self._page.locator(_COMPOSER_EDITOR_SELECTOR)
+        )
+
+    async def _clear_and_dismiss_composer(self) -> None:
+        """Empty the editor, then close the composer without a draft prompt.
+
+        Escape does not close this composer, and the discard-prompt buttons
+        have no locale-independent identity — but an *empty* composer closes
+        from its Dismiss button without any prompt, so emptiness is the
+        dismissal strategy rather than prompt-button classification.
+        """
+        try:
+            editor = self._page.locator(_COMPOSER_EDITOR_SELECTOR).first
+            if await editor.is_visible():
+                await editor.click(timeout=2000)
+                await self._page.keyboard.press("ControlOrMeta+a")
+                await self._page.keyboard.press("Delete")
+            dismiss = self._page.locator(_COMPOSER_DISMISS_SELECTOR).first
+            await dismiss.click(timeout=3000)
+            await editor.wait_for(state="hidden", timeout=5000)
+        except Exception:
+            logger.debug("Composer dismissal failed", exc_info=True)
+
+    async def _switch_composer_author(self, post_as: str) -> tuple[bool, str | None]:
+        """Try to switch the composer's author to a page/profile matching ``post_as``.
+
+        Returns ``(switched, current_author)``. LinkedIn's composer defaults
+        to the signed-in profile; accounts that admin one or more
+        organization pages get an author-switch control near the top of the
+        dialog. ``post_as`` is matched via an *exact* (case-insensitive,
+        whitespace-normalized) comparison against the full visible option
+        text, never substring containment — a substring match could pick the
+        wrong Page whenever one administered Page's name contains another's,
+        or falsely treat a not-yet-switched composer as already matching. If
+        the switcher cannot be found, or exactly one option does not match
+        ``post_as``, ``switched`` is False and the composer is left on
+        whatever author it already had — callers must not publish in that
+        case, since publishing would go out under the wrong identity.
+        """
+        dialog = self._composer_dialog()
+        switch_button = dialog.locator(_COMPOSER_UNLABELLED_BUTTON_SELECTOR).first
+        try:
+            await switch_button.wait_for(state="visible", timeout=3000)
+        except Exception:
+            return False, None
+
+        try:
+            current_label = (await switch_button.inner_text()).strip()
+        except Exception:
+            current_label = None
+        if current_label and _labels_match(current_label, post_as):
+            return True, current_label
+
+        try:
+            # Opens the "Post settings" dialog, which carries the #ACTOR
+            # toggle (LinkedIn's own semantic id for the author row).
+            await switch_button.click(timeout=5000)
+            settings_dialog = self._page.locator(_DIALOG_SELECTOR).filter(
+                has=self._page.locator("#share-to-linkedin-modal__header")
+            )
+            actor_toggle = settings_dialog.locator("#ACTOR").first
+            await actor_toggle.wait_for(state="visible", timeout=5000)
+            await actor_toggle.click(timeout=5000)
+
+            # The toggle swaps this same dialog's content in place to a
+            # "Posting as" radio list (measured: same dialog element, not a
+            # new one). Every option's full visible text is read and matched
+            # exactly (not via Playwright's substring `has_text`) against
+            # ``post_as``, since post_as is an arbitrary page/profile name
+            # with no other stable identity here; an ambiguous (more than
+            # one exact match) or absent (zero matches) result refuses the
+            # switch rather than guessing.
+            radio_options = settings_dialog.locator(
+                '[role="radiogroup"] button[role="radio"]'
+            )
+            option_count = await radio_options.count()
+            matched_index: int | None = None
+            for i in range(option_count):
+                option_label = (await radio_options.nth(i).inner_text()).strip()
+                if _labels_match(option_label, post_as):
+                    if matched_index is not None:
+                        logger.debug(
+                            "Author switch to %r is ambiguous: multiple options match",
+                            post_as,
+                        )
+                        return False, current_label
+                    matched_index = i
+            if matched_index is None:
+                logger.debug("Author switch to %r found no matching option", post_as)
+                return False, current_label
+
+            option = radio_options.nth(matched_index)
+            await option.wait_for(state="visible", timeout=5000)
+            await option.click(timeout=5000)
+            await asyncio.sleep(0.3)
+
+            # Save (posting-as picker) then Done (post-settings screen) are
+            # each the last visible button in this same dialog once enabled
+            # by the preceding click -- the last-button convention used
+            # elsewhere in this file, scoped to this dialog so hidden
+            # video-player dialogs cannot shift the count.
+            save_button = settings_dialog.locator("button").filter(visible=True).last
+            await save_button.click(timeout=5000)
+            await asyncio.sleep(0.3)
+
+            done_button = settings_dialog.locator("button").filter(visible=True).last
+            await done_button.click(timeout=5000)
+
+            await switch_button.wait_for(state="visible", timeout=5000)
+            new_label = (await switch_button.inner_text()).strip()
+        except Exception:
+            logger.debug("Author switch to %r failed", post_as, exc_info=True)
+            return False, current_label
+
+        return _labels_match(new_label, post_as), new_label
+
+    async def create_post(
+        self,
+        text: str,
+        *,
+        confirm_post: bool,
+        post_as: str | None = None,
+    ) -> dict[str, Any]:
+        """Publish a feed post immediately via LinkedIn's share composer.
+
+        Args:
+            text: The post body.
+            confirm_post: Must be True to actually publish (False does a dry
+                run that opens the composer, optionally switches the author,
+                types the text, and then discards without posting).
+            post_as: Optional author to post as, matched against the
+                composer's author-switch control (e.g. a company page name
+                this account administers). When omitted, the post is
+                published under whichever identity the composer defaults to
+                (normally the signed-in profile). If ``post_as`` is given but
+                the switcher cannot be found or no option matches, the post
+                is refused rather than publishing under the wrong identity.
+        """
+        await self._navigate_to_page("https://www.linkedin.com/feed/?shareActive=true")
+        await detect_rate_limit(self._page)
+
+        editor = self._page.locator(_COMPOSER_EDITOR_SELECTOR).first
+        try:
+            await editor.wait_for(state="visible", timeout=15000)
+        except PlaywrightTimeoutError:
+            return self._post_result(
+                self._page.url,
+                "composer_unavailable",
+                "LinkedIn did not open the share composer.",
+            )
+
+        current_author: str | None = None
+        if post_as:
+            switched, current_author = await self._switch_composer_author(post_as)
+            if not switched:
+                await self._clear_and_dismiss_composer()
+                return self._post_result(
+                    self._page.url,
+                    "author_switch_failed",
+                    f"Could not switch the composer's author to {post_as!r}"
+                    f" (composer showed {current_author!r}); refusing to post"
+                    " under the wrong identity.",
+                    author=current_author,
+                )
+
+        await editor.click(timeout=5000)
+        await self._page.keyboard.press("ControlOrMeta+a")
+        await self._page.keyboard.press("Delete")
+        await self._page.keyboard.type(text, delay=10)
+        await asyncio.sleep(1.0)  # let the composer enable its primary action
+
+        composer_dialog = self._composer_dialog()
+        composer_text = ""
+        try:
+            composer_text = await composer_dialog.first.inner_text()
+        except Exception:
+            logger.debug("Could not read composer text", exc_info=True)
+
+        if not confirm_post:
+            await self._clear_and_dismiss_composer()
+            return self._post_result(
+                self._page.url,
+                "confirmation_required",
+                "Dry run complete. Set confirm_post=true to publish the post.",
+                author=current_author,
+                composer_text=composer_text,
+            )
+
+        # Same attribute-presence selector used for the author switch, scoped
+        # to *this* dialog and taking the last match: the switch control is
+        # the first unlabelled button in the dialog, the "Post" submit
+        # button is the last (see _COMPOSER_UNLABELLED_BUTTON_SELECTOR).
+        primary = composer_dialog.locator(_COMPOSER_UNLABELLED_BUTTON_SELECTOR).last
+        try:
+            if await primary.is_disabled():
+                await self._clear_and_dismiss_composer()
+                return self._post_result(
+                    self._page.url,
+                    "post_unavailable",
+                    "The composer's Post action stayed disabled after typing.",
+                    author=current_author,
+                    composer_text=composer_text,
+                )
+            await primary.click(timeout=8000)
+            await editor.wait_for(state="hidden", timeout=10000)
+        except Exception:
+            await self._clear_and_dismiss_composer()
+            return self._post_result(
+                self._page.url,
+                "post_unconfirmed",
+                "LinkedIn did not confirm that the post was published.",
+                author=current_author,
+                composer_text=composer_text,
+            )
+
+        return self._post_result(
+            self._page.url,
+            "posted",
+            "Post published.",
+            posted=True,
+            author=current_author,
+            composer_text=composer_text,
         )
 
     async def send_message(

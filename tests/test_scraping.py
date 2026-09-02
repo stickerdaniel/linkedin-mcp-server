@@ -6292,7 +6292,150 @@ class TestSearchPosts:
         }
 
 
-class TestStripLinkedInNoise:
+class TestLabelsMatch:
+    """Exact (not substring) label matching used by the author-switch flow.
+
+    Regression coverage for a previously reported bug: substring matching
+    let ``post_as="Labs"`` match "Peacock Labs", and let a not-yet-switched
+    composer be misreported as already matching a short/generic name.
+    """
+
+    def test_exact_match_is_case_insensitive(self):
+        assert extractor_module._labels_match("Peacock Labs", "peacock labs")
+
+    def test_substring_is_not_a_match(self):
+        # A candidate containing the target must not match: this is the
+        # exact bug being regression-tested.
+        assert not extractor_module._labels_match("Peacock Labs", "Labs")
+        assert not extractor_module._labels_match("Labs", "Peacock Labs")
+
+    def test_only_the_first_line_of_a_multiline_label_is_compared(self):
+        # The author-switch button's own text carries a trailing
+        # audience/action line the target should never need to match.
+        assert extractor_module._labels_match(
+            "Peacock Labs\nPost to Anyone", "Peacock Labs"
+        )
+        assert not extractor_module._labels_match(
+            "Manik Khandelwal\nPost to Anyone", "Peacock Labs"
+        )
+
+    def test_empty_candidate_does_not_match(self):
+        assert not extractor_module._labels_match("", "Peacock Labs")
+
+
+class TestSwitchComposerAuthor:
+    async def test_ambiguous_match_refuses_the_switch(self, mock_page):
+        """Two radio options with the same exact label must refuse rather
+        than silently picking one -- an ambiguous match is exactly the
+        situation the exact-match fix must not paper over."""
+        extractor = LinkedInExtractor(mock_page)
+
+        switch_button = MagicMock()
+        switch_button.first = switch_button
+        switch_button.wait_for = AsyncMock()
+        switch_button.inner_text = AsyncMock(
+            return_value="Someone Else\nPost to Anyone"
+        )
+        switch_button.click = AsyncMock()
+
+        composer_dialog = MagicMock()
+        composer_dialog.locator = MagicMock(return_value=switch_button)
+
+        actor_toggle = MagicMock()
+        actor_toggle.first = actor_toggle
+        actor_toggle.wait_for = AsyncMock()
+        actor_toggle.click = AsyncMock()
+
+        radio_1 = MagicMock()
+        radio_1.inner_text = AsyncMock(return_value="Peacock Labs")
+        radio_2 = MagicMock()
+        radio_2.inner_text = AsyncMock(return_value="Peacock Labs")
+        radios = MagicMock()
+        radios.count = AsyncMock(return_value=2)
+        radios.nth = MagicMock(side_effect=[radio_1, radio_2])
+
+        def settings_dialog_locator(selector, **kwargs):
+            if selector == "#ACTOR":
+                return actor_toggle
+            if "radiogroup" in selector:
+                return radios
+            return MagicMock()
+
+        settings_dialog = MagicMock()
+        settings_dialog.locator = MagicMock(side_effect=settings_dialog_locator)
+
+        def page_locator(selector, **kwargs):
+            return settings_dialog
+
+        mock_page.locator = MagicMock(side_effect=page_locator)
+
+        with patch.object(extractor, "_composer_dialog", return_value=composer_dialog):
+            switched, current = await extractor._switch_composer_author("Peacock Labs")
+
+        assert switched is False
+        assert current == "Someone Else\nPost to Anyone"
+
+    async def test_exact_unique_match_switches_and_reports_success(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+
+        switch_button = MagicMock()
+        switch_button.first = switch_button
+        switch_button.wait_for = AsyncMock()
+        switch_button.inner_text = AsyncMock(
+            side_effect=[
+                "Manik Khandelwal\nPost to Anyone",
+                "Peacock Labs\nPost to Anyone",
+            ]
+        )
+        switch_button.click = AsyncMock()
+
+        composer_dialog = MagicMock()
+        composer_dialog.locator = MagicMock(return_value=switch_button)
+
+        actor_toggle = MagicMock()
+        actor_toggle.first = actor_toggle
+        actor_toggle.wait_for = AsyncMock()
+        actor_toggle.click = AsyncMock()
+
+        radio_1 = MagicMock()
+        radio_1.inner_text = AsyncMock(return_value="Manik Khandelwal")
+        radio_2 = MagicMock()
+        radio_2.inner_text = AsyncMock(return_value="Peacock Labs")
+        radio_2.wait_for = AsyncMock()
+        radio_2.click = AsyncMock()
+        radios = MagicMock()
+        radios.count = AsyncMock(return_value=2)
+        radios.nth = MagicMock(side_effect=lambda i: [radio_1, radio_2][i])
+
+        save_button = MagicMock()
+        save_button.click = AsyncMock()
+        done_button = MagicMock()
+        done_button.click = AsyncMock()
+        buttons = MagicMock()
+        buttons.filter = MagicMock(return_value=buttons)
+        buttons.last = save_button
+
+        def settings_dialog_locator(selector, **kwargs):
+            if selector == "#ACTOR":
+                return actor_toggle
+            if "radiogroup" in selector:
+                return radios
+            if selector == "button":
+                return buttons
+            return MagicMock()
+
+        settings_dialog = MagicMock()
+        settings_dialog.locator = MagicMock(side_effect=settings_dialog_locator)
+        settings_dialog.filter = MagicMock(return_value=settings_dialog)
+
+        mock_page.locator = MagicMock(return_value=settings_dialog)
+
+        with patch.object(extractor, "_composer_dialog", return_value=composer_dialog):
+            switched, current = await extractor._switch_composer_author("Peacock Labs")
+
+        assert switched is True
+        assert current == "Peacock Labs\nPost to Anyone"
+
     def test_strips_footer(self):
         text = "Bill Gates\nChair, Gates Foundation\n\nAbout\nAccessibility\nTalent Solutions\nCareers"
         assert strip_linkedin_noise(text) == "Bill Gates\nChair, Gates Foundation"
