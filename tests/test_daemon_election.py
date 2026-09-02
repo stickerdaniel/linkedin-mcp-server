@@ -6352,11 +6352,13 @@ class TestPublishingLast:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
         release = threading.Event()
+        control_read = threading.Event()
         order: list[str] = []
 
         class _SuspendedParent:
             def readline(self) -> str:
                 order.append("control")
+                control_read.set()
                 release.wait()
                 return "commit\n"
 
@@ -6376,6 +6378,7 @@ class TestPublishingLast:
         finally:
             release.set()
 
+        assert control_read.wait(_BOUNDED_CALL_SECONDS)
         assert outcome == 1
         # `control` is appended on the reader thread `_read_control_until` starts.
         # This parent never returns from `readline`, so the main flow reaches its
