@@ -3,7 +3,7 @@
   "name": "io.github.stickerdaniel/linkedin-mcp-server",
   "title": "MCP Server for LinkedIn",
   "description": "Access LinkedIn profiles, companies, jobs and messages through your own logged-in browser session.",
-  "version": "4.23.2",
+  "version": "4.23.3",
   "repository": {
     "url": "https://github.com/stickerdaniel/linkedin-mcp-server",
     "source": "github"
@@ -21,7 +21,7 @@
     {
       "registryType": "pypi",
       "identifier": "mcp-server-linkedin",
-      "version": "4.23.2",
+      "version": "4.23.3",
       "transport": {
         "type": "stdio"
       },
@@ -49,7 +49,7 @@
     },
     {
       "registryType": "oci",
-      "identifier": "docker.io/stickerdaniel/linkedin-mcp-server:4.23.2",
+      "identifier": "docker.io/stickerdaniel/linkedin-mcp-server:4.23.3",
       "transport": {
         "type": "stdio"
       },
