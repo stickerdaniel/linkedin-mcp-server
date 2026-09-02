@@ -1,0 +1,5694 @@
+{
+  "extractor_parent": "c5e5e5a6b142e910374b7b26558addfd49ed7f84",
+  "schema_version": 1,
+  "seams": [
+    {
+      "canonical_owner": "owner-local scraping modules",
+      "kind": "module_alias",
+      "line": 18,
+      "migration_stage": 14,
+      "path": "tests/scraping/policy_scenarios.py",
+      "target": "extractor_module"
+    },
+    {
+      "canonical_owner": "facade.LinkedInExtractor",
+      "kind": "direct_import",
+      "line": 19,
+      "migration_stage": 14,
+      "path": "tests/scraping/policy_scenarios.py",
+      "target": "LinkedInExtractor"
+    },
+    {
+      "canonical_owner": "facade.LinkedInExtractor",
+      "kind": "direct_import",
+      "line": 14,
+      "migration_stage": 14,
+      "path": "tests/scraping/test_facade_contracts.py",
+      "target": "LinkedInExtractor"
+    },
+    {
+      "canonical_owner": "owner-local scraping modules",
+      "kind": "module_alias",
+      "line": 12,
+      "migration_stage": 14,
+      "path": "tests/scraping/test_policy_trace_support.py",
+      "target": "extractor_module"
+    },
+    {
+      "canonical_owner": "connection_actions.ACTION_SIGNALS_JS",
+      "kind": "direct_import",
+      "line": 25,
+      "migration_stage": 7,
+      "path": "tests/test_action_signals_dom.py",
+      "target": "_ACTION_SIGNALS_JS"
+    },
+    {
+      "canonical_owner": "connection_actions.CLICK_INCOMING_ACCEPT_JS",
+      "kind": "direct_import",
+      "line": 25,
+      "migration_stage": 7,
+      "path": "tests/test_action_signals_dom.py",
+      "target": "_CLICK_INCOMING_ACCEPT_JS"
+    },
+    {
+      "canonical_owner": "job_pages.JOB_IDS_JS",
+      "kind": "direct_import",
+      "line": 21,
+      "migration_stage": 9,
+      "path": "tests/test_job_sidebar_scroll_dom.py",
+      "target": "_JOB_IDS_JS"
+    },
+    {
+      "canonical_owner": "owner-local scraping modules",
+      "kind": "module_alias",
+      "line": 25,
+      "migration_stage": 14,
+      "path": "tests/test_scraping.py",
+      "target": "extractor_module"
+    },
+    {
+      "canonical_owner": "contracts.ExtractedSection",
+      "kind": "direct_import",
+      "line": 26,
+      "migration_stage": 1,
+      "path": "tests/test_scraping.py",
+      "target": "ExtractedSection"
+    },
+    {
+      "canonical_owner": "facade.LinkedInExtractor",
+      "kind": "direct_import",
+      "line": 26,
+      "migration_stage": 14,
+      "path": "tests/test_scraping.py",
+      "target": "LinkedInExtractor"
+    },
+    {
+      "canonical_owner": "search_urls.CONTENT_DATE_POSTED_MAP",
+      "kind": "direct_import",
+      "line": 26,
+      "migration_stage": 2,
+      "path": "tests/test_scraping.py",
+      "target": "_CONTENT_DATE_POSTED_MAP"
+    },
+    {
+      "canonical_owner": "contracts.RATE_LIMITED_SECTION_TEXT",
+      "kind": "direct_import",
+      "line": 26,
+      "migration_stage": 1,
+      "path": "tests/test_scraping.py",
+      "target": "_RATE_LIMITED_MSG"
+    },
+    {
+      "canonical_owner": "feed_payload.build_feed_references",
+      "kind": "direct_import",
+      "line": 26,
+      "migration_stage": 1,
+      "path": "tests/test_scraping.py",
+      "target": "_build_feed_references"
+    },
+    {
+      "canonical_owner": "text.truncate_linkedin_noise",
+      "kind": "direct_import",
+      "line": 26,
+      "migration_stage": 1,
+      "path": "tests/test_scraping.py",
+      "target": "_truncate_linkedin_noise"
+    },
+    {
+      "canonical_owner": "text.strip_conversation_chrome",
+      "kind": "direct_import",
+      "line": 26,
+      "migration_stage": 1,
+      "path": "tests/test_scraping.py",
+      "target": "strip_conversation_chrome"
+    },
+    {
+      "canonical_owner": "text.strip_linkedin_noise",
+      "kind": "direct_import",
+      "line": 26,
+      "migration_stage": 1,
+      "path": "tests/test_scraping.py",
+      "target": "strip_linkedin_noise"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_body",
+      "kind": "string_patch",
+      "line": 246,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_to_bottom"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 250,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 254,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "owning service diagnostic boundary",
+      "kind": "string_patch",
+      "line": 297,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.build_issue_diagnostics"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "string_patch",
+      "line": 314,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_auth_barrier"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 331,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_body",
+      "kind": "string_patch",
+      "line": 355,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_to_bottom"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 359,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 363,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 368,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_body",
+      "kind": "string_patch",
+      "line": 404,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_to_bottom"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 408,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 412,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 417,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_body",
+      "kind": "string_patch",
+      "line": 441,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_to_bottom"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 445,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 449,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 467,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 504,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_job_sidebar",
+      "kind": "string_patch",
+      "line": 511,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 516,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 520,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 547,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_job_sidebar",
+      "kind": "string_patch",
+      "line": 554,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 559,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 563,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 591,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 597,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_raise_if_auth_barrier"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_job_sidebar",
+      "kind": "string_patch",
+      "line": 604,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 609,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 653,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 655,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 659,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_job_sidebar",
+      "kind": "string_patch",
+      "line": 664,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 694,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 696,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 700,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_job_sidebar",
+      "kind": "string_patch",
+      "line": 705,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 743,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 745,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 749,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_job_sidebar",
+      "kind": "string_patch",
+      "line": 754,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "string_patch",
+      "line": 758,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_auth_barrier"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 784,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 786,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 790,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_job_sidebar",
+      "kind": "string_patch",
+      "line": 795,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "string_patch",
+      "line": 800,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_auth_barrier"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 825,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 827,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 831,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_job_sidebar",
+      "kind": "string_patch",
+      "line": 836,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "string_patch",
+      "line": 841,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_auth_barrier"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 872,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 874,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 878,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_job_sidebar",
+      "kind": "string_patch",
+      "line": 883,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "string_patch",
+      "line": 887,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_auth_barrier"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 920,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 922,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 926,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_job_sidebar",
+      "kind": "string_patch",
+      "line": 931,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "string_patch",
+      "line": 935,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_auth_barrier"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 979,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 981,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 985,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_job_sidebar",
+      "kind": "string_patch",
+      "line": 990,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 1025,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 1027,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 1031,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_job_sidebar",
+      "kind": "string_patch",
+      "line": 1036,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar"
+    },
+    {
+      "canonical_owner": "content.PageContentReader",
+      "kind": "private_patch_object",
+      "line": 1040,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_root_content"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "string_patch",
+      "line": 1044,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_auth_barrier"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 1076,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 1078,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 1082,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_job_sidebar",
+      "kind": "string_patch",
+      "line": 1087,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 1118,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 1120,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 1124,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_job_sidebar",
+      "kind": "string_patch",
+      "line": 1129,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 1163,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 1165,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 1169,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_job_sidebar",
+      "kind": "string_patch",
+      "line": 1174,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 1201,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 1203,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 1207,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 1244,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 1246,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 1250,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_job_sidebar",
+      "kind": "string_patch",
+      "line": 1255,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 1291,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 1293,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 1297,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_job_sidebar",
+      "kind": "string_patch",
+      "line": 1302,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "string_patch",
+      "line": 1331,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.resolve_remember_me_prompt"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "string_patch",
+      "line": 1336,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_auth_barrier_quick"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "string_patch",
+      "line": 1365,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.resolve_remember_me_prompt"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "string_patch",
+      "line": 1370,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_auth_barrier_quick"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "string_patch",
+      "line": 1399,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.resolve_remember_me_prompt"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "string_patch",
+      "line": 1404,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.record_page_trace"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "string_patch",
+      "line": 1408,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_auth_barrier"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "string_patch",
+      "line": 1449,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.resolve_remember_me_prompt"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "string_patch",
+      "line": 1454,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_auth_barrier"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 1458,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_log_navigation_failure"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "string_patch",
+      "line": 1479,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.resolve_remember_me_prompt"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "string_patch",
+      "line": 1484,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_auth_barrier"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 1488,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_log_navigation_failure"
+    },
+    {
+      "canonical_owner": "capture.SectionCapture",
+      "kind": "private_patch_object",
+      "line": 1517,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_overlay"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 1524,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "capture.SectionCapture",
+      "kind": "private_patch_object",
+      "line": 1544,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_overlay"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 1551,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "capture.SectionCapture",
+      "kind": "private_patch_object",
+      "line": 1579,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_overlay"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 1586,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "capture.SectionCapture",
+      "kind": "private_patch_object",
+      "line": 1625,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_overlay"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 1632,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 1657,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 1685,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "capture.SectionCapture",
+      "kind": "private_patch_object",
+      "line": 1705,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_overlay"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 1712,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "capture.SectionCapture",
+      "kind": "private_patch_object",
+      "line": 1749,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_overlay"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 1756,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "capture.SectionCapture",
+      "kind": "private_patch_object",
+      "line": 1791,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_overlay"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 1798,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "capture.SectionCapture",
+      "kind": "private_patch_object",
+      "line": 1817,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_overlay"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 1824,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "capture.SectionCapture",
+      "kind": "private_patch_object",
+      "line": 1843,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_overlay"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 1850,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "capture.SectionCapture",
+      "kind": "private_patch_object",
+      "line": 1869,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_overlay"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 1876,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "capture.SectionCapture",
+      "kind": "private_patch_object",
+      "line": 1895,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_overlay"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 1902,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2085,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_read_action_signals"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 2091,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2096,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_dialog_is_open"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2102,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_click_dialog_primary_button"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2126,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_read_action_signals"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 2132,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2133,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_dialog_is_open"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2136,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_click_dialog_primary_button"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2193,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_dialog_is_open"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2196,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_get_premium_upsell_message"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2202,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_dismiss_dialog"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2254,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_dialog_is_open"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2262,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_fill_dialog_textarea"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2268,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_click_dialog_primary_button"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2274,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_get_premium_upsell_message"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2280,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_dismiss_dialog"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2297,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_read_action_signals"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 2303,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2304,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_dialog_is_open"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2307,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_dismiss_dialog"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2320,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_read_action_signals"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2338,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_read_action_signals"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2365,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_read_action_signals"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2378,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_open_more_menu"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 2384,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2387,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_dialog_is_open"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2393,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_click_dialog_primary_button"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2419,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_read_action_signals"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2429,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_open_more_menu"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 2435,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2438,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_submit_invite_dialog"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2460,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_read_action_signals"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2469,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_open_more_menu"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 2475,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2478,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_probe_invite_note_limit"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2484,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_submit_invite_dialog"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2508,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_read_action_signals"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2514,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_open_more_menu"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 2520,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2523,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_submit_invite_dialog"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2542,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_read_action_signals"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 2548,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2551,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_submit_invite_dialog"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2574,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_read_action_signals"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2583,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_click_incoming_accept"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 2589,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2594,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_submit_invite_dialog"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2619,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_read_action_signals"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2625,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_click_incoming_accept"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 2637,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2666,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_read_action_signals"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2672,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_click_incoming_accept"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 2679,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2708,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_read_action_signals"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2718,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_click_incoming_accept"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 2725,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2741,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_read_action_signals"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 2747,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2748,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_dialog_is_open"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2751,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_dismiss_dialog"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2834,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_dialog_is_open"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 2837,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_get_premium_upsell_message"
+    },
+    {
+      "canonical_owner": "capture.SectionCapture",
+      "kind": "private_patch_object",
+      "line": 2888,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_overlay"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 2895,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "owning service diagnostic boundary",
+      "kind": "string_patch",
+      "line": 2926,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.build_issue_diagnostics"
+    },
+    {
+      "canonical_owner": "capture.SectionCapture",
+      "kind": "private_patch_object",
+      "line": 2929,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_overlay"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 2936,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "capture.SectionCapture",
+      "kind": "private_patch_object",
+      "line": 2974,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_overlay"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 2981,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "profile_page.ProfilePageReader",
+      "kind": "private_patch_object",
+      "line": 3009,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_profile_urn"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 3016,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "capture.SectionCapture",
+      "kind": "private_patch_object",
+      "line": 3038,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_overlay"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 3045,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 3067,
+      "migration_stage": 8,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 3089,
+      "migration_stage": 8,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 3110,
+      "migration_stage": 8,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 3140,
+      "migration_stage": 8,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "content.PageContentReader",
+      "kind": "private_patch_object",
+      "line": 3179,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_root_content"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_body",
+      "kind": "string_patch",
+      "line": 3186,
+      "migration_stage": 8,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_to_bottom"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 3190,
+      "migration_stage": 8,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 3194,
+      "migration_stage": 8,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 3199,
+      "migration_stage": 8,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3295,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3301,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3307,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 3314,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3326,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3335,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3341,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 3348,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3377,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3382,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3388,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 3395,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 3456,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "content.PageContentReader",
+      "kind": "private_patch_object",
+      "line": 3457,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_root_content"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3463,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3469,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_job_sidebar",
+      "kind": "string_patch",
+      "line": 3476,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 3481,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 3485,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3554,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3560,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3566,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 3573,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3591,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3597,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3603,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 3610,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3641,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3642,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3648,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 3655,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 3709,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "content.PageContentReader",
+      "kind": "private_patch_object",
+      "line": 3710,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_root_content"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3716,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3722,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_job_sidebar",
+      "kind": "string_patch",
+      "line": 3729,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 3734,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 3738,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 3743,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3767,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3772,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3778,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 3785,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3824,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3833,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3839,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 3846,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3886,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3887,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3893,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 3900,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3925,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3934,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3940,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 3947,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3973,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3984,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3990,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 3997,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4019,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4030,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4036,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 4043,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4074,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4079,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4085,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 4092,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4115,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4124,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4130,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 4137,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4194,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4195,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4201,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 4208,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4241,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4247,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4253,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 4260,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4311,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4312,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4318,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 4325,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4369,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4370,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4376,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 4383,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4433,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4434,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4440,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 4447,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4493,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4494,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4500,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 4507,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4523,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4529,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4535,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 4542,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4555,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4561,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4567,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 4574,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4601,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4609,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4615,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 4622,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4637,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4642,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4648,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 4655,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4676,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4685,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4691,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 4698,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4715,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4726,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4732,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 4739,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4777,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4782,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4788,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 4795,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4811,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4821,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4827,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 4834,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 4853,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 4855,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 4859,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_job_sidebar",
+      "kind": "string_patch",
+      "line": 4864,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 4899,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 4901,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 4905,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_job_sidebar",
+      "kind": "string_patch",
+      "line": 4910,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4931,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4940,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4946,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 4953,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4973,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4982,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 4988,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 4995,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5011,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5017,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5023,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 5030,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5045,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5054,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 5061,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5080,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5089,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 5096,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 5169,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 5193,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 5217,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 5247,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 5274,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 5307,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 5309,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 5313,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_body",
+      "kind": "string_patch",
+      "line": 5318,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_to_bottom"
+    },
+    {
+      "canonical_owner": "content.PageContentReader",
+      "kind": "private_patch_object",
+      "line": 5321,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_root_content"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "string_patch",
+      "line": 5325,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_auth_barrier"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 5364,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 5366,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 5370,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_body",
+      "kind": "string_patch",
+      "line": 5375,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_to_bottom"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "string_patch",
+      "line": 5379,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_auth_barrier"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5412,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_saved_jobs_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5418,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5424,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_list_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 5431,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5452,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_saved_jobs_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5458,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5464,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_list_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 5471,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5487,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_saved_jobs_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5496,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5502,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_list_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 5509,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5524,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_saved_jobs_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5531,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5537,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_list_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 5544,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5565,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_saved_jobs_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5568,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5574,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_list_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 5581,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5598,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_saved_jobs_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5603,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5609,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_list_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 5616,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 5640,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 5642,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 5646,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "string_patch",
+      "line": 5651,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_auth_barrier"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 5689,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 5691,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 5695,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_body",
+      "kind": "string_patch",
+      "line": 5700,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_to_bottom"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5718,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_saved_jobs_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5724,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_list_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 5731,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5745,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_saved_jobs_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5751,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_list_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 5758,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5778,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_saved_jobs_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5787,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5793,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_list_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 5800,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5820,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_saved_jobs_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5825,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5831,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_list_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 5838,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5860,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_saved_jobs_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5866,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5872,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_list_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 5879,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5902,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_saved_jobs_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5908,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5914,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_list_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 5921,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5940,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_saved_jobs_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5946,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5952,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_list_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 5959,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5981,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_saved_jobs_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5987,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 5993,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_list_pages"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 6000,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_body",
+      "kind": "string_patch",
+      "line": 6515,
+      "migration_stage": 5,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_to_bottom"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 6519,
+      "migration_stage": 5,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 6523,
+      "migration_stage": 5,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_body",
+      "kind": "string_patch",
+      "line": 6556,
+      "migration_stage": 5,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_to_bottom"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 6560,
+      "migration_stage": 5,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 6564,
+      "migration_stage": 5,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_body",
+      "kind": "string_patch",
+      "line": 6595,
+      "migration_stage": 5,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_to_bottom"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 6599,
+      "migration_stage": 5,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 6603,
+      "migration_stage": 5,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_body",
+      "kind": "string_patch",
+      "line": 6628,
+      "migration_stage": 5,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_to_bottom"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 6632,
+      "migration_stage": 5,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 6636,
+      "migration_stage": 5,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_body",
+      "kind": "string_patch",
+      "line": 6665,
+      "migration_stage": 5,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_to_bottom"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 6669,
+      "migration_stage": 5,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 6673,
+      "migration_stage": 5,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_body",
+      "kind": "string_patch",
+      "line": 6702,
+      "migration_stage": 5,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_to_bottom"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 6706,
+      "migration_stage": 5,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 6710,
+      "migration_stage": 5,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_body",
+      "kind": "string_patch",
+      "line": 6738,
+      "migration_stage": 5,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_to_bottom"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 6742,
+      "migration_stage": 5,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 6746,
+      "migration_stage": 5,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_body",
+      "kind": "string_patch",
+      "line": 6786,
+      "migration_stage": 5,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_to_bottom"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 6790,
+      "migration_stage": 5,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 6794,
+      "migration_stage": 5,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 6799,
+      "migration_stage": 5,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_body",
+      "kind": "string_patch",
+      "line": 6835,
+      "migration_stage": 5,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_to_bottom"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 6839,
+      "migration_stage": 5,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 6843,
+      "migration_stage": 5,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 6848,
+      "migration_stage": 5,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_body",
+      "kind": "string_patch",
+      "line": 6883,
+      "migration_stage": 5,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_to_bottom"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 6887,
+      "migration_stage": 5,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 6891,
+      "migration_stage": 5,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_body",
+      "kind": "string_patch",
+      "line": 6917,
+      "migration_stage": 5,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_to_bottom"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 6921,
+      "migration_stage": 5,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 6925,
+      "migration_stage": 5,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_body",
+      "kind": "string_patch",
+      "line": 6958,
+      "migration_stage": 8,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_to_bottom"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 6962,
+      "migration_stage": 8,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 6966,
+      "migration_stage": 8,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_body",
+      "kind": "string_patch",
+      "line": 7003,
+      "migration_stage": 8,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_to_bottom"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 7007,
+      "migration_stage": 8,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 7011,
+      "migration_stage": 8,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_body",
+      "kind": "string_patch",
+      "line": 7041,
+      "migration_stage": 14,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_to_bottom"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 7045,
+      "migration_stage": 14,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 7049,
+      "migration_stage": 14,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_body",
+      "kind": "string_patch",
+      "line": 7071,
+      "migration_stage": 14,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_to_bottom"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 7075,
+      "migration_stage": 14,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 7079,
+      "migration_stage": 14,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.scroll_body",
+      "kind": "string_patch",
+      "line": 7105,
+      "migration_stage": 14,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_to_bottom"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 7109,
+      "migration_stage": 14,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 7113,
+      "migration_stage": 14,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "capture.SectionCapture",
+      "kind": "private_patch_object",
+      "line": 7144,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_overlay"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 7151,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 7188,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 7212,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 7236,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "capture.SectionCapture",
+      "kind": "private_patch_object",
+      "line": 7254,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_loaded_section"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 7263,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 7265,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "capture.SectionCapture",
+      "kind": "private_patch_object",
+      "line": 7289,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_loaded_section"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 7295,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "contracts.RATE_LIMITED_SECTION_TEXT",
+      "kind": "direct_import",
+      "line": 7310,
+      "migration_stage": 1,
+      "path": "tests/test_scraping.py",
+      "target": "_RATE_LIMITED_MSG"
+    },
+    {
+      "canonical_owner": "capture.SectionCapture",
+      "kind": "private_patch_object",
+      "line": 7313,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_loaded_section"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 7326,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 7358,
+      "migration_stage": 8,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 7406,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 7408,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 7412,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 7417,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 7462,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 7469,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 7473,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 7492,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 7499,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 7503,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 7535,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 7537,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 7541,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 7573,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 7575,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 7579,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 7584,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 7602,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 7604,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 7608,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "profile_page.ProfilePageReader",
+      "kind": "private_patch_object",
+      "line": 7666,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_profile_urn"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 7673,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "profile_page.ProfilePageReader",
+      "kind": "private_patch_object",
+      "line": 7691,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_profile_urn"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 7698,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 7712,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 7718,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 7722,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "conversations.ConversationReader",
+      "kind": "private_patch_object",
+      "line": 7725,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_wait_for_main_text"
+    },
+    {
+      "canonical_owner": "conversations.ConversationReader",
+      "kind": "private_patch_object",
+      "line": 7730,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_scroll_main_scrollable_region"
+    },
+    {
+      "canonical_owner": "content.PageContentReader",
+      "kind": "private_patch_object",
+      "line": 7735,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_root_content"
+    },
+    {
+      "canonical_owner": "text.strip_linkedin_noise",
+      "kind": "string_patch",
+      "line": 7745,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise"
+    },
+    {
+      "canonical_owner": "link_metadata.build_references",
+      "kind": "string_patch",
+      "line": 7749,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.build_references"
+    },
+    {
+      "canonical_owner": "conversations.ConversationReader",
+      "kind": "private_patch_object",
+      "line": 7752,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_conversation_thread_refs"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 7769,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 7771,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 7775,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "conversations.ConversationReader",
+      "kind": "private_patch_object",
+      "line": 7778,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_wait_for_main_text"
+    },
+    {
+      "canonical_owner": "conversations.ConversationReader",
+      "kind": "private_patch_object",
+      "line": 7779,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_scroll_main_scrollable_region"
+    },
+    {
+      "canonical_owner": "content.PageContentReader",
+      "kind": "private_patch_object",
+      "line": 7782,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_root_content"
+    },
+    {
+      "canonical_owner": "text.strip_linkedin_noise",
+      "kind": "string_patch",
+      "line": 7789,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise"
+    },
+    {
+      "canonical_owner": "conversations.ConversationReader",
+      "kind": "private_patch_object",
+      "line": 7792,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_conversation_thread_refs"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 7821,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 7823,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 7827,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "conversations.ConversationReader",
+      "kind": "private_patch_object",
+      "line": 7830,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_wait_for_main_text"
+    },
+    {
+      "canonical_owner": "conversations.ConversationReader",
+      "kind": "private_patch_object",
+      "line": 7831,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_scroll_main_scrollable_region"
+    },
+    {
+      "canonical_owner": "content.PageContentReader",
+      "kind": "private_patch_object",
+      "line": 7834,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_root_content"
+    },
+    {
+      "canonical_owner": "text.strip_linkedin_noise",
+      "kind": "string_patch",
+      "line": 7844,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise"
+    },
+    {
+      "canonical_owner": "link_metadata.build_references",
+      "kind": "string_patch",
+      "line": 7848,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.build_references"
+    },
+    {
+      "canonical_owner": "conversations.ConversationReader",
+      "kind": "private_patch_object",
+      "line": 7851,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_conversation_thread_refs"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 7874,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 7876,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 7880,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "conversations.ConversationReader",
+      "kind": "private_patch_object",
+      "line": 7883,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_wait_for_main_text"
+    },
+    {
+      "canonical_owner": "conversations.ConversationReader",
+      "kind": "private_patch_object",
+      "line": 7884,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_scroll_main_scrollable_region"
+    },
+    {
+      "canonical_owner": "content.PageContentReader",
+      "kind": "private_patch_object",
+      "line": 7887,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_root_content"
+    },
+    {
+      "canonical_owner": "text.strip_linkedin_noise",
+      "kind": "string_patch",
+      "line": 7894,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise"
+    },
+    {
+      "canonical_owner": "link_metadata.build_references",
+      "kind": "string_patch",
+      "line": 7898,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.build_references"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 7920,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 7922,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 7926,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "conversations.ConversationReader",
+      "kind": "private_patch_object",
+      "line": 7929,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_wait_for_main_text"
+    },
+    {
+      "canonical_owner": "conversations.ConversationReader",
+      "kind": "private_patch_object",
+      "line": 7930,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_scroll_main_scrollable_region"
+    },
+    {
+      "canonical_owner": "content.PageContentReader",
+      "kind": "private_patch_object",
+      "line": 7933,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_root_content"
+    },
+    {
+      "canonical_owner": "link_metadata.build_references",
+      "kind": "string_patch",
+      "line": 7940,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.build_references"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 7960,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 7962,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 7966,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "conversations.ConversationReader",
+      "kind": "private_patch_object",
+      "line": 7969,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_wait_for_main_text"
+    },
+    {
+      "canonical_owner": "conversations.ConversationReader",
+      "kind": "private_patch_object",
+      "line": 7970,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_scroll_main_scrollable_region"
+    },
+    {
+      "canonical_owner": "profile_page.ProfilePageReader",
+      "kind": "private_patch_object",
+      "line": 7973,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "_read_profile_display_name"
+    },
+    {
+      "canonical_owner": "conversations.ConversationReader",
+      "kind": "private_patch_object",
+      "line": 7979,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_resolve_conversation_thread_urls"
+    },
+    {
+      "canonical_owner": "content.PageContentReader",
+      "kind": "private_patch_object",
+      "line": 7988,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_root_content"
+    },
+    {
+      "canonical_owner": "text.strip_linkedin_noise",
+      "kind": "string_patch",
+      "line": 7995,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise"
+    },
+    {
+      "canonical_owner": "link_metadata.build_references",
+      "kind": "string_patch",
+      "line": 7999,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.build_references"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 8018,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 8020,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 8024,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "conversations.ConversationReader",
+      "kind": "private_patch_object",
+      "line": 8027,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_wait_for_main_text"
+    },
+    {
+      "canonical_owner": "conversations.ConversationReader",
+      "kind": "private_patch_object",
+      "line": 8028,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_scroll_main_scrollable_region"
+    },
+    {
+      "canonical_owner": "profile_page.ProfilePageReader",
+      "kind": "private_patch_object",
+      "line": 8031,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "_read_profile_display_name"
+    },
+    {
+      "canonical_owner": "conversations.ConversationReader",
+      "kind": "private_patch_object",
+      "line": 8037,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_resolve_conversation_thread_urls"
+    },
+    {
+      "canonical_owner": "content.PageContentReader",
+      "kind": "private_patch_object",
+      "line": 8046,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_root_content"
+    },
+    {
+      "canonical_owner": "text.strip_linkedin_noise",
+      "kind": "string_patch",
+      "line": 8053,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise"
+    },
+    {
+      "canonical_owner": "link_metadata.build_references",
+      "kind": "string_patch",
+      "line": 8057,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.build_references"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 8075,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 8077,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 8081,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "profile_page.ProfilePageReader",
+      "kind": "private_patch_object",
+      "line": 8084,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "_read_profile_display_name"
+    },
+    {
+      "canonical_owner": "conversations.ConversationReader",
+      "kind": "private_patch_object",
+      "line": 8090,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_resolve_conversation_thread_urls"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 8107,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 8109,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 8113,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "profile_page.ProfilePageReader",
+      "kind": "private_patch_object",
+      "line": 8116,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "_read_profile_display_name"
+    },
+    {
+      "canonical_owner": "conversations.ConversationReader",
+      "kind": "private_patch_object",
+      "line": 8122,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_resolve_conversation_thread_urls"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 8194,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 8196,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 8200,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "conversations.ConversationReader",
+      "kind": "private_patch_object",
+      "line": 8203,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_wait_for_main_text"
+    },
+    {
+      "canonical_owner": "conversations.ConversationReader",
+      "kind": "private_patch_object",
+      "line": 8204,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_scroll_main_scrollable_region"
+    },
+    {
+      "canonical_owner": "conversations.ConversationReader",
+      "kind": "private_patch_object",
+      "line": 8207,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_conversation_thread_refs"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 8237,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 8239,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 8243,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "conversations.ConversationReader",
+      "kind": "private_patch_object",
+      "line": 8246,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_wait_for_main_text"
+    },
+    {
+      "canonical_owner": "conversations.ConversationReader",
+      "kind": "private_patch_object",
+      "line": 8247,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_scroll_main_scrollable_region"
+    },
+    {
+      "canonical_owner": "conversations.ConversationReader",
+      "kind": "private_patch_object",
+      "line": 8250,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_conversation_thread_refs"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 8279,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 8281,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 8285,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "conversations.ConversationReader",
+      "kind": "private_patch_object",
+      "line": 8288,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_wait_for_main_text"
+    },
+    {
+      "canonical_owner": "conversations.ConversationReader",
+      "kind": "private_patch_object",
+      "line": 8289,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_scroll_main_scrollable_region"
+    },
+    {
+      "canonical_owner": "conversations.ConversationReader",
+      "kind": "private_patch_object",
+      "line": 8292,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_conversation_thread_refs"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 8332,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 8334,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 8338,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "conversations.ConversationReader",
+      "kind": "private_patch_object",
+      "line": 8341,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_wait_for_main_text"
+    },
+    {
+      "canonical_owner": "content.PageContentReader",
+      "kind": "private_patch_object",
+      "line": 8342,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_root_content"
+    },
+    {
+      "canonical_owner": "text.strip_linkedin_noise",
+      "kind": "string_patch",
+      "line": 8349,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise"
+    },
+    {
+      "canonical_owner": "link_metadata.build_references",
+      "kind": "string_patch",
+      "line": 8353,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.build_references"
+    },
+    {
+      "canonical_owner": "conversations.ConversationReader",
+      "kind": "private_patch_object",
+      "line": 8356,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_conversation_thread_refs"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 8392,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 8394,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 8398,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "conversations.ConversationReader",
+      "kind": "private_patch_object",
+      "line": 8401,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_wait_for_main_text"
+    },
+    {
+      "canonical_owner": "content.PageContentReader",
+      "kind": "private_patch_object",
+      "line": 8402,
+      "migration_stage": 4,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_root_content"
+    },
+    {
+      "canonical_owner": "text.strip_linkedin_noise",
+      "kind": "string_patch",
+      "line": 8409,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise"
+    },
+    {
+      "canonical_owner": "link_metadata.build_references",
+      "kind": "string_patch",
+      "line": 8413,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.build_references"
+    },
+    {
+      "canonical_owner": "conversations.ConversationReader",
+      "kind": "private_patch_object",
+      "line": 8416,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_conversation_thread_refs"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 8439,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 8441,
+      "migration_stage": 12,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 8445,
+      "migration_stage": 12,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "profile_page.ProfilePageReader",
+      "kind": "private_patch_object",
+      "line": 8448,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "_read_profile_display_name"
+    },
+    {
+      "canonical_owner": "message_sender.MessageSender",
+      "kind": "private_patch_object",
+      "line": 8454,
+      "migration_stage": 12,
+      "path": "tests/test_scraping.py",
+      "target": "_resolve_message_compose_href"
+    },
+    {
+      "canonical_owner": "message_sender.MessageSender",
+      "kind": "private_patch_object",
+      "line": 8460,
+      "migration_stage": 12,
+      "path": "tests/test_scraping.py",
+      "target": "_wait_for_message_surface"
+    },
+    {
+      "canonical_owner": "message_sender.MessageSender",
+      "kind": "private_patch_object",
+      "line": 8466,
+      "migration_stage": 12,
+      "path": "tests/test_scraping.py",
+      "target": "_resolve_message_compose_box"
+    },
+    {
+      "canonical_owner": "message_sender.MessageSender",
+      "kind": "private_patch_object",
+      "line": 8472,
+      "migration_stage": 12,
+      "path": "tests/test_scraping.py",
+      "target": "_compose_page_matches_recipient"
+    },
+    {
+      "canonical_owner": "message_sender.MessageSender",
+      "kind": "private_patch_object",
+      "line": 8478,
+      "migration_stage": 12,
+      "path": "tests/test_scraping.py",
+      "target": "_dismiss_message_ui"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 8495,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 8497,
+      "migration_stage": 12,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 8501,
+      "migration_stage": 12,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "profile_page.ProfilePageReader",
+      "kind": "private_patch_object",
+      "line": 8504,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "_read_profile_display_name"
+    },
+    {
+      "canonical_owner": "message_sender.MessageSender",
+      "kind": "private_patch_object",
+      "line": 8510,
+      "migration_stage": 12,
+      "path": "tests/test_scraping.py",
+      "target": "_resolve_message_compose_href"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 8528,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 8530,
+      "migration_stage": 12,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 8534,
+      "migration_stage": 12,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "profile_page.ProfilePageReader",
+      "kind": "private_patch_object",
+      "line": 8537,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "_read_profile_display_name"
+    },
+    {
+      "canonical_owner": "message_sender.MessageSender",
+      "kind": "private_patch_object",
+      "line": 8543,
+      "migration_stage": 12,
+      "path": "tests/test_scraping.py",
+      "target": "_resolve_message_compose_href"
+    },
+    {
+      "canonical_owner": "message_sender.MessageSender",
+      "kind": "private_patch_object",
+      "line": 8549,
+      "migration_stage": 12,
+      "path": "tests/test_scraping.py",
+      "target": "_wait_for_message_surface"
+    },
+    {
+      "canonical_owner": "message_sender.MessageSender",
+      "kind": "private_patch_object",
+      "line": 8555,
+      "migration_stage": 12,
+      "path": "tests/test_scraping.py",
+      "target": "_resolve_message_compose_box"
+    },
+    {
+      "canonical_owner": "message_sender.MessageSender",
+      "kind": "private_patch_object",
+      "line": 8561,
+      "migration_stage": 12,
+      "path": "tests/test_scraping.py",
+      "target": "_compose_page_matches_recipient"
+    },
+    {
+      "canonical_owner": "message_sender.MessageSender",
+      "kind": "private_patch_object",
+      "line": 8567,
+      "migration_stage": 12,
+      "path": "tests/test_scraping.py",
+      "target": "_dismiss_message_ui"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 8593,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 8600,
+      "migration_stage": 12,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 8604,
+      "migration_stage": 12,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "profile_page.ProfilePageReader",
+      "kind": "private_patch_object",
+      "line": 8607,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "_read_profile_display_name"
+    },
+    {
+      "canonical_owner": "message_sender.MessageSender",
+      "kind": "private_patch_object",
+      "line": 8613,
+      "migration_stage": 12,
+      "path": "tests/test_scraping.py",
+      "target": "_wait_for_message_surface"
+    },
+    {
+      "canonical_owner": "message_sender.MessageSender",
+      "kind": "private_patch_object",
+      "line": 8619,
+      "migration_stage": 12,
+      "path": "tests/test_scraping.py",
+      "target": "_resolve_message_compose_box"
+    },
+    {
+      "canonical_owner": "message_sender.MessageSender",
+      "kind": "private_patch_object",
+      "line": 8625,
+      "migration_stage": 12,
+      "path": "tests/test_scraping.py",
+      "target": "_compose_page_matches_recipient"
+    },
+    {
+      "canonical_owner": "message_sender.MessageSender",
+      "kind": "private_patch_object",
+      "line": 8631,
+      "migration_stage": 12,
+      "path": "tests/test_scraping.py",
+      "target": "_dismiss_message_ui"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 8713,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 8715,
+      "migration_stage": 12,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 8719,
+      "migration_stage": 12,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "profile_page.ProfilePageReader",
+      "kind": "private_patch_object",
+      "line": 8722,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "_read_profile_display_name"
+    },
+    {
+      "canonical_owner": "message_sender.MessageSender",
+      "kind": "private_patch_object",
+      "line": 8728,
+      "migration_stage": 12,
+      "path": "tests/test_scraping.py",
+      "target": "_resolve_message_compose_href"
+    },
+    {
+      "canonical_owner": "message_sender.MessageSender",
+      "kind": "private_patch_object",
+      "line": 8734,
+      "migration_stage": 12,
+      "path": "tests/test_scraping.py",
+      "target": "_wait_for_message_surface"
+    },
+    {
+      "canonical_owner": "message_sender.MessageSender",
+      "kind": "private_patch_object",
+      "line": 8740,
+      "migration_stage": 12,
+      "path": "tests/test_scraping.py",
+      "target": "_resolve_message_compose_box"
+    },
+    {
+      "canonical_owner": "message_sender.MessageSender",
+      "kind": "private_patch_object",
+      "line": 8746,
+      "migration_stage": 12,
+      "path": "tests/test_scraping.py",
+      "target": "_compose_page_matches_recipient"
+    },
+    {
+      "canonical_owner": "message_sender.MessageSender",
+      "kind": "private_patch_object",
+      "line": 8752,
+      "migration_stage": 12,
+      "path": "tests/test_scraping.py",
+      "target": "_dismiss_message_ui"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 8758,
+      "migration_stage": 12,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "message_sender.MessageSender",
+      "kind": "private_patch_object",
+      "line": 8785,
+      "migration_stage": 12,
+      "path": "tests/test_scraping.py",
+      "target": "_message_text_visible"
+    },
+    {
+      "canonical_owner": "message_sender.MessageSender",
+      "kind": "private_patch_object",
+      "line": 8852,
+      "migration_stage": 12,
+      "path": "tests/test_scraping.py",
+      "target": "_message_text_visible"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "string_patch",
+      "line": 8996,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.record_page_trace"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "string_patch",
+      "line": 9014,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.resolve_remember_me_prompt"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "string_patch",
+      "line": 9057,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.resolve_remember_me_prompt"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "string_patch",
+      "line": 9100,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.resolve_remember_me_prompt"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 9147,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "session.ScrapingSession.sleep",
+      "kind": "string_patch",
+      "line": 9149,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.asyncio.sleep"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 9184,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "connection_actions.ConnectionActions",
+      "kind": "private_patch_object",
+      "line": 9206,
+      "migration_stage": 7,
+      "path": "tests/test_scraping.py",
+      "target": "_read_action_signals"
+    },
+    {
+      "canonical_owner": "navigation.PageNavigator",
+      "kind": "private_patch_object",
+      "line": 9212,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_navigate_to_page"
+    },
+    {
+      "canonical_owner": "contracts.ExtractedSection",
+      "kind": "direct_import",
+      "line": 10,
+      "migration_stage": 1,
+      "path": "tests/test_tools.py",
+      "target": "ExtractedSection"
+    },
+    {
+      "canonical_owner": "contracts.RATE_LIMITED_SECTION_TEXT",
+      "kind": "direct_import",
+      "line": 10,
+      "migration_stage": 1,
+      "path": "tests/test_tools.py",
+      "target": "_RATE_LIMITED_MSG"
+    },
+    {
+      "canonical_owner": "contracts.FilterValidationError",
+      "kind": "direct_import",
+      "line": 315,
+      "migration_stage": 1,
+      "path": "tests/test_tools.py",
+      "target": "FilterValidationError"
+    },
+    {
+      "canonical_owner": "contracts.FilterValidationError",
+      "kind": "direct_import",
+      "line": 1329,
+      "migration_stage": 1,
+      "path": "tests/test_tools.py",
+      "target": "FilterValidationError"
+    }
+  ]
+}

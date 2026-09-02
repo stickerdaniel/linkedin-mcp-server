@@ -1,0 +1,119 @@
+{
+  "call": {
+    "arguments": {},
+    "method": "get_my_profile"
+  },
+  "events": [
+    {
+      "call": "get_my_profile",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "section": "main_profile",
+      "seq": 1
+    },
+    {
+      "call": "get_my_profile",
+      "extra": {
+        "target_url": "https://www.linkedin.com/in/me/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "section": "main_profile",
+      "seq": 2
+    },
+    {
+      "call": "get_my_profile",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/in/ada-lovelace/",
+      "requested_url": "https://www.linkedin.com/in/me/",
+      "section": "main_profile",
+      "seq": 3,
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "get_my_profile",
+      "extra": {
+        "target_url": "https://www.linkedin.com/in/me/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "section": "main_profile",
+      "seq": 4
+    },
+    {
+      "call": "get_my_profile",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "section": "main_profile",
+      "seq": 5
+    },
+    {
+      "call": "get_my_profile",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "section": "main_profile",
+      "seq": 6
+    },
+    {
+      "call": "get_my_profile",
+      "kind": "boundary.rate_limit",
+      "section": "main_profile",
+      "seq": 7
+    },
+    {
+      "call": "get_my_profile",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "section": "main_profile",
+      "seq": 8,
+      "state": "visible",
+      "timeout_ms": null
+    },
+    {
+      "call": "get_my_profile",
+      "dismissed": false,
+      "kind": "boundary.modal",
+      "section": "main_profile",
+      "seq": 9
+    },
+    {
+      "actual_scrolls": 2,
+      "call": "get_my_profile",
+      "kind": "boundary.scroll_body",
+      "max_scrolls": 5,
+      "pause_time": 0.5,
+      "section": "main_profile",
+      "seq": 10
+    },
+    {
+      "arg": {
+        "selectors": [
+          "main"
+        ]
+      },
+      "call": "get_my_profile",
+      "kind": "evaluate",
+      "operation": "root_content",
+      "section": "main_profile",
+      "seq": 11
+    },
+    {
+      "call": "get_my_profile",
+      "kind": "evaluate",
+      "operation": "profile_urn",
+      "section": "main_profile",
+      "seq": 12
+    }
+  ],
+  "result": {
+    "profile_urn": "ACoAA-self",
+    "url": "https://www.linkedin.com/in/ada-lovelace/"
+  },
+  "scenario": "get_my_profile__baseline",
+  "schema_version": 1
+}

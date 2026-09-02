@@ -1,0 +1,128 @@
+{
+  "call": {
+    "arguments": {
+      "username": "ada-lovelace"
+    },
+    "method": "connect_with_person"
+  },
+  "events": [
+    {
+      "call": "connect_with_person",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "section": "main_profile",
+      "seq": 1
+    },
+    {
+      "call": "connect_with_person",
+      "extra": {
+        "target_url": "https://www.linkedin.com/in/ada-lovelace/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "section": "main_profile",
+      "seq": 2
+    },
+    {
+      "call": "connect_with_person",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/in/ada-lovelace/",
+      "requested_url": "https://www.linkedin.com/in/ada-lovelace/",
+      "section": "main_profile",
+      "seq": 3,
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "connect_with_person",
+      "extra": {
+        "target_url": "https://www.linkedin.com/in/ada-lovelace/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "section": "main_profile",
+      "seq": 4
+    },
+    {
+      "call": "connect_with_person",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "section": "main_profile",
+      "seq": 5
+    },
+    {
+      "call": "connect_with_person",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "section": "main_profile",
+      "seq": 6
+    },
+    {
+      "call": "connect_with_person",
+      "kind": "boundary.rate_limit",
+      "section": "main_profile",
+      "seq": 7
+    },
+    {
+      "call": "connect_with_person",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "section": "main_profile",
+      "seq": 8,
+      "state": "visible",
+      "timeout_ms": null
+    },
+    {
+      "call": "connect_with_person",
+      "dismissed": false,
+      "kind": "boundary.modal",
+      "section": "main_profile",
+      "seq": 9
+    },
+    {
+      "actual_scrolls": 2,
+      "call": "connect_with_person",
+      "kind": "boundary.scroll_body",
+      "max_scrolls": 5,
+      "pause_time": 0.5,
+      "section": "main_profile",
+      "seq": 10
+    },
+    {
+      "arg": {
+        "selectors": [
+          "main"
+        ]
+      },
+      "call": "connect_with_person",
+      "kind": "evaluate",
+      "operation": "root_content",
+      "section": "main_profile",
+      "seq": 11
+    },
+    {
+      "call": "connect_with_person",
+      "kind": "evaluate",
+      "operation": "profile_urn",
+      "section": "main_profile",
+      "seq": 12
+    },
+    {
+      "arg": "ada-lovelace",
+      "call": "connect_with_person",
+      "kind": "evaluate",
+      "operation": "connection_action_signals",
+      "section": "main_profile",
+      "seq": 13
+    }
+  ],
+  "result": {
+    "status": "connect_unavailable"
+  },
+  "scenario": "connect_with_person__self_profile",
+  "schema_version": 1
+}

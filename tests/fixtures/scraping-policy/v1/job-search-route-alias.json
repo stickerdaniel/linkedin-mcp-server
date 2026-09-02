@@ -1,0 +1,509 @@
+{
+  "call": {
+    "arguments": {
+      "keywords": "python",
+      "max_pages": 1
+    },
+    "method": "search_jobs"
+  },
+  "events": [
+    {
+      "call": "search_jobs",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "section": "search_results",
+      "seq": 1
+    },
+    {
+      "call": "search_jobs",
+      "extra": {
+        "target_url": "https://www.linkedin.com/jobs/search/?keywords=python",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "section": "search_results",
+      "seq": 2
+    },
+    {
+      "call": "search_jobs",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/jobs/search-results/?keywords=python",
+      "requested_url": "https://www.linkedin.com/jobs/search/?keywords=python",
+      "section": "search_results",
+      "seq": 3,
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "search_jobs",
+      "extra": {
+        "target_url": "https://www.linkedin.com/jobs/search/?keywords=python",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "section": "search_results",
+      "seq": 4
+    },
+    {
+      "call": "search_jobs",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "section": "search_results",
+      "seq": 5
+    },
+    {
+      "call": "search_jobs",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "section": "search_results",
+      "seq": 6
+    },
+    {
+      "call": "search_jobs",
+      "kind": "boundary.rate_limit",
+      "section": "search_results",
+      "seq": 7
+    },
+    {
+      "call": "search_jobs",
+      "kind": "evaluate",
+      "operation": "document_origin",
+      "section": "search_results",
+      "seq": 8
+    },
+    {
+      "call": "search_jobs",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "section": "search_results",
+      "seq": 9,
+      "state": "visible",
+      "timeout_ms": null
+    },
+    {
+      "call": "search_jobs",
+      "dismissed": false,
+      "kind": "boundary.modal",
+      "section": "search_results",
+      "seq": 10
+    },
+    {
+      "call": "search_jobs",
+      "callback_id": "callback-2",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "section": "search_results",
+      "seq": 11
+    },
+    {
+      "actual_scrolls": 2,
+      "call": "search_jobs",
+      "deadline": 12.0,
+      "kind": "boundary.scroll_sidebar",
+      "max_scrolls": 10,
+      "min_budget": 0.4,
+      "moved": false,
+      "poll_interval": 0.15,
+      "section": "search_results",
+      "seq": 12,
+      "settle_timeout": 3.0
+    },
+    {
+      "call": "search_jobs",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.01,
+      "section": "search_results",
+      "seq": 13
+    },
+    {
+      "call": "search_jobs",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.01,
+      "section": "search_results",
+      "seq": 14
+    },
+    {
+      "call": "search_jobs",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.01,
+      "section": "search_results",
+      "seq": 15
+    },
+    {
+      "call": "search_jobs",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.01,
+      "section": "search_results",
+      "seq": 16
+    },
+    {
+      "call": "search_jobs",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.01,
+      "section": "search_results",
+      "seq": 17
+    },
+    {
+      "call": "search_jobs",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.01,
+      "section": "search_results",
+      "seq": 18
+    },
+    {
+      "call": "search_jobs",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.01,
+      "section": "search_results",
+      "seq": 19
+    },
+    {
+      "call": "search_jobs",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.01,
+      "section": "search_results",
+      "seq": 20
+    },
+    {
+      "call": "search_jobs",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.01,
+      "section": "search_results",
+      "seq": 21
+    },
+    {
+      "call": "search_jobs",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.01,
+      "section": "search_results",
+      "seq": 22
+    },
+    {
+      "call": "search_jobs",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.01,
+      "section": "search_results",
+      "seq": 23
+    },
+    {
+      "call": "search_jobs",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.01,
+      "section": "search_results",
+      "seq": 24
+    },
+    {
+      "call": "search_jobs",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.01,
+      "section": "search_results",
+      "seq": 25
+    },
+    {
+      "call": "search_jobs",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.01,
+      "section": "search_results",
+      "seq": 26
+    },
+    {
+      "call": "search_jobs",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.01,
+      "section": "search_results",
+      "seq": 27
+    },
+    {
+      "call": "search_jobs",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.01,
+      "section": "search_results",
+      "seq": 28
+    },
+    {
+      "call": "search_jobs",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.01,
+      "section": "search_results",
+      "seq": 29
+    },
+    {
+      "call": "search_jobs",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.01,
+      "section": "search_results",
+      "seq": 30
+    },
+    {
+      "call": "search_jobs",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.01,
+      "section": "search_results",
+      "seq": 31
+    },
+    {
+      "call": "search_jobs",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.01,
+      "section": "search_results",
+      "seq": 32
+    },
+    {
+      "call": "search_jobs",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.01,
+      "section": "search_results",
+      "seq": 33
+    },
+    {
+      "call": "search_jobs",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.01,
+      "section": "search_results",
+      "seq": 34
+    },
+    {
+      "call": "search_jobs",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.01,
+      "section": "search_results",
+      "seq": 35
+    },
+    {
+      "call": "search_jobs",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.01,
+      "section": "search_results",
+      "seq": 36
+    },
+    {
+      "call": "search_jobs",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.01,
+      "section": "search_results",
+      "seq": 37
+    },
+    {
+      "call": "search_jobs",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.01,
+      "section": "search_results",
+      "seq": 38
+    },
+    {
+      "call": "search_jobs",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.01,
+      "section": "search_results",
+      "seq": 39
+    },
+    {
+      "call": "search_jobs",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.01,
+      "section": "search_results",
+      "seq": 40
+    },
+    {
+      "call": "search_jobs",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.01,
+      "section": "search_results",
+      "seq": 41
+    },
+    {
+      "call": "search_jobs",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.01,
+      "section": "search_results",
+      "seq": 42
+    },
+    {
+      "call": "search_jobs",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.01,
+      "section": "search_results",
+      "seq": 43
+    },
+    {
+      "call": "search_jobs",
+      "callback_id": "callback-2",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "section": "search_results",
+      "seq": 44
+    },
+    {
+      "arg": {
+        "selectors": [
+          "main"
+        ]
+      },
+      "call": "search_jobs",
+      "kind": "evaluate",
+      "operation": "root_content",
+      "section": "search_results",
+      "seq": 45
+    },
+    {
+      "call": "search_jobs",
+      "kind": "evaluate",
+      "operation": "document_origin",
+      "section": "search_results",
+      "seq": 46
+    },
+    {
+      "call": "search_jobs",
+      "kind": "evaluate",
+      "operation": "job_total_pages",
+      "section": "search_results",
+      "seq": 47
+    },
+    {
+      "arg": {
+        "scoped": true,
+        "selector": "a[href*=\"/jobs/view/\"], [componentkey^=\"job-card-component-ref-\"]"
+      },
+      "call": "search_jobs",
+      "kind": "evaluate",
+      "operation": "job_ids",
+      "section": "search_results",
+      "seq": 48
+    }
+  ],
+  "result": {
+    "job_ids": [
+      "101",
+      "102"
+    ],
+    "references": {
+      "search_results": [
+        {
+          "context": "job result",
+          "kind": "job",
+          "text": "Senior policy engineer",
+          "url": "/jobs/view/101/"
+        },
+        {
+          "context": "search result",
+          "kind": "company",
+          "text": "Company 0",
+          "url": "/company/company-0/"
+        },
+        {
+          "context": "search result",
+          "kind": "company",
+          "text": "Company 1",
+          "url": "/company/company-1/"
+        },
+        {
+          "context": "search result",
+          "kind": "company",
+          "text": "Company 2",
+          "url": "/company/company-2/"
+        },
+        {
+          "context": "search result",
+          "kind": "company",
+          "text": "Company 3",
+          "url": "/company/company-3/"
+        },
+        {
+          "context": "search result",
+          "kind": "company",
+          "text": "Company 4",
+          "url": "/company/company-4/"
+        },
+        {
+          "context": "search result",
+          "kind": "company",
+          "text": "Company 5",
+          "url": "/company/company-5/"
+        },
+        {
+          "context": "search result",
+          "kind": "company",
+          "text": "Company 6",
+          "url": "/company/company-6/"
+        },
+        {
+          "context": "search result",
+          "kind": "company",
+          "text": "Company 7",
+          "url": "/company/company-7/"
+        },
+        {
+          "context": "search result",
+          "kind": "company",
+          "text": "Company 8",
+          "url": "/company/company-8/"
+        },
+        {
+          "context": "search result",
+          "kind": "company",
+          "text": "Company 9",
+          "url": "/company/company-9/"
+        },
+        {
+          "context": "search result",
+          "kind": "company",
+          "text": "Company 10",
+          "url": "/company/company-10/"
+        },
+        {
+          "context": "search result",
+          "kind": "company",
+          "text": "Company 11",
+          "url": "/company/company-11/"
+        },
+        {
+          "context": "search result",
+          "kind": "company",
+          "text": "Company 12",
+          "url": "/company/company-12/"
+        },
+        {
+          "kind": "job",
+          "url": "/jobs/view/102/"
+        }
+      ]
+    }
+  },
+  "scenario": "search_jobs__route_alias",
+  "schema_version": 1
+}

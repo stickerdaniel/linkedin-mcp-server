@@ -1,0 +1,116 @@
+{
+  "call": {
+    "arguments": {
+      "keywords": "analyst",
+      "network": [
+        "F"
+      ]
+    },
+    "method": "search_people"
+  },
+  "events": [
+    {
+      "call": "search_people",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "seq": 1
+    },
+    {
+      "call": "search_people",
+      "extra": {
+        "target_url": "https://www.linkedin.com/search/results/people/?keywords=analyst&network=%5B%22F%22%5D",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "seq": 2
+    },
+    {
+      "call": "search_people",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/search/results/people/?keywords=analyst&network=%5B%22F%22%5D",
+      "requested_url": "https://www.linkedin.com/search/results/people/?keywords=analyst&network=%5B%22F%22%5D",
+      "seq": 3,
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "search_people",
+      "extra": {
+        "target_url": "https://www.linkedin.com/search/results/people/?keywords=analyst&network=%5B%22F%22%5D",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "seq": 4
+    },
+    {
+      "call": "search_people",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "seq": 5
+    },
+    {
+      "call": "search_people",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "seq": 6
+    },
+    {
+      "call": "search_people",
+      "kind": "boundary.rate_limit",
+      "seq": 7
+    },
+    {
+      "call": "search_people",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "seq": 8,
+      "state": "visible",
+      "timeout_ms": null
+    },
+    {
+      "call": "search_people",
+      "dismissed": false,
+      "kind": "boundary.modal",
+      "seq": 9
+    },
+    {
+      "arg": null,
+      "call": "search_people",
+      "kind": "wait_for_function",
+      "operation": "main_text_100",
+      "seq": 10,
+      "timeout_ms": 10000
+    },
+    {
+      "actual_scrolls": 2,
+      "call": "search_people",
+      "kind": "boundary.scroll_body",
+      "max_scrolls": 5,
+      "pause_time": 0.5,
+      "seq": 11
+    },
+    {
+      "arg": {
+        "selectors": [
+          "main"
+        ]
+      },
+      "call": "search_people",
+      "kind": "evaluate",
+      "operation": "root_content",
+      "seq": 12
+    }
+  ],
+  "result": {
+    "section_names": [
+      "search_results"
+    ],
+    "url": "https://www.linkedin.com/search/results/people/?keywords=analyst&network=%5B%22F%22%5D"
+  },
+  "scenario": "search_people__baseline",
+  "schema_version": 1
+}

@@ -1,0 +1,113 @@
+{
+  "call": {
+    "arguments": {
+      "keywords": "engine"
+    },
+    "method": "search_companies"
+  },
+  "events": [
+    {
+      "call": "search_companies",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "seq": 1
+    },
+    {
+      "call": "search_companies",
+      "extra": {
+        "target_url": "https://www.linkedin.com/search/results/companies/?keywords=engine",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "seq": 2
+    },
+    {
+      "call": "search_companies",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/search/results/companies/?keywords=engine",
+      "requested_url": "https://www.linkedin.com/search/results/companies/?keywords=engine",
+      "seq": 3,
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "search_companies",
+      "extra": {
+        "target_url": "https://www.linkedin.com/search/results/companies/?keywords=engine",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "seq": 4
+    },
+    {
+      "call": "search_companies",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "seq": 5
+    },
+    {
+      "call": "search_companies",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "seq": 6
+    },
+    {
+      "call": "search_companies",
+      "kind": "boundary.rate_limit",
+      "seq": 7
+    },
+    {
+      "call": "search_companies",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "seq": 8,
+      "state": "visible",
+      "timeout_ms": null
+    },
+    {
+      "call": "search_companies",
+      "dismissed": false,
+      "kind": "boundary.modal",
+      "seq": 9
+    },
+    {
+      "arg": null,
+      "call": "search_companies",
+      "kind": "wait_for_function",
+      "operation": "main_text_100",
+      "seq": 10,
+      "timeout_ms": 10000
+    },
+    {
+      "actual_scrolls": 2,
+      "call": "search_companies",
+      "kind": "boundary.scroll_body",
+      "max_scrolls": 5,
+      "pause_time": 0.5,
+      "seq": 11
+    },
+    {
+      "arg": {
+        "selectors": [
+          "main"
+        ]
+      },
+      "call": "search_companies",
+      "kind": "evaluate",
+      "operation": "root_content",
+      "seq": 12
+    }
+  ],
+  "result": {
+    "section_names": [
+      "search_results"
+    ],
+    "url": "https://www.linkedin.com/search/results/companies/?keywords=engine"
+  },
+  "scenario": "search_companies__baseline",
+  "schema_version": 1
+}

@@ -1,0 +1,100 @@
+{
+  "call": {
+    "arguments": {
+      "username": "ada-lovelace"
+    },
+    "method": "get_sidebar_profiles"
+  },
+  "events": [
+    {
+      "call": "get_sidebar_profiles",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "section": "sidebar",
+      "seq": 1
+    },
+    {
+      "call": "get_sidebar_profiles",
+      "extra": {
+        "target_url": "https://www.linkedin.com/in/ada-lovelace/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "section": "sidebar",
+      "seq": 2
+    },
+    {
+      "call": "get_sidebar_profiles",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/in/ada-lovelace/",
+      "requested_url": "https://www.linkedin.com/in/ada-lovelace/",
+      "section": "sidebar",
+      "seq": 3,
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "get_sidebar_profiles",
+      "extra": {
+        "target_url": "https://www.linkedin.com/in/ada-lovelace/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "section": "sidebar",
+      "seq": 4
+    },
+    {
+      "call": "get_sidebar_profiles",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "section": "sidebar",
+      "seq": 5
+    },
+    {
+      "call": "get_sidebar_profiles",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "section": "sidebar",
+      "seq": 6
+    },
+    {
+      "call": "get_sidebar_profiles",
+      "kind": "boundary.rate_limit",
+      "section": "sidebar",
+      "seq": 7
+    },
+    {
+      "call": "get_sidebar_profiles",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "section": "sidebar",
+      "seq": 8,
+      "state": "visible",
+      "timeout_ms": 5000
+    },
+    {
+      "call": "get_sidebar_profiles",
+      "dismissed": false,
+      "kind": "boundary.modal",
+      "section": "sidebar",
+      "seq": 9
+    },
+    {
+      "call": "get_sidebar_profiles",
+      "kind": "evaluate",
+      "operation": "sidebar_profiles",
+      "section": "sidebar",
+      "seq": 10
+    }
+  ],
+  "result": {
+    "sidebar_profiles": {},
+    "url": "https://www.linkedin.com/in/ada-lovelace/"
+  },
+  "scenario": "get_sidebar_profiles__baseline",
+  "schema_version": 1
+}

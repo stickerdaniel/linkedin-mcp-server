@@ -1,0 +1,119 @@
+{
+  "call": {
+    "arguments": {
+      "constructor": "Page"
+    },
+    "method": "LinkedInExtractor"
+  },
+  "events": [],
+  "result": {
+    "compatibility_methods": [
+      "click_button_by_text",
+      "get_page_text"
+    ],
+    "methods": {
+      "click_button_by_text": {
+        "coroutine": true,
+        "signature": "(self, text: 'str', *, scope: 'str' = 'main', timeout: 'int' = 5000) -> 'bool'"
+      },
+      "connect_with_person": {
+        "coroutine": true,
+        "signature": "(self, username: 'str', *, note: 'str | None' = None) -> 'dict[str, Any]'"
+      },
+      "extract_feed": {
+        "coroutine": true,
+        "signature": "(self, num_posts: 'int' = 10) -> 'ExtractedSection'"
+      },
+      "extract_page": {
+        "coroutine": true,
+        "signature": "(self, url: 'str', section_name: 'str', max_scrolls: 'int | None' = None) -> 'ExtractedSection'"
+      },
+      "get_company_employees": {
+        "coroutine": true,
+        "signature": "(self, company_name: 'str', keywords: 'str | None' = None) -> 'dict[str, Any]'"
+      },
+      "get_conversation": {
+        "coroutine": true,
+        "signature": "(self, linkedin_username: 'str | None' = None, thread_id: 'str | None' = None, index: 'int' = 0) -> 'dict[str, Any]'"
+      },
+      "get_inbox": {
+        "coroutine": true,
+        "signature": "(self, limit: 'int' = 20) -> 'dict[str, Any]'"
+      },
+      "get_my_profile": {
+        "coroutine": true,
+        "signature": "(self, sections: 'set[str] | None' = None, callbacks: 'ProgressCallback | None' = None, max_scrolls: 'int | None' = None) -> 'dict[str, Any]'"
+      },
+      "get_page_text": {
+        "coroutine": true,
+        "signature": "(self) -> 'str'"
+      },
+      "get_saved_jobs": {
+        "coroutine": true,
+        "signature": "(self, max_pages: 'int' = 3) -> 'dict[str, Any]'"
+      },
+      "get_sidebar_profiles": {
+        "coroutine": true,
+        "signature": "(self, username: 'str') -> 'dict[str, Any]'"
+      },
+      "scrape_company": {
+        "coroutine": true,
+        "signature": "(self, company_name: 'str', requested: 'set[str]', callbacks: 'ProgressCallback | None' = None) -> 'dict[str, Any]'"
+      },
+      "scrape_job": {
+        "coroutine": true,
+        "signature": "(self, job_id: 'str') -> 'dict[str, Any]'"
+      },
+      "scrape_person": {
+        "coroutine": true,
+        "signature": "(self, username: 'str', requested: 'set[str]', callbacks: 'ProgressCallback | None' = None, max_scrolls: 'int | None' = None, *, main_profile_already_loaded: 'bool' = False, allow_self_alias: 'bool' = False) -> 'dict[str, Any]'"
+      },
+      "search_companies": {
+        "coroutine": true,
+        "signature": "(self, keywords: 'str') -> 'dict[str, Any]'"
+      },
+      "search_conversations": {
+        "coroutine": true,
+        "signature": "(self, keywords: 'str', limit: 'int' = 20) -> 'dict[str, Any]'"
+      },
+      "search_jobs": {
+        "coroutine": true,
+        "signature": "(self, keywords: 'str', location: 'str | None' = None, max_pages: 'int' = 3, date_posted: 'str | None' = None, job_type: 'str | None' = None, experience_level: 'str | None' = None, work_type: 'str | None' = None, easy_apply: 'bool' = False, sort_by: 'str | None' = None, tool_timeout: 'float' = 180.0) -> 'dict[str, Any]'"
+      },
+      "search_people": {
+        "coroutine": true,
+        "signature": "(self, keywords: 'str', location: 'str | None' = None, network: 'list[str] | None' = None, current_company: 'str | None' = None) -> 'dict[str, Any]'"
+      },
+      "search_posts": {
+        "coroutine": true,
+        "signature": "(self, keywords: 'str', date_posted: 'str | None' = None, max_pages: 'int' = 3) -> 'dict[str, Any]'"
+      },
+      "send_message": {
+        "coroutine": true,
+        "signature": "(self, linkedin_username: 'str', message: 'str', *, confirm_send: 'bool', profile_urn: 'str | None' = None) -> 'dict[str, Any]'"
+      }
+    },
+    "tool_methods": [
+      "connect_with_person",
+      "extract_feed",
+      "extract_page",
+      "get_company_employees",
+      "get_conversation",
+      "get_inbox",
+      "get_my_profile",
+      "get_saved_jobs",
+      "get_sidebar_profiles",
+      "scrape_company",
+      "scrape_job",
+      "scrape_person",
+      "search_companies",
+      "search_conversations",
+      "search_jobs",
+      "search_people",
+      "search_posts",
+      "send_message"
+    ]
+  },
+  "scenario": "facade_contract",
+  "schema_version": 1
+}

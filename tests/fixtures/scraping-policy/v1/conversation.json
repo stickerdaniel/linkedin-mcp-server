@@ -1,0 +1,163 @@
+{
+  "call": {
+    "arguments": {
+      "thread_id": "2-abc"
+    },
+    "method": "get_conversation"
+  },
+  "events": [
+    {
+      "call": "get_conversation",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "section": "conversation",
+      "seq": 1
+    },
+    {
+      "call": "get_conversation",
+      "extra": {
+        "target_url": "https://www.linkedin.com/messaging/thread/2-abc/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "section": "conversation",
+      "seq": 2
+    },
+    {
+      "call": "get_conversation",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/messaging/thread/2-abc/",
+      "requested_url": "https://www.linkedin.com/messaging/thread/2-abc/",
+      "section": "conversation",
+      "seq": 3,
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "get_conversation",
+      "extra": {
+        "target_url": "https://www.linkedin.com/messaging/thread/2-abc/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "section": "conversation",
+      "seq": 4
+    },
+    {
+      "call": "get_conversation",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "section": "conversation",
+      "seq": 5
+    },
+    {
+      "call": "get_conversation",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "section": "conversation",
+      "seq": 6
+    },
+    {
+      "call": "get_conversation",
+      "kind": "boundary.rate_limit",
+      "section": "conversation",
+      "seq": 7
+    },
+    {
+      "arg": {
+        "minimumLength": 100
+      },
+      "call": "get_conversation",
+      "kind": "wait_for_function",
+      "operation": "main_text_minimum",
+      "section": "conversation",
+      "seq": 8,
+      "timeout_ms": 10000
+    },
+    {
+      "call": "get_conversation",
+      "dismissed": false,
+      "kind": "boundary.modal",
+      "section": "conversation",
+      "seq": 9
+    },
+    {
+      "arg": {
+        "position": "top"
+      },
+      "call": "get_conversation",
+      "kind": "evaluate",
+      "operation": "scroll_main_region",
+      "section": "conversation",
+      "seq": 10
+    },
+    {
+      "call": "get_conversation",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.5,
+      "section": "conversation",
+      "seq": 11
+    },
+    {
+      "arg": {
+        "position": "top"
+      },
+      "call": "get_conversation",
+      "kind": "evaluate",
+      "operation": "scroll_main_region",
+      "section": "conversation",
+      "seq": 12
+    },
+    {
+      "call": "get_conversation",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.5,
+      "section": "conversation",
+      "seq": 13
+    },
+    {
+      "arg": {
+        "position": "top"
+      },
+      "call": "get_conversation",
+      "kind": "evaluate",
+      "operation": "scroll_main_region",
+      "section": "conversation",
+      "seq": 14
+    },
+    {
+      "call": "get_conversation",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.5,
+      "section": "conversation",
+      "seq": 15
+    },
+    {
+      "arg": {
+        "selectors": [
+          "main"
+        ]
+      },
+      "call": "get_conversation",
+      "kind": "evaluate",
+      "operation": "root_content",
+      "section": "conversation",
+      "seq": 16
+    }
+  ],
+  "result": {
+    "section_names": [
+      "conversation"
+    ],
+    "url": "https://www.linkedin.com/messaging/thread/2-abc/"
+  },
+  "scenario": "get_conversation__baseline",
+  "schema_version": 1
+}
