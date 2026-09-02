@@ -6353,7 +6353,10 @@ class TestPublishingLast:
     ):
         release = threading.Event()
         control_read = threading.Event()
+        finished = threading.Event()
         order: list[str] = []
+        outcomes: list[int] = []
+        errors: list[BaseException] = []
 
         class _SuspendedParent:
             def readline(self) -> str:
@@ -6368,22 +6371,41 @@ class TestPublishingLast:
             "warning",
             lambda *args, **kwargs: order.append("logged"),
         )
+
+        def run() -> None:
+            try:
+                outcomes.append(
+                    self._run_serve(
+                        tmp_path,
+                        monkeypatch,
+                        order,
+                        control=_SuspendedParent(),
+                    )
+                )
+            except BaseException as exc:  # noqa: BLE001 - asserted by this test
+                errors.append(exc)
+            finally:
+                finished.set()
+
+        child = threading.Thread(target=run, daemon=True)
+        child.start()
         try:
-            outcome = self._run_serve(
-                tmp_path,
-                monkeypatch,
-                order,
-                control=_SuspendedParent(),
+            assert control_read.wait(_BOUNDED_CALL_SECONDS), (
+                "the owner never started reading the open parent pipe"
+            )
+            assert finished.wait(_BOUNDED_CALL_SECONDS), (
+                "the blocked parent pipe outlived the authorization deadline"
             )
         finally:
             release.set()
+            child.join(timeout=5)
 
-        assert control_read.wait(_BOUNDED_CALL_SECONDS)
-        assert outcome == 1
+        assert not child.is_alive()
+        assert errors == []
+        assert outcomes == [1]
         # `control` is appended on the reader thread `_read_control_until` starts.
-        # This parent never returns from `readline`, so the main flow reaches its
-        # deadline on its own and nothing orders the two against each other. Only
-        # the main flow's sequence is part of what this test verifies.
+        # Once that read is known to be blocked, the main flow reaches its deadline
+        # independently. Only the main flow's sequence is ordered across threads.
         assert order.count("control") == 1
         assert [event for event in order if event != "control"] == [
             "probe",
