@@ -8918,6 +8918,14 @@ class TestVoyagerConversationAction:
         assert result["status"] == "mark_unread"
         mock_page.evaluate.assert_awaited_once()
 
+    async def test_unsupported_action_raises(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+
+        with pytest.raises(ValueError, match="Unsupported conversation action"):
+            await extractor._voyager_conversation_action(
+                "2-abc123==", action="not-a-real-action"
+            )
+
 
 class TestBuildFeedReferences:
     """Tests for _build_feed_references SDUI-capture / DOM-anchor merging."""

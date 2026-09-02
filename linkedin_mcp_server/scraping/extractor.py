@@ -5187,7 +5187,7 @@ class LinkedInExtractor:
                 }""",
                 {"threadId": thread_id},
             )
-        else:
+        elif action in {"archive", "unarchive"}:
             archive_value = action == "archive"
             result = await self._page.evaluate(
                 """async ({ threadId, archiveValue }) => {
@@ -5220,6 +5220,8 @@ class LinkedInExtractor:
                 }""",
                 {"threadId": thread_id, "archiveValue": archive_value},
             )
+        else:
+            raise ValueError(f"Unsupported conversation action: {action}")
 
         if result.get("ok"):
             return self._message_action_result(
