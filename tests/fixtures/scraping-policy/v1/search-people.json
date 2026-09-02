@@ -13,8 +13,7 @@
       "call": "search_people",
       "callback_id": "callback-1",
       "event": "framenavigated",
-      "kind": "listener.add",
-      "seq": 1
+      "kind": "listener.add"
     },
     {
       "call": "search_people",
@@ -23,15 +22,13 @@
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
-      "label": "extractor-before-goto",
-      "seq": 2
+      "label": "extractor-before-goto"
     },
     {
       "call": "search_people",
       "kind": "navigate",
       "landed_url": "https://www.linkedin.com/search/results/people/?keywords=analyst&network=%5B%22F%22%5D",
       "requested_url": "https://www.linkedin.com/search/results/people/?keywords=analyst&network=%5B%22F%22%5D",
-      "seq": 3,
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
     },
@@ -42,41 +39,35 @@
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
-      "label": "extractor-after-goto",
-      "seq": 4
+      "label": "extractor-after-goto"
     },
     {
       "call": "search_people",
       "kind": "boundary.auth_quick",
-      "result": null,
-      "seq": 5
+      "result": null
     },
     {
       "call": "search_people",
       "callback_id": "callback-1",
       "event": "framenavigated",
-      "kind": "listener.remove",
-      "seq": 6
+      "kind": "listener.remove"
     },
     {
       "call": "search_people",
-      "kind": "boundary.rate_limit",
-      "seq": 7
+      "kind": "boundary.rate_limit"
     },
     {
       "call": "search_people",
       "kind": "wait_for_selector",
       "operation": "main",
       "selector": "main",
-      "seq": 8,
       "state": "visible",
       "timeout_ms": null
     },
     {
       "call": "search_people",
       "dismissed": false,
-      "kind": "boundary.modal",
-      "seq": 9
+      "kind": "boundary.modal"
     },
     {
       "arg": null,
@@ -84,7 +75,6 @@
       "kind": "wait_for_function",
       "operation": "main_text_100",
       "program_digest": "5a4a89d4de2a",
-      "seq": 10,
       "timeout_ms": 10000
     },
     {
@@ -92,8 +82,7 @@
       "call": "search_people",
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
-      "pause_time": 0.5,
-      "seq": 11
+      "pause_time": 0.5
     },
     {
       "arg": {
@@ -104,8 +93,7 @@
       "call": "search_people",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "e8a0e21ac6f5",
-      "seq": 12
+      "program_digest": "e8a0e21ac6f5"
     }
   ],
   "result": {

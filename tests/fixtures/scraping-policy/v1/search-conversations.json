@@ -12,8 +12,7 @@
       "callback_id": "callback-1",
       "event": "framenavigated",
       "kind": "listener.add",
-      "section": "conversation",
-      "seq": 1
+      "section": "conversation"
     },
     {
       "call": "search_conversations",
@@ -23,8 +22,7 @@
       },
       "kind": "boundary.trace",
       "label": "extractor-before-goto",
-      "section": "conversation",
-      "seq": 2
+      "section": "conversation"
     },
     {
       "call": "search_conversations",
@@ -32,7 +30,6 @@
       "landed_url": "https://www.linkedin.com/messaging/?searchTerm=engine",
       "requested_url": "https://www.linkedin.com/messaging/?searchTerm=engine",
       "section": "conversation",
-      "seq": 3,
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
     },
@@ -44,36 +41,31 @@
       },
       "kind": "boundary.trace",
       "label": "extractor-after-goto",
-      "section": "conversation",
-      "seq": 4
+      "section": "conversation"
     },
     {
       "call": "search_conversations",
       "kind": "boundary.auth_quick",
       "result": null,
-      "section": "conversation",
-      "seq": 5
+      "section": "conversation"
     },
     {
       "call": "search_conversations",
       "callback_id": "callback-1",
       "event": "framenavigated",
       "kind": "listener.remove",
-      "section": "conversation",
-      "seq": 6
+      "section": "conversation"
     },
     {
       "call": "search_conversations",
       "kind": "boundary.rate_limit",
-      "section": "conversation",
-      "seq": 7
+      "section": "conversation"
     },
     {
       "call": "search_conversations",
       "dismissed": false,
       "kind": "boundary.modal",
-      "section": "conversation",
-      "seq": 8
+      "section": "conversation"
     },
     {
       "arg": {
@@ -84,7 +76,6 @@
       "operation": "main_text_minimum",
       "program_digest": "9ab4343bf5cb",
       "section": "conversation",
-      "seq": 9,
       "timeout_ms": 10000
     },
     {
@@ -97,8 +88,7 @@
       "kind": "evaluate",
       "operation": "root_content",
       "program_digest": "e8a0e21ac6f5",
-      "section": "conversation",
-      "seq": 10
+      "section": "conversation"
     },
     {
       "call": "search_conversations",
@@ -106,7 +96,6 @@
       "operation": "conversation_rows",
       "section": "conversation",
       "selector": "main li label[aria-label]",
-      "seq": 11,
       "state": "attached",
       "timeout_ms": 10000
     }

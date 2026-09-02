@@ -53,7 +53,7 @@ class TraceRecorder:
                 f"{self.scenario}: undeclared operation {kind!r}; "
                 f"allowed={sorted(self.allowed)!r}"
             )
-        event: dict[str, Any] = {"seq": len(self.events) + 1, "kind": kind}
+        event: dict[str, Any] = {"kind": kind}
         if self._call is not None:
             event["call"] = self._call
         if self._section is not None:

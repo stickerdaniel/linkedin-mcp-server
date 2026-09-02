@@ -13,8 +13,7 @@
       "callback_id": "callback-1",
       "event": "framenavigated",
       "kind": "listener.add",
-      "section": "section",
-      "seq": 1
+      "section": "section"
     },
     {
       "call": "extract_page",
@@ -24,8 +23,7 @@
       },
       "kind": "boundary.trace",
       "label": "extractor-before-goto",
-      "section": "section",
-      "seq": 2
+      "section": "section"
     },
     {
       "call": "extract_page",
@@ -33,7 +31,6 @@
       "landed_url": "https://www.linkedin.com/in/ada-lovelace/",
       "requested_url": "https://www.linkedin.com/in/ada-lovelace/",
       "section": "section",
-      "seq": 3,
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
     },
@@ -45,29 +42,25 @@
       },
       "kind": "boundary.trace",
       "label": "extractor-after-goto",
-      "section": "section",
-      "seq": 4
+      "section": "section"
     },
     {
       "call": "extract_page",
       "kind": "boundary.auth_quick",
       "result": null,
-      "section": "section",
-      "seq": 5
+      "section": "section"
     },
     {
       "call": "extract_page",
       "callback_id": "callback-1",
       "event": "framenavigated",
       "kind": "listener.remove",
-      "section": "section",
-      "seq": 6
+      "section": "section"
     },
     {
       "call": "extract_page",
       "kind": "boundary.rate_limit",
-      "section": "section",
-      "seq": 7
+      "section": "section"
     },
     {
       "call": "extract_page",
@@ -75,7 +68,6 @@
       "operation": "main",
       "section": "section",
       "selector": "main",
-      "seq": 8,
       "state": "visible",
       "timeout_ms": null
     },
@@ -83,8 +75,7 @@
       "call": "extract_page",
       "dismissed": false,
       "kind": "boundary.modal",
-      "section": "section",
-      "seq": 9
+      "section": "section"
     },
     {
       "actual_scrolls": 2,
@@ -92,8 +83,7 @@
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
       "pause_time": 0.5,
-      "section": "section",
-      "seq": 10
+      "section": "section"
     },
     {
       "arg": {
@@ -105,8 +95,7 @@
       "kind": "evaluate",
       "operation": "root_content",
       "program_digest": "e8a0e21ac6f5",
-      "section": "section",
-      "seq": 11
+      "section": "section"
     }
   ],
   "result": {

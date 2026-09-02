@@ -89,9 +89,7 @@ async def test_fake_clock_advances_without_wall_clock_delay():
     await clock.sleep(2.5)
 
     assert clock.monotonic() == 12.5
-    assert recorder.events == [
-        {"seq": 1, "kind": "sleep", "reason": "sleep", "seconds": 2.5}
-    ]
+    assert recorder.events == [{"kind": "sleep", "reason": "sleep", "seconds": 2.5}]
 
 
 async def test_listener_drain_waits_two_seconds_then_cancels_with_one_second_cap(
