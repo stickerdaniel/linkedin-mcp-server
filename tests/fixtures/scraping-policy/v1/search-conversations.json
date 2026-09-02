@@ -1,0 +1,119 @@
+{
+  "call": {
+    "arguments": {
+      "keywords": "engine",
+      "limit": 10
+    },
+    "method": "search_conversations"
+  },
+  "events": [
+    {
+      "call": "search_conversations",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "section": "conversation",
+      "seq": 1
+    },
+    {
+      "call": "search_conversations",
+      "extra": {
+        "target_url": "https://www.linkedin.com/messaging/?searchTerm=engine",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "section": "conversation",
+      "seq": 2
+    },
+    {
+      "call": "search_conversations",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/messaging/?searchTerm=engine",
+      "requested_url": "https://www.linkedin.com/messaging/?searchTerm=engine",
+      "section": "conversation",
+      "seq": 3,
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "search_conversations",
+      "extra": {
+        "target_url": "https://www.linkedin.com/messaging/?searchTerm=engine",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "section": "conversation",
+      "seq": 4
+    },
+    {
+      "call": "search_conversations",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "section": "conversation",
+      "seq": 5
+    },
+    {
+      "call": "search_conversations",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "section": "conversation",
+      "seq": 6
+    },
+    {
+      "call": "search_conversations",
+      "kind": "boundary.rate_limit",
+      "section": "conversation",
+      "seq": 7
+    },
+    {
+      "call": "search_conversations",
+      "dismissed": false,
+      "kind": "boundary.modal",
+      "section": "conversation",
+      "seq": 8
+    },
+    {
+      "arg": {
+        "minimumLength": 100
+      },
+      "call": "search_conversations",
+      "kind": "wait_for_function",
+      "operation": "main_text_minimum",
+      "section": "conversation",
+      "seq": 9,
+      "timeout_ms": 10000
+    },
+    {
+      "arg": {
+        "selectors": [
+          "main"
+        ]
+      },
+      "call": "search_conversations",
+      "kind": "evaluate",
+      "operation": "root_content",
+      "section": "conversation",
+      "seq": 10
+    },
+    {
+      "call": "search_conversations",
+      "kind": "wait_for_selector",
+      "operation": "conversation_rows",
+      "section": "conversation",
+      "seq": 11,
+      "state": "attached",
+      "timeout_ms": 10000
+    }
+  ],
+  "result": {
+    "section_names": [
+      "search_results"
+    ],
+    "url": "https://www.linkedin.com/messaging/?searchTerm=engine"
+  },
+  "scenario": "search_conversations__baseline",
+  "schema_version": 1
+}

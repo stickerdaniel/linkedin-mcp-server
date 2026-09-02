@@ -1,0 +1,116 @@
+{
+  "call": {
+    "arguments": {
+      "max_scrolls": null,
+      "section_name": "section",
+      "url": "https://www.linkedin.com/in/ada-lovelace/"
+    },
+    "method": "extract_page"
+  },
+  "events": [
+    {
+      "call": "extract_page",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "section": "section",
+      "seq": 1
+    },
+    {
+      "call": "extract_page",
+      "extra": {
+        "target_url": "https://www.linkedin.com/in/ada-lovelace/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "section": "section",
+      "seq": 2
+    },
+    {
+      "call": "extract_page",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/in/ada-lovelace/",
+      "requested_url": "https://www.linkedin.com/in/ada-lovelace/",
+      "section": "section",
+      "seq": 3,
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "extract_page",
+      "extra": {
+        "target_url": "https://www.linkedin.com/in/ada-lovelace/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "section": "section",
+      "seq": 4
+    },
+    {
+      "call": "extract_page",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "section": "section",
+      "seq": 5
+    },
+    {
+      "call": "extract_page",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "section": "section",
+      "seq": 6
+    },
+    {
+      "call": "extract_page",
+      "kind": "boundary.rate_limit",
+      "section": "section",
+      "seq": 7
+    },
+    {
+      "call": "extract_page",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "section": "section",
+      "seq": 8,
+      "state": "visible",
+      "timeout_ms": null
+    },
+    {
+      "call": "extract_page",
+      "dismissed": false,
+      "kind": "boundary.modal",
+      "section": "section",
+      "seq": 9
+    },
+    {
+      "actual_scrolls": 2,
+      "call": "extract_page",
+      "kind": "boundary.scroll_body",
+      "max_scrolls": 5,
+      "pause_time": 0.5,
+      "section": "section",
+      "seq": 10
+    },
+    {
+      "arg": {
+        "selectors": [
+          "main"
+        ]
+      },
+      "call": "extract_page",
+      "kind": "evaluate",
+      "operation": "root_content",
+      "section": "section",
+      "seq": 11
+    }
+  ],
+  "result": {
+    "references": [],
+    "text": "Policy content"
+  },
+  "scenario": "extract_page__ordinary",
+  "schema_version": 1
+}

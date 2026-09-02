@@ -1,0 +1,342 @@
+{
+  "call": {
+    "arguments": {
+      "company_name": "analytical-engine",
+      "requested": [
+        "about",
+        "posts",
+        "jobs"
+      ]
+    },
+    "method": "scrape_company"
+  },
+  "events": [
+    {
+      "call": "scrape_company",
+      "kind": "callback.start",
+      "operation": "company profile",
+      "seq": 1,
+      "url": "https://www.linkedin.com/company/analytical-engine"
+    },
+    {
+      "call": "scrape_company",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "seq": 2
+    },
+    {
+      "call": "scrape_company",
+      "extra": {
+        "target_url": "https://www.linkedin.com/company/analytical-engine/about/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "seq": 3
+    },
+    {
+      "call": "scrape_company",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/company/analytical-engine/about/",
+      "requested_url": "https://www.linkedin.com/company/analytical-engine/about/",
+      "seq": 4,
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "scrape_company",
+      "extra": {
+        "target_url": "https://www.linkedin.com/company/analytical-engine/about/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "seq": 5
+    },
+    {
+      "call": "scrape_company",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "seq": 6
+    },
+    {
+      "call": "scrape_company",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "seq": 7
+    },
+    {
+      "call": "scrape_company",
+      "kind": "boundary.rate_limit",
+      "seq": 8
+    },
+    {
+      "call": "scrape_company",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "seq": 9,
+      "state": "visible",
+      "timeout_ms": null
+    },
+    {
+      "call": "scrape_company",
+      "dismissed": false,
+      "kind": "boundary.modal",
+      "seq": 10
+    },
+    {
+      "actual_scrolls": 2,
+      "call": "scrape_company",
+      "kind": "boundary.scroll_body",
+      "max_scrolls": 5,
+      "pause_time": 0.5,
+      "seq": 11
+    },
+    {
+      "arg": {
+        "selectors": [
+          "main"
+        ]
+      },
+      "call": "scrape_company",
+      "kind": "evaluate",
+      "operation": "root_content",
+      "seq": 12
+    },
+    {
+      "call": "scrape_company",
+      "kind": "callback.progress",
+      "message": "Scraped about (1/3)",
+      "percent": 32,
+      "seq": 13
+    },
+    {
+      "call": "scrape_company",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 2.0,
+      "seq": 14
+    },
+    {
+      "call": "scrape_company",
+      "callback_id": "callback-2",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "seq": 15
+    },
+    {
+      "call": "scrape_company",
+      "extra": {
+        "target_url": "https://www.linkedin.com/company/analytical-engine/posts/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "seq": 16
+    },
+    {
+      "call": "scrape_company",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/company/analytical-engine/posts/",
+      "requested_url": "https://www.linkedin.com/company/analytical-engine/posts/",
+      "seq": 17,
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "scrape_company",
+      "extra": {
+        "target_url": "https://www.linkedin.com/company/analytical-engine/posts/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "seq": 18
+    },
+    {
+      "call": "scrape_company",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "seq": 19
+    },
+    {
+      "call": "scrape_company",
+      "callback_id": "callback-2",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "seq": 20
+    },
+    {
+      "call": "scrape_company",
+      "kind": "boundary.rate_limit",
+      "seq": 21
+    },
+    {
+      "call": "scrape_company",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "seq": 22,
+      "state": "visible",
+      "timeout_ms": null
+    },
+    {
+      "call": "scrape_company",
+      "dismissed": false,
+      "kind": "boundary.modal",
+      "seq": 23
+    },
+    {
+      "arg": null,
+      "call": "scrape_company",
+      "kind": "wait_for_function",
+      "operation": "main_text_200",
+      "seq": 24,
+      "timeout_ms": 10000
+    },
+    {
+      "actual_scrolls": 2,
+      "call": "scrape_company",
+      "kind": "boundary.scroll_body",
+      "max_scrolls": 10,
+      "pause_time": 1.0,
+      "seq": 25
+    },
+    {
+      "arg": {
+        "selectors": [
+          "main"
+        ]
+      },
+      "call": "scrape_company",
+      "kind": "evaluate",
+      "operation": "root_content",
+      "seq": 26
+    },
+    {
+      "call": "scrape_company",
+      "kind": "callback.progress",
+      "message": "Scraped posts (2/3)",
+      "percent": 63,
+      "seq": 27
+    },
+    {
+      "call": "scrape_company",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 2.0,
+      "seq": 28
+    },
+    {
+      "call": "scrape_company",
+      "callback_id": "callback-3",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "seq": 29
+    },
+    {
+      "call": "scrape_company",
+      "extra": {
+        "target_url": "https://www.linkedin.com/company/analytical-engine/jobs/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "seq": 30
+    },
+    {
+      "call": "scrape_company",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/company/analytical-engine/jobs/",
+      "requested_url": "https://www.linkedin.com/company/analytical-engine/jobs/",
+      "seq": 31,
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "scrape_company",
+      "extra": {
+        "target_url": "https://www.linkedin.com/company/analytical-engine/jobs/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "seq": 32
+    },
+    {
+      "call": "scrape_company",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "seq": 33
+    },
+    {
+      "call": "scrape_company",
+      "callback_id": "callback-3",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "seq": 34
+    },
+    {
+      "call": "scrape_company",
+      "kind": "boundary.rate_limit",
+      "seq": 35
+    },
+    {
+      "call": "scrape_company",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "seq": 36,
+      "state": "visible",
+      "timeout_ms": null
+    },
+    {
+      "call": "scrape_company",
+      "dismissed": false,
+      "kind": "boundary.modal",
+      "seq": 37
+    },
+    {
+      "actual_scrolls": 2,
+      "call": "scrape_company",
+      "kind": "boundary.scroll_body",
+      "max_scrolls": 5,
+      "pause_time": 0.5,
+      "seq": 38
+    },
+    {
+      "arg": {
+        "selectors": [
+          "main"
+        ]
+      },
+      "call": "scrape_company",
+      "kind": "evaluate",
+      "operation": "root_content",
+      "seq": 39
+    },
+    {
+      "call": "scrape_company",
+      "kind": "callback.progress",
+      "message": "Scraped jobs (3/3)",
+      "percent": 95,
+      "seq": 40
+    },
+    {
+      "call": "scrape_company",
+      "kind": "callback.complete",
+      "operation": "company profile",
+      "result_url": "https://www.linkedin.com/company/analytical-engine/",
+      "seq": 41
+    }
+  ],
+  "result": {
+    "section_names": [
+      "about",
+      "posts",
+      "jobs"
+    ]
+  },
+  "scenario": "scrape_company__all_sections",
+  "schema_version": 1
+}
