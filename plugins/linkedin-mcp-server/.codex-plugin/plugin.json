@@ -1,0 +1,42 @@
+{
+  "name": "linkedin-mcp-server",
+  "version": "4.23.3",
+  "description": "Research LinkedIn through a local, browser-backed MCP server.",
+  "author": {
+    "name": "Daniel Sticker",
+    "email": "daniel@sticker.name",
+    "url": "https://daniel.sticker.name/"
+  },
+  "homepage": "https://github.com/stickerdaniel/linkedin-mcp-server",
+  "repository": "https://github.com/stickerdaniel/linkedin-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": [
+    "linkedin",
+    "mcp",
+    "jobs",
+    "recruiting"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "LinkedIn MCP",
+    "shortDescription": "Research profiles, companies, jobs, posts, and messages.",
+    "longDescription": "Use your own LinkedIn browser session to research profiles, companies, jobs, posts, and messages in Codex. Write actions require an explicit request. This is an independent open-source integration and is not affiliated with LinkedIn.",
+    "developerName": "Daniel Sticker",
+    "category": "Business & Operations",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/stickerdaniel/linkedin-mcp-server",
+    "defaultPrompt": [
+      "Show my LinkedIn profile.",
+      "Research a company on LinkedIn.",
+      "Find LinkedIn jobs that match my criteria."
+    ],
+    "brandColor": "#0A66C2",
+    "composerIcon": "./assets/icon.svg",
+    "logo": "./assets/icon.svg"
+  },
+  "mcpServers": "./.mcp.json"
+}
