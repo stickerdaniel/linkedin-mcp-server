@@ -194,6 +194,48 @@ jobs:
           PY
           echo "✅ Updated server.json to version $VERSION"
 
+      - name: Update Codex plugin version
+        run: |
+          set -e
+          python3 - "$VERSION" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          version = sys.argv[1]
+          manifest_path = Path(
+              "plugins/linkedin-mcp-server/.codex-plugin/plugin.json"
+          )
+          mcp_path = Path("plugins/linkedin-mcp-server/.mcp.json")
+
+          plugin = json.loads(manifest_path.read_text(encoding="utf-8"))
+          plugin["version"] = version
+
+          mcp = json.loads(mcp_path.read_text(encoding="utf-8"))
+          args = mcp["mcpServers"]["linkedin"]["args"]
+          package_args = [
+              index
+              for index, value in enumerate(args)
+              if value.startswith("mcp-server-linkedin@")
+          ]
+          if len(package_args) != 1:
+              raise SystemExit(
+                  "Codex plugin must contain exactly one versioned "
+                  "mcp-server-linkedin package argument"
+              )
+          args[package_args[0]] = f"mcp-server-linkedin@{version}"
+
+          manifest_path.write_text(
+              json.dumps(plugin, indent=2, ensure_ascii=False) + "\n",
+              encoding="utf-8",
+          )
+          mcp_path.write_text(
+              json.dumps(mcp, indent=2, ensure_ascii=False) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          echo "✅ Updated Codex plugin to version $VERSION"
+
       # The rewrites above are text edits that report success whatever they
       # matched, so this asks every file that carries the version what it now
       # says. Rendering the compose file is also what proves it still parses;
@@ -215,6 +257,16 @@ jobs:
           version = sys.argv[1]
           server = json.loads(Path("server.json").read_text(encoding="utf-8"))
           manifest = json.loads(Path("manifest.json").read_text(encoding="utf-8"))
+          plugin = json.loads(
+              Path(
+                  "plugins/linkedin-mcp-server/.codex-plugin/plugin.json"
+              ).read_text(encoding="utf-8")
+          )
+          plugin_mcp = json.loads(
+              Path("plugins/linkedin-mcp-server/.mcp.json").read_text(
+                  encoding="utf-8"
+              )
+          )
           project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
           name = project["project"]["name"]
           image = next(
@@ -262,6 +314,12 @@ jobs:
                   if p["registryType"] == "oci"
               ],
               "docker-compose.yml": [tag(image) for image in images],
+              "Codex plugin": [plugin["version"]],
+              "Codex plugin MCP": [
+                  value.removeprefix("mcp-server-linkedin@")
+                  for value in plugin_mcp["mcpServers"]["linkedin"]["args"]
+                  if value.startswith("mcp-server-linkedin@")
+              ],
           }
           for site, values in found.items():
               if not values:
@@ -284,7 +342,9 @@ jobs:
           set -e
           git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git add manifest.json docker-compose.yml server.json
+          git add manifest.json docker-compose.yml server.json \
+            plugins/linkedin-mcp-server/.codex-plugin/plugin.json \
+            plugins/linkedin-mcp-server/.mcp.json
           if git diff --staged --quiet; then
             echo "ℹ️ No changes to commit"
           else

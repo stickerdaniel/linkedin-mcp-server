@@ -1,0 +1,20 @@
+{
+  "name": "linkedin-mcp-server",
+  "interface": {
+    "displayName": "LinkedIn MCP Server"
+  },
+  "plugins": [
+    {
+      "name": "linkedin-mcp-server",
+      "source": {
+        "source": "local",
+        "path": "./plugins/linkedin-mcp-server"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Business & Operations"
+    }
+  ]
+}
