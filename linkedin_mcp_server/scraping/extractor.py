@@ -1,4 +1,10 @@
-"""Core extraction engine using innerText instead of DOM selectors."""
+"""Core extraction engine using innerText instead of DOM selectors.
+
+Modified in this fork (Apache-2.0 section 4(b)): profile-identity
+confirmation on the connection flow, people-search pagination and URN
+facets, network-listing reads, paced batch invitations, and response
+payload trimming. See CHANGELOG-FORK.md.
+"""
 
 from __future__ import annotations
 
@@ -8,10 +14,11 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 import json
 import logging
+import random
 import re
 import time
 from typing import TYPE_CHECKING, Any, Literal
-from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
+from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
 
 from patchright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
@@ -53,7 +60,6 @@ from linkedin_mcp_server.scraping.identifiers import (
 from linkedin_mcp_server.scraping.link_metadata import (
     JOB_PATH_RE,
     Reference,
-    _SEARCH_RESULTS_REFERENCE_CAP,
     build_references,
     dedupe_references,
 )
@@ -73,12 +79,23 @@ _NAV_DELAY = 2.0
 # Backoff before retrying a temporarily blocked page
 _RATE_LIMIT_RETRY_DELAY = 5.0
 
+#: Seconds slept between invitations in a batch, sampled per gap. Randomised
+#: because a constant interval is itself a signal, and wider than the ordinary
+#: navigation delay because these are writes rather than reads.
+_BATCH_DELAY_RANGE = (8.0, 25.0)
+
+#: Invitations one batch call will attempt. Not LinkedIn's limit -- which is
+#: weekly, undocumented and account-specific -- but a ceiling low enough that
+#: a single call cannot spend a week's allowance before anyone reads the
+#: result.
+_BATCH_MAX_INVITES = 20
+
 # Returned as section text when a page comes back with its content gone and
 # only LinkedIn's own navigation and footer left.
 #
 # Read carefully: that condition is a *guess* that the page was throttled, not
 # an observation of one. It arrived in d8b4c62 with no cited evidence, LinkedIn
-# documents no such behaviour, and nobody here has reproduced it deliberately —
+# documents no such behaviour, and nobody here has reproduced it deliberately -
 # doing so would mean provoking a real throttle on a real account. The log line
 # hedges with "likely" for the same reason.
 #
@@ -87,47 +104,35 @@ _RATE_LIMIT_RETRY_DELAY = 5.0
 # alternative already ruled out elsewhere: every navigation checks the URL
 # against the auth-blocker patterns first, and a redirect to /login, /authwall
 # or /checkpoint raises before extraction is reached. That check stays on URLs
-# deliberately — body text would be a per-locale guess, and this project's
+# deliberately - body text would be a per-locale guess, and this project's
 # rule is that classification never depends on text values.
 _RATE_LIMITED_MSG = "[Rate limited] LinkedIn blocked this section. Try again later or request fewer sections."
 
 
-def _reconcile_search_references(
-    references: list[Reference], ids: list[str]
-) -> list[Reference]:
-    """Align one page's references with the job ids read from its rail.
+def _references_within(references: list[Reference], ids: list[str]) -> list[Reference]:
+    """Drop job references the rail did not render.
 
-    References come from the whole `<main>`, which also holds the detail pane;
-    ids come from the selected results rail. The rail therefore decides which
-    jobs exist, while the DOM references supply richer labels when available.
-    Non-job references share the search-results cap's remaining allowance.
+    The ids are read from the selected rail; the references come from the
+    whole `<main>`, which also holds the detail pane. So a job the pane had
+    loaded was emitted as a search result while `job_ids` correctly left it
+    out, and a caller following the references acts on a job the search never
+    returned. Filtering rather than re-extracting, because the rail is a pick
+    made in the page and not a selector the reference reader could be given.
+
+    Only job references are judged. Everything else on the page is unrelated
+    to which rail was picked.
     """
-    ordered_ids = list(dict.fromkeys(ids))
-    kept_ids = set(ordered_ids)
-    emitted_ids: set[str] = set()
-    ancillary_left = max(0, _SEARCH_RESULTS_REFERENCE_CAP - len(ordered_ids))
+    kept = set(ids)
     out: list[Reference] = []
-
     for ref in references:
-        if ref.get("kind") == "job":
-            match = JOB_PATH_RE.match(str(ref.get("url", "")))
-            if match is None:
-                continue
-            job_id = match.group(1)
-            if job_id not in kept_ids or job_id in emitted_ids:
-                continue
+        if ref.get("kind") != "job":
             out.append(ref)
-            emitted_ids.add(job_id)
             continue
-
-        if ancillary_left:
+        # The same pattern that produced the reference, so a form one accepts
+        # and the other does not cannot arise.
+        match = JOB_PATH_RE.match(str(ref.get("url", "")))
+        if match is None or match.group(1) in kept:
             out.append(ref)
-            ancillary_left -= 1
-
-    for job_id in ordered_ids:
-        if job_id not in emitted_ids:
-            out.append({"kind": "job", "url": f"/jobs/view/{job_id}/"})
-
     return out
 
 
@@ -397,7 +402,7 @@ _WORK_TYPE_MAP = {"on_site": "1", "remote": "2", "hybrid": "3"}
 _SORT_BY_MAP = {"date": "DD", "relevance": "R"}
 
 # Content (post) search uses literal ``datePosted`` tokens inside a JSON-list
-# facet, e.g. ``datePosted=["past-week"]`` — unlike job search, which uses
+# facet, e.g. ``datePosted=["past-week"]`` - unlike job search, which uses
 # ``f_TPR=r<seconds>`` codes. The three hyphenated values are LinkedIn's
 # complete set, verified live: the filter dropdown offers exactly Past 24
 # hours / week / month, and anything else is ignored while still being echoed
@@ -492,7 +497,7 @@ function findActionRoot(main) {
 #   [button aria-expanded, no aria-label (More)]
 #
 # All checks are attribute presence and structural counts per the
-# AGENTS.md Scraping Rules — no label values are read. Every guard kills
+# AGENTS.md Scraping Rules - no label values are read. Every guard kills
 # a known false positive: total-button-count === 3 and labeled === 2
 # exclude video-player control bars (play/mute/captions all carry
 # aria-label); the unlabeled-expander check excludes player settings
@@ -503,7 +508,7 @@ function findActionRoot(main) {
 # expander candidates because cover-video profiles render the player's
 # expander before the top-card row in DOM order.
 #
-# The search is scoped to the top card — the first <section> of <main>
+# The search is scoped to the top card - the first <section> of <main>
 # (falling back to main's first child, then main). Profile pages render
 # the action row in the top card; feed, "people also viewed", and other
 # widgets live in later sections. Without the scope an unrelated widget
@@ -550,7 +555,7 @@ function findIncomingActionRow(main) {
 
 # Locale-independent connection-state probe. Returns four booleans;
 # per AGENTS.md Scraping Rules, every signal is based on URL patterns
-# or ARIA-attribute *presence* — never on label text values.
+# or ARIA-attribute *presence* - never on label text values.
 #
 # - hasInvite: vanityName-scoped invite anchor anywhere in document.
 #   Searches document (not main) so a post-More-menu reread sees
@@ -633,7 +638,7 @@ _ACTION_SIGNALS_JS = (
 # Open the profile's More button, located inside the action root via the
 # aria-expanded attribute. The aria-expanded attribute uniquely identifies
 # the menu opener without text labels (the More button has no aria-label,
-# while Follow/Connect/Pending buttons do — the inverse pattern). Returns
+# while Follow/Connect/Pending buttons do - the inverse pattern). Returns
 # true iff the click landed; the caller waits for [role='menu'] visibility
 # before re-scanning signals.
 _OPEN_MORE_BUTTON_JS = (
@@ -655,7 +660,7 @@ _OPEN_MORE_BUTTON_JS = (
 )
 
 # Click Accept on an incoming-request profile. Accept is the FIRST labeled
-# button in the fingerprinted row — primary actions render first in
+# button in the fingerprinted row - primary actions render first in
 # top-card action rows (Connect/Message lead on other profile states; the
 # inverse of dialogs, where the primary button renders last). Clicking the
 # second button would silently and irreversibly Ignore the request, so the
@@ -677,6 +682,84 @@ _CLICK_INCOMING_ACCEPT_JS = (
 )
 
 
+#: Headings that begin the part of a profile a write operation did not ask
+#: for. Matched case-insensitively against a whole stripped line, for the
+#: reason given on _NOISE_MARKERS: LinkedIn ships more than one capitalisation
+#: of the premium heading.
+#:
+#: English-only, and knowingly so. This trims *presentation*, it does not
+#: classify anything -- a heading that does not match costs a caller some
+#: tokens, where a misread signal would cost them an invite sent to the wrong
+#: person. The locale-independence rule in AGENTS.md governs the latter.
+_PROFILE_BODY_HEADINGS = frozenset(
+    {
+        "about",
+        "activity",
+        "experience",
+        "explore premium profiles",
+        "more profiles for you",
+    }
+)
+
+_PROFILE_ELIDED = "\n... [Profile sections omitted for brevity]"
+
+
+def _minimal_profile(text: str) -> str:
+    """The top card only, for responses whose caller asked for an action.
+
+    ``connect_with_person`` embedded the entire profile in every reply: the
+    full About text, the whole experience history, reposted feed content and
+    a trailing block of unrelated premium recommendations. For a server whose
+    output lands in a context window that is a direct cost per call, and the
+    volume of off-task text is its own hazard. The caller asked to send an
+    invite, not to read a biography.
+
+    Returns ``""`` for input that held nothing, so the emptiness of a page
+    survives the trim. Appending the elision marker unconditionally would
+    make every unreadable page answer truthy and retire the caller's
+    "could not read this profile" branch.
+    """
+    if not text:
+        return ""
+    kept: list[str] = []
+    elided = False
+    for line in text.splitlines():
+        if line.strip().casefold() in _PROFILE_BODY_HEADINGS:
+            elided = True
+            break
+        kept.append(line)
+    body = "\n".join(kept).strip()
+    if not body:
+        return ""
+    return body + _PROFILE_ELIDED if elided else body
+
+
+def _profile_slug(url: str) -> str | None:
+    """The public identifier a ``/in/`` address names, or ``None``.
+
+    Reads an address the browser reports rather than one this module built, so
+    it takes the path apart instead of matching a known shape: the landed URL
+    carries whatever locale subdomain served it, a section path underneath the
+    profile (``/recent-activity/all/``) and any query LinkedIn appended.
+
+    Decoded once, because a browser reports the path escaped and the caller's
+    identifier is not. A second layer cannot arrive here: this reads
+    ``page.url``, not a tool argument, so the refusals in ``identifiers`` are
+    not duplicated.
+    """
+    try:
+        segments = [segment for segment in urlparse(url).path.split("/") if segment]
+    except ValueError:
+        return None
+    if len(segments) < 2 or segments[0].lower() != "in":
+        return None
+    try:
+        slug = unquote(segments[1], errors="strict")
+    except UnicodeDecodeError:
+        return None
+    return slug or None
+
+
 def _connection_result(
     url: str,
     status: str,
@@ -685,13 +768,24 @@ def _connection_result(
     note_sent: bool = False,
     profile: str = "",
 ) -> dict[str, Any]:
-    """Build a structured response for a profile connection attempt."""
+    """Build a structured response for a profile connection attempt.
+
+    ``resolved_username`` is the identifier the flow actually acted on, read
+    back out of ``url``. It is not decoration: ``connect_with_person`` only
+    reaches a state-bearing return after confirming the browser is on that
+    profile, so the field is the caller's cheap assertion that the answer
+    describes the person it asked about rather than whoever the page was
+    showing before.
+    """
     result: dict[str, Any] = {
         "url": url,
         "status": status,
         "message": message,
         "note_sent": note_sent,
     }
+    slug = _profile_slug(url)
+    if slug:
+        result["resolved_username"] = slug
     if profile:
         result["profile"] = profile
     return result
@@ -719,9 +813,14 @@ _NOISE_MARKERS: list[re.Pattern[str]] = [
     # Footer nav links: "About" immediately followed by "Accessibility" or "Talent Solutions"
     re.compile(r"^About\n+(?:Accessibility|Talent Solutions)", re.MULTILINE),
     # Sidebar profile recommendations
-    re.compile(r"^More profiles for you$", re.MULTILINE),
-    # Sidebar premium upsell
-    re.compile(r"^Explore premium profiles$", re.MULTILINE),
+    re.compile(r"^More profiles for you$", re.MULTILINE | re.IGNORECASE),
+    # Sidebar premium upsell. Case-insensitive because LinkedIn ships both
+    # capitalisations of this heading and an exact match kept the one it did
+    # not have: a connect response carried a trailing "Explore Premium
+    # profiles" block of four unrelated people straight into the caller's
+    # context window. Anchored to a whole line, so widening the match cannot
+    # reach prose that merely contains the phrase.
+    re.compile(r"^Explore premium profiles$", re.MULTILINE | re.IGNORECASE),
     # InMail upsell in contact info overlay
     re.compile(r"^Get up to .+ replies when you message with InMail$", re.MULTILINE),
     # Footer nav clusters in profile/posts pages
@@ -789,7 +888,7 @@ def _build_feed_references(
       for permalinks that the DOM does not surface as an anchor.
 
     Both are deduped on exact URL string. The two shapes pointing at
-    the same underlying post will *not* collapse — ``dedupe_references``
+    the same underlying post will *not* collapse - ``dedupe_references``
     matches strings, not URNs. Both are valid LinkedIn permalinks, so
     consumers should treat ``feed_post`` as polymorphic on URL form;
     URN-based equivalence is left to the consumer.
@@ -890,7 +989,7 @@ def _truncate_linkedin_noise(text: str) -> str:
 # Messaging-page chrome around an opened conversation thread. innerText on
 # /messaging/thread/ pages carries no URL or attribute signal separating the
 # inbox sidebar from the thread, so the boundaries are matched on visible
-# strings — guarded by an explicit per-locale table (CLAUDE.md → Scraping
+# strings - guarded by an explicit per-locale table (CLAUDE.md → Scraping
 # Rules). BrowserManager forces the context locale to en-US (core/browser.py),
 # so the "en" entry is the operative one; a locale without a table entry
 # passes through unstripped.
@@ -955,7 +1054,7 @@ def strip_conversation_chrome(text: str, locale: str = "en") -> str:
     # exact companion control follows within the next few lines. The real
     # composer block is contiguous (label + controls observed within 6
     # lines), so a nearby companion confirms chrome, while a message that
-    # quotes the label — or control text with any suffix — falls through to
+    # quotes the label - or control text with any suffix - falls through to
     # the missing-marker fallback. A verbatim multi-line reproduction of the
     # block inside a message remains indistinguishable from the block itself;
     # that ambiguity is inherent to text-only stripping.
@@ -973,7 +1072,7 @@ def strip_conversation_chrome(text: str, locale: str = "en") -> str:
     # Start boundary: the sidebar's pagination line, when present, pins the
     # real thread header as the first options line after it; quoted UI text
     # inside messages can no longer pull the boundary into the thread. The
-    # sidebar omits the pagination control when there are few conversations —
+    # sidebar omits the pagination control when there are few conversations -
     # then fall back to the last options line before the composer.
     start = 0
     sidebar_end = next(
@@ -1151,6 +1250,9 @@ class LinkedInExtractor:
                 extra={"target_url": url, "wait_until": wait_until},
             )
             try:
+                # Force a hard navigation to clear SPA state and prevent same-route short-circuiting (Fixes P0-1)
+                await self._page.goto("about:blank")
+                
                 await self._page.goto(url, wait_until=wait_until, timeout=30000)
                 await stabilize_navigation(f"goto {url}", logger)
                 await record_page_trace(
@@ -1158,6 +1260,12 @@ class LinkedInExtractor:
                     "extractor-after-goto",
                     extra={"target_url": url, "wait_until": wait_until},
                 )
+                
+                # Check for auth barriers even on successful navigation since LinkedIn returns 200 OK for login redirects (Fixes P1-2)
+                await self._raise_if_auth_barrier(url)
+            except AuthenticationError:
+                # If it's an explicit auth error, raise it immediately to bypass the generic error handling
+                raise
             except Exception as exc:
                 # Ahead of the traces below: they record the raw exception text,
                 # which for a proxy failure can quote the proxy URL and land a
@@ -1397,7 +1505,7 @@ class LinkedInExtractor:
         """Open the profile's More (three-dot) menu in a locale-independent way.
 
         Locates the More button structurally as ``actionRoot
-        button[aria-expanded]`` — the action-root walk discriminates the
+        button[aria-expanded]`` - the action-root walk discriminates the
         profile More button from any other More-labelled buttons elsewhere
         on the page (notably the video-player More on profiles with
         background videos), and ``aria-expanded`` distinguishes the menu
@@ -1427,7 +1535,7 @@ class LinkedInExtractor:
 
         Delegates to ``_CLICK_INCOMING_ACCEPT_JS``: the click fires only
         when the full incoming-row fingerprint matches, and it targets the
-        FIRST labeled button (Accept renders before Ignore — primary
+        FIRST labeled button (Accept renders before Ignore - primary
         actions lead in top-card rows). Clicking the second button would
         silently and irreversibly Ignore the request; the strict
         fingerprint plus the caller's verify-after-click are the
@@ -1618,7 +1726,7 @@ class LinkedInExtractor:
         except PlaywrightTimeoutError:
             logger.debug("Feed content did not appear on %s", url)
 
-        # The feed has its own scroll container — window.scrollTo is a no-op.
+        # The feed has its own scroll container - window.scrollTo is a no-op.
         # mouse.wheel over the viewport center triggers the real scroll.
         _MAX_SCROLLS = 12
         _MAX_STALE = 3
@@ -1646,7 +1754,7 @@ class LinkedInExtractor:
                 # everything Playwright already delivered. Without this,
                 # the count comparison races: the wheel fires a network
                 # response, the listener creates a read task, and the loop
-                # sleeps and re-checks before _read() finishes appending —
+                # sleeps and re-checks before _read() finishes appending -
                 # producing false-stale verdicts.
                 if pending_reads:
                     done, _still = await asyncio.wait(
@@ -1767,7 +1875,7 @@ class LinkedInExtractor:
         Assumes ``self._page`` already points at ``url`` (or its post-redirect
         equivalent). Performs rate-limit detection, modal dismissal, lazy-load
         scrolling, innerText extraction, noise truncation, and reference
-        building — everything ``_extract_page_once`` does after the goto.
+        building - everything ``_extract_page_once`` does after the goto.
         """
         await detect_rate_limit(self._page)
 
@@ -1823,7 +1931,7 @@ class LinkedInExtractor:
         # via JS. Wait until at least one /in/ profile anchor appears inside
         # <main> so innerText extraction sees the actual list. Use a 5s
         # timeout instead of the 10s pattern shared with is_search/is_details
-        # — empty/restricted listings are common here (small companies,
+        # - empty/restricted listings are common here (small companies,
         # privacy settings) and a full 10s wait per call adds up.
         is_company_people = "/company/" in url and "/people/" in url
         if is_company_people:
@@ -1847,13 +1955,18 @@ class LinkedInExtractor:
         if is_details:
             try:
                 await self._page.wait_for_function(
+                    # Case-folded for the same reason as _NOISE_MARKERS:
+                    # LinkedIn ships both capitalisations of the premium
+                    # heading, and an exact comparison reads the one it does
+                    # not have as "the panel has loaded", ending the wait on
+                    # the sidebar it exists to wait out.
                     """() => {
                         const main = document.querySelector('main');
                         if (!main) return false;
-                        const text = main.innerText.trimStart();
-                        return !text.startsWith('Load more')
-                            && !text.startsWith('More profiles for you')
-                            && !text.startsWith('Explore premium profiles');
+                        const text = main.innerText.trimStart().toLowerCase();
+                        return !text.startsWith('load more')
+                            && !text.startsWith('more profiles for you')
+                            && !text.startsWith('explore premium profiles');
                     }""",
                     timeout=10000,
                 )
@@ -1967,7 +2080,7 @@ class LinkedInExtractor:
         except PlaywrightTimeoutError:
             logger.debug("No modal overlay found on %s, falling back to main", url)
 
-        # NOTE: Do NOT call handle_modal_close() here — the contact-info
+        # NOTE: Do NOT call handle_modal_close() here - the contact-info
         # overlay *is* a dialog/modal. Dismissing it would destroy the
         # content before the JS evaluation below can read it.
 
@@ -2091,7 +2204,7 @@ class LinkedInExtractor:
                     # Skipped once the section came back empty: there is no
                     # content to read a URN from, and a failure here lands in
                     # the handler below, which would overwrite the entry just
-                    # recorded with a generic diagnostic — losing the one
+                    # recorded with a generic diagnostic - losing the one
                     # finding this section had.
                     if (
                         section_name == "main_profile"
@@ -2178,8 +2291,8 @@ class LinkedInExtractor:
         """Read locale-independent structural signals for a profile's
         relationship state.
 
-        Detection uses URL patterns and ARIA attribute presence only — never
-        text values — per the AGENTS.md Scraping Rules. The vanityName invite
+        Detection uses URL patterns and ARIA attribute presence only - never
+        text values - per the AGENTS.md Scraping Rules. The vanityName invite
         anchor is searched document-wide because LinkedIn renders the More
         menu's contents in a portal-mounted ``[role='menu']`` outside ``<main>``;
         the URL is uniquely scoped to the target user, so document-wide
@@ -2207,6 +2320,77 @@ class LinkedInExtractor:
             has_incoming_action_row=bool(data.get("hasIncomingActionRow")),
         )
 
+    async def _confirm_profile_identity(self, username: str) -> str | None:
+        """The profile the browser is actually showing, or ``None``.
+
+        Every signal in :class:`ActionSignals` except the invite anchor is read
+        off whatever document is loaded, and only the invite anchor is scoped
+        to a ``vanityName``. So a page that is not the one that was asked for
+        still answers the pending / already-connected / follow-only questions,
+        and answers them about somebody else. Observed live: a call following a
+        successful send read the *previous* profile, whose top card had just
+        turned Pending, and reported ``pending`` for a person who had never
+        been visited. That is worse than an error, because a caller treats it
+        as terminal and skips the person for good.
+
+        The write path was never exposed to this - it is gated on the
+        vanityName-scoped anchor, which cannot match on another person's page -
+        so this guards the *reads*, which is where the damage was.
+
+        Returns the landed identifier when the page can be trusted:
+
+        * it matches ``username``; or
+        * a forced re-navigation lands on the same other identifier, which is
+          LinkedIn resolving an old vanity name rather than a document that
+          never moved. A stale page does not survive ``about:blank``, and a
+          redirect reproduces exactly.
+
+        ``None`` when neither holds, which the caller reports rather than
+        classifying a page it cannot identify.
+        """
+        landed = _profile_slug(self._page.url)
+        if landed is not None and landed.casefold() == username.casefold():
+            return landed
+
+        logger.warning(
+            "Expected to be on /in/%s but the page is %s; re-navigating before "
+            "reading connection state",
+            username,
+            self._page.url,
+        )
+        # Through about:blank, so the retry cannot be answered by the document
+        # that is already loaded. A same-route goto is the short-circuit this
+        # is recovering from; a cross-origin one in between forces a real
+        # document replacement.
+        with contextlib.suppress(Exception):
+            await self._navigate_to_page("about:blank")
+        await self._navigate_to_page(person_profile_url(username, "/"))
+
+        settled = _profile_slug(self._page.url)
+        if settled is None:
+            logger.warning(
+                "Re-navigation for /in/%s did not land on a profile (%s)",
+                username,
+                self._page.url,
+            )
+            return None
+        if settled.casefold() == username.casefold():
+            return settled
+        if landed is not None and settled.casefold() == landed.casefold():
+            logger.info(
+                "LinkedIn resolves /in/%s to /in/%s; acting on the resolved profile",
+                username,
+                settled,
+            )
+            return settled
+        logger.warning(
+            "Profile identity for /in/%s did not settle (first=%s, second=%s)",
+            username,
+            landed,
+            settled,
+        )
+        return None
+
     async def _submit_invite_dialog(
         self, note: str | None
     ) -> tuple[bool, bool, str | None]:
@@ -2214,7 +2398,7 @@ class LinkedInExtractor:
 
         Returns ``(submitted, note_sent, note_limit_message)``.
 
-        ``note_sent`` reports *delivery*, not textarea fill — it stays
+        ``note_sent`` reports *delivery*, not textarea fill - it stays
         False on any failure path, including the Premium upsell that
         LinkedIn shows when the free personalized-note quota is exhausted.
         ``note_limit_message`` is the raw LinkedIn Premium dialog text when
@@ -2222,7 +2406,7 @@ class LinkedInExtractor:
         dialog is dismissed, and callers should surface that text directly.
 
         All interaction uses structural selectors and positional indexing
-        — no localized text matching. Owns dialog cleanup: the dialog is
+        - no localized text matching. Owns dialog cleanup: the dialog is
         dismissed on every failure path, callers must not dismiss again.
         """
         if not await self._dialog_is_open(timeout=5000):
@@ -2245,7 +2429,7 @@ class LinkedInExtractor:
                 # no-note layout, the click below misroutes to dismiss;
                 # the textarea-presence recheck via _fill_dialog_textarea
                 # then fails and the caller returns connect_unavailable
-                # without sending — the same outcome as today.
+                # without sending - the same outcome as today.
                 buttons = self._page.locator(
                     f"{_DIALOG_SELECTOR} button, {_DIALOG_SELECTOR} [role='button']"
                 )
@@ -2294,7 +2478,7 @@ class LinkedInExtractor:
                     logger.debug("Keyboard submit fallback failed", exc_info=True)
             if not sent:
                 # The Send click can also fail because LinkedIn swapped the
-                # invite dialog for the Premium upsell at submit time — the
+                # invite dialog for the Premium upsell at submit time - the
                 # original primary button is then detached or pointer-event
                 # covered, so the click raises or times out. Check for the
                 # upsell here so we surface the raw note-limit message
@@ -2313,7 +2497,7 @@ class LinkedInExtractor:
 
         # LinkedIn may swap the invite dialog for a Premium upsell when the
         # free note quota is exhausted. The textarea was filled but the
-        # invite was not delivered — surface LinkedIn's raw dialog text.
+        # invite was not delivered - surface LinkedIn's raw dialog text.
         if note:
             note_limit_message = await self._get_premium_upsell_message()
             if note_limit_message is not None:
@@ -2386,6 +2570,7 @@ class LinkedInExtractor:
         username: str,
         *,
         note: str | None = None,
+        fallback_to_no_note: bool = False,
     ) -> dict[str, Any]:
         """Send a LinkedIn connection request or accept an incoming one.
 
@@ -2408,10 +2593,37 @@ class LinkedInExtractor:
         url = person_profile_url(username, "/")
 
         profile = await self.scrape_person(username, {"main_profile"})
-        page_text = profile.get("sections", {}).get("main_profile", "")
+        page_text = _minimal_profile(
+            profile.get("sections", {}).get("main_profile", "")
+        )
         if not page_text:
             return _connection_result(
                 url, "unavailable", "Could not read profile page."
+            )
+
+        # Before any signal is read, and before the text just scraped is
+        # attributed to anyone. Both describe whatever document is loaded, and
+        # only this says whether that is the profile the caller named.
+        resolved = await self._confirm_profile_identity(username)
+        if resolved is None:
+            return _connection_result(
+                url,
+                "unavailable",
+                "Could not confirm the browser was on this profile, so the "
+                "connection state was not read and nothing was sent. Retry "
+                "this tool.",
+            )
+        if resolved.casefold() != username.casefold():
+            # An old vanity name that LinkedIn resolves to the current one.
+            # Everything downstream is scoped to the identifier that is
+            # actually loaded -- the invite deeplink included, which would
+            # otherwise carry a vanityName this profile does not answer to.
+            username = resolved
+            url = person_profile_url(username, "/")
+            profile = await self.scrape_person(username, {"main_profile"})
+            page_text = (
+                _minimal_profile(profile.get("sections", {}).get("main_profile", ""))
+                or page_text
             )
 
         signals = await self._read_action_signals(username)
@@ -2468,7 +2680,15 @@ class LinkedInExtractor:
                 if attempt:
                     await asyncio.sleep(3.0)
                 verified = await self.scrape_person(username, {"main_profile"})
-                verified_text = verified.get("sections", {}).get("main_profile", "")
+                verified_text = _minimal_profile(
+                    verified.get("sections", {}).get("main_profile", "")
+                )
+                # Same reason as the send path: an unidentified page answers
+                # "not 1st-degree" for a profile it is not showing, which
+                # reports a successful accept as a failure.
+                if await self._confirm_profile_identity(username) is None:
+                    verified_state = None
+                    continue
                 verified_signals = await self._read_action_signals(username)
                 verified_state = detect_connection_state(verified_signals)
                 if verified_state == "already_connected":
@@ -2526,6 +2746,13 @@ class LinkedInExtractor:
                 await self._navigate_to_page(invite_url)
                 note_limit_message = await self._probe_invite_note_limit()
                 if note_limit_message is not None:
+                    # Deliberately not honouring fallback_to_no_note here.
+                    # This branch is the write gate: LinkedIn exposed no
+                    # vanityName invite anchor, so there is nothing to send
+                    # with or without a note, and dropping the note would not
+                    # change that. Reporting the quota block is the honest
+                    # answer; logging a fallback and then returning without
+                    # sending would not be.
                     return _connection_result(
                         url,
                         "custom_note_limit_reached",
@@ -2546,13 +2773,31 @@ class LinkedInExtractor:
             note
         )
         if note_limit_message is not None:
-            return _connection_result(
-                url,
-                "custom_note_limit_reached",
-                note_limit_message,
-                note_sent=False,
-                profile=page_text,
-            )
+            if fallback_to_no_note:
+                # _submit_invite_dialog owns dialog cleanup and has already
+                # dismissed the upsell, so the deeplink is reopened to get a
+                # fresh invite dialog. Submitting with note=None takes the
+                # path that never touches the note editor, which is the one
+                # LinkedIn's quota does not gate.
+                logger.info(
+                    "Note quota blocked the invite for %s; sending without a note",
+                    username,
+                )
+                await self._navigate_to_page(invite_url)
+                (
+                    submitted,
+                    note_sent,
+                    note_limit_message,
+                ) = await self._submit_invite_dialog(None)
+
+            if note_limit_message is not None:
+                return _connection_result(
+                    url,
+                    "custom_note_limit_reached",
+                    note_limit_message,
+                    note_sent=False,
+                    profile=page_text,
+                )
         if not submitted:
             return _connection_result(
                 url,
@@ -2562,7 +2807,24 @@ class LinkedInExtractor:
             )
 
         verified = await self.scrape_person(username, {"main_profile"})
-        verified_text = verified.get("sections", {}).get("main_profile", "")
+        verified_text = _minimal_profile(
+            verified.get("sections", {}).get("main_profile", "")
+        )
+        # The invite was submitted, so this read only decides which of two
+        # answers to give -- and it is taken right after the deeplink page,
+        # which is the navigation most likely to leave the browser somewhere
+        # other than the profile. Unconfirmed, "no invite anchor" reads as a
+        # successful send on any page that never had one.
+        if await self._confirm_profile_identity(username) is None:
+            return _connection_result(
+                url,
+                "send_failed",
+                "Submitted the invite dialog but could not confirm the result "
+                "on the profile. Check LinkedIn before retrying: the invite "
+                "may already have been sent.",
+                note_sent=note_sent,
+                profile=verified_text or page_text,
+            )
         verified_signals = await self._read_action_signals(username)
         verified_state = detect_connection_state(verified_signals)
 
@@ -2583,6 +2845,119 @@ class LinkedInExtractor:
             note_sent=note_sent,
             profile=verified_text or page_text,
         )
+
+    async def connect_with_people(
+        self,
+        usernames: list[str],
+        *,
+        note: str | None = None,
+        fallback_to_no_note: bool = False,
+        delay_range: tuple[float, float] = _BATCH_DELAY_RANGE,
+        max_invites: int = _BATCH_MAX_INVITES,
+    ) -> dict[str, Any]:
+        """Send connection requests to several people, paced by the server.
+
+        The pacing belongs here rather than in each client, because this is
+        the only component that sees all traffic to a given account. Each
+        invitation goes through :meth:`connect_with_person`, so every one of
+        them is identity-checked before any state is read and gated on the
+        vanityName invite anchor before anything is sent.
+
+        Stops early rather than pushing through resistance. A rate limit or
+        an authentication barrier raised by any single invitation ends the
+        run: those are LinkedIn asking for less traffic, and the one thing
+        worse than sending fewer invitations is continuing to send them after
+        being told to stop. Whatever completed before that point is returned.
+
+        Args:
+            usernames: Public identifiers, in order. Duplicates are collapsed
+                so a repeated name cannot spend the quota twice.
+            note: Optional note sent with every invitation.
+            fallback_to_no_note: Passed through to each invitation.
+            delay_range: Inclusive ``(min, max)`` seconds slept between
+                invitations, sampled per gap. Randomised because a constant
+                interval is itself a signal.
+            max_invites: Hard ceiling on invitations attempted in one call.
+
+        Returns:
+            {results: [per-person connection result], attempted, sent, stopped_early, stop_reason?}
+        """
+        low, high = delay_range
+        if low < 0 or high < low:
+            raise FilterValidationError(
+                f"delay_range must be a (min, max) pair of non-negative seconds "
+                f"with min <= max; got {delay_range!r}."
+            )
+        if max_invites < 1:
+            raise FilterValidationError(
+                f"max_invites must be 1 or greater; got {max_invites!r}."
+            )
+
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for raw in usernames:
+            # Normalised before deduping, or "alice" and a full profile URL
+            # for alice count as two people and spend the quota twice.
+            name = normalize_person_identifier(raw)
+            if name.casefold() in seen:
+                logger.info("Skipping duplicate %s in batch", name)
+                continue
+            seen.add(name.casefold())
+            ordered.append(name)
+
+        results: list[dict[str, Any]] = []
+        sent = 0
+        stop_reason: str | None = None
+
+        for index, name in enumerate(ordered):
+            if len(results) >= max_invites:
+                stop_reason = (
+                    f"Stopped at the max_invites ceiling of {max_invites}."
+                )
+                break
+
+            if index:
+                await asyncio.sleep(random.uniform(low, high))
+
+            try:
+                result = await self.connect_with_person(
+                    name,
+                    note=note,
+                    fallback_to_no_note=fallback_to_no_note,
+                )
+            except AuthenticationError:
+                # Deliberately not caught below, though it is a
+                # LinkedInScraperException too. An expired session is not a
+                # fact about this person, and swallowing it into their result
+                # would keep the loop running against a dead session while
+                # the tool layer's re-login never fires. It belongs to the
+                # whole call, so it propagates.
+                raise
+            except LinkedInScraperException as exc:
+                # A rate limit arrives this way. Recorded against the person
+                # it happened to, then the run ends.
+                logger.warning("Batch stopped at %s: %s", name, exc)
+                results.append(
+                    _connection_result(
+                        person_profile_url(name, "/"),
+                        "send_failed",
+                        f"Batch stopped before this profile: {exc}",
+                    )
+                )
+                stop_reason = str(exc)
+                break
+
+            results.append(result)
+            if result.get("status") in ("connected", "accepted"):
+                sent += 1
+
+        return {
+            "results": results,
+            "attempted": len(results),
+            "sent": sent,
+            "stopped_early": stop_reason is not None,
+            **({"stop_reason": stop_reason} if stop_reason else {}),
+        }
 
     async def _extract_profile_urn(self) -> str | None:
         """Extract the recipient profile URN from the messaging compose link.
@@ -2784,6 +3159,87 @@ class LinkedInExtractor:
             "sidebar_profiles": sidebar_profiles,
         }
 
+    # ------------------------------------------------------------------
+    # Network introspection: what has already been sent, and to whom
+    # ------------------------------------------------------------------
+
+    async def _single_page_listing(
+        self,
+        url: str,
+        section_name: str,
+    ) -> dict[str, Any]:
+        """Navigate to one listing page and shape the standard result.
+
+        The same sections / references / section_errors assembly every read
+        tool here performs, kept in one place for the network pages added
+        alongside it rather than copied a fourth time.
+        """
+        extracted = await self.extract_page(url, section_name=section_name)
+
+        sections: dict[str, str] = {}
+        references: dict[str, list[Reference]] = {}
+        section_errors: dict[str, dict[str, Any]] = {}
+        if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+            sections[section_name] = extracted.text
+            if extracted.references:
+                references[section_name] = extracted.references
+        elif extracted.text == _RATE_LIMITED_MSG:
+            section_errors[section_name] = rate_limited_section_error()
+        elif extracted.error:
+            section_errors[section_name] = extracted.error
+
+        result: dict[str, Any] = {"url": url, "sections": sections}
+        if references:
+            result["references"] = references
+        if section_errors:
+            result["section_errors"] = section_errors
+        return result
+
+    async def get_sent_invitations(self) -> dict[str, Any]:
+        """List connection invitations this account has sent and not had answered.
+
+        Without this there is no way to deduplicate across sessions: the only
+        way to discover an invite already exists is to attempt it again and
+        read the result, which is exactly the signal a stale page corrupts.
+        It also makes the pending backlog visible, which matters because
+        LinkedIn weighs a high ratio of long-pending invitations against the
+        account.
+
+        Returns:
+            {url, sections: {sent_invitations: text}, references}
+        """
+        return await self._single_page_listing(
+            "https://www.linkedin.com/mynetwork/invitation-manager/sent/",
+            "sent_invitations",
+        )
+
+    async def get_received_invitations(self) -> dict[str, Any]:
+        """List incoming connection invitations awaiting a response.
+
+        Returns:
+            {url, sections: {received_invitations: text}, references}
+        """
+        return await self._single_page_listing(
+            "https://www.linkedin.com/mynetwork/invitation-manager/",
+            "received_invitations",
+        )
+
+    async def get_notifications(self) -> dict[str, Any]:
+        """Read the notifications page.
+
+        The natural outreach loop is invite, wait for acceptance, then send a
+        real message, and the third step is blind without this: the moment
+        someone has just accepted is the highest-value moment there is, and
+        nothing else here can see it.
+
+        Returns:
+            {url, sections: {notifications: text}, references}
+        """
+        return await self._single_page_listing(
+            "https://www.linkedin.com/notifications/",
+            "notifications",
+        )
+
     async def _resolve_message_compose_href(self) -> str | None:
         """Return the direct recipient-specific compose URL from a profile page."""
         href = await self._page.evaluate(
@@ -2951,7 +3407,7 @@ class LinkedInExtractor:
             # visibility:visible, opacity:1, non-zero bbox, no inert ancestor).
             # This appears to be a patchright bug with React-hydrated contenteditable
             # elements in isolated worlds. Skip the actionability wait when count()
-            # already confirmed the element is present — downstream interactions
+            # already confirmed the element is present - downstream interactions
             # use page.evaluate() which bypasses the same check.
             if candidate_count and candidate_count > 0:
                 return locator.last
@@ -3053,13 +3509,13 @@ class LinkedInExtractor:
 
         Enumerates the plain messaging inbox (`/messaging/`) plus click-to-capture
         because LinkedIn renders the messaging sidebar with no anchor hrefs, no
-        data-thread attributes, and no embedded URNs — clicking each row and
+        data-thread attributes, and no embedded URNs - clicking each row and
         reading the resulting SPA URL is the only available extraction path.
         The inbox is used rather than `?searchTerm=` because LinkedIn's
         messaging search frequently returns "We didn't find anything" for a
         participant whose thread is plainly present in the inbox (issue #434).
         ``name_filter`` is passed to the enumerator so only the matching row is
-        clicked — clicking a row may mark it read, so unrelated threads stay
+        clicked - clicking a row may mark it read, so unrelated threads stay
         untouched.
 
         Matches by case-insensitive equality on the cleaned participant name
@@ -3071,8 +3527,8 @@ class LinkedInExtractor:
         below the scrolled rows), it falls back to the `?searchTerm=` search as
         a last resort.
 
-        For a participant with multiple threads, the returned set — and thus
-        ``index`` selection in the caller — covers the threads visible in the
+        For a participant with multiple threads, the returned set - and thus
+        ``index`` selection in the caller - covers the threads visible in the
         scanned inbox; the search fallback only runs when the inbox scan is
         empty. Open a buried duplicate thread directly via ``thread_id``
         (enumerate IDs with ``search_conversations``).
@@ -3107,7 +3563,7 @@ class LinkedInExtractor:
 
         # Fallback: LinkedIn's messaging search. Unreliable (often returns
         # "We didn't find anything" even for present threads, see #434), so it
-        # runs only when the inbox scan came up empty — e.g. a thread buried
+        # runs only when the inbox scan came up empty - e.g. a thread buried
         # below the scrolled inbox window.
         await self._navigate_to_page(
             f"https://www.linkedin.com/messaging/?searchTerm={quote_plus(display_name)}"
@@ -3265,16 +3721,41 @@ class LinkedInExtractor:
         self,
         company_name: str,
         keywords: str | None = None,
+        title: str | None = None,
+        school: str | None = None,
     ) -> dict[str, Any]:
         """List employees at a company from the /people/ page.
+
+        This page is the most reliable route to a geographically or
+        organisationally targeted set of people, because it starts from the
+        company rather than from a search facet.
+
+        Args:
+            company_name: The /company/ slug, or a company URL.
+            keywords: Free-text filter over the listing.
+            title: Free-text job-title filter. Unlike the people-search
+                facets, the company people page filters these as text rather
+                than by URN, so a plain word is correct here.
+            school: Free-text school filter over the same listing.
 
         Returns:
             {url, sections: {employees: text}, references: {employees: [...]}}
         """
         company_name = normalize_company_identifier(company_name)
         url = company_page_url(company_name, "/people/")
-        if keywords:
-            url += f"?keywords={quote_plus(keywords)}"
+        facets = [
+            (name, value)
+            for name, value in (
+                ("keywords", keywords),
+                ("title", title),
+                ("school", school),
+            )
+            if value
+        ]
+        if facets:
+            url += "?" + "&".join(
+                f"{name}={quote_plus(value)}" for name, value in facets
+            )
         extracted = await self.extract_page(url, section_name="employees")
 
         sections: dict[str, str] = {}
@@ -3649,9 +4130,7 @@ class LinkedInExtractor:
         cleaned = _filter_linkedin_noise_lines(truncated)
         return ExtractedSection(
             text=cleaned,
-            references=build_references(
-                raw_result["references"], section_name, apply_cap=False
-            ),
+            references=build_references(raw_result["references"], section_name),
         )
 
     async def _get_total_search_pages(self) -> int | None:
@@ -3663,7 +4142,7 @@ class LinkedInExtractor:
         NOTE: This is a deliberate DOM exception. The element has ``display: none``
         (screen-reader only), so the text never appears in ``innerText``. A class-based
         selector is the only reliable way to read it. Gracefully returns ``None`` if
-        LinkedIn renames the class — pagination just falls back to ``max_pages``.
+        LinkedIn renames the class - pagination just falls back to ``max_pages``.
         """
         text = await self._page.evaluate(
             """() => {
@@ -3887,7 +4366,7 @@ class LinkedInExtractor:
                     or parsed_url.path.rstrip("/") not in _JOB_SEARCH_PATHS
                 ):
                     logger.debug(
-                        "Unexpected page URL after extraction: %s — "
+                        "Unexpected page URL after extraction: %s - "
                         "skipping job ID extraction",
                         self._page.url,
                     )
@@ -3988,9 +4467,9 @@ class LinkedInExtractor:
                         if total_pages is not None:
                             logger.debug("LinkedIn reports %d total pages", total_pages)
 
-                page_ids = list(dict.fromkeys(await self._extract_job_ids(scoped=True)))
-                # Advance by what this navigation rendered, including ids seen
-                # on earlier pages: the next unseen result sits right behind them.
+                page_ids = await self._extract_job_ids(scoped=True)
+                # Advance by what this navigation rendered, duplicates
+                # included: the next unseen result sits right behind them.
                 #
                 # This counts the whole document because everything the page
                 # holds also sits in the rail. That is only true while the
@@ -4002,7 +4481,7 @@ class LinkedInExtractor:
                 offset += len(page_ids)
                 new_ids = [jid for jid in page_ids if jid not in seen_ids]
 
-                page_refs = _reconcile_search_references(extracted.references, page_ids)
+                page_refs = _references_within(extracted.references, page_ids)
 
                 if not new_ids:
                     page_texts.append(extracted.text)
@@ -4040,7 +4519,7 @@ class LinkedInExtractor:
         }
         if page_references:
             result["references"] = {
-                "search_results": dedupe_references(page_references)
+                "search_results": dedupe_references(page_references, cap=15)
             }
         if filters_warning is not None:
             existing = section_errors.get("search_results")
@@ -4205,7 +4684,7 @@ class LinkedInExtractor:
         class is the only reachable signal. The labels are numerals rather
         than words, so no locale table is needed. A renamed class, or a locale
         serving non-ASCII numerals that ``parseInt`` cannot read, both yield
-        ``None`` — pagination then falls back to ``max_pages`` and the
+        ``None`` - pagination then falls back to ``max_pages`` and the
         no-new-ids early stop.
         """
         value = await self._page.evaluate(
@@ -4292,7 +4771,7 @@ class LinkedInExtractor:
                 ):
                     logger.debug(
                         "Unexpected page URL after saved-jobs extraction: %s "
-                        "(requested %s) — skipping job ID extraction",
+                        "(requested %s) - skipping job ID extraction",
                         self._page.url,
                         url,
                     )
@@ -4403,15 +4882,17 @@ class LinkedInExtractor:
     async def search_people(
         self,
         keywords: str,
-        location: str | None = None,
         network: list[str] | None = None,
         current_company: str | None = None,
+        past_company: str | None = None,
+        school: str | None = None,
+        industry: str | None = None,
+        page: int = 1,
     ) -> dict[str, Any]:
         """Search for people and extract the results page.
 
         Args:
-            keywords: Free-text query ("software engineer", "recruiter at Google").
-            location: Optional location filter ("New York", "Remote").
+            keywords: Free-text query ("software engineer", "recruiter at Google"). Include location here if needed (e.g. "embedded engineer Bonn").
             network: Optional connection-degree filter. Each element is one of
                 ``"F"`` (1st-degree), ``"S"`` (2nd-degree), ``"O"`` (3rd-degree
                 and beyond). Example: ``["F"]`` to only return 1st-degree
@@ -4423,9 +4904,18 @@ class LinkedInExtractor:
                 unfiltered result set. Look up a company's URN via
                 ``get_company_profile`` -- it is exposed under
                 ``references["about"]``.
+            past_company: Optional former-employer filter, same numeric-URN
+                rule as ``current_company``.
+            school: Optional school filter, by numeric school URN id. Alumni
+                of a shared institution are the highest-accepting cold
+                audience there is, which is why this is worth a facet.
+            industry: Optional industry filter, by numeric industry id.
+            page: 1-based results page. LinkedIn serves roughly ten people per
+                page behind a ``&page=`` parameter; without it about ninety
+                percent of a result set is unreachable.
 
         Returns:
-            {url, sections: {name: text}}
+            {url, sections: {name: text}, page}
         """
         if network is not None:
             invalid = [t for t in network if t not in _NETWORK_TOKENS]
@@ -4435,21 +4925,44 @@ class LinkedInExtractor:
                     f"{invalid!r}; expected any of {list(_NETWORK_TOKENS)!r}"
                 )
 
-        if current_company and not re.fullmatch(r"[0-9]+", current_company):
-            raise FilterValidationError(
-                f"current_company must be a numeric LinkedIn company URN id "
-                f"(e.g. '1115' for SAP); got {current_company!r}. Plain-text "
-                f"company names are silently ignored by LinkedIn. Look up the "
-                f'URN via get_company_profile -> references["about"].'
-            )
+        # Every one of these is a numeric-URN facet, and LinkedIn's failure
+        # mode for all of them is the one P1-1 was filed for: a plain-text
+        # value is accepted by the URL, ignored by the search, and answered
+        # with the unfiltered set, which reads exactly like a filtered one.
+        # Refused here rather than sent, so a caller learns instead of acting
+        # on the wrong people.
+        for name, value, example in (
+            ("current_company", current_company, "'1115' for SAP"),
+            ("past_company", past_company, "'1115' for SAP"),
+            ("school", school, "'1792' for Stanford"),
+            ("industry", industry, "'4' for software development"),
+        ):
+            if value and not re.fullmatch(r"[0-9]+", value):
+                raise FilterValidationError(
+                    f"{name} must be a numeric LinkedIn URN id (e.g. "
+                    f"{example}); got {value!r}. Plain-text names are silently "
+                    f"ignored by LinkedIn, which returns the unfiltered set. "
+                    f"Read the id off the corresponding facet of a LinkedIn "
+                    f"people-search URL filtered in the browser, or look a "
+                    f'company up via get_company_profile -> references["about"].'
+                )
+
+        if page < 1:
+            raise FilterValidationError(f"page must be 1 or greater; got {page!r}.")
 
         params = f"keywords={quote_plus(keywords)}"
-        if location:
-            params += f"&location={quote_plus(location)}"
         if network:
             params += f"&network={_encode_list_facet(network)}"
         if current_company:
             params += f"&currentCompany={_encode_list_facet([current_company])}"
+        if past_company:
+            params += f"&pastCompany={_encode_list_facet([past_company])}"
+        if school:
+            params += f"&schoolFilter={_encode_list_facet([school])}"
+        if industry:
+            params += f"&industry={_encode_list_facet([industry])}"
+        if page > 1:
+            params += f"&page={page}"
 
         url = f"https://www.linkedin.com/search/results/people/?{params}"
         extracted = await self.extract_page(url, section_name="search_results")
@@ -4469,6 +4982,9 @@ class LinkedInExtractor:
         result: dict[str, Any] = {
             "url": url,
             "sections": sections,
+            # Echoed so a caller walking pages knows which one this is without
+            # parsing it back out of the URL.
+            "page": page,
         }
         if references:
             result["references"] = references
@@ -4479,13 +4995,24 @@ class LinkedInExtractor:
     async def search_companies(
         self,
         keywords: str,
+        page: int = 1,
     ) -> dict[str, Any]:
         """Search for companies and extract the results page.
 
+        Args:
+            keywords: Free-text query.
+            page: 1-based results page, behind LinkedIn's ``&page=`` parameter.
+
         Returns:
-            {url, sections: {search_results: text}}
+            {url, sections: {search_results: text}, page}
         """
-        url = f"https://www.linkedin.com/search/results/companies/?keywords={quote_plus(keywords)}"
+        if page < 1:
+            raise FilterValidationError(f"page must be 1 or greater; got {page!r}.")
+
+        params = f"keywords={quote_plus(keywords)}"
+        if page > 1:
+            params += f"&page={page}"
+        url = f"https://www.linkedin.com/search/results/companies/?{params}"
         extracted = await self.extract_page(url, section_name="search_results")
 
         sections: dict[str, str] = {}
@@ -4503,6 +5030,7 @@ class LinkedInExtractor:
         result: dict[str, Any] = {
             "url": url,
             "sections": sections,
+            "page": page,
         }
         if references:
             result["references"] = references
@@ -4522,7 +5050,7 @@ class LinkedInExtractor:
         ``/search/results/content/?keywords=Buscamos+Unity&origin=FACETED_SEARCH&datePosted=%5B%22past-week%22%5D``
 
         The ``datePosted`` facet is a one-element JSON list carrying a literal
-        LinkedIn token, URL-encoded — unlike job search, which uses
+        LinkedIn token, URL-encoded - unlike job search, which uses
         ``f_TPR=r<seconds>``. The value is mapped through
         ``_CONTENT_DATE_POSTED_MAP`` so the server's own underscore spelling
         reaches LinkedIn in the form it recognizes. An unmapped value would be
@@ -4544,7 +5072,7 @@ class LinkedInExtractor:
     ) -> dict[str, Any]:
         """Search LinkedIn posts/content and extract the results page.
 
-        Reproduces the LinkedIn "Posts" content-search tab — the surface for
+        Reproduces the LinkedIn "Posts" content-search tab - the surface for
         catching informal "we're hiring" / "Buscamos ..." posts before a
         formal job listing exists.
 
@@ -4654,7 +5182,7 @@ class LinkedInExtractor:
         ``aria-label`` attribute carrying the participant name.
 
         LinkedIn renders the sidebar with no ``<a href>`` tags, no
-        ``data-thread-id`` attributes, and no embedded URNs — clicking each
+        ``data-thread-id`` attributes, and no embedded URNs - clicking each
         row and reading the SPA URL is the only reliable extraction path.
         Pass ``limit=None`` to capture every visible row.
 
@@ -4673,7 +5201,7 @@ class LinkedInExtractor:
         #
         # Selector is structural (`main li label[aria-label]`) rather than
         # text-prefix-based (`aria-label^="Select conversation"`) so it
-        # survives any LinkedIn locale — the verb in the aria-label is
+        # survives any LinkedIn locale - the verb in the aria-label is
         # locale-dependent, the attribute's presence inside a list-item label
         # is not.
         #
@@ -4696,7 +5224,7 @@ class LinkedInExtractor:
         # The Ember click handler lives on an inner div; the <li> and <label>
         # don't trigger SPA navigation.  No role/aria attributes exist on the
         # clickable element, so class-name selectors are unavoidable here.
-        # The aria-label value flows through unmodified — Python strips any
+        # The aria-label value flows through unmodified - Python strips any
         # known locale prefix to derive a clean participant name for refs.
         conversations: list[dict[str, str]] = await self._page.evaluate(
             """async ({ limit, nameFilter }) => {
@@ -4709,7 +5237,7 @@ class LinkedInExtractor:
                 // Normalize the optional participant filter the same way the
                 // Python prefix-strip does (en-US "Select conversation with"
                 // verb, collapsed whitespace) so the JS-side comparison
-                // matches. Only the matching row is clicked — clicking marks a
+                // matches. Only the matching row is clicked - clicking marks a
                 // row read, so unrelated threads must not be clicked.
                 const wanted = (nameFilter || '')
                     .replace(/\\s+/g, ' ').trim().toLowerCase();
@@ -4782,7 +5310,7 @@ class LinkedInExtractor:
         """Read a specific messaging conversation by thread ID or username.
 
         ``index`` (0-based) selects which thread to open when a participant has
-        multiple conversation threads — e.g. an organic 1-on-1 plus a separate
+        multiple conversation threads - e.g. an organic 1-on-1 plus a separate
         InMail. Ignored when ``thread_id`` is provided. Use
         ``search_conversations`` to enumerate thread IDs first if disambiguation
         by index is impractical.
@@ -4839,7 +5367,7 @@ class LinkedInExtractor:
         """Search messages by keyword.
 
         Uses LinkedIn's ``?searchTerm=`` URL parameter to drive the search
-        rather than typing into the searchbox — the URL form is reliable
+        rather than typing into the searchbox - the URL form is reliable
         regardless of how soon the messaging SPA mounts its searchbox role,
         and (critically) preserves the search filter across click-to-capture
         navigations so per-thread refs can be enumerated.
@@ -5022,7 +5550,7 @@ class LinkedInExtractor:
         # via page.keyboard.type() which operates on the active element directly
         # and fires the real keydown/input/keyup events React needs to enable Send.
         #
-        # DOM dependency: innerText extraction is not applicable here — we need
+        # DOM dependency: innerText extraction is not applicable here - we need
         # to call .focus() on the element reference, which requires querySelector.
         # Selectors use only role + contenteditable + aria-label (ARIA attributes,
         # not layout class names) so they are stable across LinkedIn UI changes.
@@ -5053,7 +5581,7 @@ class LinkedInExtractor:
         # on any visible, enabled send button; fall back to Enter key which
         # LinkedIn's composer also accepts for submission.
         #
-        # DOM dependency: we need btn.click() on the element reference — not
+        # DOM dependency: we need btn.click() on the element reference - not
         # achievable via innerText or URL navigation. Selectors use only type,
         # aria-label, and data attributes (no layout class names).
         await asyncio.sleep(1.0)  # allow React to process keyboard input

@@ -3,6 +3,10 @@ LinkedIn person profile scraping tools.
 
 Uses innerText extraction for resilient profile data capture
 with configurable section selection.
+
+Modified in this fork (Apache-2.0 section 4(b)): search pagination and
+facets, batch invitations, network-listing tools, and the
+fallback_to_no_note option. See CHANGELOG-FORK.md.
 """
 
 import logging
@@ -111,21 +115,25 @@ def register_person_tools(
     async def search_people(
         keywords: str,
         ctx: Context,
-        location: str | None = None,
         network: list[str] | None = None,
         current_company: str | None = None,
+        past_company: str | None = None,
+        school: str | None = None,
+        industry: str | None = None,
+        page: Annotated[int, Field(ge=1)] = 1,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
         Search for people on LinkedIn.
 
         Args:
-            keywords: Search keywords (e.g., "software engineer", "recruiter at Google")
+            keywords: Free-text query (e.g., "software engineer"). To filter by location, include it in the keywords (e.g., "embedded engineer Bonn").
             ctx: FastMCP context for progress reporting
-            location: Optional location filter (e.g., "New York", "Remote")
             network: Optional connection-degree filter. Each element is one of
                 "F" (1st-degree), "S" (2nd-degree), "O" (3rd-degree and beyond).
-                Example: ["F"] to only return 1st-degree connections.
+                Example: ["F"] to only return 1st-degree connections. Second-degree
+                people accept far more often than third, so this is usually the
+                highest-leverage filter for a limited invite quota.
             current_company: Optional current-employer filter. LinkedIn's
                 currentCompany facet only filters on the numeric company URN id
                 (e.g. "1115" for SAP); plain company names are accepted by the
@@ -134,9 +142,16 @@ def register_person_tools(
                 exposed under references["about"]. For company-wide employee
                 demographics (location/education/function breakdown) plus a
                 slug-based lookup, use get_company_employees instead.
+            past_company: Optional former-employer filter, numeric URN id, same
+                rule as current_company.
+            school: Optional school filter, numeric school URN id. Alumni of a
+                shared institution are the highest-accepting cold audience.
+            industry: Optional industry filter, numeric industry id.
+            page: 1-based results page. LinkedIn returns roughly ten people per
+                page; without this most of a result set is unreachable.
 
         Returns:
-            Dict with url, sections (name -> raw text), and optional references.
+            Dict with url, sections (name -> raw text), page, and optional references.
             The LLM should parse the raw text to extract individual people and their profiles.
         """
         try:
@@ -144,11 +159,15 @@ def register_person_tools(
                 ctx, tool_name="search_people"
             )
             logger.info(
-                "Searching people: keywords='%s', location='%s', network=%s, current_company='%s'",
+                "Searching people: keywords='%s', network=%s, current_company='%s', "
+                "past_company='%s', school='%s', industry='%s', page=%s",
                 keywords,
-                location,
                 network,
                 current_company,
+                past_company,
+                school,
+                industry,
+                page,
             )
 
             await ctx.report_progress(
@@ -158,9 +177,12 @@ def register_person_tools(
             try:
                 result = await extractor.search_people(
                     keywords,
-                    location,
                     network=network,
                     current_company=current_company,
+                    past_company=past_company,
+                    school=school,
+                    industry=industry,
+                    page=page,
                 )
             except FilterValidationError as e:
                 # Validation messages carry actionable detail; surface
@@ -195,6 +217,7 @@ def register_person_tools(
         linkedin_username: str,
         ctx: Context,
         note: str | None = None,
+        fallback_to_no_note: bool = False,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
@@ -207,13 +230,28 @@ def register_person_tools(
             linkedin_username: LinkedIn username (e.g., "stickerdaniel", "williamhgates"). A full profile URL is accepted too and is reduced to the username.
             ctx: FastMCP context for progress reporting
             note: Optional note to include with the invitation
+            fallback_to_no_note: Send the invitation without a note when
+                LinkedIn's personalized-invite quota is exhausted, instead of
+                returning custom_note_limit_reached and sending nothing. Only
+                applies where an invite can actually be sent; a profile that
+                exposes no Connect action is still reported, never sent to.
 
         Returns:
-            Dict with url, status, message, and note_sent.
+            Dict with url, status, message, note_sent and resolved_username.
             Statuses: pending, already_connected, follow_only,
             connect_unavailable, unavailable, send_failed,
             note_not_supported, custom_note_limit_reached,
             connected, or accepted.
+
+            ``resolved_username`` is the profile the call actually acted on.
+            A state-bearing status is only returned once the browser has been
+            confirmed to be on that profile, so comparing it against the
+            requested username is a cheap check that the answer describes the
+            right person. It differs from the request when LinkedIn resolves
+            an outdated vanity name to a current one.
+
+            ``unavailable`` includes the case where the profile could not be
+            confirmed; nothing was sent and the call is safe to retry.
 
             When status is ``custom_note_limit_reached`` LinkedIn rejected
             personalized invite notes because the free note quota for the
@@ -239,6 +277,7 @@ def register_person_tools(
             result = await extractor.connect_with_person(
                 linkedin_username,
                 note=note,
+                fallback_to_no_note=fallback_to_no_note,
             )
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
@@ -366,3 +405,235 @@ def register_person_tools(
                 raise_tool_error(relogin_exc, "get_my_profile")
         except Exception as e:
             raise_tool_error(e, "get_my_profile")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Connect With People (Batch)",
+        annotations={"destructiveHint": True, "openWorldHint": True},
+        tags={"person", "actions"},
+        exclude_args=["extractor"],
+    )
+    async def connect_with_people(
+        linkedin_usernames: list[str],
+        ctx: Context,
+        note: str | None = None,
+        fallback_to_no_note: bool = False,
+        min_delay_seconds: Annotated[float, Field(ge=0)] = 8.0,
+        max_delay_seconds: Annotated[float, Field(ge=0)] = 25.0,
+        max_invites: Annotated[int, Field(ge=1, le=20)] = 20,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        Send connection requests to several people, paced by the server.
+
+        Prefer this over calling connect_with_person in a loop: the pacing and
+        the stop-on-resistance rule live here, and this server is the only
+        component that sees all traffic to the account.
+
+        Each invitation runs the full single-invite flow, so each one confirms
+        the browser is on the right profile before reading any state and is
+        gated on LinkedIn exposing a Connect action before anything is sent.
+        The run stops at the first rate limit or authentication barrier rather
+        than pushing through it, and returns what completed.
+
+        The same note is sent to everyone, so keep it generic or omit it.
+
+        Args:
+            linkedin_usernames: Public identifiers or profile URLs, in order.
+                Duplicates are collapsed before anything is sent.
+            ctx: FastMCP context for progress reporting
+            note: Optional note included with every invitation.
+            fallback_to_no_note: Send without a note when the personalized-invite
+                quota is exhausted, rather than skipping the person.
+            min_delay_seconds: Lower bound of the randomised gap between invites.
+            max_delay_seconds: Upper bound of that gap. Must be >= the lower bound.
+            max_invites: Ceiling on invitations attempted in this call.
+
+        Returns:
+            Dict with results (one connection result per person, each carrying
+            resolved_username), attempted, sent, stopped_early and, when the run
+            ended early, stop_reason.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="connect_with_people"
+            )
+            logger.info(
+                "Batch connect: %d requested (note=%s, max_invites=%d)",
+                len(linkedin_usernames),
+                note is not None,
+                max_invites,
+            )
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Starting paced batch invitations"
+            )
+
+            try:
+                result = await extractor.connect_with_people(
+                    linkedin_usernames,
+                    note=note,
+                    fallback_to_no_note=fallback_to_no_note,
+                    delay_range=(min_delay_seconds, max_delay_seconds),
+                    max_invites=max_invites,
+                )
+            except FilterValidationError as e:
+                # Carries the correction to make; surfaced as ToolError so
+                # mask_error_details cannot reduce it to a generic failure.
+                raise ToolError(str(e)) from e
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except ToolError:
+            raise
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "connect_with_people")
+        except Exception as e:
+            raise_tool_error(e, "connect_with_people")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Get Sent Invitations",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"person", "network"},
+        exclude_args=["extractor"],
+    )
+    async def get_sent_invitations(
+        ctx: Context,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        List connection invitations you have sent that are still pending.
+
+        Use this to deduplicate before sending: without it, the only way to
+        discover an invitation already exists is to attempt it again. It also
+        shows the pending backlog, which is worth clearing periodically
+        because LinkedIn weighs a high ratio of long-pending invitations
+        against the account.
+
+        Args:
+            ctx: FastMCP context for progress reporting
+
+        Returns:
+            Dict with url, sections (sent_invitations -> raw text), and
+            references containing the /in/ paths of each recipient.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="get_sent_invitations"
+            )
+            logger.info("Reading sent invitations")
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Loading sent invitations"
+            )
+            result = await extractor.get_sent_invitations()
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_sent_invitations")
+        except Exception as e:
+            raise_tool_error(e, "get_sent_invitations")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Get Received Invitations",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"person", "network"},
+        exclude_args=["extractor"],
+    )
+    async def get_received_invitations(
+        ctx: Context,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        List incoming connection invitations awaiting your response.
+
+        Accept one with connect_with_person, which detects the incoming
+        state and clicks Accept.
+
+        Args:
+            ctx: FastMCP context for progress reporting
+
+        Returns:
+            Dict with url, sections (received_invitations -> raw text), and
+            references containing the /in/ paths of each sender.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="get_received_invitations"
+            )
+            logger.info("Reading received invitations")
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Loading received invitations"
+            )
+            result = await extractor.get_received_invitations()
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_received_invitations")
+        except Exception as e:
+            raise_tool_error(e, "get_received_invitations")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Get Notifications",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"person", "network"},
+        exclude_args=["extractor"],
+    )
+    async def get_notifications(
+        ctx: Context,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        Read your LinkedIn notifications, including connection acceptances.
+
+        The natural outreach loop is invite, wait for acceptance, then send a
+        message. This is what makes the middle step visible: the moment
+        someone has just accepted is when a message lands best.
+
+        Args:
+            ctx: FastMCP context for progress reporting
+
+        Returns:
+            Dict with url, sections (notifications -> raw text), and optional
+            references.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="get_notifications"
+            )
+            logger.info("Reading notifications")
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Loading notifications"
+            )
+            result = await extractor.get_notifications()
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_notifications")
+        except Exception as e:
+            raise_tool_error(e, "get_notifications")  # NoReturn
