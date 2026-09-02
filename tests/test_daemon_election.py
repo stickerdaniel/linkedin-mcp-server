@@ -6377,11 +6377,15 @@ class TestPublishingLast:
             release.set()
 
         assert outcome == 1
-        assert order == [
+        # `control` is appended on the reader thread `_read_control_until` starts.
+        # This parent never returns from `readline`, so the main flow reaches its
+        # deadline on its own and nothing orders the two against each other. Only
+        # the main flow's sequence is part of what this test verifies.
+        assert "control" in order
+        assert [event for event in order if event != "control"] == [
             "probe",
             "prepare",
             "prepared",
-            "control",
             "logged",
             "retry",
         ]
