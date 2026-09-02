@@ -1,6 +1,6 @@
 [project]
 name = "mcp-server-linkedin"
-version = "4.23.2"
+version = "4.23.3"
 description = "MCP server that gives AI assistants like Claude access to LinkedIn profiles, companies, and job postings through the user's own browser session."
 readme = "README.md"
 requires-python = ">=3.12.4,<3.15"
