@@ -20,6 +20,18 @@ repos:
 
 -   repo: local
     hooks:
+    -   id: scraping-migration-manifest
+        name: scraping migration manifest
+        entry: uv run python scripts/check_scraping_migration_manifest.py --check
+        language: system
+        pass_filenames: false
+        always_run: true
+    -   id: scraping-policy-traces
+        name: scraping policy traces
+        entry: uv run python scripts/check_scraping_policy_traces.py --check
+        language: system
+        pass_filenames: false
+        always_run: true
     -   id: ty
         name: ty
         entry: uv run ty check

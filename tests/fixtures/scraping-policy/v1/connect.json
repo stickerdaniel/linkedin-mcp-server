@@ -11,8 +11,7 @@
       "callback_id": "callback-1",
       "event": "framenavigated",
       "kind": "listener.add",
-      "section": "main_profile",
-      "seq": 1
+      "section": "main_profile"
     },
     {
       "call": "connect_with_person",
@@ -22,8 +21,7 @@
       },
       "kind": "boundary.trace",
       "label": "extractor-before-goto",
-      "section": "main_profile",
-      "seq": 2
+      "section": "main_profile"
     },
     {
       "call": "connect_with_person",
@@ -31,7 +29,6 @@
       "landed_url": "https://www.linkedin.com/in/ada-lovelace/",
       "requested_url": "https://www.linkedin.com/in/ada-lovelace/",
       "section": "main_profile",
-      "seq": 3,
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
     },
@@ -43,29 +40,25 @@
       },
       "kind": "boundary.trace",
       "label": "extractor-after-goto",
-      "section": "main_profile",
-      "seq": 4
+      "section": "main_profile"
     },
     {
       "call": "connect_with_person",
       "kind": "boundary.auth_quick",
       "result": null,
-      "section": "main_profile",
-      "seq": 5
+      "section": "main_profile"
     },
     {
       "call": "connect_with_person",
       "callback_id": "callback-1",
       "event": "framenavigated",
       "kind": "listener.remove",
-      "section": "main_profile",
-      "seq": 6
+      "section": "main_profile"
     },
     {
       "call": "connect_with_person",
       "kind": "boundary.rate_limit",
-      "section": "main_profile",
-      "seq": 7
+      "section": "main_profile"
     },
     {
       "call": "connect_with_person",
@@ -73,7 +66,6 @@
       "operation": "main",
       "section": "main_profile",
       "selector": "main",
-      "seq": 8,
       "state": "visible",
       "timeout_ms": null
     },
@@ -81,8 +73,7 @@
       "call": "connect_with_person",
       "dismissed": false,
       "kind": "boundary.modal",
-      "section": "main_profile",
-      "seq": 9
+      "section": "main_profile"
     },
     {
       "actual_scrolls": 2,
@@ -90,8 +81,7 @@
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
       "pause_time": 0.5,
-      "section": "main_profile",
-      "seq": 10
+      "section": "main_profile"
     },
     {
       "arg": {
@@ -103,16 +93,14 @@
       "kind": "evaluate",
       "operation": "root_content",
       "program_digest": "e8a0e21ac6f5",
-      "section": "main_profile",
-      "seq": 11
+      "section": "main_profile"
     },
     {
       "call": "connect_with_person",
       "kind": "evaluate",
       "operation": "profile_urn",
       "program_digest": "adf1074697a7",
-      "section": "main_profile",
-      "seq": 12
+      "section": "main_profile"
     },
     {
       "arg": "ada-lovelace",
@@ -120,8 +108,7 @@
       "kind": "evaluate",
       "operation": "connection_action_signals",
       "program_digest": "638a6d3b49bd",
-      "section": "main_profile",
-      "seq": 13
+      "section": "main_profile"
     }
   ],
   "result": {

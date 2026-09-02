@@ -12,8 +12,7 @@
       "callback_id": "callback-1",
       "event": "framenavigated",
       "kind": "listener.add",
-      "section": "search_results",
-      "seq": 1
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
@@ -23,8 +22,7 @@
       },
       "kind": "boundary.trace",
       "label": "extractor-before-goto",
-      "section": "search_results",
-      "seq": 2
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
@@ -32,7 +30,6 @@
       "landed_url": "https://www.linkedin.com/jobs/search-results/?keywords=python",
       "requested_url": "https://www.linkedin.com/jobs/search/?keywords=python",
       "section": "search_results",
-      "seq": 3,
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
     },
@@ -44,37 +41,32 @@
       },
       "kind": "boundary.trace",
       "label": "extractor-after-goto",
-      "section": "search_results",
-      "seq": 4
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
       "kind": "boundary.auth_quick",
       "result": null,
-      "section": "search_results",
-      "seq": 5
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
       "callback_id": "callback-1",
       "event": "framenavigated",
       "kind": "listener.remove",
-      "section": "search_results",
-      "seq": 6
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
       "kind": "boundary.rate_limit",
-      "section": "search_results",
-      "seq": 7
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
       "kind": "evaluate",
       "operation": "document_origin",
       "program_digest": "695b5d466ef7",
-      "section": "search_results",
-      "seq": 8
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
@@ -82,7 +74,6 @@
       "operation": "main",
       "section": "search_results",
       "selector": "main",
-      "seq": 9,
       "state": "visible",
       "timeout_ms": null
     },
@@ -90,16 +81,14 @@
       "call": "search_jobs",
       "dismissed": false,
       "kind": "boundary.modal",
-      "section": "search_results",
-      "seq": 10
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
       "callback_id": "callback-2",
       "event": "framenavigated",
       "kind": "listener.add",
-      "section": "search_results",
-      "seq": 11
+      "section": "search_results"
     },
     {
       "actual_scrolls": 2,
@@ -111,7 +100,6 @@
       "moved": false,
       "poll_interval": 0.15,
       "section": "search_results",
-      "seq": 12,
       "settle_timeout": 3.0
     },
     {
@@ -119,256 +107,224 @@
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 0.01,
-      "section": "search_results",
-      "seq": 13
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 0.01,
-      "section": "search_results",
-      "seq": 14
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 0.01,
-      "section": "search_results",
-      "seq": 15
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 0.01,
-      "section": "search_results",
-      "seq": 16
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 0.01,
-      "section": "search_results",
-      "seq": 17
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 0.01,
-      "section": "search_results",
-      "seq": 18
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 0.01,
-      "section": "search_results",
-      "seq": 19
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 0.01,
-      "section": "search_results",
-      "seq": 20
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 0.01,
-      "section": "search_results",
-      "seq": 21
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 0.01,
-      "section": "search_results",
-      "seq": 22
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 0.01,
-      "section": "search_results",
-      "seq": 23
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 0.01,
-      "section": "search_results",
-      "seq": 24
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 0.01,
-      "section": "search_results",
-      "seq": 25
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 0.01,
-      "section": "search_results",
-      "seq": 26
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 0.01,
-      "section": "search_results",
-      "seq": 27
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 0.01,
-      "section": "search_results",
-      "seq": 28
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 0.01,
-      "section": "search_results",
-      "seq": 29
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 0.01,
-      "section": "search_results",
-      "seq": 30
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 0.01,
-      "section": "search_results",
-      "seq": 31
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 0.01,
-      "section": "search_results",
-      "seq": 32
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 0.01,
-      "section": "search_results",
-      "seq": 33
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 0.01,
-      "section": "search_results",
-      "seq": 34
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 0.01,
-      "section": "search_results",
-      "seq": 35
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 0.01,
-      "section": "search_results",
-      "seq": 36
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 0.01,
-      "section": "search_results",
-      "seq": 37
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 0.01,
-      "section": "search_results",
-      "seq": 38
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 0.01,
-      "section": "search_results",
-      "seq": 39
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 0.01,
-      "section": "search_results",
-      "seq": 40
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 0.01,
-      "section": "search_results",
-      "seq": 41
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 0.01,
-      "section": "search_results",
-      "seq": 42
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 0.01,
-      "section": "search_results",
-      "seq": 43
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
       "callback_id": "callback-2",
       "event": "framenavigated",
       "kind": "listener.remove",
-      "section": "search_results",
-      "seq": 44
+      "section": "search_results"
     },
     {
       "arg": {
@@ -380,24 +336,21 @@
       "kind": "evaluate",
       "operation": "root_content",
       "program_digest": "e8a0e21ac6f5",
-      "section": "search_results",
-      "seq": 45
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
       "kind": "evaluate",
       "operation": "document_origin",
       "program_digest": "695b5d466ef7",
-      "section": "search_results",
-      "seq": 46
+      "section": "search_results"
     },
     {
       "call": "search_jobs",
       "kind": "evaluate",
       "operation": "job_total_pages",
       "program_digest": "5c4f77b0e1cd",
-      "section": "search_results",
-      "seq": 47
+      "section": "search_results"
     },
     {
       "arg": {
@@ -408,8 +361,7 @@
       "kind": "evaluate",
       "operation": "job_ids",
       "program_digest": "a9a17a1764bd",
-      "section": "search_results",
-      "seq": 48
+      "section": "search_results"
     }
   ],
   "result": {

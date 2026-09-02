@@ -23,15 +23,13 @@
       "call": "scrape_person",
       "kind": "callback.start",
       "operation": "person profile",
-      "seq": 1,
       "url": "https://www.linkedin.com/in/ada-lovelace"
     },
     {
       "call": "scrape_person",
       "callback_id": "callback-1",
       "event": "framenavigated",
-      "kind": "listener.add",
-      "seq": 2
+      "kind": "listener.add"
     },
     {
       "call": "scrape_person",
@@ -40,15 +38,13 @@
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
-      "label": "extractor-before-goto",
-      "seq": 3
+      "label": "extractor-before-goto"
     },
     {
       "call": "scrape_person",
       "kind": "navigate",
       "landed_url": "https://www.linkedin.com/in/ada-lovelace/",
       "requested_url": "https://www.linkedin.com/in/ada-lovelace/",
-      "seq": 4,
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
     },
@@ -59,49 +55,42 @@
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
-      "label": "extractor-after-goto",
-      "seq": 5
+      "label": "extractor-after-goto"
     },
     {
       "call": "scrape_person",
       "kind": "boundary.auth_quick",
-      "result": null,
-      "seq": 6
+      "result": null
     },
     {
       "call": "scrape_person",
       "callback_id": "callback-1",
       "event": "framenavigated",
-      "kind": "listener.remove",
-      "seq": 7
+      "kind": "listener.remove"
     },
     {
       "call": "scrape_person",
-      "kind": "boundary.rate_limit",
-      "seq": 8
+      "kind": "boundary.rate_limit"
     },
     {
       "call": "scrape_person",
       "kind": "wait_for_selector",
       "operation": "main",
       "selector": "main",
-      "seq": 9,
       "state": "visible",
       "timeout_ms": null
     },
     {
       "call": "scrape_person",
       "dismissed": false,
-      "kind": "boundary.modal",
-      "seq": 10
+      "kind": "boundary.modal"
     },
     {
       "actual_scrolls": 2,
       "call": "scrape_person",
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
-      "pause_time": 0.5,
-      "seq": 11
+      "pause_time": 0.5
     },
     {
       "arg": {
@@ -112,36 +101,31 @@
       "call": "scrape_person",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "e8a0e21ac6f5",
-      "seq": 12
+      "program_digest": "e8a0e21ac6f5"
     },
     {
       "call": "scrape_person",
       "kind": "evaluate",
       "operation": "profile_urn",
-      "program_digest": "adf1074697a7",
-      "seq": 13
+      "program_digest": "adf1074697a7"
     },
     {
       "call": "scrape_person",
       "kind": "callback.progress",
       "message": "Scraped main_profile (1/11)",
-      "percent": 9,
-      "seq": 14
+      "percent": 9
     },
     {
       "call": "scrape_person",
       "kind": "sleep",
       "reason": "sleep",
-      "seconds": 2.0,
-      "seq": 15
+      "seconds": 2.0
     },
     {
       "call": "scrape_person",
       "callback_id": "callback-2",
       "event": "framenavigated",
-      "kind": "listener.add",
-      "seq": 16
+      "kind": "listener.add"
     },
     {
       "call": "scrape_person",
@@ -150,15 +134,13 @@
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
-      "label": "extractor-before-goto",
-      "seq": 17
+      "label": "extractor-before-goto"
     },
     {
       "call": "scrape_person",
       "kind": "navigate",
       "landed_url": "https://www.linkedin.com/in/ada-lovelace/details/experience/",
       "requested_url": "https://www.linkedin.com/in/ada-lovelace/details/experience/",
-      "seq": 18,
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
     },
@@ -169,41 +151,35 @@
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
-      "label": "extractor-after-goto",
-      "seq": 19
+      "label": "extractor-after-goto"
     },
     {
       "call": "scrape_person",
       "kind": "boundary.auth_quick",
-      "result": null,
-      "seq": 20
+      "result": null
     },
     {
       "call": "scrape_person",
       "callback_id": "callback-2",
       "event": "framenavigated",
-      "kind": "listener.remove",
-      "seq": 21
+      "kind": "listener.remove"
     },
     {
       "call": "scrape_person",
-      "kind": "boundary.rate_limit",
-      "seq": 22
+      "kind": "boundary.rate_limit"
     },
     {
       "call": "scrape_person",
       "kind": "wait_for_selector",
       "operation": "main",
       "selector": "main",
-      "seq": 23,
       "state": "visible",
       "timeout_ms": null
     },
     {
       "call": "scrape_person",
       "dismissed": false,
-      "kind": "boundary.modal",
-      "seq": 24
+      "kind": "boundary.modal"
     },
     {
       "arg": null,
@@ -211,7 +187,6 @@
       "kind": "wait_for_function",
       "operation": "profile_details_ready",
       "program_digest": "652e003606ba",
-      "seq": 25,
       "timeout_ms": 10000
     },
     {
@@ -219,30 +194,26 @@
       "kind": "locator.create",
       "locator": "show_more",
       "parent": null,
-      "selector": "main button",
-      "seq": 26
+      "selector": "main button"
     },
     {
       "call": "scrape_person",
       "kind": "locator.derive",
       "locator": "show_more.filtered",
       "operation": "filter:^Show (more|all)\\b/re.IGNORECASE|re.UNICODE",
-      "parent": "show_more",
-      "seq": 27
+      "parent": "show_more"
     },
     {
       "call": "scrape_person",
       "kind": "locator.count",
-      "locator": "show_more.filtered",
-      "seq": 28
+      "locator": "show_more.filtered"
     },
     {
       "actual_scrolls": 2,
       "call": "scrape_person",
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
-      "pause_time": 0.5,
-      "seq": 29
+      "pause_time": 0.5
     },
     {
       "arg": {
@@ -253,29 +224,25 @@
       "call": "scrape_person",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "e8a0e21ac6f5",
-      "seq": 30
+      "program_digest": "e8a0e21ac6f5"
     },
     {
       "call": "scrape_person",
       "kind": "callback.progress",
       "message": "Scraped experience (2/11)",
-      "percent": 17,
-      "seq": 31
+      "percent": 17
     },
     {
       "call": "scrape_person",
       "kind": "sleep",
       "reason": "sleep",
-      "seconds": 2.0,
-      "seq": 32
+      "seconds": 2.0
     },
     {
       "call": "scrape_person",
       "callback_id": "callback-3",
       "event": "framenavigated",
-      "kind": "listener.add",
-      "seq": 33
+      "kind": "listener.add"
     },
     {
       "call": "scrape_person",
@@ -284,15 +251,13 @@
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
-      "label": "extractor-before-goto",
-      "seq": 34
+      "label": "extractor-before-goto"
     },
     {
       "call": "scrape_person",
       "kind": "navigate",
       "landed_url": "https://www.linkedin.com/in/ada-lovelace/details/education/",
       "requested_url": "https://www.linkedin.com/in/ada-lovelace/details/education/",
-      "seq": 35,
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
     },
@@ -303,41 +268,35 @@
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
-      "label": "extractor-after-goto",
-      "seq": 36
+      "label": "extractor-after-goto"
     },
     {
       "call": "scrape_person",
       "kind": "boundary.auth_quick",
-      "result": null,
-      "seq": 37
+      "result": null
     },
     {
       "call": "scrape_person",
       "callback_id": "callback-3",
       "event": "framenavigated",
-      "kind": "listener.remove",
-      "seq": 38
+      "kind": "listener.remove"
     },
     {
       "call": "scrape_person",
-      "kind": "boundary.rate_limit",
-      "seq": 39
+      "kind": "boundary.rate_limit"
     },
     {
       "call": "scrape_person",
       "kind": "wait_for_selector",
       "operation": "main",
       "selector": "main",
-      "seq": 40,
       "state": "visible",
       "timeout_ms": null
     },
     {
       "call": "scrape_person",
       "dismissed": false,
-      "kind": "boundary.modal",
-      "seq": 41
+      "kind": "boundary.modal"
     },
     {
       "arg": null,
@@ -345,7 +304,6 @@
       "kind": "wait_for_function",
       "operation": "profile_details_ready",
       "program_digest": "652e003606ba",
-      "seq": 42,
       "timeout_ms": 10000
     },
     {
@@ -353,30 +311,26 @@
       "kind": "locator.create",
       "locator": "show_more",
       "parent": null,
-      "selector": "main button",
-      "seq": 43
+      "selector": "main button"
     },
     {
       "call": "scrape_person",
       "kind": "locator.derive",
       "locator": "show_more.filtered",
       "operation": "filter:^Show (more|all)\\b/re.IGNORECASE|re.UNICODE",
-      "parent": "show_more",
-      "seq": 44
+      "parent": "show_more"
     },
     {
       "call": "scrape_person",
       "kind": "locator.count",
-      "locator": "show_more.filtered",
-      "seq": 45
+      "locator": "show_more.filtered"
     },
     {
       "actual_scrolls": 2,
       "call": "scrape_person",
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
-      "pause_time": 0.5,
-      "seq": 46
+      "pause_time": 0.5
     },
     {
       "arg": {
@@ -387,29 +341,25 @@
       "call": "scrape_person",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "e8a0e21ac6f5",
-      "seq": 47
+      "program_digest": "e8a0e21ac6f5"
     },
     {
       "call": "scrape_person",
       "kind": "callback.progress",
       "message": "Scraped education (3/11)",
-      "percent": 26,
-      "seq": 48
+      "percent": 26
     },
     {
       "call": "scrape_person",
       "kind": "sleep",
       "reason": "sleep",
-      "seconds": 2.0,
-      "seq": 49
+      "seconds": 2.0
     },
     {
       "call": "scrape_person",
       "callback_id": "callback-4",
       "event": "framenavigated",
-      "kind": "listener.add",
-      "seq": 50
+      "kind": "listener.add"
     },
     {
       "call": "scrape_person",
@@ -418,15 +368,13 @@
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
-      "label": "extractor-before-goto",
-      "seq": 51
+      "label": "extractor-before-goto"
     },
     {
       "call": "scrape_person",
       "kind": "navigate",
       "landed_url": "https://www.linkedin.com/in/ada-lovelace/details/interests/",
       "requested_url": "https://www.linkedin.com/in/ada-lovelace/details/interests/",
-      "seq": 52,
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
     },
@@ -437,41 +385,35 @@
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
-      "label": "extractor-after-goto",
-      "seq": 53
+      "label": "extractor-after-goto"
     },
     {
       "call": "scrape_person",
       "kind": "boundary.auth_quick",
-      "result": null,
-      "seq": 54
+      "result": null
     },
     {
       "call": "scrape_person",
       "callback_id": "callback-4",
       "event": "framenavigated",
-      "kind": "listener.remove",
-      "seq": 55
+      "kind": "listener.remove"
     },
     {
       "call": "scrape_person",
-      "kind": "boundary.rate_limit",
-      "seq": 56
+      "kind": "boundary.rate_limit"
     },
     {
       "call": "scrape_person",
       "kind": "wait_for_selector",
       "operation": "main",
       "selector": "main",
-      "seq": 57,
       "state": "visible",
       "timeout_ms": null
     },
     {
       "call": "scrape_person",
       "dismissed": false,
-      "kind": "boundary.modal",
-      "seq": 58
+      "kind": "boundary.modal"
     },
     {
       "arg": null,
@@ -479,7 +421,6 @@
       "kind": "wait_for_function",
       "operation": "profile_details_ready",
       "program_digest": "652e003606ba",
-      "seq": 59,
       "timeout_ms": 10000
     },
     {
@@ -487,30 +428,26 @@
       "kind": "locator.create",
       "locator": "show_more",
       "parent": null,
-      "selector": "main button",
-      "seq": 60
+      "selector": "main button"
     },
     {
       "call": "scrape_person",
       "kind": "locator.derive",
       "locator": "show_more.filtered",
       "operation": "filter:^Show (more|all)\\b/re.IGNORECASE|re.UNICODE",
-      "parent": "show_more",
-      "seq": 61
+      "parent": "show_more"
     },
     {
       "call": "scrape_person",
       "kind": "locator.count",
-      "locator": "show_more.filtered",
-      "seq": 62
+      "locator": "show_more.filtered"
     },
     {
       "actual_scrolls": 2,
       "call": "scrape_person",
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
-      "pause_time": 0.5,
-      "seq": 63
+      "pause_time": 0.5
     },
     {
       "arg": {
@@ -521,29 +458,25 @@
       "call": "scrape_person",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "e8a0e21ac6f5",
-      "seq": 64
+      "program_digest": "e8a0e21ac6f5"
     },
     {
       "call": "scrape_person",
       "kind": "callback.progress",
       "message": "Scraped interests (4/11)",
-      "percent": 35,
-      "seq": 65
+      "percent": 35
     },
     {
       "call": "scrape_person",
       "kind": "sleep",
       "reason": "sleep",
-      "seconds": 2.0,
-      "seq": 66
+      "seconds": 2.0
     },
     {
       "call": "scrape_person",
       "callback_id": "callback-5",
       "event": "framenavigated",
-      "kind": "listener.add",
-      "seq": 67
+      "kind": "listener.add"
     },
     {
       "call": "scrape_person",
@@ -552,15 +485,13 @@
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
-      "label": "extractor-before-goto",
-      "seq": 68
+      "label": "extractor-before-goto"
     },
     {
       "call": "scrape_person",
       "kind": "navigate",
       "landed_url": "https://www.linkedin.com/in/ada-lovelace/details/honors/",
       "requested_url": "https://www.linkedin.com/in/ada-lovelace/details/honors/",
-      "seq": 69,
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
     },
@@ -571,41 +502,35 @@
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
-      "label": "extractor-after-goto",
-      "seq": 70
+      "label": "extractor-after-goto"
     },
     {
       "call": "scrape_person",
       "kind": "boundary.auth_quick",
-      "result": null,
-      "seq": 71
+      "result": null
     },
     {
       "call": "scrape_person",
       "callback_id": "callback-5",
       "event": "framenavigated",
-      "kind": "listener.remove",
-      "seq": 72
+      "kind": "listener.remove"
     },
     {
       "call": "scrape_person",
-      "kind": "boundary.rate_limit",
-      "seq": 73
+      "kind": "boundary.rate_limit"
     },
     {
       "call": "scrape_person",
       "kind": "wait_for_selector",
       "operation": "main",
       "selector": "main",
-      "seq": 74,
       "state": "visible",
       "timeout_ms": null
     },
     {
       "call": "scrape_person",
       "dismissed": false,
-      "kind": "boundary.modal",
-      "seq": 75
+      "kind": "boundary.modal"
     },
     {
       "arg": null,
@@ -613,7 +538,6 @@
       "kind": "wait_for_function",
       "operation": "profile_details_ready",
       "program_digest": "652e003606ba",
-      "seq": 76,
       "timeout_ms": 10000
     },
     {
@@ -621,30 +545,26 @@
       "kind": "locator.create",
       "locator": "show_more",
       "parent": null,
-      "selector": "main button",
-      "seq": 77
+      "selector": "main button"
     },
     {
       "call": "scrape_person",
       "kind": "locator.derive",
       "locator": "show_more.filtered",
       "operation": "filter:^Show (more|all)\\b/re.IGNORECASE|re.UNICODE",
-      "parent": "show_more",
-      "seq": 78
+      "parent": "show_more"
     },
     {
       "call": "scrape_person",
       "kind": "locator.count",
-      "locator": "show_more.filtered",
-      "seq": 79
+      "locator": "show_more.filtered"
     },
     {
       "actual_scrolls": 2,
       "call": "scrape_person",
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
-      "pause_time": 0.5,
-      "seq": 80
+      "pause_time": 0.5
     },
     {
       "arg": {
@@ -655,29 +575,25 @@
       "call": "scrape_person",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "e8a0e21ac6f5",
-      "seq": 81
+      "program_digest": "e8a0e21ac6f5"
     },
     {
       "call": "scrape_person",
       "kind": "callback.progress",
       "message": "Scraped honors (5/11)",
-      "percent": 43,
-      "seq": 82
+      "percent": 43
     },
     {
       "call": "scrape_person",
       "kind": "sleep",
       "reason": "sleep",
-      "seconds": 2.0,
-      "seq": 83
+      "seconds": 2.0
     },
     {
       "call": "scrape_person",
       "callback_id": "callback-6",
       "event": "framenavigated",
-      "kind": "listener.add",
-      "seq": 84
+      "kind": "listener.add"
     },
     {
       "call": "scrape_person",
@@ -686,15 +602,13 @@
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
-      "label": "extractor-before-goto",
-      "seq": 85
+      "label": "extractor-before-goto"
     },
     {
       "call": "scrape_person",
       "kind": "navigate",
       "landed_url": "https://www.linkedin.com/in/ada-lovelace/details/languages/",
       "requested_url": "https://www.linkedin.com/in/ada-lovelace/details/languages/",
-      "seq": 86,
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
     },
@@ -705,41 +619,35 @@
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
-      "label": "extractor-after-goto",
-      "seq": 87
+      "label": "extractor-after-goto"
     },
     {
       "call": "scrape_person",
       "kind": "boundary.auth_quick",
-      "result": null,
-      "seq": 88
+      "result": null
     },
     {
       "call": "scrape_person",
       "callback_id": "callback-6",
       "event": "framenavigated",
-      "kind": "listener.remove",
-      "seq": 89
+      "kind": "listener.remove"
     },
     {
       "call": "scrape_person",
-      "kind": "boundary.rate_limit",
-      "seq": 90
+      "kind": "boundary.rate_limit"
     },
     {
       "call": "scrape_person",
       "kind": "wait_for_selector",
       "operation": "main",
       "selector": "main",
-      "seq": 91,
       "state": "visible",
       "timeout_ms": null
     },
     {
       "call": "scrape_person",
       "dismissed": false,
-      "kind": "boundary.modal",
-      "seq": 92
+      "kind": "boundary.modal"
     },
     {
       "arg": null,
@@ -747,7 +655,6 @@
       "kind": "wait_for_function",
       "operation": "profile_details_ready",
       "program_digest": "652e003606ba",
-      "seq": 93,
       "timeout_ms": 10000
     },
     {
@@ -755,30 +662,26 @@
       "kind": "locator.create",
       "locator": "show_more",
       "parent": null,
-      "selector": "main button",
-      "seq": 94
+      "selector": "main button"
     },
     {
       "call": "scrape_person",
       "kind": "locator.derive",
       "locator": "show_more.filtered",
       "operation": "filter:^Show (more|all)\\b/re.IGNORECASE|re.UNICODE",
-      "parent": "show_more",
-      "seq": 95
+      "parent": "show_more"
     },
     {
       "call": "scrape_person",
       "kind": "locator.count",
-      "locator": "show_more.filtered",
-      "seq": 96
+      "locator": "show_more.filtered"
     },
     {
       "actual_scrolls": 2,
       "call": "scrape_person",
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
-      "pause_time": 0.5,
-      "seq": 97
+      "pause_time": 0.5
     },
     {
       "arg": {
@@ -789,29 +692,25 @@
       "call": "scrape_person",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "e8a0e21ac6f5",
-      "seq": 98
+      "program_digest": "e8a0e21ac6f5"
     },
     {
       "call": "scrape_person",
       "kind": "callback.progress",
       "message": "Scraped languages (6/11)",
-      "percent": 52,
-      "seq": 99
+      "percent": 52
     },
     {
       "call": "scrape_person",
       "kind": "sleep",
       "reason": "sleep",
-      "seconds": 2.0,
-      "seq": 100
+      "seconds": 2.0
     },
     {
       "call": "scrape_person",
       "callback_id": "callback-7",
       "event": "framenavigated",
-      "kind": "listener.add",
-      "seq": 101
+      "kind": "listener.add"
     },
     {
       "call": "scrape_person",
@@ -820,15 +719,13 @@
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
-      "label": "extractor-before-goto",
-      "seq": 102
+      "label": "extractor-before-goto"
     },
     {
       "call": "scrape_person",
       "kind": "navigate",
       "landed_url": "https://www.linkedin.com/in/ada-lovelace/details/certifications/",
       "requested_url": "https://www.linkedin.com/in/ada-lovelace/details/certifications/",
-      "seq": 103,
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
     },
@@ -839,41 +736,35 @@
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
-      "label": "extractor-after-goto",
-      "seq": 104
+      "label": "extractor-after-goto"
     },
     {
       "call": "scrape_person",
       "kind": "boundary.auth_quick",
-      "result": null,
-      "seq": 105
+      "result": null
     },
     {
       "call": "scrape_person",
       "callback_id": "callback-7",
       "event": "framenavigated",
-      "kind": "listener.remove",
-      "seq": 106
+      "kind": "listener.remove"
     },
     {
       "call": "scrape_person",
-      "kind": "boundary.rate_limit",
-      "seq": 107
+      "kind": "boundary.rate_limit"
     },
     {
       "call": "scrape_person",
       "kind": "wait_for_selector",
       "operation": "main",
       "selector": "main",
-      "seq": 108,
       "state": "visible",
       "timeout_ms": null
     },
     {
       "call": "scrape_person",
       "dismissed": false,
-      "kind": "boundary.modal",
-      "seq": 109
+      "kind": "boundary.modal"
     },
     {
       "arg": null,
@@ -881,7 +772,6 @@
       "kind": "wait_for_function",
       "operation": "profile_details_ready",
       "program_digest": "652e003606ba",
-      "seq": 110,
       "timeout_ms": 10000
     },
     {
@@ -889,30 +779,26 @@
       "kind": "locator.create",
       "locator": "show_more",
       "parent": null,
-      "selector": "main button",
-      "seq": 111
+      "selector": "main button"
     },
     {
       "call": "scrape_person",
       "kind": "locator.derive",
       "locator": "show_more.filtered",
       "operation": "filter:^Show (more|all)\\b/re.IGNORECASE|re.UNICODE",
-      "parent": "show_more",
-      "seq": 112
+      "parent": "show_more"
     },
     {
       "call": "scrape_person",
       "kind": "locator.count",
-      "locator": "show_more.filtered",
-      "seq": 113
+      "locator": "show_more.filtered"
     },
     {
       "actual_scrolls": 2,
       "call": "scrape_person",
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
-      "pause_time": 0.5,
-      "seq": 114
+      "pause_time": 0.5
     },
     {
       "arg": {
@@ -923,29 +809,25 @@
       "call": "scrape_person",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "e8a0e21ac6f5",
-      "seq": 115
+      "program_digest": "e8a0e21ac6f5"
     },
     {
       "call": "scrape_person",
       "kind": "callback.progress",
       "message": "Scraped certifications (7/11)",
-      "percent": 60,
-      "seq": 116
+      "percent": 60
     },
     {
       "call": "scrape_person",
       "kind": "sleep",
       "reason": "sleep",
-      "seconds": 2.0,
-      "seq": 117
+      "seconds": 2.0
     },
     {
       "call": "scrape_person",
       "callback_id": "callback-8",
       "event": "framenavigated",
-      "kind": "listener.add",
-      "seq": 118
+      "kind": "listener.add"
     },
     {
       "call": "scrape_person",
@@ -954,15 +836,13 @@
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
-      "label": "extractor-before-goto",
-      "seq": 119
+      "label": "extractor-before-goto"
     },
     {
       "call": "scrape_person",
       "kind": "navigate",
       "landed_url": "https://www.linkedin.com/in/ada-lovelace/details/skills/",
       "requested_url": "https://www.linkedin.com/in/ada-lovelace/details/skills/",
-      "seq": 120,
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
     },
@@ -973,41 +853,35 @@
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
-      "label": "extractor-after-goto",
-      "seq": 121
+      "label": "extractor-after-goto"
     },
     {
       "call": "scrape_person",
       "kind": "boundary.auth_quick",
-      "result": null,
-      "seq": 122
+      "result": null
     },
     {
       "call": "scrape_person",
       "callback_id": "callback-8",
       "event": "framenavigated",
-      "kind": "listener.remove",
-      "seq": 123
+      "kind": "listener.remove"
     },
     {
       "call": "scrape_person",
-      "kind": "boundary.rate_limit",
-      "seq": 124
+      "kind": "boundary.rate_limit"
     },
     {
       "call": "scrape_person",
       "kind": "wait_for_selector",
       "operation": "main",
       "selector": "main",
-      "seq": 125,
       "state": "visible",
       "timeout_ms": null
     },
     {
       "call": "scrape_person",
       "dismissed": false,
-      "kind": "boundary.modal",
-      "seq": 126
+      "kind": "boundary.modal"
     },
     {
       "arg": null,
@@ -1015,7 +889,6 @@
       "kind": "wait_for_function",
       "operation": "profile_details_ready",
       "program_digest": "652e003606ba",
-      "seq": 127,
       "timeout_ms": 10000
     },
     {
@@ -1023,30 +896,26 @@
       "kind": "locator.create",
       "locator": "show_more",
       "parent": null,
-      "selector": "main button",
-      "seq": 128
+      "selector": "main button"
     },
     {
       "call": "scrape_person",
       "kind": "locator.derive",
       "locator": "show_more.filtered",
       "operation": "filter:^Show (more|all)\\b/re.IGNORECASE|re.UNICODE",
-      "parent": "show_more",
-      "seq": 129
+      "parent": "show_more"
     },
     {
       "call": "scrape_person",
       "kind": "locator.count",
-      "locator": "show_more.filtered",
-      "seq": 130
+      "locator": "show_more.filtered"
     },
     {
       "actual_scrolls": 2,
       "call": "scrape_person",
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
-      "pause_time": 0.5,
-      "seq": 131
+      "pause_time": 0.5
     },
     {
       "arg": {
@@ -1057,29 +926,25 @@
       "call": "scrape_person",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "e8a0e21ac6f5",
-      "seq": 132
+      "program_digest": "e8a0e21ac6f5"
     },
     {
       "call": "scrape_person",
       "kind": "callback.progress",
       "message": "Scraped skills (8/11)",
-      "percent": 69,
-      "seq": 133
+      "percent": 69
     },
     {
       "call": "scrape_person",
       "kind": "sleep",
       "reason": "sleep",
-      "seconds": 2.0,
-      "seq": 134
+      "seconds": 2.0
     },
     {
       "call": "scrape_person",
       "callback_id": "callback-9",
       "event": "framenavigated",
-      "kind": "listener.add",
-      "seq": 135
+      "kind": "listener.add"
     },
     {
       "call": "scrape_person",
@@ -1088,15 +953,13 @@
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
-      "label": "extractor-before-goto",
-      "seq": 136
+      "label": "extractor-before-goto"
     },
     {
       "call": "scrape_person",
       "kind": "navigate",
       "landed_url": "https://www.linkedin.com/in/ada-lovelace/details/projects/",
       "requested_url": "https://www.linkedin.com/in/ada-lovelace/details/projects/",
-      "seq": 137,
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
     },
@@ -1107,41 +970,35 @@
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
-      "label": "extractor-after-goto",
-      "seq": 138
+      "label": "extractor-after-goto"
     },
     {
       "call": "scrape_person",
       "kind": "boundary.auth_quick",
-      "result": null,
-      "seq": 139
+      "result": null
     },
     {
       "call": "scrape_person",
       "callback_id": "callback-9",
       "event": "framenavigated",
-      "kind": "listener.remove",
-      "seq": 140
+      "kind": "listener.remove"
     },
     {
       "call": "scrape_person",
-      "kind": "boundary.rate_limit",
-      "seq": 141
+      "kind": "boundary.rate_limit"
     },
     {
       "call": "scrape_person",
       "kind": "wait_for_selector",
       "operation": "main",
       "selector": "main",
-      "seq": 142,
       "state": "visible",
       "timeout_ms": null
     },
     {
       "call": "scrape_person",
       "dismissed": false,
-      "kind": "boundary.modal",
-      "seq": 143
+      "kind": "boundary.modal"
     },
     {
       "arg": null,
@@ -1149,7 +1006,6 @@
       "kind": "wait_for_function",
       "operation": "profile_details_ready",
       "program_digest": "652e003606ba",
-      "seq": 144,
       "timeout_ms": 10000
     },
     {
@@ -1157,30 +1013,26 @@
       "kind": "locator.create",
       "locator": "show_more",
       "parent": null,
-      "selector": "main button",
-      "seq": 145
+      "selector": "main button"
     },
     {
       "call": "scrape_person",
       "kind": "locator.derive",
       "locator": "show_more.filtered",
       "operation": "filter:^Show (more|all)\\b/re.IGNORECASE|re.UNICODE",
-      "parent": "show_more",
-      "seq": 146
+      "parent": "show_more"
     },
     {
       "call": "scrape_person",
       "kind": "locator.count",
-      "locator": "show_more.filtered",
-      "seq": 147
+      "locator": "show_more.filtered"
     },
     {
       "actual_scrolls": 2,
       "call": "scrape_person",
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
-      "pause_time": 0.5,
-      "seq": 148
+      "pause_time": 0.5
     },
     {
       "arg": {
@@ -1191,29 +1043,25 @@
       "call": "scrape_person",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "e8a0e21ac6f5",
-      "seq": 149
+      "program_digest": "e8a0e21ac6f5"
     },
     {
       "call": "scrape_person",
       "kind": "callback.progress",
       "message": "Scraped projects (9/11)",
-      "percent": 78,
-      "seq": 150
+      "percent": 78
     },
     {
       "call": "scrape_person",
       "kind": "sleep",
       "reason": "sleep",
-      "seconds": 2.0,
-      "seq": 151
+      "seconds": 2.0
     },
     {
       "call": "scrape_person",
       "callback_id": "callback-10",
       "event": "framenavigated",
-      "kind": "listener.add",
-      "seq": 152
+      "kind": "listener.add"
     },
     {
       "call": "scrape_person",
@@ -1222,15 +1070,13 @@
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
-      "label": "extractor-before-goto",
-      "seq": 153
+      "label": "extractor-before-goto"
     },
     {
       "call": "scrape_person",
       "kind": "navigate",
       "landed_url": "https://www.linkedin.com/in/ada-lovelace/overlay/contact-info/",
       "requested_url": "https://www.linkedin.com/in/ada-lovelace/overlay/contact-info/",
-      "seq": 154,
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
     },
@@ -1241,33 +1087,28 @@
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
-      "label": "extractor-after-goto",
-      "seq": 155
+      "label": "extractor-after-goto"
     },
     {
       "call": "scrape_person",
       "kind": "boundary.auth_quick",
-      "result": null,
-      "seq": 156
+      "result": null
     },
     {
       "call": "scrape_person",
       "callback_id": "callback-10",
       "event": "framenavigated",
-      "kind": "listener.remove",
-      "seq": 157
+      "kind": "listener.remove"
     },
     {
       "call": "scrape_person",
-      "kind": "boundary.rate_limit",
-      "seq": 158
+      "kind": "boundary.rate_limit"
     },
     {
       "call": "scrape_person",
       "kind": "wait_for_selector",
       "operation": "dialog",
       "selector": "dialog[open], .artdeco-modal__content",
-      "seq": 159,
       "state": "visible",
       "timeout_ms": null
     },
@@ -1282,29 +1123,25 @@
       "call": "scrape_person",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "e8a0e21ac6f5",
-      "seq": 160
+      "program_digest": "e8a0e21ac6f5"
     },
     {
       "call": "scrape_person",
       "kind": "callback.progress",
       "message": "Scraped contact_info (10/11)",
-      "percent": 86,
-      "seq": 161
+      "percent": 86
     },
     {
       "call": "scrape_person",
       "kind": "sleep",
       "reason": "sleep",
-      "seconds": 2.0,
-      "seq": 162
+      "seconds": 2.0
     },
     {
       "call": "scrape_person",
       "callback_id": "callback-11",
       "event": "framenavigated",
-      "kind": "listener.add",
-      "seq": 163
+      "kind": "listener.add"
     },
     {
       "call": "scrape_person",
@@ -1313,15 +1150,13 @@
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
-      "label": "extractor-before-goto",
-      "seq": 164
+      "label": "extractor-before-goto"
     },
     {
       "call": "scrape_person",
       "kind": "navigate",
       "landed_url": "https://www.linkedin.com/in/ada-lovelace/recent-activity/all/",
       "requested_url": "https://www.linkedin.com/in/ada-lovelace/recent-activity/all/",
-      "seq": 165,
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
     },
@@ -1332,41 +1167,35 @@
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
-      "label": "extractor-after-goto",
-      "seq": 166
+      "label": "extractor-after-goto"
     },
     {
       "call": "scrape_person",
       "kind": "boundary.auth_quick",
-      "result": null,
-      "seq": 167
+      "result": null
     },
     {
       "call": "scrape_person",
       "callback_id": "callback-11",
       "event": "framenavigated",
-      "kind": "listener.remove",
-      "seq": 168
+      "kind": "listener.remove"
     },
     {
       "call": "scrape_person",
-      "kind": "boundary.rate_limit",
-      "seq": 169
+      "kind": "boundary.rate_limit"
     },
     {
       "call": "scrape_person",
       "kind": "wait_for_selector",
       "operation": "main",
       "selector": "main",
-      "seq": 170,
       "state": "visible",
       "timeout_ms": null
     },
     {
       "call": "scrape_person",
       "dismissed": false,
-      "kind": "boundary.modal",
-      "seq": 171
+      "kind": "boundary.modal"
     },
     {
       "arg": null,
@@ -1374,7 +1203,6 @@
       "kind": "wait_for_function",
       "operation": "main_text_200",
       "program_digest": "24943facf9de",
-      "seq": 172,
       "timeout_ms": 10000
     },
     {
@@ -1382,8 +1210,7 @@
       "call": "scrape_person",
       "kind": "boundary.scroll_body",
       "max_scrolls": 10,
-      "pause_time": 1.0,
-      "seq": 173
+      "pause_time": 1.0
     },
     {
       "arg": {
@@ -1394,22 +1221,19 @@
       "call": "scrape_person",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "e8a0e21ac6f5",
-      "seq": 174
+      "program_digest": "e8a0e21ac6f5"
     },
     {
       "call": "scrape_person",
       "kind": "callback.progress",
       "message": "Scraped posts (11/11)",
-      "percent": 95,
-      "seq": 175
+      "percent": 95
     },
     {
       "call": "scrape_person",
       "kind": "callback.complete",
       "operation": "person profile",
-      "result_url": "https://www.linkedin.com/in/ada-lovelace/",
-      "seq": 176
+      "result_url": "https://www.linkedin.com/in/ada-lovelace/"
     }
   ],
   "result": {

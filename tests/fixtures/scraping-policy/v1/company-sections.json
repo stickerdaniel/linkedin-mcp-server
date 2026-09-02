@@ -15,15 +15,13 @@
       "call": "scrape_company",
       "kind": "callback.start",
       "operation": "company profile",
-      "seq": 1,
       "url": "https://www.linkedin.com/company/analytical-engine"
     },
     {
       "call": "scrape_company",
       "callback_id": "callback-1",
       "event": "framenavigated",
-      "kind": "listener.add",
-      "seq": 2
+      "kind": "listener.add"
     },
     {
       "call": "scrape_company",
@@ -32,15 +30,13 @@
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
-      "label": "extractor-before-goto",
-      "seq": 3
+      "label": "extractor-before-goto"
     },
     {
       "call": "scrape_company",
       "kind": "navigate",
       "landed_url": "https://www.linkedin.com/company/analytical-engine/about/",
       "requested_url": "https://www.linkedin.com/company/analytical-engine/about/",
-      "seq": 4,
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
     },
@@ -51,49 +47,42 @@
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
-      "label": "extractor-after-goto",
-      "seq": 5
+      "label": "extractor-after-goto"
     },
     {
       "call": "scrape_company",
       "kind": "boundary.auth_quick",
-      "result": null,
-      "seq": 6
+      "result": null
     },
     {
       "call": "scrape_company",
       "callback_id": "callback-1",
       "event": "framenavigated",
-      "kind": "listener.remove",
-      "seq": 7
+      "kind": "listener.remove"
     },
     {
       "call": "scrape_company",
-      "kind": "boundary.rate_limit",
-      "seq": 8
+      "kind": "boundary.rate_limit"
     },
     {
       "call": "scrape_company",
       "kind": "wait_for_selector",
       "operation": "main",
       "selector": "main",
-      "seq": 9,
       "state": "visible",
       "timeout_ms": null
     },
     {
       "call": "scrape_company",
       "dismissed": false,
-      "kind": "boundary.modal",
-      "seq": 10
+      "kind": "boundary.modal"
     },
     {
       "actual_scrolls": 2,
       "call": "scrape_company",
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
-      "pause_time": 0.5,
-      "seq": 11
+      "pause_time": 0.5
     },
     {
       "arg": {
@@ -104,29 +93,25 @@
       "call": "scrape_company",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "e8a0e21ac6f5",
-      "seq": 12
+      "program_digest": "e8a0e21ac6f5"
     },
     {
       "call": "scrape_company",
       "kind": "callback.progress",
       "message": "Scraped about (1/3)",
-      "percent": 32,
-      "seq": 13
+      "percent": 32
     },
     {
       "call": "scrape_company",
       "kind": "sleep",
       "reason": "sleep",
-      "seconds": 2.0,
-      "seq": 14
+      "seconds": 2.0
     },
     {
       "call": "scrape_company",
       "callback_id": "callback-2",
       "event": "framenavigated",
-      "kind": "listener.add",
-      "seq": 15
+      "kind": "listener.add"
     },
     {
       "call": "scrape_company",
@@ -135,15 +120,13 @@
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
-      "label": "extractor-before-goto",
-      "seq": 16
+      "label": "extractor-before-goto"
     },
     {
       "call": "scrape_company",
       "kind": "navigate",
       "landed_url": "https://www.linkedin.com/company/analytical-engine/posts/",
       "requested_url": "https://www.linkedin.com/company/analytical-engine/posts/",
-      "seq": 17,
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
     },
@@ -154,41 +137,35 @@
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
-      "label": "extractor-after-goto",
-      "seq": 18
+      "label": "extractor-after-goto"
     },
     {
       "call": "scrape_company",
       "kind": "boundary.auth_quick",
-      "result": null,
-      "seq": 19
+      "result": null
     },
     {
       "call": "scrape_company",
       "callback_id": "callback-2",
       "event": "framenavigated",
-      "kind": "listener.remove",
-      "seq": 20
+      "kind": "listener.remove"
     },
     {
       "call": "scrape_company",
-      "kind": "boundary.rate_limit",
-      "seq": 21
+      "kind": "boundary.rate_limit"
     },
     {
       "call": "scrape_company",
       "kind": "wait_for_selector",
       "operation": "main",
       "selector": "main",
-      "seq": 22,
       "state": "visible",
       "timeout_ms": null
     },
     {
       "call": "scrape_company",
       "dismissed": false,
-      "kind": "boundary.modal",
-      "seq": 23
+      "kind": "boundary.modal"
     },
     {
       "arg": null,
@@ -196,7 +173,6 @@
       "kind": "wait_for_function",
       "operation": "main_text_200",
       "program_digest": "24943facf9de",
-      "seq": 24,
       "timeout_ms": 10000
     },
     {
@@ -204,8 +180,7 @@
       "call": "scrape_company",
       "kind": "boundary.scroll_body",
       "max_scrolls": 10,
-      "pause_time": 1.0,
-      "seq": 25
+      "pause_time": 1.0
     },
     {
       "arg": {
@@ -216,29 +191,25 @@
       "call": "scrape_company",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "e8a0e21ac6f5",
-      "seq": 26
+      "program_digest": "e8a0e21ac6f5"
     },
     {
       "call": "scrape_company",
       "kind": "callback.progress",
       "message": "Scraped posts (2/3)",
-      "percent": 63,
-      "seq": 27
+      "percent": 63
     },
     {
       "call": "scrape_company",
       "kind": "sleep",
       "reason": "sleep",
-      "seconds": 2.0,
-      "seq": 28
+      "seconds": 2.0
     },
     {
       "call": "scrape_company",
       "callback_id": "callback-3",
       "event": "framenavigated",
-      "kind": "listener.add",
-      "seq": 29
+      "kind": "listener.add"
     },
     {
       "call": "scrape_company",
@@ -247,15 +218,13 @@
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
-      "label": "extractor-before-goto",
-      "seq": 30
+      "label": "extractor-before-goto"
     },
     {
       "call": "scrape_company",
       "kind": "navigate",
       "landed_url": "https://www.linkedin.com/company/analytical-engine/jobs/",
       "requested_url": "https://www.linkedin.com/company/analytical-engine/jobs/",
-      "seq": 31,
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
     },
@@ -266,49 +235,42 @@
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
-      "label": "extractor-after-goto",
-      "seq": 32
+      "label": "extractor-after-goto"
     },
     {
       "call": "scrape_company",
       "kind": "boundary.auth_quick",
-      "result": null,
-      "seq": 33
+      "result": null
     },
     {
       "call": "scrape_company",
       "callback_id": "callback-3",
       "event": "framenavigated",
-      "kind": "listener.remove",
-      "seq": 34
+      "kind": "listener.remove"
     },
     {
       "call": "scrape_company",
-      "kind": "boundary.rate_limit",
-      "seq": 35
+      "kind": "boundary.rate_limit"
     },
     {
       "call": "scrape_company",
       "kind": "wait_for_selector",
       "operation": "main",
       "selector": "main",
-      "seq": 36,
       "state": "visible",
       "timeout_ms": null
     },
     {
       "call": "scrape_company",
       "dismissed": false,
-      "kind": "boundary.modal",
-      "seq": 37
+      "kind": "boundary.modal"
     },
     {
       "actual_scrolls": 2,
       "call": "scrape_company",
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
-      "pause_time": 0.5,
-      "seq": 38
+      "pause_time": 0.5
     },
     {
       "arg": {
@@ -319,22 +281,19 @@
       "call": "scrape_company",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "e8a0e21ac6f5",
-      "seq": 39
+      "program_digest": "e8a0e21ac6f5"
     },
     {
       "call": "scrape_company",
       "kind": "callback.progress",
       "message": "Scraped jobs (3/3)",
-      "percent": 95,
-      "seq": 40
+      "percent": 95
     },
     {
       "call": "scrape_company",
       "kind": "callback.complete",
       "operation": "company profile",
-      "result_url": "https://www.linkedin.com/company/analytical-engine/",
-      "seq": 41
+      "result_url": "https://www.linkedin.com/company/analytical-engine/"
     }
   ],
   "result": {

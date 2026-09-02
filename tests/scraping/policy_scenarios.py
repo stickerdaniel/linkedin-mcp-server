@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from difflib import unified_diff
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
@@ -770,3 +771,33 @@ async def build_policy_traces() -> dict[str, dict[str, Any]]:
 
 def canonical_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+
+
+def policy_trace_diff(
+    generated: dict[str, dict[str, Any]], trace_root: Path = TRACE_ROOT
+) -> str:
+    """Return one deterministic unified comparison against canonical traces."""
+
+    generated_names = set(generated)
+    fixture_names = {path.name for path in trace_root.glob("*.json")}
+    chunks = [
+        f"missing canonical trace: {trace_root / name}\n"
+        for name in sorted(generated_names - fixture_names)
+    ]
+    chunks.extend(
+        f"unexpected canonical trace: {trace_root / name}\n"
+        for name in sorted(fixture_names - generated_names)
+    )
+    for name in sorted(generated_names & fixture_names):
+        path = trace_root / name
+        expected = path.read_text(encoding="utf-8")
+        actual = canonical_json(generated[name])
+        chunks.extend(
+            unified_diff(
+                expected.splitlines(keepends=True),
+                actual.splitlines(keepends=True),
+                fromfile=str(path),
+                tofile=f"generated/{name}",
+            )
+        )
+    return "".join(chunks)

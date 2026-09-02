@@ -11,8 +11,7 @@
       "call": "get_company_employees",
       "callback_id": "callback-1",
       "event": "framenavigated",
-      "kind": "listener.add",
-      "seq": 1
+      "kind": "listener.add"
     },
     {
       "call": "get_company_employees",
@@ -21,15 +20,13 @@
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
-      "label": "extractor-before-goto",
-      "seq": 2
+      "label": "extractor-before-goto"
     },
     {
       "call": "get_company_employees",
       "kind": "navigate",
       "landed_url": "https://www.linkedin.com/company/analytical-engine/people/?keywords=math",
       "requested_url": "https://www.linkedin.com/company/analytical-engine/people/?keywords=math",
-      "seq": 3,
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
     },
@@ -40,41 +37,35 @@
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
-      "label": "extractor-after-goto",
-      "seq": 4
+      "label": "extractor-after-goto"
     },
     {
       "call": "get_company_employees",
       "kind": "boundary.auth_quick",
-      "result": null,
-      "seq": 5
+      "result": null
     },
     {
       "call": "get_company_employees",
       "callback_id": "callback-1",
       "event": "framenavigated",
-      "kind": "listener.remove",
-      "seq": 6
+      "kind": "listener.remove"
     },
     {
       "call": "get_company_employees",
-      "kind": "boundary.rate_limit",
-      "seq": 7
+      "kind": "boundary.rate_limit"
     },
     {
       "call": "get_company_employees",
       "kind": "wait_for_selector",
       "operation": "main",
       "selector": "main",
-      "seq": 8,
       "state": "visible",
       "timeout_ms": null
     },
     {
       "call": "get_company_employees",
       "dismissed": false,
-      "kind": "boundary.modal",
-      "seq": 9
+      "kind": "boundary.modal"
     },
     {
       "arg": null,
@@ -82,7 +73,6 @@
       "kind": "wait_for_function",
       "operation": "company_people_ready",
       "program_digest": "6615c14bd135",
-      "seq": 10,
       "timeout_ms": 5000
     },
     {
@@ -90,8 +80,7 @@
       "call": "get_company_employees",
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
-      "pause_time": 0.5,
-      "seq": 11
+      "pause_time": 0.5
     },
     {
       "arg": {
@@ -102,8 +91,7 @@
       "call": "get_company_employees",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "e8a0e21ac6f5",
-      "seq": 12
+      "program_digest": "e8a0e21ac6f5"
     }
   ],
   "result": {

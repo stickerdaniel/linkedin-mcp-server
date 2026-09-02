@@ -15,8 +15,7 @@
       "callback_id": "callback-1",
       "event": "framenavigated",
       "kind": "listener.add",
-      "section": "message",
-      "seq": 1
+      "section": "message"
     },
     {
       "call": "send_message",
@@ -26,8 +25,7 @@
       },
       "kind": "boundary.trace",
       "label": "extractor-before-goto",
-      "section": "message",
-      "seq": 2
+      "section": "message"
     },
     {
       "call": "send_message",
@@ -35,7 +33,6 @@
       "landed_url": "https://www.linkedin.com/in/ada-lovelace/",
       "requested_url": "https://www.linkedin.com/in/ada-lovelace/",
       "section": "message",
-      "seq": 3,
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
     },
@@ -47,29 +44,25 @@
       },
       "kind": "boundary.trace",
       "label": "extractor-after-goto",
-      "section": "message",
-      "seq": 4
+      "section": "message"
     },
     {
       "call": "send_message",
       "kind": "boundary.auth_quick",
       "result": null,
-      "section": "message",
-      "seq": 5
+      "section": "message"
     },
     {
       "call": "send_message",
       "callback_id": "callback-1",
       "event": "framenavigated",
       "kind": "listener.remove",
-      "section": "message",
-      "seq": 6
+      "section": "message"
     },
     {
       "call": "send_message",
       "kind": "boundary.rate_limit",
-      "section": "message",
-      "seq": 7
+      "section": "message"
     },
     {
       "call": "send_message",
@@ -77,7 +70,6 @@
       "operation": "main",
       "section": "message",
       "selector": "main",
-      "seq": 8,
       "state": "visible",
       "timeout_ms": null
     },
@@ -85,24 +77,21 @@
       "call": "send_message",
       "dismissed": false,
       "kind": "boundary.modal",
-      "section": "message",
-      "seq": 9
+      "section": "message"
     },
     {
       "call": "send_message",
       "kind": "evaluate",
       "operation": "profile_display_name",
       "program_digest": "a6e221fb7a22",
-      "section": "message",
-      "seq": 10
+      "section": "message"
     },
     {
       "call": "send_message",
       "callback_id": "callback-2",
       "event": "framenavigated",
       "kind": "listener.add",
-      "section": "message",
-      "seq": 11
+      "section": "message"
     },
     {
       "call": "send_message",
@@ -112,8 +101,7 @@
       },
       "kind": "boundary.trace",
       "label": "extractor-before-goto",
-      "section": "message",
-      "seq": 12
+      "section": "message"
     },
     {
       "call": "send_message",
@@ -121,7 +109,6 @@
       "landed_url": "https://www.linkedin.com/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3AACoAA-policy&recipient=ACoAA-policy&screenContext=NON_SELF_PROFILE_VIEW&interop=msgOverlay",
       "requested_url": "https://www.linkedin.com/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3AACoAA-policy&recipient=ACoAA-policy&screenContext=NON_SELF_PROFILE_VIEW&interop=msgOverlay",
       "section": "message",
-      "seq": 13,
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
     },
@@ -133,29 +120,25 @@
       },
       "kind": "boundary.trace",
       "label": "extractor-after-goto",
-      "section": "message",
-      "seq": 14
+      "section": "message"
     },
     {
       "call": "send_message",
       "kind": "boundary.auth_quick",
       "result": null,
-      "section": "message",
-      "seq": 15
+      "section": "message"
     },
     {
       "call": "send_message",
       "callback_id": "callback-2",
       "event": "framenavigated",
       "kind": "listener.remove",
-      "section": "message",
-      "seq": 16
+      "section": "message"
     },
     {
       "call": "send_message",
       "kind": "boundary.rate_limit",
-      "section": "message",
-      "seq": 17
+      "section": "message"
     },
     {
       "call": "send_message",
@@ -163,7 +146,6 @@
       "operation": "main",
       "section": "message",
       "selector": "main",
-      "seq": 18,
       "state": "visible",
       "timeout_ms": null
     },
@@ -171,8 +153,7 @@
       "call": "send_message",
       "dismissed": false,
       "kind": "boundary.modal",
-      "section": "message",
-      "seq": 19
+      "section": "message"
     },
     {
       "call": "send_message",
@@ -180,15 +161,13 @@
       "locator": "recipient_picker",
       "parent": null,
       "section": "message",
-      "selector": "input[placeholder*=\"Type a name\"], input[aria-label*=\"Type a name\"], input[placeholder*=\"multiple names\"]",
-      "seq": 20
+      "selector": "input[placeholder*=\"Type a name\"], input[aria-label*=\"Type a name\"], input[placeholder*=\"multiple names\"]"
     },
     {
       "call": "send_message",
       "kind": "locator.count",
       "locator": "recipient_picker",
-      "section": "message",
-      "seq": 21
+      "section": "message"
     },
     {
       "call": "send_message",
@@ -196,15 +175,13 @@
       "locator": "composer.0",
       "parent": null,
       "section": "message",
-      "selector": "div[role=\"textbox\"][contenteditable=\"true\"][aria-label*=\"Write a message\"]",
-      "seq": 22
+      "selector": "div[role=\"textbox\"][contenteditable=\"true\"][aria-label*=\"Write a message\"]"
     },
     {
       "call": "send_message",
       "kind": "locator.count",
       "locator": "composer.0",
-      "section": "message",
-      "seq": 23
+      "section": "message"
     },
     {
       "call": "send_message",
@@ -212,8 +189,7 @@
       "locator": "composer.0.last",
       "operation": "last",
       "parent": "composer.0",
-      "section": "message",
-      "seq": 24
+      "section": "message"
     },
     {
       "call": "send_message",
@@ -221,15 +197,13 @@
       "locator": "composer.0",
       "parent": null,
       "section": "message",
-      "selector": "div[role=\"textbox\"][contenteditable=\"true\"][aria-label*=\"Write a message\"]",
-      "seq": 25
+      "selector": "div[role=\"textbox\"][contenteditable=\"true\"][aria-label*=\"Write a message\"]"
     },
     {
       "call": "send_message",
       "kind": "locator.count",
       "locator": "composer.0",
-      "section": "message",
-      "seq": 26
+      "section": "message"
     },
     {
       "call": "send_message",
@@ -237,8 +211,7 @@
       "locator": "composer.0.last",
       "operation": "last",
       "parent": "composer.0",
-      "section": "message",
-      "seq": 27
+      "section": "message"
     },
     {
       "arg": {
@@ -251,8 +224,7 @@
       "kind": "evaluate",
       "operation": "compose_matches_recipient",
       "program_digest": "72e8cfe97aec",
-      "section": "message",
-      "seq": 28
+      "section": "message"
     },
     {
       "call": "send_message",
@@ -260,15 +232,13 @@
       "locator": "message_close",
       "parent": null,
       "section": "message",
-      "selector": "button[aria-label*=\"Close your draft conversation\"], button[aria-label=\"Dismiss\"], button[aria-label*=\"Dismiss\"], button[aria-label*=\"Close\"]",
-      "seq": 29
+      "selector": "button[aria-label*=\"Close your draft conversation\"], button[aria-label=\"Dismiss\"], button[aria-label*=\"Dismiss\"], button[aria-label*=\"Close\"]"
     },
     {
       "call": "send_message",
       "kind": "locator.count",
       "locator": "message_close",
-      "section": "message",
-      "seq": 30
+      "section": "message"
     }
   ],
   "result": {

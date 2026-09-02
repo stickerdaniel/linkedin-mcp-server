@@ -11,8 +11,7 @@
       "callback_id": "callback-1",
       "event": "framenavigated",
       "kind": "listener.add",
-      "section": "conversation",
-      "seq": 1
+      "section": "conversation"
     },
     {
       "call": "get_conversation",
@@ -22,8 +21,7 @@
       },
       "kind": "boundary.trace",
       "label": "extractor-before-goto",
-      "section": "conversation",
-      "seq": 2
+      "section": "conversation"
     },
     {
       "call": "get_conversation",
@@ -31,7 +29,6 @@
       "landed_url": "https://www.linkedin.com/messaging/thread/2-abc/",
       "requested_url": "https://www.linkedin.com/messaging/thread/2-abc/",
       "section": "conversation",
-      "seq": 3,
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
     },
@@ -43,29 +40,25 @@
       },
       "kind": "boundary.trace",
       "label": "extractor-after-goto",
-      "section": "conversation",
-      "seq": 4
+      "section": "conversation"
     },
     {
       "call": "get_conversation",
       "kind": "boundary.auth_quick",
       "result": null,
-      "section": "conversation",
-      "seq": 5
+      "section": "conversation"
     },
     {
       "call": "get_conversation",
       "callback_id": "callback-1",
       "event": "framenavigated",
       "kind": "listener.remove",
-      "section": "conversation",
-      "seq": 6
+      "section": "conversation"
     },
     {
       "call": "get_conversation",
       "kind": "boundary.rate_limit",
-      "section": "conversation",
-      "seq": 7
+      "section": "conversation"
     },
     {
       "arg": {
@@ -76,15 +69,13 @@
       "operation": "main_text_minimum",
       "program_digest": "9ab4343bf5cb",
       "section": "conversation",
-      "seq": 8,
       "timeout_ms": 10000
     },
     {
       "call": "get_conversation",
       "dismissed": false,
       "kind": "boundary.modal",
-      "section": "conversation",
-      "seq": 9
+      "section": "conversation"
     },
     {
       "arg": {
@@ -94,16 +85,14 @@
       "kind": "evaluate",
       "operation": "scroll_main_region",
       "program_digest": "2a74f7f069d9",
-      "section": "conversation",
-      "seq": 10
+      "section": "conversation"
     },
     {
       "call": "get_conversation",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 0.5,
-      "section": "conversation",
-      "seq": 11
+      "section": "conversation"
     },
     {
       "arg": {
@@ -113,16 +102,14 @@
       "kind": "evaluate",
       "operation": "scroll_main_region",
       "program_digest": "2a74f7f069d9",
-      "section": "conversation",
-      "seq": 12
+      "section": "conversation"
     },
     {
       "call": "get_conversation",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 0.5,
-      "section": "conversation",
-      "seq": 13
+      "section": "conversation"
     },
     {
       "arg": {
@@ -132,16 +119,14 @@
       "kind": "evaluate",
       "operation": "scroll_main_region",
       "program_digest": "2a74f7f069d9",
-      "section": "conversation",
-      "seq": 14
+      "section": "conversation"
     },
     {
       "call": "get_conversation",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 0.5,
-      "section": "conversation",
-      "seq": 15
+      "section": "conversation"
     },
     {
       "arg": {
@@ -153,8 +138,7 @@
       "kind": "evaluate",
       "operation": "root_content",
       "program_digest": "e8a0e21ac6f5",
-      "section": "conversation",
-      "seq": 16
+      "section": "conversation"
     }
   ],
   "result": {

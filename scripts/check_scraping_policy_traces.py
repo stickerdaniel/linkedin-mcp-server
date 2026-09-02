@@ -3,9 +3,9 @@
 
 from __future__ import annotations
 
-from difflib import unified_diff
 from pathlib import Path
 
+import argparse
 import asyncio
 import sys
 
@@ -17,43 +17,47 @@ from tests.scraping.policy_scenarios import (  # noqa: E402
     TRACE_ROOT,
     build_policy_traces,
     canonical_json,
+    policy_trace_diff,
 )
 
 
+def _inside_fixture_root(path: Path) -> bool:
+    return path.resolve().is_relative_to(TRACE_ROOT.parent.resolve())
+
+
+def _write_generated(output: Path, generated: dict[str, dict]) -> None:
+    if _inside_fixture_root(output):
+        raise ValueError(
+            f"refusing to write generated output inside canonical fixture directory: {output}"
+        )
+    if output.exists():
+        raise ValueError(f"refusing to overwrite generated output: {output}")
+    output.mkdir(parents=True)
+    for name, trace in sorted(generated.items()):
+        (output / name).write_text(canonical_json(trace), encoding="utf-8")
+
+
 def main() -> int:
-    if sys.argv[1:] not in ([], ["--check"]):
-        print("usage: check_scraping_policy_traces.py [--check]", file=sys.stderr)
-        return 2
+    parser = argparse.ArgumentParser()
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--check", action="store_true")
+    mode.add_argument("--output", type=Path)
+    args = parser.parse_args()
 
     generated = asyncio.run(build_policy_traces())
-    expected_names = set(generated)
-    actual_names = {path.name for path in TRACE_ROOT.glob("*.json")}
-    failed = False
+    if args.output is not None:
+        try:
+            _write_generated(args.output, generated)
+        except ValueError as error:
+            parser.error(str(error))
+        print(args.output)
+        return 0
 
-    for missing in sorted(expected_names - actual_names):
-        print(f"missing canonical trace: {TRACE_ROOT / missing}", file=sys.stderr)
-        failed = True
-    for extra in sorted(actual_names - expected_names):
-        print(f"unexpected canonical trace: {TRACE_ROOT / extra}", file=sys.stderr)
-        failed = True
-
-    for name in sorted(expected_names & actual_names):
-        path = TRACE_ROOT / name
-        expected = path.read_text(encoding="utf-8")
-        actual = canonical_json(generated[name])
-        if expected == actual:
-            continue
-        failed = True
-        sys.stderr.writelines(
-            unified_diff(
-                expected.splitlines(keepends=True),
-                actual.splitlines(keepends=True),
-                fromfile=str(path),
-                tofile=f"generated/{name}",
-            )
-        )
-
-    return 1 if failed else 0
+    difference = policy_trace_diff(generated)
+    if difference:
+        sys.stderr.write(difference)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":

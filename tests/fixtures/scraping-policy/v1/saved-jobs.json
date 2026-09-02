@@ -11,16 +11,14 @@
       "callback_id": "callback-1",
       "event": "framenavigated",
       "kind": "listener.add",
-      "section": "saved_jobs",
-      "seq": 1
+      "section": "saved_jobs"
     },
     {
       "call": "get_saved_jobs",
       "callback_id": "callback-2",
       "event": "framenavigated",
       "kind": "listener.add",
-      "section": "saved_jobs",
-      "seq": 2
+      "section": "saved_jobs"
     },
     {
       "call": "get_saved_jobs",
@@ -30,8 +28,7 @@
       },
       "kind": "boundary.trace",
       "label": "extractor-before-goto",
-      "section": "saved_jobs",
-      "seq": 3
+      "section": "saved_jobs"
     },
     {
       "call": "get_saved_jobs",
@@ -39,7 +36,6 @@
       "landed_url": "https://www.linkedin.com/jobs-tracker/",
       "requested_url": "https://www.linkedin.com/my-items/saved-jobs/",
       "section": "saved_jobs",
-      "seq": 4,
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
     },
@@ -51,37 +47,32 @@
       },
       "kind": "boundary.trace",
       "label": "extractor-after-goto",
-      "section": "saved_jobs",
-      "seq": 5
+      "section": "saved_jobs"
     },
     {
       "call": "get_saved_jobs",
       "kind": "boundary.auth_quick",
       "result": null,
-      "section": "saved_jobs",
-      "seq": 6
+      "section": "saved_jobs"
     },
     {
       "call": "get_saved_jobs",
       "callback_id": "callback-2",
       "event": "framenavigated",
       "kind": "listener.remove",
-      "section": "saved_jobs",
-      "seq": 7
+      "section": "saved_jobs"
     },
     {
       "call": "get_saved_jobs",
       "kind": "boundary.rate_limit",
-      "section": "saved_jobs",
-      "seq": 8
+      "section": "saved_jobs"
     },
     {
       "call": "get_saved_jobs",
       "kind": "evaluate",
       "operation": "document_origin",
       "program_digest": "695b5d466ef7",
-      "section": "saved_jobs",
-      "seq": 9
+      "section": "saved_jobs"
     },
     {
       "call": "get_saved_jobs",
@@ -89,7 +80,6 @@
       "operation": "main",
       "section": "saved_jobs",
       "selector": "main",
-      "seq": 10,
       "state": "visible",
       "timeout_ms": null
     },
@@ -97,8 +87,7 @@
       "call": "get_saved_jobs",
       "dismissed": false,
       "kind": "boundary.modal",
-      "section": "saved_jobs",
-      "seq": 11
+      "section": "saved_jobs"
     },
     {
       "actual_scrolls": 2,
@@ -106,8 +95,7 @@
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
       "pause_time": 0.5,
-      "section": "saved_jobs",
-      "seq": 12
+      "section": "saved_jobs"
     },
     {
       "arg": {
@@ -119,32 +107,28 @@
       "kind": "evaluate",
       "operation": "root_content",
       "program_digest": "e8a0e21ac6f5",
-      "section": "saved_jobs",
-      "seq": 13
+      "section": "saved_jobs"
     },
     {
       "call": "get_saved_jobs",
       "kind": "evaluate",
       "operation": "document_origin",
       "program_digest": "695b5d466ef7",
-      "section": "saved_jobs",
-      "seq": 14
+      "section": "saved_jobs"
     },
     {
       "call": "get_saved_jobs",
       "callback_id": "callback-1",
       "event": "framenavigated",
       "kind": "listener.remove",
-      "section": "saved_jobs",
-      "seq": 15
+      "section": "saved_jobs"
     },
     {
       "call": "get_saved_jobs",
       "kind": "evaluate",
       "operation": "saved_job_total_pages",
       "program_digest": "e1521bdd818a",
-      "section": "saved_jobs",
-      "seq": 16
+      "section": "saved_jobs"
     },
     {
       "arg": {
@@ -155,32 +139,28 @@
       "kind": "evaluate",
       "operation": "job_ids",
       "program_digest": "a9a17a1764bd",
-      "section": "saved_jobs",
-      "seq": 17
+      "section": "saved_jobs"
     },
     {
       "call": "get_saved_jobs",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 2.0,
-      "section": "saved_jobs",
-      "seq": 18
+      "section": "saved_jobs"
     },
     {
       "call": "get_saved_jobs",
       "callback_id": "callback-3",
       "event": "framenavigated",
       "kind": "listener.add",
-      "section": "saved_jobs",
-      "seq": 19
+      "section": "saved_jobs"
     },
     {
       "call": "get_saved_jobs",
       "callback_id": "callback-4",
       "event": "framenavigated",
       "kind": "listener.add",
-      "section": "saved_jobs",
-      "seq": 20
+      "section": "saved_jobs"
     },
     {
       "call": "get_saved_jobs",
@@ -190,8 +170,7 @@
       },
       "kind": "boundary.trace",
       "label": "extractor-before-goto",
-      "section": "saved_jobs",
-      "seq": 21
+      "section": "saved_jobs"
     },
     {
       "call": "get_saved_jobs",
@@ -199,7 +178,6 @@
       "landed_url": "https://www.linkedin.com/my-items/saved-jobs/?start=10",
       "requested_url": "https://www.linkedin.com/my-items/saved-jobs/?start=10",
       "section": "saved_jobs",
-      "seq": 22,
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
     },
@@ -211,37 +189,32 @@
       },
       "kind": "boundary.trace",
       "label": "extractor-after-goto",
-      "section": "saved_jobs",
-      "seq": 23
+      "section": "saved_jobs"
     },
     {
       "call": "get_saved_jobs",
       "kind": "boundary.auth_quick",
       "result": null,
-      "section": "saved_jobs",
-      "seq": 24
+      "section": "saved_jobs"
     },
     {
       "call": "get_saved_jobs",
       "callback_id": "callback-4",
       "event": "framenavigated",
       "kind": "listener.remove",
-      "section": "saved_jobs",
-      "seq": 25
+      "section": "saved_jobs"
     },
     {
       "call": "get_saved_jobs",
       "kind": "boundary.rate_limit",
-      "section": "saved_jobs",
-      "seq": 26
+      "section": "saved_jobs"
     },
     {
       "call": "get_saved_jobs",
       "kind": "evaluate",
       "operation": "document_origin",
       "program_digest": "695b5d466ef7",
-      "section": "saved_jobs",
-      "seq": 27
+      "section": "saved_jobs"
     },
     {
       "call": "get_saved_jobs",
@@ -249,7 +222,6 @@
       "operation": "main",
       "section": "saved_jobs",
       "selector": "main",
-      "seq": 28,
       "state": "visible",
       "timeout_ms": null
     },
@@ -257,8 +229,7 @@
       "call": "get_saved_jobs",
       "dismissed": false,
       "kind": "boundary.modal",
-      "section": "saved_jobs",
-      "seq": 29
+      "section": "saved_jobs"
     },
     {
       "actual_scrolls": 2,
@@ -266,8 +237,7 @@
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
       "pause_time": 0.5,
-      "section": "saved_jobs",
-      "seq": 30
+      "section": "saved_jobs"
     },
     {
       "arg": {
@@ -279,24 +249,21 @@
       "kind": "evaluate",
       "operation": "root_content",
       "program_digest": "e8a0e21ac6f5",
-      "section": "saved_jobs",
-      "seq": 31
+      "section": "saved_jobs"
     },
     {
       "call": "get_saved_jobs",
       "kind": "evaluate",
       "operation": "document_origin",
       "program_digest": "695b5d466ef7",
-      "section": "saved_jobs",
-      "seq": 32
+      "section": "saved_jobs"
     },
     {
       "call": "get_saved_jobs",
       "callback_id": "callback-3",
       "event": "framenavigated",
       "kind": "listener.remove",
-      "section": "saved_jobs",
-      "seq": 33
+      "section": "saved_jobs"
     },
     {
       "arg": {
@@ -307,8 +274,7 @@
       "kind": "evaluate",
       "operation": "job_ids",
       "program_digest": "a9a17a1764bd",
-      "section": "saved_jobs",
-      "seq": 34
+      "section": "saved_jobs"
     }
   ],
   "result": {

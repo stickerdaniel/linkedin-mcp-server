@@ -10,8 +10,7 @@
       "call": "scrape_job",
       "callback_id": "callback-1",
       "event": "framenavigated",
-      "kind": "listener.add",
-      "seq": 1
+      "kind": "listener.add"
     },
     {
       "call": "scrape_job",
@@ -20,15 +19,13 @@
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
-      "label": "extractor-before-goto",
-      "seq": 2
+      "label": "extractor-before-goto"
     },
     {
       "call": "scrape_job",
       "kind": "navigate",
       "landed_url": "https://www.linkedin.com/jobs/view/123/",
       "requested_url": "https://www.linkedin.com/jobs/view/123/",
-      "seq": 3,
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
     },
@@ -39,49 +36,42 @@
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
-      "label": "extractor-after-goto",
-      "seq": 4
+      "label": "extractor-after-goto"
     },
     {
       "call": "scrape_job",
       "kind": "boundary.auth_quick",
-      "result": null,
-      "seq": 5
+      "result": null
     },
     {
       "call": "scrape_job",
       "callback_id": "callback-1",
       "event": "framenavigated",
-      "kind": "listener.remove",
-      "seq": 6
+      "kind": "listener.remove"
     },
     {
       "call": "scrape_job",
-      "kind": "boundary.rate_limit",
-      "seq": 7
+      "kind": "boundary.rate_limit"
     },
     {
       "call": "scrape_job",
       "kind": "wait_for_selector",
       "operation": "main",
       "selector": "main",
-      "seq": 8,
       "state": "visible",
       "timeout_ms": null
     },
     {
       "call": "scrape_job",
       "dismissed": false,
-      "kind": "boundary.modal",
-      "seq": 9
+      "kind": "boundary.modal"
     },
     {
       "actual_scrolls": 2,
       "call": "scrape_job",
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
-      "pause_time": 0.5,
-      "seq": 10
+      "pause_time": 0.5
     },
     {
       "arg": {
@@ -92,8 +82,7 @@
       "call": "scrape_job",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "e8a0e21ac6f5",
-      "seq": 11
+      "program_digest": "e8a0e21ac6f5"
     }
   ],
   "result": {

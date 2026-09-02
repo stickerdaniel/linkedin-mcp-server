@@ -11,16 +11,14 @@
       "callback_id": "callback-1",
       "event": "response",
       "kind": "listener.add",
-      "section": "feed",
-      "seq": 1
+      "section": "feed"
     },
     {
       "call": "extract_feed",
       "callback_id": "callback-2",
       "event": "framenavigated",
       "kind": "listener.add",
-      "section": "feed",
-      "seq": 2
+      "section": "feed"
     },
     {
       "call": "extract_feed",
@@ -30,8 +28,7 @@
       },
       "kind": "boundary.trace",
       "label": "extractor-before-goto",
-      "section": "feed",
-      "seq": 3
+      "section": "feed"
     },
     {
       "call": "extract_feed",
@@ -39,7 +36,6 @@
       "landed_url": "https://www.linkedin.com/feed/",
       "requested_url": "https://www.linkedin.com/feed/",
       "section": "feed",
-      "seq": 4,
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
     },
@@ -51,29 +47,25 @@
       },
       "kind": "boundary.trace",
       "label": "extractor-after-goto",
-      "section": "feed",
-      "seq": 5
+      "section": "feed"
     },
     {
       "call": "extract_feed",
       "kind": "boundary.auth_quick",
       "result": null,
-      "section": "feed",
-      "seq": 6
+      "section": "feed"
     },
     {
       "call": "extract_feed",
       "callback_id": "callback-2",
       "event": "framenavigated",
       "kind": "listener.remove",
-      "section": "feed",
-      "seq": 7
+      "section": "feed"
     },
     {
       "call": "extract_feed",
       "kind": "boundary.rate_limit",
-      "section": "feed",
-      "seq": 8
+      "section": "feed"
     },
     {
       "call": "extract_feed",
@@ -81,7 +73,6 @@
       "operation": "main",
       "section": "feed",
       "selector": "main",
-      "seq": 9,
       "state": "visible",
       "timeout_ms": null
     },
@@ -89,8 +80,7 @@
       "call": "extract_feed",
       "dismissed": false,
       "kind": "boundary.modal",
-      "section": "feed",
-      "seq": 10
+      "section": "feed"
     },
     {
       "arg": null,
@@ -99,14 +89,12 @@
       "operation": "main_text_200",
       "program_digest": "24943facf9de",
       "section": "feed",
-      "seq": 11,
       "timeout_ms": 10000
     },
     {
       "call": "extract_feed",
       "kind": "mouse.move",
       "section": "feed",
-      "seq": 12,
       "x": 640,
       "y": 360
     },
@@ -115,176 +103,154 @@
       "delta_x": 0,
       "delta_y": 2000,
       "kind": "mouse.wheel",
-      "section": "feed",
-      "seq": 13
+      "section": "feed"
     },
     {
       "call": "extract_feed",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 1.0,
-      "section": "feed",
-      "seq": 14
+      "section": "feed"
     },
     {
       "call": "extract_feed",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 1.0,
-      "section": "feed",
-      "seq": 15
+      "section": "feed"
     },
     {
       "call": "extract_feed",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 1.0,
-      "section": "feed",
-      "seq": 16
+      "section": "feed"
     },
     {
       "call": "extract_feed",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 1.0,
-      "section": "feed",
-      "seq": 17
+      "section": "feed"
     },
     {
       "call": "extract_feed",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 1.0,
-      "section": "feed",
-      "seq": 18
+      "section": "feed"
     },
     {
       "call": "extract_feed",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 1.0,
-      "section": "feed",
-      "seq": 19
+      "section": "feed"
     },
     {
       "call": "extract_feed",
       "delta_x": 0,
       "delta_y": 2000,
       "kind": "mouse.wheel",
-      "section": "feed",
-      "seq": 20
+      "section": "feed"
     },
     {
       "call": "extract_feed",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 1.0,
-      "section": "feed",
-      "seq": 21
+      "section": "feed"
     },
     {
       "call": "extract_feed",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 1.0,
-      "section": "feed",
-      "seq": 22
+      "section": "feed"
     },
     {
       "call": "extract_feed",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 1.0,
-      "section": "feed",
-      "seq": 23
+      "section": "feed"
     },
     {
       "call": "extract_feed",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 1.0,
-      "section": "feed",
-      "seq": 24
+      "section": "feed"
     },
     {
       "call": "extract_feed",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 1.0,
-      "section": "feed",
-      "seq": 25
+      "section": "feed"
     },
     {
       "call": "extract_feed",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 1.0,
-      "section": "feed",
-      "seq": 26
+      "section": "feed"
     },
     {
       "call": "extract_feed",
       "delta_x": 0,
       "delta_y": 2000,
       "kind": "mouse.wheel",
-      "section": "feed",
-      "seq": 27
+      "section": "feed"
     },
     {
       "call": "extract_feed",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 1.0,
-      "section": "feed",
-      "seq": 28
+      "section": "feed"
     },
     {
       "call": "extract_feed",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 1.0,
-      "section": "feed",
-      "seq": 29
+      "section": "feed"
     },
     {
       "call": "extract_feed",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 1.0,
-      "section": "feed",
-      "seq": 30
+      "section": "feed"
     },
     {
       "call": "extract_feed",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 1.0,
-      "section": "feed",
-      "seq": 31
+      "section": "feed"
     },
     {
       "call": "extract_feed",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 1.0,
-      "section": "feed",
-      "seq": 32
+      "section": "feed"
     },
     {
       "call": "extract_feed",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 1.0,
-      "section": "feed",
-      "seq": 33
+      "section": "feed"
     },
     {
       "call": "extract_feed",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 0.2,
-      "section": "feed",
-      "seq": 34
+      "section": "feed"
     },
     {
       "arg": {
@@ -296,23 +262,20 @@
       "kind": "evaluate",
       "operation": "root_content",
       "program_digest": "e8a0e21ac6f5",
-      "section": "feed",
-      "seq": 35
+      "section": "feed"
     },
     {
       "call": "extract_feed",
       "callback_id": "callback-1",
       "event": "response",
       "kind": "listener.remove",
-      "section": "feed",
-      "seq": 36
+      "section": "feed"
     },
     {
       "call": "extract_feed",
       "kind": "boundary.drain",
       "pending": 0,
-      "section": "feed",
-      "seq": 37
+      "section": "feed"
     }
   ],
   "result": {

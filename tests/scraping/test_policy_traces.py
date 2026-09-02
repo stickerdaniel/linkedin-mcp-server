@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import json
+import subprocess
+import sys
 
 from linkedin_mcp_server.scraping.fields import COMPANY_SECTIONS, PERSON_SECTIONS
 
@@ -13,7 +16,12 @@ from .policy_scenarios import (
     TRACE_ROOT,
     build_policy_traces,
     canonical_json,
+    policy_trace_diff,
 )
+
+
+ROOT = Path(__file__).resolve().parents[2]
+CHECKER = ROOT / "scripts" / "check_scraping_policy_traces.py"
 
 
 def _operation_positions(trace: dict[str, Any]) -> dict[str, list[int]]:
@@ -26,11 +34,20 @@ def _operation_positions(trace: dict[str, Any]) -> dict[str, list[int]]:
 
 async def test_generated_traces_match_every_canonical_fixture():
     generated = await build_policy_traces()
-    fixture_names = {path.name for path in TRACE_ROOT.glob("*.json")}
 
-    assert set(generated) == fixture_names
-    for name, trace in generated.items():
-        assert canonical_json(trace) == (TRACE_ROOT / name).read_text(encoding="utf-8")
+    assert policy_trace_diff(generated) == ""
+
+
+async def test_trace_comparison_reports_a_unified_diff():
+    generated = await build_policy_traces()
+    generated["connect.json"]["result"]["status"] = "mutated"
+
+    difference = policy_trace_diff(generated)
+
+    assert f"--- {TRACE_ROOT / 'connect.json'}" in difference
+    assert "+++ generated/connect.json" in difference
+    assert '-    "status":' in difference
+    assert '+    "status": "mutated"' in difference
 
 
 def test_canonical_fixtures_are_portable_deterministic_json():
@@ -43,6 +60,7 @@ def test_canonical_fixtures_are_portable_deterministic_json():
         assert decoded == canonical_json(value)
         assert "/Users/" not in decoded
         assert '"timestamp"' not in decoded
+        assert '"seq"' not in decoded
 
 
 async def test_trace_set_exercises_every_tool_facing_facade_method():
@@ -181,3 +199,32 @@ async def test_feed_response_tasks_cover_success_and_body_failure():
             e["kind"] for e in trace["events"] if e["kind"].startswith("response.body.")
         ] == ["response.body.start", "response.body.finish"]
         assert any(e["kind"] == "listener.emit" for e in trace["events"])
+
+
+def test_trace_checker_generates_only_outside_canonical_fixture_tree(tmp_path):
+    output = tmp_path / "candidate-traces"
+    result = subprocess.run(
+        [sys.executable, str(CHECKER), "--output", str(output)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert {path.name for path in output.glob("*.json")} == {
+        path.name for path in TRACE_ROOT.glob("*.json")
+    }
+
+    result = subprocess.run(
+        [sys.executable, str(CHECKER), "--output", str(TRACE_ROOT)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert (
+        "refusing to write generated output inside canonical fixture" in result.stderr
+    )
