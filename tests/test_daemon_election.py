@@ -6370,7 +6370,7 @@ class TestPublishingLast:
             assert not release.is_set()
             order.append("logged")
 
-        monkeypatch.setattr(daemon_owner, "_COMMIT_AUTH_SECONDS", 0.1)
+        monkeypatch.setattr(daemon_owner, "_COMMIT_AUTH_SECONDS", _BOUNDED_CALL_SECONDS)
         monkeypatch.setattr(daemon_owner.logger, "warning", log_timeout)
 
         def run() -> None:
