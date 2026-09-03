@@ -326,11 +326,18 @@ jobs:
           git config --local user.name "github-actions[bot]"
 
           if git tag -l "v$VERSION" | grep -q "v$VERSION"; then
-            echo "⚠️ Tag v$VERSION already exists, skipping tag creation"
+            echo "⚠️ Tag v$VERSION already exists, checking its target"
           else
             git tag "v$VERSION"
             git push origin "v$VERSION"
             echo "✅ Created and pushed tag v$VERSION"
+          fi
+
+          tag_sha=$(git rev-parse "v$VERSION^{commit}")
+          release_sha=$(git rev-parse HEAD)
+          if [ "$tag_sha" != "$release_sha" ]; then
+            echo "::error::v$VERSION points to $tag_sha, expected released commit $release_sha"
+            exit 1
           fi
 
       # The Docker image and the MCP bundle are built from the commit that
@@ -460,3 +467,33 @@ jobs:
           echo "Docker: stickerdaniel/linkedin-mcp-server:$VERSION"
           echo "PyPI: https://pypi.org/project/mcp-server-linkedin/$VERSION/"
           echo "GitHub: https://github.com/${{ github.repository }}/releases/tag/v$VERSION"
+
+  # Docker's managed `mcp/*` image follows this branch instead of `main`, so
+  # catalog users receive released commits rather than every merge. Keep this
+  # after the public release: advancing it earlier lets Docker publish a source
+  # revision whose own image or GitHub release may still fail.
+  advance-docker-catalog:
+    needs: [prepare-release, create-github-release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout released commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6 # zizmor: ignore[artipacked]
+        with:
+          ref: ${{ needs.prepare-release.outputs.release-sha }}
+          fetch-depth: 0
+
+      - name: Advance Docker catalog release branch
+        run: |
+          set -euo pipefail
+          branch=docker-release
+          remote_sha=$(git ls-remote --heads origin "refs/heads/$branch" | awk '{print $1}')
+          if [ -n "$remote_sha" ]; then
+            git fetch origin "$branch"
+            if ! git merge-base --is-ancestor "$remote_sha" HEAD; then
+              echo "::error::$branch points outside the released history; refusing to rewrite it"
+              exit 1
+            fi
+          fi
+          git push origin "HEAD:refs/heads/$branch"
