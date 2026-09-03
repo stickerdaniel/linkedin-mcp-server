@@ -38,6 +38,7 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.get_my_profile = AsyncMock(return_value=scrape_result)
     mock.search_companies = AsyncMock(return_value=scrape_result)
     mock.search_posts = AsyncMock(return_value=scrape_result)
+    mock.get_post_comments = AsyncMock(return_value=scrape_result)
     mock.get_company_employees = AsyncMock(return_value=scrape_result)
     mock.extract_page = AsyncMock(
         return_value=ExtractedSection(text="some text", references=[])
@@ -1360,6 +1361,72 @@ class TestPostTools:
         with pytest.raises(ValidationError, match="max_pages"):
             await mcp.call_tool("search_posts", {"keywords": "python", "max_pages": 0})
 
+    async def test_get_post_comments_success(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/posts/abc-activity-123/",
+            "sections": {"post_comments": "Post body\nJane Doe\nGreat insight!"},
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_post_comments")
+        result = await tool_fn(
+            "/posts/abc-activity-123/", mock_context, extractor=mock_extractor
+        )
+
+        assert "post_comments" in result["sections"]
+        assert "Great insight!" in result["sections"]["post_comments"]
+        mock_extractor.get_post_comments.assert_awaited_once_with(
+            "/posts/abc-activity-123/", max_expansions=5
+        )
+
+    async def test_get_post_comments_passes_max_expansions(self, mock_context):
+        """Verify max_expansions is passed through to the extractor."""
+        expected = {
+            "url": "https://www.linkedin.com/posts/abc-activity-123/",
+            "sections": {"post_comments": "Post body"},
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_post_comments")
+        await tool_fn(
+            "/posts/abc-activity-123/",
+            mock_context,
+            max_expansions=9,
+            extractor=mock_extractor,
+        )
+        mock_extractor.get_post_comments.assert_awaited_once_with(
+            "/posts/abc-activity-123/", max_expansions=9
+        )
+
+    async def test_get_post_comments_rejects_excessive_max_expansions(
+        self, mock_context
+    ):
+        """Verify max_expansions=21 is rejected by Field(le=20) validation."""
+        # FastMCP wraps the pydantic error raised by Field() constraints in
+        # its own ValidationError, which does not subclass pydantic's.
+        from fastmcp.exceptions import ValidationError
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        with pytest.raises(ValidationError, match="max_expansions"):
+            await mcp.call_tool(
+                "get_post_comments",
+                {"post_permalink": "/posts/abc/", "max_expansions": 21},
+            )
+
 
 class TestToolTimeouts:
     async def test_all_tools_have_global_timeout(self):
@@ -1384,6 +1451,7 @@ class TestToolTimeouts:
             "send_message",
             "get_feed",
             "search_posts",
+            "get_post_comments",
             "close_session",
         )
 
@@ -1417,6 +1485,7 @@ class TestToolTimeouts:
             "send_message",
             "get_feed",
             "search_posts",
+            "get_post_comments",
             "close_session",
         )
 
