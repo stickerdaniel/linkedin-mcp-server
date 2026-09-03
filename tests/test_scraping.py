@@ -7781,9 +7781,7 @@ class TestExtractProfileUrn:
             }
         )
 
-        target = await LinkedInExtractor(mock_page)._read_profile_message_target(
-            "testuser"
-        )
+        target = await LinkedInExtractor(mock_page)._read_profile_message_target()
 
         assert target is not None
         assert target.profile_path == "/in/canonical-user/"

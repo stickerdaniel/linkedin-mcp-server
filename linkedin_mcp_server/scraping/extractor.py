@@ -3109,9 +3109,7 @@ class LinkedInExtractor:
             "sidebar_profiles": sidebar_profiles,
         }
 
-    async def _read_profile_message_target(
-        self, _expected_username: str | None = None
-    ) -> _ProfileMessageTarget | None:
+    async def _read_profile_message_target(self) -> _ProfileMessageTarget | None:
         """Read profile identity, name, compose URL and URN in one DOM snapshot."""
         data = await self._page.evaluate(_PROFILE_MESSAGE_TARGET_JS)
         if not isinstance(data, dict):
@@ -5155,7 +5153,7 @@ class LinkedInExtractor:
             logger.debug("Profile page did not load for %s", linkedin_username)
 
         await handle_modal_close(self._page)
-        target = await self._read_profile_message_target(linkedin_username)
+        target = await self._read_profile_message_target()
         if target is None:
             return self._message_action_result(
                 profile_url,
