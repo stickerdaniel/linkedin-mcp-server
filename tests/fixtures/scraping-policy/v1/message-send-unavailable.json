@@ -289,15 +289,82 @@
       "program_digest": "2e7498d0e493",
       "section": "message",
       "timeout_ms": null
+    },
+    {
+      "call": "send_message",
+      "kind": "locator.create",
+      "locator": "message_close",
+      "parent": null,
+      "section": "message",
+      "selector": "button[aria-label*=\"Close your draft conversation\"], button[aria-label=\"Dismiss\"], button[aria-label*=\"Dismiss\"], button[aria-label*=\"Close\"]"
+    },
+    {
+      "call": "send_message",
+      "kind": "locator.count",
+      "locator": "message_close",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "locator.derive",
+      "locator": "message_close.first",
+      "operation": "first",
+      "parent": "message_close",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "locator.wait_for",
+      "locator": "message_close.first",
+      "section": "message",
+      "state": "visible",
+      "timeout_ms": 750
+    },
+    {
+      "call": "send_message",
+      "kind": "locator.create",
+      "locator": "message_close",
+      "parent": null,
+      "section": "message",
+      "selector": "button[aria-label*=\"Close your draft conversation\"], button[aria-label=\"Dismiss\"], button[aria-label*=\"Dismiss\"], button[aria-label*=\"Close\"]"
+    },
+    {
+      "call": "send_message",
+      "kind": "locator.derive",
+      "locator": "message_close.first",
+      "operation": "first",
+      "parent": "message_close",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "locator.scroll_into_view",
+      "locator": "message_close.first",
+      "section": "message",
+      "timeout_ms": 1500
+    },
+    {
+      "call": "send_message",
+      "kind": "locator.click",
+      "locator": "message_close.first",
+      "section": "message",
+      "timeout_ms": 1500
+    },
+    {
+      "call": "send_message",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.5,
+      "section": "message"
     }
   ],
   "result": {
-    "message": "Message sent.",
+    "message": "LinkedIn did not confirm that the message was sent.",
     "recipient_selected": true,
-    "sent": true,
-    "status": "sent",
+    "sent": false,
+    "status": "send_unavailable",
     "url": "https://www.linkedin.com/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3AACoAA-policy&recipient=ACoAA-policy&screenContext=NON_SELF_PROFILE_VIEW&interop=msgOverlay"
   },
-  "scenario": "send_message__confirmed_append",
+  "scenario": "send_message__unconfirmed_delivery",
   "schema_version": 1
 }

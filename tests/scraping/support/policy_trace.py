@@ -477,7 +477,15 @@ def program_digest(program: str) -> str:
 
 
 def semantic_program_id(program: str) -> str:
-    """Map current JavaScript programs to stable operation names."""
+    """Map current JavaScript programs to stable operation names.
+
+    The list is ordered and the first matching marker wins, which matters
+    whenever one program is built from another: the post-send predicate
+    inlines the whole occurrence counter, so it carries every marker the
+    counter has and only its own ``arg.previous`` tells the two apart.
+    A marker that also matches a composed program therefore has to sit
+    below the marker unique to that composition.
+    """
 
     compact = " ".join(program.split())
     checks = (
@@ -500,6 +508,8 @@ def semantic_program_id(program: str) -> str:
         ("isScrollable", "scroll_main_region"),
         ("jobs-search-pagination__page-state", "job_total_pages"),
         ("artdeco-pagination__pages", "saved_job_total_pages"),
+        ("arg.previous", "message_occurrences_increased"),
+        ("const needle = normalize(expected)", "message_occurrences"),
         ("document.body?.innerText", "body_marker"),
         ("(document.querySelector('main') || document.body).innerText", "page_text"),
         ("main.innerText.length > 200", "main_text_200"),
@@ -507,7 +517,6 @@ def semantic_program_id(program: str) -> str:
         ("minimumLength", "main_text_minimum"),
         ('a[href*="/in/"]', "company_people_ready"),
         ("text.startsWith('Load more')", "profile_details_ready"),
-        ("bodyText.includes", "message_text_visible"),
         ("premium/", "premium_dialog_text"),
         ('main a[href*="/in/"]', "sidebar_expanded_profiles"),
     )
