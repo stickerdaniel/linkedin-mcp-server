@@ -115,7 +115,7 @@ async def dom_page():
             await browser.close()
 
 
-async def send(page, html: str) -> dict:
+async def send(page, html: str, *, message: str = MESSAGE) -> dict:
     """Run the real send path against `html`, mocking discovery only."""
     await page.set_content(html)
     extractor = LinkedInExtractor(page)
@@ -134,7 +134,7 @@ async def send(page, html: str) -> dict:
             return_value=COMPOSE_URL,
         ),
     ):
-        return await extractor.send_message("fadi-eliwi", MESSAGE, confirm_send=True)
+        return await extractor.send_message("fadi-eliwi", message, confirm_send=True)
 
 
 async def text_of(page, selector: str) -> str:
@@ -142,6 +142,23 @@ async def text_of(page, selector: str) -> str:
 
 
 class TestSendConfirmationAgainstRealDom:
+    @pytest.mark.parametrize("message", ["", " \t\n"], ids=["empty", "whitespace"])
+    async def test_blank_message_leaves_existing_draft_untouched(
+        self, dom_page, message
+    ):
+        draft = "Confidential draft"
+        result = await send(
+            dom_page,
+            compose_page(DELIVERING_SEND_JS, draft=draft),
+            message=message,
+        )
+
+        assert result["status"] == "message_unavailable"
+        assert result["sent"] is False
+        assert await dom_page.evaluate("document.body.dataset.clicked") is None
+        assert await text_of(dom_page, "#composer") == draft
+        assert await dom_page.locator("#thread .msg").count() == 1
+
     async def test_ineffective_send_is_not_confirmed(self, dom_page):
         # The reported failure: Send is clicked, the handler does nothing,
         # and the message stays in the composer next to an identical earlier
