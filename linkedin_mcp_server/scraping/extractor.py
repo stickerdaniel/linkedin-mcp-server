@@ -363,6 +363,15 @@ _SAVED_JOBS_PATHS = frozenset({"/my-items/saved-jobs", "/jobs-tracker"})
 # list and yields nothing.
 _SAVED_JOBS_PAGE_SIZE = 10
 
+# Save-state labels for the job Save control, keyed by browser locale.
+# The control's text is the only state signal LinkedIn exposes (no
+# distinguishing URL or attribute), so detection is guarded by this explicit
+# per-locale table and fails closed on unknown locales.
+_JOB_SAVE_LABELS_BY_LOCALE = {
+    "en": {"saved": "Saved", "unsaved": "Save"},
+    "en-US": {"saved": "Saved", "unsaved": "Save"},
+}
+
 # Normalization maps for job search filters. Job search encodes recency as
 # ``f_TPR=r<seconds>``; content search uses named tokens, hence the separate
 # ``_CONTENT_DATE_POSTED_MAP`` below.
@@ -4221,6 +4230,130 @@ class LinkedInExtractor:
             }"""
         )
         return int(value) if value is not None else None
+
+    async def save_job(self, job_id: str) -> dict[str, Any]:
+        """Save a single job posting to the authenticated LinkedIn account."""
+        url = f"https://www.linkedin.com/jobs/view/{job_id}/"
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+        await handle_modal_close(self._page)
+
+        state = await self._job_save_button_state()
+        if state == "saved":
+            return {"url": url, "job_id": job_id, "saved": True, "already_saved": True}
+
+        clicked = await self._click_job_save_button("unsaved")
+        if not clicked:
+            raise LinkedInScraperException(
+                "Could not find or click the LinkedIn Save button for this job."
+            )
+
+        await asyncio.sleep(1)
+        return {"url": url, "job_id": job_id, "saved": True, "already_saved": False}
+
+    async def unsave_job(self, job_id: str) -> dict[str, Any]:
+        """Remove a job posting from the authenticated account's saved jobs."""
+        url = f"https://www.linkedin.com/jobs/view/{job_id}/"
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+        await handle_modal_close(self._page)
+
+        state = await self._job_save_button_state()
+        if state == "unsaved":
+            return {
+                "url": url,
+                "job_id": job_id,
+                "saved": False,
+                "already_unsaved": True,
+            }
+
+        clicked = await self._click_job_save_button("saved")
+        if not clicked:
+            raise LinkedInScraperException(
+                "Could not find or click the LinkedIn saved-job button for this job."
+            )
+
+        await asyncio.sleep(1)
+        return {
+            "url": url,
+            "job_id": job_id,
+            "saved": False,
+            "already_unsaved": False,
+        }
+
+    async def _job_save_labels(self) -> dict[str, str]:
+        """Return labels for the active browser locale, or fail closed."""
+        locale = await self._page.evaluate("() => navigator.language || ''")
+        labels = (
+            _JOB_SAVE_LABELS_BY_LOCALE.get(locale) if isinstance(locale, str) else None
+        )
+        if labels is None:
+            raise LinkedInScraperException(
+                "Job save-state detection is not supported for browser locale "
+                f"{locale!r}."
+            )
+        return labels
+
+    async def _job_save_button_state(self) -> Literal["saved", "unsaved"]:
+        """Read the job Save control's state using the per-locale label table."""
+        labels = await self._job_save_labels()
+        state = await self._page.evaluate(
+            """({ labels }) => {
+                const root = document.querySelector('main') || document.body;
+                const normalize = value =>
+                    (value || '').replace(/\\s+/g, ' ').trim();
+                const controls = Array.from(
+                    root.querySelectorAll('button, [role="button"]')
+                ).filter(element => {
+                    if (element.hasAttribute('aria-expanded')) return false;
+                    if (element.hasAttribute('disabled')) return false;
+                    const text = normalize(element.innerText || element.textContent);
+                    return text === labels.saved || text === labels.unsaved;
+                });
+                if (controls.length !== 1) return null;
+                const text = normalize(
+                    controls[0].innerText || controls[0].textContent
+                );
+                return text === labels.saved ? 'saved' : 'unsaved';
+            }""",
+            {"labels": labels},
+        )
+        if state not in {"saved", "unsaved"}:
+            raise LinkedInScraperException(
+                "Could not uniquely identify the LinkedIn job Save control."
+            )
+        return state
+
+    async def _click_job_save_button(
+        self, expected_state: Literal["saved", "unsaved"] = "unsaved"
+    ) -> bool:
+        """Click the unique job Save control when it has *expected_state*."""
+        labels = await self._job_save_labels()
+        try:
+            return bool(
+                await self._page.evaluate(
+                    """({ expectedLabel }) => {
+                        const root = document.querySelector('main') || document.body;
+                        const normalize = value =>
+                            (value || '').replace(/\\s+/g, ' ').trim();
+                        const controls = Array.from(
+                            root.querySelectorAll('button, [role="button"]')
+                        ).filter(element =>
+                            !element.hasAttribute('aria-expanded') &&
+                            !element.hasAttribute('disabled') &&
+                            normalize(element.innerText || element.textContent) ===
+                                expectedLabel
+                        );
+                        if (controls.length !== 1) return false;
+                        controls[0].click();
+                        return true;
+                    }""",
+                    {"expectedLabel": labels[expected_state]},
+                )
+            )
+        except Exception:
+            logger.debug("Job Save button click failed", exc_info=True)
+            return False
 
     async def get_saved_jobs(self, max_pages: int = 3) -> dict[str, Any]:
         """List the authenticated user's saved job postings.
