@@ -164,6 +164,51 @@ async def test_saved_jobs_and_write_gate_keep_their_caps_and_ordering():
     assert sent["result"]["status"] == "sent"
 
 
+async def test_message_delivery_evidence_is_ordered_and_gated():
+    traces = await build_policy_traces()
+    sent = traces["message-append.json"]
+    unconfirmed = traces["message-send-unavailable.json"]
+    blank = traces["message-blank.json"]
+
+    # Delivery is proven by a count that grew, so the baseline has to be taken
+    # after the text is in the composer and before anything tries to send it.
+    positions = _operation_positions(sent)
+    assert positions.get("message_occurrences"), "no baseline occurrence count"
+    assert (
+        positions["keyboard.type"][0]
+        < positions["message_occurrences"][0]
+        < positions["click_send_button"][0]
+    )
+    confirmations = [
+        event
+        for event in sent["events"]
+        if event.get("operation") == "message_occurrences_increased"
+    ]
+    assert [event["kind"] for event in confirmations] == ["wait_for_function"]
+    assert confirmations[0]["arg"] == {"expected": "New text", "previous": 0}
+
+    # An unconfirmed send reports failure and closes the draft it opened,
+    # rather than leaving the composer standing with unsent text in it.
+    assert unconfirmed["result"]["status"] == "send_unavailable"
+    assert unconfirmed["result"]["sent"] is False
+    unconfirmed_positions = _operation_positions(unconfirmed)
+    assert unconfirmed_positions.get("keyboard.type"), "no send was ever attempted"
+    dismissals = [
+        index
+        for index, event in enumerate(unconfirmed["events"])
+        if event["kind"] == "locator.click"
+        and event["locator"] == "message_close.first"
+    ]
+    assert len(dismissals) == 1, "the failed draft was not dismissed"
+    assert unconfirmed_positions["message_occurrences_increased"][0] < dismissals[0]
+
+    # The blank-message guard returns before the browser is touched at all.
+    assert blank["result"]["status"] == "message_unavailable"
+    assert blank["result"]["sent"] is False
+    assert not any(e["kind"] == "navigate" for e in blank["events"])
+    assert blank["events"] == []
+
+
 async def test_feed_stale_stop_and_listener_cleanup_are_bounded():
     feed = (await build_policy_traces())["feed-stale.json"]
     events = feed["events"]

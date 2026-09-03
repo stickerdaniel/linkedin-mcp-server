@@ -48,10 +48,12 @@ _COMMON_ALLOWED = {
     "listener.add",
     "listener.emit",
     "listener.remove",
+    "locator.click",
     "locator.count",
     "locator.create",
     "locator.derive",
     "locator.is_visible",
+    "locator.scroll_into_view",
     "locator.wait_for",
     "mouse.move",
     "mouse.wheel",
@@ -488,8 +490,15 @@ async def _feed_response_scenario(*, body_failure: bool) -> dict[str, Any]:
     )
 
 
-async def _messaging_safety_scenario(confirm_send: bool) -> dict[str, Any]:
-    suffix = "confirmed_append" if confirm_send else "confirmation_gate"
+async def _messaging_safety_scenario(
+    confirm_send: bool, *, delivery_confirmed: bool = True
+) -> dict[str, Any]:
+    if not confirm_send:
+        suffix = "confirmation_gate"
+    elif delivery_confirmed:
+        suffix = "confirmed_append"
+    else:
+        suffix = "unconfirmed_delivery"
     name = f"send_message__{suffix}"
     recorder = TraceRecorder(name, _COMMON_ALLOWED)
     clock = FakeClock(recorder)
@@ -509,11 +518,31 @@ async def _messaging_safety_scenario(confirm_send: bool) -> dict[str, Any]:
         page.script(f"{semantic_id}.count", *counts)
     page.script("evaluate:compose_matches_recipient", True)
     page.declare_locator(extractor_module._MESSAGING_CLOSE_SELECTOR, "message_close")
-    page.script("message_close.count", 0)
     if confirm_send:
         page.script("evaluate:focus_message_composer", True)
+        # The baseline is taken after typing and before the click, so the
+        # composer already holds the text while this count is still zero:
+        # occurrences inside a visible editor do not count as delivery.
+        page.script("evaluate:message_occurrences", 0)
         page.script("evaluate:click_send_button", True)
-        page.script("wait_for_function:message_text_visible", None)
+        # A timeout is the only way the predicate reports "not delivered".
+        page.script(
+            "wait_for_function:message_occurrences_increased",
+            None
+            if delivery_confirmed
+            else PlaywrightTimeoutError("message never appeared outside the composer"),
+        )
+    if confirm_send and not delivery_confirmed:
+        # An unsent draft is the one path that reaches the close button itself.
+        # Every other exit dismisses against an empty locator, so the click and
+        # the sleep behind it would otherwise never appear in any trace.
+        page.script("message_close.count", 1)
+        page.declare_derived("message_close", "first", "message_close.first")
+        page.script("message_close.first.wait_for", None)
+        page.script("message_close.first.scroll_into_view", None)
+        page.script("message_close.first.click", None)
+    else:
+        page.script("message_close.count", 0)
     extractor = _extractor(page)
     async with boundaries(recorder, clock):
         with recorder.context("send_message", "message"):
@@ -533,6 +562,41 @@ async def _messaging_safety_scenario(confirm_send: bool) -> dict[str, Any]:
                 "confirm_send": confirm_send,
                 "profile_urn": "ACoAA-policy",
                 "composer_initial_text": "Existing text",
+            },
+        },
+        result,
+    )
+
+
+async def _blank_message_scenario() -> dict[str, Any]:
+    """Record that a whitespace-only message never reaches the browser."""
+
+    name = "send_message__blank_message"
+    recorder = TraceRecorder(name, _COMMON_ALLOWED)
+    clock = FakeClock(recorder)
+    # Nothing is declared or scripted: every browser operation the extractor
+    # could reach past the guard would fail the strict page instead of being
+    # recorded, so an empty trace is the assertion rather than an absence of
+    # setup.
+    page = _page(recorder)
+    extractor = _extractor(page)
+    async with boundaries(recorder, clock):
+        with recorder.context("send_message", "message"):
+            result = await extractor.send_message(
+                "ada-lovelace",
+                "   ",
+                confirm_send=True,
+                profile_urn="ACoAA-policy",
+            )
+    page.assert_clean()
+    return recorder.trace(
+        {
+            "method": "send_message",
+            "arguments": {
+                "linkedin_username": "ada-lovelace",
+                "message": "   ",
+                "confirm_send": True,
+                "profile_urn": "ACoAA-policy",
             },
         },
         result,
@@ -748,6 +812,10 @@ async def build_policy_traces() -> dict[str, dict[str, Any]]:
         "feed-response-failure.json": await _feed_response_scenario(body_failure=True),
         "message-confirmation.json": await _messaging_safety_scenario(False),
         "message-append.json": await _messaging_safety_scenario(True),
+        "message-send-unavailable.json": await _messaging_safety_scenario(
+            True, delivery_confirmed=False
+        ),
+        "message-blank.json": await _blank_message_scenario(),
         "connect.json": await _connect_scenario(),
         "get-my-profile.json": await _get_my_profile_scenario(),
         "sidebar-profiles.json": await _sidebar_scenario(),

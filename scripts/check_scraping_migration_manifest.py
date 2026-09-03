@@ -72,6 +72,7 @@ _PRIVATE_OWNERS: dict[str, tuple[str, int]] = {
     "_select_message_recipient": ("message_sender.MessageSender", 12),
     "_resolve_message_compose_box": ("message_sender.MessageSender", 12),
     "_compose_page_matches_recipient": ("message_sender.MessageSender", 12),
+    "_message_text_occurrences": ("message_sender.MessageSender", 12),
     "_message_text_visible": ("message_sender.MessageSender", 12),
     "_dismiss_message_ui": ("message_sender.MessageSender", 12),
     "_drain_listener_tasks": ("feed.FeedScraper", 5),
@@ -107,6 +108,11 @@ _IMPORT_OWNERS = {
     "_ACTION_SIGNALS_JS": ("connection_actions.ACTION_SIGNALS_JS", 7),
     "_CLICK_INCOMING_ACCEPT_JS": ("connection_actions.CLICK_INCOMING_ACCEPT_JS", 7),
     "_JOB_IDS_JS": ("job_pages.JOB_IDS_JS", 9),
+    "_MESSAGE_OCCURRENCES_JS": ("message_sender.MESSAGE_OCCURRENCES_JS", 12),
+    "_MESSAGE_OCCURRENCES_INCREASED_JS": (
+        "message_sender.MESSAGE_OCCURRENCES_INCREASED_JS",
+        12,
+    ),
 }
 
 _WORKFLOW_OWNERS: dict[str, tuple[str, int]] = {
