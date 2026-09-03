@@ -6,7 +6,9 @@ runs there: the JS focus, the keyboard typing into a contenteditable, the
 Send click and the occurrence count taken across the resulting DOM. These
 cases drive the production ``send_message`` path in headless chromium and
 replace navigation and recipient discovery only, so every step the
-confirmation depends on executes unchanged. Skipped automatically when
+confirmation depends on executes unchanged: recipient verification reads
+this page's own identity and submission clicks this page's own button.
+Skipped automatically when
 chromium is not installed; run locally after
 ``uv run patchright install chromium --no-shell``.
 
@@ -23,7 +25,10 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from patchright.async_api import async_playwright
 
-from linkedin_mcp_server.scraping.extractor import LinkedInExtractor
+from linkedin_mcp_server.scraping.extractor import (
+    LinkedInExtractor,
+    _ProfileMessageTarget,
+)
 
 #: CI uses ``--dist loadgroup``. Keep every test that launches Chromium on one
 #: worker so browser startups cannot compete with the DOM cases' wall-clock
@@ -38,6 +43,13 @@ DISPLAY_NAME = "Fadi Al Eliwi"
 MESSAGE = "UNDELIVERED SENTINEL"
 DRAFT = "Draft: "
 COMPOSE_URL = "https://www.linkedin.com/messaging/compose/?recipient=ACoAAB"
+PROFILE_PATH = "/in/fadi-eliwi/"
+TARGET = _ProfileMessageTarget(
+    profile_path=PROFILE_PATH,
+    profile_urn="ACoAAB",
+    compose_url=COMPOSE_URL,
+    display_name=DISPLAY_NAME,
+)
 
 # Records the click as a body attribute and does nothing else: the button is
 # visible and enabled, so the production JS click path succeeds while the
@@ -77,19 +89,27 @@ DELIVERING_SEND_JS = """
 
 
 def compose_page(send_js: str, *, draft: str = "") -> str:
-    """A compose surface holding one earlier copy of the same message."""
+    """A compose surface holding one earlier copy of the same message.
+
+    The recipient link sits beside the editor rather than inside it, which is
+    what lets the production verification resolve an identity at all: draft
+    content never authorizes anyone.
+    """
     return f"""<!DOCTYPE html>
 <html lang="en">
   <head><meta charset="utf-8"><title>Messaging</title></head>
   <body>
     <main>
-      <h2 id="recipient">{DISPLAY_NAME}</h2>
-      <div id="thread">
-        <div class="msg">{MESSAGE}</div>
-      </div>
-      <div id="composer" role="textbox" contenteditable="true"
-        aria-label="Write a message…">{draft}</div>
-      <button id="send" type="submit">Send</button>
+      <section id="conversation">
+        <a id="recipient" href="https://www.linkedin.com{PROFILE_PATH}">
+          {DISPLAY_NAME}</a>
+        <div id="thread">
+          <div class="msg">{MESSAGE}</div>
+        </div>
+        <div id="composer" role="textbox" contenteditable="true"
+          aria-label="Write a message…">{draft}</div>
+        <button id="send" type="submit">Send</button>
+      </section>
     </main>
     <script>{send_js}</script>
   </body>
@@ -127,22 +147,26 @@ async def dom_page():
 
 
 async def send(page, html: str, *, message: str = MESSAGE) -> dict:
-    """Run the real send path against `html`, mocking discovery only."""
+    """Run the real send path against `html`, mocking discovery only.
+
+    Only the two steps that need a live LinkedIn are replaced: reading the
+    target off a profile page, and the messaging-URL guard, which cannot pass
+    for the ``about:blank`` a ``set_content`` page reports. Both have their own
+    unit tests. Everything the confirmation rests on runs here for real.
+    """
     await page.set_content(html)
     extractor = LinkedInExtractor(page)
     with (
         patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
         patch.object(
             extractor,
-            "_read_profile_display_name",
+            "_read_profile_message_target",
             new_callable=AsyncMock,
-            return_value=DISPLAY_NAME,
+            return_value=TARGET,
         ),
-        patch.object(
-            extractor,
-            "_resolve_message_compose_href",
-            new_callable=AsyncMock,
-            return_value=COMPOSE_URL,
+        patch(
+            "linkedin_mcp_server.scraping.extractor._message_page_url_is_safe",
+            return_value=True,
         ),
     ):
         return await extractor.send_message("fadi-eliwi", message, confirm_send=True)
@@ -168,6 +192,22 @@ class TestSendConfirmationAgainstRealDom:
         assert result["sent"] is False
         assert await dom_page.evaluate("document.body.dataset.clicked") is None
         assert await text_of(dom_page, "#composer") == draft
+        assert await dom_page.locator("#thread .msg").count() == 1
+
+    async def test_foreign_recipient_never_reaches_the_composer(self, dom_page):
+        # Issue #861: the composer belongs to someone else. Nothing may be
+        # typed and nothing may be clicked, so the message the caller wrote
+        # cannot reach a person they never named.
+        page = compose_page(DELIVERING_SEND_JS).replace(
+            f'href="https://www.linkedin.com{PROFILE_PATH}"',
+            'href="https://www.linkedin.com/in/someone-else/"',
+        )
+        result = await send(dom_page, page)
+
+        assert result["sent"] is False
+        assert result["status"] == "composer_unavailable"
+        assert await dom_page.evaluate("document.body.dataset.clicked") is None
+        assert await text_of(dom_page, "#composer") == ""
         assert await dom_page.locator("#thread .msg").count() == 1
 
     async def test_existing_draft_is_never_sent_along(self, dom_page):
