@@ -84,11 +84,18 @@ def test_manifest_covers_production_callers_not_only_tests():
         "linkedin_mcp_server/tools/person.py",
         "linkedin_mcp_server/tools/post.py",
     }
+    # Both remaining production targets are permanent aliases, so nothing in
+    # the shipped package holds a seam that a later relocation has to close.
     assert {
         seam["target"]
         for seam in current["seams"]
         if seam["path"].startswith("linkedin_mcp_server/")
-    } == {"_RATE_LIMITED_MSG", "rate_limited_section_error", "FilterValidationError"}
+    } == {"rate_limited_section_error", "FilterValidationError"}
+    assert all(
+        seam["kind"] == "permanent_alias_import"
+        for seam in current["seams"]
+        if seam["path"].startswith("linkedin_mcp_server/")
+    )
 
 
 def test_module_boundary_patches_follow_their_callers():
@@ -236,8 +243,10 @@ def test_manifest_is_canonical_portable_json():
 
 
 def test_checker_rejects_obsolete_seams_at_their_migration_stage():
+    # One stage ahead of the tree, which is the smallest override the gate
+    # accepts and the only one that can still surface an unclosed seam.
     result = subprocess.run(
-        [sys.executable, str(CHECKER), "--check", "--stage", "1"],
+        [sys.executable, str(CHECKER), "--check", "--stage", "2"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -245,7 +254,7 @@ def test_checker_rejects_obsolete_seams_at_their_migration_stage():
     )
 
     assert result.returncode == 1
-    assert "obsolete at stage 1:" in result.stderr
+    assert "obsolete at stage 2:" in result.stderr
     assert "direct_import" in result.stderr
 
 
