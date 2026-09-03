@@ -4959,6 +4959,13 @@ class LinkedInExtractor:
         """
         linkedin_username = normalize_person_identifier(linkedin_username)
         profile_url = person_profile_url(linkedin_username, "/")
+        if not message.strip():
+            return self._message_action_result(
+                profile_url,
+                "message_unavailable",
+                "Message must contain non-whitespace characters.",
+            )
+
         await self._navigate_to_page(profile_url)
         await detect_rate_limit(self._page)
 

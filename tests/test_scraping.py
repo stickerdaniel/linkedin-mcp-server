@@ -8434,6 +8434,33 @@ class TestSearchConversations:
 
 
 class TestSendMessage:
+    @pytest.mark.parametrize("message", ["", " \t\n"], ids=["empty", "whitespace"])
+    async def test_blank_message_is_rejected_before_browser_interaction(
+        self, mock_page, message
+    ):
+        extractor = LinkedInExtractor(mock_page)
+        keyboard = MagicMock()
+        mock_page.keyboard = keyboard
+
+        with patch.object(
+            extractor, "_navigate_to_page", new_callable=AsyncMock
+        ) as navigate:
+            result = await extractor.send_message(
+                "testuser", message, confirm_send=True
+            )
+
+        assert result == {
+            "url": "https://www.linkedin.com/in/testuser/",
+            "status": "message_unavailable",
+            "message": "Message must contain non-whitespace characters.",
+            "recipient_selected": False,
+            "sent": False,
+        }
+        navigate.assert_not_awaited()
+        mock_page.evaluate.assert_not_awaited()
+        keyboard.type.assert_not_called()
+        keyboard.press.assert_not_called()
+
     async def test_dry_run_returns_confirmation_required(self, mock_page):
         """send_message with confirm_send=False returns confirmation_required status."""
         extractor = LinkedInExtractor(mock_page)
