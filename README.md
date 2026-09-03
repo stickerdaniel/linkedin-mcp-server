@@ -53,6 +53,7 @@ This MCP server is **free** and **open source**, supported by [**Unipile**](http
 | `get_company_employees` | List employees at a company from the /people/ page, with optional keyword filter |
 | `search_jobs` | Search for jobs with keywords and location filters |
 | `get_saved_jobs` | List job postings saved by the authenticated user |
+| `save_job` | Save a LinkedIn job posting to the authenticated user's saved jobs list |
 | `search_people` | Search for people by keywords, location, connection degree (1st/2nd/3rd), and current company |
 | `get_job_details` | Get detailed information about a specific job posting |
 | `get_feed` | Get recent posts from the authenticated user's home feed |
