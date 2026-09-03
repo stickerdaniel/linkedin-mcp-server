@@ -393,6 +393,36 @@ class TestMessageComposerDom:
         assert foreign["status"] == "recipient_mismatch"
         assert multiple["status"] == "ambiguous_editor"
 
+    @pytest.mark.parametrize(
+        ("href", "expected"),
+        [
+            # Every shape below was read off one live profile page. Four of
+            # its 38 visible anchors point into the member's own subtree, and
+            # reading those as an unknown member made the recipient
+            # contradict themselves and stopped the send.
+            ("https://www.linkedin.com/in/testuser/overlay/contact-info/", "valid"),
+            ("https://www.linkedin.com/in/testuser/recent-activity/all/", "valid"),
+            ("https://www.linkedin.com/in/testuser", "valid"),
+            ("https://www.linkedin.com/in/testuser?miniProfileUrn=urn%3A", "valid"),
+            # A different member stays a different member in every shape.
+            ("https://www.linkedin.com/in/other/en/", "recipient_mismatch"),
+            ("https://www.linkedin.com/in/other", "recipient_mismatch"),
+            # An anchor that names nobody stays a contradiction rather than
+            # silence: a link the check cannot read is not evidence that the
+            # recipient is the requested one.
+            ("https://www.linkedin.com/in/", "recipient_mismatch"),
+            ("https://evil.example/in/testuser/", "recipient_mismatch"),
+        ],
+    )
+    async def test_subpaths_belong_to_the_member_they_sit_under(
+        self, dom_page, href, expected
+    ):
+        state = await _state(
+            dom_page, _composer(identity=f'<a href="{href}">Profile</a>')
+        )
+
+        assert state["status"] == expected
+
     async def test_focus_and_single_submit_stay_local(self, dom_page):
         await dom_page.set_content(
             _composer(

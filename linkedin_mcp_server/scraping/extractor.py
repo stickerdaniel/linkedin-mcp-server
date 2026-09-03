@@ -545,12 +545,17 @@ _MESSAGE_COMPOSER_INSPECT_JS = r"""
                 url.username ||
                 url.password ||
                 (url.port && url.port !== '443') ||
-                url.hash ||
-                !/^\/in\/[^/?#]+\/$/.test(url.pathname)
+                url.hash
             ) {
                 return null;
             }
-            return url.pathname;
+            // Everything under /in/<slug>/ belongs to that member, so the
+            // canonical path is the identity. Measured on a live profile:
+            // four of its own anchors point at /overlay/... and
+            // /recent-activity/, and reading those as an unknown member let
+            // the recipient contradict themselves.
+            const match = /^\/in\/([^/?#]+)(?:\/.*)?$/.exec(url.pathname);
+            return match ? `/in/${match[1]}/` : null;
         } catch {
             return null;
         }
@@ -691,7 +696,13 @@ _MESSAGE_COMPOSER_SUBMIT_JS = (
 
 _LINKEDIN_MESSAGE_HOST_RE = re.compile(r"^(?:[a-z0-9-]+\.)*linkedin\.com$")
 _PROFILE_PATH_RE = re.compile(r"^/in/[^/?#]+/$")
-_MESSAGE_THREAD_PATH_RE = re.compile(r"^/messaging/thread/[A-Za-z0-9_-]+/$")
+# A thread id is base64url and keeps its padding literally. Measured live:
+# /messaging/thread/2-ZDBkMjZiY2Ut...XzEwMA==/ is what LinkedIn redirects an
+# existing conversation to, and rejecting it stopped every send to a member
+# the account had already written to. Only '=' is added: '%' would readmit an
+# encoded slash and let one path pose as another. The id identifies nobody on
+# its own, and the recipient is proven by the composer rather than this path.
+_MESSAGE_THREAD_PATH_RE = re.compile(r"^/messaging/thread/[A-Za-z0-9_=-]+/$")
 _PROFILE_URN_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _PROFILE_URN_PREFIX = "urn:li:fsd_profile:"
 

@@ -7735,6 +7735,13 @@ class TestMessageTargetUrls:
             ("https://www.linkedin.com:444/messaging/compose/", False),
             ("https://www.linkedin.com/messaging/compose/#draft", False),
             ("https://www.linkedin.com/messaging/thread/2-abc%2Fother/", False),
+            # Measured live: LinkedIn redirects an existing conversation to a
+            # padded base64url id, and the padding reaches the path unescaped.
+            (
+                "https://www.linkedin.com/messaging/thread/"
+                "2-ZDBkMjZiY2UtNjQwYi00NzczLWIxYWYtNTczZTZhZDkzMzQ4XzEwMA==/",
+                True,
+            ),
             ("https://www.linkedin.com/feed/", False),
         ],
     )
