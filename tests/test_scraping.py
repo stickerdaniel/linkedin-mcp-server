@@ -3378,6 +3378,103 @@ class TestSaveJob:
                 await extractor.save_job("12345")
 
 
+class TestUnsaveJob:
+    async def test_unsave_job_already_unsaved(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                extractor,
+                "_job_save_button_state",
+                new_callable=AsyncMock,
+                return_value="unsaved",
+            ),
+            patch.object(
+                extractor, "_click_job_save_button", new_callable=AsyncMock
+            ) as click_unsave,
+        ):
+            result = await extractor.unsave_job("12345")
+
+        assert result == {
+            "url": "https://www.linkedin.com/jobs/view/12345/",
+            "job_id": "12345",
+            "saved": False,
+            "already_unsaved": True,
+        }
+        click_unsave.assert_not_awaited()
+
+    async def test_unsave_job_clicks_saved_control(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                extractor,
+                "_job_save_button_state",
+                new_callable=AsyncMock,
+                return_value="saved",
+            ),
+            patch.object(
+                extractor,
+                "_click_job_save_button",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as click_unsave,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.unsave_job("12345")
+
+        assert result["saved"] is False
+        assert result["already_unsaved"] is False
+        click_unsave.assert_awaited_once_with("saved")
+
+    async def test_unsave_job_raises_when_saved_control_missing(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                extractor,
+                "_job_save_button_state",
+                new_callable=AsyncMock,
+                return_value="saved",
+            ),
+            patch.object(
+                extractor,
+                "_click_job_save_button",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            with pytest.raises(LinkedInScraperException):
+                await extractor.unsave_job("12345")
+
+
 class TestSearchJobs:
     """Tests for search_jobs with job ID extraction and pagination."""
 

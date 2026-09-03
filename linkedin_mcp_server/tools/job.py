@@ -205,6 +205,53 @@ def register_job_tools(
 
     @mcp.tool(
         timeout=tool_timeout,
+        title="Unsave Job",
+        annotations={
+            "readOnlyHint": False,
+            "destructiveHint": True,
+            "openWorldHint": True,
+        },
+        tags={"job", "scraping"},
+        exclude_args=["extractor"],
+    )
+    async def unsave_job(
+        job_id: str,
+        ctx: Context,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """Remove a LinkedIn job posting from the saved jobs list.
+
+        Args:
+            job_id: LinkedIn job ID (e.g., "4252026496", "3856789012")
+            ctx: FastMCP context for progress reporting
+
+        Returns:
+            Dict with url, job_id, saved, and already_unsaved status.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="unsave_job"
+            )
+            logger.info("Unsaving job: %s", job_id)
+
+            await ctx.report_progress(progress=0, total=100, message="Opening job")
+
+            result = await extractor.unsave_job(job_id)
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "unsave_job")
+        except Exception as e:
+            raise_tool_error(e, "unsave_job")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
         title="Get Saved Jobs",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"job", "scraping"},

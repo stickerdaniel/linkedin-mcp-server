@@ -4251,6 +4251,36 @@ class LinkedInExtractor:
         await asyncio.sleep(1)
         return {"url": url, "job_id": job_id, "saved": True, "already_saved": False}
 
+    async def unsave_job(self, job_id: str) -> dict[str, Any]:
+        """Remove a job posting from the authenticated account's saved jobs."""
+        url = f"https://www.linkedin.com/jobs/view/{job_id}/"
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+        await handle_modal_close(self._page)
+
+        state = await self._job_save_button_state()
+        if state == "unsaved":
+            return {
+                "url": url,
+                "job_id": job_id,
+                "saved": False,
+                "already_unsaved": True,
+            }
+
+        clicked = await self._click_job_save_button("saved")
+        if not clicked:
+            raise LinkedInScraperException(
+                "Could not find or click the LinkedIn saved-job button for this job."
+            )
+
+        await asyncio.sleep(1)
+        return {
+            "url": url,
+            "job_id": job_id,
+            "saved": False,
+            "already_unsaved": False,
+        }
+
     async def _job_save_labels(self) -> dict[str, str]:
         """Return labels for the active browser locale, or fail closed."""
         locale = await self._page.evaluate("() => navigator.language || ''")

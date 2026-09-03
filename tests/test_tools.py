@@ -29,6 +29,7 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.scrape_job = AsyncMock(return_value=scrape_result)
     mock.search_jobs = AsyncMock(return_value=scrape_result)
     mock.save_job = AsyncMock(return_value=scrape_result)
+    mock.unsave_job = AsyncMock(return_value=scrape_result)
     mock.get_saved_jobs = AsyncMock(return_value=scrape_result)
     mock.search_people = AsyncMock(return_value=scrape_result)
     mock.get_sidebar_profiles = AsyncMock(return_value=scrape_result)
@@ -775,6 +776,25 @@ class TestJobTools:
         result = await tool_fn("12345", mock_context, extractor=mock_extractor)
         assert result["saved"] is True
         mock_extractor.save_job.assert_awaited_once_with("12345")
+
+    async def test_unsave_job(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/jobs/view/12345/",
+            "job_id": "12345",
+            "saved": False,
+            "already_unsaved": False,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.job import register_job_tools
+
+        mcp = FastMCP("test")
+        register_job_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "unsave_job")
+        result = await tool_fn("12345", mock_context, extractor=mock_extractor)
+        assert result["saved"] is False
+        mock_extractor.unsave_job.assert_awaited_once_with("12345")
 
     async def test_get_saved_jobs(self, mock_context):
         expected = {
