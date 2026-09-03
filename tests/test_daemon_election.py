@@ -4729,7 +4729,8 @@ class TestRealOwner:
             assert "get_person_profile" in names
             assert "close_session" in names
             assert "save_job" in names
-            assert len(names) == 20, sorted(names)
+            assert "unsave_job" in names
+            assert len(names) == 21, sorted(names)
         finally:
             _stop(result.get("pid"))
 
