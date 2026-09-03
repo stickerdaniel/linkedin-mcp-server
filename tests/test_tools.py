@@ -304,6 +304,68 @@ class TestPersonTool:
             current_company="1115",
         )
 
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("F", ["F"]),
+            ('["F"]', ["F"]),
+            ('["F", "S"]', ["F", "S"]),
+            ("F,S", ["F", "S"]),
+            (" F , S ", ["F", "S"]),
+            ("", []),
+            (["F"], ["F"]),
+            (None, None),
+        ],
+    )
+    def test_coerce_str_list_repairs_stringified_arrays(self, raw, expected):
+        """A client that flattens the array must still produce a list.
+
+        Lists and None pass through untouched, so a well-behaved client is
+        unaffected.
+        """
+        from linkedin_mcp_server.tools.person import _coerce_str_list
+
+        assert _coerce_str_list(raw) == expected
+
+    async def test_search_people_accepts_stringified_network(self, monkeypatch):
+        """Regression for #739.
+
+        The published schema for ``network`` is ``anyOf: [array, null]``, but
+        clients that collapse that union send a bare string. Going through
+        ``call_tool`` exercises the pydantic validation the direct-``fn`` tests
+        skip, which is where the original failure lived.
+        """
+        import linkedin_mcp_server.tools.person as person_module
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        expected = {
+            "url": (
+                "https://www.linkedin.com/search/results/people/"
+                "?keywords=engineer&network=%5B%22F%22%5D"
+            ),
+            "sections": {"search_results": "Jane Doe"},
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        async def _fake_get_ready_extractor(ctx, tool_name):
+            return mock_extractor
+
+        monkeypatch.setattr(
+            person_module, "get_ready_extractor", _fake_get_ready_extractor
+        )
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        await mcp.call_tool("search_people", {"keywords": "engineer", "network": "F"})
+
+        mock_extractor.search_people.assert_awaited_once_with(
+            "engineer",
+            None,
+            network=["F"],
+            current_company=None,
+        )
+
     async def test_search_people_validation_error_surfaced_as_tool_error(
         self, mock_context
     ):
