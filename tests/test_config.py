@@ -897,6 +897,19 @@ class TestLoaders:
         config = load_from_args(AppConfig())
         assert config.browser.installer_temp_dir == "/custom/installer/temp"
 
+    def test_load_from_args_installer_temp_dir_overrides_env(self, monkeypatch):
+        monkeypatch.setenv("INSTALLER_TEMP_DIR", "/env/installer/temp")
+        monkeypatch.setattr(
+            "sys.argv",
+            ["linkedin-mcp-server", "--installer-temp-dir", "/cli/installer/temp"],
+        )
+        from linkedin_mcp_server.config.loaders import load_from_args, load_from_env
+
+        config = load_from_env(AppConfig())
+        assert config.browser.installer_temp_dir == "/env/installer/temp"
+        config = load_from_args(config)
+        assert config.browser.installer_temp_dir == "/cli/installer/temp"
+
     def test_load_from_env_import_from_browser(self, monkeypatch):
         monkeypatch.setenv("IMPORT_FROM_BROWSER", "brave")
         from linkedin_mcp_server.config.loaders import load_from_env

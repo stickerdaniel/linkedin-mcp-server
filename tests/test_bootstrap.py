@@ -4194,6 +4194,24 @@ class TestPatchrightInstallStreaming:
 
         assert bootstrap._installer_temporary_parent() == custom_temp.resolve()
 
+    def test_installer_temporary_parent_prefers_config_over_env(
+        self, tmp_path, monkeypatch
+    ):
+        from linkedin_mcp_server import bootstrap
+
+        cli_temp = tmp_path / "cli_temp"
+        cli_temp.mkdir()
+        env_temp = tmp_path / "env_temp"
+        env_temp.mkdir()
+
+        monkeypatch.setenv("INSTALLER_TEMP_DIR", str(env_temp))
+        fake_config = SimpleNamespace(
+            browser=SimpleNamespace(installer_temp_dir=str(cli_temp))
+        )
+        monkeypatch.setattr(bootstrap, "get_config", lambda: fake_config)
+
+        assert bootstrap._installer_temporary_parent() == cli_temp.resolve()
+
     def test_installer_temporary_parent_defaults_to_gettempdir_when_unset(
         self, tmp_path, monkeypatch
     ):
