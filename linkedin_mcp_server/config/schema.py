@@ -510,6 +510,20 @@ class AppConfig:
         """Validate all configuration values. Call after modifying config."""
         self.browser.validate()
         self.server.validate()
+        # Interval wait shares each call's tool-timeout budget. An interval
+        # longer than the timeout can never be honoured by waiting, so clamp.
+        if (
+            self.server.min_tool_interval_seconds > 0
+            and self.server.min_tool_interval_seconds
+            > self.server.tool_timeout_seconds
+        ):
+            logger.warning(
+                "min_tool_interval_seconds %.1f exceeds tool_timeout_seconds "
+                "%.1f; clamping (pacing shares the call's timeout budget).",
+                self.server.min_tool_interval_seconds,
+                self.server.tool_timeout_seconds,
+            )
+            self.server.min_tool_interval_seconds = self.server.tool_timeout_seconds
         if self.server.transport == "streamable-http":
             self._validate_transport_config()
             self._validate_path_format()

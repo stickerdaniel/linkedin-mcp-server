@@ -751,6 +751,35 @@ class TestSequentialToolExecutionMiddleware:
             await task
         call_next.assert_not_awaited()
 
+    async def test_min_tool_interval_refuses_wait_past_tool_timeout(
+        self, monkeypatch, tmp_path
+    ):
+        from fastmcp.exceptions import ToolError
+
+        config = AppConfig()
+        config.server.min_tool_interval_seconds = 30.0
+        config.server.tool_timeout_seconds = 5.0
+        set_config(config)
+
+        auth_root = tmp_path / "auth"
+        auth_root.mkdir(exist_ok=True)
+        lease = ProfileLease(auth_root)
+        monkeypatch.setattr(
+            sequential_middleware_module, "get_profile_lease", lambda: lease
+        )
+
+        middleware = SequentialToolExecutionMiddleware()
+        middleware._last_start_mono = time.monotonic()
+        call_next = AsyncMock(return_value=MagicMock())
+        context = MiddlewareContext(
+            message=mt.CallToolRequestParams(name="slow_tool", arguments={}),
+            method="tools/call",
+        )
+
+        with pytest.raises(ToolError, match="tool timeout"):
+            await middleware.on_call_tool(context, call_next)
+        call_next.assert_not_awaited()
+
 
 class TestBrowserLifespan:
     """The lifespan owns the background handoff poller.

@@ -45,6 +45,13 @@ class TestRemainingWaitSeconds:
             == 0.0
         )
 
+    def test_small_clock_rollback_still_waits_full_interval(self):
+        # Stamp is 2s ahead of now — within skew. Must not grant immediately.
+        assert (
+            remaining_wait_seconds(interval=15, last_start_wall=102.0, now_wall=100.0)
+            == 15.0
+        )
+
 
 class TestTryClaimStart:
     def test_claims_and_blocks_until_interval(self, tmp_path: Path, monkeypatch):
