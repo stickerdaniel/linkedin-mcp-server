@@ -40,6 +40,7 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.search_companies = AsyncMock(return_value=scrape_result)
     mock.search_posts = AsyncMock(return_value=scrape_result)
     mock.get_company_employees = AsyncMock(return_value=scrape_result)
+    mock.get_group_members = AsyncMock(return_value=scrape_result)
     mock.extract_page = AsyncMock(
         return_value=ExtractedSection(text="some text", references=[])
     )
@@ -1251,6 +1252,62 @@ class TestFeedToolDeadline:
             await self._call(use_session=False)
 
 
+class TestGetGroupMembersTool:
+    async def test_get_group_members_success(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/groups/12345/members/",
+            "sections": {"members": "Jane Doe\nResearch Engineer\nSan Francisco"},
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.group import register_group_tools
+
+        mcp = FastMCP("test")
+        register_group_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_group_members")
+        result = await tool_fn("12345", mock_context, extractor=mock_extractor)
+        assert "members" in result["sections"]
+        mock_extractor.get_group_members.assert_awaited_once_with(
+            "12345", max_scrolls=None
+        )
+
+    async def test_get_group_members_passes_max_scrolls(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/groups/12345/members/",
+            "sections": {"members": "Jane Doe"},
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.group import register_group_tools
+
+        mcp = FastMCP("test")
+        register_group_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_group_members")
+        await tool_fn("12345", mock_context, max_scrolls=20, extractor=mock_extractor)
+        mock_extractor.get_group_members.assert_awaited_once_with(
+            "12345", max_scrolls=20
+        )
+
+    async def test_get_group_members_error(self, mock_context):
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.exceptions import SessionExpiredError
+
+        mock_extractor = MagicMock()
+        mock_extractor.get_group_members = AsyncMock(side_effect=SessionExpiredError())
+
+        from linkedin_mcp_server.tools.group import register_group_tools
+
+        mcp = FastMCP("test")
+        register_group_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_group_members")
+        with pytest.raises(ToolError, match="Session expired"):
+            await tool_fn("12345", mock_context, extractor=mock_extractor)
+
+
 class TestFeedTools:
     async def test_get_feed_success(self, mock_context):
         mock_extractor = MagicMock()
@@ -1489,6 +1546,7 @@ class TestToolTimeouts:
             "get_company_posts",
             "search_companies",
             "get_company_employees",
+            "get_group_members",
             "get_job_details",
             "search_jobs",
             "get_saved_jobs",

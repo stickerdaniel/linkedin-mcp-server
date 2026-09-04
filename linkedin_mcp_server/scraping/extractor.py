@@ -1860,8 +1860,13 @@ class LinkedInExtractor:
         # timeout instead of the 10s pattern shared with is_search/is_details
         # — empty/restricted listings are common here (small companies,
         # privacy settings) and a full 10s wait per call adds up.
+        # Group members pages (/groups/<id>/members/) hydrate the same way:
+        # the group header renders first and the member list fills in via JS,
+        # so they share the wait. Restricted listings (non-member visitors)
+        # are common there too, matching the short-timeout rationale.
         is_company_people = "/company/" in url and "/people/" in url
-        if is_company_people:
+        is_group_members = "/groups/" in url and "/members/" in url
+        if is_company_people or is_group_members:
             try:
                 await self._page.wait_for_function(
                     """() => {
@@ -3323,6 +3328,46 @@ class LinkedInExtractor:
             section_errors["employees"] = rate_limited_section_error()
         elif extracted.error:
             section_errors["employees"] = extracted.error
+
+        result: dict[str, Any] = {
+            "url": url,
+            "sections": sections,
+        }
+        if references:
+            result["references"] = references
+        if section_errors:
+            result["section_errors"] = section_errors
+        return result
+
+    async def get_group_members(
+        self,
+        group_id: str,
+        max_scrolls: int | None = None,
+    ) -> dict[str, Any]:
+        """List members of a LinkedIn group from the /members/ page.
+
+        The member list is only fully visible when the logged-in account
+        is a member of the group; otherwise LinkedIn redirects to the
+        group's landing page or shows a restricted listing. Either way
+        the extracted text reflects what the page actually served.
+
+        Returns:
+            {url, sections: {members: text}, references: {members: [...]}}
+        """
+        url = f"https://www.linkedin.com/groups/{group_id}/members/"
+        extracted = await self.extract_page(
+            url, section_name="members", max_scrolls=max_scrolls
+        )
+
+        sections: dict[str, str] = {}
+        references: dict[str, list[Reference]] = {}
+        section_errors: dict[str, dict[str, Any]] = {}
+        if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+            sections["members"] = extracted.text
+            if extracted.references:
+                references["members"] = extracted.references
+        elif extracted.error:
+            section_errors["members"] = extracted.error
 
         result: dict[str, Any] = {
             "url": url,

@@ -80,6 +80,10 @@
       "description": "List employees at a company from the LinkedIn /people/ page, with optional keyword filter by name, title, or skill"
     },
     {
+      "name": "get_group_members",
+      "description": "List members of a LinkedIn group from its /members/ page; the full list requires the authenticated account to be a member of the group"
+    },
+    {
       "name": "get_job_details",
       "description": "Retrieve specific job posting details using LinkedIn job IDs"
     },
