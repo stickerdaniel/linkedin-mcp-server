@@ -15,6 +15,7 @@ from fastmcp.tools import ToolResult
 from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.exceptions import BrowserBusyError
 from linkedin_mcp_server.profile_lease import get_profile_lease
+from linkedin_mcp_server.tool_interval import try_claim_start
 
 logger = logging.getLogger(__name__)
 
@@ -31,10 +32,15 @@ class SequentialToolExecutionMiddleware(Middleware):
 
     Without the second layer two processes open that profile simultaneously and
     the last one to close silently overwrites the other's cookies.
+
+    An optional minimum interval between tool-call starts (see
+    ``min_tool_interval_seconds``) is enforced after the in-process lock and
+    before the profile lease, so waiting never holds the browser.
     """
 
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
+        self._last_start_mono: float | None = None
 
     async def _report_progress(
         self,
@@ -51,6 +57,73 @@ class SequentialToolExecutionMiddleware(Middleware):
             total=100,
             message=message,
         )
+
+    async def _sleep_reporting(
+        self,
+        context: MiddlewareContext[mt.CallToolRequestParams],
+        seconds: float,
+        *,
+        message: str,
+    ) -> None:
+        """Sleep *seconds*, honouring cancellation and reporting progress."""
+        if seconds <= 0:
+            return
+        await self._report_progress(context, message=message)
+        # Chunk so a cancel reaches the waiter without waiting out the full
+        # interval, and so progress can be re-announced on long waits.
+        deadline = time.monotonic() + seconds
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            await asyncio.sleep(min(remaining, 0.5))
+
+    async def _await_min_interval(
+        self,
+        context: MiddlewareContext[mt.CallToolRequestParams],
+        tool_name: str,
+    ) -> None:
+        """Wait until this tool call may start under the configured interval."""
+        interval = get_config().server.min_tool_interval_seconds
+        if interval <= 0:
+            return
+
+        if self._last_start_mono is not None:
+            mono_wait = interval - (time.monotonic() - self._last_start_mono)
+            if mono_wait > 0:
+                logger.debug(
+                    "Tool '%s' waiting %.3fs for in-process min interval",
+                    tool_name,
+                    mono_wait,
+                )
+                await self._sleep_reporting(
+                    context,
+                    mono_wait,
+                    message=(
+                        f"Waiting {mono_wait:.1f}s for minimum tool-call interval"
+                    ),
+                )
+
+        lease = get_profile_lease()
+        auth_root = lease.auth_root
+        while True:
+            wait = try_claim_start(auth_root, interval)
+            if wait <= 0:
+                self._last_start_mono = time.monotonic()
+                return
+            logger.debug(
+                "Tool '%s' waiting %.3fs for cross-process min interval",
+                tool_name,
+                wait,
+            )
+            await self._sleep_reporting(
+                context,
+                wait,
+                message=(
+                    f"Waiting {wait:.1f}s for minimum tool-call interval "
+                    "(shared profile)"
+                ),
+            )
 
     async def on_call_tool(
         self,
@@ -76,6 +149,8 @@ class SequentialToolExecutionMiddleware(Middleware):
                 context,
                 message="Scraper lock acquired, starting tool",
             )
+            # Interval before the lease: waiting must not pin the browser.
+            await self._await_min_interval(context, tool_name)
             return await self._run_owning_the_profile(context, call_next, tool_name)
 
     async def _run_owning_the_profile(
