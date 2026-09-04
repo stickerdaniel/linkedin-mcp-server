@@ -75,14 +75,16 @@ def remaining_wait_seconds(
     """How long to wait before the next start may claim the interval slot."""
     if interval <= 0 or last_start_wall is None:
         return 0.0
-    # Clock stepped backwards past tolerance: refuse to wait forever on a
-    # stamp from "the future", and refuse to treat a small NTP step as a
-    # fresh start either.
+    # Stamp absurdly in the future (large clock jump / corruption): reclaim
+    # immediately rather than waiting forever.
     if last_start_wall - now_wall > _CLOCK_SKEW_TOLERANCE_SECONDS:
         return 0.0
-    if now_wall < last_start_wall:
-        return 0.0
-    return max(0.0, interval - (now_wall - last_start_wall))
+    # A small clock step backwards must not look like the interval already
+    # elapsed (``now - last`` would be negative and ``max(0, interval - …)``
+    # would grant the slot at once). Treat elapsed time as zero until wall
+    # time catches the stamp again.
+    elapsed = max(0.0, now_wall - last_start_wall)
+    return max(0.0, interval - elapsed)
 
 
 def try_claim_start(auth_root: Path, interval: float) -> float:

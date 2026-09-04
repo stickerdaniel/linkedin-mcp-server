@@ -84,9 +84,30 @@ class SequentialToolExecutionMiddleware(Middleware):
         tool_name: str,
     ) -> None:
         """Wait until this tool call may start under the configured interval."""
-        interval = get_config().server.min_tool_interval_seconds
+        config = get_config().server
+        interval = config.min_tool_interval_seconds
         if interval <= 0:
             return
+
+        # Pacing shares this call's tool-timeout budget with the scrape. The
+        # daemon frontend's deadline is that budget plus a fixed margin, so a
+        # wait longer than the tool timeout makes the frontend give up while
+        # the owner is still sleeping — the opposite of "wait rather than
+        # fail". Refuse when the remaining wait cannot fit.
+        budget = config.tool_timeout_seconds
+        wait_started = time.monotonic()
+
+        async def sleep_within_budget(seconds: float, *, message: str) -> None:
+            if seconds <= 0:
+                return
+            remaining = budget - (time.monotonic() - wait_started)
+            if seconds > remaining:
+                raise ToolError(
+                    f"Minimum tool-call interval ({interval:g}s) has not "
+                    f"elapsed, and waiting would exceed this call's "
+                    f"{budget:g}s tool timeout. Retry shortly."
+                )
+            await self._sleep_reporting(context, seconds, message=message)
 
         if self._last_start_mono is not None:
             mono_wait = interval - (time.monotonic() - self._last_start_mono)
@@ -96,8 +117,7 @@ class SequentialToolExecutionMiddleware(Middleware):
                     tool_name,
                     mono_wait,
                 )
-                await self._sleep_reporting(
-                    context,
+                await sleep_within_budget(
                     mono_wait,
                     message=(
                         f"Waiting {mono_wait:.1f}s for minimum tool-call interval"
@@ -116,8 +136,7 @@ class SequentialToolExecutionMiddleware(Middleware):
                 tool_name,
                 wait,
             )
-            await self._sleep_reporting(
-                context,
+            await sleep_within_budget(
                 wait,
                 message=(
                     f"Waiting {wait:.1f}s for minimum tool-call interval "
