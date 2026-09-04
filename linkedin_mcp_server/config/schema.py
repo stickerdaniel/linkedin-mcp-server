@@ -514,8 +514,7 @@ class AppConfig:
         # longer than the timeout can never be honoured by waiting, so clamp.
         if (
             self.server.min_tool_interval_seconds > 0
-            and self.server.min_tool_interval_seconds
-            > self.server.tool_timeout_seconds
+            and self.server.min_tool_interval_seconds > self.server.tool_timeout_seconds
         ):
             logger.warning(
                 "min_tool_interval_seconds %.1f exceeds tool_timeout_seconds "
