@@ -1316,8 +1316,8 @@ class TestPostTools:
         mock_extractor.search_posts.assert_awaited_once_with(
             "Buscamos Unity",
             date_posted="past-week",
-            sort_by=None,
             max_pages=3,
+            sort_by=None,
         )
 
     async def test_search_posts_passes_sort_by(self, mock_context):
@@ -1342,8 +1342,8 @@ class TestPostTools:
         mock_extractor.search_posts.assert_awaited_once_with(
             "python",
             date_posted=None,
-            sort_by="date",
             max_pages=3,
+            sort_by="date",
         )
 
     async def test_search_posts_validation_error_surfaced_as_tool_error(

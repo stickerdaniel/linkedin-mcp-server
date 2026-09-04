@@ -4554,8 +4554,8 @@ class LinkedInExtractor:
         self,
         keywords: str,
         date_posted: str | None = None,
-        sort_by: str | None = None,
         max_pages: int = 3,
+        sort_by: str | None = None,
     ) -> dict[str, Any]:
         """Search LinkedIn posts/content and extract the results page.
 
@@ -4570,14 +4570,16 @@ class LinkedInExtractor:
                 ``FilterValidationError`` (a ``ValueError`` subclass) rather
                 than reaching LinkedIn, which would ignore them silently and
                 return unfiltered results that look filtered.
-            sort_by: Optional sort, one of the keys of ``_CONTENT_SORT_BY_MAP``
-                (``date`` / ``date_posted`` for Latest, ``relevance`` for Top
-                match). Same validation rule as ``date_posted``.
             max_pages: Scroll depth, expressed in result "pages" of roughly
                 ``_CONTENT_SCROLLS_PER_REQUESTED_PAGE`` scrolls each (default
                 3). Content search is an infinite scroll with no per-page URL,
                 so this caps how far the page is scrolled rather than fetching
                 discrete ``&start=`` pages.
+            sort_by: Optional sort, one of the keys of ``_CONTENT_SORT_BY_MAP``
+                (``date`` / ``date_posted`` for Latest, ``relevance`` for Top
+                match). Same validation rule as ``date_posted``. Appended after
+                ``max_pages`` so legacy positional callers that pass an int
+                third argument keep the old scroll-depth meaning.
 
         Returns:
             {url, sections: {search_results: text}} plus optional ``references``
@@ -4628,6 +4630,29 @@ class LinkedInExtractor:
             }
         elif extracted.error:
             section_errors["search_results"] = extracted.error
+
+        # Presence-only, same contract as search_jobs: LinkedIn may re-encode
+        # the facet value, but dropping the key means Top match results while
+        # the requested URL still advertises Latest.
+        asked = parse_qs(urlparse(url).query)
+        if asked.get("sortBy"):
+            landed_query = parse_qs(urlparse(self._page.url).query)
+            if not landed_query.get("sortBy"):
+                logger.debug(
+                    "Content-search sortBy did not survive navigation to %s",
+                    self._page.url,
+                )
+                filters_warning = dropped_filters_section_error(
+                    ["sortBy"], self._page.url
+                )
+                existing = section_errors.get("search_results")
+                if existing is None:
+                    section_errors["search_results"] = filters_warning
+                else:
+                    existing["error_message"] = (
+                        f"{existing['error_message']} "
+                        f"{filters_warning['error_message']}"
+                    )
 
         result: dict[str, Any] = {"url": url, "sections": sections}
         if references:
