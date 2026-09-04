@@ -145,7 +145,6 @@ Optional additional keys:
 - `unknown_sections: [name, ...]`
 - `job_ids: [id, ...]` (search_jobs and get_saved_jobs)
 - `pagination: {pages_fetched, next_offset, reason}` (search_jobs planned stops) — `reason` is `complete`, `max_pages`, `time_budget`, or `no_new_ids`. Hard failures use `section_errors` and omit this key.
-- `pagination: {pages_fetched, next_offset, reason}` (search_jobs planned stops) — `reason` is `complete`, `max_pages`, `time_budget`, or `no_new_ids`. Hard failures use `section_errors` and omit this key.
 - `references["feed"]` (get_feed only) — every entry is `kind: "feed_post"`; non-post anchors (sidebar profiles, employer logos) are filtered. URLs may carry either `/feed/update/<urn>/` (DOM-anchor-derived) or `/posts/<slug>` (SDUI-derived) form; both are valid LinkedIn permalinks. Cap is 50 entries, matching `get_feed`'s `num_posts` ceiling.
 
 ## Tests
