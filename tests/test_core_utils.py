@@ -141,3 +141,56 @@ class TestScrollDeadline:
         await scroll_job_sidebar(page, deadline=0.0004)
 
         assert page.wait_for_selector.await_args.kwargs["timeout"] == 1
+
+
+class TestScrollToBottom:
+    """Stall tolerance in scroll_to_bottom."""
+
+    @staticmethod
+    def _page_with_heights(heights: list[int]) -> MagicMock:
+        """Mock page whose scrollHeight evaluates to successive values.
+
+        Each scroll iteration reads the height twice (before/after);
+        window.scrollTo evaluations return None and are interleaved.
+        """
+        page = MagicMock()
+        height_iter = iter(heights)
+
+        async def evaluate(script: str) -> int | None:
+            if "scrollHeight" in script and "scrollTo" not in script:
+                return next(height_iter)
+            return None
+
+        page.evaluate = AsyncMock(side_effect=evaluate)
+        return page
+
+    async def test_default_stops_on_first_stall(self):
+        from linkedin_mcp_server.core.utils import scroll_to_bottom
+
+        # Iteration 1: 100 -> 200 (growth). Iteration 2: 200 -> 200 (stall).
+        page = self._page_with_heights([100, 200, 200, 200, 999, 999])
+        await scroll_to_bottom(page, pause_time=0, max_scrolls=10)
+        # 2 iterations x 3 evaluate calls (read, scroll, read) each
+        assert page.evaluate.await_count == 6
+
+    async def test_max_stalls_tolerates_slow_responses(self):
+        from linkedin_mcp_server.core.utils import scroll_to_bottom
+
+        # Iteration 1: growth. Iteration 2: stall. Iteration 3: growth
+        # (late XHR landed). Iteration 4 + 5: two consecutive stalls -> stop.
+        page = self._page_with_heights(
+            [100, 200, 200, 200, 200, 300, 300, 300, 300, 300]
+        )
+        await scroll_to_bottom(page, pause_time=0, max_scrolls=10, max_stalls=2)
+        assert page.evaluate.await_count == 15
+
+    async def test_stall_counter_resets_on_growth(self):
+        from linkedin_mcp_server.core.utils import scroll_to_bottom
+
+        # Alternating stall/growth never accumulates max_stalls=2 in a row,
+        # so the loop runs out of max_scrolls instead of stopping early.
+        page = self._page_with_heights(
+            [100, 100, 100, 200, 200, 200, 200, 300, 300, 300, 300, 400]
+        )
+        await scroll_to_bottom(page, pause_time=0, max_scrolls=4, max_stalls=2)
+        assert page.evaluate.await_count == 12

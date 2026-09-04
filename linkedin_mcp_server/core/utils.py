@@ -164,7 +164,7 @@ async def detect_rate_limit(page: Page) -> None:
 
 
 async def scroll_to_bottom(
-    page: Page, pause_time: float = 1.0, max_scrolls: int = 10
+    page: Page, pause_time: float = 1.0, max_scrolls: int = 10, max_stalls: int = 1
 ) -> None:
     """Scroll to the bottom of the page to trigger lazy loading.
 
@@ -172,7 +172,13 @@ async def scroll_to_bottom(
         page: Patchright page object
         pause_time: Time to pause between scrolls (seconds)
         max_scrolls: Maximum number of scroll attempts
+        max_stalls: Consecutive no-growth scrolls tolerated before treating
+            the page as fully loaded. The default of 1 keeps the historic
+            stop-on-first-stall behavior; deep infinite-scroll listings
+            (e.g. group member lists) pass a higher value so one slow XHR
+            response is not mistaken for the end of the list.
     """
+    stalls = 0
     for i in range(max_scrolls):
         previous_height = await page.evaluate("document.body.scrollHeight")
         await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
@@ -180,8 +186,12 @@ async def scroll_to_bottom(
 
         new_height = await page.evaluate("document.body.scrollHeight")
         if new_height == previous_height:
-            logger.debug("Reached bottom after %d scrolls", i + 1)
-            break
+            stalls += 1
+            if stalls >= max_stalls:
+                logger.debug("Reached bottom after %d scrolls", i + 1)
+                break
+        else:
+            stalls = 0
 
 
 async def scroll_job_sidebar(

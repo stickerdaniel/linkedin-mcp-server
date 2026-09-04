@@ -1929,6 +1929,14 @@ class LinkedInExtractor:
         if is_activity:
             scrolls = max_scrolls if max_scrolls is not None else 10
             await scroll_to_bottom(self._page, pause_time=1.0, max_scrolls=scrolls)
+        elif is_group_members:
+            # Deep member pulls need the slower pause plus stall tolerance:
+            # at 0.5s a slow pagination XHR reads as "no new content" and the
+            # loop stops hundreds of members early (verified live).
+            scrolls = max_scrolls if max_scrolls is not None else 5
+            await scroll_to_bottom(
+                self._page, pause_time=1.0, max_scrolls=scrolls, max_stalls=3
+            )
         else:
             scrolls = max_scrolls if max_scrolls is not None else 5
             await scroll_to_bottom(self._page, pause_time=0.5, max_scrolls=scrolls)

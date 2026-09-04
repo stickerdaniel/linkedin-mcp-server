@@ -33,7 +33,7 @@ def register_group_tools(
     async def get_group_members(
         group_id: str,
         ctx: Context,
-        max_scrolls: Annotated[int, Field(ge=1, le=50)] | None = None,
+        max_scrolls: Annotated[int, Field(ge=1, le=2000)] | None = None,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
@@ -53,9 +53,15 @@ def register_group_tools(
             group_id: Numeric LinkedIn group id (e.g., "12345")
             ctx: FastMCP context for progress reporting
             max_scrolls: Maximum scroll-to-bottom iterations to load more
-                members. The listing is an infinite-scroll list, so each
-                scroll loads roughly one more page of members. Default (None)
-                uses 5. Increase for large groups (e.g., max_scrolls=20).
+                members. The listing is an infinite-scroll list (no page
+                URLs), so a fresh call always restarts from the top — the
+                only way to reach deeper members is a single call with a
+                larger budget, not repeated calls. Each scroll loads roughly
+                5 more members and takes about a second. Default (None) uses
+                5. For a full pull of a large group, size the budget at
+                members/5 (e.g., ~1200 for a 6,000-member group) and raise
+                the server's --tool-timeout accordingly; the default 180s
+                timeout supports roughly 150 scrolls.
 
         Returns:
             Dict with url, sections (members -> raw text), and optional
