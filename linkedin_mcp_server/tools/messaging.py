@@ -231,10 +231,10 @@ def register_messaging_tools(
 
         Profile-based targeting opens LinkedIn's compose flow. It is not a safe
         reply path for an existing recruiter/InMail or messaging thread: it may
-        create a separate DM even after you read that thread with
-        get_conversation. Prefer get_conversation or search_conversations to
-        continue an existing thread until a thread-targeted send path is
-        available.
+        create a separate DM even after you inspect that thread with
+        get_conversation or search_conversations. Those tools only read an
+        existing thread; they do not send a reply. Until a thread-targeted send
+        path is available, do not treat profile-based send_message as a reply.
 
         The recipient must be directly messageable from the profile page. This is a
         write operation when confirm_send is True.
