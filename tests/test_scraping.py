@@ -8865,6 +8865,68 @@ class TestSendMessageComposerInteraction:
         mock_keyboard.press.assert_awaited_once_with("Enter")
 
 
+class TestVoyagerConversationAction:
+    async def test_archive_dry_run_skips_navigation(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        navigate = patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock)
+
+        with navigate as mock_navigate:
+            result = await extractor.archive_conversation(
+                "2-abc123==", confirm_action=False
+            )
+
+        assert result["status"] == "confirmation_required"
+        mock_navigate.assert_not_awaited()
+
+    async def test_mark_read_uses_inbox_navigation(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.evaluate = AsyncMock(return_value={"ok": True, "status": 200})
+        mock_page.wait_for_selector = AsyncMock()
+
+        with (
+            patch.object(
+                extractor, "_navigate_to_page", new_callable=AsyncMock
+            ) as mock_navigate,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.mark_conversation_read("2-abc123==")
+
+        mock_navigate.assert_awaited_once_with("https://www.linkedin.com/messaging/")
+        assert result["status"] == "mark_read"
+        mock_page.evaluate.assert_awaited_once()
+
+    async def test_mark_unread_uses_inbox_navigation(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.evaluate = AsyncMock(return_value={"ok": True, "status": 200})
+        mock_page.wait_for_selector = AsyncMock()
+
+        with (
+            patch.object(
+                extractor, "_navigate_to_page", new_callable=AsyncMock
+            ) as mock_navigate,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.mark_conversation_unread("2-abc123==")
+
+        mock_navigate.assert_awaited_once_with("https://www.linkedin.com/messaging/")
+        assert result["status"] == "mark_unread"
+        mock_page.evaluate.assert_awaited_once()
+
+    async def test_unsupported_action_raises(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+
+        with pytest.raises(ValueError, match="Unsupported conversation action"):
+            await extractor._voyager_conversation_action(
+                "2-abc123==", action="not-a-real-action"
+            )
+
+
 class TestBuildFeedReferences:
     """Tests for _build_feed_references SDUI-capture / DOM-anchor merging."""
 

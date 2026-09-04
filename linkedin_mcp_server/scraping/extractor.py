@@ -5088,6 +5088,197 @@ class LinkedInExtractor:
             sent=True,
         )
 
+    _MESSAGING_INBOX_URL = "https://www.linkedin.com/messaging/"
+
+    async def _voyager_conversation_action(
+        self,
+        thread_id: str,
+        *,
+        action: str,
+        confirm_action: bool = False,
+    ) -> dict[str, Any]:
+        """Perform a Voyager API action on a conversation thread.
+
+        Calls LinkedIn's internal Voyager API from within the authenticated
+        browser session using ``page.evaluate()``. The CSRF token comes from
+        the ``csrf-token`` meta tag, and cookies/TLS fingerprint come from the
+        real browser session.
+
+        Navigation stays on the inbox so opening a thread does not clear unread
+        badges as a side effect.
+        """
+        thread_url = messaging_thread_url(thread_id, "/")
+
+        if action in {"archive", "unarchive"} and not confirm_action:
+            return self._message_action_result(
+                thread_url,
+                "confirmation_required",
+                f"Set confirm_action=true to {action} this conversation.",
+            )
+
+        await self._navigate_to_page(self._MESSAGING_INBOX_URL)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector("main")
+        except PlaywrightTimeoutError:
+            logger.debug("Messaging inbox did not fully load for %s", thread_id)
+
+        # DOM dependency: Voyager calls need fetch() inside the page context so
+        # the session cookies and CSRF token match the browser. URL navigation
+        # alone cannot flip read/archive state.
+        if action == "mark_read":
+            result = await self._page.evaluate(
+                """async ({ threadId }) => {
+                    const csrfToken = document.querySelector(
+                        'meta[name="csrf-token"]'
+                    )?.getAttribute('content') || '';
+                    try {
+                        const resp = await fetch(
+                            '/voyager/api/messaging/conversations/'
+                            + encodeURIComponent(threadId)
+                            + '/events?action=markAsRead',
+                            {
+                                method: 'POST',
+                                headers: {
+                                    'csrf-token': csrfToken,
+                                    'content-type': 'application/json',
+                                    'x-restli-method': 'CREATE',
+                                },
+                                credentials: 'same-origin',
+                            }
+                        );
+                        return { ok: resp.ok, status: resp.status };
+                    } catch (e) {
+                        return { ok: false, status: 0, error: String(e) };
+                    }
+                }""",
+                {"threadId": thread_id},
+            )
+        elif action == "mark_unread":
+            result = await self._page.evaluate(
+                """async ({ threadId }) => {
+                    const csrfToken = document.querySelector(
+                        'meta[name="csrf-token"]'
+                    )?.getAttribute('content') || '';
+                    try {
+                        const resp = await fetch(
+                            '/voyager/api/messaging/conversations/'
+                            + encodeURIComponent(threadId),
+                            {
+                                method: 'PATCH',
+                                headers: {
+                                    'csrf-token': csrfToken,
+                                    'content-type': 'application/json',
+                                    'x-restli-method': 'PARTIAL_UPDATE',
+                                },
+                                credentials: 'same-origin',
+                                body: JSON.stringify({
+                                    patch: {
+                                        $set: { read: false }
+                                    }
+                                }),
+                            }
+                        );
+                        return { ok: resp.ok, status: resp.status };
+                    } catch (e) {
+                        return { ok: false, status: 0, error: String(e) };
+                    }
+                }""",
+                {"threadId": thread_id},
+            )
+        elif action in {"archive", "unarchive"}:
+            archive_value = action == "archive"
+            result = await self._page.evaluate(
+                """async ({ threadId, archiveValue }) => {
+                    const csrfToken = document.querySelector(
+                        'meta[name="csrf-token"]'
+                    )?.getAttribute('content') || '';
+                    try {
+                        const resp = await fetch(
+                            '/voyager/api/messaging/conversations/'
+                            + encodeURIComponent(threadId),
+                            {
+                                method: 'PATCH',
+                                headers: {
+                                    'csrf-token': csrfToken,
+                                    'content-type': 'application/json',
+                                    'x-restli-method': 'PARTIAL_UPDATE',
+                                },
+                                credentials: 'same-origin',
+                                body: JSON.stringify({
+                                    patch: {
+                                        $set: { archived: archiveValue }
+                                    }
+                                }),
+                            }
+                        );
+                        return { ok: resp.ok, status: resp.status };
+                    } catch (e) {
+                        return { ok: false, status: 0, error: String(e) };
+                    }
+                }""",
+                {"threadId": thread_id, "archiveValue": archive_value},
+            )
+        else:
+            raise ValueError(f"Unsupported conversation action: {action}")
+
+        if result.get("ok"):
+            return self._message_action_result(
+                thread_url,
+                action,
+                f"Conversation {action.replace('_', ' ')} successful.",
+            )
+
+        status_code = result.get("status", 0)
+        error_detail = result.get("error", "")
+        return self._message_action_result(
+            thread_url,
+            f"{action}_failed",
+            f"LinkedIn returned status {status_code}"
+            + (f": {error_detail}" if error_detail else ""),
+        )
+
+    async def archive_conversation(
+        self,
+        thread_id: str,
+        *,
+        confirm_action: bool = False,
+    ) -> dict[str, Any]:
+        """Archive a conversation thread."""
+        thread_id = normalize_thread_id(thread_id)
+        return await self._voyager_conversation_action(
+            thread_id, action="archive", confirm_action=confirm_action
+        )
+
+    async def unarchive_conversation(
+        self,
+        thread_id: str,
+        *,
+        confirm_action: bool = False,
+    ) -> dict[str, Any]:
+        """Restore an archived conversation to the inbox."""
+        thread_id = normalize_thread_id(thread_id)
+        return await self._voyager_conversation_action(
+            thread_id, action="unarchive", confirm_action=confirm_action
+        )
+
+    async def mark_conversation_read(
+        self,
+        thread_id: str,
+    ) -> dict[str, Any]:
+        """Mark a conversation as read without opening it."""
+        thread_id = normalize_thread_id(thread_id)
+        return await self._voyager_conversation_action(thread_id, action="mark_read")
+
+    async def mark_conversation_unread(
+        self,
+        thread_id: str,
+    ) -> dict[str, Any]:
+        """Mark a conversation as unread without opening it."""
+        thread_id = normalize_thread_id(thread_id)
+        return await self._voyager_conversation_action(thread_id, action="mark_unread")
+
     async def _extract_root_content(
         self,
         selectors: list[str],

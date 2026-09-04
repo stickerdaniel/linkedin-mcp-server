@@ -35,6 +35,10 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.get_conversation = AsyncMock(return_value=scrape_result)
     mock.search_conversations = AsyncMock(return_value=scrape_result)
     mock.send_message = AsyncMock(return_value=scrape_result)
+    mock.archive_conversation = AsyncMock(return_value=scrape_result)
+    mock.unarchive_conversation = AsyncMock(return_value=scrape_result)
+    mock.mark_conversation_read = AsyncMock(return_value=scrape_result)
+    mock.mark_conversation_unread = AsyncMock(return_value=scrape_result)
     mock.get_my_profile = AsyncMock(return_value=scrape_result)
     mock.search_companies = AsyncMock(return_value=scrape_result)
     mock.search_posts = AsyncMock(return_value=scrape_result)
@@ -977,6 +981,142 @@ class TestMessagingTools:
                 extractor=mock_extractor,
             )
 
+    async def test_archive_conversation_success(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/messaging/thread/2-abc123==/",
+            "status": "archive",
+            "message": "Conversation archive successful.",
+            "recipient_selected": False,
+            "sent": False,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "archive_conversation")
+        result = await tool_fn(
+            "2-abc123==", True, mock_context, extractor=mock_extractor
+        )
+
+        assert result["status"] == "archive"
+        mock_extractor.archive_conversation.assert_awaited_once_with(
+            "2-abc123==", confirm_action=True
+        )
+
+    async def test_archive_conversation_not_confirmed(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/messaging/thread/2-abc123==/",
+            "status": "confirmation_required",
+            "message": "Set confirm_action=true to archive this conversation.",
+            "recipient_selected": False,
+            "sent": False,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "archive_conversation")
+        result = await tool_fn(
+            "2-abc123==", False, mock_context, extractor=mock_extractor
+        )
+
+        assert result["status"] == "confirmation_required"
+        mock_extractor.archive_conversation.assert_awaited_once_with(
+            "2-abc123==", confirm_action=False
+        )
+
+    async def test_unarchive_conversation_success(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/messaging/thread/2-abc123==/",
+            "status": "unarchive",
+            "message": "Conversation unarchive successful.",
+            "recipient_selected": False,
+            "sent": False,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "unarchive_conversation")
+        result = await tool_fn(
+            "2-abc123==", True, mock_context, extractor=mock_extractor
+        )
+
+        assert result["status"] == "unarchive"
+        mock_extractor.unarchive_conversation.assert_awaited_once_with(
+            "2-abc123==", confirm_action=True
+        )
+
+    async def test_mark_conversation_read_success(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/messaging/thread/2-abc123==/",
+            "status": "mark_read",
+            "message": "Conversation mark read successful.",
+            "recipient_selected": False,
+            "sent": False,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "mark_conversation_read")
+        result = await tool_fn("2-abc123==", mock_context, extractor=mock_extractor)
+
+        assert result["status"] == "mark_read"
+        mock_extractor.mark_conversation_read.assert_awaited_once_with("2-abc123==")
+
+    async def test_mark_conversation_unread_success(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/messaging/thread/2-abc123==/",
+            "status": "mark_unread",
+            "message": "Conversation mark unread successful.",
+            "recipient_selected": False,
+            "sent": False,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "mark_conversation_unread")
+        result = await tool_fn("2-abc123==", mock_context, extractor=mock_extractor)
+
+        assert result["status"] == "mark_unread"
+        mock_extractor.mark_conversation_unread.assert_awaited_once_with("2-abc123==")
+
+    async def test_mark_conversation_read_error(self, mock_context):
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.exceptions import SessionExpiredError
+
+        mock_extractor = MagicMock()
+        mock_extractor.mark_conversation_read = AsyncMock(
+            side_effect=SessionExpiredError()
+        )
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "mark_conversation_read")
+        with pytest.raises(ToolError, match="Session expired"):
+            await tool_fn("2-abc123==", mock_context, extractor=mock_extractor)
+
 
 class TestGetMyProfileTool:
     async def test_get_my_profile_success(self, mock_context):
@@ -1382,6 +1522,10 @@ class TestToolTimeouts:
             "get_conversation",
             "search_conversations",
             "send_message",
+            "archive_conversation",
+            "unarchive_conversation",
+            "mark_conversation_read",
+            "mark_conversation_unread",
             "get_feed",
             "search_posts",
             "close_session",
@@ -1415,6 +1559,10 @@ class TestToolTimeouts:
             "get_conversation",
             "search_conversations",
             "send_message",
+            "archive_conversation",
+            "unarchive_conversation",
+            "mark_conversation_read",
+            "mark_conversation_unread",
             "get_feed",
             "search_posts",
             "close_session",
