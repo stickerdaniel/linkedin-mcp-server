@@ -4890,7 +4890,11 @@ class LinkedInExtractor:
         confirm_send: bool,
         profile_urn: str | None = None,
     ) -> dict[str, Any]:
-        """Send a message to a LinkedIn user with explicit confirmation gating.
+        """Compose and send a new message with explicit confirmation gating.
+
+        Opens LinkedIn's profile-based compose flow. That may create a separate
+        DM instead of replying in an existing recruiter/InMail or messaging
+        thread.
 
         Args:
             linkedin_username: LinkedIn username of the recipient.
