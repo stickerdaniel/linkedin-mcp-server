@@ -7099,6 +7099,31 @@ class TestGroupMembersExtraction:
         assert result["sections"]["members"] == "Jane Doe\nResearch Engineer"
         assert result["references"]["members"][0]["url"] == "/in/janedoe/"
 
+    async def test_get_group_members_keywords_routes_to_filtered_path(self, mock_page):
+        """A keywords value routes through the search-box filter helper
+        instead of the plain extract_page path."""
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_extract_group_members_filtered",
+                new_callable=AsyncMock,
+                return_value=ExtractedSection(text="Maria Doe", references=[]),
+            ) as mock_filtered,
+            patch.object(
+                extractor, "extract_page", new_callable=AsyncMock
+            ) as mock_plain,
+        ):
+            result = await extractor.get_group_members(
+                "12345", keywords="maria", max_scrolls=10
+            )
+
+        mock_filtered.assert_awaited_once_with(
+            "https://www.linkedin.com/groups/12345/members/", "maria", 10
+        )
+        mock_plain.assert_not_awaited()
+        assert result["sections"]["members"] == "Maria Doe"
+
     async def test_get_group_members_rate_limited_omits_section(self, mock_page):
         """The _RATE_LIMITED_MSG sentinel is not surfaced as member text."""
         extractor = LinkedInExtractor(mock_page)

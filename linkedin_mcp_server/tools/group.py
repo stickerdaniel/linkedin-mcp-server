@@ -33,6 +33,7 @@ def register_group_tools(
     async def get_group_members(
         group_id: str,
         ctx: Context,
+        keywords: str | None = None,
         max_scrolls: Annotated[int, Field(ge=1, le=2000)] | None = None,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
@@ -49,19 +50,27 @@ def register_group_tools(
         group_id is the numeric id from the group URL — the path segment
         after /groups/ (e.g. "12345" for linkedin.com/groups/12345/).
 
+        LinkedIn serves at most ~500 member rows per listing no matter how
+        far the page is scrolled. To enumerate a larger group, make multiple
+        calls with different keywords values (e.g. common first names or
+        role terms) — each filtered slice gets its own ~500-row budget —
+        and merge/dedupe the results by profile URL.
+
         Args:
             group_id: Numeric LinkedIn group id (e.g., "12345")
             ctx: FastMCP context for progress reporting
+            keywords: Optional server-side member filter (name, headline
+                term). Filters via the page's member search box.
             max_scrolls: Maximum scroll-to-bottom iterations to load more
                 members. The listing is an infinite-scroll list (no page
                 URLs), so a fresh call always restarts from the top — the
-                only way to reach deeper members is a single call with a
+                only way to reach deeper members within one slice is a
                 larger budget, not repeated calls. Each scroll loads roughly
                 5 more members and takes about a second. Default (None) uses
-                5. For a full pull of a large group, size the budget at
-                members/5 (e.g., ~1200 for a 6,000-member group) and raise
-                the server's --tool-timeout accordingly; the default 180s
-                timeout supports roughly 150 scrolls.
+                5. ~100 scrolls reaches the ~500-row serving cap; budgets
+                beyond that only add time. Raise the server's --tool-timeout
+                for deep pulls (the default 180s supports roughly 150
+                scrolls).
 
         Returns:
             Dict with url, sections (members -> raw text), and optional
@@ -74,7 +83,10 @@ def register_group_tools(
                 ctx, tool_name="get_group_members"
             )
             logger.info(
-                "Scraping group members: %s (max_scrolls=%s)", group_id, max_scrolls
+                "Scraping group members: %s (keywords=%s, max_scrolls=%s)",
+                group_id,
+                keywords,
+                max_scrolls,
             )
 
             await ctx.report_progress(
@@ -82,7 +94,7 @@ def register_group_tools(
             )
 
             result = await extractor.get_group_members(
-                group_id, max_scrolls=max_scrolls
+                group_id, keywords=keywords, max_scrolls=max_scrolls
             )
 
             await ctx.report_progress(progress=100, total=100, message="Complete")

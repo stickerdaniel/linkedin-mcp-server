@@ -1269,7 +1269,25 @@ class TestGetGroupMembersTool:
         result = await tool_fn("12345", mock_context, extractor=mock_extractor)
         assert "members" in result["sections"]
         mock_extractor.get_group_members.assert_awaited_once_with(
-            "12345", max_scrolls=None
+            "12345", keywords=None, max_scrolls=None
+        )
+
+    async def test_get_group_members_passes_keywords(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/groups/12345/members/",
+            "sections": {"members": "Maria Doe"},
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.group import register_group_tools
+
+        mcp = FastMCP("test")
+        register_group_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_group_members")
+        await tool_fn("12345", mock_context, keywords="maria", extractor=mock_extractor)
+        mock_extractor.get_group_members.assert_awaited_once_with(
+            "12345", keywords="maria", max_scrolls=None
         )
 
     async def test_get_group_members_passes_max_scrolls(self, mock_context):
@@ -1287,7 +1305,7 @@ class TestGetGroupMembersTool:
         tool_fn = await get_tool_fn(mcp, "get_group_members")
         await tool_fn("12345", mock_context, max_scrolls=20, extractor=mock_extractor)
         mock_extractor.get_group_members.assert_awaited_once_with(
-            "12345", max_scrolls=20
+            "12345", keywords=None, max_scrolls=20
         )
 
     async def test_get_group_members_error(self, mock_context):

@@ -3350,6 +3350,7 @@ class LinkedInExtractor:
     async def get_group_members(
         self,
         group_id: str,
+        keywords: str | None = None,
         max_scrolls: int | None = None,
     ) -> dict[str, Any]:
         """List members of a LinkedIn group from the /members/ page.
@@ -3359,13 +3360,25 @@ class LinkedInExtractor:
         group's landing page or shows a restricted listing. Either way
         the extracted text reflects what the page actually served.
 
+        LinkedIn serves at most ~500 rows per listing regardless of scroll
+        depth (verified live). ``keywords`` filters server-side via the
+        page's member search box — the only filter mechanism the page has;
+        a ``?q=`` URL param is accepted but ignored by LinkedIn. Each
+        keyword slice gets its own ~500-row budget, so slicing is the way
+        to enumerate groups larger than the cap.
+
         Returns:
             {url, sections: {members: text}, references: {members: [...]}}
         """
         url = f"https://www.linkedin.com/groups/{group_id}/members/"
-        extracted = await self.extract_page(
-            url, section_name="members", max_scrolls=max_scrolls
-        )
+        if keywords:
+            extracted = await self._extract_group_members_filtered(
+                url, keywords, max_scrolls
+            )
+        else:
+            extracted = await self.extract_page(
+                url, section_name="members", max_scrolls=max_scrolls
+            )
 
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}
@@ -3386,6 +3399,59 @@ class LinkedInExtractor:
         if section_errors:
             result["section_errors"] = section_errors
         return result
+
+    async def _extract_group_members_filtered(
+        self,
+        url: str,
+        keywords: str,
+        max_scrolls: int | None,
+    ) -> ExtractedSection:
+        """Filter the group member list via the page's search box, then extract.
+
+        The members page exposes exactly one text input inside <main> (the
+        member search box), so the structural ``main input[type="text"]``
+        selector is locale-independent — placeholder/aria text is not.
+        Filling it triggers a server-side filtered fetch that replaces the
+        listing in place (the URL does not change).
+        """
+        try:
+            await self._navigate_to_page(url)
+            await detect_rate_limit(self._page)
+            try:
+                await self._page.wait_for_selector(
+                    'main input[type="text"]', timeout=5000
+                )
+            except PlaywrightTimeoutError:
+                logger.debug("Member search input did not appear on %s", url)
+
+            search_box = self._page.locator('main input[type="text"]').first
+            if await search_box.count() > 0:
+                await search_box.click()
+                await search_box.fill(keywords)
+                # Debounced server-side fetch replaces the listing in place.
+                await asyncio.sleep(2.5)
+            else:
+                logger.warning(
+                    "No member search input on %s; returning unfiltered list", url
+                )
+
+            return await self._extract_loaded_section(
+                url, "members", max_scrolls=max_scrolls
+            )
+        except LinkedInScraperException:
+            raise
+        except Exception as e:
+            logger.warning("Failed to extract filtered group members %s: %s", url, e)
+            return ExtractedSection(
+                text="",
+                references=[],
+                error=build_issue_diagnostics(
+                    e,
+                    context="get_group_members",
+                    target_url=url,
+                    section_name="members",
+                ),
+            )
 
     async def scrape_job(self, job_id: str) -> dict[str, Any]:
         """Scrape a single job posting.
