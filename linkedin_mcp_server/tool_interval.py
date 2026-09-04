@@ -24,8 +24,11 @@ logger = logging.getLogger(__name__)
 
 _TIMESTAMP_FILE = "tool-interval.json"
 _LOCK_FILE = "tool-interval.lock"
-# Wall-clock skew larger than this treats the stored stamp as unusable.
-_CLOCK_SKEW_TOLERANCE_SECONDS = 5.0
+# A stamp this far ahead of wall time is treated as corrupt (or from a
+# wildly desynchronized clock) and reclaimed. Smaller steps backwards —
+# including multi-minute NTP corrections — must not grant an immediate
+# start; they count as zero elapsed time so the full interval is waited.
+_CORRUPT_FUTURE_SECONDS = 3600.0
 
 
 def interval_paths(auth_root: Path) -> tuple[Path, Path]:
@@ -75,14 +78,11 @@ def remaining_wait_seconds(
     """How long to wait before the next start may claim the interval slot."""
     if interval <= 0 or last_start_wall is None:
         return 0.0
-    # Stamp absurdly in the future (large clock jump / corruption): reclaim
-    # immediately rather than waiting forever.
-    if last_start_wall - now_wall > _CLOCK_SKEW_TOLERANCE_SECONDS:
+    # Only reclaim stamps that are absurdly in the future. Any smaller
+    # backward step (or peer clock slightly ahead) must wait the full
+    # interval — treating it as "already elapsed" would bypass pacing.
+    if last_start_wall - now_wall > _CORRUPT_FUTURE_SECONDS:
         return 0.0
-    # A small clock step backwards must not look like the interval already
-    # elapsed (``now - last`` would be negative and ``max(0, interval - …)``
-    # would grant the slot at once). Treat elapsed time as zero until wall
-    # time catches the stamp again.
     elapsed = max(0.0, now_wall - last_start_wall)
     return max(0.0, interval - elapsed)
 

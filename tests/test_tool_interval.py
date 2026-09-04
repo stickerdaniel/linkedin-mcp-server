@@ -40,15 +40,25 @@ class TestRemainingWaitSeconds:
         )
 
     def test_future_stamp_beyond_skew_is_ignored(self):
+        # More than an hour ahead of wall time: treat as corrupt and reclaim.
         assert (
-            remaining_wait_seconds(interval=15, last_start_wall=200.0, now_wall=100.0)
+            remaining_wait_seconds(
+                interval=15, last_start_wall=100.0 + 3601.0, now_wall=100.0
+            )
             == 0.0
         )
 
     def test_small_clock_rollback_still_waits_full_interval(self):
-        # Stamp is 2s ahead of now — within skew. Must not grant immediately.
+        # Stamp is 2s ahead of now. Must not grant immediately.
         assert (
             remaining_wait_seconds(interval=15, last_start_wall=102.0, now_wall=100.0)
+            == 15.0
+        )
+
+    def test_multi_minute_clock_rollback_still_waits_full_interval(self):
+        # Ten minutes backwards is still a real clock step, not a corrupt stamp.
+        assert (
+            remaining_wait_seconds(interval=15, last_start_wall=700.0, now_wall=100.0)
             == 15.0
         )
 
