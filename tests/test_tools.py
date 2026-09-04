@@ -1317,6 +1317,33 @@ class TestPostTools:
             "Buscamos Unity",
             date_posted="past-week",
             max_pages=3,
+            sort_by=None,
+        )
+
+    async def test_search_posts_passes_sort_by(self, mock_context):
+        mock_extractor = _make_mock_extractor(
+            {
+                "url": "https://www.linkedin.com/search/results/content/?keywords=python",
+                "sections": {"search_results": "post"},
+            }
+        )
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+        tool_fn = await get_tool_fn(mcp, "search_posts")
+        await tool_fn(
+            "python",
+            mock_context,
+            sort_by="date",
+            extractor=mock_extractor,
+        )
+        mock_extractor.search_posts.assert_awaited_once_with(
+            "python",
+            date_posted=None,
+            max_pages=3,
+            sort_by="date",
         )
 
     async def test_search_posts_validation_error_surfaced_as_tool_error(

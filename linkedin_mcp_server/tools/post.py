@@ -41,6 +41,7 @@ def register_post_tools(
         ctx: Context,
         date_posted: str | None = None,
         max_pages: Annotated[int, Field(ge=1, le=10)] = 3,
+        sort_by: str | None = None,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
@@ -63,6 +64,11 @@ def register_post_tools(
                 (1-10, default 3). Content search is an infinite scroll, so
                 this caps how far the page is scrolled rather than fetching
                 discrete pages.
+            sort_by: Optional sort. "date" (or "date_posted") for Latest,
+                "relevance" for Top match — same spellings as search_jobs
+                where possible. Omit for LinkedIn's default Top match.
+                Declared after max_pages so positional callers keep the prior
+                scroll-depth argument order.
 
         Returns:
             Dict with url, sections (search_results -> raw text), and optional
@@ -77,9 +83,11 @@ def register_post_tools(
                 ctx, tool_name="search_posts"
             )
             logger.info(
-                "Searching posts: keywords='%s', date_posted='%s', max_pages=%d",
+                "Searching posts: keywords='%s', date_posted='%s', "
+                "sort_by='%s', max_pages=%d",
                 keywords,
                 date_posted,
+                sort_by,
                 max_pages,
             )
 
@@ -92,6 +100,7 @@ def register_post_tools(
                     keywords,
                     date_posted=date_posted,
                     max_pages=max_pages,
+                    sort_by=sort_by,
                 )
             except FilterValidationError as e:
                 # Validation messages carry actionable detail; surface them as

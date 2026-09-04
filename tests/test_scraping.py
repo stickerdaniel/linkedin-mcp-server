@@ -27,6 +27,7 @@ from linkedin_mcp_server.scraping.extractor import (
     ExtractedSection,
     LinkedInExtractor,
     _CONTENT_DATE_POSTED_MAP,
+    _CONTENT_SORT_BY_MAP,
     _RATE_LIMITED_MSG,
     _build_feed_references,
     _truncate_linkedin_noise,
@@ -6192,6 +6193,37 @@ class TestBuildContentSearchUrl:
         url = LinkedInExtractor._build_content_search_url("python", date_posted="   ")
         assert "datePosted" not in url
 
+    def test_sort_by_date_uses_date_posted_token(self):
+        url = LinkedInExtractor._build_content_search_url("python", sort_by="date")
+        assert "sortBy=%5B%22date_posted%22%5D" in url
+
+    def test_sort_by_date_posted_alias(self):
+        url = LinkedInExtractor._build_content_search_url(
+            "python", sort_by="date_posted"
+        )
+        assert "sortBy=%5B%22date_posted%22%5D" in url
+
+    def test_sort_by_relevance(self):
+        url = LinkedInExtractor._build_content_search_url("python", sort_by="relevance")
+        assert "sortBy=%5B%22relevance%22%5D" in url
+
+    def test_every_accepted_sort_by_reaches_linkedin_as_a_real_token(self):
+        """LinkedIn ignores an unrecognized sortBy instead of rejecting it."""
+        for accepted, expected in _CONTENT_SORT_BY_MAP.items():
+            url = LinkedInExtractor._build_content_search_url(
+                "python", sort_by=accepted
+            )
+            assert expected in ("date_posted", "relevance")
+            assert f"%22{expected}%22" in url
+
+    def test_no_sort_by_omits_facet(self):
+        url = LinkedInExtractor._build_content_search_url("python")
+        assert "sortBy" not in url
+
+    def test_whitespace_sort_by_omits_facet(self):
+        url = LinkedInExtractor._build_content_search_url("python", sort_by="   ")
+        assert "sortBy" not in url
+
 
 @pytest.mark.asyncio
 class TestSearchPosts:
@@ -6226,6 +6258,63 @@ class TestSearchPosts:
             )
 
         assert "datePosted=%5B%22past-week%22%5D" in result["url"]
+
+    async def test_sort_by_date_in_url(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+
+        async def land(url, *args, **kwargs):
+            mock_page.url = url
+            return extracted("post")
+
+        with patch.object(extractor, "extract_page", side_effect=land):
+            result = await extractor.search_posts("python", sort_by="date")
+
+        assert "sortBy=%5B%22date_posted%22%5D" in result["url"]
+        assert "section_errors" not in result
+
+    async def test_positional_max_pages_still_means_scroll_depth(self, mock_page):
+        """Legacy ``search_posts(keywords, date_posted, max_pages)`` must not
+        bind the int as ``sort_by`` (which would call ``.strip()`` and crash).
+        """
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted("post"),
+        ) as mock_extract:
+            await extractor.search_posts("python", None, 2)
+
+        mock_extract.assert_awaited_once_with(
+            ANY, section_name="search_results", max_scrolls=10
+        )
+
+    async def test_dropped_sort_by_reports_filters_dropped(self, mock_page):
+        """If LinkedIn navigates away from sortBy, keep results but say so."""
+        extractor = LinkedInExtractor(mock_page)
+
+        async def land_without_sort(url, *args, **kwargs):
+            mock_page.url = (
+                "https://www.linkedin.com/search/results/content/"
+                "?keywords=python&origin=FACETED_SEARCH"
+            )
+            return extracted("post")
+
+        with patch.object(extractor, "extract_page", side_effect=land_without_sort):
+            result = await extractor.search_posts("python", sort_by="date")
+
+        assert result["sections"]["search_results"] == "post"
+        assert "sortBy=%5B%22date_posted%22%5D" in result["url"]
+        error = result["section_errors"]["search_results"]
+        assert error["error_type"] == "filters_dropped"
+        assert "sortBy" in error["error_message"]
+
+    async def test_invalid_sort_by_raises(self, mock_page):
+        from linkedin_mcp_server.scraping.extractor import FilterValidationError
+
+        extractor = LinkedInExtractor(mock_page)
+        with pytest.raises(FilterValidationError, match="sort_by"):
+            await extractor.search_posts("python", sort_by="popularity")
 
     async def test_max_pages_controls_scroll_depth(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
