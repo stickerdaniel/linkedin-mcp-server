@@ -40,6 +40,7 @@ def register_post_tools(
         keywords: str,
         ctx: Context,
         date_posted: str | None = None,
+        sort_by: str | None = None,
         max_pages: Annotated[int, Field(ge=1, le=10)] = 3,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
@@ -59,6 +60,9 @@ def register_post_tools(
                 "past-week", "past-month"; the "past_24_hours" / "past_week" /
                 "past_month" spellings used by search_jobs are accepted too.
                 Omit for any time.
+            sort_by: Optional sort. "date" (or "date_posted") for Latest,
+                "relevance" for Top match — same spellings as search_jobs
+                where possible. Omit for LinkedIn's default Top match.
             max_pages: Scroll depth as result "pages" of ~5 scrolls each
                 (1-10, default 3). Content search is an infinite scroll, so
                 this caps how far the page is scrolled rather than fetching
@@ -77,9 +81,11 @@ def register_post_tools(
                 ctx, tool_name="search_posts"
             )
             logger.info(
-                "Searching posts: keywords='%s', date_posted='%s', max_pages=%d",
+                "Searching posts: keywords='%s', date_posted='%s', "
+                "sort_by='%s', max_pages=%d",
                 keywords,
                 date_posted,
+                sort_by,
                 max_pages,
             )
 
@@ -91,6 +97,7 @@ def register_post_tools(
                 result = await extractor.search_posts(
                     keywords,
                     date_posted=date_posted,
+                    sort_by=sort_by,
                     max_pages=max_pages,
                 )
             except FilterValidationError as e:

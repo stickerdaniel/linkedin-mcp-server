@@ -414,6 +414,15 @@ _CONTENT_DATE_POSTED_MAP = {
     "past_month": "past-month",
 }
 
+# Content-search ``sortBy`` facet tokens, verified against LinkedIn's Posts
+# tab URL (Top match / Latest). ``date`` matches ``search_jobs`` spelling;
+# ``date_posted`` is LinkedIn's own Latest token.
+_CONTENT_SORT_BY_MAP = {
+    "date": "date_posted",
+    "date_posted": "date_posted",
+    "relevance": "relevance",
+}
+
 # Content search is an infinite scroll with no ``&start=`` pagination, so
 # ``max_pages`` caps scroll depth instead of fetching discrete pages. One
 # nominal "page" is this many scrolls.
@@ -4514,6 +4523,7 @@ class LinkedInExtractor:
     def _build_content_search_url(
         keywords: str,
         date_posted: str | None = None,
+        sort_by: str | None = None,
     ) -> str:
         """Build a LinkedIn content (post) search URL.
 
@@ -4521,12 +4531,13 @@ class LinkedInExtractor:
         Posts results tab, e.g. for "Buscamos Unity" in the past week:
         ``/search/results/content/?keywords=Buscamos+Unity&origin=FACETED_SEARCH&datePosted=%5B%22past-week%22%5D``
 
-        The ``datePosted`` facet is a one-element JSON list carrying a literal
-        LinkedIn token, URL-encoded — unlike job search, which uses
-        ``f_TPR=r<seconds>``. The value is mapped through
-        ``_CONTENT_DATE_POSTED_MAP`` so the server's own underscore spelling
-        reaches LinkedIn in the form it recognizes. An unmapped value would be
-        ignored rather than rejected, so callers validate first.
+        The ``datePosted`` and ``sortBy`` facets are one-element JSON lists
+        carrying literal LinkedIn tokens, URL-encoded — unlike job search,
+        which uses ``f_TPR=r<seconds>`` / ``sortBy=DD|R``. Values are mapped
+        through ``_CONTENT_DATE_POSTED_MAP`` / ``_CONTENT_SORT_BY_MAP`` so the
+        server's own spellings reach LinkedIn in the form it recognizes. An
+        unmapped value would be ignored rather than rejected, so callers
+        validate first.
         """
         params = f"keywords={quote_plus(keywords)}&origin=FACETED_SEARCH"
         if date_posted and date_posted.strip():
@@ -4534,12 +4545,16 @@ class LinkedInExtractor:
                 date_posted.strip(), date_posted.strip()
             )
             params += f"&datePosted={_encode_list_facet([token])}"
+        if sort_by and sort_by.strip():
+            token = _CONTENT_SORT_BY_MAP.get(sort_by.strip(), sort_by.strip())
+            params += f"&sortBy={_encode_list_facet([token])}"
         return f"https://www.linkedin.com/search/results/content/?{params}"
 
     async def search_posts(
         self,
         keywords: str,
         date_posted: str | None = None,
+        sort_by: str | None = None,
         max_pages: int = 3,
     ) -> dict[str, Any]:
         """Search LinkedIn posts/content and extract the results page.
@@ -4555,6 +4570,9 @@ class LinkedInExtractor:
                 ``FilterValidationError`` (a ``ValueError`` subclass) rather
                 than reaching LinkedIn, which would ignore them silently and
                 return unfiltered results that look filtered.
+            sort_by: Optional sort, one of the keys of ``_CONTENT_SORT_BY_MAP``
+                (``date`` / ``date_posted`` for Latest, ``relevance`` for Top
+                match). Same validation rule as ``date_posted``.
             max_pages: Scroll depth, expressed in result "pages" of roughly
                 ``_CONTENT_SCROLLS_PER_REQUESTED_PAGE`` scrolls each (default
                 3). Content search is an infinite scroll with no per-page URL,
@@ -4578,8 +4596,19 @@ class LinkedInExtractor:
                 f"Invalid date_posted {date_posted!r}; expected one of "
                 f"{list(_CONTENT_DATE_POSTED_MAP)!r}."
             )
+        if (
+            sort_by is not None
+            and sort_by.strip()
+            and sort_by.strip() not in _CONTENT_SORT_BY_MAP
+        ):
+            raise FilterValidationError(
+                f"Invalid sort_by {sort_by!r}; expected one of "
+                f"{list(_CONTENT_SORT_BY_MAP)!r}."
+            )
 
-        url = self._build_content_search_url(keywords, date_posted=date_posted)
+        url = self._build_content_search_url(
+            keywords, date_posted=date_posted, sort_by=sort_by
+        )
         max_scrolls = max(1, max_pages) * _CONTENT_SCROLLS_PER_REQUESTED_PAGE
         extracted = await self.extract_page(
             url, section_name="search_results", max_scrolls=max_scrolls
