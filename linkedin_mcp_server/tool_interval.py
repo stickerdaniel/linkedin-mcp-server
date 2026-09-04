@@ -78,13 +78,16 @@ def remaining_wait_seconds(
     """How long to wait before the next start may claim the interval slot."""
     if interval <= 0 or last_start_wall is None:
         return 0.0
-    # Only reclaim stamps that are absurdly in the future. Any smaller
-    # backward step (or peer clock slightly ahead) must wait the full
-    # interval — treating it as "already elapsed" would bypass pacing.
-    if last_start_wall - now_wall > _CORRUPT_FUTURE_SECONDS:
+    skew = last_start_wall - now_wall
+    # Only reclaim stamps that are absurdly in the future.
+    if skew > _CORRUPT_FUTURE_SECONDS:
         return 0.0
-    elapsed = max(0.0, now_wall - last_start_wall)
-    return max(0.0, interval - elapsed)
+    if skew > 0:
+        # Peer clock ahead / local rollback: waiting the full interval on
+        # every retry never advances (elapsed stays 0) and burns the wait
+        # budget. Catch up toward the stamp in interval-sized steps instead.
+        return min(interval, skew)
+    return max(0.0, interval - (now_wall - last_start_wall))
 
 
 def try_claim_start(auth_root: Path, interval: float) -> float:

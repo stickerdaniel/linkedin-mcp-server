@@ -518,7 +518,8 @@ class AppConfig:
         ):
             logger.warning(
                 "min_tool_interval_seconds %.1f exceeds tool_timeout_seconds "
-                "%.1f; clamping (pacing shares the call's timeout budget).",
+                "%.1f; clamping (a paced wait still has to leave room for the "
+                "tool inside the daemon frontend deadline).",
                 self.server.min_tool_interval_seconds,
                 self.server.tool_timeout_seconds,
             )

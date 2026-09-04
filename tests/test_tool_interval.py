@@ -48,18 +48,28 @@ class TestRemainingWaitSeconds:
             == 0.0
         )
 
-    def test_small_clock_rollback_still_waits_full_interval(self):
-        # Stamp is 2s ahead of now. Must not grant immediately.
+    def test_small_clock_rollback_waits_only_the_skew(self):
+        # Stamp is 2s ahead of now. Must not grant immediately, but must not
+        # restart a full interval on every retry either — catch up by the skew.
         assert (
             remaining_wait_seconds(interval=15, last_start_wall=102.0, now_wall=100.0)
-            == 15.0
+            == 2.0
         )
 
-    def test_multi_minute_clock_rollback_still_waits_full_interval(self):
-        # Ten minutes backwards is still a real clock step, not a corrupt stamp.
+    def test_multi_minute_clock_rollback_catches_up_in_interval_steps(self):
+        # Ten minutes backwards: each retry advances by at most ``interval``,
+        # so the wait budget is not burned on identical full-interval sleeps.
         assert (
             remaining_wait_seconds(interval=15, last_start_wall=700.0, now_wall=100.0)
             == 15.0
+        )
+        assert (
+            remaining_wait_seconds(interval=15, last_start_wall=700.0, now_wall=115.0)
+            == 15.0
+        )
+        assert (
+            remaining_wait_seconds(interval=15, last_start_wall=700.0, now_wall=690.0)
+            == 10.0
         )
 
 
