@@ -13,6 +13,7 @@ from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
 
 from linkedin_mcp_server.config import get_config
+from linkedin_mcp_server.daemon_proxy import TIMEOUT_MARGIN_SECONDS
 from linkedin_mcp_server.exceptions import BrowserBusyError
 from linkedin_mcp_server.profile_lease import get_profile_lease
 from linkedin_mcp_server.tool_interval import try_claim_start
@@ -89,12 +90,14 @@ class SequentialToolExecutionMiddleware(Middleware):
         if interval <= 0:
             return
 
-        # Pacing shares this call's tool-timeout budget with the scrape. The
-        # daemon frontend's deadline is that budget plus a fixed margin, so a
-        # wait longer than the tool timeout makes the frontend give up while
-        # the owner is still sleeping — the opposite of "wait rather than
-        # fail". Refuse when the remaining wait cannot fit.
-        budget = config.tool_timeout_seconds
+        # The interval wait runs in middleware *before* FastMCP's tool
+        # ``fail_after(tool_timeout)``. The daemon frontend's deadline is
+        # ``tool_timeout + TIMEOUT_MARGIN_SECONDS``, so the wait may only
+        # spend that margin — otherwise the tool can still take a full
+        # timeout and the client sees a transport failure instead of a
+        # result or a pacing error. Refuse when the remaining wait cannot
+        # fit.
+        budget = TIMEOUT_MARGIN_SECONDS
         wait_started = time.monotonic()
 
         async def sleep_within_budget(seconds: float, *, message: str) -> None:
@@ -104,8 +107,9 @@ class SequentialToolExecutionMiddleware(Middleware):
             if seconds > remaining:
                 raise ToolError(
                     f"Minimum tool-call interval ({interval:g}s) has not "
-                    f"elapsed, and waiting would exceed this call's "
-                    f"{budget:g}s tool timeout. Retry shortly."
+                    f"elapsed, and waiting would exceed the {budget:g}s "
+                    f"daemon proxy margin reserved beyond the tool timeout. "
+                    f"Retry shortly."
                 )
             await self._sleep_reporting(context, seconds, message=message)
 

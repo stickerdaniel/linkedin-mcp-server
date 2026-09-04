@@ -315,7 +315,7 @@ class FrontendAuthRepairMiddleware(Middleware):
             # showed why. Bounding it locally left the owner finishing the
             # mutation after the frontend had reported failure: cancellation is
             # not forwarded across the hop, which
-            # `daemon_proxy._TIMEOUT_MARGIN_SECONDS` already records. Measured
+            # `daemon_proxy.TIMEOUT_MARGIN_SECONDS` already records. Measured
             # over a real loopback owner, the client was answered at 0.66s with
             # an error and the effect landed 0.7s later. Removing the bound only
             # moved the deadline: an MCP client that gives up on its own call

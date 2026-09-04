@@ -751,14 +751,15 @@ class TestSequentialToolExecutionMiddleware:
             await task
         call_next.assert_not_awaited()
 
-    async def test_min_tool_interval_refuses_wait_past_tool_timeout(
+    async def test_min_tool_interval_refuses_wait_past_proxy_margin(
         self, monkeypatch, tmp_path
     ):
         from fastmcp.exceptions import ToolError
 
         config = AppConfig()
-        config.server.min_tool_interval_seconds = 30.0
-        config.server.tool_timeout_seconds = 5.0
+        # Wait needed (~60s) exceeds the daemon proxy margin (30s).
+        config.server.min_tool_interval_seconds = 60.0
+        config.server.tool_timeout_seconds = 180.0
         set_config(config)
 
         auth_root = tmp_path / "auth"
@@ -776,7 +777,7 @@ class TestSequentialToolExecutionMiddleware:
             method="tools/call",
         )
 
-        with pytest.raises(ToolError, match="tool timeout"):
+        with pytest.raises(ToolError, match="proxy margin"):
             await middleware.on_call_tool(context, call_next)
         call_next.assert_not_awaited()
 

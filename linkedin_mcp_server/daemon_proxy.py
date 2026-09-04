@@ -106,7 +106,12 @@ _call_being_made: contextvars.ContextVar[_CallBinding | None] = contextvars.Cont
 #: waiting its turn, and because cancellation is not forwarded, the owner may go
 #: on scraping afterwards. That is the orphaned call #606 names, and the heartbeat
 #: is what will bound it.
-_TIMEOUT_MARGIN_SECONDS = 30.0
+#:
+#: Middleware that runs *outside* that tool ``fail_after`` (the min-tool-interval
+#: wait) may only spend this margin: wait + tool execution must fit inside
+#: ``tool_timeout + TIMEOUT_MARGIN_SECONDS``.
+TIMEOUT_MARGIN_SECONDS = 30.0
+
 
 #: The provider's component cache, switched off. FastMCP's default is 300
 #: seconds and this module used to take it, on the stated grounds that an owner's
@@ -567,7 +572,7 @@ def create_proxy_provider(
     """Serve the owner's tools as if they were this server's own."""
     from fastmcp.server.providers.proxy import ProxyProvider
 
-    timeout = tool_timeout + _TIMEOUT_MARGIN_SECONDS
+    timeout = tool_timeout + TIMEOUT_MARGIN_SECONDS
     logger.debug(
         "Forwarding tool calls to the shared browser owner at %s (deadline %.0fs)",
         backend.attachment.descriptor.url,
