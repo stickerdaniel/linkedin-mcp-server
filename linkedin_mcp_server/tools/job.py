@@ -110,7 +110,10 @@ def register_job_tools(
 
         Returns:
             Dict with url, sections (name -> raw text), job_ids (list of
-            numeric job ID strings usable with get_job_details), and optional references.
+            numeric job ID strings usable with get_job_details), optional
+            references, and pagination ({pages_fetched, next_offset, reason})
+            explaining why paging stopped (complete, max_pages, time_budget,
+            or no_new_ids). Hard failures use section_errors instead.
         """
         try:
             # Before the browser, because FastMCP is already timing this call
