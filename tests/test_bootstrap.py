@@ -4179,6 +4179,34 @@ class TestPatchrightInstallStreaming:
         assert root.path == temporary_root
         assert created == [tmp_path]
 
+    def test_installer_temporary_parent_respects_configured_installer_temp_dir(
+        self, tmp_path, monkeypatch
+    ):
+        from linkedin_mcp_server import bootstrap
+
+        custom_temp = tmp_path / "custom_temp"
+        custom_temp.mkdir()
+
+        fake_config = SimpleNamespace(
+            browser=SimpleNamespace(installer_temp_dir=str(custom_temp))
+        )
+        monkeypatch.setattr(bootstrap, "get_config", lambda: fake_config)
+
+        assert bootstrap._installer_temporary_parent() == custom_temp.resolve()
+
+    def test_installer_temporary_parent_defaults_to_gettempdir_when_unset(
+        self, tmp_path, monkeypatch
+    ):
+        from linkedin_mcp_server import bootstrap
+
+        fake_config = SimpleNamespace(browser=SimpleNamespace(installer_temp_dir=None))
+        monkeypatch.setattr(bootstrap, "get_config", lambda: fake_config)
+        default_temp = tmp_path / "default_temp"
+        default_temp.mkdir()
+        monkeypatch.setattr(bootstrap.tempfile, "gettempdir", lambda: str(default_temp))
+
+        assert bootstrap._installer_temporary_parent() == default_temp.resolve()
+
     @pytest.mark.skipif(os.name == "nt", reason="POSIX directory modes are required")
     def test_replaceable_temporary_parent_is_refused_before_creation(
         self, tmp_path, monkeypatch

@@ -591,6 +591,7 @@ The local server uses the same managed-runtime flow as MCPB and `uvx`: it prepar
 - `--timeout MS` - Timeout for a single page operation (default: 5000)
 - `--tool-timeout SECONDS` - Timeout for a whole tool call (default: 180). Raise it for heavy scrapes, slow networks, or a cold-start browser.
 - `--user-data-dir PATH` - Browser profile directory (default: ~/.linkedin-mcp/profile). Rotating or clearing a session deletes this directory *and its parent*, which holds the stored cookies and derived profiles.
+- `--installer-temp-dir PATH` - Parent directory for temporary files created during browser installation bootstrap (default: system temporary directory). Useful when system %TEMP% ancestry has non-standard ACLs or permissions.
 - `--claim-profile-root` - Take over a profile directory the server will not claim on its own, such as one whose parent already holds other files. Needed once per directory.
 - `--slow-mo MS` - Delay between browser actions (default: 0, useful for debugging)
 - `--viewport WxH` - Viewport size (default: 1280x720). Applies to windowless mode only; a headed launch uses the real window size.

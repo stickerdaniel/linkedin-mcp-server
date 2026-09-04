@@ -2005,7 +2005,15 @@ def _installer_temporary_parent() -> Path:
     is pinned, and the pins have to be held across the creation that happens
     after this function has already returned.
     """
-    parent = Path(tempfile.gettempdir()).resolve(strict=True)
+    configured_parent: str | None = os.environ.get("INSTALLER_TEMP_DIR")
+    if configured_parent is None:
+        with contextlib.suppress(Exception):
+            configured_parent = get_config().browser.installer_temp_dir
+
+    if configured_parent:
+        parent = Path(configured_parent).resolve(strict=True)
+    else:
+        parent = Path(tempfile.gettempdir()).resolve(strict=True)
     if os.name == "nt":
         return parent
 
