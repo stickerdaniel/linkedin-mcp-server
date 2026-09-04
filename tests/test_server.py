@@ -1,6 +1,7 @@
 import asyncio
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -14,6 +15,7 @@ from fastmcp.server.providers.proxy import ProxyClient
 
 import linkedin_mcp_server.server as server_module
 from linkedin_mcp_server import __version__
+from linkedin_mcp_server.config import reset_config, set_config
 from linkedin_mcp_server.sequential_tool_middleware import (
     SequentialToolExecutionMiddleware,
 )
@@ -25,6 +27,8 @@ from linkedin_mcp_server.server_role import (
     process_role,
 )
 from linkedin_mcp_server.update_check import UpdateNoticeMiddleware
+from linkedin_mcp_server.profile_lease import ProfileLease
+import linkedin_mcp_server.sequential_tool_middleware as sequential_middleware_module
 
 
 def _has_middleware(mcp: FastMCP, kind: type) -> bool:
@@ -577,6 +581,13 @@ class TestOwnerAuthentication:
 
 
 class TestSequentialToolExecutionMiddleware:
+    @pytest.fixture(autouse=True)
+    def _install_default_config(self):
+        """Keep middleware hermetic: get_config must not parse pytest argv."""
+        set_config(AppConfig())
+        yield
+        reset_config()
+
     async def test_create_mcp_server_registers_sequential_tool_middleware(self):
         mcp = create_mcp_server()
 
@@ -652,6 +663,93 @@ class TestSequentialToolExecutionMiddleware:
                 ),
             ]
         )
+
+    async def test_min_tool_interval_disabled_by_default(self, monkeypatch):
+        """Default 0 must not delay consecutive tool calls."""
+
+        async def fake_owning(self, context, call_next, tool_name):
+            return await call_next(context)
+
+        monkeypatch.setattr(
+            SequentialToolExecutionMiddleware,
+            "_run_owning_the_profile",
+            fake_owning,
+        )
+
+        mcp = FastMCP("test")
+        mcp.add_middleware(SequentialToolExecutionMiddleware())
+
+        @mcp.tool
+        async def quick_tool() -> dict[str, str]:
+            return {"ok": "yes"}
+
+        started = time.perf_counter()
+        await mcp.call_tool("quick_tool", {})
+        await mcp.call_tool("quick_tool", {})
+        assert time.perf_counter() - started < 0.5
+
+    async def test_min_tool_interval_spaces_sequential_calls(
+        self, monkeypatch, tmp_path
+    ):
+        config = AppConfig()
+        config.server.min_tool_interval_seconds = 0.2
+        set_config(config)
+
+        auth_root = tmp_path / "auth"
+        auth_root.mkdir(exist_ok=True)
+        lease = ProfileLease(auth_root)
+        monkeypatch.setattr(
+            sequential_middleware_module, "get_profile_lease", lambda: lease
+        )
+
+        async def fake_owning(self, context, call_next, tool_name):
+            return await call_next(context)
+
+        monkeypatch.setattr(
+            SequentialToolExecutionMiddleware,
+            "_run_owning_the_profile",
+            fake_owning,
+        )
+
+        mcp = FastMCP("test")
+        mcp.add_middleware(SequentialToolExecutionMiddleware())
+
+        @mcp.tool
+        async def quick_tool() -> dict[str, str]:
+            return {"ok": "yes"}
+
+        started = time.perf_counter()
+        await mcp.call_tool("quick_tool", {})
+        await mcp.call_tool("quick_tool", {})
+        elapsed = time.perf_counter() - started
+        assert elapsed >= 0.15
+
+    async def test_min_tool_interval_honours_cancellation(self, monkeypatch, tmp_path):
+        config = AppConfig()
+        config.server.min_tool_interval_seconds = 5.0
+        set_config(config)
+
+        auth_root = tmp_path / "auth"
+        auth_root.mkdir(exist_ok=True)
+        lease = ProfileLease(auth_root)
+        monkeypatch.setattr(
+            sequential_middleware_module, "get_profile_lease", lambda: lease
+        )
+
+        middleware = SequentialToolExecutionMiddleware()
+        middleware._last_start_mono = time.monotonic()
+        call_next = AsyncMock(return_value=MagicMock())
+        context = MiddlewareContext(
+            message=mt.CallToolRequestParams(name="slow_tool", arguments={}),
+            method="tools/call",
+        )
+
+        task = asyncio.create_task(middleware.on_call_tool(context, call_next))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        call_next.assert_not_awaited()
 
 
 class TestBrowserLifespan:

@@ -136,6 +136,7 @@ class EnvironmentKeys:
     PROXY_BYPASS = "PROXY_BYPASS"
     USER_DATA_DIR = "USER_DATA_DIR"
     TOOL_TIMEOUT = "TOOL_TIMEOUT"
+    MIN_TOOL_INTERVAL = "MIN_TOOL_INTERVAL"
     LOGIN_TIMEOUT = "LOGIN_TIMEOUT"
     LOGIN_INLINE_WAIT = "LOGIN_INLINE_WAIT"
     BROWSER_WAIT = "BROWSER_WAIT"
@@ -273,6 +274,24 @@ def load_from_env(config: AppConfig) -> AppConfig:
                 f"Invalid TOOL_TIMEOUT: '{tool_timeout_env}'. Must be a positive finite number."
             )
         config.server.tool_timeout_seconds = tool_timeout_value
+
+    # Minimum seconds between MCP tool-call starts; 0 = disabled (validated in
+    # ServerConfig.validate())
+    if min_tool_interval_env := os.environ.get(EnvironmentKeys.MIN_TOOL_INTERVAL):
+        try:
+            min_tool_interval_value = float(min_tool_interval_env)
+        except ValueError:
+            raise ConfigurationError(
+                f"Invalid MIN_TOOL_INTERVAL: '{min_tool_interval_env}'. Must be a number."
+            )
+        if not (
+            math.isfinite(min_tool_interval_value) and min_tool_interval_value >= 0
+        ):
+            raise ConfigurationError(
+                f"Invalid MIN_TOOL_INTERVAL: '{min_tool_interval_env}'. "
+                "Must be a non-negative finite number (0 = disabled)."
+            )
+        config.server.min_tool_interval_seconds = min_tool_interval_value
 
     # Manual-login wait timeout in seconds; 0 = no limit (validated in
     # BrowserConfig.validate())
@@ -525,6 +544,17 @@ def load_from_args(config: AppConfig) -> AppConfig:
         default=None,
         metavar="SECONDS",
         help="Per-tool MCP execution timeout in seconds (default: 180.0)",
+    )
+
+    parser.add_argument(
+        "--min-tool-interval",
+        type=non_negative_float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "Minimum seconds between MCP tool-call starts (default: 0 = disabled; "
+            "max 3600). Waits rather than failing; does not hold the browser lease"
+        ),
     )
 
     parser.add_argument(
@@ -787,6 +817,9 @@ def load_from_args(config: AppConfig) -> AppConfig:
 
     if args.tool_timeout is not None:
         config.server.tool_timeout_seconds = args.tool_timeout
+
+    if args.min_tool_interval is not None:
+        config.server.min_tool_interval_seconds = args.min_tool_interval
 
     if args.login_timeout is not None:
         config.browser.login_timeout_seconds = args.login_timeout

@@ -112,6 +112,7 @@ AI agent? Get a quick confirmation from the user before enabling automatic updat
 - `--host HOST` / `--port PORT` / `--path PATH` - HTTP server address (defaults: 127.0.0.1, 8000, /mcp)
 - `--timeout MS` - Timeout for a single page operation (default: 5000)
 - `--tool-timeout SECONDS` - Timeout for a whole tool call (default: 180). Raise it for heavy scrapes, slow networks, or a cold-start browser.
+- `--min-tool-interval SECONDS` - Minimum seconds between MCP tool-call starts (default: 0 = off). Waits rather than failing; does not hold the browser lease while waiting. Also `MIN_TOOL_INTERVAL`.
 - `--login-timeout SECONDS` - How long the login browser waits for you to finish signing in (default: 1800; 0 = no limit). `--login-viewer` ends the session after 30 minutes either way.
 - `--login-viewer` - Docker only: show the `--login` browser at a token-protected URL on port 6080 (see [Authentication](#authentication))
 - `--login-inline-wait SECONDS` - How long a tool call waits for a login to finish before telling the model to retry (default: 25, max 45; 0 = return at once)
@@ -400,6 +401,7 @@ username.
 - `--logout` - Clear the stored session and every profile derived from it
 - `--timeout MS` - Timeout for a single page operation (default: 5000)
 - `--tool-timeout SECONDS` - Timeout for a whole tool call (default: 180). Raise it for heavy scrapes, slow networks, or a cold-start browser.
+- `--min-tool-interval SECONDS` - Minimum seconds between MCP tool-call starts (default: 0 = off). Waits rather than failing; does not hold the browser lease while waiting. Also `MIN_TOOL_INTERVAL`.
 - `--login-timeout SECONDS` - How long the login browser waits for you to finish signing in (default: 1800; 0 = no limit). `--login-viewer` ends the session after 30 minutes either way.
 - `--login-viewer` - With `--login`, show the login browser at a token-protected URL on port 6080. Needs the profile mount from [Authentication](#authentication).
 - `--login-inline-wait SECONDS` - How long a tool call waits for a login to finish before telling the model to retry (default: 25, max 45; 0 = return at once)
@@ -590,6 +592,7 @@ The local server uses the same managed-runtime flow as MCPB and `uvx`: it prepar
 - `--host HOST` / `--port PORT` / `--path PATH` - HTTP server address (defaults: 127.0.0.1, 8000, /mcp)
 - `--timeout MS` - Timeout for a single page operation (default: 5000)
 - `--tool-timeout SECONDS` - Timeout for a whole tool call (default: 180). Raise it for heavy scrapes, slow networks, or a cold-start browser.
+- `--min-tool-interval SECONDS` - Minimum seconds between MCP tool-call starts (default: 0 = off). Waits rather than failing; does not hold the browser lease while waiting. Also `MIN_TOOL_INTERVAL`.
 - `--user-data-dir PATH` - Browser profile directory (default: ~/.linkedin-mcp/profile). Rotating or clearing a session deletes this directory *and its parent*, which holds the stored cookies and derived profiles.
 - `--claim-profile-root` - Take over a profile directory the server will not claim on its own, such as one whose parent already holds other files. Needed once per directory.
 - `--slow-mo MS` - Delay between browser actions (default: 0, useful for debugging)

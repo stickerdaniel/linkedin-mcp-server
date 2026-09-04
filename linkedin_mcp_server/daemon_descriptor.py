@@ -809,6 +809,7 @@ def config_fingerprint(config: AppConfig, *, key: str) -> str:
         for name in SHARED_CONFIG_FIELDS
     }
     material["tool_timeout_seconds"] = config.server.tool_timeout_seconds
+    material["min_tool_interval_seconds"] = config.server.min_tool_interval_seconds
     return hmac.new(
         key.encode("utf-8"), _canonical(material).encode("utf-8"), hashlib.sha256
     ).hexdigest()
@@ -828,6 +829,11 @@ def mismatched_fields(config: AppConfig, other: AppConfig) -> tuple[str, ...]:
     ]
     if config.server.tool_timeout_seconds != other.server.tool_timeout_seconds:
         differing.append("tool_timeout_seconds")
+    if (
+        config.server.min_tool_interval_seconds
+        != other.server.min_tool_interval_seconds
+    ):
+        differing.append("min_tool_interval_seconds")
     return tuple(differing)
 
 
