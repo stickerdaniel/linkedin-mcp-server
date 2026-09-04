@@ -3670,6 +3670,11 @@ class TestSearchJobs:
         # start=30, which is exactly what a stride regression would produce.
         page2 = parse_qs(urlparse(urls_visited[1]).query)
         assert page2["start"] == ["3"]  # page 1 rendered three cards
+        assert result["pagination"] == {
+            "pages_fetched": 2,
+            "next_offset": 5,
+            "reason": "max_pages",
+        }
 
     async def test_references_keep_all_jobs_beyond_the_per_section_cap(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
@@ -4149,6 +4154,8 @@ class TestSearchJobs:
             result["section_errors"]["search_results"]["error_type"]
             == "pagination_stopped"
         )
+        # Hard stop: planned ``pagination`` is omitted; section_errors explains.
+        assert "pagination" not in result
 
     async def test_no_new_id_page_can_upgrade_duplicate_metadata(self, mock_page):
         """The stopping page still contributes richer duplicate metadata."""
@@ -4224,6 +4231,11 @@ class TestSearchJobs:
                 },
             ]
         }
+        assert result["pagination"] == {
+            "pages_fetched": 2,
+            "next_offset": 4,
+            "reason": "no_new_ids",
+        }
 
     async def test_stops_once_past_the_advertised_results(self, mock_page):
         """Stop when the offset passes the last result LinkedIn advertises.
@@ -4267,6 +4279,11 @@ class TestSearchJobs:
         assert mock_extract.await_count == 1
         assert mock_total_pages.await_count == 1
         assert result["job_ids"] == [str(i) for i in range(25)]
+        assert result["pagination"] == {
+            "pages_fetched": 1,
+            "next_offset": 25,
+            "reason": "complete",
+        }
 
     async def test_the_scroll_budget_is_spent_and_not_divided(self, mock_page):
         """Asking for more pages must not shorten the first one.
@@ -4453,6 +4470,11 @@ class TestSearchJobs:
         # Seven pages end at 142.9s; an eighth would need 163.6s.
         assert len(seen) == 7
         assert result["job_ids"] == [jid for page in pages[:7] for jid in page]
+        assert result["pagination"] == {
+            "pages_fetched": 7,
+            "next_offset": 70,
+            "reason": "time_budget",
+        }
 
     async def test_the_next_navigation_delay_is_part_of_the_prediction(self, mock_page):
         """The guard budgets the delay before a page, not just the page.
@@ -4515,6 +4537,11 @@ class TestSearchJobs:
 
         assert len(seen) == 6
         assert result["job_ids"] == [jid for page in pages[:6] for jid in page]
+        assert result["pagination"] == {
+            "pages_fetched": 6,
+            "next_offset": 60,
+            "reason": "time_budget",
+        }
 
     async def test_zero_max_pages_fetches_nothing(self, mock_page):
         """max_pages=0 should fetch zero pages (validation at tool boundary)."""
@@ -4547,6 +4574,11 @@ class TestSearchJobs:
 
         assert result["job_ids"] == []
         assert mock_extract.await_count == 0
+        assert result["pagination"] == {
+            "pages_fetched": 0,
+            "next_offset": 0,
+            "reason": "max_pages",
+        }
 
     async def test_single_page(self, mock_page):
         """max_pages=1 should only visit one page; filters appear in URL."""
@@ -4591,6 +4623,11 @@ class TestSearchJobs:
         assert "f_WT=2" in result["url"]
         assert "f_EA=true" in result["url"]
         assert mock_extract.await_count == 1
+        assert result["pagination"] == {
+            "pages_fetched": 1,
+            "next_offset": 1,
+            "reason": "max_pages",
+        }
 
     async def test_page_texts_joined_with_separator(self, mock_page):
         """Multiple pages should join text with --- separator."""

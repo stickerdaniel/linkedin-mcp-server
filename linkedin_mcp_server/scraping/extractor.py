@@ -3747,7 +3747,11 @@ class LinkedInExtractor:
             sort_by: Sort results (date, relevance)
 
         Returns:
-            {url, sections: {search_results: text}, job_ids: [str]}
+            {url, sections: {search_results: text}, job_ids: [str],
+            pagination: {pages_fetched, next_offset, reason}}. ``reason`` is
+            one of ``complete``, ``max_pages``, ``time_budget``, or
+            ``no_new_ids`` for planned stops. Hard failures still use
+            ``section_errors`` and omit ``pagination``.
         """
         base_url = self._build_job_search_url(
             keywords,
@@ -3771,6 +3775,12 @@ class LinkedInExtractor:
         filters_warning: dict[str, str] | None = None
         total_pages: int | None = None
         total_pages_queried = False
+        # Planned stop reason for the ``pagination`` key. Hard failures leave
+        # this unset and report via ``section_errors`` instead — those are not
+        # successful partial deliveries dressed as complete searches.
+        stop_reason: str | None = None
+        pages_fetched = 0
+        hard_stop = False
 
         # The search-wide scroll budget is spent as it goes rather than
         # divided up front, because dividing it charges every navigation for
@@ -3803,6 +3813,7 @@ class LinkedInExtractor:
                     offset,
                     total_pages,
                 )
+                stop_reason = "complete"
                 break
 
             elapsed = time.monotonic() - started
@@ -3815,6 +3826,7 @@ class LinkedInExtractor:
                     _NAV_DELAY + slowest_page,
                     budget,
                 )
+                stop_reason = "time_budget"
                 break
 
             if page_num > 0:
@@ -3858,10 +3870,17 @@ class LinkedInExtractor:
                 # is a successful answer to a different search.
                 if extracted.text == _RATE_LIMITED_MSG:
                     section_errors["search_results"] = rate_limited_section_error()
+                    hard_stop = True
                     break
                 if not extracted.text and extracted.error:
                     section_errors["search_results"] = extracted.error
+                    hard_stop = True
                     break
+
+                # Count only pages that passed extraction without a hard
+                # failure. Time-budget and advertised-complete stops happen
+                # before this navigation, so they leave the count alone.
+                pages_fetched += 1
 
                 # Prove the destination still represents the requested search
                 # before accepting even an empty result. The id extraction is
@@ -3937,6 +3956,7 @@ class LinkedInExtractor:
                     section_errors["search_results"] = lost_keywords_section_error(
                         asked_keywords, landed_keywords
                     )
+                    hard_stop = True
                     break
 
                 # Presence only for the rest, where the keywords are compared
@@ -3969,12 +3989,14 @@ class LinkedInExtractor:
                     section_errors["search_results"] = dropped_offset_section_error(
                         offset, self._page.url
                     )
+                    hard_stop = True
                     break
 
                 if not extracted.text:
                     # The route and query survived, so this is a real empty
                     # result rather than a redirect that silently replaced the
                     # search. Do not read ids from a DOM that supplied no text.
+                    stop_reason = "complete"
                     break
 
                 # Read total pages from pagination state (once only, best-effort)
@@ -4009,6 +4031,7 @@ class LinkedInExtractor:
                     if page_refs:
                         page_references.extend(page_refs)
                     logger.debug("No new job IDs on page %d, stopping", page_num + 1)
+                    stop_reason = "no_new_ids"
                     break
 
                 for jid in new_ids:
@@ -4029,6 +4052,7 @@ class LinkedInExtractor:
                     target_url=url,
                     section_name="search_results",
                 )
+                hard_stop = True
                 break
 
         result: dict[str, Any] = {
@@ -4055,6 +4079,20 @@ class LinkedInExtractor:
                 )
         if section_errors:
             result["section_errors"] = section_errors
+        # Planned stops only. A hard failure already explains itself in
+        # ``section_errors``; attaching ``pagination`` there would dress an
+        # interrupted search as a deliberate partial delivery.
+        # ``filters_dropped`` is a warning on kept results, not a hard stop.
+        if not hard_stop and (
+            stop_reason is not None or max_pages == 0 or pages_fetched > 0
+        ):
+            if stop_reason is None:
+                stop_reason = "max_pages" if pages_fetched >= max_pages else "complete"
+            result["pagination"] = {
+                "pages_fetched": pages_fetched,
+                "next_offset": offset,
+                "reason": stop_reason,
+            }
         return result
 
     async def _extract_saved_jobs_page(
