@@ -5,7 +5,10 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
 import asyncio
+import logging
+import time
 
+import anyio
 from patchright.async_api import Error as PatchrightError
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
@@ -8967,6 +8970,336 @@ class TestBuildFeedReferences:
             "/posts/alice_x-ugcPost-1-xx",
         ]
         assert kinds == {"feed_post"}
+
+
+class TestDrainListenerTasks:
+    """Teardown of the feed response reads, on every path out of it.
+
+    The reads are fire-and-forget: ``_extract_feed_once`` unsubscribes the
+    response listener before it drains, so once this helper returns nothing
+    in the process holds a reference that could still stop them. Every case
+    here is therefore about what is left running afterwards.
+    """
+
+    @staticmethod
+    async def _blocked_read() -> asyncio.Task[None]:
+        """A started, cooperative read that never finishes on its own.
+
+        Stands in for ``resp.body()`` on a response whose body never
+        arrives, which is what the browser probe for this behaviour drove.
+        """
+        started = asyncio.Event()
+
+        async def read() -> None:
+            started.set()
+            await asyncio.Event().wait()
+
+        task = asyncio.create_task(read())
+        await started.wait()
+        return task
+
+    async def test_an_empty_list_is_a_no_op(self):
+        begun = time.monotonic()
+        await extractor_module._drain_listener_tasks([])
+        assert time.monotonic() - begun < 0.5
+
+    async def test_reads_that_finish_are_left_alone_and_their_failures_read(self):
+        order: list[int] = []
+
+        async def read(index: int) -> None:
+            await asyncio.sleep(0.01)
+            if index == 1:
+                raise ValueError("body decode failed")
+            order.append(index)
+
+        reads = [asyncio.create_task(read(index)) for index in range(3)]
+        begun = time.monotonic()
+        await extractor_module._drain_listener_tasks(reads)
+        elapsed = time.monotonic() - begun
+
+        assert order == [0, 2]
+        assert all(task.done() for task in reads)
+        assert not any(task.cancelled() for task in reads)
+        # Left unretrieved, the failure resurfaces from the loop long after
+        # the feed call returned. ``_log_traceback`` is the flag
+        # ``Task.__del__`` reads for that, and no public API exposes it.
+        assert reads[1]._log_traceback is False
+        assert elapsed < 1.0
+
+    async def test_a_stuck_read_is_cancelled_without_failing_the_call(self, caplog):
+        """The ordinary slow-response path, with no outer cancellation.
+
+        The read is cancelled here by the helper itself, so reading its
+        result has to account for that: a bare ``exception()`` on it would
+        re-raise the ``CancelledError`` and turn a successful feed call into
+        a cancelled one from inside its own ``finally``.
+        """
+        read = await self._blocked_read()
+
+        begun = time.monotonic()
+        with caplog.at_level(logging.WARNING):
+            await extractor_module._drain_listener_tasks([read])
+        elapsed = time.monotonic() - begun
+
+        assert read.cancelled()
+        # Two seconds of settling; the cancel is honoured well inside the
+        # second that follows, so nothing is reported as left behind.
+        assert 1.9 <= elapsed < 3.0, elapsed
+        assert "leaking" not in caplog.text
+
+    async def test_a_failed_read_is_still_read_when_the_drain_is_cancelled(self):
+        """Cancelling the caller used to skip the consumption step entirely.
+
+        The failure then belongs to nobody: the listener is gone, the feed
+        call is unwinding, and the loop reports it whenever the task is
+        finally collected.
+        """
+
+        async def read() -> None:
+            raise ValueError("body decode failed")
+
+        failed = asyncio.create_task(read())
+        await asyncio.wait({failed})
+        blocked = await self._blocked_read()
+
+        drain = asyncio.create_task(
+            extractor_module._drain_listener_tasks([failed, blocked])
+        )
+        await asyncio.sleep(0.05)
+        drain.cancel()
+
+        done, _pending = await asyncio.wait({drain}, timeout=2.0)
+        assert done == {drain}
+        assert failed._log_traceback is False
+
+    async def test_cancelling_the_drain_still_cancels_the_reads(self):
+        """The caller's cancellation reaches this helper mid-wait.
+
+        A tool timeout lands here, and previously the first
+        ``asyncio.wait`` just propagated it: measured against a real
+        ``resp.body()``, the read stayed pending afterwards with
+        ``cancelling() == 0``, with the listener already unsubscribed.
+        """
+        read = await self._blocked_read()
+
+        drain = asyncio.create_task(extractor_module._drain_listener_tasks([read]))
+        # Let the drain reach its first wait before cancelling it.
+        await asyncio.sleep(0.05)
+        drain.cancel()
+
+        done, _pending = await asyncio.wait({drain}, timeout=2.0)
+
+        assert done == {drain}
+        # Cancellation is not converted into a successful teardown.
+        assert drain.cancelled()
+        # The read was asked to stop, and being cooperative it is already
+        # finished by the time the helper gives up ownership of it.
+        assert read.cancelling() >= 1
+        assert read.done()
+        assert read.cancelled()
+
+    async def test_a_repeated_cancellation_still_leaves_the_reads_cancelled(self):
+        """A second request lands while the helper is already in teardown."""
+        read = await self._blocked_read()
+
+        drain = asyncio.create_task(extractor_module._drain_listener_tasks([read]))
+        await asyncio.sleep(0.05)
+        drain.cancel()
+        await asyncio.sleep(0)
+        drain.cancel()
+
+        done, _pending = await asyncio.wait({drain}, timeout=2.0)
+        assert done == {drain}
+        assert drain.cancelled()
+        assert read.cancelling() >= 1
+
+        finished, _still = await asyncio.wait({read}, timeout=2.0)
+        assert finished == {read}
+        assert read.cancelled()
+
+    async def test_a_second_cancellation_inside_the_cleanup_still_reports(self, caplog):
+        """The shield holds off AnyIO's delivery, not a plain ``cancel()``.
+
+        The cooperative case above cannot see this: both reads are settled
+        by the time the second request lands, so nothing is left to read or
+        report. Here a failure arrived before the cancel and a read outlives
+        it, and the second request cuts the bounded wait short between the
+        two.
+        """
+
+        async def failing() -> None:
+            raise ValueError("body decode failed")
+
+        failed = asyncio.create_task(failing())
+        await asyncio.wait({failed})
+
+        release = asyncio.Event()
+        started = asyncio.Event()
+
+        async def stubborn() -> None:
+            started.set()
+            while not release.is_set():
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    pass
+
+        read = asyncio.create_task(stubborn())
+        await started.wait()
+        drain = asyncio.create_task(
+            extractor_module._drain_listener_tasks([failed, read])
+        )
+
+        try:
+            with caplog.at_level(logging.WARNING):
+                await asyncio.sleep(0.05)
+                drain.cancel()
+                # Land the second request inside the bounded wait. The cancel
+                # loop and that wait are one stretch with no await between
+                # them, so a read that has been asked to stop means the drain
+                # is already suspended in it.
+                for _ in range(100):
+                    await asyncio.sleep(0)
+                    if read.cancelling() >= 1:
+                        break
+                assert read.cancelling() >= 1, "drain never reached its cleanup"
+                drain.cancel()
+
+                done, _pending = await asyncio.wait({drain}, timeout=2.0)
+
+            assert done == {drain}
+            assert drain.cancelled()
+            # The read refused the cancel, so it is genuinely still running
+            # and has to be named rather than passed over in silence.
+            assert not read.done()
+            assert "leaking 1 task(s)" in caplog.text
+            # And the failure that landed before any of this is read, not
+            # left for the loop to report against an unrelated call.
+            assert failed._log_traceback is False
+        finally:
+            release.set()
+            await asyncio.wait({drain, read}, timeout=2.0)
+
+    async def test_a_tool_deadline_does_not_cut_the_bounded_cleanup_short(self):
+        """FastMCP runs every tool call inside ``anyio.fail_after``.
+
+        That scope re-delivers its cancellation on every loop iteration
+        until the task leaves it, so an unshielded wait in the teardown is
+        cancelled again as soon as it starts. A read that unwinds within a
+        single iteration cannot show this, because the one iteration it
+        needs is granted either way; this one awaits on its cleanup path,
+        which is what makes the difference observable.
+        """
+        started = asyncio.Event()
+        unwound = False
+
+        async def read() -> None:
+            nonlocal unwound
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                for _ in range(20):
+                    await asyncio.sleep(0)
+                unwound = True
+
+        task = asyncio.create_task(read())
+        await started.wait()
+
+        with pytest.raises(TimeoutError):
+            with anyio.fail_after(0.2):
+                await extractor_module._drain_listener_tasks([task])
+
+        # Asserted without awaiting anything first: further loop iterations
+        # would let the read unwind on its own, and the assertions would then
+        # hold whether or not the cleanup was shielded.
+        assert task.cancelling() >= 1
+        assert unwound
+        assert task.done()
+
+    async def test_a_deadline_falling_due_inside_the_shield_still_fires(self):
+        """The shield can swallow the moment a deadline comes due.
+
+        AnyIO skips a shielded scope while delivering, and the restart on
+        the way out runs inside this task, where it can only schedule
+        delivery for the next turn. The ``fail_after(0.2)`` case above
+        never reaches that: its deadline is already past before the first
+        wait ends, so the cancel is delivered before the shield is entered.
+        Here it first comes due while the shield is open, and a caller that
+        does not suspend again would carry the expired deadline to a
+        successful return.
+        """
+        started = asyncio.Event()
+
+        async def read() -> None:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                # Outlives the deadline, so the shield is still open when it
+                # falls due, and closes only afterwards.
+                await asyncio.sleep(0.7)
+
+        task = asyncio.create_task(read())
+        await started.wait()
+
+        reached_the_caller = False
+        with pytest.raises(TimeoutError):
+            with anyio.fail_after(2.3):
+                await extractor_module._drain_listener_tasks([task])
+                # Nothing between here and the scope's close suspends, which
+                # is exactly get_feed's own report_progress when the client
+                # sent no progress token.
+                reached_the_caller = True
+
+        assert not reached_the_caller
+        assert task.cancelling() >= 1
+
+    async def test_a_read_refusing_cancellation_cannot_outlast_the_ceiling(
+        self, caplog
+    ):
+        """The three-second ceiling the docstring claims, measured.
+
+        Waiting on ``gather`` waits for the requested cancellation to
+        *complete*, so a read that swallows ``CancelledError`` held teardown
+        open for as long as it liked. The outer deadline here is an
+        ``asyncio.wait`` rather than a ``wait_for``, which would cancel the
+        drain itself and measure something else.
+        """
+        release = asyncio.Event()
+        started = asyncio.Event()
+        cancels = 0
+
+        async def stubborn() -> None:
+            nonlocal cancels
+            started.set()
+            while not release.is_set():
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    cancels += 1
+
+        read = asyncio.create_task(stubborn())
+        await started.wait()
+        drain = asyncio.create_task(extractor_module._drain_listener_tasks([read]))
+
+        try:
+            with caplog.at_level(logging.WARNING):
+                begun = time.monotonic()
+                done, _pending = await asyncio.wait({drain}, timeout=4.5)
+                elapsed = time.monotonic() - begun
+
+            assert done == {drain}, "drain still running 4.5s into a 3s ceiling"
+            assert drain.exception() is None
+            # Two seconds of settling plus one after the cancel, and nothing
+            # spent waiting on the cancellation itself to be honoured.
+            assert 2.9 <= elapsed < 4.0, elapsed
+            assert cancels == 1
+            assert not read.done()
+            assert "leaking 1 task(s)" in caplog.text
+        finally:
+            release.set()
+            await asyncio.wait({drain, read}, timeout=2.0)
 
 
 class TestProxyNavigationFailures:
