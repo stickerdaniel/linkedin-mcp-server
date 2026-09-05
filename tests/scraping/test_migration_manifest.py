@@ -18,6 +18,15 @@ from scripts import check_scraping_migration_manifest as migration  # noqa: E402
 
 MANIFEST = ROOT / "tests" / "fixtures" / "scraping-policy" / "migration-manifest.json"
 CHECKER = ROOT / "scripts" / "check_scraping_migration_manifest.py"
+POLICY_SCENARIOS = ROOT / "tests" / "scraping" / "policy_scenarios.py"
+
+_SHARED_BOUNDARY_STAGES = {
+    "detect_rate_limit": {4, 5, 6, 9, 11, 12},
+    "handle_modal_close": {4, 5, 6, 9, 11, 12},
+    "scroll_to_bottom": {4, 9},
+    "scroll_job_sidebar": {9},
+    "build_issue_diagnostics": {4, 5, 6, 8, 9},
+}
 
 
 def canonical_json(value: object) -> str:
@@ -83,25 +92,36 @@ def test_manifest_covers_production_callers_not_only_tests():
 
 
 def test_module_boundary_patches_follow_their_callers():
-    current = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    current = migration.scan()
     boundary = [
         seam for seam in current["seams"] if seam["kind"] == "boundary_patch_object"
     ]
 
     assert {
-        "record_page_trace",
-        "detect_auth_barrier",
-        "detect_rate_limit",
-        "handle_modal_close",
-        "scroll_to_bottom",
-        "scroll_job_sidebar",
-    } <= {seam["target"] for seam in boundary}
-    assert {
-        seam["migration_stage"]
-        for seam in boundary
-        if seam["target"] == "detect_rate_limit"
-    } == {4}
+        target: {
+            seam["migration_stage"] for seam in boundary if seam["target"] == target
+        }
+        for target in _SHARED_BOUNDARY_STAGES
+    } == _SHARED_BOUNDARY_STAGES
     assert all(seam["migration_stage"] is not None for seam in boundary)
+
+    direct_attributes = [
+        seam
+        for seam in current["seams"]
+        if seam["kind"] == "module_attribute"
+        and seam["target"] in {"scroll_to_bottom", "scroll_job_sidebar"}
+    ]
+    assert {
+        target: {
+            seam["migration_stage"]
+            for seam in direct_attributes
+            if seam["target"] == target
+        }
+        for target in ("scroll_to_bottom", "scroll_job_sidebar")
+    } == {
+        target: _SHARED_BOUNDARY_STAGES[target]
+        for target in ("scroll_to_bottom", "scroll_job_sidebar")
+    }
 
     imported_patches = [
         seam for seam in current["seams"] if seam["kind"] == "imported_module_patch"
@@ -120,6 +140,45 @@ def test_module_boundary_patches_follow_their_callers():
     assert all(
         "person.PersonScraper" in seam["canonical_owner"] for seam in logger_patches
     )
+
+
+@pytest.mark.parametrize(
+    ("target", "expected_stages"),
+    [
+        (target, stages)
+        for target, stages in _SHARED_BOUNDARY_STAGES.items()
+        if len(stages) > 1
+    ],
+)
+def test_shared_boundary_patches_retain_later_consumers_after_early_migration(
+    monkeypatch, target, expected_stages
+):
+    key = ("tests/scraping/policy_scenarios.py", "boundaries", target)
+    owners = migration._WORKFLOW_OWNERS | migration._PRIVATE_OWNERS
+    consumers = migration._EXPLICIT_CALLER_CONTEXTS[key]
+    earliest_stage = min(owners[name][1] for name in consumers)
+    remaining = tuple(name for name in consumers if owners[name][1] != earliest_stage)
+    monkeypatch.setitem(migration._EXPLICIT_CALLER_CONTEXTS, key, remaining)
+
+    publics, privates = migration.extractor_methods()
+    seams = migration.scan_source(
+        POLICY_SCENARIOS,
+        POLICY_SCENARIOS.read_text(encoding="utf-8"),
+        publics,
+        privates,
+    )
+
+    assert {
+        seam.migration_stage
+        for seam in seams
+        if seam.kind == "boundary_patch_object" and seam.target == target
+    } == expected_stages - {earliest_stage}
+    if target == "scroll_to_bottom":
+        assert {
+            seam.migration_stage
+            for seam in seams
+            if seam.kind == "module_attribute" and seam.target == target
+        } == expected_stages - {earliest_stage}
 
 
 def test_public_facade_patches_follow_each_calling_workflow():
@@ -287,27 +346,36 @@ async def boundaries(tasks):
 """,
         path=ROOT / "tests" / "scraping" / "policy_scenarios.py",
     )
-    attributes = {
-        seam.target: seam for seam in seams if seam.kind == "module_attribute"
-    }
+    attributes = [seam for seam in seams if seam.kind == "module_attribute"]
 
-    assert attributes["_drain_listener_tasks"].migration_stage == 5
-    assert attributes["_drain_listener_tasks"].canonical_owner == "feed.FeedScraper"
-    assert attributes["scroll_to_bottom"].migration_stage == 4
-    assert attributes["scroll_job_sidebar"].migration_stage == 9
-    assert attributes["_URL_SETTLE_LAG"].migration_stage == 3
-    assert (
-        attributes["_URL_SETTLE_LAG"].canonical_owner
-        == "navigation.PageNavigator.URL_SETTLE_LAG"
-    )
-    assert attributes["_URL_SETTLE_QUIET"].migration_stage == 3
-    assert (
-        attributes["_URL_SETTLE_QUIET"].canonical_owner
-        == "navigation.PageNavigator.URL_SETTLE_QUIET"
-    )
-    assert attributes["_MESSAGING_RECIPIENT_PICKER_SELECTOR"].migration_stage == 12
-    assert attributes["_MESSAGING_COMPOSE_FALLBACK_SELECTORS"].migration_stage == 12
-    assert attributes["_MESSAGING_CLOSE_SELECTOR"].migration_stage == 12
+    def matching(target: str) -> list[migration.Seam]:
+        return [seam for seam in attributes if seam.target == target]
+
+    assert {seam.migration_stage for seam in matching("_drain_listener_tasks")} == {5}
+    assert {seam.canonical_owner for seam in matching("_drain_listener_tasks")} == {
+        "feed.FeedScraper"
+    }
+    assert {seam.migration_stage for seam in matching("scroll_to_bottom")} == {4, 9}
+    assert {seam.migration_stage for seam in matching("scroll_job_sidebar")} == {9}
+    assert {seam.migration_stage for seam in matching("_URL_SETTLE_LAG")} == {3}
+    assert {seam.canonical_owner for seam in matching("_URL_SETTLE_LAG")} == {
+        "navigation.PageNavigator.URL_SETTLE_LAG"
+    }
+    assert {seam.migration_stage for seam in matching("_URL_SETTLE_QUIET")} == {3}
+    assert {seam.canonical_owner for seam in matching("_URL_SETTLE_QUIET")} == {
+        "navigation.PageNavigator.URL_SETTLE_QUIET"
+    }
+    assert {
+        seam.migration_stage
+        for seam in matching("_MESSAGING_RECIPIENT_PICKER_SELECTOR")
+    } == {12}
+    assert {
+        seam.migration_stage
+        for seam in matching("_MESSAGING_COMPOSE_FALLBACK_SELECTORS")
+    } == {12}
+    assert {seam.migration_stage for seam in matching("_MESSAGING_CLOSE_SELECTOR")} == {
+        12
+    }
 
 
 def test_direct_private_helper_calls_and_stage_gate_are_inventoried():

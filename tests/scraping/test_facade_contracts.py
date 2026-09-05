@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import AsyncMock
 
 import inspect
 
+from fastmcp.tools import FunctionTool
 from patchright.async_api import Page
 
 from linkedin_mcp_server import dependencies
@@ -21,7 +23,7 @@ from .support.policy_trace import ScriptedPage, TraceRecorder
 TOOL_DELEGATES = {
     "connect_with_person": "connect_with_person",
     "get_company_employees": "get_company_employees",
-    "get_company_posts": "scrape_company",
+    "get_company_posts": "extract_page",
     "get_company_profile": "scrape_company",
     "get_conversation": "get_conversation",
     "get_feed": "extract_feed",
@@ -78,8 +80,29 @@ async def test_registered_tools_and_extractor_delegates_are_counted_separately()
     assert len(tool_names) == 19
     assert tool_names == {*TOOL_DELEGATES, "close_session"}
     assert len(TOOL_DELEGATES) == 18
-    assert set(TOOL_DELEGATES.values()) | {"extract_page"} == TOOL_FACADE_METHODS
+    assert set(TOOL_DELEGATES.values()) == TOOL_FACADE_METHODS
     assert "close_session" not in TOOL_DELEGATES
+
+
+async def test_company_posts_delegate_matches_registered_tool_consumer():
+    tool = await create_mcp_server().get_tool("get_company_posts")
+    assert isinstance(tool, FunctionTool)
+    extractor = SimpleNamespace(
+        extract_page=AsyncMock(
+            return_value=SimpleNamespace(text="posts", references=[], error=None)
+        ),
+        scrape_company=AsyncMock(),
+    )
+    context = SimpleNamespace(report_progress=AsyncMock())
+
+    await tool.fn("example", context, extractor=extractor)
+
+    delegate = getattr(extractor, TOOL_DELEGATES["get_company_posts"])
+    delegate.assert_awaited_once()
+    extractor.extract_page.assert_awaited_once_with(
+        "https://www.linkedin.com/company/example/posts/", section_name="posts"
+    )
+    extractor.scrape_company.assert_not_awaited()
 
 
 def test_facade_methods_are_exactly_the_frozen_coroutine_surface():
