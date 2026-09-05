@@ -17,9 +17,19 @@ from linkedin_mcp_server.daemon_proxy import TIMEOUT_MARGIN_SECONDS
 from linkedin_mcp_server.exceptions import BrowserBusyError
 from linkedin_mcp_server.profile_lease import get_profile_lease
 from linkedin_mcp_server.server_role import ServerRole, process_role
-from linkedin_mcp_server.tool_interval import try_claim_start
+from linkedin_mcp_server.tool_interval import (
+    force_claim_start,
+    future_stamp_skew_seconds,
+    try_claim_start,
+)
 
 logger = logging.getLogger(__name__)
+
+# Leave this much of the owner's pre-tool margin for raising and proxying a
+# ToolError after a contended lease wait. Spending the entire remainder on
+# ``lease.acquire`` lets the frontend deadline expire first and surfaces a
+# transport timeout instead of the structured error (#877).
+_PRE_TOOL_RESPONSE_RESERVE_SECONDS = 2.0
 
 
 class SequentialToolExecutionMiddleware(Middleware):
@@ -146,6 +156,35 @@ class SequentialToolExecutionMiddleware(Middleware):
             if wait <= 0:
                 self._last_start_mono = time.monotonic()
                 return
+            remaining = deadline - time.monotonic()
+            skew = future_stamp_skew_seconds(auth_root)
+            # A stamp farther ahead than this call can wait will never
+            # converge inside the budget: each retry only chips interval-
+            # sized pieces off the skew and then raises. Pace once, claim
+            # at local time, and proceed.
+            if skew > remaining:
+                pace = min(interval, max(0.0, remaining))
+                logger.debug(
+                    "Tool '%s' absorbing %.1fs future stamp skew "
+                    "(%.1fs budget left) with a %.1fs pace then claiming "
+                    "locally",
+                    tool_name,
+                    skew,
+                    remaining,
+                    pace,
+                )
+                if pace > 0:
+                    await self._sleep_reporting(
+                        context,
+                        pace,
+                        message=(
+                            f"Waiting {pace:.1f}s for minimum tool-call "
+                            "interval (shared profile clock skew)"
+                        ),
+                    )
+                force_claim_start(auth_root)
+                self._last_start_mono = time.monotonic()
+                return
             logger.debug(
                 "Tool '%s' waiting %.3fs for cross-process min interval",
                 tool_name,
@@ -230,13 +269,18 @@ class SequentialToolExecutionMiddleware(Middleware):
             budget = get_config().browser.browser_wait_seconds
             if pre_tool_deadline is not None:
                 remaining = pre_tool_deadline - time.monotonic()
-                if remaining <= 0:
+                usable = remaining - _PRE_TOOL_RESPONSE_RESERVE_SECONDS
+                if usable <= 0:
                     raise ToolError(
                         "The daemon proxy margin was spent waiting for the "
                         "minimum tool-call interval, with no time left to "
                         "wait for the shared browser. Retry shortly."
                     )
-                budget = min(budget, remaining)
+                # Keep a slice of the margin for constructing and delivering
+                # the ToolError if acquire times out; otherwise the frontend
+                # deadline expires first and the client sees a transport
+                # failure instead of BrowserBusyError.
+                budget = min(budget, usable)
             acquired = await lease.acquire(timeout=budget)
 
         if not acquired:

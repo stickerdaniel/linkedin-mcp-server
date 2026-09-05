@@ -122,3 +122,36 @@ def try_claim_start(auth_root: Path, interval: float) -> float:
             os.close(fd)
         except OSError:
             logger.debug("Closing tool-interval lock fd failed", exc_info=True)
+
+
+def force_claim_start(auth_root: Path) -> None:
+    """Write a local-time start stamp, ignoring any prior wait.
+
+    Used when a future peer stamp cannot be converged on inside this call's
+    wait budget (the daemon owner's 30s proxy margin). Marching toward that
+    stamp would reject the call; claiming at local time completes one pacing
+    step and lets the tool proceed.
+    """
+    _, lock_path = interval_paths(auth_root)
+    fd = acquire_locked_fd(lock_path, exclusive=True)
+    if fd is None:
+        # Best-effort: another process holds the lock. Writing without it can
+        # race, but the next claim still re-checks under the lock.
+        write_last_start_wall(auth_root, time.time())
+        return
+    try:
+        write_last_start_wall(auth_root, time.time())
+    finally:
+        _release_locked_fd(fd)
+        try:
+            os.close(fd)
+        except OSError:
+            logger.debug("Closing tool-interval lock fd failed", exc_info=True)
+
+
+def future_stamp_skew_seconds(auth_root: Path) -> float:
+    """How far ahead of wall time the shared stamp is, or ``0`` if none/past."""
+    last = read_last_start_wall(auth_root)
+    if last is None:
+        return 0.0
+    return max(0.0, last - time.time())
