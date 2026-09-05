@@ -1141,11 +1141,18 @@ class LinkedInExtractor:
         *,
         wait_until: WaitUntil = "domcontentloaded",
         allow_remember_me: bool = True,
-        timeout_ms: float = _GOTO_TIMEOUT_MS,
+        deadline: float | None = None,
     ) -> None:
-        """Navigate to a LinkedIn page and fail fast on auth barriers."""
+        """Navigate to a LinkedIn page and fail fast on auth barriers.
+
+        ``deadline`` is an absolute monotonic end. Each ``goto`` — including
+        remember-me retries — recomputes its Playwright timeout from what is
+        left, so a slow first attempt cannot hand the original allowance to a
+        second navigation (#754 / #882).
+        """
         hops: list[str] = []
         listener_registered = False
+        timeout_ms = _timeout_ms_until(deadline)
 
         def record_navigation(frame: Any) -> None:
             if frame != self._page.main_frame:
@@ -1214,7 +1221,7 @@ class LinkedInExtractor:
                         url,
                         wait_until=wait_until,
                         allow_remember_me=False,
-                        timeout_ms=timeout_ms,
+                        deadline=deadline,
                     )
                     return
                 await record_page_trace(
@@ -1255,7 +1262,7 @@ class LinkedInExtractor:
                     url,
                     wait_until=wait_until,
                     allow_remember_me=False,
-                    timeout_ms=timeout_ms,
+                    deadline=deadline,
                 )
                 return
 
@@ -1273,11 +1280,11 @@ class LinkedInExtractor:
             unregister_navigation_listener()
 
     async def _navigate_to_page(
-        self, url: str, *, timeout_ms: float = _GOTO_TIMEOUT_MS
+        self, url: str, *, deadline: float | None = None
     ) -> None:
         """Navigate to a LinkedIn page and fail fast on auth barriers."""
-        logger.debug("_navigate_to_page: target=%s timeout_ms=%.0f", url, timeout_ms)
-        await self._goto_with_auth_checks(url, timeout_ms=timeout_ms)
+        logger.debug("_navigate_to_page: target=%s deadline=%s", url, deadline)
+        await self._goto_with_auth_checks(url, deadline=deadline)
 
     # ------------------------------------------------------------------
     # Generic browser helpers for LLM-driven connection flow
@@ -3578,7 +3585,7 @@ class LinkedInExtractor:
         page_deadline: float | None = None,
     ) -> ExtractedSection:
         """Single attempt to navigate, scroll sidebar, and extract innerText."""
-        await self._navigate_to_page(url, timeout_ms=_timeout_ms_until(page_deadline))
+        await self._navigate_to_page(url, deadline=page_deadline)
         # Navigation spent wall clock the scroll budget does not own. Re-cap
         # against what is left so a slow `goto` cannot leave scrolling the
         # original twelve seconds on a budget that already expired.

@@ -4571,9 +4571,9 @@ class TestSearchJobs:
     async def test_search_page_goto_timeout_follows_page_deadline(self, mock_page):
         """Navigation may not keep its own 30s once the search is short on time.
 
-        Mutating away the deadline cap leaves `timeout_ms` at 30000 and leaves
-        scrolling the original twelve seconds after a slow `goto` has already
-        spent most of what remained.
+        Mutating away the deadline hand-off leaves `_navigate_to_page` unbound
+        and leaves scrolling the original twelve seconds after a slow `goto`
+        has already spent most of what remained.
         """
 
         class Clock:
@@ -4584,11 +4584,11 @@ class TestSearchJobs:
                 return self.now
 
         clock = Clock()
-        seen_timeouts: list[float] = []
+        seen_deadlines: list[float | None] = []
         seen_scroll: list[float | None] = []
 
-        async def navigate(url, *, timeout_ms=extractor_module._GOTO_TIMEOUT_MS):
-            seen_timeouts.append(timeout_ms)
+        async def navigate(url, *, deadline=None):
+            seen_deadlines.append(deadline)
             clock.now += 2.5
             return None
 
@@ -4622,8 +4622,59 @@ class TestSearchJobs:
                 page_deadline=14.0,
             )
 
-        assert seen_timeouts == [4000.0]
+        assert seen_deadlines == [14.0]
         assert seen_scroll == [1.5]
+
+    async def test_remember_me_retry_recomputes_goto_timeout(self, mock_page):
+        """A remember-me retry must not reuse the first attempt's allowance.
+
+        Converting the absolute deadline to a relative timeout once, then
+        forwarding that same number into the recursive retry, lets a page
+        admitted with four seconds left spend those four seconds twice —
+        once on the failed goto and again after the prompt (#882).
+        """
+
+        class Clock:
+            def __init__(self) -> None:
+                self.now = 0.0
+
+            def monotonic(self) -> float:
+                return self.now
+
+        clock = Clock()
+        timeouts: list[float] = []
+        calls = 0
+
+        async def goto(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            timeouts.append(kwargs["timeout"])
+            if calls == 1:
+                clock.now += 2.5
+                raise Exception("net::ERR_TOO_MANY_REDIRECTS")
+            return None
+
+        mock_page.goto = AsyncMock(side_effect=goto)
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(extractor_module, "time", clock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                side_effect=[True],
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_auth_barrier_quick",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+        ):
+            await extractor._goto_with_auth_checks(
+                "https://www.linkedin.com/jobs/search/?keywords=test",
+                deadline=4.0,
+            )
+
+        assert timeouts == [4000.0, 1500.0]
 
     async def test_search_page_skips_rate_limit_retry_when_backoff_would_overrun(
         self, mock_page
