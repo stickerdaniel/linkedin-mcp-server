@@ -16,6 +16,7 @@ from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.daemon_proxy import TIMEOUT_MARGIN_SECONDS
 from linkedin_mcp_server.exceptions import BrowserBusyError
 from linkedin_mcp_server.profile_lease import get_profile_lease
+from linkedin_mcp_server.server_role import ServerRole, process_role
 from linkedin_mcp_server.tool_interval import try_claim_start
 
 logger = logging.getLogger(__name__)
@@ -83,32 +84,42 @@ class SequentialToolExecutionMiddleware(Middleware):
         self,
         context: MiddlewareContext[mt.CallToolRequestParams],
         tool_name: str,
+        *,
+        deadline: float | None = None,
     ) -> None:
-        """Wait until this tool call may start under the configured interval."""
+        """Wait until this tool call may start under the configured interval.
+
+        ``deadline`` is an absolute monotonic end for pre-tool waiting. Daemon
+        owners pass the frontend's proxy margin; a standalone DIRECT server
+        leaves it ``None`` and uses the tool timeout instead, because there is
+        no proxy deadline to protect.
+        """
         config = get_config().server
         interval = config.min_tool_interval_seconds
         if interval <= 0:
             return
 
-        # The interval wait runs in middleware *before* FastMCP's tool
-        # ``fail_after(tool_timeout)``. The daemon frontend's deadline is
-        # ``tool_timeout + TIMEOUT_MARGIN_SECONDS``, so the wait may only
-        # spend that margin — otherwise the tool can still take a full
-        # timeout and the client sees a transport failure instead of a
-        # result or a pacing error. Refuse when the remaining wait cannot
-        # fit.
-        budget = TIMEOUT_MARGIN_SECONDS
-        wait_started = time.monotonic()
+        if deadline is None:
+            # DIRECT: middleware runs before FastMCP's fail_after, and there is
+            # no daemon frontend. Waiting the full configured interval is the
+            # documented "wait rather than fail" behaviour; the tool timeout is
+            # the interval's ceiling (see ServerConfig.validate).
+            deadline = time.monotonic() + config.tool_timeout_seconds
+            budget_label = f"{config.tool_timeout_seconds:g}s tool timeout"
+        else:
+            budget_label = (
+                f"{TIMEOUT_MARGIN_SECONDS:g}s daemon proxy margin "
+                "reserved beyond the tool timeout"
+            )
 
         async def sleep_within_budget(seconds: float, *, message: str) -> None:
             if seconds <= 0:
                 return
-            remaining = budget - (time.monotonic() - wait_started)
+            remaining = deadline - time.monotonic()
             if seconds > remaining:
                 raise ToolError(
                     f"Minimum tool-call interval ({interval:g}s) has not "
-                    f"elapsed, and waiting would exceed the {budget:g}s "
-                    f"daemon proxy margin reserved beyond the tool timeout. "
+                    f"elapsed, and waiting would exceed the {budget_label}. "
                     f"Retry shortly."
                 )
             await self._sleep_reporting(context, seconds, message=message)
@@ -173,14 +184,30 @@ class SequentialToolExecutionMiddleware(Middleware):
                 message="Scraper lock acquired, starting tool",
             )
             # Interval before the lease: waiting must not pin the browser.
-            await self._await_min_interval(context, tool_name)
-            return await self._run_owning_the_profile(context, call_next, tool_name)
+            # On the daemon owner the frontend's deadline is
+            # tool_timeout + TIMEOUT_MARGIN_SECONDS; everything before the
+            # tool body — interval wait *and* contended lease acquisition —
+            # shares that margin, or the client sees a transport timeout.
+            pre_tool_deadline: float | None = None
+            if process_role() is ServerRole.OWNER:
+                pre_tool_deadline = time.monotonic() + TIMEOUT_MARGIN_SECONDS
+            await self._await_min_interval(
+                context, tool_name, deadline=pre_tool_deadline
+            )
+            return await self._run_owning_the_profile(
+                context,
+                call_next,
+                tool_name,
+                pre_tool_deadline=pre_tool_deadline,
+            )
 
     async def _run_owning_the_profile(
         self,
         context: MiddlewareContext[mt.CallToolRequestParams],
         call_next: CallNext[mt.CallToolRequestParams, ToolResult],
         tool_name: str,
+        *,
+        pre_tool_deadline: float | None = None,
     ) -> ToolResult:
         """Run the tool while this process owns the browser profile."""
         # Imported here so the module stays importable without the driver.
@@ -201,6 +228,15 @@ class SequentialToolExecutionMiddleware(Middleware):
                 ),
             )
             budget = get_config().browser.browser_wait_seconds
+            if pre_tool_deadline is not None:
+                remaining = pre_tool_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ToolError(
+                        "The daemon proxy margin was spent waiting for the "
+                        "minimum tool-call interval, with no time left to "
+                        "wait for the shared browser. Retry shortly."
+                    )
+                budget = min(budget, remaining)
             acquired = await lease.acquire(timeout=budget)
 
         if not acquired:
