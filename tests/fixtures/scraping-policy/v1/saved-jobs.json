@@ -41,6 +41,13 @@
     },
     {
       "call": "get_saved_jobs",
+      "description": "goto https://www.linkedin.com/my-items/saved-jobs/",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "saved_jobs"
+    },
+    {
+      "call": "get_saved_jobs",
       "extra": {
         "target_url": "https://www.linkedin.com/my-items/saved-jobs/",
         "wait_until": "domcontentloaded"
@@ -183,6 +190,13 @@
     },
     {
       "call": "get_saved_jobs",
+      "description": "goto https://www.linkedin.com/my-items/saved-jobs/?start=10",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "saved_jobs"
+    },
+    {
+      "call": "get_saved_jobs",
       "extra": {
         "target_url": "https://www.linkedin.com/my-items/saved-jobs/?start=10",
         "wait_until": "domcontentloaded"
@@ -301,83 +315,89 @@
       "119"
     ],
     "reference_count": 15,
-    "references": [
-      {
-        "kind": "job",
-        "text": "Senior policy engineer with richer duplicate metadata",
-        "url": "/jobs/view/100/"
-      },
-      {
-        "kind": "job",
-        "text": "Job 101",
-        "url": "/jobs/view/101/"
-      },
-      {
-        "kind": "job",
-        "text": "Job 102",
-        "url": "/jobs/view/102/"
-      },
-      {
-        "kind": "job",
-        "text": "Job 103",
-        "url": "/jobs/view/103/"
-      },
-      {
-        "kind": "job",
-        "text": "Job 104",
-        "url": "/jobs/view/104/"
-      },
-      {
-        "kind": "job",
-        "text": "Job 105",
-        "url": "/jobs/view/105/"
-      },
-      {
-        "kind": "job",
-        "text": "Job 106",
-        "url": "/jobs/view/106/"
-      },
-      {
-        "kind": "job",
-        "text": "Job 107",
-        "url": "/jobs/view/107/"
-      },
-      {
-        "kind": "job",
-        "text": "Job 108",
-        "url": "/jobs/view/108/"
-      },
-      {
-        "kind": "job",
-        "text": "Job 109",
-        "url": "/jobs/view/109/"
-      },
-      {
-        "kind": "job",
-        "text": "Job 110",
-        "url": "/jobs/view/110/"
-      },
-      {
-        "kind": "job",
-        "text": "Job 111",
-        "url": "/jobs/view/111/"
-      },
-      {
-        "kind": "job",
-        "text": "Job 112",
-        "url": "/jobs/view/112/"
-      },
-      {
-        "kind": "job",
-        "text": "Job 113",
-        "url": "/jobs/view/113/"
-      },
-      {
-        "kind": "job",
-        "text": "Job 114",
-        "url": "/jobs/view/114/"
-      }
-    ]
+    "references": {
+      "saved_jobs": [
+        {
+          "kind": "job",
+          "text": "Senior policy engineer with richer duplicate metadata",
+          "url": "/jobs/view/100/"
+        },
+        {
+          "kind": "job",
+          "text": "Job 101",
+          "url": "/jobs/view/101/"
+        },
+        {
+          "kind": "job",
+          "text": "Job 102",
+          "url": "/jobs/view/102/"
+        },
+        {
+          "kind": "job",
+          "text": "Job 103",
+          "url": "/jobs/view/103/"
+        },
+        {
+          "kind": "job",
+          "text": "Job 104",
+          "url": "/jobs/view/104/"
+        },
+        {
+          "kind": "job",
+          "text": "Job 105",
+          "url": "/jobs/view/105/"
+        },
+        {
+          "kind": "job",
+          "text": "Job 106",
+          "url": "/jobs/view/106/"
+        },
+        {
+          "kind": "job",
+          "text": "Job 107",
+          "url": "/jobs/view/107/"
+        },
+        {
+          "kind": "job",
+          "text": "Job 108",
+          "url": "/jobs/view/108/"
+        },
+        {
+          "kind": "job",
+          "text": "Job 109",
+          "url": "/jobs/view/109/"
+        },
+        {
+          "kind": "job",
+          "text": "Job 110",
+          "url": "/jobs/view/110/"
+        },
+        {
+          "kind": "job",
+          "text": "Job 111",
+          "url": "/jobs/view/111/"
+        },
+        {
+          "kind": "job",
+          "text": "Job 112",
+          "url": "/jobs/view/112/"
+        },
+        {
+          "kind": "job",
+          "text": "Job 113",
+          "url": "/jobs/view/113/"
+        },
+        {
+          "kind": "job",
+          "text": "Job 114",
+          "url": "/jobs/view/114/"
+        }
+      ]
+    },
+    "sections": {
+      "saved_jobs": "Saved jobs page one\n---\nSaved jobs page two"
+    },
+    "url": "https://www.linkedin.com/my-items/saved-jobs/"
   },
   "scenario": "get_saved_jobs__redirect_caps_and_upgrade",
   "schema_version": 1

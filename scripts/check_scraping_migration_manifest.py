@@ -115,6 +115,20 @@ _IMPORT_OWNERS = {
     ),
 }
 
+_MODULE_ATTRIBUTE_OWNERS = {
+    "_URL_SETTLE_LAG": ("navigation.PageNavigator.URL_SETTLE_LAG", 3),
+    "_URL_SETTLE_QUIET": ("navigation.PageNavigator.URL_SETTLE_QUIET", 3),
+    "_MESSAGING_CLOSE_SELECTOR": ("message_sender.MESSAGE_CLOSE_SELECTOR", 12),
+    "_MESSAGING_COMPOSE_FALLBACK_SELECTORS": (
+        "message_sender.MESSAGE_COMPOSE_FALLBACK_SELECTORS",
+        12,
+    ),
+    "_MESSAGING_RECIPIENT_PICKER_SELECTOR": (
+        "message_sender.MESSAGE_RECIPIENT_PICKER_SELECTOR",
+        12,
+    ),
+}
+
 _WORKFLOW_OWNERS: dict[str, tuple[str, int]] = {
     "extract_page": ("capture.SectionCapture", 4),
     "extract_feed": ("feed.FeedScraper", 5),
@@ -215,7 +229,7 @@ _EXPLICIT_CALLER_CONTEXTS: dict[tuple[str, str, str], tuple[str, ...]] = {
         "tests/scraping/policy_scenarios.py",
         "boundaries",
         "scroll_job_sidebar",
-    ): ("extract_page",),
+    ): ("search_jobs",),
     (
         "tests/scraping/policy_scenarios.py",
         "boundaries",
@@ -249,7 +263,8 @@ _TOOL_METHODS = {
     if 4 <= stage <= 12 and not name.startswith("_")
 }
 _COMPATIBILITY_METHODS = {"get_page_text", "click_button_by_text"}
-_IMPORTED_MODULE_NAMES = {"asyncio", "time", "logger"}
+_IMPORTED_MODULE_NAMES = {"asyncio", "time"}
+_CONTEXTUAL_MODULE_NAMES = {"logger"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -383,6 +398,7 @@ class Scanner(ast.NodeVisitor):
         self.functions: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
         self.instance_bindings: list[set[str]] = []
         self.caller_contexts: list[set[str]] = []
+        self.suppressed_module_attributes: set[int] = set()
         self.seams: list[Seam] = []
         self.errors: list[str] = []
 
@@ -593,6 +609,62 @@ class Scanner(ast.NodeVisitor):
                     )
         self.generic_visit(node)
 
+    def _suppress_module_attributes(self, target: ast.expr) -> None:
+        for item in ast.walk(target):
+            if (
+                isinstance(item, ast.Attribute)
+                and isinstance(item.value, ast.Name)
+                and item.value.id in self.module_names
+            ):
+                self.suppressed_module_attributes.add(id(item))
+
+    def visit_Attribute(self, node: ast.Attribute) -> Any:
+        if (
+            id(node) not in self.suppressed_module_attributes
+            and isinstance(node.value, ast.Name)
+            and node.value.id in self.module_names
+        ):
+            self._direct_module_attribute(node, node.attr)
+        self.generic_visit(node)
+
+    def _direct_module_attribute(self, node: ast.Attribute, name: str) -> None:
+        if name in _IMPORTED_MODULE_NAMES:
+            self._add(
+                "module_attribute",
+                node,
+                name,
+                "global imported object, unaffected by relocation",
+                None,
+            )
+            return
+        if name in _CONTEXTUAL_MODULE_NAMES:
+            self._add_contextual(
+                "module_attribute", node, name, f"owner-local {name} binding"
+            )
+            return
+        if name in PERMANENT_ALIASES:
+            self._add(
+                "module_attribute",
+                node,
+                name,
+                PERMANENT_ALIASES[name],
+                None,
+            )
+            return
+        owner_stage = (
+            _MODULE_ATTRIBUTE_OWNERS.get(name)
+            or _PRIVATE_OWNERS.get(name)
+            or _IMPORT_OWNERS.get(name)
+        )
+        if owner_stage is not None:
+            self._add("module_attribute", node, name, *owner_stage)
+            return
+        owner = _BOUNDARY_OWNERS.get(name)
+        if owner is not None:
+            self._add_contextual("module_attribute", node, name, owner)
+            return
+        self._error(node, name, "unknown direct extractor module attribute")
+
     def visit_Call(self, node: ast.Call) -> Any:
         function = node.func
         if (
@@ -612,6 +684,7 @@ class Scanner(ast.NodeVisitor):
             and function.value.id == "patch"
             and len(node.args) >= 2
         ):
+            self._suppress_module_attributes(node.args[0])
             self._patch_object(node, node.args[0], node.args[1])
         self.generic_visit(node)
 
@@ -625,6 +698,14 @@ class Scanner(ast.NodeVisitor):
                 target,
                 "global imported object, unaffected by relocation",
                 None,
+            )
+            return
+        if root in _CONTEXTUAL_MODULE_NAMES and "." in target:
+            self._add_contextual(
+                "imported_module_patch",
+                node,
+                target,
+                f"owner-local {root} binding",
             )
             return
         owner = _BOUNDARY_OWNERS.get(target)
@@ -684,7 +765,7 @@ class Scanner(ast.NodeVisitor):
                     return
                 self._add("private_patch_object", node, name, *owner_stage)
                 return
-            if name in _IMPORTED_MODULE_NAMES:
+            if name in _IMPORTED_MODULE_NAMES | _CONTEXTUAL_MODULE_NAMES:
                 self._add_contextual(
                     "module_rebind_patch",
                     node,
@@ -705,19 +786,27 @@ class Scanner(ast.NodeVisitor):
             and target.value.id in self.module_names
         ):
             patch_target = f"{target.attr}.{name}"
-            if target.attr not in _IMPORTED_MODULE_NAMES:
-                self._error(
+            if target.attr in _CONTEXTUAL_MODULE_NAMES:
+                self._add_contextual(
+                    "imported_module_patch",
                     node,
                     patch_target,
-                    "unknown extractor module object patch",
+                    f"owner-local {target.attr} binding",
                 )
                 return
-            self._add(
-                "imported_module_patch",
+            if target.attr in _IMPORTED_MODULE_NAMES:
+                self._add(
+                    "imported_module_patch",
+                    node,
+                    patch_target,
+                    "global imported object, unaffected by relocation",
+                    None,
+                )
+                return
+            self._error(
                 node,
                 patch_target,
-                "global imported object, unaffected by relocation",
-                None,
+                "unknown extractor module object patch",
             )
             return
 

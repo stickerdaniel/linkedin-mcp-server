@@ -36,6 +36,13 @@
     },
     {
       "call": "extract_page",
+      "description": "goto https://www.linkedin.com/in/ada-lovelace/recent-activity/all/",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "section"
+    },
+    {
+      "call": "extract_page",
       "extra": {
         "target_url": "https://www.linkedin.com/in/ada-lovelace/recent-activity/all/",
         "wait_until": "domcontentloaded"

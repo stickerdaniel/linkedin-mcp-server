@@ -1,66 +1,66 @@
 {
   "call": {
     "arguments": {
-      "keywords": "engine"
+      "job_id": "123"
     },
-    "method": "search_companies"
+    "method": "scrape_job"
   },
   "events": [
     {
-      "call": "search_companies",
+      "call": "scrape_job",
       "callback_id": "callback-1",
       "event": "framenavigated",
       "kind": "listener.add"
     },
     {
-      "call": "search_companies",
+      "call": "scrape_job",
       "extra": {
-        "target_url": "https://www.linkedin.com/search/results/companies/?keywords=engine",
+        "target_url": "https://www.linkedin.com/jobs/view/123/",
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
       "label": "extractor-before-goto"
     },
     {
-      "call": "search_companies",
+      "call": "scrape_job",
       "kind": "navigate",
-      "landed_url": "https://www.linkedin.com/search/results/companies/?keywords=engine",
-      "requested_url": "https://www.linkedin.com/search/results/companies/?keywords=engine",
+      "landed_url": "https://www.linkedin.com/jobs/view/123/",
+      "requested_url": "https://www.linkedin.com/jobs/view/123/",
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
     },
     {
-      "call": "search_companies",
-      "description": "goto https://www.linkedin.com/search/results/companies/?keywords=engine",
+      "call": "scrape_job",
+      "description": "goto https://www.linkedin.com/jobs/view/123/",
       "kind": "boundary.stabilize",
       "result": null
     },
     {
-      "call": "search_companies",
+      "call": "scrape_job",
       "extra": {
-        "target_url": "https://www.linkedin.com/search/results/companies/?keywords=engine",
+        "target_url": "https://www.linkedin.com/jobs/view/123/",
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
       "label": "extractor-after-goto"
     },
     {
-      "call": "search_companies",
+      "call": "scrape_job",
       "kind": "boundary.auth_quick",
       "result": null
     },
     {
-      "call": "search_companies",
+      "call": "scrape_job",
       "callback_id": "callback-1",
       "event": "framenavigated",
       "kind": "listener.remove"
     },
     {
-      "call": "search_companies",
+      "call": "scrape_job",
       "kind": "boundary.rate_limit"
     },
     {
-      "call": "search_companies",
+      "call": "scrape_job",
       "kind": "wait_for_selector",
       "operation": "main",
       "selector": "main",
@@ -68,21 +68,13 @@
       "timeout_ms": null
     },
     {
-      "call": "search_companies",
+      "call": "scrape_job",
       "dismissed": false,
       "kind": "boundary.modal"
     },
     {
-      "arg": null,
-      "call": "search_companies",
-      "kind": "wait_for_function",
-      "operation": "main_text_100",
-      "program_digest": "5a4a89d4de2a",
-      "timeout_ms": 10000
-    },
-    {
       "actual_scrolls": 2,
-      "call": "search_companies",
+      "call": "scrape_job",
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
       "pause_time": 0.5
@@ -93,21 +85,24 @@
           "main"
         ]
       },
-      "call": "search_companies",
+      "call": "scrape_job",
       "kind": "evaluate",
       "operation": "root_content",
       "program_digest": "e8a0e21ac6f5"
     }
   ],
   "result": {
-    "section_names": [
-      "search_results"
-    ],
-    "sections": {
-      "search_results": "Result content"
+    "section_errors": {
+      "job_posting": {
+        "context": "extract_page",
+        "error_message": "synthetic capture failure",
+        "error_type": "RuntimeError"
+      }
     },
-    "url": "https://www.linkedin.com/search/results/companies/?keywords=engine"
+    "section_names": [],
+    "sections": {},
+    "url": "https://www.linkedin.com/jobs/view/123/"
   },
-  "scenario": "search_companies__baseline",
+  "scenario": "scrape_job__capture_error",
   "schema_version": 1
 }

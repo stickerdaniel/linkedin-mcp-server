@@ -41,6 +41,13 @@
     },
     {
       "call": "extract_feed",
+      "description": "goto https://www.linkedin.com/feed/",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "feed"
+    },
+    {
+      "call": "extract_feed",
       "extra": {
         "target_url": "https://www.linkedin.com/feed/",
         "wait_until": "domcontentloaded"

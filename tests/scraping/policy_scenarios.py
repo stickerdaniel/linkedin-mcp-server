@@ -32,12 +32,14 @@ from .support.policy_trace import (
 TRACE_ROOT = Path(__file__).parents[1] / "fixtures" / "scraping-policy" / "v1"
 
 _COMMON_ALLOWED = {
+    "boundary.auth",
     "boundary.auth_quick",
     "boundary.drain",
     "boundary.modal",
     "boundary.rate_limit",
     "boundary.scroll_body",
     "boundary.scroll_sidebar",
+    "boundary.stabilize",
     "boundary.trace",
     "callback.complete",
     "callback.progress",
@@ -84,7 +86,12 @@ class TraceCallbacks(ProgressCallback):
 
 
 @asynccontextmanager
-async def boundaries(recorder: TraceRecorder, clock: FakeClock) -> AsyncIterator[None]:
+async def boundaries(
+    recorder: TraceRecorder,
+    clock: FakeClock,
+    *,
+    auth_result: str | None = None,
+) -> AsyncIterator[None]:
     real_scroll_body = extractor_module.scroll_to_bottom
     real_scroll_sidebar = extractor_module.scroll_job_sidebar
     real_drain = extractor_module._drain_listener_tasks
@@ -96,14 +103,19 @@ async def boundaries(recorder: TraceRecorder, clock: FakeClock) -> AsyncIterator
         recorder.record("boundary.auth_quick", result=None)
         return None
 
-    async def auth(_page: Any) -> None:
-        return None
+    async def auth(_page: Any) -> str | None:
+        recorder.record("boundary.auth", result=auth_result)
+        return auth_result
 
     async def remember(_page: Any) -> bool:
         return False
 
-    async def stabilize(_description: str, _logger: Any) -> None:
-        return None
+    async def stabilize(description: str, _logger: Any) -> None:
+        recorder.record(
+            "boundary.stabilize",
+            description=description,
+            result=None,
+        )
 
     async def rate_limit(_page: Any) -> None:
         recorder.record("boundary.rate_limit")
@@ -164,6 +176,15 @@ def _page(recorder: TraceRecorder, *, url: str = "about:blank") -> ScriptedPage:
 
 def _extractor(page: ScriptedPage) -> LinkedInExtractor:
     return LinkedInExtractor(cast(Page, page))
+
+
+def _complete_mapping_result(result: dict[str, Any], **derived: Any) -> dict[str, Any]:
+    overlap = result.keys() & derived.keys()
+    if overlap:
+        raise AssertionError(
+            f"derived result fields overlap raw result: {sorted(overlap)}"
+        )
+    return {**result, **derived}
 
 
 def _root(text: str, references: list[dict[str, str]] | None = None) -> dict[str, Any]:
@@ -249,14 +270,7 @@ async def _person_sections_scenario() -> dict[str, Any]:
                 "requested": list(PERSON_SECTIONS),
             },
         },
-        {
-            "section_names": list(result["sections"]),
-            # Keep the values, not only the keys: without them, serving every
-            # section the first section's text leaves the trace unchanged.
-            "sections": result["sections"],
-            "references": result.get("references"),
-            "profile_urn": result.get("profile_urn"),
-        },
+        _complete_mapping_result(result, section_names=list(result["sections"])),
     )
 
 
@@ -284,10 +298,7 @@ async def _company_sections_scenario() -> dict[str, Any]:
                 "requested": list(COMPANY_SECTIONS),
             },
         },
-        {
-            "section_names": list(result["sections"]),
-            "sections": result["sections"],
-        },
+        _complete_mapping_result(result, section_names=list(result["sections"])),
     )
 
 
@@ -324,7 +335,7 @@ async def _job_search_scenario(route: str = "/jobs/search/") -> dict[str, Any]:
     page.assert_clean()
     return recorder.trace(
         {"method": "search_jobs", "arguments": {"keywords": "python", "max_pages": 1}},
-        {"job_ids": result["job_ids"], "references": result.get("references")},
+        result,
     )
 
 
@@ -366,7 +377,7 @@ async def _job_search_upgrade_scenario() -> dict[str, Any]:
     page.assert_clean()
     return recorder.trace(
         {"method": "search_jobs", "arguments": {"keywords": "python", "max_pages": 2}},
-        {"job_ids": result["job_ids"], "references": result.get("references")},
+        result,
     )
 
 
@@ -433,11 +444,7 @@ async def _saved_jobs_scenario() -> dict[str, Any]:
     references = result.get("references", {}).get("saved_jobs", [])
     return recorder.trace(
         {"method": "get_saved_jobs", "arguments": {"max_pages": 2}},
-        {
-            "job_ids": result["job_ids"],
-            "references": references,
-            "reference_count": len(references),
-        },
+        _complete_mapping_result(result, reference_count=len(references)),
     )
 
 
@@ -453,7 +460,7 @@ async def _feed_stale_scenario() -> dict[str, Any]:
     page.assert_clean()
     return recorder.trace(
         {"method": "extract_feed", "arguments": {"num_posts": 10}},
-        {"text": result.text},
+        {"references": result.references, "text": result.text},
     )
 
 
@@ -632,10 +639,25 @@ async def _single_capture_facade_scenario(method: str) -> dict[str, Any]:
     page.assert_clean()
     return recorder.trace(
         {"method": method, "arguments": arguments},
-        {
-            "url": result["url"],
-            "section_names": list(result["sections"]),
-        },
+        _complete_mapping_result(result, section_names=list(result["sections"])),
+    )
+
+
+async def _single_capture_error_scenario() -> dict[str, Any]:
+    recorder = TraceRecorder("scrape_job__capture_error", _COMMON_ALLOWED)
+    clock = FakeClock(recorder)
+    page = _page(recorder).script(
+        "evaluate:root_content", RuntimeError("synthetic capture failure")
+    )
+    extractor = _extractor(page)
+    arguments = {"job_id": "123"}
+    async with boundaries(recorder, clock):
+        with recorder.context("scrape_job"):
+            result = await extractor.scrape_job(**arguments)
+    page.assert_clean()
+    return recorder.trace(
+        {"method": "scrape_job", "arguments": arguments},
+        _complete_mapping_result(result, section_names=list(result["sections"])),
     )
 
 
@@ -654,7 +676,7 @@ async def _get_my_profile_scenario() -> dict[str, Any]:
     page.assert_clean()
     return recorder.trace(
         {"method": "get_my_profile", "arguments": {}},
-        {"url": result["url"], "profile_urn": result.get("profile_urn")},
+        result,
     )
 
 
@@ -683,7 +705,7 @@ async def _connect_scenario() -> dict[str, Any]:
     page.assert_clean()
     return recorder.trace(
         {"method": "connect_with_person", "arguments": {"username": "ada-lovelace"}},
-        {"status": result["status"]},
+        result,
     )
 
 
@@ -733,7 +755,7 @@ async def _conversation_scenario(method: str) -> dict[str, Any]:
     page.assert_clean()
     return recorder.trace(
         {"method": method, "arguments": arguments},
-        {"url": result["url"], "section_names": list(result["sections"])},
+        _complete_mapping_result(result, section_names=list(result["sections"])),
     )
 
 
@@ -823,6 +845,7 @@ async def build_policy_traces() -> dict[str, dict[str, Any]]:
             "get_company_employees"
         ),
         "scrape-job.json": await _single_capture_facade_scenario("scrape_job"),
+        "scrape-job-error.json": await _single_capture_error_scenario(),
         "search-people.json": await _single_capture_facade_scenario("search_people"),
         "search-companies.json": await _single_capture_facade_scenario(
             "search_companies"

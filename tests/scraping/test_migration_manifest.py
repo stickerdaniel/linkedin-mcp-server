@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import json
+import logging
 import subprocess
 import sys
 
@@ -46,6 +47,7 @@ def test_manifest_matches_every_current_extractor_seam():
         "module_rebind_patch",
         "public_patch_object",
         "imported_module_patch",
+        "module_attribute",
     } <= {seam["kind"] for seam in current["seams"]}
     assert all(seam["canonical_owner"] for seam in current["seams"])
     assert not {
@@ -101,11 +103,23 @@ def test_module_boundary_patches_follow_their_callers():
     } == {4}
     assert all(seam["migration_stage"] is not None for seam in boundary)
 
-    stdlib = [
+    imported_patches = [
         seam for seam in current["seams"] if seam["kind"] == "imported_module_patch"
+    ]
+    stdlib = [
+        seam
+        for seam in imported_patches
+        if seam["target"].split(".", 1)[0] in {"asyncio", "time"}
+    ]
+    logger_patches = [
+        seam for seam in imported_patches if seam["target"].split(".", 1)[0] == "logger"
     ]
     assert stdlib
     assert all(seam["migration_stage"] is None for seam in stdlib)
+    assert {seam["migration_stage"] for seam in logger_patches} == {6}
+    assert all(
+        "person.PersonScraper" in seam["canonical_owner"] for seam in logger_patches
+    )
 
 
 def test_public_facade_patches_follow_each_calling_workflow():
@@ -189,9 +203,9 @@ def test_checkers_offer_no_fixture_update_mode():
     assert "unrecognized arguments: --update" in result.stderr
 
 
-def _scan_synthetic(source: str) -> list[migration.Seam]:
+def _scan_synthetic(source: str, *, path: Path | None = None) -> list[migration.Seam]:
     return migration.scan_source(
-        ROOT / "tests" / "synthetic_inventory.py",
+        path or ROOT / "tests" / "synthetic_inventory.py",
         source,
         frozenset(
             {
@@ -255,6 +269,128 @@ async def test_bindings(page):
     assert by_kind["imported_module_patch"].migration_stage is None
 
 
+def test_direct_module_attributes_follow_their_canonical_bindings():
+    seams = _scan_synthetic(
+        """
+from linkedin_mcp_server.scraping import extractor as legacy_surface
+
+async def boundaries(tasks):
+    real_drain = legacy_surface._drain_listener_tasks
+    real_scroll_body = legacy_surface.scroll_to_bottom
+    real_scroll_sidebar = legacy_surface.scroll_job_sidebar
+    recipient_selector = legacy_surface._MESSAGING_RECIPIENT_PICKER_SELECTOR
+    compose_selectors = legacy_surface._MESSAGING_COMPOSE_FALLBACK_SELECTORS
+    close_selector = legacy_surface._MESSAGING_CLOSE_SELECTOR
+    settle_lag = legacy_surface._URL_SETTLE_LAG
+    settle_quiet = legacy_surface._URL_SETTLE_QUIET
+    await real_drain(tasks)
+""",
+        path=ROOT / "tests" / "scraping" / "policy_scenarios.py",
+    )
+    attributes = {
+        seam.target: seam for seam in seams if seam.kind == "module_attribute"
+    }
+
+    assert attributes["_drain_listener_tasks"].migration_stage == 5
+    assert attributes["_drain_listener_tasks"].canonical_owner == "feed.FeedScraper"
+    assert attributes["scroll_to_bottom"].migration_stage == 4
+    assert attributes["scroll_job_sidebar"].migration_stage == 9
+    assert attributes["_URL_SETTLE_LAG"].migration_stage == 3
+    assert (
+        attributes["_URL_SETTLE_LAG"].canonical_owner
+        == "navigation.PageNavigator.URL_SETTLE_LAG"
+    )
+    assert attributes["_URL_SETTLE_QUIET"].migration_stage == 3
+    assert (
+        attributes["_URL_SETTLE_QUIET"].canonical_owner
+        == "navigation.PageNavigator.URL_SETTLE_QUIET"
+    )
+    assert attributes["_MESSAGING_RECIPIENT_PICKER_SELECTOR"].migration_stage == 12
+    assert attributes["_MESSAGING_COMPOSE_FALLBACK_SELECTORS"].migration_stage == 12
+    assert attributes["_MESSAGING_CLOSE_SELECTOR"].migration_stage == 12
+
+
+def test_direct_private_helper_calls_and_stage_gate_are_inventoried():
+    current = migration.scan()
+    drains = [
+        seam
+        for seam in current["seams"]
+        if seam["kind"] == "module_attribute"
+        and seam["target"] == "_drain_listener_tasks"
+    ]
+
+    assert {seam["path"] for seam in drains} == {
+        "tests/scraping/policy_scenarios.py",
+        "tests/scraping/test_policy_trace_support.py",
+    }
+    assert all(seam["migration_stage"] == 5 for seam in drains)
+
+    result = subprocess.run(
+        [sys.executable, str(CHECKER), "--check", "--stage", "5"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "module_attribute _drain_listener_tasks -> feed.FeedScraper" in result.stderr
+
+
+def test_permanent_alias_module_attributes_keep_identity_compatibility():
+    expressions = "\n".join(
+        f"same_{name} = legacy_surface.{name}" for name in migration.PERMANENT_ALIASES
+    )
+    seams = _scan_synthetic(
+        "from linkedin_mcp_server.scraping import extractor as legacy_surface\n"
+        + expressions
+    )
+    permanent = [
+        seam
+        for seam in seams
+        if seam.kind == "module_attribute"
+        and seam.target in migration.PERMANENT_ALIASES
+    ]
+
+    assert {seam.target for seam in permanent} == set(migration.PERMANENT_ALIASES)
+    assert all(seam.migration_stage is None for seam in permanent)
+
+
+def test_logger_patch_forms_follow_the_consuming_workflow():
+    seams = _scan_synthetic(
+        """
+from unittest.mock import patch
+from linkedin_mcp_server.scraping import extractor as legacy_surface
+from linkedin_mcp_server.scraping.extractor import LinkedInExtractor
+
+async def test_sidebar(page):
+    extractor = LinkedInExtractor(page)
+    with patch.object(legacy_surface.logger, "debug"):
+        await extractor.get_sidebar_profiles("example")
+    with patch("linkedin_mcp_server.scraping.extractor.logger.debug"):
+        await extractor.get_sidebar_profiles("example")
+"""
+    )
+    logger_patches = [
+        seam
+        for seam in seams
+        if seam.kind == "imported_module_patch" and "logger" in seam.target
+    ]
+
+    assert len(logger_patches) == 2
+    assert {seam.migration_stage for seam in logger_patches} == {6}
+    assert all(
+        "person.PersonScraper -> owner-local logger binding" in seam.canonical_owner
+        for seam in logger_patches
+    )
+    assert not any(
+        seam.kind == "module_attribute" and seam.target == "logger" for seam in seams
+    )
+    assert logging.getLogger(
+        "linkedin_mcp_server.scraping.extractor"
+    ) is not logging.getLogger("linkedin_mcp_server.scraping.person")
+
+
 @pytest.mark.parametrize(
     ("target", "message"),
     [
@@ -274,6 +410,20 @@ async def test_unknown(page):
 """
 
     with pytest.raises(migration.UnresolvedSeamError, match=message):
+        _scan_synthetic(source)
+
+
+def test_unknown_direct_extractor_module_attributes_fail_closed():
+    source = """
+from linkedin_mcp_server.scraping import extractor as legacy_surface
+
+unknown = legacy_surface._unknown_extractor_target
+"""
+
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match="unknown direct extractor module attribute",
+    ):
         _scan_synthetic(source)
 
 

@@ -50,6 +50,12 @@
     },
     {
       "call": "scrape_person",
+      "description": "goto https://www.linkedin.com/in/ada-lovelace/",
+      "kind": "boundary.stabilize",
+      "result": null
+    },
+    {
+      "call": "scrape_person",
       "extra": {
         "target_url": "https://www.linkedin.com/in/ada-lovelace/",
         "wait_until": "domcontentloaded"
@@ -143,6 +149,12 @@
       "requested_url": "https://www.linkedin.com/in/ada-lovelace/details/experience/",
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "scrape_person",
+      "description": "goto https://www.linkedin.com/in/ada-lovelace/details/experience/",
+      "kind": "boundary.stabilize",
+      "result": null
     },
     {
       "call": "scrape_person",
@@ -263,6 +275,12 @@
     },
     {
       "call": "scrape_person",
+      "description": "goto https://www.linkedin.com/in/ada-lovelace/details/education/",
+      "kind": "boundary.stabilize",
+      "result": null
+    },
+    {
+      "call": "scrape_person",
       "extra": {
         "target_url": "https://www.linkedin.com/in/ada-lovelace/details/education/",
         "wait_until": "domcontentloaded"
@@ -377,6 +395,12 @@
       "requested_url": "https://www.linkedin.com/in/ada-lovelace/details/interests/",
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "scrape_person",
+      "description": "goto https://www.linkedin.com/in/ada-lovelace/details/interests/",
+      "kind": "boundary.stabilize",
+      "result": null
     },
     {
       "call": "scrape_person",
@@ -497,6 +521,12 @@
     },
     {
       "call": "scrape_person",
+      "description": "goto https://www.linkedin.com/in/ada-lovelace/details/honors/",
+      "kind": "boundary.stabilize",
+      "result": null
+    },
+    {
+      "call": "scrape_person",
       "extra": {
         "target_url": "https://www.linkedin.com/in/ada-lovelace/details/honors/",
         "wait_until": "domcontentloaded"
@@ -611,6 +641,12 @@
       "requested_url": "https://www.linkedin.com/in/ada-lovelace/details/languages/",
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "scrape_person",
+      "description": "goto https://www.linkedin.com/in/ada-lovelace/details/languages/",
+      "kind": "boundary.stabilize",
+      "result": null
     },
     {
       "call": "scrape_person",
@@ -731,6 +767,12 @@
     },
     {
       "call": "scrape_person",
+      "description": "goto https://www.linkedin.com/in/ada-lovelace/details/certifications/",
+      "kind": "boundary.stabilize",
+      "result": null
+    },
+    {
+      "call": "scrape_person",
       "extra": {
         "target_url": "https://www.linkedin.com/in/ada-lovelace/details/certifications/",
         "wait_until": "domcontentloaded"
@@ -845,6 +887,12 @@
       "requested_url": "https://www.linkedin.com/in/ada-lovelace/details/skills/",
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "scrape_person",
+      "description": "goto https://www.linkedin.com/in/ada-lovelace/details/skills/",
+      "kind": "boundary.stabilize",
+      "result": null
     },
     {
       "call": "scrape_person",
@@ -965,6 +1013,12 @@
     },
     {
       "call": "scrape_person",
+      "description": "goto https://www.linkedin.com/in/ada-lovelace/details/projects/",
+      "kind": "boundary.stabilize",
+      "result": null
+    },
+    {
+      "call": "scrape_person",
       "extra": {
         "target_url": "https://www.linkedin.com/in/ada-lovelace/details/projects/",
         "wait_until": "domcontentloaded"
@@ -1082,6 +1136,12 @@
     },
     {
       "call": "scrape_person",
+      "description": "goto https://www.linkedin.com/in/ada-lovelace/overlay/contact-info/",
+      "kind": "boundary.stabilize",
+      "result": null
+    },
+    {
+      "call": "scrape_person",
       "extra": {
         "target_url": "https://www.linkedin.com/in/ada-lovelace/overlay/contact-info/",
         "wait_until": "domcontentloaded"
@@ -1159,6 +1219,12 @@
       "requested_url": "https://www.linkedin.com/in/ada-lovelace/recent-activity/all/",
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "scrape_person",
+      "description": "goto https://www.linkedin.com/in/ada-lovelace/recent-activity/all/",
+      "kind": "boundary.stabilize",
+      "result": null
     },
     {
       "call": "scrape_person",
@@ -1339,7 +1405,8 @@
       "posts": "posts content",
       "projects": "projects content",
       "skills": "skills content"
-    }
+    },
+    "url": "https://www.linkedin.com/in/ada-lovelace/"
   },
   "scenario": "scrape_person__all_sections",
   "schema_version": 1

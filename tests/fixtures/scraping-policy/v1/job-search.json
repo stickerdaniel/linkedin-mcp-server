@@ -35,6 +35,13 @@
     },
     {
       "call": "search_jobs",
+      "description": "goto https://www.linkedin.com/jobs/search/?keywords=python",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "search_results"
+    },
+    {
+      "call": "search_jobs",
       "extra": {
         "target_url": "https://www.linkedin.com/jobs/search/?keywords=python",
         "wait_until": "domcontentloaded"
@@ -235,7 +242,11 @@
           "url": "/jobs/view/116/"
         }
       ]
-    }
+    },
+    "sections": {
+      "search_results": "Python jobs"
+    },
+    "url": "https://www.linkedin.com/jobs/search/?keywords=python"
   },
   "scenario": "search_jobs__baseline",
   "schema_version": 1
