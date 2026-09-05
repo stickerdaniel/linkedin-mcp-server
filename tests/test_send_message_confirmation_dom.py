@@ -164,8 +164,9 @@ class TestSendConfirmationAgainstRealDom:
             message=message,
         )
 
-        assert result["status"] == "message_unavailable"
+        assert result["status"] == "invalid_message"
         assert result["sent"] is False
+        assert result["retry_safe"] is True
         assert await dom_page.evaluate("document.body.dataset.clicked") is None
         assert await text_of(dom_page, "#composer") == draft
         assert await dom_page.locator("#thread .msg").count() == 1
@@ -182,6 +183,8 @@ class TestSendConfirmationAgainstRealDom:
 
         assert result["status"] == "composer_occupied"
         assert result["sent"] is False
+        # Nothing was submitted, so calling again cannot deliver twice.
+        assert result["retry_safe"] is True
         assert await dom_page.evaluate("document.body.dataset.clicked") is None
         assert await text_of(dom_page, "#composer") == DRAFT.strip()
         assert await dom_page.locator("#thread .msg").count() == 1
@@ -196,6 +199,8 @@ class TestSendConfirmationAgainstRealDom:
         assert await dom_page.evaluate("document.body.dataset.clicked") == "true"
         assert result["status"] == "send_unconfirmed"
         assert result["sent"] is False
+        # The click happened, so a retry can deliver the message twice.
+        assert result["retry_safe"] is False
         assert await text_of(dom_page, "#composer") == MESSAGE
         assert await dom_page.locator("#thread .msg").count() == 1
 
@@ -209,6 +214,8 @@ class TestSendConfirmationAgainstRealDom:
         assert await dom_page.evaluate("document.body.dataset.clicked") == "true"
         assert result["status"] == "send_unconfirmed"
         assert result["sent"] is False
+        # The click happened, so a retry can deliver the message twice.
+        assert result["retry_safe"] is False
         assert await text_of(dom_page, "#composer") == MESSAGE
         assert await dom_page.locator("#thread .msg").count() == 1
 
@@ -220,6 +227,7 @@ class TestSendConfirmationAgainstRealDom:
 
         assert result["status"] == "sent"
         assert result["sent"] is True
+        assert result["retry_safe"] is False
         assert await text_of(dom_page, "#composer") == ""
         entries = dom_page.locator("#thread .msg")
         assert await entries.count() == 2

@@ -8449,12 +8449,15 @@ class TestSendMessage:
                 "testuser", message, confirm_send=True
             )
 
+        # Not `message_unavailable`: that status is about the recipient and
+        # tells a caller to move on, while this one is about their own input.
         assert result == {
             "url": "https://www.linkedin.com/in/testuser/",
-            "status": "message_unavailable",
+            "status": "invalid_message",
             "message": "Message must contain non-whitespace characters.",
             "recipient_selected": False,
             "sent": False,
+            "retry_safe": True,
         }
         navigate.assert_not_awaited()
         mock_page.evaluate.assert_not_awaited()
@@ -9012,9 +9015,11 @@ class TestSendMessageComposerInteraction:
             )
 
         # The click happened, so nothing here proves the message did not go
-        # out. Answering "not sent" would invite a retry that delivers twice.
+        # out. Answering "not sent" would invite a retry that delivers twice,
+        # which is what `retry_safe` says and `sent` cannot.
         assert result["status"] == "send_unconfirmed"
         assert result["sent"] is False
+        assert result["retry_safe"] is False
         visible.assert_awaited_once_with("Hello!", previous_occurrences=1)
 
 
@@ -9066,14 +9071,21 @@ class TestMessageTextOccurrences:
         )
 
     async def test_other_confirmation_errors_do_not_confirm(self, mock_page):
-        """A broken confirmation surfaces as an error, never as a send."""
+        """A broken confirmation is an unknown, never a send and never an error.
+
+        This runs only after a submission was attempted, so letting the error
+        out would reach the caller as a plain tool failure and invite the one
+        retry that delivers the message a second time.
+        """
         extractor = LinkedInExtractor(mock_page)
         mock_page.wait_for_function = AsyncMock(
             side_effect=PatchrightError("execution context destroyed")
         )
 
-        with pytest.raises(PatchrightError):
+        assert (
             await extractor._message_text_visible("Hello!", previous_occurrences=0)
+            is False
+        )
 
 
 class TestBuildFeedReferences:

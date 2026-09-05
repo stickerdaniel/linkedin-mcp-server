@@ -1099,14 +1099,25 @@ class LinkedInExtractor:
         *,
         recipient_selected: bool = False,
         sent: bool = False,
+        retry_safe: bool = True,
     ) -> dict[str, Any]:
-        """Build a structured response for the send_message tool."""
+        """Build a structured response for the send_message tool.
+
+        ``sent`` answers whether delivery was proven, so it is false both
+        where nothing was submitted and where submission happened but
+        delivery could not be observed. A caller keying a retry on it alone
+        therefore re-sends a message that may already have arrived, which is
+        what ``retry_safe`` exists to say: it is false from the moment a
+        submission is attempted, and true only while nothing can have left
+        the composer.
+        """
         return {
             "url": url,
             "status": status,
             "message": message,
             "recipient_selected": recipient_selected,
             "sent": sent,
+            "retry_safe": retry_safe,
         }
 
     async def _log_navigation_failure(
@@ -3093,6 +3104,12 @@ class LinkedInExtractor:
         and neither can an identical message already in the thread.
 
         Uses the page-level default timeout (``BrowserConfig.default_timeout``).
+
+        Every failure answers "not observed" rather than raising, because this
+        runs only after a submission was attempted. An execution context that
+        dies mid-wait, which is what an SPA remount looks like from here, would
+        otherwise reach the caller as a plain tool error and invite the one
+        retry that delivers the message twice.
         """
         try:
             await self._page.wait_for_function(
@@ -3100,7 +3117,8 @@ class LinkedInExtractor:
                 arg={"expected": message, "previous": previous_occurrences},
             )
             return True
-        except PlaywrightTimeoutError:
+        except Exception:
+            logger.debug("Message delivery could not be confirmed", exc_info=True)
             return False
 
     async def _dismiss_message_ui(self) -> None:
@@ -4973,9 +4991,12 @@ class LinkedInExtractor:
         linkedin_username = normalize_person_identifier(linkedin_username)
         profile_url = person_profile_url(linkedin_username, "/")
         if not message.strip():
+            # Not `message_unavailable`, which says the *recipient* exposes no
+            # Message action and tells a caller to give up on this person. A
+            # blank message is the caller's own input and the repair is theirs.
             return self._message_action_result(
                 profile_url,
-                "message_unavailable",
+                "invalid_message",
                 "Message must contain non-whitespace characters.",
             )
 
@@ -5189,6 +5210,7 @@ class LinkedInExtractor:
                 "delivery in time. Check the conversation before retrying; "
                 "retrying may deliver the message twice.",
                 recipient_selected=recipient_selected,
+                retry_safe=False,
             )
 
         return self._message_action_result(
@@ -5197,6 +5219,7 @@ class LinkedInExtractor:
             "Message sent.",
             recipient_selected=recipient_selected,
             sent=True,
+            retry_safe=False,
         )
 
     async def _extract_root_content(
