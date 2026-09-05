@@ -331,25 +331,57 @@
       "target": "time.monotonic"
     },
     {
-      "canonical_owner": "message_sender.MESSAGE_RECIPIENT_PICKER_SELECTOR",
-      "kind": "module_attribute",
-      "line": 515,
-      "migration_stage": 12,
-      "path": "tests/scraping/policy_scenarios.py",
-      "target": "_MESSAGING_RECIPIENT_PICKER_SELECTOR"
-    },
-    {
       "canonical_owner": "message_sender.MESSAGE_COMPOSE_FALLBACK_SELECTORS",
       "kind": "module_attribute",
-      "line": 519,
+      "line": 511,
       "migration_stage": 12,
       "path": "tests/scraping/policy_scenarios.py",
       "target": "_MESSAGING_COMPOSE_FALLBACK_SELECTORS"
     },
     {
+      "canonical_owner": "message_sender.MESSAGE_RECIPIENT_PICKER_SELECTOR",
+      "kind": "module_attribute",
+      "line": 544,
+      "migration_stage": 12,
+      "path": "tests/scraping/policy_scenarios.py",
+      "target": "_MESSAGING_RECIPIENT_PICKER_SELECTOR"
+    },
+    {
       "canonical_owner": "message_sender.MESSAGE_CLOSE_SELECTOR",
       "kind": "module_attribute",
-      "line": 527,
+      "line": 549,
+      "migration_stage": 12,
+      "path": "tests/scraping/policy_scenarios.py",
+      "target": "_MESSAGING_CLOSE_SELECTOR"
+    },
+    {
+      "canonical_owner": "message_sender.MESSAGE_RECIPIENT_PICKER_SELECTOR",
+      "kind": "module_attribute",
+      "line": 608,
+      "migration_stage": 12,
+      "path": "tests/scraping/policy_scenarios.py",
+      "target": "_MESSAGING_RECIPIENT_PICKER_SELECTOR"
+    },
+    {
+      "canonical_owner": "message_sender.MESSAGE_CLOSE_SELECTOR",
+      "kind": "module_attribute",
+      "line": 618,
+      "migration_stage": 12,
+      "path": "tests/scraping/policy_scenarios.py",
+      "target": "_MESSAGING_CLOSE_SELECTOR"
+    },
+    {
+      "canonical_owner": "message_sender.MESSAGE_RECIPIENT_PICKER_SELECTOR",
+      "kind": "module_attribute",
+      "line": 656,
+      "migration_stage": 12,
+      "path": "tests/scraping/policy_scenarios.py",
+      "target": "_MESSAGING_RECIPIENT_PICKER_SELECTOR"
+    },
+    {
+      "canonical_owner": "message_sender.MESSAGE_CLOSE_SELECTOR",
+      "kind": "module_attribute",
+      "line": 661,
       "migration_stage": 12,
       "path": "tests/scraping/policy_scenarios.py",
       "target": "_MESSAGING_CLOSE_SELECTOR"
