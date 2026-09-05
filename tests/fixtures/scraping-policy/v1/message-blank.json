@@ -1,0 +1,21 @@
+{
+  "call": {
+    "arguments": {
+      "confirm_send": true,
+      "linkedin_username": "ada-lovelace",
+      "message": "   ",
+      "profile_urn": "ACoAA-policy"
+    },
+    "method": "send_message"
+  },
+  "events": [],
+  "result": {
+    "message": "Message must contain non-whitespace characters.",
+    "recipient_selected": false,
+    "sent": false,
+    "status": "message_unavailable",
+    "url": "https://www.linkedin.com/in/ada-lovelace/"
+  },
+  "scenario": "send_message__blank_message",
+  "schema_version": 1
+}

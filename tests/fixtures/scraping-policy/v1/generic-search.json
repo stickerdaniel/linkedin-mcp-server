@@ -1,0 +1,123 @@
+{
+  "call": {
+    "arguments": {
+      "max_scrolls": null,
+      "section_name": "section",
+      "url": "https://www.linkedin.com/search/results/people/?keywords=ada"
+    },
+    "method": "extract_page"
+  },
+  "events": [
+    {
+      "call": "extract_page",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "section": "section"
+    },
+    {
+      "call": "extract_page",
+      "extra": {
+        "target_url": "https://www.linkedin.com/search/results/people/?keywords=ada",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "section": "section"
+    },
+    {
+      "call": "extract_page",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/search/results/people/?keywords=ada",
+      "requested_url": "https://www.linkedin.com/search/results/people/?keywords=ada",
+      "section": "section",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "extract_page",
+      "description": "goto https://www.linkedin.com/search/results/people/?keywords=ada",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "section"
+    },
+    {
+      "call": "extract_page",
+      "extra": {
+        "target_url": "https://www.linkedin.com/search/results/people/?keywords=ada",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "section": "section"
+    },
+    {
+      "call": "extract_page",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "section": "section"
+    },
+    {
+      "call": "extract_page",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "section": "section"
+    },
+    {
+      "call": "extract_page",
+      "kind": "boundary.rate_limit",
+      "section": "section"
+    },
+    {
+      "call": "extract_page",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "section": "section",
+      "selector": "main",
+      "state": "visible",
+      "timeout_ms": null
+    },
+    {
+      "call": "extract_page",
+      "dismissed": false,
+      "kind": "boundary.modal",
+      "section": "section"
+    },
+    {
+      "arg": null,
+      "call": "extract_page",
+      "kind": "wait_for_function",
+      "operation": "main_text_100",
+      "program_digest": "5a4a89d4de2a",
+      "section": "section",
+      "timeout_ms": 10000
+    },
+    {
+      "actual_scrolls": 2,
+      "call": "extract_page",
+      "kind": "boundary.scroll_body",
+      "max_scrolls": 5,
+      "pause_time": 0.5,
+      "section": "section"
+    },
+    {
+      "arg": {
+        "selectors": [
+          "main"
+        ]
+      },
+      "call": "extract_page",
+      "kind": "evaluate",
+      "operation": "root_content",
+      "program_digest": "e8a0e21ac6f5",
+      "section": "section"
+    }
+  ],
+  "result": {
+    "references": [],
+    "text": "Policy content"
+  },
+  "scenario": "extract_page__search",
+  "schema_version": 1
+}

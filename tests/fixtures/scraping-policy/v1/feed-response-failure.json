@@ -1,0 +1,313 @@
+{
+  "call": {
+    "arguments": {
+      "num_posts": 1
+    },
+    "method": "extract_feed"
+  },
+  "events": [
+    {
+      "call": "extract_feed",
+      "callback_id": "callback-1",
+      "event": "response",
+      "kind": "listener.add",
+      "section": "feed"
+    },
+    {
+      "call": "extract_feed",
+      "callback_id": "callback-2",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "section": "feed"
+    },
+    {
+      "call": "extract_feed",
+      "extra": {
+        "target_url": "https://www.linkedin.com/feed/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "section": "feed"
+    },
+    {
+      "call": "extract_feed",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/feed/",
+      "requested_url": "https://www.linkedin.com/feed/",
+      "section": "feed",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "extract_feed",
+      "description": "goto https://www.linkedin.com/feed/",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "feed"
+    },
+    {
+      "call": "extract_feed",
+      "extra": {
+        "target_url": "https://www.linkedin.com/feed/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "section": "feed"
+    },
+    {
+      "call": "extract_feed",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "section": "feed"
+    },
+    {
+      "call": "extract_feed",
+      "callback_id": "callback-2",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "section": "feed"
+    },
+    {
+      "call": "extract_feed",
+      "kind": "boundary.rate_limit",
+      "section": "feed"
+    },
+    {
+      "call": "extract_feed",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "section": "feed",
+      "selector": "main",
+      "state": "visible",
+      "timeout_ms": null
+    },
+    {
+      "call": "extract_feed",
+      "dismissed": false,
+      "kind": "boundary.modal",
+      "section": "feed"
+    },
+    {
+      "arg": null,
+      "call": "extract_feed",
+      "kind": "wait_for_function",
+      "operation": "main_text_200",
+      "program_digest": "24943facf9de",
+      "section": "feed",
+      "timeout_ms": 10000
+    },
+    {
+      "call": "extract_feed",
+      "kind": "mouse.move",
+      "section": "feed",
+      "x": 640,
+      "y": 360
+    },
+    {
+      "call": "extract_feed",
+      "delta_x": 0,
+      "delta_y": 2000,
+      "kind": "mouse.wheel",
+      "section": "feed"
+    },
+    {
+      "call": "extract_feed",
+      "count": 1,
+      "event": "response",
+      "kind": "listener.emit",
+      "section": "feed"
+    },
+    {
+      "call": "extract_feed",
+      "kind": "response.body.start",
+      "section": "feed",
+      "url": "https://www.linkedin.com/feed/"
+    },
+    {
+      "call": "extract_feed",
+      "kind": "response.body.finish",
+      "section": "feed",
+      "url": "https://www.linkedin.com/feed/"
+    },
+    {
+      "call": "extract_feed",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 1.0,
+      "section": "feed"
+    },
+    {
+      "call": "extract_feed",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 1.0,
+      "section": "feed"
+    },
+    {
+      "call": "extract_feed",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 1.0,
+      "section": "feed"
+    },
+    {
+      "call": "extract_feed",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 1.0,
+      "section": "feed"
+    },
+    {
+      "call": "extract_feed",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 1.0,
+      "section": "feed"
+    },
+    {
+      "call": "extract_feed",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 1.0,
+      "section": "feed"
+    },
+    {
+      "call": "extract_feed",
+      "delta_x": 0,
+      "delta_y": 2000,
+      "kind": "mouse.wheel",
+      "section": "feed"
+    },
+    {
+      "call": "extract_feed",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 1.0,
+      "section": "feed"
+    },
+    {
+      "call": "extract_feed",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 1.0,
+      "section": "feed"
+    },
+    {
+      "call": "extract_feed",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 1.0,
+      "section": "feed"
+    },
+    {
+      "call": "extract_feed",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 1.0,
+      "section": "feed"
+    },
+    {
+      "call": "extract_feed",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 1.0,
+      "section": "feed"
+    },
+    {
+      "call": "extract_feed",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 1.0,
+      "section": "feed"
+    },
+    {
+      "call": "extract_feed",
+      "delta_x": 0,
+      "delta_y": 2000,
+      "kind": "mouse.wheel",
+      "section": "feed"
+    },
+    {
+      "call": "extract_feed",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 1.0,
+      "section": "feed"
+    },
+    {
+      "call": "extract_feed",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 1.0,
+      "section": "feed"
+    },
+    {
+      "call": "extract_feed",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 1.0,
+      "section": "feed"
+    },
+    {
+      "call": "extract_feed",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 1.0,
+      "section": "feed"
+    },
+    {
+      "call": "extract_feed",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 1.0,
+      "section": "feed"
+    },
+    {
+      "call": "extract_feed",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 1.0,
+      "section": "feed"
+    },
+    {
+      "call": "extract_feed",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.2,
+      "section": "feed"
+    },
+    {
+      "arg": {
+        "selectors": [
+          "main"
+        ]
+      },
+      "call": "extract_feed",
+      "kind": "evaluate",
+      "operation": "root_content",
+      "program_digest": "e8a0e21ac6f5",
+      "section": "feed"
+    },
+    {
+      "call": "extract_feed",
+      "callback_id": "callback-1",
+      "event": "response",
+      "kind": "listener.remove",
+      "section": "feed"
+    },
+    {
+      "call": "extract_feed",
+      "kind": "boundary.drain",
+      "pending": 0,
+      "section": "feed"
+    }
+  ],
+  "result": {
+    "references": [],
+    "text": "Feed content"
+  },
+  "scenario": "extract_feed__body_failure",
+  "schema_version": 1
+}

@@ -27,6 +27,8 @@ from linkedin_mcp_server.scraping.extractor import (
     ExtractedSection,
     LinkedInExtractor,
     _CONTENT_DATE_POSTED_MAP,
+    _MESSAGE_OCCURRENCES_INCREASED_JS,
+    _MESSAGE_OCCURRENCES_JS,
     _RATE_LIMITED_MSG,
     _build_feed_references,
     _truncate_linkedin_noise,
@@ -8432,6 +8434,33 @@ class TestSearchConversations:
 
 
 class TestSendMessage:
+    @pytest.mark.parametrize("message", ["", " \t\n"], ids=["empty", "whitespace"])
+    async def test_blank_message_is_rejected_before_browser_interaction(
+        self, mock_page, message
+    ):
+        extractor = LinkedInExtractor(mock_page)
+        keyboard = MagicMock()
+        mock_page.keyboard = keyboard
+
+        with patch.object(
+            extractor, "_navigate_to_page", new_callable=AsyncMock
+        ) as navigate:
+            result = await extractor.send_message(
+                "testuser", message, confirm_send=True
+            )
+
+        assert result == {
+            "url": "https://www.linkedin.com/in/testuser/",
+            "status": "message_unavailable",
+            "message": "Message must contain non-whitespace characters.",
+            "recipient_selected": False,
+            "sent": False,
+        }
+        navigate.assert_not_awaited()
+        mock_page.evaluate.assert_not_awaited()
+        keyboard.type.assert_not_called()
+        keyboard.press.assert_not_called()
+
     async def test_dry_run_returns_confirmation_required(self, mock_page):
         """send_message with confirm_send=False returns confirmation_required status."""
         extractor = LinkedInExtractor(mock_page)
@@ -8784,6 +8813,12 @@ class TestSendMessageComposerInteraction:
             patches[9],
             patch.object(
                 extractor,
+                "_message_text_occurrences",
+                new_callable=AsyncMock,
+                return_value=0,
+            ),
+            patch.object(
+                extractor,
                 "_message_text_visible",
                 new_callable=AsyncMock,
                 return_value=True,
@@ -8851,6 +8886,12 @@ class TestSendMessageComposerInteraction:
             patches[9],
             patch.object(
                 extractor,
+                "_message_text_occurrences",
+                new_callable=AsyncMock,
+                return_value=0,
+            ),
+            patch.object(
+                extractor,
                 "_message_text_visible",
                 new_callable=AsyncMock,
                 return_value=True,
@@ -8863,6 +8904,170 @@ class TestSendMessageComposerInteraction:
         assert result["status"] == "sent"
         # Enter was pressed as fallback
         mock_keyboard.press.assert_awaited_once_with("Enter")
+
+    async def test_baseline_is_taken_after_typing_and_before_send(self, mock_page):
+        """The occurrence baseline is captured between typing and the click.
+
+        Taken any earlier it would miss what the composer already holds; taken
+        after the click it could already include the delivered message, and
+        the confirmation would compare that copy against itself.
+        """
+        extractor = LinkedInExtractor(mock_page)
+        steps: list[str] = []
+        mock_keyboard = MagicMock()
+        mock_keyboard.type = AsyncMock(
+            side_effect=lambda *args, **kwargs: steps.append("type")
+        )
+        mock_keyboard.press = AsyncMock()
+        mock_page.keyboard = mock_keyboard
+
+        async def evaluate(*args, **kwargs):
+            steps.append("click" if steps else "focus")
+            return True
+
+        async def occurrences(message):
+            steps.append("baseline")
+            return 2
+
+        async def visible(message, *, previous_occurrences):
+            steps.append(f"confirm:{previous_occurrences}")
+            return True
+
+        mock_page.evaluate = AsyncMock(side_effect=evaluate)
+        patches = self._patch_send_message_to_compose(extractor, mock_page)
+
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patches[7],
+            patches[8],
+            patches[9],
+            patch.object(
+                extractor,
+                "_message_text_occurrences",
+                new_callable=AsyncMock,
+                side_effect=occurrences,
+            ),
+            patch.object(
+                extractor,
+                "_message_text_visible",
+                new_callable=AsyncMock,
+                side_effect=visible,
+            ),
+        ):
+            result = await extractor.send_message(
+                "testuser", "Hello!", confirm_send=True
+            )
+
+        assert result["status"] == "sent"
+        # The confirmation receives exactly the baseline taken before the click.
+        assert steps == ["focus", "type", "baseline", "click", "confirm:2"]
+
+    async def test_send_unavailable_when_click_adds_nothing(self, mock_page):
+        """A clicked Send button that changes nothing is not a sent message."""
+        extractor = LinkedInExtractor(mock_page)
+        mock_keyboard = MagicMock()
+        mock_keyboard.type = AsyncMock()
+        mock_keyboard.press = AsyncMock()
+        mock_page.keyboard = mock_keyboard
+        # evaluate returns: True (focus), True (send button found and clicked)
+        mock_page.evaluate = AsyncMock(side_effect=[True, True])
+        patches = self._patch_send_message_to_compose(extractor, mock_page)
+
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patches[7],
+            patches[8],
+            patches[9],
+            patch.object(
+                extractor,
+                "_message_text_occurrences",
+                new_callable=AsyncMock,
+                return_value=1,
+            ),
+            patch.object(
+                extractor,
+                "_message_text_visible",
+                new_callable=AsyncMock,
+                return_value=False,
+            ) as visible,
+        ):
+            result = await extractor.send_message(
+                "testuser", "Hello!", confirm_send=True
+            )
+
+        assert result["status"] == "send_unavailable"
+        assert result["sent"] is False
+        visible.assert_awaited_once_with("Hello!", previous_occurrences=1)
+
+
+class TestMessageTextOccurrences:
+    """Tests for the occurrence-based send confirmation (issue #866)."""
+
+    async def test_occurrences_run_the_shared_counting_routine(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.evaluate = AsyncMock(return_value=3)
+
+        assert await extractor._message_text_occurrences("Hello!") == 3
+
+        mock_page.evaluate.assert_awaited_once_with(
+            _MESSAGE_OCCURRENCES_JS, {"expected": "Hello!"}
+        )
+
+    async def test_missing_count_reads_as_zero(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.evaluate = AsyncMock(return_value=None)
+
+        assert await extractor._message_text_occurrences("Hello!") == 0
+
+    async def test_confirmation_waits_for_more_than_the_baseline(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.wait_for_function = AsyncMock(return_value=None)
+
+        assert (
+            await extractor._message_text_visible("Hello!", previous_occurrences=2)
+            is True
+        )
+
+        mock_page.wait_for_function.assert_awaited_once_with(
+            _MESSAGE_OCCURRENCES_INCREASED_JS,
+            arg={"expected": "Hello!", "previous": 2},
+        )
+        # Baseline and confirmation run one routine, so they cannot disagree
+        # about what counts as an occurrence.
+        assert _MESSAGE_OCCURRENCES_JS in _MESSAGE_OCCURRENCES_INCREASED_JS
+
+    async def test_confirmation_timeout_is_not_a_send(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.wait_for_function = AsyncMock(
+            side_effect=PlaywrightTimeoutError("timeout")
+        )
+
+        assert (
+            await extractor._message_text_visible("Hello!", previous_occurrences=0)
+            is False
+        )
+
+    async def test_other_confirmation_errors_do_not_confirm(self, mock_page):
+        """A broken confirmation surfaces as an error, never as a send."""
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.wait_for_function = AsyncMock(
+            side_effect=PatchrightError("execution context destroyed")
+        )
+
+        with pytest.raises(PatchrightError):
+            await extractor._message_text_visible("Hello!", previous_occurrences=0)
 
 
 class TestBuildFeedReferences:

@@ -1,0 +1,114 @@
+{
+  "call": {
+    "arguments": {
+      "keywords": "mathematics",
+      "max_pages": 2
+    },
+    "method": "search_posts"
+  },
+  "events": [
+    {
+      "call": "search_posts",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add"
+    },
+    {
+      "call": "search_posts",
+      "extra": {
+        "target_url": "https://www.linkedin.com/search/results/content/?keywords=mathematics&origin=FACETED_SEARCH",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto"
+    },
+    {
+      "call": "search_posts",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/search/results/content/?keywords=mathematics&origin=FACETED_SEARCH",
+      "requested_url": "https://www.linkedin.com/search/results/content/?keywords=mathematics&origin=FACETED_SEARCH",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "search_posts",
+      "description": "goto https://www.linkedin.com/search/results/content/?keywords=mathematics&origin=FACETED_SEARCH",
+      "kind": "boundary.stabilize",
+      "result": null
+    },
+    {
+      "call": "search_posts",
+      "extra": {
+        "target_url": "https://www.linkedin.com/search/results/content/?keywords=mathematics&origin=FACETED_SEARCH",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto"
+    },
+    {
+      "call": "search_posts",
+      "kind": "boundary.auth_quick",
+      "result": null
+    },
+    {
+      "call": "search_posts",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove"
+    },
+    {
+      "call": "search_posts",
+      "kind": "boundary.rate_limit"
+    },
+    {
+      "call": "search_posts",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "selector": "main",
+      "state": "visible",
+      "timeout_ms": null
+    },
+    {
+      "call": "search_posts",
+      "dismissed": false,
+      "kind": "boundary.modal"
+    },
+    {
+      "arg": null,
+      "call": "search_posts",
+      "kind": "wait_for_function",
+      "operation": "main_text_100",
+      "program_digest": "5a4a89d4de2a",
+      "timeout_ms": 10000
+    },
+    {
+      "actual_scrolls": 2,
+      "call": "search_posts",
+      "kind": "boundary.scroll_body",
+      "max_scrolls": 10,
+      "pause_time": 0.5
+    },
+    {
+      "arg": {
+        "selectors": [
+          "main"
+        ]
+      },
+      "call": "search_posts",
+      "kind": "evaluate",
+      "operation": "root_content",
+      "program_digest": "e8a0e21ac6f5"
+    }
+  ],
+  "result": {
+    "section_names": [
+      "search_results"
+    ],
+    "sections": {
+      "search_results": "Result content"
+    },
+    "url": "https://www.linkedin.com/search/results/content/?keywords=mathematics&origin=FACETED_SEARCH"
+  },
+  "scenario": "search_posts__baseline",
+  "schema_version": 1
+}

@@ -121,6 +121,29 @@ When adding an entirely new MCP tool (e.g., `search_companies`):
 - [ ] `uv run ruff check . --fix && uv run ruff format .`
 - [ ] `uv run pre-commit run --all-files`
 
+## Regenerating Scraping Policy Fixtures
+
+The migration manifest and semantic traces are canonical review fixtures. The
+checkers compare them by default and deliberately refuse to overwrite anything
+under `tests/fixtures/scraping-policy/`. Generate candidates outside that
+directory, inspect the full diff, and copy accepted bytes into the fixture tree:
+
+```bash
+uv run python scripts/check_scraping_migration_manifest.py --output ../linkedin-mcp-migration-manifest.json
+uv run python scripts/check_scraping_policy_traces.py --output ../linkedin-mcp-policy-traces
+diff -u tests/fixtures/scraping-policy/migration-manifest.json ../linkedin-mcp-migration-manifest.json
+diff -ru tests/fixtures/scraping-policy/v1 ../linkedin-mcp-policy-traces
+cp ../linkedin-mcp-migration-manifest.json tests/fixtures/scraping-policy/migration-manifest.json
+cp ../linkedin-mcp-policy-traces/*.json tests/fixtures/scraping-policy/v1/
+rm ../linkedin-mcp-migration-manifest.json
+rm -rf ../linkedin-mcp-policy-traces
+uv run python scripts/check_scraping_migration_manifest.py --check
+uv run python scripts/check_scraping_policy_traces.py --check
+```
+
+Both output paths must be absent before generation. Commit fixture changes only
+when the reviewed policy change is intentional.
+
 ## Workflow
 
 1. [Open an issue](https://github.com/stickerdaniel/linkedin-mcp-server/issues) using the correct GitHub issue template. Fill in every section; delete optional sections if not applicable.

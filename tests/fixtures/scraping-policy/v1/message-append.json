@@ -1,0 +1,317 @@
+{
+  "call": {
+    "arguments": {
+      "composer_initial_text": "Existing text",
+      "confirm_send": true,
+      "linkedin_username": "ada-lovelace",
+      "message": "New text",
+      "profile_urn": "ACoAA-policy"
+    },
+    "method": "send_message"
+  },
+  "events": [
+    {
+      "call": "send_message",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "extra": {
+        "target_url": "https://www.linkedin.com/in/ada-lovelace/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/in/ada-lovelace/",
+      "requested_url": "https://www.linkedin.com/in/ada-lovelace/",
+      "section": "message",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "send_message",
+      "description": "goto https://www.linkedin.com/in/ada-lovelace/",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "extra": {
+        "target_url": "https://www.linkedin.com/in/ada-lovelace/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "boundary.rate_limit",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "section": "message",
+      "selector": "main",
+      "state": "visible",
+      "timeout_ms": null
+    },
+    {
+      "call": "send_message",
+      "dismissed": false,
+      "kind": "boundary.modal",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "evaluate",
+      "operation": "profile_display_name",
+      "program_digest": "a6e221fb7a22",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "callback_id": "callback-2",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "extra": {
+        "target_url": "https://www.linkedin.com/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3AACoAA-policy&recipient=ACoAA-policy&screenContext=NON_SELF_PROFILE_VIEW&interop=msgOverlay",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3AACoAA-policy&recipient=ACoAA-policy&screenContext=NON_SELF_PROFILE_VIEW&interop=msgOverlay",
+      "requested_url": "https://www.linkedin.com/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3AACoAA-policy&recipient=ACoAA-policy&screenContext=NON_SELF_PROFILE_VIEW&interop=msgOverlay",
+      "section": "message",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "send_message",
+      "description": "goto https://www.linkedin.com/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3AACoAA-policy&recipient=ACoAA-policy&screenContext=NON_SELF_PROFILE_VIEW&interop=msgOverlay",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "extra": {
+        "target_url": "https://www.linkedin.com/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3AACoAA-policy&recipient=ACoAA-policy&screenContext=NON_SELF_PROFILE_VIEW&interop=msgOverlay",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "callback_id": "callback-2",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "boundary.rate_limit",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "section": "message",
+      "selector": "main",
+      "state": "visible",
+      "timeout_ms": null
+    },
+    {
+      "call": "send_message",
+      "dismissed": false,
+      "kind": "boundary.modal",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "locator.create",
+      "locator": "recipient_picker",
+      "parent": null,
+      "section": "message",
+      "selector": "input[placeholder*=\"Type a name\"], input[aria-label*=\"Type a name\"], input[placeholder*=\"multiple names\"]"
+    },
+    {
+      "call": "send_message",
+      "kind": "locator.count",
+      "locator": "recipient_picker",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "locator.create",
+      "locator": "composer.0",
+      "parent": null,
+      "section": "message",
+      "selector": "div[role=\"textbox\"][contenteditable=\"true\"][aria-label*=\"Write a message\"]"
+    },
+    {
+      "call": "send_message",
+      "kind": "locator.count",
+      "locator": "composer.0",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "locator.derive",
+      "locator": "composer.0.last",
+      "operation": "last",
+      "parent": "composer.0",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "locator.create",
+      "locator": "composer.0",
+      "parent": null,
+      "section": "message",
+      "selector": "div[role=\"textbox\"][contenteditable=\"true\"][aria-label*=\"Write a message\"]"
+    },
+    {
+      "call": "send_message",
+      "kind": "locator.count",
+      "locator": "composer.0",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "locator.derive",
+      "locator": "composer.0.last",
+      "operation": "last",
+      "parent": "composer.0",
+      "section": "message"
+    },
+    {
+      "arg": {
+        "candidates": [
+          "Ada Lovelace",
+          "ada-lovelace"
+        ]
+      },
+      "call": "send_message",
+      "kind": "evaluate",
+      "operation": "compose_matches_recipient",
+      "program_digest": "72e8cfe97aec",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "evaluate",
+      "operation": "focus_message_composer",
+      "program_digest": "01421825590d",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.1,
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "delay_ms": 15,
+      "kind": "keyboard.type",
+      "section": "message",
+      "text": "New text"
+    },
+    {
+      "call": "send_message",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.3,
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 1.0,
+      "section": "message"
+    },
+    {
+      "arg": {
+        "expected": "New text"
+      },
+      "call": "send_message",
+      "kind": "evaluate",
+      "operation": "message_occurrences",
+      "program_digest": "b1263ac9a4f8",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "evaluate",
+      "operation": "click_send_button",
+      "program_digest": "cabf522492be",
+      "section": "message"
+    },
+    {
+      "arg": {
+        "expected": "New text",
+        "previous": 0
+      },
+      "call": "send_message",
+      "kind": "wait_for_function",
+      "operation": "message_occurrences_increased",
+      "program_digest": "2e7498d0e493",
+      "section": "message",
+      "timeout_ms": null
+    }
+  ],
+  "result": {
+    "message": "Message sent.",
+    "recipient_selected": true,
+    "sent": true,
+    "status": "sent",
+    "url": "https://www.linkedin.com/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3AACoAA-policy&recipient=ACoAA-policy&screenContext=NON_SELF_PROFILE_VIEW&interop=msgOverlay"
+  },
+  "scenario": "send_message__confirmed_append",
+  "schema_version": 1
+}
