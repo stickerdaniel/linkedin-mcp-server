@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import Iterator
-import json
 import logging
 import re
 import time
@@ -42,7 +41,10 @@ from linkedin_mcp_server.scraping.connection import ActionSignals
 from linkedin_mcp_server.scraping.contracts import (
     RATE_LIMITED_SECTION_TEXT,
     ExtractedSection,
-    FilterValidationError,
+    # Re-exported, not used: the search filters that raise it moved to
+    # `search_urls`, while the MCP tool wrappers still catch the class through
+    # this module. The redundant alias is what marks that as deliberate.
+    FilterValidationError as FilterValidationError,
     rate_limited_section_error,
 )
 from linkedin_mcp_server.scraping.feed_payload import (
@@ -80,6 +82,12 @@ from linkedin_mcp_server.scraping.link_metadata import (
     Reference,
     build_references,
     dedupe_references,
+)
+from linkedin_mcp_server.scraping.search_urls import (
+    build_company_search_url,
+    build_content_search_url,
+    build_job_search_url,
+    build_people_search_url,
 )
 from linkedin_mcp_server.scraping.text import (
     filter_linkedin_noise_lines,
@@ -177,65 +185,10 @@ _URL_SETTLE_LAG = 0.3
 # its own navigation, so a page judged on arrival is judged empty.
 _DOCUMENT_READY_TIMEOUT = 5.0
 
-# Normalization maps for job search filters. Job search encodes recency as
-# ``f_TPR=r<seconds>``; content search uses named tokens, hence the separate
-# ``_CONTENT_DATE_POSTED_MAP`` below.
-_JOB_DATE_POSTED_MAP = {
-    "past_hour": "r3600",
-    "past_24_hours": "r86400",
-    "past_week": "r604800",
-    "past_month": "r2592000",
-}
-
-_EXPERIENCE_LEVEL_MAP = {
-    "internship": "1",
-    "entry": "2",
-    "associate": "3",
-    "mid_senior": "4",
-    "director": "5",
-    "executive": "6",
-}
-
-_JOB_TYPE_MAP = {
-    "full_time": "F",
-    "part_time": "P",
-    "contract": "C",
-    "temporary": "T",
-    "volunteer": "V",
-    "internship": "I",
-    "other": "O",
-}
-
-_WORK_TYPE_MAP = {"on_site": "1", "remote": "2", "hybrid": "3"}
-
-_SORT_BY_MAP = {"date": "DD", "relevance": "R"}
-
-# Content (post) search uses literal ``datePosted`` tokens inside a JSON-list
-# facet, e.g. ``datePosted=["past-week"]`` — unlike job search, which uses
-# ``f_TPR=r<seconds>`` codes. The three hyphenated values are LinkedIn's
-# complete set, verified live: the filter dropdown offers exactly Past 24
-# hours / week / month, and anything else is ignored while still being echoed
-# back in the url, so a near-miss spelling returns unfiltered results that
-# look filtered. The underscore keys are this server's own spelling, carried
-# over so ``date_posted`` reads the same here as in ``search_jobs``
-# (``_JOB_DATE_POSTED_MAP``); ``past_hour`` has no content-search equivalent.
-_CONTENT_DATE_POSTED_MAP = {
-    "past-24h": "past-24h",
-    "past_24_hours": "past-24h",
-    "past-week": "past-week",
-    "past_week": "past-week",
-    "past-month": "past-month",
-    "past_month": "past-month",
-}
-
 # Content search is an infinite scroll with no ``&start=`` pagination, so
 # ``max_pages`` caps scroll depth instead of fetching discrete pages. One
 # nominal "page" is this many scrolls.
 _CONTENT_SCROLLS_PER_REQUESTED_PAGE = 5
-
-# Valid tokens for the people-search ``network`` facet.
-# LinkedIn accepts "F" (1st-degree), "S" (2nd-degree), "O" (3rd-degree and beyond).
-_NETWORK_TOKENS = ("F", "S", "O")
 
 _DIALOG_SELECTOR = 'dialog[open], [role="dialog"]'
 _DIALOG_PREMIUM_LINK_SELECTOR = (
@@ -558,22 +511,6 @@ def _connection_result(
     if profile:
         result["profile"] = profile
     return result
-
-
-def _normalize_csv(value: str, mapping: dict[str, str]) -> str:
-    """Normalize a comma-separated filter value using the provided mapping."""
-    parts = [v.strip() for v in value.split(",")]
-    return ",".join(mapping.get(p, p) for p in parts)
-
-
-def _encode_list_facet(values: list[str]) -> str:
-    """Encode a list of string values for a LinkedIn people-search list facet.
-
-    LinkedIn's people-search URL uses JSON-list encoded facets of the form
-    ``["A","B"]``. This helper URL-encodes the rendered JSON so the final URL
-    contains e.g. ``%5B%22F%22%5D`` for ``["F"]``.
-    """
-    return quote_plus(json.dumps(values, separators=(",", ":")))
 
 
 async def _drain_listener_tasks(pending: list[asyncio.Task[None]]) -> None:
@@ -3291,44 +3228,6 @@ class LinkedInExtractor:
         match = re.search(r"of\s+(\d+)", text)
         return int(match.group(1)) if match else None
 
-    @staticmethod
-    def _build_job_search_url(
-        keywords: str,
-        location: str | None = None,
-        date_posted: str | None = None,
-        job_type: str | None = None,
-        experience_level: str | None = None,
-        work_type: str | None = None,
-        easy_apply: bool = False,
-        sort_by: str | None = None,
-    ) -> str:
-        """Build a LinkedIn job search URL with optional filters.
-
-        Human-readable names are normalized to LinkedIn URL codes.
-        Comma-separated values are normalized individually.
-        Unknown values pass through unchanged.
-        """
-        params = f"keywords={quote_plus(keywords)}"
-        if location:
-            params += f"&location={quote_plus(location)}"
-
-        if date_posted:
-            mapped = _JOB_DATE_POSTED_MAP.get(date_posted.strip(), date_posted)
-            params += f"&f_TPR={quote_plus(mapped)}"
-        if job_type:
-            params += f"&f_JT={_normalize_csv(job_type, _JOB_TYPE_MAP)}"
-        if experience_level:
-            params += f"&f_E={_normalize_csv(experience_level, _EXPERIENCE_LEVEL_MAP)}"
-        if work_type:
-            params += f"&f_WT={_normalize_csv(work_type, _WORK_TYPE_MAP)}"
-        if easy_apply:
-            params += "&f_EA=true"
-        if sort_by:
-            mapped = _SORT_BY_MAP.get(sort_by.strip(), sort_by)
-            params += f"&sortBy={quote_plus(mapped)}"
-
-        return f"https://www.linkedin.com/jobs/search/?{params}"
-
     async def search_jobs(
         self,
         keywords: str,
@@ -3362,7 +3261,7 @@ class LinkedInExtractor:
         Returns:
             {url, sections: {search_results: text}, job_ids: [str]}
         """
-        base_url = self._build_job_search_url(
+        base_url = build_job_search_url(
             keywords,
             location=location,
             date_posted=date_posted,
@@ -4040,31 +3939,14 @@ class LinkedInExtractor:
         Returns:
             {url, sections: {name: text}}
         """
-        if network is not None:
-            invalid = [t for t in network if t not in _NETWORK_TOKENS]
-            if invalid:
-                raise FilterValidationError(
-                    "Invalid network token(s) "
-                    f"{invalid!r}; expected any of {list(_NETWORK_TOKENS)!r}"
-                )
-
-        if current_company and not re.fullmatch(r"[0-9]+", current_company):
-            raise FilterValidationError(
-                f"current_company must be a numeric LinkedIn company URN id "
-                f"(e.g. '1115' for SAP); got {current_company!r}. Plain-text "
-                f"company names are silently ignored by LinkedIn. Look up the "
-                f'URN via get_company_profile -> references["about"].'
-            )
-
-        params = f"keywords={quote_plus(keywords)}"
-        if location:
-            params += f"&location={quote_plus(location)}"
-        if network:
-            params += f"&network={_encode_list_facet(network)}"
-        if current_company:
-            params += f"&currentCompany={_encode_list_facet([current_company])}"
-
-        url = f"https://www.linkedin.com/search/results/people/?{params}"
+        # Builds before it navigates, and the builder refuses a filter
+        # LinkedIn would swallow, so an invalid token costs no page load.
+        url = build_people_search_url(
+            keywords,
+            location=location,
+            network=network,
+            current_company=current_company,
+        )
         extracted = await self.extract_page(url, section_name="search_results")
 
         sections: dict[str, str] = {}
@@ -4098,7 +3980,7 @@ class LinkedInExtractor:
         Returns:
             {url, sections: {search_results: text}}
         """
-        url = f"https://www.linkedin.com/search/results/companies/?keywords={quote_plus(keywords)}"
+        url = build_company_search_url(keywords)
         extracted = await self.extract_page(url, section_name="search_results")
 
         sections: dict[str, str] = {}
@@ -4123,32 +4005,6 @@ class LinkedInExtractor:
             result["section_errors"] = section_errors
         return result
 
-    @staticmethod
-    def _build_content_search_url(
-        keywords: str,
-        date_posted: str | None = None,
-    ) -> str:
-        """Build a LinkedIn content (post) search URL.
-
-        Reproduces the ``FACETED_SEARCH`` URL LinkedIn produces from the
-        Posts results tab, e.g. for "Buscamos Unity" in the past week:
-        ``/search/results/content/?keywords=Buscamos+Unity&origin=FACETED_SEARCH&datePosted=%5B%22past-week%22%5D``
-
-        The ``datePosted`` facet is a one-element JSON list carrying a literal
-        LinkedIn token, URL-encoded — unlike job search, which uses
-        ``f_TPR=r<seconds>``. The value is mapped through
-        ``_CONTENT_DATE_POSTED_MAP`` so the server's own underscore spelling
-        reaches LinkedIn in the form it recognizes. An unmapped value would be
-        ignored rather than rejected, so callers validate first.
-        """
-        params = f"keywords={quote_plus(keywords)}&origin=FACETED_SEARCH"
-        if date_posted and date_posted.strip():
-            token = _CONTENT_DATE_POSTED_MAP.get(
-                date_posted.strip(), date_posted.strip()
-            )
-            params += f"&datePosted={_encode_list_facet([token])}"
-        return f"https://www.linkedin.com/search/results/content/?{params}"
-
     async def search_posts(
         self,
         keywords: str,
@@ -4164,7 +4020,7 @@ class LinkedInExtractor:
         Args:
             keywords: Free-text query (e.g. "Buscamos Unity", "estamos contratando").
             date_posted: Optional recency filter, one of the keys of
-                ``_CONTENT_DATE_POSTED_MAP``. Invalid values raise
+                ``search_urls.CONTENT_DATE_POSTED_MAP``. Invalid values raise
                 ``FilterValidationError`` (a ``ValueError`` subclass) rather
                 than reaching LinkedIn, which would ignore them silently and
                 return unfiltered results that look filtered.
@@ -4182,17 +4038,9 @@ class LinkedInExtractor:
             The LLM should parse the raw text to extract each post's author,
             headline, body, date, and reaction counts.
         """
-        if (
-            date_posted is not None
-            and date_posted.strip()
-            and date_posted.strip() not in _CONTENT_DATE_POSTED_MAP
-        ):
-            raise FilterValidationError(
-                f"Invalid date_posted {date_posted!r}; expected one of "
-                f"{list(_CONTENT_DATE_POSTED_MAP)!r}."
-            )
-
-        url = self._build_content_search_url(keywords, date_posted=date_posted)
+        # Builds before it navigates, so a recency filter LinkedIn would
+        # ignore is refused rather than answered with unfiltered results.
+        url = build_content_search_url(keywords, date_posted=date_posted)
         max_scrolls = max(1, max_pages) * _CONTENT_SCROLLS_PER_REQUESTED_PAGE
         extracted = await self.extract_page(
             url, section_name="search_results", max_scrolls=max_scrolls

@@ -27,7 +27,6 @@ from linkedin_mcp_server.scraping.contracts import RATE_LIMITED_SECTION_TEXT
 from linkedin_mcp_server.scraping.extractor import (
     ExtractedSection,
     LinkedInExtractor,
-    _CONTENT_DATE_POSTED_MAP,
     _MESSAGE_OCCURRENCES_INCREASED_JS,
     _MESSAGE_OCCURRENCES_JS,
 )
@@ -41,93 +40,6 @@ def extracted(
 ) -> ExtractedSection:
     """Create an ExtractedSection for tests."""
     return ExtractedSection(text=text, references=references or [], error=error)
-
-
-class TestBuildJobSearchUrl:
-    """Tests for _build_job_search_url URL construction."""
-
-    def test_keywords_only(self):
-        url = LinkedInExtractor._build_job_search_url("python developer")
-        assert url == "https://www.linkedin.com/jobs/search/?keywords=python+developer"
-
-    def test_with_location(self):
-        url = LinkedInExtractor._build_job_search_url("python", location="Remote")
-        assert "keywords=python" in url
-        assert "location=Remote" in url
-
-    def test_date_posted_normalization(self):
-        url = LinkedInExtractor._build_job_search_url("python", date_posted="past_week")
-        assert "f_TPR=r604800" in url
-
-    def test_date_posted_passthrough(self):
-        url = LinkedInExtractor._build_job_search_url("python", date_posted="r3600")
-        assert "f_TPR=r3600" in url
-
-    def test_experience_level_normalization(self):
-        url = LinkedInExtractor._build_job_search_url(
-            "python", experience_level="entry"
-        )
-        assert "f_E=2" in url
-
-    def test_experience_level_csv(self):
-        url = LinkedInExtractor._build_job_search_url(
-            "python", experience_level="entry,director"
-        )
-        assert "f_E=2,5" in url
-
-    def test_work_type_normalization(self):
-        url = LinkedInExtractor._build_job_search_url("python", work_type="remote")
-        assert "f_WT=2" in url
-
-    def test_work_type_csv(self):
-        url = LinkedInExtractor._build_job_search_url(
-            "python", work_type="on_site,hybrid"
-        )
-        assert "f_WT=1,3" in url
-
-    def test_easy_apply(self):
-        url = LinkedInExtractor._build_job_search_url("python", easy_apply=True)
-        assert "f_EA=true" in url
-
-    def test_easy_apply_false_omitted(self):
-        url = LinkedInExtractor._build_job_search_url("python", easy_apply=False)
-        assert "f_EA" not in url
-
-    def test_sort_by_normalization(self):
-        url = LinkedInExtractor._build_job_search_url("python", sort_by="date")
-        assert "sortBy=DD" in url
-
-    def test_job_type_normalization(self):
-        url = LinkedInExtractor._build_job_search_url("python", job_type="full_time")
-        assert "f_JT=F" in url
-
-    def test_job_type_csv(self):
-        url = LinkedInExtractor._build_job_search_url(
-            "python", job_type="full_time,contract"
-        )
-        assert "f_JT=F,C" in url
-
-    def test_job_type_passthrough(self):
-        url = LinkedInExtractor._build_job_search_url("python", job_type="F")
-        assert "f_JT=F" in url
-
-    def test_all_filters_combined(self):
-        url = LinkedInExtractor._build_job_search_url(
-            "python",
-            location="Berlin",
-            date_posted="past_week",
-            experience_level="entry,mid_senior",
-            work_type="remote",
-            easy_apply=True,
-            sort_by="date",
-        )
-        assert "keywords=python" in url
-        assert "location=Berlin" in url
-        assert "f_TPR=r604800" in url
-        assert "f_E=2,4" in url
-        assert "f_WT=2" in url
-        assert "f_EA=true" in url
-        assert "sortBy=DD" in url
 
 
 @pytest.fixture
@@ -6102,10 +6014,14 @@ class TestSearchPeople:
         with pytest.raises(ValueError, match="Invalid network token"):
             await extractor.search_people("engineer", network=["X"])
 
+        mock_page.goto.assert_not_awaited()
+
     async def test_search_people_rejects_plain_company_name(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         with pytest.raises(ValueError, match="must be a numeric"):
             await extractor.search_people("engineer", current_company="SAP")
+
+        mock_page.goto.assert_not_awaited()
 
     async def test_search_people_rejects_unicode_digit_company(self, mock_page):
         """LinkedIn URN ids are ASCII decimal; reject Unicode digits even
@@ -6113,6 +6029,8 @@ class TestSearchPeople:
         extractor = LinkedInExtractor(mock_page)
         with pytest.raises(ValueError, match="must be a numeric"):
             await extractor.search_people("engineer", current_company="١١١٥")
+
+        mock_page.goto.assert_not_awaited()
 
     async def test_search_people_empty_current_company_is_noop(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
@@ -6145,50 +6063,6 @@ class TestSearchPeople:
         assert "location=Seattle" in result["url"]
         assert "network=%5B%22F%22%5D" in result["url"]
         assert "currentCompany=%5B%221115%22%5D" in result["url"]
-
-
-class TestBuildContentSearchUrl:
-    """Tests for _build_content_search_url URL construction."""
-
-    def test_basic_keywords(self):
-        url = LinkedInExtractor._build_content_search_url("Buscamos Unity")
-        assert url == (
-            "https://www.linkedin.com/search/results/content/"
-            "?keywords=Buscamos+Unity&origin=FACETED_SEARCH"
-        )
-
-    def test_date_posted_past_week(self):
-        url = LinkedInExtractor._build_content_search_url(
-            "Buscamos Unity", date_posted="past-week"
-        )
-        assert "datePosted=%5B%22past-week%22%5D" in url
-
-    def test_date_posted_alias_normalized(self):
-        url = LinkedInExtractor._build_content_search_url(
-            "python", date_posted="past_24_hours"
-        )
-        assert "datePosted=%5B%22past-24h%22%5D" in url
-
-    def test_every_accepted_date_posted_reaches_linkedin_as_a_real_token(self):
-        """LinkedIn ignores an unrecognized token instead of rejecting it, so
-        an accepted value that never maps to one of its three would return
-        unfiltered results while looking filtered."""
-        for accepted, expected in _CONTENT_DATE_POSTED_MAP.items():
-            url = LinkedInExtractor._build_content_search_url(
-                "python", date_posted=accepted
-            )
-            assert expected in ("past-24h", "past-week", "past-month")
-            assert f"%22{expected}%22" in url
-
-    def test_no_date_posted_omits_facet(self):
-        url = LinkedInExtractor._build_content_search_url("python")
-        assert "datePosted" not in url
-
-    def test_whitespace_date_posted_omits_facet(self):
-        # Whitespace-only date_posted must be ignored, not appended as an
-        # invalid facet token (regression guard).
-        url = LinkedInExtractor._build_content_search_url("python", date_posted="   ")
-        assert "datePosted" not in url
 
 
 @pytest.mark.asyncio
@@ -6243,6 +6117,8 @@ class TestSearchPosts:
         extractor = LinkedInExtractor(mock_page)
         with pytest.raises(ValueError, match="Invalid date_posted"):
             await extractor.search_posts("python", date_posted="last-year")
+
+        mock_page.goto.assert_not_awaited()
 
     async def test_empty_results_omit_optional_keys(self, mock_page):
         extractor = LinkedInExtractor(mock_page)

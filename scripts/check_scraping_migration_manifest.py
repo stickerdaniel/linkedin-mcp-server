@@ -99,7 +99,6 @@ _BOUNDARY_OWNERS = {
 
 _IMPORT_OWNERS = {
     "LinkedInExtractor": ("facade.LinkedInExtractor", 14),
-    "_CONTENT_DATE_POSTED_MAP": ("search_urls.CONTENT_DATE_POSTED_MAP", 2),
     "_ACTION_SIGNALS_JS": ("connection_actions.ACTION_SIGNALS_JS", 7),
     "_CLICK_INCOMING_ACCEPT_JS": ("connection_actions.CLICK_INCOMING_ACCEPT_JS", 7),
     "_JOB_IDS_JS": ("job_pages.JOB_IDS_JS", 9),
