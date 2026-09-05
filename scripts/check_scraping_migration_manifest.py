@@ -34,9 +34,14 @@ PERMANENT_ALIASES = {
 }
 
 _PRIVATE_OWNERS: dict[str, tuple[str, int]] = {
-    "_navigate_to_page": ("navigation.PageNavigator", 3),
-    "_raise_if_auth_barrier": ("navigation.PageNavigator", 3),
+    "_normalize_body_marker": ("navigation.PageNavigator", 3),
     "_log_navigation_failure": ("navigation.PageNavigator", 3),
+    "_raise_if_auth_barrier": ("navigation.PageNavigator", 3),
+    "_goto_with_auth_checks": ("navigation.PageNavigator", 3),
+    "_navigate_to_page": ("navigation.PageNavigator", 3),
+    "_watching_navigations": ("navigation.PageNavigator", 3),
+    "_document_origin": ("navigation.PageNavigator", 3),
+    "_settle_navigation": ("navigation.PageNavigator", 3),
     "_extract_loaded_section": ("capture.SectionCapture", 4),
     "_extract_overlay": ("capture.SectionCapture", 4),
     "_extract_overlay_once": ("capture.SectionCapture", 4),
@@ -110,8 +115,8 @@ _IMPORT_OWNERS = {
 }
 
 _MODULE_ATTRIBUTE_OWNERS = {
-    "_URL_SETTLE_LAG": ("navigation.PageNavigator.URL_SETTLE_LAG", 3),
-    "_URL_SETTLE_QUIET": ("navigation.PageNavigator.URL_SETTLE_QUIET", 3),
+    "_URL_SETTLE_LAG": ("navigation.PageNavigator", 3),
+    "_URL_SETTLE_QUIET": ("navigation.PageNavigator", 3),
     "_MESSAGING_CLOSE_SELECTOR": ("message_sender.MESSAGE_CLOSE_SELECTOR", 12),
     "_MESSAGING_COMPOSE_FALLBACK_SELECTORS": (
         "message_sender.MESSAGE_COMPOSE_FALLBACK_SELECTORS",
@@ -147,9 +152,9 @@ _WORKFLOW_OWNERS: dict[str, tuple[str, int]] = {
     "_goto_with_auth_checks": ("navigation.PageNavigator", 3),
     "_extract_page_once": ("capture.SectionCapture", 4),
     "_extract_feed_once": ("feed.FeedScraper", 5),
-    "_watching_navigations": ("job_pages.JobPageReader", 9),
-    "_document_origin": ("job_pages.JobPageReader", 9),
-    "_settle_navigation": ("job_pages.JobPageReader", 9),
+    "_watching_navigations": ("navigation.PageNavigator", 3),
+    "_document_origin": ("navigation.PageNavigator", 3),
+    "_settle_navigation": ("navigation.PageNavigator", 3),
     "_extract_search_page": ("job_pages.JobPageReader", 9),
     "_extract_saved_jobs_page": ("job_pages.JobPageReader", 9),
     "_open_conversation_by_username": ("conversations.ConversationReader", 11),

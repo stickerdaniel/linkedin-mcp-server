@@ -17,6 +17,8 @@ from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.callbacks import ProgressCallback
 from linkedin_mcp_server.scraping import extractor as extractor_module
+from linkedin_mcp_server.scraping import navigation as navigation_module
+from linkedin_mcp_server.scraping import session as session_module
 from linkedin_mcp_server.scraping.extractor import LinkedInExtractor
 from linkedin_mcp_server.scraping.fields import COMPANY_SECTIONS, PERSON_SECTIONS
 
@@ -153,19 +155,19 @@ async def boundaries(
         }
 
     with (
-        patch.object(extractor_module, "record_page_trace", trace),
-        patch.object(extractor_module, "detect_auth_barrier_quick", auth_quick),
-        patch.object(extractor_module, "detect_auth_barrier", auth),
-        patch.object(extractor_module, "resolve_remember_me_prompt", remember),
-        patch.object(extractor_module, "stabilize_navigation", stabilize),
+        patch.object(navigation_module, "record_page_trace", trace),
+        patch.object(navigation_module, "detect_auth_barrier_quick", auth_quick),
+        patch.object(navigation_module, "detect_auth_barrier", auth),
+        patch.object(navigation_module, "resolve_remember_me_prompt", remember),
+        patch.object(navigation_module, "stabilize_navigation", stabilize),
         patch.object(extractor_module, "detect_rate_limit", rate_limit),
         patch.object(extractor_module, "handle_modal_close", modal),
         patch.object(extractor_module, "scroll_to_bottom", scroll_body),
         patch.object(extractor_module, "scroll_job_sidebar", scroll_sidebar),
         patch.object(extractor_module, "build_issue_diagnostics", diagnostics),
         patch.object(extractor_module, "_drain_listener_tasks", drain),
-        patch.object(extractor_module.asyncio, "sleep", clock.sleep),
-        patch.object(extractor_module.time, "monotonic", clock.monotonic),
+        patch.object(session_module.asyncio, "sleep", clock.sleep),
+        patch.object(session_module.time, "monotonic", clock.monotonic),
     ):
         yield
 

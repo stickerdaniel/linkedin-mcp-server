@@ -82,7 +82,7 @@ async def test_stabilization_trace_ignores_physical_logger_identity():
     relocated_logger = logging.getLogger("linkedin_mcp_server.scraping.navigation")
 
     async with boundaries(recorder, clock):
-        await policy_scenarios.extractor_module.stabilize_navigation(
+        await policy_scenarios.navigation_module.stabilize_navigation(
             "logical navigation", relocated_logger
         )
 
@@ -103,7 +103,7 @@ async def test_full_auth_boundary_propagates_a_detected_barrier():
 
     async with boundaries(recorder, clock, auth_result="account picker"):
         with pytest.raises(AuthenticationError, match="interactive re-authentication"):
-            await extractor._raise_if_auth_barrier(
+            await extractor._navigator._raise_if_auth_barrier(
                 "https://www.linkedin.com/jobs/search/"
             )
 
