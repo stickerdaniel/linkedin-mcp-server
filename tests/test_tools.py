@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 from typing import Any, Callable, Coroutine, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1168,6 +1169,86 @@ class TestGetCompanyEmployeesTool:
         tool_fn = await get_tool_fn(mcp, "get_company_employees")
         with pytest.raises(ToolError, match="Session expired"):
             await tool_fn("anthropic", mock_context, extractor=mock_extractor)
+
+
+class TestFeedToolDeadline:
+    """A tool deadline that comes due inside the cleanup shield.
+
+    ``_drain_listener_tasks`` shields its bounded teardown, and AnyIO does
+    not deliver into a shielded scope: on the way out it can only schedule
+    delivery for the next turn. ``get_feed`` then calls ``report_progress``,
+    which suspends only when the client sent a progress token, so the two
+    cases have to be driven separately. Both go over a real client session
+    against a real ``anyio.fail_after``; nothing about the timeout is mocked.
+    """
+
+    @staticmethod
+    def _server_and_reads(mcp_timeout: float, cleanup: float):
+        from linkedin_mcp_server.scraping.extractor import _drain_listener_tasks
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        reads: list[asyncio.Task[None]] = []
+
+        async def extract_feed(num_posts: int = 1) -> ExtractedSection:
+            started = asyncio.Event()
+
+            async def read() -> None:
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    # Holds the shield open across the deadline.
+                    await asyncio.sleep(cleanup)
+
+            task = asyncio.create_task(read())
+            reads.append(task)
+            await started.wait()
+            await _drain_listener_tasks([task])
+            return ExtractedSection(text="synthetic feed", references=[])
+
+        mcp = FastMCP("deadline-test")
+        register_feed_tools(mcp, tool_timeout=mcp_timeout)
+        return mcp, reads, SimpleNamespace(extract_feed=extract_feed)
+
+    async def _call(self, use_session: bool):
+        from fastmcp import Client
+
+        from linkedin_mcp_server.tools import feed as feed_tools
+
+        mcp, reads, extractor = self._server_and_reads(2.5, 0.7)
+        try:
+            with patch.object(
+                feed_tools,
+                "get_ready_extractor",
+                AsyncMock(return_value=extractor),
+            ):
+                async with Client(mcp) as client:
+                    if use_session:
+                        # No progress token: report_progress never suspends.
+                        return await client.session.call_tool(
+                            "get_feed", {"num_posts": 1}
+                        )
+                    # Client.call_tool installs a progress handler, so the
+                    # request carries a token and report_progress awaits.
+                    return await client.call_tool("get_feed", {"num_posts": 1})
+        finally:
+            for task in reads:
+                if not task.done():
+                    task.cancel()
+            if reads:
+                await asyncio.wait(reads, timeout=2.0)
+
+    async def test_the_deadline_fires_without_a_progress_token(self):
+        result = await self._call(use_session=True)
+
+        assert result.isError, "expired call returned a feed result"
+        assert "timed out" in str(result.content)
+
+    async def test_the_deadline_fires_with_a_progress_token(self):
+        from fastmcp.exceptions import ToolError
+
+        with pytest.raises(ToolError, match="timed out"):
+            await self._call(use_session=False)
 
 
 class TestFeedTools:
