@@ -1043,6 +1043,7 @@ name = "mcp-server-linkedin"
 version = "4.23.3"
 source = { editable = "." }
 dependencies = [
+    { name = "anyio" },
     { name = "cryptography" },
     { name = "fastmcp" },
     { name = "inquirer" },
@@ -1067,6 +1068,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anyio", specifier = ">=4.13.0" },
     { name = "cryptography", specifier = ">=48.0.1" },
     { name = "fastmcp", specifier = ">=3.4.4,<4" },
     { name = "inquirer", specifier = ">=3.4.0" },
