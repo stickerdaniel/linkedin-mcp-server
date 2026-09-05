@@ -16,6 +16,7 @@ from patchright.async_api import Page
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.callbacks import ProgressCallback
+from linkedin_mcp_server.scraping import capture as capture_module
 from linkedin_mcp_server.scraping import extractor as extractor_module
 from linkedin_mcp_server.scraping import navigation as navigation_module
 from linkedin_mcp_server.scraping import session as session_module
@@ -160,10 +161,19 @@ async def boundaries(
         patch.object(navigation_module, "detect_auth_barrier", auth),
         patch.object(navigation_module, "resolve_remember_me_prompt", remember),
         patch.object(navigation_module, "stabilize_navigation", stabilize),
+        # Both bindings of each shared boundary, because the workflows that
+        # reach it are split across the modules mid-relocation: capture goes
+        # through `ScrapingSession`, while the job, conversation and messaging
+        # workflows still call the imported helper on the facade. Patching one
+        # side only lets the real helper loose on a strict scripted page.
+        patch.object(session_module, "detect_rate_limit", rate_limit),
         patch.object(extractor_module, "detect_rate_limit", rate_limit),
+        patch.object(session_module, "handle_modal_close", modal),
         patch.object(extractor_module, "handle_modal_close", modal),
+        patch.object(session_module, "scroll_to_bottom", scroll_body),
         patch.object(extractor_module, "scroll_to_bottom", scroll_body),
         patch.object(extractor_module, "scroll_job_sidebar", scroll_sidebar),
+        patch.object(capture_module, "build_issue_diagnostics", diagnostics),
         patch.object(extractor_module, "build_issue_diagnostics", diagnostics),
         patch.object(extractor_module, "_drain_listener_tasks", drain),
         patch.object(session_module.asyncio, "sleep", clock.sleep),

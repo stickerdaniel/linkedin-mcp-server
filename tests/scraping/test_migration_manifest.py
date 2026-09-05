@@ -21,11 +21,11 @@ CHECKER = ROOT / "scripts" / "check_scraping_migration_manifest.py"
 POLICY_SCENARIOS = ROOT / "tests" / "scraping" / "policy_scenarios.py"
 
 _SHARED_BOUNDARY_STAGES = {
-    "detect_rate_limit": {4, 5, 6, 9, 11, 12},
-    "handle_modal_close": {4, 5, 6, 9, 11, 12},
-    "scroll_to_bottom": {4, 9},
+    "detect_rate_limit": {5, 6, 9, 11, 12},
+    "handle_modal_close": {5, 6, 9, 11, 12},
+    "scroll_to_bottom": {9},
     "scroll_job_sidebar": {9},
-    "build_issue_diagnostics": {4, 5, 6, 8, 9},
+    "build_issue_diagnostics": {5, 6, 8, 9},
 }
 
 
@@ -180,12 +180,6 @@ def test_shared_boundary_patches_retain_later_consumers_after_early_migration(
         for seam in seams
         if seam.kind == "boundary_patch_object" and seam.target == target
     } == expected_stages - {earliest_stage}
-    if target == "scroll_to_bottom":
-        assert {
-            seam.migration_stage
-            for seam in seams
-            if seam.kind == "module_attribute" and seam.target == target
-        } == expected_stages - {earliest_stage}
 
 
 def test_public_facade_patches_follow_each_calling_workflow():
@@ -248,7 +242,7 @@ def test_checker_rejects_obsolete_seams_at_their_migration_stage():
     # completed stage are closed by definition, so an override there proves
     # nothing; raise this number as each stage lands.
     result = subprocess.run(
-        [sys.executable, str(CHECKER), "--check", "--stage", "4"],
+        [sys.executable, str(CHECKER), "--check", "--stage", "5"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -256,8 +250,12 @@ def test_checker_rejects_obsolete_seams_at_their_migration_stage():
     )
 
     assert result.returncode == 1
-    assert "obsolete at stage 4:" in result.stderr
-    assert "string_patch" in result.stderr
+    assert "obsolete at stage 5:" in result.stderr
+    assert "module_attribute" in result.stderr
+    # Every extractor-rooted string patch aimed at generic capture moved with
+    # the test that held it, so no override below stage 6 can surface one. A
+    # capture test that reached back through the facade would show up here.
+    assert "string_patch" not in result.stderr
 
 
 def test_checkers_offer_no_fixture_update_mode():
@@ -366,7 +364,7 @@ async def boundaries(tasks):
     assert {seam.canonical_owner for seam in matching("_drain_listener_tasks")} == {
         "feed.FeedScraper"
     }
-    assert {seam.migration_stage for seam in matching("scroll_to_bottom")} == {4, 9}
+    assert {seam.migration_stage for seam in matching("scroll_to_bottom")} == {9}
     assert {seam.migration_stage for seam in matching("scroll_job_sidebar")} == {9}
     assert {seam.migration_stage for seam in matching("_URL_SETTLE_LAG")} == {3}
     assert {seam.canonical_owner for seam in matching("_URL_SETTLE_LAG")} == {

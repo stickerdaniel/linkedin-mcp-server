@@ -214,8 +214,6 @@ _EXPLICIT_CALLER_CONTEXTS: dict[tuple[str, str, str], tuple[str, ...]] = {
         "boundaries",
         "detect_rate_limit",
     ): (
-        "_extract_loaded_section",
-        "_extract_overlay_once",
         "_extract_feed_body",
         "get_sidebar_profiles",
         "_extract_search_page_once",
@@ -232,7 +230,6 @@ _EXPLICIT_CALLER_CONTEXTS: dict[tuple[str, str, str], tuple[str, ...]] = {
         "boundaries",
         "handle_modal_close",
     ): (
-        "_extract_loaded_section",
         "_extract_feed_body",
         "get_sidebar_profiles",
         "_extract_search_page_once",
@@ -248,7 +245,7 @@ _EXPLICIT_CALLER_CONTEXTS: dict[tuple[str, str, str], tuple[str, ...]] = {
         "tests/scraping/policy_scenarios.py",
         "boundaries",
         "scroll_to_bottom",
-    ): ("_extract_loaded_section", "_extract_saved_jobs_page_once"),
+    ): ("_extract_saved_jobs_page_once",),
     (
         "tests/scraping/policy_scenarios.py",
         "boundaries",
@@ -260,8 +257,6 @@ _EXPLICIT_CALLER_CONTEXTS: dict[tuple[str, str, str], tuple[str, ...]] = {
         "build_issue_diagnostics",
     ): (
         "extract_feed",
-        "extract_page",
-        "_extract_overlay",
         "scrape_person",
         "scrape_company",
         "_extract_search_page",
