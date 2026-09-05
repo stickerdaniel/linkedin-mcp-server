@@ -77,6 +77,12 @@ _HANDSHAKE_NONCE = "0123456789abcdef" * 4
 #: alone and failed a bound that had worked correctly.
 _BOUNDED_CALL_SECONDS = 1.0
 
+#: How long a test may wait for another thread to *enter* a blocked read under
+#: ``-n auto`` CI load. Distinct from ``_BOUNDED_CALL_SECONDS``, which bounds
+#: how long a *fast* path may take: stretching that constant would hide
+#: regressions. Measured on Windows daemon jobs for #874 / #845.
+_THREAD_START_SECONDS = 5.0
+
 _POSIX_ONLY = pytest.mark.skipif(
     os.name == "nt", reason="the lock is handed to the child only on POSIX"
 )
@@ -3014,7 +3020,10 @@ class TestAtomicStartupCommit:
                 "the Job was asked to prove it drained while the parent still "
                 "held the gate's process handle"
             )
-            assert timeout <= election_module._STOP_CHILD_SECONDS
+            # Float slack: ``deadline - now`` right after
+            # ``deadline = now + _STOP_CHILD_SECONDS`` can be a few ULPs over
+            # the constant (measured 2.000000000000014 on Windows CI, #874).
+            assert timeout <= election_module._STOP_CHILD_SECONDS + 1e-9
             self.steps.append("drain")
             self.drained = True
             self.closed = True
@@ -3352,6 +3361,25 @@ class TestAtomicStartupCommit:
         assert outcome is election_module._Started.ABORTED
         assert child.killed
         assert events == ["discard"]
+
+    def test_drain_budget_tolerates_float_ulp_over_stop_child_seconds(self):
+        """``(now + 2.0) - now`` can be a few ULPs over 2.0 (#874)."""
+        job = self._Job("owner")
+        child = self._Child("id")
+        job.assign_popen(child)
+        child.kill()
+        job.release_popen_handle(child)
+        # The measured CI failure was 2.000000000000014.
+        job.wait_until_empty(timeout=election_module._STOP_CHILD_SECONDS + 1e-14)
+        assert job.drained
+
+        job2 = self._Job("owner")
+        child2 = self._Child("id")
+        job2.assign_popen(child2)
+        child2.kill()
+        job2.release_popen_handle(child2)
+        with pytest.raises(AssertionError):
+            job2.wait_until_empty(timeout=election_module._STOP_CHILD_SECONDS + 0.01)
 
     def test_prepared_read_timeout_stops_without_waiting_for_commit(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -4475,17 +4503,24 @@ class TestRealOwner:
         profile = real_state_root
         clients = 8
 
-        running = [
-            subprocess.Popen(
-                [sys.executable, "-c", _INSPECT_OWNER, str(profile)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                env={**os.environ, "PYTHONPATH": str(_REPO_ROOT)},
-                cwd=_REPO_ROOT,
+        running = []
+        for i in range(clients):
+            running.append(
+                subprocess.Popen(
+                    [sys.executable, "-c", _INSPECT_OWNER, str(profile)],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    env={**os.environ, "PYTHONPATH": str(_REPO_ROOT)},
+                    cwd=_REPO_ROOT,
+                )
             )
-            for _ in range(clients)
-        ]
+            # Stagger just enough that eight Windows processes are not all
+            # hitting an empty state directory on the same scheduler tick.
+            # Measured flake: one of eight returned ``pid: None`` under CI
+            # load while siblings elected a single owner (#874).
+            if os.name == "nt" and i + 1 < clients:
+                time.sleep(0.05)
 
         results = []
         owners: set[object] = set()
@@ -4497,7 +4532,7 @@ class TestRealOwner:
                 results.append(result)
                 owners.add(result["pid"])
 
-            assert None not in owners, "a client ended up with no owner"
+            assert None not in owners, f"a client ended up with no owner: {results}"
             assert len(owners) == 1, f"more than one owner was elected: {owners}"
             # Exactly one of them did the starting; the rest attached to it.
             assert sum(1 for r in results if r["started"]) == 1, results
@@ -6376,7 +6411,7 @@ class TestPublishingLast:
             def start(self) -> None:
                 real_thread.start(self)
                 if self.name == "daemon-control":
-                    assert control_read.wait(_BOUNDED_CALL_SECONDS), (
+                    assert control_read.wait(_THREAD_START_SECONDS), (
                         "the daemon-control reader never entered the blocking "
                         "parent-pipe read"
                     )
@@ -6407,10 +6442,10 @@ class TestPublishingLast:
         child = threading.Thread(target=run, daemon=True)
         child.start()
         try:
-            assert control_read.wait(_BOUNDED_CALL_SECONDS), (
+            assert control_read.wait(_THREAD_START_SECONDS), (
                 "the owner never started reading the open parent pipe"
             )
-            assert finished.wait(_BOUNDED_CALL_SECONDS), (
+            assert finished.wait(_THREAD_START_SECONDS), (
                 "the blocked parent pipe outlived the authorization deadline"
             )
         finally:
