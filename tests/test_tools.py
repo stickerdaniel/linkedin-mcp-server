@@ -1017,6 +1017,47 @@ class TestMessagingTools:
         assert result["retry_safe"] is True
         assert result["url"] == "https://www.linkedin.com/in/testuser/"
 
+    @pytest.mark.parametrize(
+        "username",
+        ["", "me", "https://www.linkedin.com/company/microsoft/"],
+        ids=["empty", "self-alias", "not-a-person"],
+    )
+    async def test_blank_message_with_an_unusable_recipient_is_mapped(
+        self, mock_context, username
+    ):
+        """A recipient the refusal cannot name still reaches the error mapping.
+
+        Building the refusal normalizes the recipient, so a username that
+        cannot become a profile URL raises `InvalidReferenceError` from inside
+        the guard. Raised past `raise_tool_error` it would arrive at the caller
+        as a generic masked error (`mask_error_details=True` in `server.py`),
+        which drops the one sentence that says what to correct.
+        """
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.core.exceptions import InvalidReferenceError
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "send_message")
+        with (
+            patch(
+                "linkedin_mcp_server.tools.messaging.get_ready_extractor",
+                new_callable=AsyncMock,
+            ) as ready,
+            pytest.raises(ToolError) as excinfo,
+        ):
+            await tool_fn(username, "", True, mock_context)
+
+        ready.assert_not_awaited()
+        # A ToolError is what `mask_error_details` lets through, so the
+        # correction the message names reaches the caller intact.
+        cause = excinfo.value.__cause__
+        assert isinstance(cause, InvalidReferenceError)
+        assert str(excinfo.value) == str(cause) != ""
+
     async def test_send_message_with_profile_urn(self, mock_context):
         expected = {
             "url": "https://www.linkedin.com/messaging/thread/abc123/",

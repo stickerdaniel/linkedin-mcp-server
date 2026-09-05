@@ -1,5 +1,6 @@
 """Tests for the LinkedInExtractor scraping engine."""
 
+from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 from urllib.parse import parse_qs, urlparse
@@ -9040,7 +9041,9 @@ class TestSendMessageComposerInteraction:
         # attempted; the answer comes from the interruption itself.
         visible.assert_not_awaited()
 
-    @pytest.mark.parametrize("stage", ["dispatch", "confirmation"])
+    @pytest.mark.parametrize(
+        "stage", ["dispatch", "confirmation", "failed-cleanup", "unconfirmed-cleanup"]
+    )
     async def test_cancellation_after_dispatch_is_logged(
         self, mock_page, caplog, stage
     ):
@@ -9051,33 +9054,51 @@ class TestSendMessageComposerInteraction:
         anything the cancelled scope returns. The caller therefore sees a
         timeout carrying no ``retry_safe``, and this log line is the only
         record that a message may already have left.
+
+        The window ends where a result exists, not where the send returns.
+        Both cleanup calls run after a submission was dispatched, and both
+        await: the one in the submission-failure handler and the one on the
+        unconfirmed path. Cancelled there, the message is exactly as
+        possibly-delivered as during the send itself.
         """
         extractor = LinkedInExtractor(mock_page)
         mock_keyboard = MagicMock()
         mock_keyboard.type = AsyncMock()
         mock_keyboard.press = AsyncMock()
         mock_page.keyboard = mock_keyboard
+        dismiss_effect = None
         if stage == "dispatch":
             mock_page.evaluate = AsyncMock(
                 side_effect=["focused", asyncio.CancelledError()]
             )
             visible_effect = AsyncMock()
-        else:
+        elif stage == "confirmation":
             mock_page.evaluate = AsyncMock(side_effect=["focused", True])
             visible_effect = AsyncMock(side_effect=asyncio.CancelledError())
+        elif stage == "failed-cleanup":
+            # The submission raised an ordinary error after dispatching its
+            # input event, so the handler runs and is cancelled inside it.
+            mock_page.evaluate = AsyncMock(
+                side_effect=["focused", RuntimeError("context destroyed")]
+            )
+            visible_effect = AsyncMock()
+            dismiss_effect = AsyncMock(side_effect=asyncio.CancelledError())
+        else:
+            # The send went out and delivery was not observed, which is the
+            # path that most needs the warning: the result it was about to
+            # return is the one carrying `retry_safe=False`.
+            mock_page.evaluate = AsyncMock(side_effect=["focused", True])
+            visible_effect = AsyncMock(return_value=False)
+            dismiss_effect = AsyncMock(side_effect=asyncio.CancelledError())
         patches = self._patch_send_message_to_compose(extractor, mock_page)
+        if dismiss_effect is not None:
+            patches = [
+                *patches,
+                patch.object(extractor, "_dismiss_message_ui", dismiss_effect),
+            ]
 
         with (
-            patches[0],
-            patches[1],
-            patches[2],
-            patches[3],
-            patches[4],
-            patches[5],
-            patches[6],
-            patches[7],
-            patches[8],
-            patches[9],
+            ExitStack() as stack,
             patch.object(
                 extractor,
                 "_message_text_occurrences",
@@ -9090,6 +9111,8 @@ class TestSendMessageComposerInteraction:
             ),
             pytest.raises(asyncio.CancelledError),
         ):
+            for entered in patches:
+                stack.enter_context(entered)
             await extractor.send_message("testuser", "Hello!", confirm_send=True)
 
         # Cancellation has to keep propagating, or the surrounding scope

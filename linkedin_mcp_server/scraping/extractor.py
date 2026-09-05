@@ -514,15 +514,15 @@ _MESSAGE_OCCURRENCES_JS = r"""
 """
 
 # A submission is in flight from the moment the send is dispatched until the
-# confirmation answers, and a cancellation in that window cannot be reported:
-# FastMCP runs every tool inside `anyio.fail_after()`, so the deadline raises
-# `CancelledError` past `except Exception` and discards any result returned
-# from the cancelled scope. The caller gets a timeout that carries no
-# `retry_safe`, and this line is then the only record that a message may
-# already have left. Answering the caller instead needs the tool to know its
-# own deadline, which is issue #889.
-_SEND_CANCELLED_WARNING = (
-    "Message submission was cancelled while in flight. Delivery is unknown; "
+# whole path has produced a result, cleanup included, and an interruption in
+# that window cannot be reported. FastMCP runs every tool inside
+# `anyio.fail_after()`, so the deadline raises `CancelledError` past
+# `except Exception` and discards any result returned from the cancelled
+# scope. The caller gets a timeout that carries no `retry_safe`, and this line
+# is then the only record that a message may already have left. Answering the
+# caller instead needs the tool to know its own deadline, which is issue #889.
+_SEND_INTERRUPTED_WARNING = (
+    "Message submission was interrupted while in flight. Delivery is unknown; "
     "check the conversation before retrying, as a retry may deliver the "
     "message twice."
 )
@@ -5219,16 +5219,23 @@ class LinkedInExtractor:
         # the composer still holds.
         previous_occurrences = await self._message_text_occurrences(message)
 
-        # patchright actionability also blocks send_button.click(). Use JS click
-        # on any visible, enabled send button; fall back to Enter key which
-        # LinkedIn's composer also accepts for submission.
-        #
-        # DOM dependency: we need btn.click() on the element reference — not
-        # achievable via innerText or URL navigation. Selectors use only type,
-        # aria-label, and data attributes (no layout class names).
+        # Everything from here on runs with a submission dispatched or about to
+        # be, so any exit that carries no result leaves the caller unable to
+        # tell whether a message went out. The cleanup awaits between the
+        # branches below are inside this window for that reason: an
+        # interruption during `_dismiss_message_ui` is as unreportable as one
+        # during the send itself.
         try:
-            sent_via_js = await self._page.evaluate(
-                """() => {
+            # patchright actionability also blocks send_button.click(). Use JS
+            # click on any visible, enabled send button; fall back to Enter key
+            # which LinkedIn's composer also accepts for submission.
+            #
+            # DOM dependency: we need btn.click() on the element reference — not
+            # achievable via innerText or URL navigation. Selectors use only
+            # type, aria-label, and data attributes (no layout class names).
+            try:
+                sent_via_js = await self._page.evaluate(
+                    """() => {
                     const btn = Array.from(document.querySelectorAll(
                         'button[type="submit"], button[aria-label*="Send"], button[aria-label*="send"],'
                         + 'button[data-control-name="send"]'
@@ -5237,71 +5244,69 @@ class LinkedInExtractor:
                     btn.click();
                     return true;
                 }"""
-            )
-            if not sent_via_js:
-                await self._page.keyboard.press("Enter")
-        except Exception:
-            # Both submissions dispatch their input event inside the very call
-            # that then fails, so a context that dies here says nothing about
-            # whether the message left: a send that navigates the page away
-            # looks exactly like one that never started. Letting the error out
-            # would reach the caller as a plain tool failure and invite the
-            # retry that delivers a second message to a real person.
-            logger.debug("Message submission did not complete", exc_info=True)
-            await self._dismiss_message_ui()
-            return self._message_action_result(
-                self._page.url,
-                "send_unconfirmed",
-                "The message submission was interrupted and LinkedIn did not "
-                "confirm delivery. Check the conversation before retrying; "
-                "retrying may deliver the message twice.",
-                recipient_selected=recipient_selected,
-                retry_safe=False,
-            )
-        except BaseException:
-            # Ordered after `except Exception`, so this is cancellation and
-            # not an ordinary failure. Re-raised rather than reported,
-            # because the cancelled scope discards a return value.
-            logger.warning(_SEND_CANCELLED_WARNING)
-            raise
+                )
+                if not sent_via_js:
+                    await self._page.keyboard.press("Enter")
+            except Exception:
+                # Both submissions dispatch their input event inside the very
+                # call that then fails, so a context that dies here says
+                # nothing about whether the message left: a send that navigates
+                # the page away looks exactly like one that never started.
+                # Letting the error out would reach the caller as a plain tool
+                # failure and invite the retry that delivers a second message
+                # to a real person.
+                logger.debug("Message submission did not complete", exc_info=True)
+                await self._dismiss_message_ui()
+                return self._message_action_result(
+                    self._page.url,
+                    "send_unconfirmed",
+                    "The message submission was interrupted and LinkedIn did "
+                    "not confirm delivery. Check the conversation before "
+                    "retrying; retrying may deliver the message twice.",
+                    recipient_selected=recipient_selected,
+                    retry_safe=False,
+                )
 
-        try:
             confirmed = await self._message_text_visible(
                 message, previous_occurrences=previous_occurrences
             )
-        except BaseException:
-            # `_message_text_visible` answers False for every failure it can
-            # observe, so only cancellation arrives here, and it arrives
-            # after a message may already have been delivered.
-            logger.warning(_SEND_CANCELLED_WARNING)
-            raise
 
-        if not confirmed:
-            await self._dismiss_message_ui()
-            # Submission already happened, so this is not evidence that
-            # nothing was sent: a thread that renders the delivered bubble
-            # slower than the page timeout arrives here having delivered.
-            # Reporting a plain failure invites a retry, and a retry sends a
-            # second real message to a real person, so the status says
-            # unknown rather than no.
+            if not confirmed:
+                await self._dismiss_message_ui()
+                # Submission already happened, so this is not evidence that
+                # nothing was sent: a thread that renders the delivered bubble
+                # slower than the page timeout arrives here having delivered.
+                # Reporting a plain failure invites a retry, and a retry sends a
+                # second real message to a real person, so the status says
+                # unknown rather than no.
+                return self._message_action_result(
+                    self._page.url,
+                    "send_unconfirmed",
+                    "The message was submitted but LinkedIn did not confirm "
+                    "delivery in time. Check the conversation before retrying; "
+                    "retrying may deliver the message twice.",
+                    recipient_selected=recipient_selected,
+                    retry_safe=False,
+                )
+
             return self._message_action_result(
                 self._page.url,
-                "send_unconfirmed",
-                "The message was submitted but LinkedIn did not confirm "
-                "delivery in time. Check the conversation before retrying; "
-                "retrying may deliver the message twice.",
+                "sent",
+                "Message sent.",
                 recipient_selected=recipient_selected,
+                sent=True,
                 retry_safe=False,
             )
-
-        return self._message_action_result(
-            self._page.url,
-            "sent",
-            "Message sent.",
-            recipient_selected=recipient_selected,
-            sent=True,
-            retry_safe=False,
-        )
+        except BaseException:
+            # Reached only where the window produced no result at all. An
+            # ordinary submission failure returns from the inner handler, and
+            # `_message_text_visible` answers False for every failure it can
+            # observe, so what arrives here is cancellation or the rare error
+            # escaping cleanup. Both leave the same question behind, and both
+            # are re-raised rather than reported, because a cancelled scope
+            # discards a return value.
+            logger.warning(_SEND_INTERRUPTED_WARNING)
+            raise
 
     async def _extract_root_content(
         self,

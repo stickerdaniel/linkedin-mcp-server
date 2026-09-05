@@ -259,15 +259,18 @@ def register_messaging_tools(
             moment a submission is attempted, and calling again while it is
             false can deliver the message twice.
         """
-        # Answered before a session is acquired. Nothing about a blank message
-        # needs a browser, and acquiring one can spend a login attempt and
-        # come back as an authentication error instead of the refusal the
-        # caller can act on.
-        refusal = refuse_a_blank_message(linkedin_username, message)
-        if refusal is not None:
-            return refusal
-
         try:
+            # Answered before a session is acquired. Nothing about a blank
+            # message needs a browser, and acquiring one can spend a login
+            # attempt and come back as an authentication error instead of the
+            # refusal the caller can act on. Inside the `try` because building
+            # the refusal normalizes the recipient, and an unusable one raises
+            # `InvalidReferenceError`; outside, that error would skip
+            # `raise_tool_error` and reach the caller masked by
+            # `mask_error_details` instead of naming the correction.
+            refusal = refuse_a_blank_message(linkedin_username, message)
+            if refusal is not None:
+                return refusal
             extractor = extractor or await get_ready_extractor(
                 ctx, tool_name="send_message"
             )
