@@ -987,6 +987,36 @@ class TestMessagingTools:
             "testuser", "Hello!", confirm_send=True, profile_urn=None
         )
 
+    @pytest.mark.parametrize("message", ["", "   \t\n"], ids=["empty", "whitespace"])
+    async def test_send_message_refuses_blank_before_a_session(
+        self, mock_context, message
+    ):
+        """A blank message is answered without acquiring a browser session.
+
+        The extractor keeps the same guard, but it only runs once a session
+        exists. Reaching it means `get_ready_extractor` has already had the
+        chance to spend a login attempt and answer with an authentication
+        error, which is not the refusal the caller can act on.
+        """
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "send_message")
+        with patch(
+            "linkedin_mcp_server.tools.messaging.get_ready_extractor",
+            new_callable=AsyncMock,
+        ) as ready:
+            result = await tool_fn("testuser", message, True, mock_context)
+
+        ready.assert_not_awaited()
+        assert result["status"] == "invalid_message"
+        assert result["sent"] is False
+        # Nothing was submitted, so calling again cannot deliver twice.
+        assert result["retry_safe"] is True
+        assert result["url"] == "https://www.linkedin.com/in/testuser/"
+
     async def test_send_message_with_profile_urn(self, mock_context):
         expected = {
             "url": "https://www.linkedin.com/messaging/thread/abc123/",

@@ -5041,17 +5041,11 @@ class LinkedInExtractor:
             profile_urn: Optional profile URN (e.g. ACoAAB...) to construct the
                 compose URL directly, bypassing the Message-button lookup.
         """
+        refusal = refuse_a_blank_message(linkedin_username, message)
+        if refusal is not None:
+            return refusal
         linkedin_username = normalize_person_identifier(linkedin_username)
         profile_url = person_profile_url(linkedin_username, "/")
-        if not message.strip():
-            # Not `message_unavailable`, which says the *recipient* exposes no
-            # Message action and tells a caller to give up on this person. A
-            # blank message is the caller's own input and the repair is theirs.
-            return self._message_action_result(
-                profile_url,
-                "invalid_message",
-                "Message must contain non-whitespace characters.",
-            )
 
         await self._navigate_to_page(profile_url)
         await detect_rate_limit(self._page)
@@ -5417,3 +5411,26 @@ class LinkedInExtractor:
             {"selectors": selectors},
         )
         return result
+
+
+def refuse_a_blank_message(
+    linkedin_username: str, message: str
+) -> dict[str, Any] | None:
+    """The refusal for a whitespace-only message, or None if there is none.
+
+    Shared between the MCP tool and `LinkedInExtractor.send_message` so the
+    two cannot answer the same input differently. The tool calls it before
+    acquiring a session: the input is the caller's own and needs no browser
+    to judge, while acquiring one can spend a login attempt and answer with
+    an authentication error the caller then has to interpret instead.
+    """
+    if message.strip():
+        return None
+    # Not `message_unavailable`, which says the *recipient* exposes no
+    # Message action and tells a caller to give up on this person. A blank
+    # message is the caller's own input and the repair is theirs.
+    return LinkedInExtractor._message_action_result(
+        person_profile_url(normalize_person_identifier(linkedin_username), "/"),
+        "invalid_message",
+        "Message must contain non-whitespace characters.",
+    )

@@ -17,6 +17,7 @@ from linkedin_mcp_server.core.exceptions import (
 )
 from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
 from linkedin_mcp_server.error_handler import raise_tool_error
+from linkedin_mcp_server.scraping.extractor import refuse_a_blank_message
 
 logger = logging.getLogger(__name__)
 
@@ -258,6 +259,14 @@ def register_messaging_tools(
             moment a submission is attempted, and calling again while it is
             false can deliver the message twice.
         """
+        # Answered before a session is acquired. Nothing about a blank message
+        # needs a browser, and acquiring one can spend a login attempt and
+        # come back as an authentication error instead of the refusal the
+        # caller can act on.
+        refusal = refuse_a_blank_message(linkedin_username, message)
+        if refusal is not None:
+            return refusal
+
         try:
             extractor = extractor or await get_ready_extractor(
                 ctx, tool_name="send_message"
