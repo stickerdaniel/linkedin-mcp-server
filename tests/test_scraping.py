@@ -5,6 +5,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
 import asyncio
+import logging
 
 from patchright.async_api import Error as PatchrightError
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
@@ -9036,6 +9037,66 @@ class TestSendMessageComposerInteraction:
         # There is no page left to read, so the confirmation is never even
         # attempted; the answer comes from the interruption itself.
         visible.assert_not_awaited()
+
+    @pytest.mark.parametrize("stage", ["dispatch", "confirmation"])
+    async def test_cancellation_after_dispatch_is_logged(
+        self, mock_page, caplog, stage
+    ):
+        """Cancellation in the destructive window leaves a warning behind.
+
+        FastMCP runs the tool inside ``anyio.fail_after()``, so the deadline
+        raises ``CancelledError`` past ``except Exception`` and discards
+        anything the cancelled scope returns. The caller therefore sees a
+        timeout carrying no ``retry_safe``, and this log line is the only
+        record that a message may already have left.
+        """
+        extractor = LinkedInExtractor(mock_page)
+        mock_keyboard = MagicMock()
+        mock_keyboard.type = AsyncMock()
+        mock_keyboard.press = AsyncMock()
+        mock_page.keyboard = mock_keyboard
+        if stage == "dispatch":
+            mock_page.evaluate = AsyncMock(
+                side_effect=["focused", asyncio.CancelledError()]
+            )
+            visible_effect = AsyncMock()
+        else:
+            mock_page.evaluate = AsyncMock(side_effect=["focused", True])
+            visible_effect = AsyncMock(side_effect=asyncio.CancelledError())
+        patches = self._patch_send_message_to_compose(extractor, mock_page)
+
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patches[7],
+            patches[8],
+            patches[9],
+            patch.object(
+                extractor,
+                "_message_text_occurrences",
+                new_callable=AsyncMock,
+                return_value=1,
+            ),
+            patch.object(extractor, "_message_text_visible", visible_effect),
+            caplog.at_level(
+                logging.WARNING, logger="linkedin_mcp_server.scraping.extractor"
+            ),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await extractor.send_message("testuser", "Hello!", confirm_send=True)
+
+        # Cancellation has to keep propagating, or the surrounding scope
+        # never unwinds. The warning names the duplicate-delivery risk that
+        # the discarded result can no longer report.
+        warnings = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("retry may deliver the message twice" in w for w in warnings), (
+            warnings
+        )
 
     async def test_send_unconfirmed_when_click_adds_nothing(self, mock_page):
         """A clicked Send button that changes nothing is not a sent message."""

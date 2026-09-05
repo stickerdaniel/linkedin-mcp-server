@@ -464,7 +464,7 @@ _MESSAGING_CLOSE_SELECTOR = (
 # it. Visibility is pure geometry and the match is on normalized text, so no
 # LinkedIn class name or localized label enters the decision.
 #
-# Known limit, and it scales with how short the message is: the count is taken
+# Known limit (issue #888), and it scales with how short the message is: the count is taken
 # over the whole body, so any unrelated text arriving between the two reads can
 # raise it if the message occurs inside it. A messaging page updates presence
 # and timestamps on its own, so a one-character message can be confirmed by
@@ -510,6 +510,20 @@ _MESSAGE_OCCURRENCES_JS = r"""
     return total > 0 ? total : 0;
 }
 """
+
+# A submission is in flight from the moment the send is dispatched until the
+# confirmation answers, and a cancellation in that window cannot be reported:
+# FastMCP runs every tool inside `anyio.fail_after()`, so the deadline raises
+# `CancelledError` past `except Exception` and discards any result returned
+# from the cancelled scope. The caller gets a timeout that carries no
+# `retry_safe`, and this line is then the only record that a message may
+# already have left. Answering the caller instead needs the tool to know its
+# own deadline, which is issue #889.
+_SEND_CANCELLED_WARNING = (
+    "Message submission was cancelled while in flight. Delivery is unknown; "
+    "check the conversation before retrying, as a retry may deliver the "
+    "message twice."
+)
 
 # The post-send predicate is the same counting routine, so the baseline and
 # the confirmation can never disagree about what counts as an occurrence.
@@ -5211,10 +5225,25 @@ class LinkedInExtractor:
                 recipient_selected=recipient_selected,
                 retry_safe=False,
             )
+        except BaseException:
+            # Ordered after `except Exception`, so this is cancellation and
+            # not an ordinary failure. Re-raised rather than reported,
+            # because the cancelled scope discards a return value.
+            logger.warning(_SEND_CANCELLED_WARNING)
+            raise
 
-        if not await self._message_text_visible(
-            message, previous_occurrences=previous_occurrences
-        ):
+        try:
+            confirmed = await self._message_text_visible(
+                message, previous_occurrences=previous_occurrences
+            )
+        except BaseException:
+            # `_message_text_visible` answers False for every failure it can
+            # observe, so only cancellation arrives here, and it arrives
+            # after a message may already have been delivered.
+            logger.warning(_SEND_CANCELLED_WARNING)
+            raise
+
+        if not confirmed:
             await self._dismiss_message_ui()
             # Submission already happened, so this is not evidence that
             # nothing was sent: a thread that renders the delivered bubble
