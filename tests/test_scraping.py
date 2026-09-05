@@ -8799,8 +8799,9 @@ class TestSendMessageComposerInteraction:
         mock_keyboard.type = AsyncMock()
         mock_keyboard.press = AsyncMock()
         mock_page.keyboard = mock_keyboard
-        # evaluate returns: True (focus), True (send button click)
-        mock_page.evaluate = AsyncMock(side_effect=[True, True])
+        # evaluate returns: 'focused' (empty composer, focused), then
+        # True (send button click)
+        mock_page.evaluate = AsyncMock(side_effect=["focused", True])
         patches = self._patch_send_message_to_compose(extractor, mock_page)
 
         with (
@@ -8842,8 +8843,8 @@ class TestSendMessageComposerInteraction:
         mock_keyboard = MagicMock()
         mock_keyboard.type = AsyncMock()
         mock_page.keyboard = mock_keyboard
-        # evaluate returns False (focus failed)
-        mock_page.evaluate = AsyncMock(return_value=False)
+        # evaluate returns 'missing' (no composer to focus)
+        mock_page.evaluate = AsyncMock(return_value="missing")
         patches = self._patch_send_message_to_compose(extractor, mock_page)
 
         with (
@@ -8872,8 +8873,8 @@ class TestSendMessageComposerInteraction:
         mock_keyboard.type = AsyncMock()
         mock_keyboard.press = AsyncMock()
         mock_page.keyboard = mock_keyboard
-        # evaluate returns: True (focus), False (no send button found)
-        mock_page.evaluate = AsyncMock(side_effect=[True, False])
+        # evaluate returns: 'focused', then False (no send button found)
+        mock_page.evaluate = AsyncMock(side_effect=["focused", False])
         patches = self._patch_send_message_to_compose(extractor, mock_page)
 
         with (
@@ -8925,8 +8926,11 @@ class TestSendMessageComposerInteraction:
         mock_page.keyboard = mock_keyboard
 
         async def evaluate(*args, **kwargs):
-            steps.append("click" if steps else "focus")
-            return True
+            focusing = not steps
+            steps.append("focus" if focusing else "click")
+            # The focus call reports the composer state; the click reports
+            # whether a send button was found.
+            return "focused" if focusing else True
 
         async def occurrences(message):
             steps.append("baseline")
@@ -8971,15 +8975,15 @@ class TestSendMessageComposerInteraction:
         # The confirmation receives exactly the baseline taken before the click.
         assert steps == ["focus", "type", "baseline", "click", "confirm:2"]
 
-    async def test_send_unavailable_when_click_adds_nothing(self, mock_page):
+    async def test_send_unconfirmed_when_click_adds_nothing(self, mock_page):
         """A clicked Send button that changes nothing is not a sent message."""
         extractor = LinkedInExtractor(mock_page)
         mock_keyboard = MagicMock()
         mock_keyboard.type = AsyncMock()
         mock_keyboard.press = AsyncMock()
         mock_page.keyboard = mock_keyboard
-        # evaluate returns: True (focus), True (send button found and clicked)
-        mock_page.evaluate = AsyncMock(side_effect=[True, True])
+        # evaluate returns: 'focused', then True (send button found and clicked)
+        mock_page.evaluate = AsyncMock(side_effect=["focused", True])
         patches = self._patch_send_message_to_compose(extractor, mock_page)
 
         with (
@@ -9010,7 +9014,9 @@ class TestSendMessageComposerInteraction:
                 "testuser", "Hello!", confirm_send=True
             )
 
-        assert result["status"] == "send_unavailable"
+        # The click happened, so nothing here proves the message did not go
+        # out. Answering "not sent" would invite a retry that delivers twice.
+        assert result["status"] == "send_unconfirmed"
         assert result["sent"] is False
         visible.assert_awaited_once_with("Hello!", previous_occurrences=1)
 
