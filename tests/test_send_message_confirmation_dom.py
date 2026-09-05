@@ -18,6 +18,7 @@ whether or not the send succeeds.
 
 from __future__ import annotations
 
+import os
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -56,6 +57,18 @@ READONLY_NOOP_SEND_JS = """
   document.getElementById('send').addEventListener('click', () => {
     document.body.setAttribute('data-clicked', 'true');
     document.getElementById('composer').setAttribute('contenteditable', 'false');
+  });
+"""
+
+# Clears the composer and delivers nothing, which is what an optimistic
+# reset followed by a failed submission leaves behind. This is the case that
+# separates "a new occurrence appeared" from "the editor went empty": a
+# confirmation that subtracted the draft only while the editor held text
+# would read the clearance itself as the delivery.
+CLEARING_NOOP_SEND_JS = """
+  document.getElementById('send').addEventListener('click', () => {
+    document.body.setAttribute('data-clicked', 'true');
+    document.getElementById('composer').textContent = '';
   });
 """
 
@@ -116,6 +129,12 @@ async def dom_page():
             browser = await p.chromium.launch(channel="chromium", headless=True)
             page = await browser.new_page()
         except Exception as exc:  # browser binary missing
+            if os.environ.get("CI"):
+                # CI installs chromium before this suite runs, so a launch
+                # that fails there is a broken environment rather than an
+                # absent browser. Skipping would take every case in this file
+                # out of CI while the run stayed green.
+                raise
             pytest.skip(f"chromium unavailable: {exc}")
         # The confirmation waits on the page-level default, so a failed send
         # has to give up quickly here.
@@ -217,6 +236,22 @@ class TestSendConfirmationAgainstRealDom:
         # The click happened, so a retry can deliver the message twice.
         assert result["retry_safe"] is False
         assert await text_of(dom_page, "#composer") == MESSAGE
+        assert await dom_page.locator("#thread .msg").count() == 1
+
+    async def test_a_cleared_composer_alone_does_not_confirm(self, dom_page):
+        # The composer empties and nothing arrives in the thread. The count
+        # outside every editor is the same before and after, so this stays
+        # unconfirmed. Reading the clearance as delivery is the mistake this
+        # case exists to catch: an implementation that stopped subtracting
+        # the draft once the editor went empty would pass every other case
+        # in this file and confirm here.
+        result = await send(dom_page, compose_page(CLEARING_NOOP_SEND_JS))
+
+        assert await dom_page.evaluate("document.body.dataset.clicked") == "true"
+        assert result["status"] == "send_unconfirmed"
+        assert result["sent"] is False
+        assert result["retry_safe"] is False
+        assert await text_of(dom_page, "#composer") == ""
         assert await dom_page.locator("#thread .msg").count() == 1
 
     async def test_delivered_message_is_confirmed(self, dom_page):

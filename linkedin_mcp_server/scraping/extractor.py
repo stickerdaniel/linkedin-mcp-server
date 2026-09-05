@@ -5179,19 +5179,38 @@ class LinkedInExtractor:
         # DOM dependency: we need btn.click() on the element reference — not
         # achievable via innerText or URL navigation. Selectors use only type,
         # aria-label, and data attributes (no layout class names).
-        sent_via_js = await self._page.evaluate(
-            """() => {
-                const btn = Array.from(document.querySelectorAll(
-                    'button[type="submit"], button[aria-label*="Send"], button[aria-label*="send"],'
-                    + 'button[data-control-name="send"]'
-                )).find(b => !b.disabled && (b.offsetWidth || b.offsetHeight || b.getClientRects().length));
-                if (!btn) return false;
-                btn.click();
-                return true;
-            }"""
-        )
-        if not sent_via_js:
-            await self._page.keyboard.press("Enter")
+        try:
+            sent_via_js = await self._page.evaluate(
+                """() => {
+                    const btn = Array.from(document.querySelectorAll(
+                        'button[type="submit"], button[aria-label*="Send"], button[aria-label*="send"],'
+                        + 'button[data-control-name="send"]'
+                    )).find(b => !b.disabled && (b.offsetWidth || b.offsetHeight || b.getClientRects().length));
+                    if (!btn) return false;
+                    btn.click();
+                    return true;
+                }"""
+            )
+            if not sent_via_js:
+                await self._page.keyboard.press("Enter")
+        except Exception:
+            # Both submissions dispatch their input event inside the very call
+            # that then fails, so a context that dies here says nothing about
+            # whether the message left: a send that navigates the page away
+            # looks exactly like one that never started. Letting the error out
+            # would reach the caller as a plain tool failure and invite the
+            # retry that delivers a second message to a real person.
+            logger.debug("Message submission did not complete", exc_info=True)
+            await self._dismiss_message_ui()
+            return self._message_action_result(
+                self._page.url,
+                "send_unconfirmed",
+                "The message submission was interrupted and LinkedIn did not "
+                "confirm delivery. Check the conversation before retrying; "
+                "retrying may deliver the message twice.",
+                recipient_selected=recipient_selected,
+                retry_safe=False,
+            )
 
         if not await self._message_text_visible(
             message, previous_occurrences=previous_occurrences

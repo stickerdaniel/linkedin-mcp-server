@@ -8975,6 +8975,68 @@ class TestSendMessageComposerInteraction:
         # The confirmation receives exactly the baseline taken before the click.
         assert steps == ["focus", "type", "baseline", "click", "confirm:2"]
 
+    @pytest.mark.parametrize(
+        "side_effect",
+        [
+            ["focused", PatchrightError("execution context was destroyed")],
+            ["focused", False],
+        ],
+        ids=["click", "enter"],
+    )
+    async def test_interrupted_submission_is_not_a_failure(
+        self, mock_page, side_effect
+    ):
+        """A submission that dies mid-call is an unknown, never a tool error.
+
+        Both paths dispatch their input event inside the call that then
+        fails, so the exception says nothing about whether the message left.
+        Letting it out would reach the caller as a plain failure and invite
+        the retry that delivers a second message to a real person.
+        """
+        extractor = LinkedInExtractor(mock_page)
+        mock_keyboard = MagicMock()
+        mock_keyboard.type = AsyncMock()
+        mock_keyboard.press = AsyncMock(
+            side_effect=PatchrightError("execution context was destroyed")
+        )
+        mock_page.keyboard = mock_keyboard
+        mock_page.evaluate = AsyncMock(side_effect=side_effect)
+        patches = self._patch_send_message_to_compose(extractor, mock_page)
+
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patches[7],
+            patches[8],
+            patches[9],
+            patch.object(
+                extractor,
+                "_message_text_occurrences",
+                new_callable=AsyncMock,
+                return_value=1,
+            ),
+            patch.object(
+                extractor,
+                "_message_text_visible",
+                new_callable=AsyncMock,
+            ) as visible,
+        ):
+            result = await extractor.send_message(
+                "testuser", "Hello!", confirm_send=True
+            )
+
+        assert result["status"] == "send_unconfirmed"
+        assert result["sent"] is False
+        assert result["retry_safe"] is False
+        # There is no page left to read, so the confirmation is never even
+        # attempted; the answer comes from the interruption itself.
+        visible.assert_not_awaited()
+
     async def test_send_unconfirmed_when_click_adds_nothing(self, mock_page):
         """A clicked Send button that changes nothing is not a sent message."""
         extractor = LinkedInExtractor(mock_page)
