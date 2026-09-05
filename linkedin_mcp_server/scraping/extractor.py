@@ -463,6 +463,14 @@ _MESSAGING_CLOSE_SELECTOR = (
 # send path compares a baseline taken before the click with the count after
 # it. Visibility is pure geometry and the match is on normalized text, so no
 # LinkedIn class name or localized label enters the decision.
+#
+# Known limit, and it scales with how short the message is: the count is taken
+# over the whole body, so any unrelated text arriving between the two reads can
+# raise it if the message occurs inside it. A messaging page updates presence
+# and timestamps on its own, so a one-character message can be confirmed by
+# something that has nothing to do with it. A sentence cannot. Scoping the
+# count to the thread would need a container selector, and every candidate
+# LinkedIn offers is a layout class name.
 _MESSAGE_OCCURRENCES_JS = r"""
 ({ expected }) => {
     const normalize = value => (value || '').replace(/\s+/g, ' ').trim();
@@ -489,7 +497,12 @@ _MESSAGE_OCCURRENCES_JS = r"""
         );
 
     let total = countIn(document.body?.innerText || '');
-    for (const editor of document.querySelectorAll('[contenteditable="true"]')) {
+    // Any element that declares contenteditable at all, not only the ones
+    // currently set to "true": a composer commonly goes read-only for the
+    // duration of an in-flight send while keeping its text on screen, and
+    // an occurrence subtracted at baseline must stay subtracted afterwards
+    // or the same unsent draft confirms itself.
+    for (const editor of document.querySelectorAll('[contenteditable]')) {
         if (isVisible(editor)) {
             total -= countIn(editor.innerText);
         }
@@ -5091,18 +5104,35 @@ class LinkedInExtractor:
         # to call .focus() on the element reference, which requires querySelector.
         # Selectors use only role + contenteditable + aria-label (ARIA attributes,
         # not layout class names) so they are stable across LinkedIn UI changes.
-        focused = await self._page.evaluate(
+        composer = await self._page.evaluate(
             """() => {
                 const el = document.querySelector(
                     'div[role="textbox"][contenteditable="true"][aria-label*="Write a message"],'
                     + 'div[role="textbox"][contenteditable="true"]'
                 );
-                if (!el) return false;
+                if (!el) return 'missing';
+                // Text already in the editor belongs to whoever typed it.
+                // Chromium leaves the caret at the start of a contenteditable
+                // after focus(), so typing here puts the message in front of
+                // that draft and LinkedIn delivers the two as one. Clearing
+                // it would destroy it, so refuse and leave it standing.
+                if ((el.innerText || '').replace(/\\s+/g, ' ').trim()) {
+                    return 'occupied';
+                }
                 el.focus();
-                return true;
+                return 'focused';
             }"""
         )
-        if not focused:
+        if composer == "occupied":
+            await self._dismiss_message_ui()
+            return self._message_action_result(
+                self._page.url,
+                "composer_occupied",
+                "The composer already holds a draft that would be sent along "
+                "with the message. The draft was left untouched.",
+                recipient_selected=recipient_selected,
+            )
+        if composer != "focused":
             await self._dismiss_message_ui()
             return self._message_action_result(
                 self._page.url,
@@ -5146,10 +5176,18 @@ class LinkedInExtractor:
             message, previous_occurrences=previous_occurrences
         ):
             await self._dismiss_message_ui()
+            # Submission already happened, so this is not evidence that
+            # nothing was sent: a thread that renders the delivered bubble
+            # slower than the page timeout arrives here having delivered.
+            # Reporting a plain failure invites a retry, and a retry sends a
+            # second real message to a real person, so the status says
+            # unknown rather than no.
             return self._message_action_result(
                 self._page.url,
-                "send_unavailable",
-                "LinkedIn did not confirm that the message was sent.",
+                "send_unconfirmed",
+                "The message was submitted but LinkedIn did not confirm "
+                "delivery in time. Check the conversation before retrying; "
+                "retrying may deliver the message twice.",
                 recipient_selected=recipient_selected,
             )
 

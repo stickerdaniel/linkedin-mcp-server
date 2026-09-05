@@ -48,6 +48,17 @@ NOOP_SEND_JS = """
   });
 """
 
+# Goes read-only for the duration of an in-flight send and delivers nothing,
+# which is what a React composer commonly does while it waits. The text stays
+# on screen the whole time, so an occurrence subtracted at baseline has to
+# stay subtracted or this no-op confirms itself.
+READONLY_NOOP_SEND_JS = """
+  document.getElementById('send').addEventListener('click', () => {
+    document.body.setAttribute('data-clicked', 'true');
+    document.getElementById('composer').setAttribute('contenteditable', 'false');
+  });
+"""
+
 # Moves the composer's text into the thread as a plain, non-editable entry,
 # which is what a delivered message looks like to the page.
 DELIVERING_SEND_JS = """
@@ -159,14 +170,44 @@ class TestSendConfirmationAgainstRealDom:
         assert await text_of(dom_page, "#composer") == draft
         assert await dom_page.locator("#thread .msg").count() == 1
 
+    async def test_existing_draft_is_never_sent_along(self, dom_page):
+        # Measured, and the reason this fixture carries a draft at all:
+        # `element.focus()` leaves the caret at the *start* of a
+        # contenteditable in Chromium, so a typed message lands in front of
+        # whatever the composer already held and LinkedIn delivers the two as
+        # one. The draft is the user's text and nobody asked for it to be
+        # sent, so the send refuses here. Clearing it instead would trade the
+        # leak for destroying it.
+        result = await send(dom_page, compose_page(DELIVERING_SEND_JS, draft=DRAFT))
+
+        assert result["status"] == "composer_occupied"
+        assert result["sent"] is False
+        assert await dom_page.evaluate("document.body.dataset.clicked") is None
+        assert await text_of(dom_page, "#composer") == DRAFT.strip()
+        assert await dom_page.locator("#thread .msg").count() == 1
+
     async def test_ineffective_send_is_not_confirmed(self, dom_page):
         # The reported failure: Send is clicked, the handler does nothing,
         # and the message stays in the composer next to an identical earlier
-        # copy in the thread. Neither is evidence of delivery.
+        # copy in the thread. Neither is evidence of delivery. The click did
+        # happen, though, so the answer is "unknown" rather than "not sent".
         result = await send(dom_page, compose_page(NOOP_SEND_JS))
 
         assert await dom_page.evaluate("document.body.dataset.clicked") == "true"
-        assert result["status"] == "send_unavailable"
+        assert result["status"] == "send_unconfirmed"
+        assert result["sent"] is False
+        assert await text_of(dom_page, "#composer") == MESSAGE
+        assert await dom_page.locator("#thread .msg").count() == 1
+
+    async def test_composer_going_read_only_does_not_confirm(self, dom_page):
+        # The same no-op, except the composer stops being editable while it
+        # waits. Counting only `[contenteditable="true"]` would stop
+        # subtracting the unsent text at exactly that moment and read its
+        # own draft as a delivery.
+        result = await send(dom_page, compose_page(READONLY_NOOP_SEND_JS))
+
+        assert await dom_page.evaluate("document.body.dataset.clicked") == "true"
+        assert result["status"] == "send_unconfirmed"
         assert result["sent"] is False
         assert await text_of(dom_page, "#composer") == MESSAGE
         assert await dom_page.locator("#thread .msg").count() == 1
@@ -175,18 +216,11 @@ class TestSendConfirmationAgainstRealDom:
         # Same page, same earlier copy, but the Send handler moves the text
         # into the thread. The count outside the composer grows, so this one
         # confirms where the ineffective click above did not.
-        result = await send(dom_page, compose_page(DELIVERING_SEND_JS, draft=DRAFT))
+        result = await send(dom_page, compose_page(DELIVERING_SEND_JS))
 
         assert result["status"] == "sent"
         assert result["sent"] is True
         assert await text_of(dom_page, "#composer") == ""
         entries = dom_page.locator("#thread .msg")
         assert await entries.count() == 2
-        # Measured, and the reason this fixture carries a draft at all:
-        # `element.focus()` leaves the caret at the *start* of a
-        # contenteditable in Chromium, so the typed message lands in front of
-        # whatever the composer already held. The delivered entry therefore
-        # reads message-then-draft. The confirmation is unaffected — it counts
-        # the message as a substring — but a composer with an unsent draft
-        # sends the two in that order.
-        assert (await entries.last.inner_text()).strip() == f"{MESSAGE}{DRAFT}".strip()
+        assert (await entries.last.inner_text()).strip() == MESSAGE
