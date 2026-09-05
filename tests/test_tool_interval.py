@@ -117,3 +117,16 @@ class TestTryClaimStart:
         write_last_start_wall(one, 40.0)
         assert try_claim_start(one, 10.0) == 0.0
         assert try_claim_start(two, 10.0) == pytest.approx(5.0)
+
+    def test_force_claim_overwrites_future_stamp(self, tmp_path: Path, monkeypatch):
+        from linkedin_mcp_server.tool_interval import force_claim_start
+
+        auth_root = tmp_path / "auth"
+        auth_root.mkdir()
+        write_last_start_wall(auth_root, 2000.0)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tool_interval.time.time", lambda: 1000.0
+        )
+        force_claim_start(auth_root)
+        stamp = json.loads((auth_root / "tool-interval.json").read_text())
+        assert stamp["last_start_wall"] == 1000.0
