@@ -521,7 +521,7 @@ _MESSAGE_OCCURRENCES_JS = r"""
 # scope. The caller gets a timeout that carries no `retry_safe`, and this line
 # is then the only record that a message may already have left. Answering the
 # caller instead needs the tool to know its own deadline, which is issue #889.
-_SEND_INTERRUPTED_WARNING = (
+SEND_INTERRUPTED_WARNING = (
     "Message submission was interrupted while in flight. Delivery is unknown; "
     "check the conversation before retrying, as a retry may deliver the "
     "message twice."
@@ -5209,23 +5209,35 @@ class LinkedInExtractor:
                 recipient_selected=recipient_selected,
             )
         await asyncio.sleep(0.1)
-        await self._page.keyboard.type(message, delay=15)
-        await asyncio.sleep(0.3)
-        await asyncio.sleep(1.0)  # allow React to process keyboard input
 
-        # Baseline immediately before the send attempt: how often the message
-        # is already visible outside the composer. The click below only tries
-        # to send; delivery is proven by this count growing, never by the text
-        # the composer still holds.
-        previous_occurrences = await self._message_text_occurrences(message)
+        # Typing is inside the window, and not as a precaution.
+        # `keyboard.type()` presses one key per character, and patchright maps
+        # "\n" and "\r" onto Enter through its alias table, which this
+        # composer submits on: the send below relies on that very behaviour.
+        # A message carrying a newline therefore delivers its first paragraph
+        # *during* typing, and typing is slow enough for that to matter — at
+        # 15ms per character a 20k-character message runs past the 180s tool
+        # deadline long before the send call is reached. Splitting the text so
+        # a newline cannot submit is issue #441 and a change of its own; until
+        # then the flag below is what keeps the interruption reportable.
+        may_have_submitted = "\n" in message or "\r" in message
 
-        # Everything from here on runs with a submission dispatched or about to
-        # be, so any exit that carries no result leaves the caller unable to
-        # tell whether a message went out. The cleanup awaits between the
-        # branches below are inside this window for that reason: an
-        # interruption during `_dismiss_message_ui` is as unreportable as one
-        # during the send itself.
+        # Everything from here on can leave a message delivered, so any exit
+        # that carries no result leaves the caller unable to tell whether one
+        # went out. The cleanup awaits between the branches below are inside
+        # this window for that reason: an interruption during
+        # `_dismiss_message_ui` is as unreportable as one during the send.
         try:
+            await self._page.keyboard.type(message, delay=15)
+            await asyncio.sleep(0.3)
+            await asyncio.sleep(1.0)  # allow React to process keyboard input
+
+            # Baseline immediately before the send attempt: how often the
+            # message is already visible outside the composer. The click below
+            # only tries to send; delivery is proven by this count growing,
+            # never by the text the composer still holds.
+            previous_occurrences = await self._message_text_occurrences(message)
+
             # patchright actionability also blocks send_button.click(). Use JS
             # click on any visible, enabled send button; fall back to Enter key
             # which LinkedIn's composer also accepts for submission.
@@ -5234,6 +5246,9 @@ class LinkedInExtractor:
             # achievable via innerText or URL navigation. Selectors use only
             # type, aria-label, and data attributes (no layout class names).
             try:
+                # The click is dispatched inside the call that may then fail,
+                # so the flag is set before it rather than after.
+                may_have_submitted = True
                 sent_via_js = await self._page.evaluate(
                     """() => {
                     const btn = Array.from(document.querySelectorAll(
@@ -5305,7 +5320,13 @@ class LinkedInExtractor:
             # escaping cleanup. Both leave the same question behind, and both
             # are re-raised rather than reported, because a cancelled scope
             # discards a return value.
-            logger.warning(_SEND_INTERRUPTED_WARNING)
+            #
+            # Silent for an interruption while typing a message without a
+            # newline: nothing can have submitted yet, and a warning that
+            # cries duplicate delivery where none is possible is the kind
+            # that gets ignored when it is right.
+            if may_have_submitted:
+                logger.warning(SEND_INTERRUPTED_WARNING)
             raise
 
     async def _extract_root_content(

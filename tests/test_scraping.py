@@ -9123,6 +9123,52 @@ class TestSendMessageComposerInteraction:
             warnings
         )
 
+    @pytest.mark.parametrize(
+        ("message", "warns"),
+        [("Hello\nthere!", True), ("Hello there!", False)],
+        ids=["newline", "single-line"],
+    )
+    async def test_cancellation_while_typing_warns_only_for_a_newline(
+        self, mock_page, caplog, message, warns
+    ):
+        """Typing can submit, so the window has to start before it.
+
+        ``keyboard.type()`` presses one key per character and patchright maps
+        ``"\n"`` onto Enter, which this composer submits on: the send path
+        relies on that very behaviour. A message carrying a newline therefore
+        delivers its first paragraph *while* it is being typed, long before
+        the send call, and typing is slow enough for the tool deadline to land
+        in there — at 15ms per character a 20k-character message runs past
+        180s on its own.
+
+        The single-line case is what makes this a test rather than a blanket
+        warning: nothing can have submitted yet, and a warning that cries
+        duplicate delivery where none is possible is the kind that gets
+        ignored when it is right.
+        """
+        extractor = LinkedInExtractor(mock_page)
+        mock_keyboard = MagicMock()
+        mock_keyboard.type = AsyncMock(side_effect=asyncio.CancelledError())
+        mock_keyboard.press = AsyncMock()
+        mock_page.keyboard = mock_keyboard
+        mock_page.evaluate = AsyncMock(return_value="focused")
+        patches = self._patch_send_message_to_compose(extractor, mock_page)
+
+        with (
+            ExitStack() as stack,
+            caplog.at_level(
+                logging.WARNING, logger="linkedin_mcp_server.scraping.extractor"
+            ),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            for entered in patches:
+                stack.enter_context(entered)
+            await extractor.send_message("testuser", message, confirm_send=True)
+
+        warnings = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+        hit = any("retry may deliver the message twice" in w for w in warnings)
+        assert hit is warns, warnings
+
     async def test_send_unconfirmed_when_click_adds_nothing(self, mock_page):
         """A clicked Send button that changes nothing is not a sent message."""
         extractor = LinkedInExtractor(mock_page)

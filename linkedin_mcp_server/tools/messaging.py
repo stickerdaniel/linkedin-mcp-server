@@ -17,7 +17,10 @@ from linkedin_mcp_server.core.exceptions import (
 )
 from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
 from linkedin_mcp_server.error_handler import raise_tool_error
-from linkedin_mcp_server.scraping.extractor import refuse_a_blank_message
+from linkedin_mcp_server.scraping.extractor import (
+    SEND_INTERRUPTED_WARNING,
+    refuse_a_blank_message,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -289,7 +292,18 @@ def register_messaging_tools(
                 profile_urn=profile_urn,
             )
 
-            await ctx.report_progress(progress=100, total=100, message="Complete")
+            try:
+                await ctx.report_progress(progress=100, total=100, message="Complete")
+            except BaseException:
+                # The send has already answered, and this notification is the
+                # last await inside FastMCP's `anyio.fail_after()`. A deadline
+                # landing here discards a result that may say a message was
+                # delivered, and nothing can hand it back afterwards, so the
+                # log line is all that is left. Quiet where the result says a
+                # retry is safe, because then there is nothing to warn about.
+                if result.get("retry_safe") is False:
+                    logger.warning(SEND_INTERRUPTED_WARNING)
+                raise
 
             return result
 
