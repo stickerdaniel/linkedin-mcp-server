@@ -34,6 +34,13 @@
     },
     {
       "call": "get_inbox",
+      "description": "goto https://www.linkedin.com/messaging/",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "conversation"
+    },
+    {
+      "call": "get_inbox",
       "extra": {
         "target_url": "https://www.linkedin.com/messaging/",
         "wait_until": "domcontentloaded"
@@ -120,6 +127,9 @@
     "section_names": [
       "inbox"
     ],
+    "sections": {
+      "inbox": "Conversation content"
+    },
     "url": "https://www.linkedin.com/messaging/"
   },
   "scenario": "get_inbox__baseline",

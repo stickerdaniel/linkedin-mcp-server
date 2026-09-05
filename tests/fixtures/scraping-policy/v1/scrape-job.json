@@ -31,6 +31,12 @@
     },
     {
       "call": "scrape_job",
+      "description": "goto https://www.linkedin.com/jobs/view/123/",
+      "kind": "boundary.stabilize",
+      "result": null
+    },
+    {
+      "call": "scrape_job",
       "extra": {
         "target_url": "https://www.linkedin.com/jobs/view/123/",
         "wait_until": "domcontentloaded"
@@ -89,6 +95,9 @@
     "section_names": [
       "job_posting"
     ],
+    "sections": {
+      "job_posting": "Result content"
+    },
     "url": "https://www.linkedin.com/jobs/view/123/"
   },
   "scenario": "scrape_job__baseline",

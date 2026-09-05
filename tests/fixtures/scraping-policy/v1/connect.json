@@ -34,6 +34,13 @@
     },
     {
       "call": "connect_with_person",
+      "description": "goto https://www.linkedin.com/in/ada-lovelace/",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "main_profile"
+    },
+    {
+      "call": "connect_with_person",
       "extra": {
         "target_url": "https://www.linkedin.com/in/ada-lovelace/",
         "wait_until": "domcontentloaded"
@@ -112,7 +119,11 @@
     }
   ],
   "result": {
-    "status": "connect_unavailable"
+    "message": "Cannot send a connection request to your own profile.",
+    "note_sent": false,
+    "profile": "Own profile",
+    "status": "connect_unavailable",
+    "url": "https://www.linkedin.com/in/ada-lovelace/"
   },
   "scenario": "connect_with_person__self_profile",
   "schema_version": 1

@@ -32,6 +32,12 @@
     },
     {
       "call": "search_posts",
+      "description": "goto https://www.linkedin.com/search/results/content/?keywords=mathematics&origin=FACETED_SEARCH",
+      "kind": "boundary.stabilize",
+      "result": null
+    },
+    {
+      "call": "search_posts",
       "extra": {
         "target_url": "https://www.linkedin.com/search/results/content/?keywords=mathematics&origin=FACETED_SEARCH",
         "wait_until": "domcontentloaded"
@@ -98,6 +104,9 @@
     "section_names": [
       "search_results"
     ],
+    "sections": {
+      "search_results": "Result content"
+    },
     "url": "https://www.linkedin.com/search/results/content/?keywords=mathematics&origin=FACETED_SEARCH"
   },
   "scenario": "search_posts__baseline",

@@ -32,6 +32,12 @@
     },
     {
       "call": "get_company_employees",
+      "description": "goto https://www.linkedin.com/company/analytical-engine/people/?keywords=math",
+      "kind": "boundary.stabilize",
+      "result": null
+    },
+    {
+      "call": "get_company_employees",
       "extra": {
         "target_url": "https://www.linkedin.com/company/analytical-engine/people/?keywords=math",
         "wait_until": "domcontentloaded"
@@ -98,6 +104,9 @@
     "section_names": [
       "employees"
     ],
+    "sections": {
+      "employees": "Result content"
+    },
     "url": "https://www.linkedin.com/company/analytical-engine/people/?keywords=math"
   },
   "scenario": "get_company_employees__baseline",

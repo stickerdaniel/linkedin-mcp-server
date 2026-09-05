@@ -38,6 +38,13 @@
     },
     {
       "call": "send_message",
+      "description": "goto https://www.linkedin.com/in/ada-lovelace/",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "message"
+    },
+    {
+      "call": "send_message",
       "extra": {
         "target_url": "https://www.linkedin.com/in/ada-lovelace/",
         "wait_until": "domcontentloaded"
@@ -111,6 +118,13 @@
       "section": "message",
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "send_message",
+      "description": "goto https://www.linkedin.com/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3AACoAA-policy&recipient=ACoAA-policy&screenContext=NON_SELF_PROFILE_VIEW&interop=msgOverlay",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "message"
     },
     {
       "call": "send_message",

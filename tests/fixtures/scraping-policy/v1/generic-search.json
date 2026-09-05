@@ -36,6 +36,13 @@
     },
     {
       "call": "extract_page",
+      "description": "goto https://www.linkedin.com/search/results/people/?keywords=ada",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "section"
+    },
+    {
+      "call": "extract_page",
       "extra": {
         "target_url": "https://www.linkedin.com/search/results/people/?keywords=ada",
         "wait_until": "domcontentloaded"

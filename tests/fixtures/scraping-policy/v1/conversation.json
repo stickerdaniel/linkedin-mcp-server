@@ -34,6 +34,13 @@
     },
     {
       "call": "get_conversation",
+      "description": "goto https://www.linkedin.com/messaging/thread/2-abc/",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "conversation"
+    },
+    {
+      "call": "get_conversation",
       "extra": {
         "target_url": "https://www.linkedin.com/messaging/thread/2-abc/",
         "wait_until": "domcontentloaded"
@@ -145,6 +152,9 @@
     "section_names": [
       "conversation"
     ],
+    "sections": {
+      "conversation": "Conversation content"
+    },
     "url": "https://www.linkedin.com/messaging/thread/2-abc/"
   },
   "scenario": "get_conversation__baseline",

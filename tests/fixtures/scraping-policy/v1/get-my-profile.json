@@ -32,6 +32,13 @@
     },
     {
       "call": "get_my_profile",
+      "description": "goto https://www.linkedin.com/in/me/",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "main_profile"
+    },
+    {
+      "call": "get_my_profile",
       "extra": {
         "target_url": "https://www.linkedin.com/in/me/",
         "wait_until": "domcontentloaded"
@@ -103,6 +110,9 @@
   ],
   "result": {
     "profile_urn": "ACoAA-self",
+    "sections": {
+      "main_profile": "Own profile"
+    },
     "url": "https://www.linkedin.com/in/ada-lovelace/"
   },
   "scenario": "get_my_profile__baseline",

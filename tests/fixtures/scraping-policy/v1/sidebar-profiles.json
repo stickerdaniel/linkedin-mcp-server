@@ -34,6 +34,13 @@
     },
     {
       "call": "get_sidebar_profiles",
+      "description": "goto https://www.linkedin.com/in/ada-lovelace/",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "sidebar"
+    },
+    {
+      "call": "get_sidebar_profiles",
       "extra": {
         "target_url": "https://www.linkedin.com/in/ada-lovelace/",
         "wait_until": "domcontentloaded"
