@@ -76,8 +76,6 @@ _PRIVATE_OWNERS: dict[str, tuple[str, int]] = {
     "_message_text_visible": ("message_sender.MessageSender", 12),
     "_dismiss_message_ui": ("message_sender.MessageSender", 12),
     "_drain_listener_tasks": ("feed.FeedScraper", 5),
-    "_build_feed_references": ("feed_payload.build_feed_references", 1),
-    "_truncate_linkedin_noise": ("text.truncate_linkedin_noise", 1),
 }
 
 # Module-level names patched through scraping.extractor. These aliases remain
@@ -101,9 +99,6 @@ _BOUNDARY_OWNERS = {
 
 _IMPORT_OWNERS = {
     "LinkedInExtractor": ("facade.LinkedInExtractor", 14),
-    "_RATE_LIMITED_MSG": ("contracts.RATE_LIMITED_SECTION_TEXT", 1),
-    "_truncate_linkedin_noise": ("text.truncate_linkedin_noise", 1),
-    "_build_feed_references": ("feed_payload.build_feed_references", 1),
     "_CONTENT_DATE_POSTED_MAP": ("search_urls.CONTENT_DATE_POSTED_MAP", 2),
     "_ACTION_SIGNALS_JS": ("connection_actions.ACTION_SIGNALS_JS", 7),
     "_CLICK_INCOMING_ACCEPT_JS": ("connection_actions.CLICK_INCOMING_ACCEPT_JS", 7),

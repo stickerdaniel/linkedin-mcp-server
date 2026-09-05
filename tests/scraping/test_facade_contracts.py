@@ -13,7 +13,15 @@ from patchright.async_api import Page
 
 from linkedin_mcp_server import dependencies
 from linkedin_mcp_server.scraping import LinkedInExtractor as PackageExtractor
-from linkedin_mcp_server.scraping.extractor import LinkedInExtractor
+from linkedin_mcp_server.scraping import contracts, text
+from linkedin_mcp_server.scraping.extractor import (
+    ExtractedSection,
+    FilterValidationError,
+    LinkedInExtractor,
+    rate_limited_section_error,
+    strip_conversation_chrome,
+    strip_linkedin_noise,
+)
 from linkedin_mcp_server.server import create_mcp_server
 
 from .policy_scenarios import COMPATIBILITY_METHODS, TOOL_FACADE_METHODS
@@ -71,6 +79,17 @@ async def test_constructor_export_and_dependency_use_the_same_facade(monkeypatch
     assert type(constructed) is LinkedInExtractor
     assert constructed._page is page
     assert calls == ["ready", "browser", "authenticated"]
+
+
+def test_permanent_facade_aliases_are_the_canonical_objects():
+    # Identity, not equality: an alias that merely compares equal would let a
+    # second copy of a contract live in the facade, and `except
+    # FilterValidationError` imported from one copy would not catch the other.
+    assert ExtractedSection is contracts.ExtractedSection
+    assert FilterValidationError is contracts.FilterValidationError
+    assert rate_limited_section_error is contracts.rate_limited_section_error
+    assert strip_linkedin_noise is text.strip_linkedin_noise
+    assert strip_conversation_chrome is text.strip_conversation_chrome
 
 
 async def test_registered_tools_and_extractor_delegates_are_counted_separately():
