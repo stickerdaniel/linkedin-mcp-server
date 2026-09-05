@@ -1404,6 +1404,7 @@ _INSPECT_OWNER = """
 import faulthandler
 import json
 import sys
+import time
 from pathlib import Path
 
 # A frontend that dies natively says nothing otherwise. Measured on a Windows
@@ -1418,6 +1419,17 @@ from linkedin_mcp_server.daemon_lock import DaemonLock
 from linkedin_mcp_server.profile_claim import ensure_profile_claim
 
 profile = Path(sys.argv[1])
+# Optional launch barrier: argv[2]=ready_dir, argv[3]=slot. All siblings
+# announce ready then wait for ``go`` so the election stampede is simultaneous
+# rather than staggered (#874 / #881).
+if len(sys.argv) >= 4:
+    ready_dir = Path(sys.argv[2])
+    slot = sys.argv[3]
+    (ready_dir / f"ready-{slot}").write_text("1", encoding="utf-8")
+    go = ready_dir / "go"
+    barrier_deadline = time.monotonic() + 60.0
+    while not go.exists() and time.monotonic() < barrier_deadline:
+        time.sleep(0.01)
 auth_root = profile.parent
 ensure_profile_claim(profile, claim_anyway=True)
 config = AppConfig()
@@ -3020,10 +3032,10 @@ class TestAtomicStartupCommit:
                 "the Job was asked to prove it drained while the parent still "
                 "held the gate's process handle"
             )
-            # Float slack: ``deadline - now`` right after
-            # ``deadline = now + _STOP_CHILD_SECONDS`` can be a few ULPs over
-            # the constant (measured 2.000000000000014 on Windows CI, #874).
-            assert timeout <= election_module._STOP_CHILD_SECONDS + 1e-9
+            # Strict: production clamps to ``_STOP_CHILD_SECONDS`` before this
+            # call (#874). A ULP overshoot must not be absorbed here — that
+            # would let the clamp be deleted without failing any test.
+            assert timeout <= election_module._STOP_CHILD_SECONDS
             self.steps.append("drain")
             self.drained = True
             self.closed = True
@@ -3362,24 +3374,53 @@ class TestAtomicStartupCommit:
         assert child.killed
         assert events == ["discard"]
 
-    def test_drain_budget_tolerates_float_ulp_over_stop_child_seconds(self):
-        """``(now + 2.0) - now`` can be a few ULPs over 2.0 (#874)."""
-        job = self._Job("owner")
-        child = self._Child("id")
-        job.assign_popen(child)
-        child.kill()
-        job.release_popen_handle(child)
-        # The measured CI failure was 2.000000000000014.
-        job.wait_until_empty(timeout=election_module._STOP_CHILD_SECONDS + 1e-14)
-        assert job.drained
+    def test_drain_budget_tolerates_float_ulp_over_stop_child_seconds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """``(now + 2.0) - now`` can be a few ULPs over 2.0 (#874).
 
-        job2 = self._Job("owner")
-        child2 = self._Child("id")
-        job2.assign_popen(child2)
-        child2.kill()
-        job2.release_popen_handle(child2)
-        with pytest.raises(AssertionError):
-            job2.wait_until_empty(timeout=election_module._STOP_CHILD_SECONDS + 0.01)
+        Driven through ``_stop_child`` so removing the production
+        ``min(_STOP_CHILD_SECONDS, ...)`` clamp fails this test: the Job
+        double rejects any timeout strictly above the constant.
+        """
+        seen: list[float] = []
+
+        class _Child:
+            pid = 4242
+            stdin = None
+            returncode: int | None = None
+
+            def wait(self, timeout: float) -> int:
+                self.returncode = 1
+                return 1
+
+        class _Job:
+            def terminate(self) -> None:
+                return None
+
+            def release_popen_handle(self, process: object) -> None:
+                return None
+
+            def wait_until_empty(self, *, timeout: float) -> None:
+                seen.append(timeout)
+                assert timeout <= election_module._STOP_CHILD_SECONDS
+
+        # Three monotonic reads in the assigned path: deadline, child.wait,
+        # then drain. Pull the clock a ULP backward on the drain read so
+        # ``deadline - now`` overshoots the constant the way Windows CI did.
+        times = iter([100.0, 100.0, 100.0 - 1e-14])
+        monkeypatch.setattr(election_module.time, "monotonic", lambda: next(times))
+
+        election_module._stop_child(
+            cast(Any, _Child()), windows_job=cast(Any, _Job()), assigned=True
+        )
+
+        assert seen == [election_module._STOP_CHILD_SECONDS]
+        # Prove the overshoot was real: without the clamp the drain would
+        # have seen more than the constant.
+        assert (100.0 + election_module._STOP_CHILD_SECONDS) - (
+            100.0 - 1e-14
+        ) > election_module._STOP_CHILD_SECONDS
 
     def test_prepared_read_timeout_stops_without_waiting_for_commit(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -4502,12 +4543,24 @@ class TestRealOwner:
 
         profile = real_state_root
         clients = 8
+        # Shared start barrier: every frontend announces ready, then all
+        # release together. A 50ms stagger would avoid the empty-directory
+        # stampede this test exists to exercise (#881).
+        ready_dir = profile.parent / "launch-barrier"
+        ready_dir.mkdir()
 
         running = []
         for i in range(clients):
             running.append(
                 subprocess.Popen(
-                    [sys.executable, "-c", _INSPECT_OWNER, str(profile)],
+                    [
+                        sys.executable,
+                        "-c",
+                        _INSPECT_OWNER,
+                        str(profile),
+                        str(ready_dir),
+                        str(i),
+                    ],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
@@ -4515,12 +4568,21 @@ class TestRealOwner:
                     cwd=_REPO_ROOT,
                 )
             )
-            # Stagger just enough that eight Windows processes are not all
-            # hitting an empty state directory on the same scheduler tick.
-            # Measured flake: one of eight returned ``pid: None`` under CI
-            # load while siblings elected a single owner (#874).
-            if os.name == "nt" and i + 1 < clients:
-                time.sleep(0.05)
+
+        barrier_deadline = time.monotonic() + 60.0
+        while time.monotonic() < barrier_deadline:
+            if len(list(ready_dir.glob("ready-*"))) >= clients:
+                break
+            time.sleep(0.01)
+        else:
+            for frontend in running:
+                if frontend.poll() is None:
+                    frontend.kill()
+            pytest.fail(
+                f"only {len(list(ready_dir.glob('ready-*')))} of {clients} "
+                "frontends reached the launch barrier"
+            )
+        (ready_dir / "go").write_text("1", encoding="utf-8")
 
         results = []
         owners: set[object] = set()
@@ -6445,7 +6507,11 @@ class TestPublishingLast:
             assert control_read.wait(_THREAD_START_SECONDS), (
                 "the owner never started reading the open parent pipe"
             )
-            assert finished.wait(_THREAD_START_SECONDS), (
+            # After the reader is known to be blocked, authorization expiry is
+            # a fast path (0.1s here). Bound completion with the call budget,
+            # not the thread-start allowance — otherwise a multi-second cleanup
+            # regression would still pass (#881).
+            assert finished.wait(_BOUNDED_CALL_SECONDS), (
                 "the blocked parent pipe outlived the authorization deadline"
             )
         finally:
