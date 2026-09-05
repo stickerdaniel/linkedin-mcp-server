@@ -1,6 +1,5 @@
 """Tests for the LinkedInExtractor scraping engine."""
 
-from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
@@ -31,6 +30,7 @@ from linkedin_mcp_server.scraping.extractor import (
     _MESSAGE_OCCURRENCES_JS,
 )
 from linkedin_mcp_server.scraping.link_metadata import Reference
+from scraping.support.navigation import navigate
 
 
 def extracted(
@@ -40,104 +40,6 @@ def extracted(
 ) -> ExtractedSection:
     """Create an ExtractedSection for tests."""
     return ExtractedSection(text=text, references=references or [], error=error)
-
-
-@pytest.fixture
-def mock_page():
-    """Create a mock Patchright page."""
-    page = MagicMock()
-    page.goto = AsyncMock()
-    page.title = AsyncMock(return_value="LinkedIn")
-    page.wait_for_selector = AsyncMock()
-    page.wait_for_function = AsyncMock()
-    page.url = "https://www.linkedin.com/in/testuser/"
-    page.locator = MagicMock()
-    # Default: no modals, no CAPTCHA
-    mock_locator = MagicMock()
-    mock_locator.count = AsyncMock(return_value=0)
-    mock_locator.is_visible = AsyncMock(return_value=False)
-    mock_locator.first = mock_locator
-    mock_locator.inner_text = AsyncMock(return_value="normal page content")
-    mock_locator.filter = MagicMock(return_value=mock_locator)
-    page.locator.return_value = mock_locator
-    # A real `Frame` carries the address it navigated to, and production
-    # reads it off the `framenavigated` argument rather than off the page.
-    # A bare object answers every attribute with nothing, which left hop
-    # recording looking correct here however broken it was.
-    page.main_frame = SimpleNamespace(url=page.url)
-    page.wait_for_load_state = AsyncMock()
-    # Real listeners, so that a double can navigate the way the browser does.
-    # A reload leaves `page.url` untouched, so the event is the only thing that
-    # says the document was replaced, and a double that only assigns the URL
-    # cannot express one.
-    listeners: dict[str, list] = {}
-    page.on = MagicMock(
-        side_effect=lambda event, cb: listeners.setdefault(event, []).append(cb)
-    )
-    page.remove_listener = MagicMock(
-        side_effect=lambda event, cb: (
-            listeners.get(event, []).remove(cb)
-            if cb in listeners.get(event, [])
-            else None
-        )
-    )
-    page.listeners = listeners
-    # The document's own identity, which `performance.timeOrigin` reports and
-    # `navigate()` moves. A double answering every script with one object
-    # claims a document that is never replaced, and the code under test reads
-    # that as a page rewriting its own address.
-    page.time_origin = 1_000.0
-    page.evaluate = with_document_identity(
-        page,
-        AsyncMock(
-            return_value={
-                "source": "root",
-                "text": "Sample page text",
-                "references": [],
-            }
-        ),
-    )
-    return page
-
-
-def with_document_identity(page, evaluate):
-    """Answer the document-identity read from `page.time_origin`.
-
-    Every other script keeps going to `evaluate`. A test that replaces
-    `page.evaluate` outright loses this and reads no identity at all, which
-    leaves the production code where it was before there was one: it settles
-    on the event alone.
-    """
-
-    async def dispatch(script, *args, **kwargs):
-        if "timeOrigin" in script:
-            return page.time_origin
-        return await evaluate(script, *args, **kwargs)
-
-    return AsyncMock(side_effect=dispatch)
-
-
-def navigate(page, url: str | None = None, same_document: bool = False) -> None:
-    """Move a mock page the way a navigation does: the address and the event.
-
-    `url` is omitted for a reload, which replaces the document and leaves the
-    address exactly as it was.
-
-    `same_document` is a `pushState`, a `replaceState` or a hash change. Each
-    raises `framenavigated` on the main frame exactly as a replacement does
-    (measured), and LinkedIn appends `currentJobId` to a search URL that way
-    on every healthy page. What separates them is the document surviving.
-    """
-    if url is not None:
-        page.url = url
-    if not same_document:
-        page.time_origin += 1.0
-    # The frame carries the address too, and production reads the hop off the
-    # frame rather than off the page. Leaving it behind is what let the hop
-    # recording look correct here however broken it was.
-    page.main_frame.url = page.url
-    for callback in list(page.listeners.get("framenavigated", [])):
-        callback(page.main_frame)
 
 
 class TestExtractPage:
@@ -221,7 +123,7 @@ class TestExtractPage:
 
         with (
             patch(
-                "linkedin_mcp_server.scraping.extractor.detect_auth_barrier",
+                "linkedin_mcp_server.scraping.navigation.detect_auth_barrier",
                 new_callable=AsyncMock,
                 return_value="auth barrier text: welcome back + sign in using another account",
             ),
@@ -375,7 +277,7 @@ class TestExtractPage:
         extractor = LinkedInExtractor(mock_page)
         with (
             patch.object(
-                extractor,
+                extractor._navigator,
                 "_navigate_to_page",
                 new_callable=AsyncMock,
                 side_effect=AuthenticationError("Run with --login"),
@@ -412,7 +314,7 @@ class TestExtractPage:
         extractor = LinkedInExtractor(mock_page)
         with (
             patch.object(
-                extractor,
+                extractor._navigator,
                 "_navigate_to_page",
                 new_callable=AsyncMock,
                 side_effect=redirect_to_the_redesign,
@@ -455,7 +357,7 @@ class TestExtractPage:
         extractor = LinkedInExtractor(mock_page)
         with (
             patch.object(
-                extractor,
+                extractor._navigator,
                 "_navigate_to_page",
                 new_callable=AsyncMock,
                 side_effect=redirect_to_the_feed,
@@ -499,13 +401,13 @@ class TestExtractPage:
         extractor = LinkedInExtractor(mock_page)
         with (
             patch.object(
-                extractor,
+                extractor._navigator,
                 "_navigate_to_page",
                 new_callable=AsyncMock,
                 side_effect=redirect_to_the_redesign,
             ),
             patch.object(
-                extractor,
+                extractor._navigator,
                 "_raise_if_auth_barrier",
                 new_callable=AsyncMock,
                 side_effect=AuthenticationError("Run with --login"),
@@ -560,7 +462,9 @@ class TestExtractPage:
 
         extractor = LinkedInExtractor(mock_page)
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -601,7 +505,9 @@ class TestExtractPage:
 
         extractor = LinkedInExtractor(mock_page)
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -650,7 +556,9 @@ class TestExtractPage:
 
         extractor = LinkedInExtractor(mock_page)
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -665,7 +573,7 @@ class TestExtractPage:
                 side_effect=reload_in_place,
             ),
             patch(
-                "linkedin_mcp_server.scraping.extractor.detect_auth_barrier",
+                "linkedin_mcp_server.scraping.navigation.detect_auth_barrier",
                 side_effect=barrier,
             ),
             pytest.raises(AuthenticationError, match="--login"),
@@ -691,7 +599,9 @@ class TestExtractPage:
 
         extractor = LinkedInExtractor(mock_page)
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -707,7 +617,7 @@ class TestExtractPage:
                 return_value=False,
             ) as scroll,
             patch(
-                "linkedin_mcp_server.scraping.extractor.detect_auth_barrier",
+                "linkedin_mcp_server.scraping.navigation.detect_auth_barrier",
                 new_callable=AsyncMock,
                 return_value="auth barrier text: welcome back + join now",
             ),
@@ -732,7 +642,9 @@ class TestExtractPage:
 
         extractor = LinkedInExtractor(mock_page)
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -748,7 +660,7 @@ class TestExtractPage:
                 return_value=False,
             ),
             patch(
-                "linkedin_mcp_server.scraping.extractor.detect_auth_barrier",
+                "linkedin_mcp_server.scraping.navigation.detect_auth_barrier",
                 new_callable=AsyncMock,
                 return_value=None,
             ),
@@ -779,7 +691,9 @@ class TestExtractPage:
 
         extractor = LinkedInExtractor(mock_page)
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -794,7 +708,7 @@ class TestExtractPage:
                 side_effect=scroll_then_reload,
             ),
             patch(
-                "linkedin_mcp_server.scraping.extractor.detect_auth_barrier",
+                "linkedin_mcp_server.scraping.navigation.detect_auth_barrier",
                 new_callable=AsyncMock,
                 return_value="account picker: #rememberme-div",
             ),
@@ -827,7 +741,9 @@ class TestExtractPage:
         barrier = AsyncMock(return_value=None)
         extractor = LinkedInExtractor(mock_page)
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -842,7 +758,7 @@ class TestExtractPage:
                 side_effect=scroll_then_name_a_job,
             ),
             patch(
-                "linkedin_mcp_server.scraping.extractor.detect_auth_barrier",
+                "linkedin_mcp_server.scraping.navigation.detect_auth_barrier",
                 barrier,
             ),
         ):
@@ -886,7 +802,9 @@ class TestExtractPage:
         extractor = LinkedInExtractor(mock_page)
         with (
             patch.object(extractor_module, "time", clock),
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -932,7 +850,9 @@ class TestExtractPage:
 
         extractor = LinkedInExtractor(mock_page)
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -951,7 +871,7 @@ class TestExtractPage:
                 extractor, "_extract_root_content", side_effect=reload_at_read
             ),
             patch(
-                "linkedin_mcp_server.scraping.extractor.detect_auth_barrier",
+                "linkedin_mcp_server.scraping.navigation.detect_auth_barrier",
                 side_effect=barrier,
             ),
             pytest.raises(AuthenticationError, match="--login"),
@@ -983,7 +903,9 @@ class TestExtractPage:
 
         extractor = LinkedInExtractor(mock_page)
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -1025,7 +947,9 @@ class TestExtractPage:
 
         extractor = LinkedInExtractor(mock_page)
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -1070,7 +994,9 @@ class TestExtractPage:
 
         extractor = LinkedInExtractor(mock_page)
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -1108,7 +1034,9 @@ class TestExtractPage:
         )
         extractor = LinkedInExtractor(mock_page)
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -1151,7 +1079,9 @@ class TestExtractPage:
 
         extractor = LinkedInExtractor(mock_page)
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -1198,7 +1128,9 @@ class TestExtractPage:
 
         extractor = LinkedInExtractor(mock_page)
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -1221,194 +1153,6 @@ class TestExtractPage:
 
         assert "Python Developer" in result.text
         assert result.error is None
-
-
-class TestNavigationDiagnostics:
-    async def test_goto_with_auth_checks_clicks_remember_me_and_retries(
-        self, mock_page
-    ):
-        extractor = LinkedInExtractor(mock_page)
-
-        async def goto_side_effect(*args, **kwargs):
-            if mock_page.goto.await_count == 1:
-                raise Exception("net::ERR_TOO_MANY_REDIRECTS")
-            return None
-
-        mock_page.goto = AsyncMock(side_effect=goto_side_effect)
-
-        with (
-            patch(
-                "linkedin_mcp_server.scraping.extractor.resolve_remember_me_prompt",
-                new_callable=AsyncMock,
-                side_effect=[True],
-            ) as mock_resolve,
-            patch(
-                "linkedin_mcp_server.scraping.extractor.detect_auth_barrier_quick",
-                new_callable=AsyncMock,
-                return_value=None,
-            ),
-        ):
-            await extractor._goto_with_auth_checks(
-                "https://www.linkedin.com/in/testuser/"
-            )
-
-        assert mock_page.goto.await_count == 2
-        mock_resolve.assert_awaited_once()
-
-    async def test_goto_with_auth_checks_unhooks_outer_listener_before_retry(
-        self, mock_page
-    ):
-        extractor = LinkedInExtractor(mock_page)
-        listener_events: list[str] = []
-
-        def record_on(event_name, callback):
-            listener_events.append(f"on:{event_name}")
-
-        def record_remove(event_name, callback):
-            listener_events.append(f"off:{event_name}")
-
-        mock_page.on.side_effect = record_on
-        mock_page.remove_listener.side_effect = record_remove
-
-        with (
-            patch(
-                "linkedin_mcp_server.scraping.extractor.resolve_remember_me_prompt",
-                new_callable=AsyncMock,
-                return_value=True,
-            ),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.detect_auth_barrier_quick",
-                new_callable=AsyncMock,
-                side_effect=["account picker", None],
-            ),
-        ):
-            await extractor._goto_with_auth_checks(
-                "https://www.linkedin.com/in/testuser/"
-            )
-
-        assert listener_events == [
-            "on:framenavigated",
-            "off:framenavigated",
-            "on:framenavigated",
-            "off:framenavigated",
-        ]
-
-    async def test_goto_with_auth_checks_records_original_failure_before_retry(
-        self, mock_page
-    ):
-        extractor = LinkedInExtractor(mock_page)
-        mock_page.goto = AsyncMock(
-            side_effect=[
-                Exception("net::ERR_TOO_MANY_REDIRECTS"),
-                Exception("retry failed"),
-            ]
-        )
-
-        with (
-            patch(
-                "linkedin_mcp_server.scraping.extractor.resolve_remember_me_prompt",
-                new_callable=AsyncMock,
-                side_effect=[True, False],
-            ),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.record_page_trace",
-                new_callable=AsyncMock,
-            ) as mock_trace,
-            patch(
-                "linkedin_mcp_server.scraping.extractor.detect_auth_barrier",
-                new_callable=AsyncMock,
-                return_value=None,
-            ),
-            pytest.raises(Exception, match="retry failed"),
-        ):
-            await extractor._goto_with_auth_checks(
-                "https://www.linkedin.com/in/testuser/"
-            )
-
-        trace_steps = [call.args[1] for call in mock_trace.await_args_list]
-        assert "extractor-navigation-error-before-remember-me-retry" in trace_steps
-
-        trace_call = next(
-            call
-            for call in mock_trace.await_args_list
-            if call.args[1] == "extractor-navigation-error-before-remember-me-retry"
-        )
-        assert (
-            trace_call.kwargs["extra"]["error"]
-            == "Exception: net::ERR_TOO_MANY_REDIRECTS"
-        )
-
-    async def test_a_hop_on_the_way_reaches_the_failure_log(self, mock_page):
-        """Where a failed navigation went is the diagnostic it leaves behind.
-
-        The address is read off the frame the event carries and not off the
-        page, so a double whose frame never moves records nothing while
-        looking exactly like one that works.
-        """
-        extractor = LinkedInExtractor(mock_page)
-        checkpoint = "https://www.linkedin.com/checkpoint/challenge/"
-
-        async def goto_then_fail(*args, **kwargs):
-            navigate(mock_page, checkpoint)
-            raise Exception("net::ERR_ABORTED")
-
-        mock_page.goto = AsyncMock(side_effect=goto_then_fail)
-
-        with (
-            patch(
-                "linkedin_mcp_server.scraping.extractor.resolve_remember_me_prompt",
-                new_callable=AsyncMock,
-                return_value=False,
-            ),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.detect_auth_barrier",
-                new_callable=AsyncMock,
-                return_value=None,
-            ),
-            patch.object(
-                extractor,
-                "_log_navigation_failure",
-                new_callable=AsyncMock,
-            ) as mock_log_failure,
-            pytest.raises(Exception, match="ERR_ABORTED"),
-        ):
-            await extractor._goto_with_auth_checks(
-                "https://www.linkedin.com/in/testuser/"
-            )
-
-        logged = mock_log_failure.await_args
-        assert logged is not None
-        assert logged.args[3] == [checkpoint]
-
-    async def test_goto_with_auth_checks_logs_failure_context(self, mock_page):
-        extractor = LinkedInExtractor(mock_page)
-        mock_page.goto = AsyncMock(side_effect=Exception("net::ERR_TOO_MANY_REDIRECTS"))
-
-        with (
-            patch(
-                "linkedin_mcp_server.scraping.extractor.resolve_remember_me_prompt",
-                new_callable=AsyncMock,
-                return_value=False,
-            ),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.detect_auth_barrier",
-                new_callable=AsyncMock,
-                return_value=None,
-            ),
-            patch.object(
-                extractor,
-                "_log_navigation_failure",
-                new_callable=AsyncMock,
-            ) as mock_log_failure,
-            pytest.raises(Exception, match="ERR_TOO_MANY_REDIRECTS"),
-        ):
-            await extractor._goto_with_auth_checks(
-                "https://www.linkedin.com/in/testuser/"
-            )
-
-        mock_log_failure.assert_awaited_once()
-        mock_page.on.assert_called_once()
-        mock_page.remove_listener.assert_called_once()
 
 
 class TestScrapePersonUrls:
@@ -1999,7 +1743,7 @@ class TestConnectWithPerson:
                 side_effect=[self._signals(invite=True), self._signals()],
             ),
             patch.object(
-                extractor,
+                extractor._navigator,
                 "_navigate_to_page",
                 new_callable=AsyncMock,
             ) as mock_nav,
@@ -2039,7 +1783,9 @@ class TestConnectWithPerson:
                 new_callable=AsyncMock,
                 side_effect=[self._signals(invite=True), self._signals(invite=True)],
             ),
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
             patch.object(
                 extractor, "_dialog_is_open", new_callable=AsyncMock, return_value=True
             ),
@@ -2210,7 +1956,9 @@ class TestConnectWithPerson:
                 new_callable=AsyncMock,
                 return_value=self._signals(invite=True),
             ),
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
             patch.object(
                 extractor, "_dialog_is_open", new_callable=AsyncMock, return_value=False
             ),
@@ -2292,7 +2040,7 @@ class TestConnectWithPerson:
                 return_value=True,
             ) as mock_open_more,
             patch.object(
-                extractor, "_navigate_to_page", new_callable=AsyncMock
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
             ) as mock_nav,
             patch.object(
                 extractor,
@@ -2343,7 +2091,7 @@ class TestConnectWithPerson:
                 return_value=True,
             ) as mock_open_more,
             patch.object(
-                extractor, "_navigate_to_page", new_callable=AsyncMock
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
             ) as mock_nav,
             patch.object(
                 extractor, "_submit_invite_dialog", new_callable=AsyncMock
@@ -2383,7 +2131,7 @@ class TestConnectWithPerson:
                 return_value=True,
             ),
             patch.object(
-                extractor, "_navigate_to_page", new_callable=AsyncMock
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
             ) as mock_nav,
             patch.object(
                 extractor,
@@ -2428,7 +2176,7 @@ class TestConnectWithPerson:
                 return_value=False,
             ),
             patch.object(
-                extractor, "_navigate_to_page", new_callable=AsyncMock
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
             ) as mock_nav,
             patch.object(
                 extractor, "_submit_invite_dialog", new_callable=AsyncMock
@@ -2456,7 +2204,7 @@ class TestConnectWithPerson:
                 return_value=self._signals(compose=True, labeled_anchor=True),
             ),
             patch.object(
-                extractor, "_navigate_to_page", new_callable=AsyncMock
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
             ) as mock_nav,
             patch.object(
                 extractor, "_submit_invite_dialog", new_callable=AsyncMock
@@ -2497,7 +2245,7 @@ class TestConnectWithPerson:
                 return_value=True,
             ) as mock_accept,
             patch.object(
-                extractor,
+                extractor._navigator,
                 "_navigate_to_page",
                 new_callable=AsyncMock,
             ) as mock_nav,
@@ -2545,7 +2293,7 @@ class TestConnectWithPerson:
                 return_value=True,
             ) as mock_text_click,
             patch.object(
-                extractor,
+                extractor._navigator,
                 "_navigate_to_page",
                 new_callable=AsyncMock,
             ) as mock_nav,
@@ -2654,7 +2402,9 @@ class TestConnectWithPerson:
                 new_callable=AsyncMock,
                 return_value=self._signals(),
             ),
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
             patch.object(
                 extractor, "_dialog_is_open", new_callable=AsyncMock, return_value=False
             ),
@@ -3363,7 +3113,9 @@ class TestSearchJobs:
             navigate(mock_page, url)
 
         with (
-            patch.object(extractor, "_navigate_to_page", side_effect=navigate_page),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", side_effect=navigate_page
+            ),
             patch.object(
                 extractor,
                 "_extract_root_content",
@@ -3616,7 +3368,9 @@ class TestSearchJobs:
             navigate(mock_page, url)
 
         with (
-            patch.object(extractor, "_navigate_to_page", side_effect=navigate_page),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", side_effect=navigate_page
+            ),
             patch.object(
                 extractor,
                 "_extract_root_content",
@@ -4760,7 +4514,9 @@ class TestSearchJobs:
         mock_page.url = "https://www.linkedin.com/feed/"
         extractor = LinkedInExtractor(mock_page)
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -4806,7 +4562,9 @@ class TestSearchJobs:
 
         extractor = LinkedInExtractor(mock_page)
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -5013,183 +4771,6 @@ class TestSearchJobs:
         mock_ids.assert_not_awaited()
 
 
-class TestSettleNavigation:
-    """The listener decides whether anything happened; the URL cannot."""
-
-    class Clock:
-        def __init__(self) -> None:
-            self.now = 0.0
-
-        def monotonic(self) -> float:
-            return self.now
-
-    @staticmethod
-    def _sleep(clock, hops, page, schedule=()):
-        """Advance the clock per poll, landing each hop at its own moment.
-
-        Each hop replaces the document, which is what a reload and a redirect
-        both do. A same-document change is spelled by leaving `time_origin`
-        alone instead.
-        """
-        pending = list(schedule)
-
-        async def sleep(seconds: float) -> None:
-            clock.now += seconds
-            while pending and pending[0] <= clock.now:
-                pending.pop(0)
-                hops.append("hop")
-                page.time_origin += 1.0
-
-        return sleep
-
-    async def test_a_destroyed_context_reads_as_no_document(self, mock_page):
-        """A navigation in flight takes the context the reading needs with it.
-
-        The class patchright raises for that is `Error`, measured, and not a
-        `RuntimeError`. A handler narrowed to the latter would turn the
-        ordinary case this reading exists for into an unhandled exception,
-        so the double is held to the real class.
-        """
-        extractor = LinkedInExtractor(mock_page)
-        mock_page.evaluate = AsyncMock(
-            side_effect=PatchrightError(
-                "Page.evaluate: Execution context was destroyed, "
-                "most likely because of a navigation."
-            )
-        )
-
-        assert await extractor._document_origin() is None
-
-    async def test_a_page_going_nowhere_costs_the_lag_and_not_the_quiet(
-        self, mock_page
-    ):
-        """An ordinary failure has no navigation behind it.
-
-        Charging it the quiet window spends half a second on every DOM error,
-        and a call near its tool timeout loses the diagnostic it was about to
-        build.
-        """
-        clock = self.Clock()
-        extractor = LinkedInExtractor(mock_page)
-        hops: list[str] = []
-
-        with (
-            patch.object(extractor_module, "time", clock),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
-                side_effect=self._sleep(clock, hops, mock_page),
-            ),
-        ):
-            assert (
-                await extractor._settle_navigation(hops, mock_page.time_origin) is False
-            )
-
-        assert clock.now < extractor_module._URL_SETTLE_QUIET
-        assert clock.now >= extractor_module._URL_SETTLE_LAG
-
-    async def test_a_reload_is_a_navigation_though_the_address_holds(self, mock_page):
-        """A reload replaces the document and leaves the address alone.
-
-        Comparing addresses calls the replacement the same page, so a picker
-        served by a reload was read as search results. The event says so.
-        """
-        clock = self.Clock()
-        extractor = LinkedInExtractor(mock_page)
-        hops: list[str] = []
-
-        with (
-            patch.object(extractor_module, "time", clock),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
-                side_effect=self._sleep(clock, hops, mock_page, [0.05]),
-            ),
-        ):
-            assert (
-                await extractor._settle_navigation(hops, mock_page.time_origin) is True
-            )
-
-        assert mock_page.wait_for_load_state.await_count == 1
-
-    async def test_a_chain_is_followed_to_its_last_hop(self, mock_page):
-        """Hops are counted, not compared.
-
-        A chain that returns to the route it started on reads as one that
-        never left, and its last hop is what decides whether this is a
-        checkpoint.
-        """
-        clock = self.Clock()
-        extractor = LinkedInExtractor(mock_page)
-        hops: list[str] = []
-
-        with (
-            patch.object(extractor_module, "time", clock),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
-                side_effect=self._sleep(clock, hops, mock_page, [0.05, 0.4]),
-            ),
-        ):
-            assert (
-                await extractor._settle_navigation(hops, mock_page.time_origin) is True
-            )
-
-        assert len(hops) == 2
-        assert clock.now >= 0.4 + extractor_module._URL_SETTLE_QUIET
-
-    async def test_a_history_change_is_not_a_navigation(self, mock_page):
-        """LinkedIn rewrites its own address, and the event cannot tell.
-
-        `pushState`, `replaceState` and a hash change each fire
-        `framenavigated` on the main frame, and a search page appends
-        `currentJobId` that way by itself. Settling on the event alone charges
-        every healthy page the quiet window plus a document wait plus the
-        barrier check that follows from it. The document surviving is what
-        says nothing was replaced.
-        """
-        clock = self.Clock()
-        extractor = LinkedInExtractor(mock_page)
-        origin = mock_page.time_origin
-        navigate(mock_page, same_document=True)
-        hops = ["https://www.linkedin.com/jobs/search/?currentJobId=1"]
-
-        with (
-            patch.object(extractor_module, "time", clock),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
-                side_effect=self._sleep(clock, hops, mock_page),
-            ),
-        ):
-            assert await extractor._settle_navigation(hops, origin) is False
-
-        assert clock.now >= extractor_module._URL_SETTLE_LAG
-        assert clock.now < extractor_module._URL_SETTLE_QUIET
-        assert mock_page.wait_for_load_state.await_count == 0
-
-    async def test_a_redirect_behind_a_history_change_is_still_caught(self, mock_page):
-        """The address is announced before the checkpoint commits.
-
-        A search page names its selected job the moment a card is chosen, and
-        a checkpoint arriving right behind it would be waved through by a
-        settler that left on the first hop. The wait is for a replaced
-        document, so the second hop is what ends it.
-        """
-        clock = self.Clock()
-        extractor = LinkedInExtractor(mock_page)
-        origin = mock_page.time_origin
-        navigate(mock_page, same_document=True)
-        hops = ["https://www.linkedin.com/jobs/search/?currentJobId=1"]
-
-        with (
-            patch.object(extractor_module, "time", clock),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
-                side_effect=self._sleep(clock, hops, mock_page, [0.05]),
-            ),
-        ):
-            assert await extractor._settle_navigation(hops, origin) is True
-
-        assert mock_page.wait_for_load_state.await_count == 1
-
-
 class TestGetSavedJobs:
     """Tests for get_saved_jobs with job ID extraction and pagination."""
 
@@ -5214,7 +4795,9 @@ class TestGetSavedJobs:
 
         extractor = LinkedInExtractor(mock_page)
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -5232,7 +4815,7 @@ class TestGetSavedJobs:
                 extractor, "_extract_root_content", side_effect=reload_at_read
             ),
             patch(
-                "linkedin_mcp_server.scraping.extractor.detect_auth_barrier",
+                "linkedin_mcp_server.scraping.navigation.detect_auth_barrier",
                 side_effect=barrier,
             ),
             pytest.raises(AuthenticationError, match="--login"),
@@ -5271,7 +4854,9 @@ class TestGetSavedJobs:
 
         extractor = LinkedInExtractor(mock_page)
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -5286,7 +4871,7 @@ class TestGetSavedJobs:
                 side_effect=reload_in_place,
             ),
             patch(
-                "linkedin_mcp_server.scraping.extractor.detect_auth_barrier",
+                "linkedin_mcp_server.scraping.navigation.detect_auth_barrier",
                 side_effect=barrier,
             ),
             pytest.raises(AuthenticationError, match="--login"),
@@ -5547,7 +5132,9 @@ class TestGetSavedJobs:
         )
         extractor = LinkedInExtractor(mock_page)
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -5558,7 +5145,7 @@ class TestGetSavedJobs:
                 return_value=False,
             ),
             patch(
-                "linkedin_mcp_server.scraping.extractor.detect_auth_barrier",
+                "linkedin_mcp_server.scraping.navigation.detect_auth_barrier",
                 new_callable=AsyncMock,
                 return_value="account picker: #rememberme-div",
             ),
@@ -5596,7 +5183,9 @@ class TestGetSavedJobs:
 
         extractor = LinkedInExtractor(mock_page)
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -6905,7 +6494,9 @@ class TestMainProfileAlreadyLoaded:
         extractor = LinkedInExtractor(mock_page)
         mock_page.url = "https://www.linkedin.com/in/realuser/"
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock) as nav,
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ) as nav,
             patch.object(
                 extractor,
                 "scrape_person",
@@ -6932,7 +6523,9 @@ class TestMainProfileAlreadyLoaded:
             patch.object(
                 extractor, "extract_page", new_callable=AsyncMock
             ) as extract_page,
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock) as nav,
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ) as nav,
             patch(
                 "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
                 new_callable=AsyncMock,
@@ -7077,7 +6670,9 @@ class TestGetSidebarProfiles:
 
         extractor = LinkedInExtractor(mock_page)
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -7134,7 +6729,7 @@ class TestGetSidebarProfiles:
         extractor = LinkedInExtractor(mock_page)
         with (
             patch.object(
-                extractor,
+                extractor._navigator,
                 "_navigate_to_page",
                 new_callable=AsyncMock,
                 side_effect=[None, error_type(message)],
@@ -7164,7 +6759,7 @@ class TestGetSidebarProfiles:
         extractor = LinkedInExtractor(mock_page)
         with (
             patch.object(
-                extractor,
+                extractor._navigator,
                 "_navigate_to_page",
                 new_callable=AsyncMock,
                 side_effect=[None, RuntimeError("navigation failed")],
@@ -7206,7 +6801,7 @@ class TestGetSidebarProfiles:
         extractor = LinkedInExtractor(mock_page)
         navigate_mock = AsyncMock()
         with (
-            patch.object(extractor, "_navigate_to_page", navigate_mock),
+            patch.object(extractor._navigator, "_navigate_to_page", navigate_mock),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -7244,7 +6839,9 @@ class TestGetSidebarProfiles:
 
         extractor = LinkedInExtractor(mock_page)
         with (
-            patch.object(extractor, "_navigate_to_page", side_effect=fake_navigate),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", side_effect=fake_navigate
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -7273,7 +6870,9 @@ class TestGetSidebarProfiles:
 
         extractor = LinkedInExtractor(mock_page)
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -7384,7 +6983,7 @@ class TestGetInbox:
         extractor = LinkedInExtractor(mock_page)
         with (
             patch.object(
-                extractor,
+                extractor._navigator,
                 "_navigate_to_page",
                 new_callable=AsyncMock,
             ),
@@ -7440,7 +7039,9 @@ class TestGetInbox:
         """get_inbox returns empty sections when page has no content."""
         extractor = LinkedInExtractor(mock_page)
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -7492,7 +7093,9 @@ class TestGetInbox:
             },
         ]
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -7545,7 +7148,7 @@ class TestGetConversation:
         extractor = LinkedInExtractor(mock_page)
         nav_mock = AsyncMock()
         with (
-            patch.object(extractor, "_navigate_to_page", nav_mock),
+            patch.object(extractor._navigator, "_navigate_to_page", nav_mock),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -7591,7 +7194,9 @@ class TestGetConversation:
         )
         extractor = LinkedInExtractor(mock_page)
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -7631,7 +7236,7 @@ class TestGetConversation:
         nav_mock = AsyncMock()
         mock_page.wait_for_selector = AsyncMock()
         with (
-            patch.object(extractor, "_navigate_to_page", nav_mock),
+            patch.object(extractor._navigator, "_navigate_to_page", nav_mock),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -7689,7 +7294,7 @@ class TestGetConversation:
         nav_mock = AsyncMock()
         mock_page.wait_for_selector = AsyncMock()
         with (
-            patch.object(extractor, "_navigate_to_page", nav_mock),
+            patch.object(extractor._navigator, "_navigate_to_page", nav_mock),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -7746,7 +7351,9 @@ class TestGetConversation:
         extractor = LinkedInExtractor(mock_page)
         mock_page.wait_for_selector = AsyncMock()
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -7778,7 +7385,9 @@ class TestGetConversation:
         extractor = LinkedInExtractor(mock_page)
         mock_page.wait_for_selector = AsyncMock()
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -7865,7 +7474,7 @@ class TestResolveConversationThreadUrls:
             },
         ]
         with (
-            patch.object(extractor, "_navigate_to_page", nav_mock),
+            patch.object(extractor._navigator, "_navigate_to_page", nav_mock),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -7908,7 +7517,9 @@ class TestResolveConversationThreadUrls:
             ]
         )
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -7950,7 +7561,7 @@ class TestResolveConversationThreadUrls:
             ]
         )
         with (
-            patch.object(extractor, "_navigate_to_page", nav_mock),
+            patch.object(extractor._navigator, "_navigate_to_page", nav_mock),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -8003,7 +7614,7 @@ class TestSearchConversations:
         nav_mock = AsyncMock()
 
         with (
-            patch.object(extractor, "_navigate_to_page", nav_mock),
+            patch.object(extractor._navigator, "_navigate_to_page", nav_mock),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -8063,7 +7674,9 @@ class TestSearchConversations:
             },
         ]
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -8115,7 +7728,7 @@ class TestSendMessage:
         mock_page.keyboard = keyboard
 
         with patch.object(
-            extractor, "_navigate_to_page", new_callable=AsyncMock
+            extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
         ) as navigate:
             result = await extractor.send_message(
                 "testuser", message, confirm_send=True
@@ -8137,7 +7750,9 @@ class TestSendMessage:
         """send_message with confirm_send=False returns confirmation_required status."""
         extractor = LinkedInExtractor(mock_page)
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -8193,7 +7808,9 @@ class TestSendMessage:
         """send_message returns message_unavailable when no compose URL found."""
         extractor = LinkedInExtractor(mock_page)
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -8226,7 +7843,9 @@ class TestSendMessage:
         """send_message builds compose URL from profile_urn without Message-button lookup."""
         extractor = LinkedInExtractor(mock_page)
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -8292,7 +7911,7 @@ class TestSendMessage:
 
         with (
             patch.object(
-                extractor,
+                extractor._navigator,
                 "_navigate_to_page",
                 new_callable=AsyncMock,
                 side_effect=capture_navigate,
@@ -8411,7 +8030,9 @@ class TestSendMessageComposerInteraction:
     def _patch_send_message_to_compose(self, extractor, mock_page):
         """Return a context manager that patches send_message up to the compose step."""
         return (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -8742,151 +8363,6 @@ class TestMessageTextOccurrences:
             await extractor._message_text_visible("Hello!", previous_occurrences=0)
 
 
-class TestProxyNavigationFailures:
-    """A proxy outage during an ordinary tool call is reported as itself."""
-
-    async def test_proxy_error_is_raised_instead_of_a_scraping_failure(self, mock_page):
-        extractor = LinkedInExtractor(mock_page)
-        mock_page.goto = AsyncMock(
-            side_effect=Exception("net::ERR_PROXY_CONNECTION_FAILED at …")
-        )
-
-        with pytest.raises(ProxyConnectionError):
-            await extractor._goto_with_auth_checks(
-                "https://www.linkedin.com/in/testuser/"
-            )
-
-    async def test_proxy_error_is_converted_before_it_reaches_a_trace(self, mock_page):
-        # The trace records the raw exception text, which for a proxy failure
-        # can quote the proxy URL and put a password into trace.jsonl.
-        extractor = LinkedInExtractor(mock_page)
-        mock_page.goto = AsyncMock(
-            side_effect=Exception("net::ERR_TUNNEL_CONNECTION_FAILED")
-        )
-
-        with (
-            patch(
-                "linkedin_mcp_server.scraping.extractor.record_page_trace",
-                new_callable=AsyncMock,
-            ) as mock_trace,
-            pytest.raises(ProxyConnectionError),
-        ):
-            await extractor._goto_with_auth_checks(
-                "https://www.linkedin.com/in/testuser/"
-            )
-
-        recorded = [call.args[1] for call in mock_trace.await_args_list]
-        assert "extractor-navigation-error" not in recorded
-
-    async def test_ordinary_navigation_failure_is_unaffected(self, mock_page):
-        extractor = LinkedInExtractor(mock_page)
-        mock_page.goto = AsyncMock(side_effect=Exception("net::ERR_ABORTED"))
-
-        with (
-            patch(
-                "linkedin_mcp_server.scraping.extractor.resolve_remember_me_prompt",
-                new_callable=AsyncMock,
-                return_value=False,
-            ),
-            pytest.raises(Exception) as excinfo,
-        ):
-            await extractor._goto_with_auth_checks(
-                "https://www.linkedin.com/in/testuser/"
-            )
-
-        assert not isinstance(excinfo.value, ProxyConnectionError)
-
-
-class TestNavigationFailureLogRedaction:
-    """The navigation-failure log must not carry proxy credentials.
-
-    It reaches the log even for errors the marker check does not recognise as
-    proxy faults, and that log is what users paste into issue reports.
-    """
-
-    async def test_credentials_are_redacted_from_the_log(
-        self, mock_page, monkeypatch, caplog
-    ):
-        import logging
-
-        from linkedin_mcp_server.config.schema import AppConfig
-
-        config = AppConfig()
-        config.browser.proxy_server = "http://gate.example:7000"
-        config.browser.proxy_username = "acctzone9"
-        config.browser.proxy_password = "s3cr3t"
-        monkeypatch.setattr("linkedin_mcp_server.config.get_config", lambda: config)
-
-        extractor = LinkedInExtractor(mock_page)
-        # No proxy marker, so it is not converted and reaches the logger.
-        mock_page.goto = AsyncMock(
-            side_effect=Exception(
-                "failed via http://acctzone9:s3cr3t@gate.example:7000"
-            )
-        )
-
-        with (
-            patch(
-                "linkedin_mcp_server.scraping.extractor.resolve_remember_me_prompt",
-                new_callable=AsyncMock,
-                return_value=False,
-            ),
-            caplog.at_level(logging.WARNING),
-            pytest.raises(Exception),
-        ):
-            await extractor._goto_with_auth_checks(
-                "https://www.linkedin.com/in/testuser/"
-            )
-
-        assert "s3cr3t" not in caplog.text
-        assert "acctzone9" not in caplog.text
-
-
-class TestNavigationFailureCrossesTheToolBoundaryClean:
-    """The re-raised exception itself must be credential-free.
-
-    Redacting the extractor's own trace and log is not enough: everything
-    downstream logs the exception too, starting with the catch-all in
-    error_handler and FastMCP's handler above it.
-    """
-
-    async def test_reraised_exception_carries_no_credentials(
-        self, mock_page, monkeypatch
-    ):
-        from linkedin_mcp_server.config.schema import AppConfig
-
-        config = AppConfig()
-        config.browser.proxy_server = "http://gate.example:7000"
-        config.browser.proxy_username = "acctzone9"
-        config.browser.proxy_password = "s3cr3t"
-        monkeypatch.setattr("linkedin_mcp_server.config.get_config", lambda: config)
-
-        extractor = LinkedInExtractor(mock_page)
-        mock_page.goto = AsyncMock(
-            side_effect=Exception(
-                "failed via http://acctzone9:s3cr3t@gate.example:7000"
-            )
-        )
-
-        with (
-            patch(
-                "linkedin_mcp_server.scraping.extractor.resolve_remember_me_prompt",
-                new_callable=AsyncMock,
-                return_value=False,
-            ),
-            pytest.raises(Exception) as excinfo,
-        ):
-            await extractor._goto_with_auth_checks(
-                "https://www.linkedin.com/in/testuser/"
-            )
-
-        assert "s3cr3t" not in str(excinfo.value)
-        assert "acctzone9" not in str(excinfo.value)
-        # The raw error must not survive as a cause either: the handlers
-        # downstream print the whole chain.
-        assert excinfo.value.__cause__ is None
-
-
 def _no_signals() -> ActionSignals:
     """Every structural signal absent, which is all these tests need."""
     return ActionSignals(
@@ -8917,7 +8393,9 @@ class TestGetMyProfileAlias:
                 new_callable=AsyncMock,
                 return_value=extracted("profile text"),
             ) as mock_extract,
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
                 new_callable=AsyncMock,
@@ -8954,7 +8432,9 @@ class TestEveryNormalizedEntryPoint:
     def _calls(extractor: LinkedInExtractor):
         return (
             patch.object(extractor, "extract_page", new_callable=AsyncMock),
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
         )
 
     async def test_connect_with_person_normalizes_before_its_own_downstream_use(
@@ -8982,7 +8462,9 @@ class TestEveryNormalizedEntryPoint:
                 new_callable=AsyncMock,
                 side_effect=lambda username: seen.append(username) or _no_signals(),
             ),
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor._navigator, "_navigate_to_page", new_callable=AsyncMock
+            ),
         ):
             await extractor.connect_with_person(
                 "https://de.linkedin.com/in/williamhgates"

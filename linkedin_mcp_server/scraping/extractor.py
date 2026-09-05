@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
-from collections.abc import Iterator
 import logging
 import re
 import time
@@ -14,20 +12,7 @@ from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
 from patchright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
-from linkedin_mcp_server.core import (
-    detect_auth_barrier,
-    detect_auth_barrier_quick,
-    raise_if_proxy_error,
-    redact_proxy_credentials,
-    redacted_copy,
-    resolve_remember_me_prompt,
-)
-from linkedin_mcp_server.core.exceptions import (
-    AuthenticationError,
-    LinkedInScraperException,
-)
-from linkedin_mcp_server.debug_trace import record_page_trace
-from linkedin_mcp_server.debug_utils import stabilize_navigation
+from linkedin_mcp_server.core.exceptions import LinkedInScraperException
 from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
 from linkedin_mcp_server.core.utils import (
     _JOB_CARD_SELECTOR,
@@ -78,6 +63,8 @@ from linkedin_mcp_server.scraping.job_policy import (
     route,
     same_job_search,
 )
+from linkedin_mcp_server.scraping.navigation import PageNavigator
+from linkedin_mcp_server.scraping.session import ScrapingSession
 from linkedin_mcp_server.scraping.link_metadata import (
     Reference,
     build_references,
@@ -102,8 +89,6 @@ if TYPE_CHECKING:
     from linkedin_mcp_server.callbacks import ProgressCallback
 
 logger = logging.getLogger(__name__)
-
-WaitUntil = Literal["commit", "domcontentloaded", "load", "networkidle"]
 
 # Pacing between page navigations
 _NAV_DELAY = 2.0
@@ -156,34 +141,6 @@ _JOB_IDS_JS = (
     return {ids: ids, scoped: Boolean(picked)};
 }"""
 )
-
-# How long to let `page.url` catch up with a navigation the sidebar scroll
-# suppressed. The lag itself measured 6ms across ten runs, min and max alike;
-# the rest of the budget is for a redirect chain that is still hopping. Only a
-# page that already looks wrong pays it, so the ceiling costs a healthy
-# ten-page search nothing and a broken one 25s of its 180s tool timeout.
-_URL_SETTLE_TIMEOUT = 2.5
-_URL_SETTLE_POLL = 0.01
-# How long the route has to hold still before it counts as the destination. A
-# redirect chain hops through intermediate documents, and judging one of those
-# calls a checkpoint healthy, or a healthy page a checkpoint.
-_URL_SETTLE_QUIET = 0.5
-# How long a navigation has to announce itself before the page counts as
-# going nowhere. Measured across 300 evaluations destroyed by a navigation:
-# 0.37ms at worst idle, 0.81ms at the 99th percentile with twenty-four
-# workers saturating the machine. Paid in full only by a failure with no
-# navigation behind it, and by a page that only rewrote its own address.
-#
-# It is also the whole window: a redirect committing later than this after
-# the scroll returns is not seen here, and falls to the route comparison at
-# the end, which a reload leaves nothing for. Three hundred times the
-# measured announcement is the trade, the other side of it being the wait
-# every ordinary DOM failure pays before it can report itself.
-_URL_SETTLE_LAG = 0.3
-# How long the replacement document gets to reach `domcontentloaded`. It
-# renders after it commits, and an account picker was measured 200ms behind
-# its own navigation, so a page judged on arrival is judged empty.
-_DOCUMENT_READY_TIMEOUT = 5.0
 
 # Content search is an infinite scroll with no ``&start=`` pagination, so
 # ``max_pages`` caps scroll depth instead of fetching discrete pages. One
@@ -543,17 +500,12 @@ class LinkedInExtractor:
     """Extracts LinkedIn page content via navigate-scroll-innerText pattern."""
 
     def __init__(self, page: Page):
+        self._session = ScrapingSession(page)
+        self._navigator = PageNavigator(self._session)
         self._page = page
         # What the sidebar scroll spent on the page being read, so that a
         # multi-page search charges its scroll budget for scrolling alone.
         self._scroll_seconds = 0.0
-
-    @staticmethod
-    def _normalize_body_marker(value: Any) -> str:
-        """Compress body text into a short, single-line diagnostic marker."""
-        if not isinstance(value, str):
-            return ""
-        return re.sub(r"\s+", " ", value).strip()[:200]
 
     @staticmethod
     def _single_section_result(
@@ -587,215 +539,6 @@ class LinkedInExtractor:
             "recipient_selected": recipient_selected,
             "sent": sent,
         }
-
-    async def _log_navigation_failure(
-        self,
-        target_url: str,
-        wait_until: str,
-        navigation_error: Exception,
-        hops: list[str],
-    ) -> None:
-        """Emit structured diagnostics for a failed target navigation."""
-        try:
-            title = await self._page.title()
-        except Exception:
-            title = ""
-
-        try:
-            auth_barrier = await detect_auth_barrier(self._page)
-        except Exception:
-            auth_barrier = None
-
-        try:
-            remember_me_visible = (
-                await self._page.locator("#rememberme-div").count()
-            ) > 0
-        except Exception:
-            remember_me_visible = False
-
-        try:
-            body_marker = self._normalize_body_marker(
-                await self._page.evaluate("() => document.body?.innerText || ''")
-            )
-        except Exception:
-            body_marker = ""
-
-        logger.warning(
-            "Navigation to %s failed (wait_until=%s, error=%s). "
-            "current_url=%s title=%r auth_barrier=%s remember_me=%s hops=%s body_marker=%r",
-            target_url,
-            wait_until,
-            # Redacted like the traces above: a driver error can quote the
-            # proxy URL, and this log is what users paste into issue reports.
-            redact_proxy_credentials(
-                f"{type(navigation_error).__name__}: {navigation_error}"
-            ),
-            self._page.url,
-            title,
-            auth_barrier,
-            remember_me_visible,
-            hops,
-            body_marker,
-        )
-
-    async def _raise_if_auth_barrier(
-        self,
-        url: str,
-        *,
-        navigation_error: Exception | None = None,
-    ) -> None:
-        """Raise an auth error when LinkedIn shows login/account-picker UI."""
-        barrier = await detect_auth_barrier(self._page)
-        if not barrier:
-            return
-
-        logger.warning("Authentication barrier detected on %s: %s", url, barrier)
-        message = (
-            "LinkedIn requires interactive re-authentication. "
-            "Run with --login and complete the account selection/sign-in flow."
-        )
-        if navigation_error is not None:
-            raise AuthenticationError(message) from navigation_error
-        raise AuthenticationError(message)
-
-    async def _goto_with_auth_checks(
-        self,
-        url: str,
-        *,
-        wait_until: WaitUntil = "domcontentloaded",
-        allow_remember_me: bool = True,
-    ) -> None:
-        """Navigate to a LinkedIn page and fail fast on auth barriers."""
-        hops: list[str] = []
-        listener_registered = False
-
-        def record_navigation(frame: Any) -> None:
-            if frame != self._page.main_frame:
-                return
-            frame_url = getattr(frame, "url", "")
-            if frame_url and (not hops or hops[-1] != frame_url):
-                hops.append(frame_url)
-
-        def unregister_navigation_listener() -> None:
-            nonlocal listener_registered
-            if not listener_registered:
-                return
-            self._page.remove_listener("framenavigated", record_navigation)
-            listener_registered = False
-
-        self._page.on("framenavigated", record_navigation)
-        listener_registered = True
-        try:
-            await record_page_trace(
-                self._page,
-                "extractor-before-goto",
-                extra={"target_url": url, "wait_until": wait_until},
-            )
-            try:
-                await self._page.goto(url, wait_until=wait_until, timeout=30000)
-                await stabilize_navigation(f"goto {url}", logger)
-                await record_page_trace(
-                    self._page,
-                    "extractor-after-goto",
-                    extra={"target_url": url, "wait_until": wait_until},
-                )
-            except Exception as exc:
-                # Ahead of the traces below: they record the raw exception text,
-                # which for a proxy failure can quote the proxy URL and land a
-                # password in trace.jsonl. Converting here also keeps a proxy
-                # outage from being reported as a LinkedIn navigation problem.
-                raise_if_proxy_error(exc)
-                if allow_remember_me and await resolve_remember_me_prompt(self._page):
-                    await stabilize_navigation(
-                        f"remember-me resolution for {url}", logger
-                    )
-                    await record_page_trace(
-                        self._page,
-                        "extractor-navigation-error-before-remember-me-retry",
-                        extra={
-                            "target_url": url,
-                            "wait_until": wait_until,
-                            "error": redact_proxy_credentials(
-                                f"{type(exc).__name__}: {exc}"
-                            ),
-                            "hops": hops,
-                        },
-                    )
-                    await record_page_trace(
-                        self._page,
-                        "extractor-after-remember-me",
-                        extra={
-                            "target_url": url,
-                            "error": redact_proxy_credentials(
-                                f"{type(exc).__name__}: {exc}"
-                            ),
-                        },
-                    )
-                    unregister_navigation_listener()
-                    await self._goto_with_auth_checks(
-                        url,
-                        wait_until=wait_until,
-                        allow_remember_me=False,
-                    )
-                    return
-                await record_page_trace(
-                    self._page,
-                    "extractor-navigation-error",
-                    extra={
-                        "target_url": url,
-                        "wait_until": wait_until,
-                        "error": redact_proxy_credentials(
-                            f"{type(exc).__name__}: {exc}"
-                        ),
-                        "hops": hops,
-                    },
-                )
-                await self._log_navigation_failure(url, wait_until, exc, hops)
-                await self._raise_if_auth_barrier(url, navigation_error=exc)
-                # Re-raised as a redacted copy rather than the original: with a
-                # proxy configured, a driver error can quote the proxy URL, and
-                # everything downstream from here logs the exception -- the
-                # catch-all in error_handler, and FastMCP's own handler above
-                # that. Only the message is rewritten; the type is preserved so
-                # callers that branch on it are unaffected.
-                raise redacted_copy(exc) from None
-
-            barrier = await detect_auth_barrier_quick(self._page)
-            if not barrier:
-                return
-
-            if allow_remember_me and await resolve_remember_me_prompt(self._page):
-                await stabilize_navigation(f"remember-me retry for {url}", logger)
-                await record_page_trace(
-                    self._page,
-                    "extractor-after-remember-me-retry",
-                    extra={"target_url": url, "barrier": barrier},
-                )
-                unregister_navigation_listener()
-                await self._goto_with_auth_checks(
-                    url,
-                    wait_until=wait_until,
-                    allow_remember_me=False,
-                )
-                return
-
-            await record_page_trace(
-                self._page,
-                "extractor-auth-barrier",
-                extra={"target_url": url, "barrier": barrier},
-            )
-            logger.warning("Authentication barrier detected on %s: %s", url, barrier)
-            raise AuthenticationError(
-                "LinkedIn requires interactive re-authentication. "
-                "Run with --login and complete the account selection/sign-in flow."
-            )
-        finally:
-            unregister_navigation_listener()
-
-    async def _navigate_to_page(self, url: str) -> None:
-        """Navigate to a LinkedIn page and fail fast on auth barriers."""
-        logger.debug("_navigate_to_page: target=%s", url)
-        await self._goto_with_auth_checks(url)
 
     # ------------------------------------------------------------------
     # Generic browser helpers for LLM-driven connection flow
@@ -1137,7 +880,7 @@ class LinkedInExtractor:
         captured_urls: list[str],
         pending_reads: list[asyncio.Task[None]],
     ) -> ExtractedSection:
-        await self._navigate_to_page(url)
+        await self._navigator._navigate_to_page(url)
         await detect_rate_limit(self._page)
 
         try:
@@ -1294,7 +1037,7 @@ class LinkedInExtractor:
         max_scrolls: int | None = None,
     ) -> ExtractedSection:
         """Single attempt to navigate, scroll, and extract innerText."""
-        await self._navigate_to_page(url)
+        await self._navigator._navigate_to_page(url)
         return await self._extract_loaded_section(url, section_name, max_scrolls)
 
     async def _extract_loaded_section(
@@ -1499,7 +1242,7 @@ class LinkedInExtractor:
         section_name: str,
     ) -> ExtractedSection:
         """Single attempt to extract content from an overlay/modal page."""
-        await self._navigate_to_page(url)
+        await self._navigator._navigate_to_page(url)
         await detect_rate_limit(self._page)
 
         # Wait for the dialog/modal to render (LinkedIn uses native <dialog>)
@@ -1697,7 +1440,7 @@ class LinkedInExtractor:
         Returns:
             {url, sections: {name: text}}
         """
-        await self._navigate_to_page("https://www.linkedin.com/in/me/")
+        await self._navigator._navigate_to_page("https://www.linkedin.com/in/me/")
         real_url = self._page.url  # post-redirect, e.g. /in/johndoe/
         match = re.search(r"/in/([^/?#]+)", real_url)
         username = match.group(1) if match else "me"
@@ -2064,7 +1807,7 @@ class LinkedInExtractor:
                     "because a personalized note was requested",
                     username,
                 )
-                await self._navigate_to_page(invite_url)
+                await self._navigator._navigate_to_page(invite_url)
                 note_limit_message = await self._probe_invite_note_limit()
                 if note_limit_message is not None:
                     return _connection_result(
@@ -2081,7 +1824,7 @@ class LinkedInExtractor:
                 profile=page_text,
             )
 
-        await self._navigate_to_page(invite_url)
+        await self._navigator._navigate_to_page(invite_url)
 
         submitted, note_sent, note_limit_message = await self._submit_invite_dialog(
             note
@@ -2162,7 +1905,7 @@ class LinkedInExtractor:
         """
         username = normalize_person_identifier(username)
         url = person_profile_url(username, "/")
-        await self._navigate_to_page(url)
+        await self._navigator._navigate_to_page(url)
         await detect_rate_limit(self._page)
 
         try:
@@ -2257,7 +2000,7 @@ class LinkedInExtractor:
             first_show_all = False
 
             try:
-                await self._navigate_to_page(show_all_url)
+                await self._navigator._navigate_to_page(show_all_url)
             except LinkedInScraperException:
                 raise
             except Exception:
@@ -2640,7 +2383,7 @@ class LinkedInExtractor:
 
         # Primary path: enumerate the plain inbox. Reliable for the recent
         # threads that the verify-after-send workflow needs (issue #434).
-        await self._navigate_to_page("https://www.linkedin.com/messaging/")
+        await self._navigator._navigate_to_page("https://www.linkedin.com/messaging/")
         await detect_rate_limit(self._page)
         await self._wait_for_main_text(log_context="Messaging inbox")
         await handle_modal_close(self._page)
@@ -2659,7 +2402,7 @@ class LinkedInExtractor:
         # "We didn't find anything" even for present threads, see #434), so it
         # runs only when the inbox scan came up empty — e.g. a thread buried
         # below the scrolled inbox window.
-        await self._navigate_to_page(
+        await self._navigator._navigate_to_page(
             f"https://www.linkedin.com/messaging/?searchTerm={quote_plus(display_name)}"
         )
         await detect_rate_limit(self._page)
@@ -2684,7 +2427,7 @@ class LinkedInExtractor:
 
         linkedin_username = normalize_person_identifier(linkedin_username)
         profile_url = person_profile_url(linkedin_username, "/")
-        await self._navigate_to_page(profile_url)
+        await self._navigator._navigate_to_page(profile_url)
         await detect_rate_limit(self._page)
 
         try:
@@ -2711,7 +2454,7 @@ class LinkedInExtractor:
                     f"thread(s) exist for {linkedin_username}."
                 )
 
-            await self._navigate_to_page(thread_urls[index])
+            await self._navigator._navigate_to_page(thread_urls[index])
         except PlaywrightTimeoutError as exc:
             raise LinkedInScraperException(
                 "Messaging search results did not load in time."
@@ -2881,128 +2624,6 @@ class LinkedInExtractor:
             result["section_errors"] = section_errors
         return result
 
-    @contextlib.contextmanager
-    def _watching_navigations(self) -> Iterator[list[str]]:
-        """Record main-frame navigations for the duration of the block.
-
-        The address is not the signal. A reload replaces the document and
-        leaves `page.url` exactly as it was, so a check that samples the URL
-        calls the replacement the same page and reads whatever it renders. The
-        browser says so directly, and this is the same listener
-        `_goto_with_auth_checks` uses.
-        """
-        hops: list[str] = []
-
-        def record(frame: Any) -> None:
-            if frame == self._page.main_frame:
-                hops.append(self._page.url)
-
-        self._page.on("framenavigated", record)
-        try:
-            yield hops
-        finally:
-            try:
-                self._page.remove_listener("framenavigated", record)
-            except Exception:
-                logger.debug("Could not remove navigation listener", exc_info=True)
-
-    async def _document_origin(self) -> float | None:
-        """A reading that is fixed when the document is created.
-
-        `framenavigated` fires for a same-document history change as readily
-        as for a replacement, and LinkedIn appends `currentJobId` to a search
-        URL that way by itself: measured locally, `pushState`, `replaceState`
-        and a bare hash change each raise the event on the main frame. Acting
-        on the event alone would make every healthy search page wait out a
-        chain that never ran.
-
-        `performance.timeOrigin` separates them, and separates them without
-        writing anything into the page. Measured against the same four
-        changes: identical across all three same-document ones, different
-        after a reload and after a navigation elsewhere.
-
-        `None` when the reading cannot be taken, which is what a context
-        destroyed by a navigation in flight looks like from here.
-        """
-        try:
-            origin = await self._page.evaluate("() => performance.timeOrigin")
-        except Exception:
-            return None
-        return origin if isinstance(origin, (int, float)) else None
-
-    async def _settle_navigation(self, hops: list[str], origin: float | None) -> bool:
-        """Wait out a navigation the page is in the middle of.
-
-        Returns whether one happened at all.
-
-        Three waits, and each answers a question the one before it cannot.
-
-        Whether the page navigated is answered by the listener and the
-        document identity together, the listener firing for a reload as well
-        as for a redirect. It is dispatched over the
-        channel that also updates `page.url`, so it arrives at the same moment
-        the address would have: measured across 300 destroyed evaluations,
-        0.37ms at worst on an idle machine and 0.81ms with twenty-four workers
-        saturating it. `_URL_SETTLE_LAG` is three hundred times that, and an
-        ordinary failure with nothing behind it pays exactly that and no more.
-
-        The listener overreports, so `_document_origin` decides which hop
-        counts: a page rewriting its own address raises the same event and
-        leaves nothing to settle.
-
-        Where it stopped is answered by the hops falling quiet. Counting them
-        rather than comparing addresses, or a chain that returns to the route
-        it started on reads as one that never left.
-
-        What the destination holds is answered by the document being ready. A
-        replacement renders after it commits, and the account picker measured
-        200ms behind its own navigation; judging that page on arrival calls a
-        barrier a loading screen.
-        """
-        # A hop says something moved, not that the document was replaced, so
-        # the wait is for a replacement and not for an event. Leaving on the
-        # first same-document hop is what a page rewriting its own address
-        # would buy, and it costs the redirect arriving right behind it: the
-        # search page announces `currentJobId` the moment a card is selected,
-        # and a checkpoint committing fifty milliseconds later would then be
-        # judged by a route comparison that has not been told yet.
-        #
-        # Each hop is read at most once, so a healthy page pays one evaluate
-        # and the wait, and only a page that keeps moving pays more.
-        lag_deadline = time.monotonic() + _URL_SETTLE_LAG
-        judged = 0
-        replaced = False
-        while time.monotonic() < lag_deadline:
-            if len(hops) > judged:
-                judged = len(hops)
-                if origin is None or await self._document_origin() != origin:
-                    replaced = True
-                    break
-            await asyncio.sleep(_URL_SETTLE_POLL)
-        if not replaced:
-            if hops:
-                logger.debug("Same document after %d history change(s)", len(hops))
-            return False
-
-        deadline = time.monotonic() + _URL_SETTLE_TIMEOUT
-        seen = len(hops)
-        quiet_since = time.monotonic()
-        while time.monotonic() < deadline:
-            await asyncio.sleep(_URL_SETTLE_POLL)
-            if len(hops) != seen:
-                seen = len(hops)
-                quiet_since = time.monotonic()
-            elif time.monotonic() - quiet_since >= _URL_SETTLE_QUIET:
-                break
-
-        try:
-            await self._page.wait_for_load_state(
-                "domcontentloaded", timeout=_DOCUMENT_READY_TIMEOUT * 1000
-            )
-        except Exception:
-            logger.debug("Replacement document was not ready in time", exc_info=True)
-        return True
-
     async def _extract_job_ids(self, *, scoped: bool = False) -> list[str]:
         """Extract unique job IDs from job card links on the current page.
 
@@ -3083,13 +2704,13 @@ class LinkedInExtractor:
         scroll_deadline: float = SCROLL_DEADLINE_MAX,
     ) -> ExtractedSection:
         """Single attempt to navigate, scroll sidebar, and extract innerText."""
-        await self._navigate_to_page(url)
+        await self._navigator._navigate_to_page(url)
         await detect_rate_limit(self._page)
         # Above the selector wait and the modal close, so the window this
         # opens covers everything read from here on. Taken between them, a
         # reload committing during either one became the baseline itself, and
         # `main_found` then described a document that no longer existed.
-        origin = await self._document_origin()
+        origin = await self._navigator._document_origin()
 
         main_found = True
         try:
@@ -3122,7 +2743,7 @@ class LinkedInExtractor:
         before = route(url)
         moved = False
         navigated = False
-        with self._watching_navigations() as hops:
+        with self._navigator._watching_navigations() as hops:
             if main_found:
                 scroll_started = time.monotonic()
                 try:
@@ -3143,7 +2764,7 @@ class LinkedInExtractor:
             # raised, so it reports no movement, and a reload moves no route,
             # so neither of the other two says anything happened.
             if moved or hops or before != route(self._page.url):
-                navigated = await self._settle_navigation(hops, origin)
+                navigated = await self._navigator._settle_navigation(hops, origin)
 
         after = route(self._page.url)
         if navigated or moved or not main_found or before != after:
@@ -3156,7 +2777,7 @@ class LinkedInExtractor:
             # That third one is the shape this check exists for and the one it
             # missed: an exhausted search renders no `<main>` either, which is
             # why the check has to decide it rather than the absence alone.
-            await self._raise_if_auth_barrier(url)
+            await self._navigator._raise_if_auth_barrier(url)
         if before != after and not same_job_search(before, after):
             # An expired session lands here as often as a layout change does,
             # and the two need different answers. A plain error is caught by
@@ -3174,9 +2795,9 @@ class LinkedInExtractor:
         # off, or during the extraction itself, moves no route and raises
         # nothing. The document says what neither the address nor the listener
         # can, and it is asked about the text that was actually read.
-        if origin is not None and await self._document_origin() != origin:
+        if origin is not None and await self._navigator._document_origin() != origin:
             logger.debug("The search document was replaced before it was read")
-            await self._raise_if_auth_barrier(url)
+            await self._navigator._raise_if_auth_barrier(url)
 
         raw = raw_result["text"]
         if raw_result["source"] == "body":
@@ -3408,7 +3029,7 @@ class LinkedInExtractor:
                     # carrying whatever job links it held. Raised rather than
                     # broken out of, because a result with no ids and nothing
                     # beside it is what an exhausted search looks like.
-                    await self._raise_if_auth_barrier(self._page.url)
+                    await self._navigator._raise_if_auth_barrier(self._page.url)
                     raise RuntimeError(f"Search navigation ended on {self._page.url}")
 
                 # The offset has to have survived as well as the route. A
@@ -3575,7 +3196,7 @@ class LinkedInExtractor:
         section_name: str,
     ) -> ExtractedSection:
         """Extract innerText from a saved-jobs page with soft rate-limit retry."""
-        with self._watching_navigations() as hops:
+        with self._navigator._watching_navigations() as hops:
             try:
                 result = await self._extract_saved_jobs_page_once(url, section_name)
                 if result.text != RATE_LIMITED_SECTION_TEXT:
@@ -3619,13 +3240,15 @@ class LinkedInExtractor:
                 # says so, and settling costs a moment on a path that has
                 # already failed.
                 try:
-                    await self._settle_navigation(hops, None)
+                    await self._navigator._settle_navigation(hops, None)
                 except Exception:
                     logger.debug(
                         "Could not settle the route after a saved-jobs failure",
                         exc_info=True,
                     )
-                await self._raise_if_auth_barrier(self._page.url, navigation_error=e)
+                await self._navigator._raise_if_auth_barrier(
+                    self._page.url, navigation_error=e
+                )
                 return ExtractedSection(
                     text="",
                     references=[],
@@ -3643,11 +3266,11 @@ class LinkedInExtractor:
         section_name: str,
     ) -> ExtractedSection:
         """Single attempt: navigate, scroll list, and extract innerText."""
-        await self._navigate_to_page(url)
+        await self._navigator._navigate_to_page(url)
         await detect_rate_limit(self._page)
         # Taken after this page's own navigation, so it belongs to the
         # document about to be read rather than to the one that was left.
-        origin = await self._document_origin()
+        origin = await self._navigator._document_origin()
 
         main_found = True
         try:
@@ -3665,7 +3288,7 @@ class LinkedInExtractor:
             # the body fallback returns the picker under `saved_jobs`. Missing
             # `<main>` is what is left, and an emptied list has none either,
             # which is why the check decides it rather than the absence.
-            await self._raise_if_auth_barrier(self._page.url)
+            await self._navigator._raise_if_auth_barrier(self._page.url)
 
         # A picker served by a reload keeps this page's address and this
         # page's title, so the route guard reads it as the list. Nothing else
@@ -3678,9 +3301,9 @@ class LinkedInExtractor:
         # two is a window of its own and the text that came back is not the
         # text the check judged.
         raw_result = await self._extract_root_content(["main"])
-        if origin is not None and await self._document_origin() != origin:
+        if origin is not None and await self._navigator._document_origin() != origin:
             logger.debug("The saved-jobs document was replaced before it was read")
-            await self._raise_if_auth_barrier(self._page.url)
+            await self._navigator._raise_if_auth_barrier(self._page.url)
         raw = raw_result["text"]
         if raw_result["source"] == "body":
             logger.debug("No <main> at evaluation time on %s, using body fallback", url)
@@ -3818,7 +3441,7 @@ class LinkedInExtractor:
                     # relogin path instead of a diagnostic. Against the page
                     # that answered, because that is where the barrier is; the
                     # address that was asked for is on the line above.
-                    await self._raise_if_auth_barrier(self._page.url)
+                    await self._navigator._raise_if_auth_barrier(self._page.url)
                     raise RuntimeError(
                         f"Saved jobs navigation ended on {self._page.url}"
                     )
@@ -4071,7 +3694,7 @@ class LinkedInExtractor:
     async def get_inbox(self, limit: int = 20) -> dict[str, Any]:
         """List recent conversations from the messaging inbox."""
         url = "https://www.linkedin.com/messaging/"
-        await self._navigate_to_page(url)
+        await self._navigator._navigate_to_page(url)
         await detect_rate_limit(self._page)
         await self._wait_for_main_text(log_context="Messaging inbox")
         await handle_modal_close(self._page)
@@ -4262,7 +3885,9 @@ class LinkedInExtractor:
 
         if thread_id:
             thread_id = normalize_thread_id(thread_id)
-            await self._navigate_to_page(messaging_thread_url(thread_id, "/"))
+            await self._navigator._navigate_to_page(
+                messaging_thread_url(thread_id, "/")
+            )
         else:
             await self._open_conversation_by_username(
                 linkedin_username or "", index=index
@@ -4312,7 +3937,7 @@ class LinkedInExtractor:
         search_url = (
             f"https://www.linkedin.com/messaging/?searchTerm={quote_plus(keywords)}"
         )
-        await self._navigate_to_page(search_url)
+        await self._navigator._navigate_to_page(search_url)
         await detect_rate_limit(self._page)
         await handle_modal_close(self._page)
         await self._wait_for_main_text(log_context="Messaging search")
@@ -4369,7 +3994,7 @@ class LinkedInExtractor:
                 "Message must contain non-whitespace characters.",
             )
 
-        await self._navigate_to_page(profile_url)
+        await self._navigator._navigate_to_page(profile_url)
         await detect_rate_limit(self._page)
 
         try:
@@ -4402,7 +4027,7 @@ class LinkedInExtractor:
                 "LinkedIn did not expose a usable Message action for this profile.",
             )
 
-        await self._navigate_to_page(compose_url)
+        await self._navigator._navigate_to_page(compose_url)
         await detect_rate_limit(self._page)
 
         try:

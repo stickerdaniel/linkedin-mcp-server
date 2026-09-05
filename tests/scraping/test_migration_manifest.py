@@ -248,7 +248,7 @@ def test_checker_rejects_obsolete_seams_at_their_migration_stage():
     # completed stage are closed by definition, so an override there proves
     # nothing; raise this number as each stage lands.
     result = subprocess.run(
-        [sys.executable, str(CHECKER), "--check", "--stage", "3"],
+        [sys.executable, str(CHECKER), "--check", "--stage", "4"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -256,7 +256,7 @@ def test_checker_rejects_obsolete_seams_at_their_migration_stage():
     )
 
     assert result.returncode == 1
-    assert "obsolete at stage 3:" in result.stderr
+    assert "obsolete at stage 4:" in result.stderr
     assert "string_patch" in result.stderr
 
 
@@ -370,11 +370,11 @@ async def boundaries(tasks):
     assert {seam.migration_stage for seam in matching("scroll_job_sidebar")} == {9}
     assert {seam.migration_stage for seam in matching("_URL_SETTLE_LAG")} == {3}
     assert {seam.canonical_owner for seam in matching("_URL_SETTLE_LAG")} == {
-        "navigation.PageNavigator.URL_SETTLE_LAG"
+        "navigation.PageNavigator"
     }
     assert {seam.migration_stage for seam in matching("_URL_SETTLE_QUIET")} == {3}
     assert {seam.canonical_owner for seam in matching("_URL_SETTLE_QUIET")} == {
-        "navigation.PageNavigator.URL_SETTLE_QUIET"
+        "navigation.PageNavigator"
     }
     assert {
         seam.migration_stage

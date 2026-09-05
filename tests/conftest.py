@@ -2,6 +2,8 @@ import sys
 
 import pytest
 
+pytest_plugins = ("scraping.support.navigation",)
+
 
 @pytest.fixture(autouse=True)
 def reset_singletons():

@@ -76,8 +76,12 @@ async def test_constructor_export_and_dependency_use_the_same_facade(monkeypatch
 
     assert PackageExtractor is LinkedInExtractor
     assert extractor._page is page
+    assert extractor._session.page is page
+    assert extractor._navigator._session is extractor._session
     assert type(constructed) is LinkedInExtractor
     assert constructed._page is page
+    assert constructed._session.page is page
+    assert constructed._navigator._session is constructed._session
     assert calls == ["ready", "browser", "authenticated"]
 
 

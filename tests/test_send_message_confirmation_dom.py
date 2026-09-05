@@ -120,7 +120,7 @@ async def send(page, html: str, *, message: str = MESSAGE) -> dict:
     await page.set_content(html)
     extractor = LinkedInExtractor(page)
     with (
-        patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+        patch.object(extractor._navigator, "_navigate_to_page", new_callable=AsyncMock),
         patch.object(
             extractor,
             "_read_profile_display_name",
