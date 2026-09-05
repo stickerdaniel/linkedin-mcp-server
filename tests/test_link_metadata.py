@@ -592,6 +592,27 @@ class TestBuildReferences:
             }
         ]
 
+    def test_names_the_context_for_jobs_saved_jobs_and_feed(self):
+        """The structural guard below only proves a context key exists, so it
+        survives a wrong label. These are the values themselves."""
+        raw: list[RawReference] = [
+            {
+                "href": "https://www.linkedin.com/jobs/view/123/",
+                "text": "Senior Engineer",
+            }
+        ]
+
+        contexts = {
+            section: build_references(raw, section)[0]["context"]
+            for section in ("jobs", "saved_jobs", "feed")
+        }
+
+        assert contexts == {
+            "jobs": "jobs",
+            "saved_jobs": "saved jobs",
+            "feed": "feed",
+        }
+
     def test_every_scraped_section_gives_its_references_a_context(self):
         """Nothing tied the context table to the section tables, which is how
         seven sections have now reached main without an entry. A context-less
