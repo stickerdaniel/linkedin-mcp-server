@@ -77,6 +77,12 @@ _HANDSHAKE_NONCE = "0123456789abcdef" * 4
 #: alone and failed a bound that had worked correctly.
 _BOUNDED_CALL_SECONDS = 1.0
 
+#: How long a test may wait for another thread to *enter* a blocked read under
+#: ``-n auto`` CI load. Distinct from ``_BOUNDED_CALL_SECONDS``, which bounds
+#: how long a *fast* path may take: stretching that constant would hide
+#: regressions. Measured on Windows daemon jobs for #874 / #845.
+_THREAD_START_SECONDS = 5.0
+
 _POSIX_ONLY = pytest.mark.skipif(
     os.name == "nt", reason="the lock is handed to the child only on POSIX"
 )
@@ -1398,6 +1404,7 @@ _INSPECT_OWNER = """
 import faulthandler
 import json
 import sys
+import time
 from pathlib import Path
 
 # A frontend that dies natively says nothing otherwise. Measured on a Windows
@@ -1412,6 +1419,17 @@ from linkedin_mcp_server.daemon_lock import DaemonLock
 from linkedin_mcp_server.profile_claim import ensure_profile_claim
 
 profile = Path(sys.argv[1])
+# Optional launch barrier: argv[2]=ready_dir, argv[3]=slot. All siblings
+# announce ready then wait for ``go`` so the election stampede is simultaneous
+# rather than staggered (#874 / #881).
+if len(sys.argv) >= 4:
+    ready_dir = Path(sys.argv[2])
+    slot = sys.argv[3]
+    (ready_dir / f"ready-{slot}").write_text("1", encoding="utf-8")
+    go = ready_dir / "go"
+    barrier_deadline = time.monotonic() + 60.0
+    while not go.exists() and time.monotonic() < barrier_deadline:
+        time.sleep(0.01)
 auth_root = profile.parent
 ensure_profile_claim(profile, claim_anyway=True)
 config = AppConfig()
@@ -3014,6 +3032,9 @@ class TestAtomicStartupCommit:
                 "the Job was asked to prove it drained while the parent still "
                 "held the gate's process handle"
             )
+            # Strict: production clamps to ``_STOP_CHILD_SECONDS`` before this
+            # call (#874). A ULP overshoot must not be absorbed here — that
+            # would let the clamp be deleted without failing any test.
             assert timeout <= election_module._STOP_CHILD_SECONDS
             self.steps.append("drain")
             self.drained = True
@@ -3352,6 +3373,54 @@ class TestAtomicStartupCommit:
         assert outcome is election_module._Started.ABORTED
         assert child.killed
         assert events == ["discard"]
+
+    def test_drain_budget_tolerates_float_ulp_over_stop_child_seconds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """``(now + 2.0) - now`` can be a few ULPs over 2.0 (#874).
+
+        Driven through ``_stop_child`` so removing the production
+        ``min(_STOP_CHILD_SECONDS, ...)`` clamp fails this test: the Job
+        double rejects any timeout strictly above the constant.
+        """
+        seen: list[float] = []
+
+        class _Child:
+            pid = 4242
+            stdin = None
+            returncode: int | None = None
+
+            def wait(self, timeout: float) -> int:
+                self.returncode = 1
+                return 1
+
+        class _Job:
+            def terminate(self) -> None:
+                return None
+
+            def release_popen_handle(self, process: object) -> None:
+                return None
+
+            def wait_until_empty(self, *, timeout: float) -> None:
+                seen.append(timeout)
+                assert timeout <= election_module._STOP_CHILD_SECONDS
+
+        # Three monotonic reads in the assigned path: deadline, child.wait,
+        # then drain. Pull the clock a ULP backward on the drain read so
+        # ``deadline - now`` overshoots the constant the way Windows CI did.
+        times = iter([100.0, 100.0, 100.0 - 1e-14])
+        monkeypatch.setattr(election_module.time, "monotonic", lambda: next(times))
+
+        election_module._stop_child(
+            cast(Any, _Child()), windows_job=cast(Any, _Job()), assigned=True
+        )
+
+        assert seen == [election_module._STOP_CHILD_SECONDS]
+        # Prove the overshoot was real: without the clamp the drain would
+        # have seen more than the constant.
+        assert (100.0 + election_module._STOP_CHILD_SECONDS) - (
+            100.0 - 1e-14
+        ) > election_module._STOP_CHILD_SECONDS
 
     def test_prepared_read_timeout_stops_without_waiting_for_commit(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -4474,18 +4543,46 @@ class TestRealOwner:
 
         profile = real_state_root
         clients = 8
+        # Shared start barrier: every frontend announces ready, then all
+        # release together. A 50ms stagger would avoid the empty-directory
+        # stampede this test exists to exercise (#881).
+        ready_dir = profile.parent / "launch-barrier"
+        ready_dir.mkdir()
 
-        running = [
-            subprocess.Popen(
-                [sys.executable, "-c", _INSPECT_OWNER, str(profile)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                env={**os.environ, "PYTHONPATH": str(_REPO_ROOT)},
-                cwd=_REPO_ROOT,
+        running = []
+        for i in range(clients):
+            running.append(
+                subprocess.Popen(
+                    [
+                        sys.executable,
+                        "-c",
+                        _INSPECT_OWNER,
+                        str(profile),
+                        str(ready_dir),
+                        str(i),
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    env={**os.environ, "PYTHONPATH": str(_REPO_ROOT)},
+                    cwd=_REPO_ROOT,
+                )
             )
-            for _ in range(clients)
-        ]
+
+        barrier_deadline = time.monotonic() + 60.0
+        while time.monotonic() < barrier_deadline:
+            if len(list(ready_dir.glob("ready-*"))) >= clients:
+                break
+            time.sleep(0.01)
+        else:
+            for frontend in running:
+                if frontend.poll() is None:
+                    frontend.kill()
+            pytest.fail(
+                f"only {len(list(ready_dir.glob('ready-*')))} of {clients} "
+                "frontends reached the launch barrier"
+            )
+        (ready_dir / "go").write_text("1", encoding="utf-8")
 
         results = []
         owners: set[object] = set()
@@ -4497,7 +4594,7 @@ class TestRealOwner:
                 results.append(result)
                 owners.add(result["pid"])
 
-            assert None not in owners, "a client ended up with no owner"
+            assert None not in owners, f"a client ended up with no owner: {results}"
             assert len(owners) == 1, f"more than one owner was elected: {owners}"
             # Exactly one of them did the starting; the rest attached to it.
             assert sum(1 for r in results if r["started"]) == 1, results
@@ -6376,7 +6473,7 @@ class TestPublishingLast:
             def start(self) -> None:
                 real_thread.start(self)
                 if self.name == "daemon-control":
-                    assert control_read.wait(_BOUNDED_CALL_SECONDS), (
+                    assert control_read.wait(_THREAD_START_SECONDS), (
                         "the daemon-control reader never entered the blocking "
                         "parent-pipe read"
                     )
@@ -6407,9 +6504,13 @@ class TestPublishingLast:
         child = threading.Thread(target=run, daemon=True)
         child.start()
         try:
-            assert control_read.wait(_BOUNDED_CALL_SECONDS), (
+            assert control_read.wait(_THREAD_START_SECONDS), (
                 "the owner never started reading the open parent pipe"
             )
+            # After the reader is known to be blocked, authorization expiry is
+            # a fast path (0.1s here). Bound completion with the call budget,
+            # not the thread-start allowance — otherwise a multi-second cleanup
+            # regression would still pass (#881).
             assert finished.wait(_BOUNDED_CALL_SECONDS), (
                 "the blocked parent pipe outlived the authorization deadline"
             )

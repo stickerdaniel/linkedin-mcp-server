@@ -1205,7 +1205,12 @@ def _stop_child(
             # Left to settle itself: it closes on a proved drain and retains the
             # handle on an unproved one, and retention is the deliberate choice
             # to keep containment authority rather than to abandon it.
-            windows_job.wait_until_empty(timeout=max(deadline - time.monotonic(), 0.0))
+            # Clamp to the constant: ``(now + N) - now`` is not always exactly
+            # ``N`` in float, and a picosecond over would fail a zero-tolerance
+            # drain budget check (#874).
+            windows_job.wait_until_empty(
+                timeout=min(_STOP_CHILD_SECONDS, max(deadline - time.monotonic(), 0.0))
+            )
         else:
             # Before assignment EOF is the only contained stop. If the isolated
             # gate does not accept it, stop and reap that direct child explicitly.
