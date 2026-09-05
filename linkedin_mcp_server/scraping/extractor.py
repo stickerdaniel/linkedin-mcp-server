@@ -22,7 +22,12 @@ from linkedin_mcp_server.core.utils import (
     scroll_job_sidebar,
     scroll_to_bottom,
 )
+from linkedin_mcp_server.scraping.capture import (
+    RATE_LIMIT_RETRY_DELAY,
+    SectionCapture,
+)
 from linkedin_mcp_server.scraping.connection import ActionSignals
+from linkedin_mcp_server.scraping.content import PageContentReader
 from linkedin_mcp_server.scraping.contracts import (
     RATE_LIMITED_SECTION_TEXT,
     ExtractedSection,
@@ -92,9 +97,6 @@ logger = logging.getLogger(__name__)
 
 # Pacing between page navigations
 _NAV_DELAY = 2.0
-
-# Backoff before retrying a temporarily blocked page
-_RATE_LIMIT_RETRY_DELAY = 5.0
 
 # The id is the trailing run of digits, and LinkedIn serves the same job under
 # both `/jobs/view/1967281839/` and `/jobs/view/<title>-at-<company>-1967281839/`.
@@ -502,6 +504,8 @@ class LinkedInExtractor:
     def __init__(self, page: Page):
         self._session = ScrapingSession(page)
         self._navigator = PageNavigator(self._session)
+        self._content = PageContentReader(self._session)
+        self._capture = SectionCapture(self._session, self._navigator, self._content)
         self._page = page
         # What the sidebar scroll spent on the page being read, so that a
         # multi-page search charges its scroll budget for scrolling alone.
@@ -972,7 +976,7 @@ class LinkedInExtractor:
         # Give any in-flight response reads a beat to finish recording URLs.
         await asyncio.sleep(0.2)
 
-        raw_result = await self._extract_root_content(["main"])
+        raw_result = await self._content._extract_root_content(["main"])
         raw = raw_result["text"]
 
         if not raw:
@@ -995,285 +999,8 @@ class LinkedInExtractor:
         section_name: str,
         max_scrolls: int | None = None,
     ) -> ExtractedSection:
-        """Navigate to a URL, scroll to load lazy content, and extract innerText.
-
-        Retries once after a backoff when the page returns only LinkedIn chrome
-        (sidebar/footer noise with no actual content), which indicates a soft
-        rate limit.
-
-        Raises LinkedInScraperException subclasses (rate limit, auth, etc.).
-        Returns RATE_LIMITED_SECTION_TEXT sentinel when soft-rate-limited after retry.
-        Returns empty string for unexpected non-domain failures (error isolation).
-        """
-        try:
-            result = await self._extract_page_once(url, section_name, max_scrolls)
-            if result.text != RATE_LIMITED_SECTION_TEXT:
-                return result
-
-            # Retry once after backoff
-            logger.info("Retrying %s after %.0fs backoff", url, _RATE_LIMIT_RETRY_DELAY)
-            await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
-            return await self._extract_page_once(url, section_name, max_scrolls)
-
-        except LinkedInScraperException:
-            raise
-        except Exception as e:
-            logger.warning("Failed to extract page %s: %s", url, e)
-            return ExtractedSection(
-                text="",
-                references=[],
-                error=build_issue_diagnostics(
-                    e,
-                    context="extract_page",
-                    target_url=url,
-                    section_name=section_name,
-                ),
-            )
-
-    async def _extract_page_once(
-        self,
-        url: str,
-        section_name: str,
-        max_scrolls: int | None = None,
-    ) -> ExtractedSection:
-        """Single attempt to navigate, scroll, and extract innerText."""
-        await self._navigator._navigate_to_page(url)
-        return await self._extract_loaded_section(url, section_name, max_scrolls)
-
-    async def _extract_loaded_section(
-        self,
-        url: str,
-        section_name: str,
-        max_scrolls: int | None = None,
-    ) -> ExtractedSection:
-        """Run the post-navigation extraction pipeline on the current page.
-
-        Assumes ``self._page`` already points at ``url`` (or its post-redirect
-        equivalent). Performs rate-limit detection, modal dismissal, lazy-load
-        scrolling, innerText extraction, noise truncation, and reference
-        building — everything ``_extract_page_once`` does after the goto.
-        """
-        await detect_rate_limit(self._page)
-
-        # Wait for main content to render
-        try:
-            await self._page.wait_for_selector("main")
-        except PlaywrightTimeoutError:
-            logger.debug("No <main> element found on %s", url)
-
-        # Dismiss any modals blocking content
-        await handle_modal_close(self._page)
-
-        # Activity feed pages lazy-load post content after the tab header.
-        # Company posts pages (/company/<slug>/posts/) lazy-load the same way
-        # but don't carry a /recent-activity/ path, so match them too. Matched
-        # on the parsed path, since the url can carry a query string
-        # (?viewAsMember=true) that a raw suffix check would miss.
-        path = urlparse(url).path
-        is_activity = "/recent-activity/" in path or (
-            "/company/" in path and path.rstrip("/").endswith("/posts")
-        )
-        if is_activity:
-            try:
-                await self._page.wait_for_function(
-                    """() => {
-                        const main = document.querySelector('main');
-                        if (!main) return false;
-                        return main.innerText.length > 200;
-                    }""",
-                    timeout=10000,
-                )
-            except PlaywrightTimeoutError:
-                logger.debug("Activity feed content did not appear on %s", url)
-
-        # Search results pages load a placeholder first then fill in results
-        # via JavaScript. Wait for actual content before extracting.
-        is_search = "/search/results/" in url
-        if is_search:
-            try:
-                await self._page.wait_for_function(
-                    """() => {
-                        const main = document.querySelector('main');
-                        if (!main) return false;
-                        return main.innerText.length > 100;
-                    }""",
-                    timeout=10000,
-                )
-            except PlaywrightTimeoutError:
-                logger.debug("Search results content did not appear on %s", url)
-
-        # Company people pages (/company/<slug>/people/) initially render only
-        # the company header in <main>; the employee listing hydrates later
-        # via JS. Wait until at least one /in/ profile anchor appears inside
-        # <main> so innerText extraction sees the actual list. Use a 5s
-        # timeout instead of the 10s pattern shared with is_search/is_details
-        # — empty/restricted listings are common here (small companies,
-        # privacy settings) and a full 10s wait per call adds up.
-        is_company_people = "/company/" in url and "/people/" in url
-        if is_company_people:
-            try:
-                await self._page.wait_for_function(
-                    """() => {
-                        const main = document.querySelector('main');
-                        if (!main) return false;
-                        return main.querySelectorAll('a[href*="/in/"]').length > 0;
-                    }""",
-                    timeout=5000,
-                )
-            except PlaywrightTimeoutError:
-                logger.debug("Company people listing did not appear on %s", url)
-
-        # Profile detail pages (/details/experience/, /details/education/, etc.)
-        # initially render sidebar recommendations into <main> while the section
-        # panel loads asynchronously. Wait until the panel replaces the sidebar.
-        # The sidebar placeholder starts with "Load more" or "More profiles for you".
-        is_details = "/details/" in url
-        if is_details:
-            try:
-                await self._page.wait_for_function(
-                    """() => {
-                        const main = document.querySelector('main');
-                        if (!main) return false;
-                        const text = main.innerText.trimStart();
-                        return !text.startsWith('Load more')
-                            && !text.startsWith('More profiles for you')
-                            && !text.startsWith('Explore premium profiles');
-                    }""",
-                    timeout=10000,
-                )
-            except PlaywrightTimeoutError:
-                logger.debug("Detail section content did not appear on %s", url)
-
-        # Detail pages paginate with a "Show more" button inside <main>, not scroll.
-        # Click it until it disappears or the budget runs out.
-        if is_details:
-            max_clicks = max_scrolls if max_scrolls is not None else 5
-            for i in range(max_clicks):
-                button = self._page.locator("main button").filter(
-                    has_text=re.compile(r"^Show (more|all)\b", re.IGNORECASE)
-                )
-                try:
-                    if await button.count() == 0:
-                        logger.debug("No 'Show more' button after %d clicks", i)
-                        break
-                    target = button.first
-                    if not await target.is_visible():
-                        break
-                    await target.scroll_into_view_if_needed(timeout=2000)
-                    await target.click(timeout=2000)
-                    await asyncio.sleep(1.0)
-                except PlaywrightTimeoutError:
-                    logger.debug("Show more click timed out after %d clicks", i)
-                    break
-                except Exception as e:
-                    logger.debug("Show more click failed: %s", e)
-                    break
-
-        # Scroll to trigger lazy loading
-        if is_activity:
-            scrolls = max_scrolls if max_scrolls is not None else 10
-            await scroll_to_bottom(self._page, pause_time=1.0, max_scrolls=scrolls)
-        else:
-            scrolls = max_scrolls if max_scrolls is not None else 5
-            await scroll_to_bottom(self._page, pause_time=0.5, max_scrolls=scrolls)
-
-        # Extract text from main content area
-        raw_result = await self._extract_root_content(["main"])
-        raw = raw_result["text"]
-
-        if not raw:
-            return ExtractedSection(text="", references=[])
-        truncated = truncate_linkedin_noise(raw)
-        if not truncated and raw.strip():
-            logger.warning(
-                "Page %s returned only LinkedIn chrome (likely rate-limited)", url
-            )
-            return ExtractedSection(text=RATE_LIMITED_SECTION_TEXT, references=[])
-        cleaned = filter_linkedin_noise_lines(truncated)
-        return ExtractedSection(
-            text=cleaned,
-            references=build_references(raw_result["references"], section_name),
-        )
-
-    async def _extract_overlay(
-        self,
-        url: str,
-        section_name: str,
-    ) -> ExtractedSection:
-        """Extract content from an overlay/modal page (e.g. contact info).
-
-        LinkedIn renders contact info as a native <dialog> element.
-        Falls back to `<main>` if no dialog is found.
-
-        Retries once after a backoff when the overlay returns only LinkedIn
-        chrome (noise), mirroring `extract_page` behavior.
-        """
-        try:
-            result = await self._extract_overlay_once(url, section_name)
-            if result.text != RATE_LIMITED_SECTION_TEXT:
-                return result
-
-            logger.info(
-                "Retrying overlay %s after %.0fs backoff",
-                url,
-                _RATE_LIMIT_RETRY_DELAY,
-            )
-            await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
-            return await self._extract_overlay_once(url, section_name)
-
-        except LinkedInScraperException:
-            raise
-        except Exception as e:
-            logger.warning("Failed to extract overlay %s: %s", url, e)
-            return ExtractedSection(
-                text="",
-                references=[],
-                error=build_issue_diagnostics(
-                    e,
-                    context="extract_overlay",
-                    target_url=url,
-                    section_name=section_name,
-                ),
-            )
-
-    async def _extract_overlay_once(
-        self,
-        url: str,
-        section_name: str,
-    ) -> ExtractedSection:
-        """Single attempt to extract content from an overlay/modal page."""
-        await self._navigator._navigate_to_page(url)
-        await detect_rate_limit(self._page)
-
-        # Wait for the dialog/modal to render (LinkedIn uses native <dialog>)
-        try:
-            await self._page.wait_for_selector("dialog[open], .artdeco-modal__content")
-        except PlaywrightTimeoutError:
-            logger.debug("No modal overlay found on %s, falling back to main", url)
-
-        # NOTE: Do NOT call handle_modal_close() here — the contact-info
-        # overlay *is* a dialog/modal. Dismissing it would destroy the
-        # content before the JS evaluation below can read it.
-
-        raw_result = await self._extract_root_content(
-            ["dialog[open]", ".artdeco-modal__content", "main"],
-        )
-        raw = raw_result["text"]
-
-        if not raw:
-            return ExtractedSection(text="", references=[])
-        truncated = truncate_linkedin_noise(raw)
-        if not truncated and raw.strip():
-            logger.warning(
-                "Overlay %s returned only LinkedIn chrome (likely rate-limited)",
-                url,
-            )
-            return ExtractedSection(text=RATE_LIMITED_SECTION_TEXT, references=[])
-        cleaned = filter_linkedin_noise_lines(truncated)
-        return ExtractedSection(
-            text=cleaned,
-            references=build_references(raw_result["references"], section_name),
-        )
+        """Navigate to a URL, scroll to load lazy content, and extract innerText."""
+        return await self._capture.extract_page(url, section_name, max_scrolls)
 
     async def scrape_person(
         self,
@@ -1332,7 +1059,7 @@ class LinkedInExtractor:
                         == urlparse(base_url).path.rstrip("/")
                     )
                     if can_reuse_main:
-                        extracted = await self._extract_loaded_section(
+                        extracted = await self._capture._extract_loaded_section(
                             url,
                             section_name=section_name,
                             max_scrolls=max_scrolls,
@@ -1348,7 +1075,7 @@ class LinkedInExtractor:
                                 max_scrolls=max_scrolls,
                             )
                     elif is_overlay:
-                        extracted = await self._extract_overlay(
+                        extracted = await self._capture._extract_overlay(
                             url, section_name=section_name
                         )
                     else:
@@ -2497,7 +2224,7 @@ class LinkedInExtractor:
                 url = base_url + suffix
                 try:
                     if is_overlay:
-                        extracted = await self._extract_overlay(
+                        extracted = await self._capture._extract_overlay(
                             url, section_name=section_name
                         )
                     else:
@@ -2659,8 +2386,8 @@ class LinkedInExtractor:
         """Extract innerText from a job search page with soft rate-limit retry.
 
         Mirrors the noise-only detection and single-retry behavior of
-        ``extract_page`` / ``_extract_page_once`` so that callers get a
-        ``RATE_LIMITED_SECTION_TEXT`` sentinel instead of silent empty results.
+        ``SectionCapture`` so that callers get a ``RATE_LIMITED_SECTION_TEXT``
+        sentinel instead of silent empty results.
         """
         try:
             result = await self._extract_search_page_once(
@@ -2672,9 +2399,9 @@ class LinkedInExtractor:
             logger.info(
                 "Retrying search page %s after %.0fs backoff",
                 url,
-                _RATE_LIMIT_RETRY_DELAY,
+                RATE_LIMIT_RETRY_DELAY,
             )
-            await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
+            await asyncio.sleep(RATE_LIMIT_RETRY_DELAY)
             result = await self._extract_search_page_once(
                 url, section_name, scroll_deadline / 2
             )
@@ -2788,7 +2515,7 @@ class LinkedInExtractor:
                 f"Page navigated to {self._page.url} while scrolling {url}"
             )
 
-        raw_result = await self._extract_root_content(["main"])
+        raw_result = await self._content._extract_root_content(["main"])
 
         # The watcher covers the scroll and nothing else, and the read sits
         # outside it at both ends: a reload committing after the listener came
@@ -3205,9 +2932,9 @@ class LinkedInExtractor:
                 logger.info(
                     "Retrying saved jobs page %s after %.0fs backoff",
                     url,
-                    _RATE_LIMIT_RETRY_DELAY,
+                    RATE_LIMIT_RETRY_DELAY,
                 )
-                await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
+                await asyncio.sleep(RATE_LIMIT_RETRY_DELAY)
                 result = await self._extract_saved_jobs_page_once(url, section_name)
                 if result.text == RATE_LIMITED_SECTION_TEXT:
                     logger.warning(
@@ -3300,7 +3027,7 @@ class LinkedInExtractor:
         # Asked after the read rather than before it, or the gap between the
         # two is a window of its own and the text that came back is not the
         # text the check judged.
-        raw_result = await self._extract_root_content(["main"])
+        raw_result = await self._content._extract_root_content(["main"])
         if origin is not None and await self._navigator._document_origin() != origin:
             logger.debug("The saved-jobs document was replaced before it was read")
             await self._navigator._raise_if_auth_barrier(self._page.url)
@@ -3704,7 +3431,7 @@ class LinkedInExtractor:
             position="bottom", attempts=scrolls, pause_time=0.5
         )
 
-        raw_result = await self._extract_root_content(["main"])
+        raw_result = await self._content._extract_root_content(["main"])
         raw = raw_result["text"]
         cleaned = strip_linkedin_noise(raw) if raw else ""
         references: list[Reference] = (
@@ -3900,7 +3627,7 @@ class LinkedInExtractor:
             position="top", attempts=3, pause_time=0.5
         )
 
-        raw_result = await self._extract_root_content(["main"])
+        raw_result = await self._content._extract_root_content(["main"])
         raw = raw_result["text"]
         # Conversation chrome first: a sidebar preview containing a generic
         # noise marker would otherwise truncate the page before the thread
@@ -3942,7 +3669,7 @@ class LinkedInExtractor:
         await handle_modal_close(self._page)
         await self._wait_for_main_text(log_context="Messaging search")
 
-        raw_result = await self._extract_root_content(["main"])
+        raw_result = await self._content._extract_root_content(["main"])
         raw = raw_result["text"]
         cleaned = strip_linkedin_noise(raw) if raw else ""
         references: list[Reference] = (
@@ -4188,112 +3915,3 @@ class LinkedInExtractor:
             recipient_selected=recipient_selected,
             sent=True,
         )
-
-    async def _extract_root_content(
-        self,
-        selectors: list[str],
-    ) -> dict[str, Any]:
-        """Extract innerText and raw anchor metadata from the first matching root."""
-        result = await self._page.evaluate(
-            """({ selectors }) => {
-                const normalize = value => (value || '').replace(/\\s+/g, ' ').trim();
-                const containerSelector = 'section, article, li, div';
-                const headingSelector = 'h1, h2, h3';
-                const directHeadingSelector = ':scope > h1, :scope > h2, :scope > h3';
-                const MAX_HEADING_CONTAINERS = 300;
-                const MAX_REFERENCE_ANCHORS = 500;
-
-                const getHeadingText = element => {
-                    if (!element) return '';
-
-                    const heading =
-                        element.matches && element.matches(headingSelector)
-                            ? element
-                            : element.querySelector
-                              ? element.querySelector(directHeadingSelector)
-                              : null;
-
-                    return normalize(heading?.innerText || heading?.textContent);
-                };
-
-                const getPreviousHeading = node => {
-                    let sibling = node?.previousElementSibling || null;
-                    for (let index = 0; sibling && index < 3; index += 1) {
-                        const heading = getHeadingText(sibling);
-                        if (heading) {
-                            return heading;
-                        }
-                        sibling = sibling.previousElementSibling;
-                    }
-                    return '';
-                };
-
-                const root = selectors
-                    .map(selector => document.querySelector(selector))
-                    .find(Boolean);
-                const source = root ? 'root' : 'body';
-                const container = root || document.body;
-                const text = container ? (container.innerText || '').trim() : '';
-                const headingMap = new WeakMap();
-
-                const candidateContainers = [
-                    container,
-                    ...Array.from(container.querySelectorAll(containerSelector)).slice(
-                        0,
-                        MAX_HEADING_CONTAINERS,
-                    ),
-                ];
-                candidateContainers.forEach(node => {
-                    const ownHeading = getHeadingText(node);
-                    const previousHeading = getPreviousHeading(node);
-                    const heading = ownHeading || previousHeading;
-                    if (heading) {
-                        headingMap.set(node, heading);
-                    }
-                });
-
-                const findHeading = element => {
-                    let current = element.closest(containerSelector) || container;
-                    for (let depth = 0; current && depth < 4; depth += 1) {
-                        const heading = headingMap.get(current);
-                        if (heading) {
-                            return heading;
-                        }
-                        if (current === container) {
-                            break;
-                        }
-                        current = current.parentElement?.closest(containerSelector) || null;
-                    }
-                    return '';
-                };
-
-                const references = Array.from(container.querySelectorAll('a[href]'))
-                    .slice(0, MAX_REFERENCE_ANCHORS)
-                    .map(anchor => {
-                        const rawHref = (anchor.getAttribute('href') || '').trim();
-                        if (!rawHref || rawHref === '#') {
-                            return null;
-                        }
-
-                        const href = rawHref.startsWith('#')
-                            ? rawHref
-                            : (anchor.href || rawHref);
-
-                        return {
-                            href,
-                            text: normalize(anchor.innerText || anchor.textContent),
-                            aria_label: normalize(anchor.getAttribute('aria-label')),
-                            title: normalize(anchor.getAttribute('title')),
-                            heading: findHeading(anchor),
-                            in_article: Boolean(anchor.closest('article')),
-                            in_nav: Boolean(anchor.closest('nav')),
-                            in_footer: Boolean(anchor.closest('footer')),
-                        };
-                    })
-                    .filter(Boolean);
-
-                return { source, text, references };
-            }""",
-            {"selectors": selectors},
-        )
-        return result
