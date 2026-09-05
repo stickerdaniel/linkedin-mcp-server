@@ -166,8 +166,8 @@ class SequentialToolExecutionMiddleware(Middleware):
                 pace = min(interval, max(0.0, remaining))
                 logger.debug(
                     "Tool '%s' absorbing %.1fs future stamp skew "
-                    "(%.1fs budget left) with a %.1fs pace then claiming "
-                    "locally",
+                    "(%.1fs budget left) with a %.1fs pace then proceeding "
+                    "without rewinding the shared stamp",
                     tool_name,
                     skew,
                     remaining,

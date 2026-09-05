@@ -118,7 +118,7 @@ class TestTryClaimStart:
         assert try_claim_start(one, 10.0) == 0.0
         assert try_claim_start(two, 10.0) == pytest.approx(5.0)
 
-    def test_force_claim_overwrites_future_stamp(self, tmp_path: Path, monkeypatch):
+    def test_force_claim_never_rewinds_future_stamp(self, tmp_path: Path, monkeypatch):
         from linkedin_mcp_server.tool_interval import force_claim_start
 
         auth_root = tmp_path / "auth"
@@ -129,4 +129,41 @@ class TestTryClaimStart:
         )
         force_claim_start(auth_root)
         stamp = json.loads((auth_root / "tool-interval.json").read_text())
+        # A slower clock must not replace a faster peer's stamp (#877).
+        assert stamp["last_start_wall"] == 2000.0
+
+    def test_force_claim_advances_a_stale_stamp(self, tmp_path: Path, monkeypatch):
+        from linkedin_mcp_server.tool_interval import force_claim_start
+
+        auth_root = tmp_path / "auth"
+        auth_root.mkdir()
+        write_last_start_wall(auth_root, 500.0)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tool_interval.time.time", lambda: 1000.0
+        )
+        force_claim_start(auth_root)
+        stamp = json.loads((auth_root / "tool-interval.json").read_text())
         assert stamp["last_start_wall"] == 1000.0
+
+    def test_force_claim_keeps_fast_peer_waiting(self, tmp_path: Path, monkeypatch):
+        """Rewinding the stamp would let a fast peer skip the interval (#877)."""
+        from linkedin_mcp_server.tool_interval import force_claim_start
+
+        auth_root = tmp_path / "auth"
+        auth_root.mkdir()
+        # Fast peer wrote a start at wall=2000.
+        write_last_start_wall(auth_root, 2000.0)
+        # Slow peer (wall=1000) absorbs unreachable skew.
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tool_interval.time.time", lambda: 1000.0
+        )
+        force_claim_start(auth_root)
+        # Fast peer shortly after its own start must still wait.
+        assert (
+            remaining_wait_seconds(
+                interval=15.0, last_start_wall=2000.0, now_wall=2005.0
+            )
+            == 10.0
+        )
+        stamp = json.loads((auth_root / "tool-interval.json").read_text())
+        assert stamp["last_start_wall"] == 2000.0
