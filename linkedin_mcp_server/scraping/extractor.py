@@ -336,21 +336,39 @@ _SCROLL_BUDGET_TOTAL = 60.0
 # developer search take 83s in total, 6.5s each, so this leaves the normal case
 # untouched and only catches a run that is genuinely running out.
 #
-# This predicts, it does not guarantee. Only the decision to *start* a page is
-# bounded; once started, a page runs to its own timeouts, and `goto` alone
-# allows 30s. The reserve is what covers that gap, and it has three claims on
-# it: the extraction and assembly after the last navigation, a page slower than
-# every page before it, and the browser startup inside `get_ready_extractor`,
-# which FastMCP is already timing before this budget begins. A page that
-# overruns the reserve is still cancelled and still loses every page gathered.
-# Bounding that too means handing the remaining budget down into navigation
-# and the rate-limit retry; see #754 rather than the margin. Scrolling is
-# already handed a deadline, so it takes what is left of this budget when
-# that is less than its own cap.
+# The loop predicts before admitting page N. Once admitted, the page is also
+# handed `page_deadline` (the same absolute end of this budget) so `goto`, the
+# `<main>` wait, scrolling, and the soft rate-limit backoff cannot each spend
+# their own constant past what is left. The 20% reserve still covers assembly
+# after the last navigation, a page slower than every page before it, and
+# browser startup inside `get_ready_extractor`, which FastMCP is already timing
+# before this budget begins.
 #
 # The timeout arrives as an argument because `get_config()` parses `sys.argv`
 # on its first call, and a scraping path is the wrong place to discover that.
 _SEARCH_TIMEOUT_FRACTION = 0.8
+
+# Playwright `goto` default used everywhere navigation is uncapped. Search
+# pages replace this with whatever remains of `page_deadline`.
+_GOTO_TIMEOUT_MS = 30_000.0
+
+
+def _timeout_ms_until(
+    deadline: float | None, *, default_ms: float = _GOTO_TIMEOUT_MS
+) -> float:
+    """Milliseconds allowed until *deadline*, or *default_ms* when unbound.
+
+    A non-positive remainder becomes ``1`` so Playwright still treats it as an
+    explicit short timeout rather than falling back to the page default (its
+    behaviour for ``timeout=0``).
+    """
+    if deadline is None:
+        return default_ms
+    remaining_ms = (deadline - time.monotonic()) * 1000
+    if remaining_ms <= 0:
+        return 1.0
+    return min(default_ms, remaining_ms)
+
 
 _SAVED_JOBS_URL = "https://www.linkedin.com/my-items/saved-jobs/"
 # Where a saved-jobs navigation may legitimately end. LinkedIn redirects the
@@ -1123,6 +1141,7 @@ class LinkedInExtractor:
         *,
         wait_until: WaitUntil = "domcontentloaded",
         allow_remember_me: bool = True,
+        timeout_ms: float = _GOTO_TIMEOUT_MS,
     ) -> None:
         """Navigate to a LinkedIn page and fail fast on auth barriers."""
         hops: list[str] = []
@@ -1151,7 +1170,7 @@ class LinkedInExtractor:
                 extra={"target_url": url, "wait_until": wait_until},
             )
             try:
-                await self._page.goto(url, wait_until=wait_until, timeout=30000)
+                await self._page.goto(url, wait_until=wait_until, timeout=timeout_ms)
                 await stabilize_navigation(f"goto {url}", logger)
                 await record_page_trace(
                     self._page,
@@ -1195,6 +1214,7 @@ class LinkedInExtractor:
                         url,
                         wait_until=wait_until,
                         allow_remember_me=False,
+                        timeout_ms=timeout_ms,
                     )
                     return
                 await record_page_trace(
@@ -1235,6 +1255,7 @@ class LinkedInExtractor:
                     url,
                     wait_until=wait_until,
                     allow_remember_me=False,
+                    timeout_ms=timeout_ms,
                 )
                 return
 
@@ -1251,10 +1272,12 @@ class LinkedInExtractor:
         finally:
             unregister_navigation_listener()
 
-    async def _navigate_to_page(self, url: str) -> None:
+    async def _navigate_to_page(
+        self, url: str, *, timeout_ms: float = _GOTO_TIMEOUT_MS
+    ) -> None:
         """Navigate to a LinkedIn page and fail fast on auth barriers."""
-        logger.debug("_navigate_to_page: target=%s", url)
-        await self._goto_with_auth_checks(url)
+        logger.debug("_navigate_to_page: target=%s timeout_ms=%.0f", url, timeout_ms)
+        await self._goto_with_auth_checks(url, timeout_ms=timeout_ms)
 
     # ------------------------------------------------------------------
     # Generic browser helpers for LLM-driven connection flow
@@ -3484,19 +3507,37 @@ class LinkedInExtractor:
         url: str,
         section_name: str,
         scroll_deadline: float = _SCROLL_DEADLINE_MAX,
+        page_deadline: float | None = None,
     ) -> ExtractedSection:
         """Extract innerText from a job search page with soft rate-limit retry.
 
         Mirrors the noise-only detection and single-retry behavior of
         ``extract_page`` / ``_extract_page_once`` so that callers get a
         ``_RATE_LIMITED_MSG`` sentinel instead of silent empty results.
+
+        ``page_deadline`` is an absolute monotonic end of the search budget.
+        Navigation, the ``<main>`` wait, scrolling, and the rate-limit backoff
+        are each capped by what remains of it. When the backoff alone would
+        overrun, the rate-limited sentinel is returned without retrying.
         """
         try:
             result = await self._extract_search_page_once(
-                url, section_name, scroll_deadline
+                url, section_name, scroll_deadline, page_deadline=page_deadline
             )
             if result.text != _RATE_LIMITED_MSG:
                 return result
+
+            if page_deadline is not None:
+                remaining = page_deadline - time.monotonic()
+                if remaining < _RATE_LIMIT_RETRY_DELAY:
+                    logger.info(
+                        "Skipping search page retry on %s: %.1fs left, "
+                        "need %.1fs backoff",
+                        url,
+                        remaining,
+                        _RATE_LIMIT_RETRY_DELAY,
+                    )
+                    return result
 
             logger.info(
                 "Retrying search page %s after %.0fs backoff",
@@ -3505,7 +3546,10 @@ class LinkedInExtractor:
             )
             await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
             result = await self._extract_search_page_once(
-                url, section_name, scroll_deadline / 2
+                url,
+                section_name,
+                scroll_deadline / 2,
+                page_deadline=page_deadline,
             )
             if result.text == _RATE_LIMITED_MSG:
                 logger.warning("Search page %s still rate-limited after retry", url)
@@ -3531,9 +3575,17 @@ class LinkedInExtractor:
         url: str,
         section_name: str,
         scroll_deadline: float = _SCROLL_DEADLINE_MAX,
+        page_deadline: float | None = None,
     ) -> ExtractedSection:
         """Single attempt to navigate, scroll sidebar, and extract innerText."""
-        await self._navigate_to_page(url)
+        await self._navigate_to_page(url, timeout_ms=_timeout_ms_until(page_deadline))
+        # Navigation spent wall clock the scroll budget does not own. Re-cap
+        # against what is left so a slow `goto` cannot leave scrolling the
+        # original twelve seconds on a budget that already expired.
+        if page_deadline is not None:
+            scroll_deadline = min(
+                scroll_deadline, max(0.0, page_deadline - time.monotonic())
+            )
         await detect_rate_limit(self._page)
         # Above the selector wait and the modal close, so the window this
         # opens covers everything read from here on. Taken between them, a
@@ -3543,7 +3595,12 @@ class LinkedInExtractor:
 
         main_found = True
         try:
-            await self._page.wait_for_selector("main")
+            if page_deadline is not None:
+                await self._page.wait_for_selector(
+                    "main", timeout=_timeout_ms_until(page_deadline)
+                )
+            else:
+                await self._page.wait_for_selector("main")
         except PlaywrightTimeoutError:
             logger.debug("No <main> element found on %s", url)
             main_found = False
@@ -3829,17 +3886,18 @@ class LinkedInExtractor:
 
             url = base_url if offset == 0 else f"{base_url}&start={offset}"
             # Against what is left of the tool's own timeout as well. The
-            # per-page cap is twelve seconds and the whole search gets
+            # per-page scroll cap is twelve seconds and the whole search gets
             # `tool_timeout` times the fraction above, so a caller passing ten
             # seconds had the first scroll alone allowed to outlast the call
-            # and take every page gathered with it. Scrolling is the one part
-            # already told how long it may run, so it is the one part this can
-            # bound without handing the budget down into navigation.
+            # and take every page gathered with it. Navigation and the soft
+            # rate-limit retry share the same absolute end via `page_deadline`.
+            remaining = max(0.0, budget - (time.monotonic() - started))
             scroll_deadline = min(
                 _SCROLL_DEADLINE_MAX,
                 scroll_budget_left,
-                max(0.0, budget - (time.monotonic() - started)),
+                remaining,
             )
+            page_deadline = started + budget
             self._scroll_seconds = 0.0
 
             try:
@@ -3847,6 +3905,7 @@ class LinkedInExtractor:
                     url,
                     section_name="search_results",
                     scroll_deadline=scroll_deadline,
+                    page_deadline=page_deadline,
                 )
                 slowest_page = max(slowest_page, time.monotonic() - page_started)
                 scroll_budget_left = max(0.0, scroll_budget_left - self._scroll_seconds)
