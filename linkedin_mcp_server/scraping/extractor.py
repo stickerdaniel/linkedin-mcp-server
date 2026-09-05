@@ -592,6 +592,21 @@ _MESSAGE_COMPOSER_INSPECT_JS = r"""
                     .map(name => normalizeUrn(element.getAttribute(name)))
             ),
         });
+        // The walk climbs until a dialog closes it, and every identity it
+        // finds on the way has to agree with the target. That scope is
+        // deliberate and it is not free. A thread rendered inside the same
+        // section as the editor puts its message history in the walk, so a
+        // profile mention anyone can drop into a conversation refuses every
+        // later send to that person. The refusal is the safe half of the
+        // trade: adding identities can only ever make this stricter, so the
+        // recipient cannot use it to redirect a message. The unsafe half
+        // needs the real recipient to expose no identity at all in the whole
+        // chain while a mention of the target does, which no measurement has
+        // reached: the live compose surface has not been read yet, so what
+        // LinkedIn actually puts between the editor and its dialog is
+        // unknown. Narrowing the walk to the innermost owner would cut the
+        // false refusals and give up that asymmetry, which is a design
+        // decision and not a repair.
         const identities = [];
         let ancestor = editor.parentElement;
         while (ancestor) {
@@ -5307,6 +5322,11 @@ class LinkedInExtractor:
             ):
                 submission = "invalid"
             else:
+                # The read and the keypress are two round trips, so the editor
+                # could in principle lose focus between them. Nothing a caller
+                # or a recipient controls reaches that window, and closing it
+                # would need the keystroke and the check to be one operation,
+                # which no input API offers.
                 await self._page.keyboard.press("Enter")
         if submission not in {"clicked", "enter"}:
             await self._dismiss_message_ui()
