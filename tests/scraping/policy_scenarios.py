@@ -497,6 +497,35 @@ async def _feed_response_scenario(*, body_failure: bool) -> dict[str, Any]:
     )
 
 
+_EXPECTED_MESSAGE_COMPOSE_SELECTORS = (
+    'div[role="textbox"][contenteditable="true"][aria-label*="Write a message"]',
+    'main div[role="textbox"][contenteditable="true"]',
+    'main [contenteditable="true"][aria-label*="message"]',
+)
+
+
+def _script_message_composer(
+    page: ScriptedPage, *, fallback_index: int, resolutions: int = 2
+) -> None:
+    """Script exact misses before one successful production fallback."""
+    for selector in extractor_module._MESSAGING_COMPOSE_FALLBACK_SELECTORS:
+        index = _EXPECTED_MESSAGE_COMPOSE_SELECTORS.index(selector)
+        semantic_id = f"composer.{index}"
+        page.declare_locator(selector, semantic_id)
+        page.declare_derived(semantic_id, "last", f"{semantic_id}.last")
+        if index < fallback_index:
+            page.script(f"{semantic_id}.count", *([0] * resolutions))
+            page.script(
+                f"{semantic_id}.last.wait_for",
+                *(
+                    PlaywrightTimeoutError(f"composer fallback {index} unavailable")
+                    for _ in range(resolutions)
+                ),
+            )
+        elif index == fallback_index:
+            page.script(f"{semantic_id}.count", *([1] * resolutions))
+
+
 async def _messaging_safety_scenario(
     confirm_send: bool, *, delivery_confirmed: bool = True
 ) -> dict[str, Any]:
@@ -515,14 +544,7 @@ async def _messaging_safety_scenario(
         extractor_module._MESSAGING_RECIPIENT_PICKER_SELECTOR, "recipient_picker"
     )
     page.script("recipient_picker.count", 0)
-    for index, selector in enumerate(
-        extractor_module._MESSAGING_COMPOSE_FALLBACK_SELECTORS
-    ):
-        semantic_id = f"composer.{index}"
-        page.declare_locator(selector, semantic_id)
-        page.declare_derived(semantic_id, "last", f"{semantic_id}.last")
-        counts = (1, 1) if index == 0 else (0,)
-        page.script(f"{semantic_id}.count", *counts)
+    _script_message_composer(page, fallback_index=0)
     page.script("evaluate:compose_matches_recipient", True)
     page.declare_locator(extractor_module._MESSAGING_CLOSE_SELECTOR, "message_close")
     if confirm_send:
@@ -569,6 +591,95 @@ async def _messaging_safety_scenario(
                 "confirm_send": confirm_send,
                 "profile_urn": "ACoAA-policy",
                 "composer_initial_text": "Existing text",
+            },
+        },
+        result,
+    )
+
+
+async def _recipient_picker_scenario(*, recipient_selected: bool) -> dict[str, Any]:
+    """Record production recipient selection against synthetic picker outcomes."""
+    suffix = "selected" if recipient_selected else "selection_failure"
+    recorder = TraceRecorder(f"send_message__recipient_{suffix}", _COMMON_ALLOWED)
+    clock = FakeClock(recorder)
+    page = _page(recorder)
+    page.script("evaluate:profile_display_name", "Ada Lovelace")
+    page.declare_locator(
+        extractor_module._MESSAGING_RECIPIENT_PICKER_SELECTOR, "recipient_picker"
+    )
+    page.declare_derived("recipient_picker", "first", "recipient_picker.first")
+    page.script("recipient_picker.count", 1, *([0] if recipient_selected else []))
+    page.script("recipient_picker.first.wait_for", None)
+    page.script("evaluate:select_message_recipient", recipient_selected)
+    _script_message_composer(
+        page, fallback_index=0, resolutions=2 if recipient_selected else 1
+    )
+    page.script("evaluate:compose_matches_recipient", True)
+    page.declare_locator(extractor_module._MESSAGING_CLOSE_SELECTOR, "message_close")
+    page.script("message_close.count", 0)
+
+    extractor = _extractor(page)
+    async with boundaries(recorder, clock):
+        with recorder.context("send_message", "message"):
+            result = await extractor.send_message(
+                "ada-lovelace",
+                "New text",
+                confirm_send=False,
+                profile_urn="ACoAA-policy",
+            )
+    page.assert_clean()
+    return recorder.trace(
+        {
+            "method": "send_message",
+            "arguments": {
+                "linkedin_username": "ada-lovelace",
+                "message": "New text",
+                "confirm_send": False,
+                "profile_urn": "ACoAA-policy",
+            },
+        },
+        result,
+    )
+
+
+async def _messaging_compose_fallback_scenario(
+    fallback_index: int,
+) -> dict[str, Any]:
+    """Record both production composer resolutions with synthetic misses."""
+    recorder = TraceRecorder(
+        f"send_message__composer_fallback_{fallback_index}", _COMMON_ALLOWED
+    )
+    clock = FakeClock(recorder)
+    page = _page(recorder)
+    page.script("evaluate:profile_display_name", "Ada Lovelace")
+    page.declare_locator(
+        extractor_module._MESSAGING_RECIPIENT_PICKER_SELECTOR, "recipient_picker"
+    )
+    page.script("recipient_picker.count", 0)
+    _script_message_composer(page, fallback_index=fallback_index)
+    page.script("evaluate:compose_matches_recipient", True)
+    page.declare_locator(extractor_module._MESSAGING_CLOSE_SELECTOR, "message_close")
+    page.script("message_close.count", 0)
+
+    extractor = _extractor(page)
+    async with boundaries(recorder, clock):
+        with recorder.context("send_message", "message"):
+            result = await extractor.send_message(
+                "ada-lovelace",
+                "New text",
+                confirm_send=False,
+                profile_urn="ACoAA-policy",
+            )
+    page.assert_clean()
+    return recorder.trace(
+        {
+            "method": "send_message",
+            "arguments": {
+                "linkedin_username": "ada-lovelace",
+                "message": "New text",
+                "confirm_send": False,
+                "profile_urn": "ACoAA-policy",
+                "composer_fallback_index": fallback_index,
             },
         },
         result,
@@ -836,6 +947,18 @@ async def build_policy_traces() -> dict[str, dict[str, Any]]:
         "message-append.json": await _messaging_safety_scenario(True),
         "message-send-unavailable.json": await _messaging_safety_scenario(
             True, delivery_confirmed=False
+        ),
+        "message-recipient-picker.json": await _recipient_picker_scenario(
+            recipient_selected=True
+        ),
+        "message-recipient-selection-failure.json": await _recipient_picker_scenario(
+            recipient_selected=False
+        ),
+        "message-composer-fallback-1.json": await _messaging_compose_fallback_scenario(
+            1
+        ),
+        "message-composer-fallback-2.json": await _messaging_compose_fallback_scenario(
+            2
         ),
         "message-blank.json": await _blank_message_scenario(),
         "connect.json": await _connect_scenario(),

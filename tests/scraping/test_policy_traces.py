@@ -359,6 +359,90 @@ async def test_message_delivery_evidence_is_ordered_and_gated():
     assert blank["events"] == []
 
 
+async def test_message_recipient_picker_selects_before_confirmation_gate():
+    selected = await policy_scenarios._recipient_picker_scenario(
+        recipient_selected=True
+    )
+    failed = await policy_scenarios._recipient_picker_scenario(recipient_selected=False)
+
+    positions = _operation_positions(selected)
+    picker_wait = next(
+        index
+        for index, event in enumerate(selected["events"])
+        if event["kind"] == "locator.wait_for"
+        and event["locator"] == "recipient_picker.first"
+    )
+    composer_counts = [
+        index
+        for index, event in enumerate(selected["events"])
+        if event["kind"] == "locator.count" and event["locator"] == "composer.0"
+    ]
+
+    assert len(composer_counts) == 2
+    assert (
+        picker_wait
+        < positions["select_message_recipient"][0]
+        < composer_counts[0]
+        < composer_counts[1]
+        < positions["compose_matches_recipient"][0]
+    )
+    selection = selected["events"][positions["select_message_recipient"][0]]
+    assert selection["arg"] == {"candidates": ["Ada Lovelace", "ada-lovelace"]}
+    assert selected["result"]["status"] == "confirmation_required"
+    assert selected["result"]["recipient_selected"] is True
+    assert not any(event["kind"] == "keyboard.type" for event in selected["events"])
+
+    assert failed["result"]["status"] == "recipient_resolution_failed"
+    assert failed["result"]["recipient_selected"] is False
+    assert not any(
+        event.get("operation") == "compose_matches_recipient"
+        for event in failed["events"]
+    )
+
+
+@pytest.mark.parametrize(
+    "fallback_index",
+    [
+        pytest.param(1, id="second-selector"),
+        pytest.param(2, id="third-selector"),
+    ],
+)
+async def test_message_composer_reaches_each_later_fallback(fallback_index: int):
+    trace = await policy_scenarios._messaging_compose_fallback_scenario(fallback_index)
+    expected_cycle = [f"composer.{index}" for index in range(fallback_index + 1)]
+    composer_counts = [
+        event["locator"]
+        for event in trace["events"]
+        if event["kind"] == "locator.count" and event["locator"].startswith("composer.")
+    ]
+    waits = [
+        event["locator"]
+        for event in trace["events"]
+        if event["kind"] == "locator.wait_for"
+        and event["locator"].startswith("composer.")
+    ]
+    created_selectors = [
+        event["selector"]
+        for event in trace["events"]
+        if event["kind"] == "locator.create"
+        and event["locator"].startswith("composer.")
+    ]
+
+    assert composer_counts == expected_cycle * 2
+    assert waits == [
+        f"composer.{index}.last" for _ in range(2) for index in range(fallback_index)
+    ]
+    assert created_selectors == [
+        policy_scenarios._EXPECTED_MESSAGE_COMPOSE_SELECTORS[index]
+        for _ in range(2)
+        for index in range(fallback_index + 1)
+    ]
+    assert composer_counts.count(f"composer.{fallback_index}") == 2
+    assert trace["result"]["status"] == "confirmation_required"
+    assert trace["result"]["recipient_selected"] is True
+    assert not any(event["kind"] == "keyboard.type" for event in trace["events"])
+
+
 async def test_feed_stale_stop_and_listener_cleanup_are_bounded():
     feed = (await build_policy_traces())["feed-stale.json"]
     events = feed["events"]
