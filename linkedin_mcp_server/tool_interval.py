@@ -125,22 +125,30 @@ def try_claim_start(auth_root: Path, interval: float) -> float:
 
 
 def force_claim_start(auth_root: Path) -> None:
-    """Write a local-time start stamp, ignoring any prior wait.
+    """Mark a start without rewinding a future shared stamp.
 
     Used when a future peer stamp cannot be converged on inside this call's
     wait budget (the daemon owner's 30s proxy margin). Marching toward that
-    stamp would reject the call; claiming at local time completes one pacing
-    step and lets the tool proceed.
+    stamp would reject the call; proceeding after one local pace lets the
+    tool run. The stamp is set to ``max(now, last)`` so a slower clock never
+    replaces a faster peer's start time — that rewrite would make the peer
+    see the stamp as ancient and skip the configured interval (#877).
     """
     _, lock_path = interval_paths(auth_root)
     fd = acquire_locked_fd(lock_path, exclusive=True)
+
+    def _write_monotone(now: float) -> None:
+        last = read_last_start_wall(auth_root)
+        stamp = now if last is None else max(now, last)
+        write_last_start_wall(auth_root, stamp)
+
     if fd is None:
         # Best-effort: another process holds the lock. Writing without it can
         # race, but the next claim still re-checks under the lock.
-        write_last_start_wall(auth_root, time.time())
+        _write_monotone(time.time())
         return
     try:
-        write_last_start_wall(auth_root, time.time())
+        _write_monotone(time.time())
     finally:
         _release_locked_fd(fd)
         try:

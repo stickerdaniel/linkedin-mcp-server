@@ -1002,7 +1002,8 @@ class TestSequentialToolExecutionMiddleware:
         )
 
         # Stamp 120s ahead: more than the 30s owner margin can close.
-        write_last_start_wall(auth_root, time.time() + 120.0)
+        future = time.time() + 120.0
+        write_last_start_wall(auth_root, future)
 
         slept: list[float] = []
 
@@ -1032,11 +1033,12 @@ class TestSequentialToolExecutionMiddleware:
 
         await middleware.on_call_tool(context, call_next)
 
-        # One interval-sized pace, then local claim — not 30s of retries.
+        # One interval-sized pace, then proceed — stamp must stay ahead so a
+        # fast-clock peer cannot treat it as ancient and skip the interval.
         assert slept == [15.0]
         call_next.assert_awaited_once()
         stamp = json.loads((auth_root / "tool-interval.json").read_text())
-        assert stamp["last_start_wall"] == pytest.approx(time.time(), abs=2.0)
+        assert stamp["last_start_wall"] == pytest.approx(future)
 
 
 class TestBrowserLifespan:
