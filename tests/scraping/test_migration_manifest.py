@@ -481,6 +481,26 @@ async def test_unknown(page):
         _scan_synthetic(source)
 
 
+@pytest.mark.parametrize(
+    "suffix",
+    ["", "\nreader = linkedin_mcp_server.scraping.extractor._drain_listener_tasks"],
+)
+def test_unaliased_extractor_module_imports_are_rejected(suffix):
+    with pytest.raises(migration.UnresolvedSeamError, match="requires an as alias"):
+        _scan_synthetic("import linkedin_mcp_server.scraping.extractor" + suffix)
+
+
+def test_aliased_full_module_import_keeps_its_direct_attribute_inventory():
+    seams = _scan_synthetic(
+        "import linkedin_mcp_server.scraping.extractor as legacy\n"
+        "reader = legacy._drain_listener_tasks\n"
+    )
+    attributes = [seam for seam in seams if seam.kind == "module_attribute"]
+    assert len(attributes) == 1
+    assert attributes[0].target == "_drain_listener_tasks"
+    assert attributes[0].migration_stage == 5
+
+
 def test_unknown_direct_extractor_module_attributes_fail_closed():
     source = """
 from linkedin_mcp_server.scraping import extractor as legacy_surface

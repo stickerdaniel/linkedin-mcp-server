@@ -391,7 +391,11 @@ def module_aliases(tree: ast.AST) -> set[str]:
                         aliases.add(alias.asname or alias.name)
         elif isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.name == EXTRACTOR_MODULE and alias.asname:
+                if alias.name == EXTRACTOR_MODULE:
+                    if not alias.asname:
+                        raise UnresolvedSeamError(
+                            f"line {node.lineno}: extractor module import requires an as alias"
+                        )
                     aliases.add(alias.asname)
     return aliases
 
