@@ -1,6 +1,8 @@
 import asyncio
+import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -14,6 +16,7 @@ from fastmcp.server.providers.proxy import ProxyClient
 
 import linkedin_mcp_server.server as server_module
 from linkedin_mcp_server import __version__
+from linkedin_mcp_server.config import reset_config, set_config
 from linkedin_mcp_server.sequential_tool_middleware import (
     SequentialToolExecutionMiddleware,
 )
@@ -25,6 +28,8 @@ from linkedin_mcp_server.server_role import (
     process_role,
 )
 from linkedin_mcp_server.update_check import UpdateNoticeMiddleware
+from linkedin_mcp_server.profile_lease import ProfileLease
+import linkedin_mcp_server.sequential_tool_middleware as sequential_middleware_module
 
 
 def _has_middleware(mcp: FastMCP, kind: type) -> bool:
@@ -577,6 +582,13 @@ class TestOwnerAuthentication:
 
 
 class TestSequentialToolExecutionMiddleware:
+    @pytest.fixture(autouse=True)
+    def _install_default_config(self):
+        """Keep middleware hermetic: get_config must not parse pytest argv."""
+        set_config(AppConfig())
+        yield
+        reset_config()
+
     async def test_create_mcp_server_registers_sequential_tool_middleware(self):
         mcp = create_mcp_server()
 
@@ -652,6 +664,381 @@ class TestSequentialToolExecutionMiddleware:
                 ),
             ]
         )
+
+    async def test_min_tool_interval_disabled_by_default(self, monkeypatch):
+        """Default 0 must not delay consecutive tool calls."""
+
+        async def fake_owning(
+            self, context, call_next, tool_name, *, pre_tool_deadline=None
+        ):
+            return await call_next(context)
+
+        monkeypatch.setattr(
+            SequentialToolExecutionMiddleware,
+            "_run_owning_the_profile",
+            fake_owning,
+        )
+
+        mcp = FastMCP("test")
+        mcp.add_middleware(SequentialToolExecutionMiddleware())
+
+        @mcp.tool
+        async def quick_tool() -> dict[str, str]:
+            return {"ok": "yes"}
+
+        started = time.perf_counter()
+        await mcp.call_tool("quick_tool", {})
+        await mcp.call_tool("quick_tool", {})
+        assert time.perf_counter() - started < 0.5
+
+    async def test_min_tool_interval_spaces_sequential_calls(
+        self, monkeypatch, tmp_path
+    ):
+        config = AppConfig()
+        config.server.min_tool_interval_seconds = 0.2
+        set_config(config)
+
+        auth_root = tmp_path / "auth"
+        auth_root.mkdir(exist_ok=True)
+        lease = ProfileLease(auth_root)
+        monkeypatch.setattr(
+            sequential_middleware_module, "get_profile_lease", lambda: lease
+        )
+
+        async def fake_owning(
+            self, context, call_next, tool_name, *, pre_tool_deadline=None
+        ):
+            return await call_next(context)
+
+        monkeypatch.setattr(
+            SequentialToolExecutionMiddleware,
+            "_run_owning_the_profile",
+            fake_owning,
+        )
+
+        mcp = FastMCP("test")
+        mcp.add_middleware(SequentialToolExecutionMiddleware())
+
+        @mcp.tool
+        async def quick_tool() -> dict[str, str]:
+            return {"ok": "yes"}
+
+        started = time.perf_counter()
+        await mcp.call_tool("quick_tool", {})
+        await mcp.call_tool("quick_tool", {})
+        elapsed = time.perf_counter() - started
+        assert elapsed >= 0.15
+
+    async def test_min_tool_interval_honours_cancellation(self, monkeypatch, tmp_path):
+        config = AppConfig()
+        config.server.min_tool_interval_seconds = 5.0
+        set_config(config)
+
+        auth_root = tmp_path / "auth"
+        auth_root.mkdir(exist_ok=True)
+        lease = ProfileLease(auth_root)
+        monkeypatch.setattr(
+            sequential_middleware_module, "get_profile_lease", lambda: lease
+        )
+
+        middleware = SequentialToolExecutionMiddleware()
+        middleware._last_start_mono = time.monotonic()
+        call_next = AsyncMock(return_value=MagicMock())
+        context = MiddlewareContext(
+            message=mt.CallToolRequestParams(name="slow_tool", arguments={}),
+            method="tools/call",
+        )
+
+        task = asyncio.create_task(middleware.on_call_tool(context, call_next))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        call_next.assert_not_awaited()
+
+    async def test_min_tool_interval_refuses_wait_past_proxy_margin(
+        self, monkeypatch, tmp_path
+    ):
+        from fastmcp.exceptions import ToolError
+        from linkedin_mcp_server.server_role import ServerRole, set_process_role
+
+        # The 30s margin is a daemon-owner constraint only.
+        set_process_role(ServerRole.OWNER)
+
+        config = AppConfig()
+        # Wait needed (~60s) exceeds the daemon proxy margin (30s).
+        config.server.min_tool_interval_seconds = 60.0
+        config.server.tool_timeout_seconds = 180.0
+        set_config(config)
+
+        auth_root = tmp_path / "auth"
+        auth_root.mkdir(exist_ok=True)
+        lease = ProfileLease(auth_root)
+        monkeypatch.setattr(
+            sequential_middleware_module, "get_profile_lease", lambda: lease
+        )
+
+        middleware = SequentialToolExecutionMiddleware()
+        middleware._last_start_mono = time.monotonic()
+        call_next = AsyncMock(return_value=MagicMock())
+        context = MiddlewareContext(
+            message=mt.CallToolRequestParams(name="slow_tool", arguments={}),
+            method="tools/call",
+        )
+
+        with pytest.raises(ToolError, match="proxy margin"):
+            await middleware.on_call_tool(context, call_next)
+        call_next.assert_not_awaited()
+
+    async def test_direct_server_may_wait_past_proxy_margin(
+        self, monkeypatch, tmp_path
+    ):
+        """A standalone DIRECT server has no proxy deadline to protect.
+
+        Applying the daemon margin unconditionally made a valid 60s interval
+        fail immediately on DIRECT even though the tool timeout still had
+        room for the wait (#877).
+        """
+        config = AppConfig()
+        config.server.min_tool_interval_seconds = 60.0
+        config.server.tool_timeout_seconds = 180.0
+        set_config(config)
+
+        auth_root = tmp_path / "auth"
+        auth_root.mkdir(exist_ok=True)
+        lease = ProfileLease(auth_root)
+        monkeypatch.setattr(
+            sequential_middleware_module, "get_profile_lease", lambda: lease
+        )
+
+        slept: list[float] = []
+
+        async def capture_sleep(self, context, seconds, *, message):
+            slept.append(seconds)
+
+        async def fake_owning(
+            self, context, call_next, tool_name, *, pre_tool_deadline=None
+        ):
+            return await call_next(context)
+
+        monkeypatch.setattr(
+            SequentialToolExecutionMiddleware, "_sleep_reporting", capture_sleep
+        )
+        monkeypatch.setattr(
+            SequentialToolExecutionMiddleware,
+            "_run_owning_the_profile",
+            fake_owning,
+        )
+
+        middleware = SequentialToolExecutionMiddleware()
+        middleware._last_start_mono = time.monotonic()
+        call_next = AsyncMock(return_value=MagicMock())
+        context = MiddlewareContext(
+            message=mt.CallToolRequestParams(name="slow_tool", arguments={}),
+            method="tools/call",
+        )
+
+        await middleware.on_call_tool(context, call_next)
+
+        assert slept
+        assert max(slept) >= 59.0
+        call_next.assert_awaited_once()
+
+    async def test_owner_lease_wait_is_capped_by_remaining_margin(
+        self, monkeypatch, tmp_path
+    ):
+        """Contended lease acquisition must share the owner's proxy margin.
+
+        Mutating away the remaining-budget cap leaves ``browser_wait_seconds``
+        unbounded after a long interval wait, and the frontend times out.
+        """
+        from linkedin_mcp_server.server_role import ServerRole, set_process_role
+
+        set_process_role(ServerRole.OWNER)
+
+        config = AppConfig()
+        config.server.min_tool_interval_seconds = 0.0
+        config.browser.browser_wait_seconds = 120.0
+        set_config(config)
+
+        auth_root = tmp_path / "auth"
+        auth_root.mkdir(exist_ok=True)
+        lease = ProfileLease(auth_root)
+        monkeypatch.setattr(
+            sequential_middleware_module, "get_profile_lease", lambda: lease
+        )
+
+        class Clock:
+            def __init__(self) -> None:
+                self.now = 0.0
+
+            def monotonic(self) -> float:
+                return self.now
+
+            def perf_counter(self) -> float:
+                return self.now
+
+        clock = Clock()
+        seen_timeouts: list[float] = []
+
+        async def burn_interval(self, context, tool_name, *, deadline=None):
+            assert deadline is not None
+            clock.now += 25.0
+
+        async def capture_acquire(self, timeout):
+            seen_timeouts.append(timeout)
+            return True
+
+        monkeypatch.setattr(sequential_middleware_module, "time", clock)
+        monkeypatch.setattr(
+            SequentialToolExecutionMiddleware,
+            "_await_min_interval",
+            burn_interval,
+        )
+        monkeypatch.setattr(ProfileLease, "try_acquire", lambda self: False)
+        monkeypatch.setattr(ProfileLease, "acquire", capture_acquire)
+        monkeypatch.setattr(ProfileLease, "release", lambda self: None)
+
+        import linkedin_mcp_server.drivers.browser as browser_module
+
+        monkeypatch.setattr(browser_module, "note_call_started", lambda: None)
+        monkeypatch.setattr(browser_module, "note_activity", lambda: None)
+        monkeypatch.setattr(
+            browser_module,
+            "release_profile_if_idle_or_requested",
+            AsyncMock(),
+        )
+
+        middleware = SequentialToolExecutionMiddleware()
+        call_next = AsyncMock(return_value=MagicMock())
+        context = MiddlewareContext(
+            message=mt.CallToolRequestParams(name="slow_tool", arguments={}),
+            method="tools/call",
+        )
+
+        await middleware.on_call_tool(context, call_next)
+
+        assert seen_timeouts == [3.0]
+        call_next.assert_awaited_once()
+
+    async def test_owner_refuses_lease_wait_when_margin_is_spent(
+        self, monkeypatch, tmp_path
+    ):
+        from fastmcp.exceptions import ToolError
+        from linkedin_mcp_server.server_role import ServerRole, set_process_role
+
+        set_process_role(ServerRole.OWNER)
+
+        config = AppConfig()
+        config.server.min_tool_interval_seconds = 0.0
+        config.browser.browser_wait_seconds = 120.0
+        set_config(config)
+
+        auth_root = tmp_path / "auth"
+        auth_root.mkdir(exist_ok=True)
+        lease = ProfileLease(auth_root)
+        monkeypatch.setattr(
+            sequential_middleware_module, "get_profile_lease", lambda: lease
+        )
+
+        class Clock:
+            def __init__(self) -> None:
+                self.now = 0.0
+
+            def monotonic(self) -> float:
+                return self.now
+
+            def perf_counter(self) -> float:
+                return self.now
+
+        clock = Clock()
+
+        async def burn_all(self, context, tool_name, *, deadline=None):
+            clock.now += 31.0
+
+        monkeypatch.setattr(sequential_middleware_module, "time", clock)
+        monkeypatch.setattr(
+            SequentialToolExecutionMiddleware,
+            "_await_min_interval",
+            burn_all,
+        )
+        monkeypatch.setattr(ProfileLease, "try_acquire", lambda self: False)
+
+        middleware = SequentialToolExecutionMiddleware()
+        call_next = AsyncMock(return_value=MagicMock())
+        context = MiddlewareContext(
+            message=mt.CallToolRequestParams(name="slow_tool", arguments={}),
+            method="tools/call",
+        )
+
+        with pytest.raises(ToolError, match="no time left"):
+            await middleware.on_call_tool(context, call_next)
+        call_next.assert_not_awaited()
+
+    async def test_owner_absorbs_unreachable_future_stamp_skew(
+        self, monkeypatch, tmp_path
+    ):
+        """Large future skew must not burn the proxy margin then reject.
+
+        Mutating away the force-claim path leaves the loop sleeping
+        ``min(interval, skew)`` until the 30s budget is gone and raising
+        ToolError — rejecting calls until clocks converge (#877).
+        """
+        from linkedin_mcp_server.server_role import ServerRole, set_process_role
+        from linkedin_mcp_server.tool_interval import write_last_start_wall
+
+        set_process_role(ServerRole.OWNER)
+
+        config = AppConfig()
+        config.server.min_tool_interval_seconds = 15.0
+        config.server.tool_timeout_seconds = 180.0
+        set_config(config)
+
+        auth_root = tmp_path / "auth"
+        auth_root.mkdir(exist_ok=True)
+        lease = ProfileLease(auth_root)
+        monkeypatch.setattr(
+            sequential_middleware_module, "get_profile_lease", lambda: lease
+        )
+
+        # Stamp 120s ahead: more than the 30s owner margin can close.
+        future = time.time() + 120.0
+        write_last_start_wall(auth_root, future)
+
+        slept: list[float] = []
+
+        async def capture_sleep(self, context, seconds, *, message):
+            slept.append(seconds)
+
+        async def fake_owning(
+            self, context, call_next, tool_name, *, pre_tool_deadline=None
+        ):
+            return await call_next(context)
+
+        monkeypatch.setattr(
+            SequentialToolExecutionMiddleware, "_sleep_reporting", capture_sleep
+        )
+        monkeypatch.setattr(
+            SequentialToolExecutionMiddleware,
+            "_run_owning_the_profile",
+            fake_owning,
+        )
+
+        middleware = SequentialToolExecutionMiddleware()
+        call_next = AsyncMock(return_value=MagicMock())
+        context = MiddlewareContext(
+            message=mt.CallToolRequestParams(name="slow_tool", arguments={}),
+            method="tools/call",
+        )
+
+        await middleware.on_call_tool(context, call_next)
+
+        # One interval-sized pace, then proceed — stamp must stay ahead so a
+        # fast-clock peer cannot treat it as ancient and skip the interval.
+        assert slept == [15.0]
+        call_next.assert_awaited_once()
+        stamp = json.loads((auth_root / "tool-interval.json").read_text())
+        assert stamp["last_start_wall"] == pytest.approx(future)
 
 
 class TestBrowserLifespan:

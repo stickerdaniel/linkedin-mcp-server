@@ -192,6 +192,7 @@ class TestServerConfig:
         assert config.transport == "stdio"
         assert config.port == 8000
         assert config.tool_timeout_seconds == 180.0
+        assert config.min_tool_interval_seconds == 0.0
 
     def test_validate_passes(self):
         ServerConfig().validate()  # No error
@@ -202,6 +203,23 @@ class TestServerConfig:
     def test_validate_invalid_tool_timeout(self, bad_value):
         with pytest.raises(ConfigurationError):
             ServerConfig(tool_timeout_seconds=bad_value).validate()
+
+    @pytest.mark.parametrize(
+        "bad_value", [-1.0, float("nan"), float("inf"), float("-inf")]
+    )
+    def test_validate_invalid_min_tool_interval(self, bad_value):
+        with pytest.raises(ConfigurationError):
+            ServerConfig(min_tool_interval_seconds=bad_value).validate()
+
+    def test_min_tool_interval_zero_is_allowed(self):
+        config = ServerConfig(min_tool_interval_seconds=0.0)
+        config.validate()
+        assert config.min_tool_interval_seconds == 0.0
+
+    def test_min_tool_interval_is_clamped(self):
+        config = ServerConfig(min_tool_interval_seconds=10_000.0)
+        config.validate()
+        assert config.min_tool_interval_seconds == 3600.0
 
 
 class TestAppConfig:
@@ -485,6 +503,30 @@ class TestLoaders:
 
         config = load_from_args(AppConfig())
         assert config.server.tool_timeout_seconds == 7.5
+
+    def test_load_from_env_min_tool_interval(self, monkeypatch):
+        monkeypatch.setenv("MIN_TOOL_INTERVAL", "15")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        config = load_from_env(AppConfig())
+        assert config.server.min_tool_interval_seconds == 15.0
+
+    @pytest.mark.parametrize("bad_value", ["abc", "-1", "nan", "inf"])
+    def test_load_from_env_invalid_min_tool_interval(self, monkeypatch, bad_value):
+        monkeypatch.setenv("MIN_TOOL_INTERVAL", bad_value)
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        with pytest.raises(ConfigurationError, match="Invalid MIN_TOOL_INTERVAL"):
+            load_from_env(AppConfig())
+
+    def test_load_from_args_min_tool_interval(self, monkeypatch):
+        monkeypatch.setattr(
+            "sys.argv", ["linkedin-mcp-server", "--min-tool-interval", "12.5"]
+        )
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        config = load_from_args(AppConfig())
+        assert config.server.min_tool_interval_seconds == 12.5
 
     def test_claim_profile_root_defaults_off(self, monkeypatch):
         """Taking over an occupied directory is never the default."""

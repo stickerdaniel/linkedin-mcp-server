@@ -22,6 +22,10 @@ DEFAULT_LOGIN_INLINE_WAIT_SECONDS: float = 25.0  # bounded inline wait
 # call and the smallest MCP client timeout is ~60s, so the wait alone must stay
 # well under that floor.
 MAX_LOGIN_INLINE_WAIT_SECONDS: float = 45.0
+# Optional pacing between MCP tool-call starts. 0 disables. Above an hour is
+# almost certainly a misconfiguration rather than a deliberate throttle.
+DEFAULT_MIN_TOOL_INTERVAL_SECONDS: float = 0.0
+MAX_MIN_TOOL_INTERVAL_SECONDS: float = 3600.0
 
 # How long a tool call waits for another process to hand over the browser. Same
 # budget and ceiling as the login inline wait, for the same reason: the wait is
@@ -433,6 +437,9 @@ class ServerConfig:
     port: int = 8000
     path: str = "/mcp"
     tool_timeout_seconds: float = DEFAULT_TOOL_TIMEOUT_SECONDS
+    # Minimum seconds between MCP tool-call starts. 0 disables. Enforced by
+    # SequentialToolExecutionMiddleware without holding the profile lease.
+    min_tool_interval_seconds: float = DEFAULT_MIN_TOOL_INTERVAL_SECONDS
     # Serve every stdio client from one browser-owning process instead of
     # giving each its own. Off while the supervision and liveness work is
     # unfinished: an owner that outlives its client must be provably unable to
@@ -448,6 +455,21 @@ class ServerConfig:
             raise ConfigurationError(
                 f"tool_timeout_seconds must be a positive finite number, got {self.tool_timeout_seconds}"
             )
+        if not (
+            math.isfinite(self.min_tool_interval_seconds)
+            and self.min_tool_interval_seconds >= 0
+        ):
+            raise ConfigurationError(
+                "min_tool_interval_seconds must be a non-negative finite number, "
+                f"got {self.min_tool_interval_seconds}"
+            )
+        if self.min_tool_interval_seconds > MAX_MIN_TOOL_INTERVAL_SECONDS:
+            logger.warning(
+                "min_tool_interval_seconds %.1f exceeds the %.1fs ceiling; clamping.",
+                self.min_tool_interval_seconds,
+                MAX_MIN_TOOL_INTERVAL_SECONDS,
+            )
+            self.min_tool_interval_seconds = MAX_MIN_TOOL_INTERVAL_SECONDS
         if self.login_viewer:
             if not self.login:
                 raise ConfigurationError("--login-viewer requires --login")
@@ -488,6 +510,20 @@ class AppConfig:
         """Validate all configuration values. Call after modifying config."""
         self.browser.validate()
         self.server.validate()
+        # Interval wait shares each call's tool-timeout budget. An interval
+        # longer than the timeout can never be honoured by waiting, so clamp.
+        if (
+            self.server.min_tool_interval_seconds > 0
+            and self.server.min_tool_interval_seconds > self.server.tool_timeout_seconds
+        ):
+            logger.warning(
+                "min_tool_interval_seconds %.1f exceeds tool_timeout_seconds "
+                "%.1f; clamping (a paced wait still has to leave room for the "
+                "tool inside the daemon frontend deadline).",
+                self.server.min_tool_interval_seconds,
+                self.server.tool_timeout_seconds,
+            )
+            self.server.min_tool_interval_seconds = self.server.tool_timeout_seconds
         if self.server.transport == "streamable-http":
             self._validate_transport_config()
             self._validate_path_format()
