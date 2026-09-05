@@ -75,7 +75,15 @@
       "target": "scroll_to_bottom"
     },
     {
-      "canonical_owner": "jobs.JobScraper -> session.ScrapingSession.scroll_job_sidebar",
+      "canonical_owner": "job_pages.JobPageReader -> session.ScrapingSession.scroll_body",
+      "kind": "module_attribute",
+      "line": 95,
+      "migration_stage": 9,
+      "path": "tests/scraping/policy_scenarios.py",
+      "target": "scroll_to_bottom"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader -> session.ScrapingSession.scroll_job_sidebar",
       "kind": "module_attribute",
       "line": 96,
       "migration_stage": 9,
@@ -139,10 +147,90 @@
       "target": "detect_rate_limit"
     },
     {
+      "canonical_owner": "feed.FeedScraper -> session.ScrapingSession.check_rate_limit",
+      "kind": "boundary_patch_object",
+      "line": 161,
+      "migration_stage": 5,
+      "path": "tests/scraping/policy_scenarios.py",
+      "target": "detect_rate_limit"
+    },
+    {
+      "canonical_owner": "person.PersonScraper -> session.ScrapingSession.check_rate_limit",
+      "kind": "boundary_patch_object",
+      "line": 161,
+      "migration_stage": 6,
+      "path": "tests/scraping/policy_scenarios.py",
+      "target": "detect_rate_limit"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader -> session.ScrapingSession.check_rate_limit",
+      "kind": "boundary_patch_object",
+      "line": 161,
+      "migration_stage": 9,
+      "path": "tests/scraping/policy_scenarios.py",
+      "target": "detect_rate_limit"
+    },
+    {
+      "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.check_rate_limit",
+      "kind": "boundary_patch_object",
+      "line": 161,
+      "migration_stage": 11,
+      "path": "tests/scraping/policy_scenarios.py",
+      "target": "detect_rate_limit"
+    },
+    {
+      "canonical_owner": "message_sender.MessageSender -> session.ScrapingSession.check_rate_limit",
+      "kind": "boundary_patch_object",
+      "line": 161,
+      "migration_stage": 12,
+      "path": "tests/scraping/policy_scenarios.py",
+      "target": "detect_rate_limit"
+    },
+    {
       "canonical_owner": "capture.SectionCapture -> session.ScrapingSession.dismiss_modal",
       "kind": "boundary_patch_object",
       "line": 162,
       "migration_stage": 4,
+      "path": "tests/scraping/policy_scenarios.py",
+      "target": "handle_modal_close"
+    },
+    {
+      "canonical_owner": "feed.FeedScraper -> session.ScrapingSession.dismiss_modal",
+      "kind": "boundary_patch_object",
+      "line": 162,
+      "migration_stage": 5,
+      "path": "tests/scraping/policy_scenarios.py",
+      "target": "handle_modal_close"
+    },
+    {
+      "canonical_owner": "person.PersonScraper -> session.ScrapingSession.dismiss_modal",
+      "kind": "boundary_patch_object",
+      "line": 162,
+      "migration_stage": 6,
+      "path": "tests/scraping/policy_scenarios.py",
+      "target": "handle_modal_close"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader -> session.ScrapingSession.dismiss_modal",
+      "kind": "boundary_patch_object",
+      "line": 162,
+      "migration_stage": 9,
+      "path": "tests/scraping/policy_scenarios.py",
+      "target": "handle_modal_close"
+    },
+    {
+      "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.dismiss_modal",
+      "kind": "boundary_patch_object",
+      "line": 162,
+      "migration_stage": 11,
+      "path": "tests/scraping/policy_scenarios.py",
+      "target": "handle_modal_close"
+    },
+    {
+      "canonical_owner": "message_sender.MessageSender -> session.ScrapingSession.dismiss_modal",
+      "kind": "boundary_patch_object",
+      "line": 162,
+      "migration_stage": 12,
       "path": "tests/scraping/policy_scenarios.py",
       "target": "handle_modal_close"
     },
@@ -155,7 +243,15 @@
       "target": "scroll_to_bottom"
     },
     {
-      "canonical_owner": "jobs.JobScraper -> session.ScrapingSession.scroll_job_sidebar",
+      "canonical_owner": "job_pages.JobPageReader -> session.ScrapingSession.scroll_body",
+      "kind": "boundary_patch_object",
+      "line": 163,
+      "migration_stage": 9,
+      "path": "tests/scraping/policy_scenarios.py",
+      "target": "scroll_to_bottom"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader -> session.ScrapingSession.scroll_job_sidebar",
       "kind": "boundary_patch_object",
       "line": 164,
       "migration_stage": 9,
@@ -167,6 +263,46 @@
       "kind": "boundary_patch_object",
       "line": 165,
       "migration_stage": 4,
+      "path": "tests/scraping/policy_scenarios.py",
+      "target": "build_issue_diagnostics"
+    },
+    {
+      "canonical_owner": "feed.FeedScraper -> error_diagnostics.build_issue_diagnostics",
+      "kind": "boundary_patch_object",
+      "line": 165,
+      "migration_stage": 5,
+      "path": "tests/scraping/policy_scenarios.py",
+      "target": "build_issue_diagnostics"
+    },
+    {
+      "canonical_owner": "person.PersonScraper -> error_diagnostics.build_issue_diagnostics",
+      "kind": "boundary_patch_object",
+      "line": 165,
+      "migration_stage": 6,
+      "path": "tests/scraping/policy_scenarios.py",
+      "target": "build_issue_diagnostics"
+    },
+    {
+      "canonical_owner": "company.CompanyScraper -> error_diagnostics.build_issue_diagnostics",
+      "kind": "boundary_patch_object",
+      "line": 165,
+      "migration_stage": 8,
+      "path": "tests/scraping/policy_scenarios.py",
+      "target": "build_issue_diagnostics"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader -> error_diagnostics.build_issue_diagnostics",
+      "kind": "boundary_patch_object",
+      "line": 165,
+      "migration_stage": 9,
+      "path": "tests/scraping/policy_scenarios.py",
+      "target": "build_issue_diagnostics"
+    },
+    {
+      "canonical_owner": "jobs.JobScraper -> error_diagnostics.build_issue_diagnostics",
+      "kind": "boundary_patch_object",
+      "line": 165,
+      "migration_stage": 9,
       "path": "tests/scraping/policy_scenarios.py",
       "target": "build_issue_diagnostics"
     },
@@ -221,7 +357,7 @@
     {
       "canonical_owner": "facade.LinkedInExtractor",
       "kind": "direct_import",
-      "line": 14,
+      "line": 16,
       "migration_stage": 14,
       "path": "tests/scraping/test_facade_contracts.py",
       "target": "LinkedInExtractor"
