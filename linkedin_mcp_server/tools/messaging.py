@@ -229,19 +229,21 @@ def register_messaging_tools(
         """
         Send a message to a LinkedIn user.
 
-        The recipient must be directly messageable from the profile page. This is a
-        write operation when confirm_send is True.
+        The recipient must be directly messageable from the profile page. Nothing
+        is typed or submitted until the loaded profile and the open composer
+        identify the same person; on any disagreement the tool returns without
+        touching the editor. This is a write operation when confirm_send is True.
 
         Args:
             linkedin_username: LinkedIn username of the recipient; a full profile URL is accepted too
             message: The message text to send
             confirm_send: Must be True to send the message
             ctx: FastMCP context for progress reporting
-            profile_urn: Optional profile URN (e.g. ACoAAB...) to construct the
-                compose URL directly. Providing this bypasses the Message-button
-                lookup and is more reliable when available. Obtain via
-                get_person_profile. Note: inbox may not always show all
-                messages; use search_conversations as a fallback.
+            profile_urn: Optional profile URN (e.g. ACoAAB...) to verify against
+                the URN exposed by the loaded profile before opening its Message
+                action. It never bypasses recipient verification. Obtain via
+                get_person_profile. Note: inbox may not always show all messages;
+                use search_conversations as a fallback.
 
         Returns:
             Dict with url, status, message, recipient_selected, and sent.
