@@ -244,7 +244,12 @@ def register_messaging_tools(
                 messages; use search_conversations as a fallback.
 
         Returns:
-            Dict with url, status, message, recipient_selected, and sent.
+            Dict with url, status, message, recipient_selected, sent, and
+            retry_safe. ``sent`` is true only where delivery was observed, so
+            it is false both where nothing was submitted and where the outcome
+            is unknown. ``retry_safe`` separates the two: it is false from the
+            moment a submission is attempted, and calling again while it is
+            false can deliver the message twice.
         """
         try:
             extractor = extractor or await get_ready_extractor(

@@ -455,6 +455,82 @@ _MESSAGING_CLOSE_SELECTOR = (
     'button[aria-label*="Close"]'
 )
 
+# Counts visible occurrences of a message *outside* every open composer.
+# The composer holds the message before it is sent, so plain body text is no
+# evidence of delivery: a Send button whose handler does nothing leaves the
+# text standing in the editor and the page still "contains" it. Occurrences
+# inside visible contenteditable editors are therefore subtracted, and the
+# send path compares a baseline taken before the click with the count after
+# it. Visibility is pure geometry and the match is on normalized text, so no
+# LinkedIn class name or localized label enters the decision.
+#
+# Known limit (issue #888), and it scales with how short the message is: the count is taken
+# over the whole body, so any unrelated text arriving between the two reads can
+# raise it if the message occurs inside it. A messaging page updates presence
+# and timestamps on its own, so a one-character message can be confirmed by
+# something that has nothing to do with it. A sentence cannot. Scoping the
+# count to the thread would need a container selector, and every candidate
+# LinkedIn offers is a layout class name.
+_MESSAGE_OCCURRENCES_JS = r"""
+({ expected }) => {
+    const normalize = value => (value || '').replace(/\s+/g, ' ').trim();
+    const needle = normalize(expected);
+    if (!needle) return 0;
+
+    const countIn = value => {
+        const haystack = normalize(value);
+        let count = 0;
+        let index = haystack.indexOf(needle);
+        while (index !== -1) {
+            count += 1;
+            index = haystack.indexOf(needle, index + needle.length);
+        }
+        return count;
+    };
+
+    const isVisible = element =>
+        !!(
+            element &&
+            (element.offsetWidth ||
+                element.offsetHeight ||
+                element.getClientRects().length)
+        );
+
+    let total = countIn(document.body?.innerText || '');
+    // Any element that declares contenteditable at all, not only the ones
+    // currently set to "true": a composer commonly goes read-only for the
+    // duration of an in-flight send while keeping its text on screen, and
+    // an occurrence subtracted at baseline must stay subtracted afterwards
+    // or the same unsent draft confirms itself.
+    for (const editor of document.querySelectorAll('[contenteditable]')) {
+        if (isVisible(editor)) {
+            total -= countIn(editor.innerText);
+        }
+    }
+    return total > 0 ? total : 0;
+}
+"""
+
+# A submission is in flight from the moment the send is dispatched until the
+# confirmation answers, and a cancellation in that window cannot be reported:
+# FastMCP runs every tool inside `anyio.fail_after()`, so the deadline raises
+# `CancelledError` past `except Exception` and discards any result returned
+# from the cancelled scope. The caller gets a timeout that carries no
+# `retry_safe`, and this line is then the only record that a message may
+# already have left. Answering the caller instead needs the tool to know its
+# own deadline, which is issue #889.
+_SEND_CANCELLED_WARNING = (
+    "Message submission was cancelled while in flight. Delivery is unknown; "
+    "check the conversation before retrying, as a retry may deliver the "
+    "message twice."
+)
+
+# The post-send predicate is the same counting routine, so the baseline and
+# the confirmation can never disagree about what counts as an occurrence.
+_MESSAGE_OCCURRENCES_INCREASED_JS = (
+    f"(arg) => ({_MESSAGE_OCCURRENCES_JS})(arg) > arg.previous"
+)
+
 # Shared JS function that walks up from any /messaging/compose/ anchor
 # inside <main> to find the smallest ancestor that satisfies the
 # action-root predicate (>=2 interactive children, >=1 button). This is
@@ -1037,14 +1113,25 @@ class LinkedInExtractor:
         *,
         recipient_selected: bool = False,
         sent: bool = False,
+        retry_safe: bool = True,
     ) -> dict[str, Any]:
-        """Build a structured response for the send_message tool."""
+        """Build a structured response for the send_message tool.
+
+        ``sent`` answers whether delivery was proven, so it is false both
+        where nothing was submitted and where submission happened but
+        delivery could not be observed. A caller keying a retry on it alone
+        therefore re-sends a message that may already have arrived, which is
+        what ``retry_safe`` exists to say: it is false from the moment a
+        submission is attempted, and true only while nothing can have left
+        the composer.
+        """
         return {
             "url": url,
             "status": status,
             "message": message,
             "recipient_selected": recipient_selected,
             "sent": sent,
+            "retry_safe": retry_safe,
         }
 
     async def _log_navigation_failure(
@@ -3013,23 +3100,39 @@ class LinkedInExtractor:
         )
         return bool(matched)
 
-    async def _message_text_visible(self, message: str) -> bool:
-        """Wait until the compose page visibly contains the just-sent message text.
+    async def _message_text_occurrences(self, message: str) -> int:
+        """Count visible occurrences of the message outside any open composer."""
+        occurrences = await self._page.evaluate(
+            _MESSAGE_OCCURRENCES_JS, {"expected": message}
+        )
+        return int(occurrences or 0)
+
+    async def _message_text_visible(
+        self, message: str, *, previous_occurrences: int
+    ) -> bool:
+        """Wait until a *new* copy of the message appears outside the composer.
+
+        ``previous_occurrences`` is the baseline taken after typing and before
+        the send attempt, so the requirement is strictly more occurrences than
+        before: the typed text sitting in the composer cannot confirm itself,
+        and neither can an identical message already in the thread.
 
         Uses the page-level default timeout (``BrowserConfig.default_timeout``).
+
+        Every failure answers "not observed" rather than raising, because this
+        runs only after a submission was attempted. An execution context that
+        dies mid-wait, which is what an SPA remount looks like from here, would
+        otherwise reach the caller as a plain tool error and invite the one
+        retry that delivers the message twice.
         """
         try:
             await self._page.wait_for_function(
-                """({ expected }) => {
-                    const normalize = value =>
-                        (value || '').replace(/\\s+/g, ' ').trim();
-                    const bodyText = normalize(document.body?.innerText || '');
-                    return bodyText.includes(normalize(expected));
-                }""",
-                arg={"expected": message},
+                _MESSAGE_OCCURRENCES_INCREASED_JS,
+                arg={"expected": message, "previous": previous_occurrences},
             )
             return True
-        except PlaywrightTimeoutError:
+        except Exception:
+            logger.debug("Message delivery could not be confirmed", exc_info=True)
             return False
 
     async def _dismiss_message_ui(self) -> None:
@@ -4901,6 +5004,16 @@ class LinkedInExtractor:
         """
         linkedin_username = normalize_person_identifier(linkedin_username)
         profile_url = person_profile_url(linkedin_username, "/")
+        if not message.strip():
+            # Not `message_unavailable`, which says the *recipient* exposes no
+            # Message action and tells a caller to give up on this person. A
+            # blank message is the caller's own input and the repair is theirs.
+            return self._message_action_result(
+                profile_url,
+                "invalid_message",
+                "Message must contain non-whitespace characters.",
+            )
+
         await self._navigate_to_page(profile_url)
         await detect_rate_limit(self._page)
 
@@ -5026,18 +5139,35 @@ class LinkedInExtractor:
         # to call .focus() on the element reference, which requires querySelector.
         # Selectors use only role + contenteditable + aria-label (ARIA attributes,
         # not layout class names) so they are stable across LinkedIn UI changes.
-        focused = await self._page.evaluate(
+        composer = await self._page.evaluate(
             """() => {
                 const el = document.querySelector(
                     'div[role="textbox"][contenteditable="true"][aria-label*="Write a message"],'
                     + 'div[role="textbox"][contenteditable="true"]'
                 );
-                if (!el) return false;
+                if (!el) return 'missing';
+                // Text already in the editor belongs to whoever typed it.
+                // Chromium leaves the caret at the start of a contenteditable
+                // after focus(), so typing here puts the message in front of
+                // that draft and LinkedIn delivers the two as one. Clearing
+                // it would destroy it, so refuse and leave it standing.
+                if ((el.innerText || '').replace(/\\s+/g, ' ').trim()) {
+                    return 'occupied';
+                }
                 el.focus();
-                return true;
+                return 'focused';
             }"""
         )
-        if not focused:
+        if composer == "occupied":
+            await self._dismiss_message_ui()
+            return self._message_action_result(
+                self._page.url,
+                "composer_occupied",
+                "The composer already holds a draft that would be sent along "
+                "with the message. The draft was left untouched.",
+                recipient_selected=recipient_selected,
+            )
+        if composer != "focused":
             await self._dismiss_message_ui()
             return self._message_action_result(
                 self._page.url,
@@ -5048,6 +5178,13 @@ class LinkedInExtractor:
         await asyncio.sleep(0.1)
         await self._page.keyboard.type(message, delay=15)
         await asyncio.sleep(0.3)
+        await asyncio.sleep(1.0)  # allow React to process keyboard input
+
+        # Baseline immediately before the send attempt: how often the message
+        # is already visible outside the composer. The click below only tries
+        # to send; delivery is proven by this count growing, never by the text
+        # the composer still holds.
+        previous_occurrences = await self._message_text_occurrences(message)
 
         # patchright actionability also blocks send_button.click(). Use JS click
         # on any visible, enabled send button; fall back to Enter key which
@@ -5056,28 +5193,72 @@ class LinkedInExtractor:
         # DOM dependency: we need btn.click() on the element reference — not
         # achievable via innerText or URL navigation. Selectors use only type,
         # aria-label, and data attributes (no layout class names).
-        await asyncio.sleep(1.0)  # allow React to process keyboard input
-        sent_via_js = await self._page.evaluate(
-            """() => {
-                const btn = Array.from(document.querySelectorAll(
-                    'button[type="submit"], button[aria-label*="Send"], button[aria-label*="send"],'
-                    + 'button[data-control-name="send"]'
-                )).find(b => !b.disabled && (b.offsetWidth || b.offsetHeight || b.getClientRects().length));
-                if (!btn) return false;
-                btn.click();
-                return true;
-            }"""
-        )
-        if not sent_via_js:
-            await self._page.keyboard.press("Enter")
-
-        if not await self._message_text_visible(message):
+        try:
+            sent_via_js = await self._page.evaluate(
+                """() => {
+                    const btn = Array.from(document.querySelectorAll(
+                        'button[type="submit"], button[aria-label*="Send"], button[aria-label*="send"],'
+                        + 'button[data-control-name="send"]'
+                    )).find(b => !b.disabled && (b.offsetWidth || b.offsetHeight || b.getClientRects().length));
+                    if (!btn) return false;
+                    btn.click();
+                    return true;
+                }"""
+            )
+            if not sent_via_js:
+                await self._page.keyboard.press("Enter")
+        except Exception:
+            # Both submissions dispatch their input event inside the very call
+            # that then fails, so a context that dies here says nothing about
+            # whether the message left: a send that navigates the page away
+            # looks exactly like one that never started. Letting the error out
+            # would reach the caller as a plain tool failure and invite the
+            # retry that delivers a second message to a real person.
+            logger.debug("Message submission did not complete", exc_info=True)
             await self._dismiss_message_ui()
             return self._message_action_result(
                 self._page.url,
-                "send_unavailable",
-                "LinkedIn did not confirm that the message was sent.",
+                "send_unconfirmed",
+                "The message submission was interrupted and LinkedIn did not "
+                "confirm delivery. Check the conversation before retrying; "
+                "retrying may deliver the message twice.",
                 recipient_selected=recipient_selected,
+                retry_safe=False,
+            )
+        except BaseException:
+            # Ordered after `except Exception`, so this is cancellation and
+            # not an ordinary failure. Re-raised rather than reported,
+            # because the cancelled scope discards a return value.
+            logger.warning(_SEND_CANCELLED_WARNING)
+            raise
+
+        try:
+            confirmed = await self._message_text_visible(
+                message, previous_occurrences=previous_occurrences
+            )
+        except BaseException:
+            # `_message_text_visible` answers False for every failure it can
+            # observe, so only cancellation arrives here, and it arrives
+            # after a message may already have been delivered.
+            logger.warning(_SEND_CANCELLED_WARNING)
+            raise
+
+        if not confirmed:
+            await self._dismiss_message_ui()
+            # Submission already happened, so this is not evidence that
+            # nothing was sent: a thread that renders the delivered bubble
+            # slower than the page timeout arrives here having delivered.
+            # Reporting a plain failure invites a retry, and a retry sends a
+            # second real message to a real person, so the status says
+            # unknown rather than no.
+            return self._message_action_result(
+                self._page.url,
+                "send_unconfirmed",
+                "The message was submitted but LinkedIn did not confirm "
+                "delivery in time. Check the conversation before retrying; "
+                "retrying may deliver the message twice.",
+                recipient_selected=recipient_selected,
+                retry_safe=False,
             )
 
         return self._message_action_result(
@@ -5086,6 +5267,7 @@ class LinkedInExtractor:
             "Message sent.",
             recipient_selected=recipient_selected,
             sent=True,
+            retry_safe=False,
         )
 
     async def _extract_root_content(
