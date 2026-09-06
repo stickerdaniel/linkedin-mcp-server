@@ -143,9 +143,10 @@ def force_claim_start(auth_root: Path) -> None:
         write_last_start_wall(auth_root, stamp)
 
     if fd is None:
-        # Best-effort: another process holds the lock. Writing without it can
-        # race, but the next claim still re-checks under the lock.
-        _write_monotone(time.time())
+        # Do not write without the lock. A concurrent holder may have a newer
+        # stamp; an unlocked write can rewind it and let a fast peer skip the
+        # configured interval (#877 / Greptile). Local pacing already elapsed —
+        # leave the shared stamp alone.
         return
     try:
         _write_monotone(time.time())

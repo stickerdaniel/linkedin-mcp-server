@@ -167,3 +167,28 @@ class TestTryClaimStart:
         )
         stamp = json.loads((auth_root / "tool-interval.json").read_text())
         assert stamp["last_start_wall"] == 2000.0
+
+    def test_force_claim_skips_write_when_lock_unavailable(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """Unlocked force-claim must not rewind a peer stamp (#877).
+
+        Mutation target: restore unlocked ``_write_monotone(time.time())``.
+        With the lock unavailable and a slow local clock, that write replaces
+        a newer peer stamp and this assertion fails.
+        """
+        from linkedin_mcp_server.tool_interval import force_claim_start
+
+        auth_root = tmp_path / "auth"
+        auth_root.mkdir()
+        write_last_start_wall(auth_root, 2000.0)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tool_interval.time.time", lambda: 1000.0
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tool_interval.acquire_locked_fd",
+            lambda *args, **kwargs: None,
+        )
+        force_claim_start(auth_root)
+        stamp = json.loads((auth_root / "tool-interval.json").read_text())
+        assert stamp["last_start_wall"] == 2000.0

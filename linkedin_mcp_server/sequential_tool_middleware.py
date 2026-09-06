@@ -211,6 +211,15 @@ class SequentialToolExecutionMiddleware(Middleware):
             message="Queued waiting for scraper lock",
         )
 
+        # Capture the owner pre-tool budget *before* queueing on the
+        # in-process lock so lock wait counts against the frontend margin
+        # (#877 / Greptile). Creating it after acquire would let queued
+        # owner calls outlive the proxy deadline and surface a transport
+        # timeout instead of a structured ToolError.
+        pre_tool_deadline: float | None = None
+        if process_role() is ServerRole.OWNER:
+            pre_tool_deadline = time.monotonic() + TIMEOUT_MARGIN_SECONDS
+
         async with self._lock:
             wait_seconds = time.perf_counter() - wait_started
             logger.debug(
@@ -222,14 +231,18 @@ class SequentialToolExecutionMiddleware(Middleware):
                 context,
                 message="Scraper lock acquired, starting tool",
             )
+            if pre_tool_deadline is not None and time.monotonic() >= pre_tool_deadline:
+                raise ToolError(
+                    "The daemon proxy margin was spent waiting for the "
+                    "in-process scraper lock, with no time left for the "
+                    "minimum tool-call interval. Retry shortly."
+                )
             # Interval before the lease: waiting must not pin the browser.
             # On the daemon owner the frontend's deadline is
             # tool_timeout + TIMEOUT_MARGIN_SECONDS; everything before the
-            # tool body — interval wait *and* contended lease acquisition —
-            # shares that margin, or the client sees a transport timeout.
-            pre_tool_deadline: float | None = None
-            if process_role() is ServerRole.OWNER:
-                pre_tool_deadline = time.monotonic() + TIMEOUT_MARGIN_SECONDS
+            # tool body — lock wait, interval wait, *and* contended lease
+            # acquisition — shares that margin, or the client sees a
+            # transport timeout.
             await self._await_min_interval(
                 context, tool_name, deadline=pre_tool_deadline
             )

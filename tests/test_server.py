@@ -1041,6 +1041,59 @@ class TestSequentialToolExecutionMiddleware:
         assert stamp["last_start_wall"] == pytest.approx(future)
 
 
+    async def test_owner_lock_wait_counts_against_proxy_margin(
+        self, monkeypatch, tmp_path
+    ):
+        """Owner pre-tool deadline must start before the in-process lock (#877).
+
+        Mutation target: move ``pre_tool_deadline = ...`` back inside
+        ``async with self._lock``. A call that spends the whole proxy margin
+        queued on the lock would then get a fresh budget and reach the tool
+        instead of raising ToolError.
+        """
+        from fastmcp.exceptions import ToolError
+        from linkedin_mcp_server.server_role import ServerRole, set_process_role
+
+        set_process_role(ServerRole.OWNER)
+
+        config = AppConfig()
+        config.server.min_tool_interval_seconds = 0.0
+        set_config(config)
+
+        auth_root = tmp_path / "auth"
+        auth_root.mkdir(exist_ok=True)
+        lease = ProfileLease(auth_root)
+        monkeypatch.setattr(
+            sequential_middleware_module, "get_profile_lease", lambda: lease
+        )
+        monkeypatch.setattr(
+            sequential_middleware_module, "TIMEOUT_MARGIN_SECONDS", 0.05
+        )
+
+        middleware = SequentialToolExecutionMiddleware()
+        call_next = AsyncMock(return_value=MagicMock())
+        context = MiddlewareContext(
+            message=mt.CallToolRequestParams(name="slow_tool", arguments={}),
+            method="tools/call",
+        )
+
+        await middleware._lock.acquire()
+
+        async def release_after_queue() -> None:
+            await asyncio.sleep(0.1)
+            middleware._lock.release()
+
+        releaser = asyncio.create_task(release_after_queue())
+        try:
+            with pytest.raises(ToolError, match="scraper lock"):
+                await middleware.on_call_tool(context, call_next)
+        finally:
+            await releaser
+            if middleware._lock.locked():
+                middleware._lock.release()
+        call_next.assert_not_awaited()
+
+
 class TestBrowserLifespan:
     """The lifespan owns the background handoff poller.
 
