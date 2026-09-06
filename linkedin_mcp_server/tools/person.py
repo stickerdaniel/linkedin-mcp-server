@@ -5,6 +5,7 @@ Uses innerText extraction for resilient profile data capture
 with configurable section selection.
 """
 
+import json
 import logging
 from typing import Annotated, Any
 
@@ -112,7 +113,7 @@ def register_person_tools(
         keywords: str,
         ctx: Context,
         location: str | None = None,
-        network: list[str] | None = None,
+        network: str | list[str] | None = None,
         current_company: str | None = None,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
@@ -126,6 +127,9 @@ def register_person_tools(
             network: Optional connection-degree filter. Each element is one of
                 "F" (1st-degree), "S" (2nd-degree), "O" (3rd-degree and beyond).
                 Example: ["F"] to only return 1st-degree connections.
+                Accepts either a list or a JSON-encoded string (e.g. '["F"]')
+                for compatibility with MCP clients that serialize array
+                arguments to strings.
             current_company: Optional current-employer filter. LinkedIn's
                 currentCompany facet only filters on the numeric company URN id
                 (e.g. "1115" for SAP); plain company names are accepted by the
@@ -139,6 +143,20 @@ def register_person_tools(
             Dict with url, sections (name -> raw text), and optional references.
             The LLM should parse the raw text to extract individual people and their profiles.
         """
+        # Some MCP clients serialize array arguments whose JSON Schema has no
+        # top-level "type" (the anyOf[array, null] rendering of `list[str] |
+        # None`) into a JSON string before dispatch, so ["F"] can arrive as
+        # the string '["F"]'. Accept and normalize that to a list.
+        if isinstance(network, str):
+            raw = network.strip()
+            if not raw:
+                network = None
+            else:
+                try:
+                    parsed = json.loads(raw)
+                except ValueError:
+                    parsed = raw
+                network = parsed if isinstance(parsed, list) else [str(parsed)]
         try:
             extractor = extractor or await get_ready_extractor(
                 ctx, tool_name="search_people"
