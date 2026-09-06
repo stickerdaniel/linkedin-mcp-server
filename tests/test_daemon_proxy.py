@@ -752,11 +752,14 @@ class TestRepeatingOnlyWhatIsSafe:
         *,
         nothing_was_sent: bool,
         instance_id: str,
-    ) -> tuple[bool, int]:
+    ) -> tuple[bool, int, BaseException | None]:
         """Drive one failing call through the middleware.
 
-        Returns whether it succeeded and how many times the call was attempted.
+        Returns whether it succeeded, how many times the call was attempted, and
+        the exception raised when the call was not repeated (else ``None``).
         """
+        from fastmcp.exceptions import ToolError
+
         from linkedin_mcp_server.daemon_proxy import (
             FrontendOwnerRecoveryMiddleware,
             OwnerUnreachableError,
@@ -778,9 +781,9 @@ class TestRepeatingOnlyWhatIsSafe:
         middleware = FrontendOwnerRecoveryMiddleware(backend)
         try:
             await middleware.on_call_tool(context, call_next)  # ty: ignore
-        except OwnerUnreachableError:
-            return False, attempts
-        return True, attempts
+        except (ToolError, OwnerUnreachableError) as err:
+            return False, attempts, err
+        return True, attempts, None
 
     @pytest.fixture
     def _recovering(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -799,8 +802,12 @@ class TestRepeatingOnlyWhatIsSafe:
         # The failure the user pays for. `daemon_auth` already recorded the
         # measurement behind the rule: a client answered with an error at 0.66s
         # and the effect landing 0.7s later.
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.daemon_proxy import OwnerUnreachableError
+
         backend, failed = _recovering
-        succeeded, attempts = await self._run(
+        succeeded, attempts, err = await self._run(
             backend,
             self._context(read_only=False),
             nothing_was_sent=False,
@@ -811,12 +818,19 @@ class TestRepeatingOnlyWhatIsSafe:
         assert attempts == 1
         # And the replacement was still adopted, for the next call.
         assert backend.attachment.descriptor.instance_id != failed
+        # #891: a plain OwnerUnreachableError is masked to a generic tool error,
+        # which an autonomous client retries. ToolError keeps the risk visible.
+        assert isinstance(err, ToolError)
+        assert "may already have taken effect" in str(err)
+        assert "Do not retry blindly" in str(err)
+        assert "do_the_thing" in str(err)
+        assert isinstance(err.__cause__, OwnerUnreachableError)
 
     async def test_a_mutating_call_is_repeated_when_nothing_was_sent(self, _recovering):
         # The only reason the dispatch question is worth asking. Without it every
         # write tool would keep failing across an upgrade.
         backend, failed = _recovering
-        succeeded, attempts = await self._run(
+        succeeded, attempts, err = await self._run(
             backend,
             self._context(read_only=False),
             nothing_was_sent=True,
@@ -825,13 +839,14 @@ class TestRepeatingOnlyWhatIsSafe:
 
         assert succeeded
         assert attempts == 2
+        assert err is None
 
     async def test_a_read_only_call_is_repeated_even_when_it_may_have_run(
         self, _recovering
     ):
         # Repeating a read costs a page load and nothing else.
         backend, failed = _recovering
-        succeeded, attempts = await self._run(
+        succeeded, attempts, err = await self._run(
             backend,
             self._context(read_only=True),
             nothing_was_sent=False,
@@ -840,13 +855,16 @@ class TestRepeatingOnlyWhatIsSafe:
 
         assert succeeded
         assert attempts == 2
+        assert err is None
 
     async def test_an_unannotated_call_is_treated_as_mutating(self, _recovering):
         # A tool that declares nothing has not promised anything, and the default
         # has to be the safe one: this is what keeps a tool added later from
         # being replayed because nobody remembered to annotate it.
+        from fastmcp.exceptions import ToolError
+
         backend, failed = _recovering
-        succeeded, attempts = await self._run(
+        succeeded, attempts, err = await self._run(
             backend,
             self._context(read_only=None),
             nothing_was_sent=False,
@@ -855,6 +873,7 @@ class TestRepeatingOnlyWhatIsSafe:
 
         assert not succeeded
         assert attempts == 1
+        assert isinstance(err, ToolError)
 
     async def test_a_failure_from_something_else_is_left_alone(self, _recovering):
         # Only an unreachable owner is this middleware's business. Swallowing or
