@@ -4718,8 +4718,45 @@ class TestSearchJobs:
         assert once.await_count == 1
         sleep.assert_not_awaited()
 
+    async def test_search_page_skips_retry_when_only_backoff_fits(self, mock_page):
+        """Backoff alone is not enough — the retry attempt needs budget too.
+
+        Mutation target: compare remaining only to ``_RATE_LIMIT_RETRY_DELAY``.
+        At 6s remaining the backoff fits, the sleep runs, and a second extract
+        starts with almost no page budget left (#882 / Greptile).
+        """
+        once = AsyncMock(return_value=extracted(_RATE_LIMITED_MSG))
+        sleep = AsyncMock()
+        extractor = LinkedInExtractor(mock_page)
+
+        class Clock:
+            def __init__(self) -> None:
+                self.now = 0.0
+
+            def monotonic(self) -> float:
+                return self.now
+
+        clock = Clock()
+        with (
+            patch.object(extractor_module, "time", clock),
+            patch.object(extractor, "_extract_search_page_once", once),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                sleep,
+            ),
+        ):
+            result = await extractor._extract_search_page(
+                "https://www.linkedin.com/jobs/search/?keywords=test",
+                section_name="search_results",
+                page_deadline=6.0,
+            )
+
+        assert result.text == _RATE_LIMITED_MSG
+        assert once.await_count == 1
+        sleep.assert_not_awaited()
+
     async def test_search_page_still_retries_when_backoff_fits(self, mock_page):
-        """The skip is only for a backoff that cannot finish in time."""
+        """Retry when both the backoff and a minimum retry-work reserve fit."""
         once = AsyncMock(
             side_effect=[
                 extracted(_RATE_LIMITED_MSG),

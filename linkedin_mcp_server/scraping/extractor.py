@@ -74,6 +74,11 @@ _NAV_DELAY = 2.0
 
 # Backoff before retrying a temporarily blocked page
 _RATE_LIMIT_RETRY_DELAY = 5.0
+# Minimum wall time a rate-limit retry itself needs after the backoff —
+# navigation, modal handling, and a capped ``<main>`` wait. Checking only
+# the backoff lets a 5.1s remainder sleep away the page budget and still
+# start work that can overrun the outer tool reserve (#882 / Greptile).
+_RATE_LIMIT_RETRY_WORK = 5.0
 
 # Returned as section text when a page comes back with its content gone and
 # only LinkedIn's own navigation and footer left.
@@ -3559,7 +3564,7 @@ class LinkedInExtractor:
 
         ``page_deadline`` is an absolute monotonic end of the search budget.
         Navigation, the ``<main>`` wait, scrolling, and the rate-limit backoff
-        are each capped by what remains of it. When the backoff alone would
+        are each capped by what remains of it. When the backoff plus a minimum retry-work reserve would
         overrun, the rate-limited sentinel is returned without retrying.
         """
         try:
@@ -3571,13 +3576,16 @@ class LinkedInExtractor:
 
             if page_deadline is not None:
                 remaining = page_deadline - time.monotonic()
-                if remaining < _RATE_LIMIT_RETRY_DELAY:
+                retry_need = _RATE_LIMIT_RETRY_DELAY + _RATE_LIMIT_RETRY_WORK
+                if remaining < retry_need:
                     logger.info(
                         "Skipping search page retry on %s: %.1fs left, "
-                        "need %.1fs backoff",
+                        "need %.1fs (%.1fs backoff + %.1fs retry work)",
                         url,
                         remaining,
+                        retry_need,
                         _RATE_LIMIT_RETRY_DELAY,
+                        _RATE_LIMIT_RETRY_WORK,
                     )
                     return result
 
