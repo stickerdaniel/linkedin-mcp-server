@@ -114,3 +114,71 @@ def register_post_tools(
                 raise_tool_error(relogin_exc, "search_posts")
         except Exception as e:
             raise_tool_error(e, "search_posts")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Get Post Comments",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"post", "comments", "scraping"},
+        exclude_args=["extractor"],
+    )
+    async def get_post_comments(
+        post_permalink: str,
+        ctx: Context,
+        max_expansions: Annotated[int, Field(ge=0, le=20)] = 5,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        Read the full comment thread of a single LinkedIn post.
+
+        get_feed surfaces comments only when LinkedIn's ranking expands them
+        inline in the home feed. This tool navigates to the post permalink
+        directly, loads the complete thread by clicking the comment-pagination
+        buttons ("See N more comments" / "See N previous replies"), and returns
+        the post plus every loaded comment as raw text. Pair with
+        get_notifications to read the reply text behind a "someone replied to
+        your comment" notification.
+
+        Args:
+            post_permalink: Post URL or path. Accepts a full URL, a path, or a
+                bare slug: "/posts/<slug>", "/feed/update/<urn>/", or
+                "posts/<slug>". Obtain permalinks from get_feed or
+                get_notifications references.
+            ctx: FastMCP context for progress reporting
+            max_expansions: Maximum comment-pagination button clicks (0-20,
+                default 5). Each click loads one more batch of comments and
+                replies; raise for posts with very long threads.
+
+        Returns:
+            Dict with url, sections (post_comments -> raw text), and optional
+            references["post_comments"] (author profile links).
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="get_post_comments"
+            )
+            logger.info(
+                "Fetching post comments: permalink=%s, max_expansions=%d",
+                post_permalink,
+                max_expansions,
+            )
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Loading post comment thread"
+            )
+
+            result = await extractor.get_post_comments(
+                post_permalink, max_expansions=max_expansions
+            )
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_post_comments")
+        except Exception as e:
+            raise_tool_error(e, "get_post_comments")  # NoReturn
