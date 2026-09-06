@@ -980,9 +980,9 @@ class TestSequentialToolExecutionMiddleware:
     ):
         """Large future skew must not burn the proxy margin then reject.
 
-        Mutating away the force-claim path leaves the loop sleeping
-        ``min(interval, skew)`` until the 30s budget is gone and raising
-        ToolError — rejecting calls until clocks converge (#877).
+        Mutation target: write the local wall time into the shared stamp on
+        the skew-absorb path. A fast-clock peer would then see an ancient
+        stamp and skip the configured interval (#877 / Greptile).
         """
         from linkedin_mcp_server.server_role import ServerRole, set_process_role
         from linkedin_mcp_server.tool_interval import write_last_start_wall
