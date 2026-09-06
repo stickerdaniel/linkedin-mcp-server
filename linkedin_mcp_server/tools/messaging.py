@@ -276,3 +276,167 @@ def register_messaging_tools(
                 raise_tool_error(relogin_exc, "send_message")
         except Exception as e:
             raise_tool_error(e, "send_message")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Archive Conversation",
+        annotations={"destructiveHint": True, "openWorldHint": True},
+        tags={"messaging", "actions"},
+        exclude_args=["extractor"],
+    )
+    async def archive_conversation(
+        thread_id: str,
+        confirm_action: bool,
+        ctx: Context,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        Archive a LinkedIn conversation thread.
+
+        Moves the conversation to LinkedIn's archived folder. The thread
+        remains accessible and can be unarchived. This is a write operation
+        that requires confirmation.
+
+        Args:
+            thread_id: LinkedIn messaging thread ID (from get_inbox or
+                search_conversations references)
+            confirm_action: Must be True to archive. False does a dry run.
+            ctx: FastMCP context for progress reporting
+
+        Returns:
+            Dict with url, status, message, and action result.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="archive_conversation"
+            )
+            logger.info(
+                "Archiving conversation %s (confirm_action=%s)",
+                thread_id,
+                confirm_action,
+            )
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Archiving conversation"
+            )
+
+            result = await extractor.archive_conversation(
+                thread_id, confirm_action=confirm_action
+            )
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "archive_conversation")
+        except Exception as e:
+            raise_tool_error(e, "archive_conversation")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Unarchive Conversation",
+        annotations={"destructiveHint": True, "openWorldHint": True},
+        tags={"messaging", "actions"},
+        exclude_args=["extractor"],
+    )
+    async def unarchive_conversation(
+        thread_id: str,
+        confirm_action: bool,
+        ctx: Context,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        Restore an archived conversation to the inbox.
+
+        Args:
+            thread_id: LinkedIn messaging thread ID
+            confirm_action: Must be True to unarchive. False does a dry run.
+            ctx: FastMCP context for progress reporting
+
+        Returns:
+            Dict with url, status, message, and action result.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="unarchive_conversation"
+            )
+            logger.info(
+                "Unarchiving conversation %s (confirm_action=%s)",
+                thread_id,
+                confirm_action,
+            )
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Unarchiving conversation"
+            )
+
+            result = await extractor.unarchive_conversation(
+                thread_id, confirm_action=confirm_action
+            )
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "unarchive_conversation")
+        except Exception as e:
+            raise_tool_error(e, "unarchive_conversation")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Mark Conversation Read",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"messaging", "actions"},
+        exclude_args=["extractor"],
+    )
+    async def mark_conversation_read(
+        thread_id: str,
+        ctx: Context,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        Mark a conversation as read without opening it.
+
+        Clears the unread badge on the conversation. Unlike
+        get_conversation, this does not navigate to the thread content
+        and does not mark it read as a side effect of viewing — it calls
+        the Voyager mark-as-read endpoint directly.
+
+        Args:
+            thread_id: LinkedIn messaging thread ID
+            ctx: FastMCP context for progress reporting
+
+        Returns:
+            Dict with url, status, message, and action result.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="mark_conversation_read"
+            )
+            logger.info("Marking conversation %s as read", thread_id)
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Marking conversation read"
+            )
+
+            result = await extractor.mark_conversation_read(thread_id)
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "mark_conversation_read")
+        except Exception as e:
+            raise_tool_error(e, "mark_conversation_read")  # NoReturn
