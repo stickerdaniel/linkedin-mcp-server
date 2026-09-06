@@ -18,7 +18,6 @@ from linkedin_mcp_server.exceptions import BrowserBusyError
 from linkedin_mcp_server.profile_lease import get_profile_lease
 from linkedin_mcp_server.server_role import ServerRole, process_role
 from linkedin_mcp_server.tool_interval import (
-    force_claim_start,
     future_stamp_skew_seconds,
     try_claim_start,
 )
@@ -163,11 +162,16 @@ class SequentialToolExecutionMiddleware(Middleware):
             # sized pieces off the skew and then raises. Pace once, claim
             # at local time, and proceed.
             if skew > remaining:
+                # Leave the shared stamp alone. A slow clock cannot close a
+                # peer stamp that sits beyond this call's budget; rewriting
+                # it to local time would make that peer see an ancient stamp
+                # and skip the configured interval (#877 / Greptile). Pace
+                # once locally, then proceed without a shared claim.
                 pace = min(interval, max(0.0, remaining))
                 logger.debug(
                     "Tool '%s' absorbing %.1fs future stamp skew "
                     "(%.1fs budget left) with a %.1fs pace then proceeding "
-                    "without rewinding the shared stamp",
+                    "without touching the shared stamp",
                     tool_name,
                     skew,
                     remaining,
@@ -182,7 +186,6 @@ class SequentialToolExecutionMiddleware(Middleware):
                             "interval (shared profile clock skew)"
                         ),
                     )
-                force_claim_start(auth_root)
                 self._last_start_mono = time.monotonic()
                 return
             logger.debug(
