@@ -1040,7 +1040,6 @@ class TestSequentialToolExecutionMiddleware:
         stamp = json.loads((auth_root / "tool-interval.json").read_text())
         assert stamp["last_start_wall"] == pytest.approx(future)
 
-
     async def test_owner_lock_wait_counts_against_proxy_margin(
         self, monkeypatch, tmp_path
     ):
