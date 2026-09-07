@@ -134,6 +134,13 @@
       "url": "https://github.com/mhammond/pywin32",
       "branch": "main",
       "specialNotes": "Windows API bindings. Used for daemon and installer Job Object containment."
+    },
+    {
+      "type": "git",
+      "name": "anyio",
+      "url": "https://github.com/agronholm/anyio",
+      "branch": "master",
+      "specialNotes": "Structured-concurrency layer FastMCP runs on. Its asyncio CancelScope is what shields the feed listener teardown from the tool-call deadline."
     }
   ]
 }

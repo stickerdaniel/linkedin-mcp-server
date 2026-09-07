@@ -10,53 +10,128 @@ on:
 # from the conventional-commit type in the PR title so the filtering works
 # without anyone remembering to label by hand.
 # pull_request_target is required so PRs from forks get a writable token.
-# It is safe here only because this job never checks out the PR branch and
-# never runs its code: the title is read into a variable and matched against
-# a fixed case list, so an untrusted title can at worst yield no label.
+# It is safe here only because the job checks out the trusted workflow revision,
+# never the PR branch, and matches current API data against a fixed case list.
+# An untrusted title can at worst yield no label.
+concurrency:
+  group: label-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   label:
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       pull-requests: write
     steps:
-      - name: Apply label for the conventional-commit type
+      - name: Checkout the trusted workflow revision
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Apply label for the current conventional-commit type
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
         run: |
-          # Read the type from the title via a parameter expansion rather than
-          # interpolating it into a pattern, so a crafted title cannot inject.
-          TYPE="${PR_TITLE%%[(:]*}"
-          TYPE="${TYPE// /}"
+          set -euo pipefail
+          PR_JSON="$RUNNER_TEMP/pull-request.json"
+          LABELS_JSON="$RUNNER_TEMP/pull-request-labels.json"
+          ATTACHED_DERIVED="$RUNNER_TEMP/attached-derived-labels.txt"
 
-          case "$TYPE" in
-            feat)           LABEL="enhancement" ;;
-            fix)            LABEL="bug" ;;
-            docs)           LABEL="documentation" ;;
-            refactor)       LABEL="refactoring" ;;
-            chore|ci|style|test|build|perf) LABEL="chore" ;;
-            *)              LABEL="" ;;
-          esac
+          gh api --method GET "repos/${REPO}/pulls/${PR_NUMBER}" > "$PR_JSON"
+          TITLE_VALID=true
+          if ! python3 scripts/check_pr_title.py --pr-json "$PR_JSON" >/dev/null; then
+            TITLE_VALID=false
+          fi
 
-          if [ -n "$LABEL" ]; then
+          gh api --method GET --paginate --slurp \
+            "repos/${REPO}/issues/${PR_NUMBER}/labels?per_page=100" > "$LABELS_JSON"
+
+          PR_TITLE=$(python3 - "$PR_JSON" "$LABELS_JSON" "$ATTACHED_DERIVED" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          derived = {
+              "breaking-change",
+              "enhancement",
+              "bug",
+              "documentation",
+              "refactoring",
+              "chore",
+          }
+          try:
+              pr = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+              label_pages = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+              if not isinstance(pr, dict) or not isinstance(label_pages, list):
+                  raise TypeError
+              if any(not isinstance(page, list) for page in label_pages):
+                  raise TypeError
+              title = pr["title"]
+              attached = {
+                  label["name"]
+                  for page in label_pages
+                  for label in page
+                  if isinstance(label, dict) and label.get("name") in derived
+              }
+          except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError):
+              raise SystemExit("Unable to read current pull request data.") from None
+          if not isinstance(title, str):
+              raise SystemExit("Unable to read current pull request data.")
+          Path(sys.argv[3]).write_text("\n".join(sorted(attached)), encoding="utf-8")
+          print(title)
+          PY
+          )
+
+          # Match only a type at the exact start of a structurally valid prefix.
+          # The title stays in a variable, so a crafted value cannot inject shell.
+          TYPE=""
+          BREAKING=""
+          if [ "$TITLE_VALID" = true ]; then
+            if [[ "$PR_TITLE" =~ ^([a-z]+)(\([^()]+\))?(!)?:\ [^[:space:]] ]]; then
+              TYPE="${BASH_REMATCH[1]}"
+              BREAKING="${BASH_REMATCH[3]-}"
+            fi
+          fi
+
+          if [ "$BREAKING" = "!" ]; then
+            LABEL="breaking-change"
+          else
+            case "$TYPE" in
+              feat)           LABEL="enhancement" ;;
+              fix)            LABEL="bug" ;;
+              docs)           LABEL="documentation" ;;
+              refactor)       LABEL="refactoring" ;;
+              chore|ci|style|test|perf) LABEL="chore" ;;
+              *)              LABEL="" ;;
+            esac
+          fi
+
+          if [ "$TITLE_VALID" != true ]; then
+            echo "Title is invalid; clearing derived labels."
+          elif [ -n "$LABEL" ]; then
             echo "Title type '$TYPE' -> label '$LABEL'"
           else
             echo "No conventional-commit type in title; clearing derived labels."
           fi
 
-          # The cleanup runs even when the title yields no label: retitling away
-          # from docs: must not leave the documentation label attached, and one
-          # excluded label is enough to drop the PR from the release notes. The
-          # title is the single source of truth for these five, so any other one
-          # is cleared even if set by hand; labels outside this set
-          # (skip-changelog, upstream, ...) are untouched.
-          for stale in enhancement bug documentation refactoring chore; do
+          is_attached() {
+            grep -Fxq "$1" "$ATTACHED_DERIVED"
+          }
+
+          # Idempotency is explicit: only attached stale derived labels are
+          # removed, and the desired label is added only when it is absent.
+          # Labels outside this fixed derived set are untouched.
+          for stale in breaking-change enhancement bug documentation refactoring chore; do
             [ "$stale" = "$LABEL" ] && continue
-            gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label "$stale" 2>/dev/null || true
+            if is_attached "$stale"; then
+              gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label "$stale"
+            fi
           done
 
-          if [ -n "$LABEL" ]; then
+          if [ -n "$LABEL" ] && ! is_attached "$LABEL"; then
             gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label "$LABEL"
           fi
