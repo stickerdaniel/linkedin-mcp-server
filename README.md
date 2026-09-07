@@ -46,7 +46,7 @@ This MCP server is **free** and **open source**, supported by [**Unipile**](http
 | `get_inbox` | List recent conversations from the LinkedIn messaging inbox |
 | `get_conversation` | Read a specific messaging conversation by username or thread ID |
 | `search_conversations` | Search messages by keyword |
-| `send_message` | Send a message to a LinkedIn user (requires confirmation) |
+| `send_message` | Compose/send a new message to a LinkedIn user (requires confirmation; profile-based targeting may open a separate DM instead of replying in an existing thread — see #483) |
 | `get_company_profile` | Extract company information with explicit section selection (posts, jobs); about-section references may include a `company_urn` entry carrying the numeric id used by LinkedIn's people-search `currentCompany` URL facet |
 | `get_company_posts` | Get recent posts from a company's LinkedIn feed |
 | `search_companies` | Search for companies on LinkedIn by keywords |
@@ -61,6 +61,31 @@ This MCP server is **free** and **open source**, supported by [**Unipile**](http
 
 <br/>
 <br/>
+
+## Codex plugin
+
+This repository includes an opt-in Codex plugin that bundles the MCP server and
+its LinkedIn workflow guidance. Add the repository marketplace, then install the
+plugin:
+
+```bash
+codex plugin marketplace add stickerdaniel/linkedin-mcp-server
+codex plugin add linkedin-mcp-server@linkedin-mcp-server
+```
+
+The plugin pins the MCP package to the same version as the plugin release. It
+does not install by default or override the user's enabled state. The plugin can
+be disabled in Codex settings, and its bundled MCP server can be disabled
+independently in `~/.codex/config.toml`:
+
+```toml
+[plugins."linkedin-mcp-server".mcp_servers.linkedin]
+enabled = false
+```
+
+Installing or enabling the plugin does not open a browser or sign in. A
+LinkedIn data request may start the managed browser, import an existing local
+session, or require a visible login window.
 
 ## 🚀 uvx Setup (Recommended - Universal)
 

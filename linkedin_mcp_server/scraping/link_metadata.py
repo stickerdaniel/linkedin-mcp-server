@@ -87,6 +87,9 @@ _SECTION_CONTEXTS = {
     "job_posting": "job posting",
     "inbox": "inbox",
     "conversation": "conversation",
+    "jobs": "jobs",
+    "saved_jobs": "saved jobs",
+    "feed": "feed",
 }
 
 _DEFAULT_REFERENCE_CAP = 12

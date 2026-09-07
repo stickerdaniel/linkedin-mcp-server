@@ -229,8 +229,19 @@ def test_worker_status_accepts_a_frame_after_large_startup_noise():
     assert frame == [authentic]
 
 
+_STARTUP_HOOK_MODULE = "_linkedin_mcp_test_startup_hook"
+
+
+def _install_startup_hook(site_dir: Path, hook: str) -> None:
+    """Install a startup hook without colliding with vendor ``sitecustomize``."""
+    (site_dir / f"{_STARTUP_HOOK_MODULE}.py").write_text(hook)
+    (site_dir / "linkedin-mcp-startup-hook.pth").write_text(
+        f"import {_STARTUP_HOOK_MODULE}\n"
+    )
+
+
 def _user_site_with_hook(tmp_path: Path, hook: str) -> tuple[str, dict[str, str], Path]:
-    """Install *hook* as a real ``sitecustomize`` an interpreter would execute.
+    """Install *hook* as executable user-site startup code.
 
     Returns the interpreter that honours it, the environment that points at it,
     and the user-site directory. The base interpreter is needed because a
@@ -257,19 +268,19 @@ def _user_site_with_hook(tmp_path: Path, hook: str) -> tuple[str, dict[str, str]
     # The worker resolves the package through ordinary startup, so it needs a
     # path entry. The supervisor does not: it runs the file by absolute path.
     (user_site / "linkedin-mcp-source.pth").write_text(f"{_REPO_ROOT}\n")
-    (user_site / "sitecustomize.py").write_text(hook)
+    _install_startup_hook(user_site, hook)
     return base_executable, environment, user_site
 
 
 def _venv_with_site_hook(tmp_path: Path, hook: str) -> tuple[str, dict[str, str]]:
     """Install *hook* where only ``-S`` can stop it: a real environment's site.
 
-    A ``sitecustomize`` in the interpreter's own ``site-packages`` is what a
-    virtual environment or a system install ships, and it survives ``-P``,
-    ``PYTHONNOUSERSITE``, a popped ``PYTHONPATH`` and ``-I`` alike, because all
-    of those act on the user-site copy or on path entries. The environment
-    keeps the source root on a ``.pth`` for the worker, which runs with
-    ordinary startup.
+    Executable ``.pth`` startup code in the interpreter's own
+    ``site-packages`` survives ``-P``, ``PYTHONNOUSERSITE``, a popped
+    ``PYTHONPATH`` and ``-I`` alike. Unlike a test-owned ``sitecustomize.py``,
+    it cannot be shadowed by a vendor module of the same name. The environment
+    keeps the source root on a separate ``.pth`` for the worker, which runs
+    with ordinary startup.
     """
     venv = tmp_path / "hooked-venv"
     subprocess.run(
@@ -294,7 +305,7 @@ def _venv_with_site_hook(tmp_path: Path, hook: str) -> tuple[str, dict[str, str]
     )
     site_packages = Path(located.stdout.strip())
     (site_packages / "linkedin-mcp-source.pth").write_text(f"{_REPO_ROOT}\n")
-    (site_packages / "sitecustomize.py").write_text(hook)
+    _install_startup_hook(site_packages, hook)
 
     environment = os.environ.copy()
     environment.pop("PYTHONPATH", None)
@@ -351,7 +362,11 @@ def test_real_user_site_hook_cannot_join_the_completion_frame(tmp_path: Path):
     )
 
     enabled = subprocess.run(
-        [base_executable, "-c", "import sys; print('sitecustomize' in sys.modules)"],
+        [
+            base_executable,
+            "-c",
+            f"import sys; print({_STARTUP_HOOK_MODULE!r} in sys.modules)",
+        ],
         cwd=tmp_path,
         env=environment,
         capture_output=True,
@@ -441,7 +456,7 @@ def test_a_startup_hook_cannot_spawn_a_pipe_holder_in_the_supervisor(tmp_path: P
                 interpreter,
                 "-I",
                 "-c",
-                "import sys; print('sitecustomize' in sys.modules)",
+                f"import sys; print({_STARTUP_HOOK_MODULE!r} in sys.modules)",
             ],
             env=environment,
             stdout=sink,

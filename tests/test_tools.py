@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 from typing import Any, Callable, Coroutine, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -302,6 +303,68 @@ class TestPersonTool:
             None,
             network=["F"],
             current_company="1115",
+        )
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("F", ["F"]),
+            ('["F"]', ["F"]),
+            ('["F", "S"]', ["F", "S"]),
+            ("F,S", ["F", "S"]),
+            (" F , S ", ["F", "S"]),
+            ("", []),
+            (["F"], ["F"]),
+            (None, None),
+        ],
+    )
+    def test_coerce_str_list_repairs_stringified_arrays(self, raw, expected):
+        """A client that flattens the array must still produce a list.
+
+        Lists and None pass through untouched, so a well-behaved client is
+        unaffected.
+        """
+        from linkedin_mcp_server.tools.person import _coerce_str_list
+
+        assert _coerce_str_list(raw) == expected
+
+    async def test_search_people_accepts_stringified_network(self, monkeypatch):
+        """Regression for #739.
+
+        The published schema for ``network`` is ``anyOf: [array, null]``, but
+        clients that collapse that union send a bare string. Going through
+        ``call_tool`` exercises the pydantic validation the direct-``fn`` tests
+        skip, which is where the original failure lived.
+        """
+        import linkedin_mcp_server.tools.person as person_module
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        expected = {
+            "url": (
+                "https://www.linkedin.com/search/results/people/"
+                "?keywords=engineer&network=%5B%22F%22%5D"
+            ),
+            "sections": {"search_results": "Jane Doe"},
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        async def _fake_get_ready_extractor(ctx, tool_name):
+            return mock_extractor
+
+        monkeypatch.setattr(
+            person_module, "get_ready_extractor", _fake_get_ready_extractor
+        )
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        await mcp.call_tool("search_people", {"keywords": "engineer", "network": "F"})
+
+        mock_extractor.search_people.assert_awaited_once_with(
+            "engineer",
+            None,
+            network=["F"],
+            current_company=None,
         )
 
     async def test_search_people_validation_error_surfaced_as_tool_error(
@@ -1168,6 +1231,86 @@ class TestGetCompanyEmployeesTool:
         tool_fn = await get_tool_fn(mcp, "get_company_employees")
         with pytest.raises(ToolError, match="Session expired"):
             await tool_fn("anthropic", mock_context, extractor=mock_extractor)
+
+
+class TestFeedToolDeadline:
+    """A tool deadline that comes due inside the cleanup shield.
+
+    ``_drain_listener_tasks`` shields its bounded teardown, and AnyIO does
+    not deliver into a shielded scope: on the way out it can only schedule
+    delivery for the next turn. ``get_feed`` then calls ``report_progress``,
+    which suspends only when the client sent a progress token, so the two
+    cases have to be driven separately. Both go over a real client session
+    against a real ``anyio.fail_after``; nothing about the timeout is mocked.
+    """
+
+    @staticmethod
+    def _server_and_reads(mcp_timeout: float, cleanup: float):
+        from linkedin_mcp_server.scraping.extractor import _drain_listener_tasks
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        reads: list[asyncio.Task[None]] = []
+
+        async def extract_feed(num_posts: int = 1) -> ExtractedSection:
+            started = asyncio.Event()
+
+            async def read() -> None:
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    # Holds the shield open across the deadline.
+                    await asyncio.sleep(cleanup)
+
+            task = asyncio.create_task(read())
+            reads.append(task)
+            await started.wait()
+            await _drain_listener_tasks([task])
+            return ExtractedSection(text="synthetic feed", references=[])
+
+        mcp = FastMCP("deadline-test")
+        register_feed_tools(mcp, tool_timeout=mcp_timeout)
+        return mcp, reads, SimpleNamespace(extract_feed=extract_feed)
+
+    async def _call(self, use_session: bool):
+        from fastmcp import Client
+
+        from linkedin_mcp_server.tools import feed as feed_tools
+
+        mcp, reads, extractor = self._server_and_reads(2.5, 0.7)
+        try:
+            with patch.object(
+                feed_tools,
+                "get_ready_extractor",
+                AsyncMock(return_value=extractor),
+            ):
+                async with Client(mcp) as client:
+                    if use_session:
+                        # No progress token: report_progress never suspends.
+                        return await client.session.call_tool(
+                            "get_feed", {"num_posts": 1}
+                        )
+                    # Client.call_tool installs a progress handler, so the
+                    # request carries a token and report_progress awaits.
+                    return await client.call_tool("get_feed", {"num_posts": 1})
+        finally:
+            for task in reads:
+                if not task.done():
+                    task.cancel()
+            if reads:
+                await asyncio.wait(reads, timeout=2.0)
+
+    async def test_the_deadline_fires_without_a_progress_token(self):
+        result = await self._call(use_session=True)
+
+        assert result.isError, "expired call returned a feed result"
+        assert "timed out" in str(result.content)
+
+    async def test_the_deadline_fires_with_a_progress_token(self):
+        from fastmcp.exceptions import ToolError
+
+        with pytest.raises(ToolError, match="timed out"):
+            await self._call(use_session=False)
 
 
 class TestFeedTools:
