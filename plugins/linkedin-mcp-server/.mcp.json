@@ -3,7 +3,7 @@
     "linkedin": {
       "command": "uvx",
       "args": [
-        "mcp-server-linkedin@4.23.3",
+        "mcp-server-linkedin@4.24.0",
         "--transport",
         "stdio",
         "--timeout",
