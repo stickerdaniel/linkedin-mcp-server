@@ -425,6 +425,55 @@ async def test_login_prompt_reports_the_effective_viewer_budget(
     )
 
 
+@pytest.mark.asyncio
+async def test_a_viewer_that_never_starts_leaves_the_profile_free(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No browser was opened, so nothing may be held on its account.
+
+    The window manager comes up before the browser does, and a login that ends
+    there never reaches the manager at all. Its ``close_confirmed`` is then the
+    pessimistic default every manager starts with, which reads exactly like a
+    Chromium that would not shut down: the profile stays marked busy for the
+    life of the process, over a browser that never ran.
+    """
+    import linkedin_mcp_server.setup as setup
+
+    class Manager:
+        # As constructed, and never opened.
+        close_confirmed = False
+
+    class Viewer:
+        def start_window_manager(self) -> None:
+            raise RuntimeError("openbox did not become ready")
+
+        def stop_window_manager(self) -> None:
+            pass
+
+    async def never_reached(*_args: object, **_kwargs: object) -> bool:
+        raise AssertionError("the login ran without a window manager")
+
+    config = SimpleNamespace(
+        browser=SimpleNamespace(login_timeout_seconds=60, slow_mo=0)
+    )
+    monkeypatch.setattr(setup, "build_launch_options", lambda _config: ({}, None))
+    monkeypatch.setattr(setup, "describe_launch", lambda _options: None)
+    monkeypatch.setattr(setup, "BrowserManager", lambda **_kwargs: Manager())
+    monkeypatch.setattr(setup, "LoginViewer", Viewer)
+    monkeypatch.setattr(setup, "_run_login", never_reached)
+
+    state = setup._LoginState()
+    with pytest.raises(RuntimeError, match="openbox"):
+        await setup._login_into_fresh_profile(
+            tmp_path / "profile",
+            config=config,
+            state=state,
+            login_viewer=True,
+        )
+
+    assert state.close_confirmed is True
+
+
 def test_viewer_hard_cap_applies_when_login_timeout_is_unlimited(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -3,6 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
+import codecs
+from collections import deque
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
+import contextlib
+import errno
+from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import Enum
 import functools
@@ -11,11 +18,32 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
+import shutil
 import stat
+import subprocess
 import sys
-from typing import NoReturn
+import tempfile
+import threading
+import time
+from typing import Any, NoReturn, TypeVar
+from urllib.parse import urlsplit
 
 from fastmcp import Context
+from rich.console import Console
+from rich.markup import escape
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TaskID,
+    TaskProgressColumn,
+    TextColumn,
+    TimeRemainingColumn,
+    TransferSpeedColumn,
+)
+from rich.spinner import Spinner
+from rich.theme import Theme
 
 from linkedin_mcp_server.common_utils import secure_mkdir, secure_write_text, utcnow_iso
 from linkedin_mcp_server.config import get_config
@@ -35,15 +63,37 @@ from linkedin_mcp_server.exceptions import (
     BrowserSetupFailedError,
     BrowserSetupInProgressError,
     DockerHostLoginRequiredError,
+    LinkedInMCPError,
+    OwnerStandingDownError,
+    ProfileRootRefusedError,
+)
+from linkedin_mcp_server.private_state import (
+    PrivateStateError,
+    harden_created_directory,
+    verify_no_extended_acl,
+)
+from linkedin_mcp_server.process_protocol import new_nonce
+from linkedin_mcp_server.process_tree import (
+    ProcessTreeError,
+    WindowsJob,
+    release_nonce,
+    release_windows_gate,
+    windows_gate_command,
 )
 from linkedin_mcp_server.profile_lease import (
     ProfileLeaseUnavailableError,
     _release_locked_fd,
     acquire_locked_fd,
 )
-from linkedin_mcp_server.server_role import ServerRole, process_role
+from linkedin_mcp_server.server_role import (
+    ServerRole,
+    ask_this_process_to_stand_down,
+    process_role,
+    stand_down_reason,
+)
 from linkedin_mcp_server.session_state import (
     PeerSessionInPlaceError,
+    _owned,
     auth_root_dir,
     get_runtime_id,
     load_source_state,
@@ -71,6 +121,12 @@ _REGISTRY_NAME_TO_DIR_PREFIX = {
     "chromium-headless-shell": "chromium_headless_shell-",
 }
 
+# Targets `patchright install chromium` writes beside the browser and never
+# launches: ffmpeg for any argument resolving to a browser, winldd on win32
+# only. Both land in this cache under the same byte ceiling (`resolveBrowsers`).
+_FFMPEG_REGISTRY_NAME = "ffmpeg"
+_WINDOWS_TOOL_REGISTRY_NAME = "winldd"
+
 # On-disk dir prefix of the headless shell. Nothing launches it any more —
 # every launch names ``channel="chromium"`` — but the prefix is still needed to
 # recognise one in an install written before that change.
@@ -87,6 +143,189 @@ _FULL_DIR_PREFIX = "chromium-"
 _CACHE_REPORT_MARKER = ".linkedin-mcp-cache-report.json"
 _CACHE_REPORT_LOCK = ".linkedin-mcp-cache-report.lock"
 _CACHE_REPORT_SCHEMA = 1
+
+#: How much of the installer's output a failure message may quote. Patchright
+#: embeds a whole non-200 response body in one error, and retries five times, so
+#: an authenticated mirror answering with a page rather than a browser can emit
+#: arbitrarily much. The tail is what says why it failed. Bounded by characters
+#: as well as by count, because a fragment can itself be 64 KiB: two hundred of
+#: those would put 12 MiB into an exception message and into ``last_error``.
+_MAX_RETAINED_LINES = 200
+_MAX_RETAINED_CHARS = 64 * 1024
+#: Read size for the installer's pipe.
+_READ_CHUNK = 64 * 1024
+#: How much of a supervisor's startup diagnostics reaches its failure message.
+#: Counted in characters and kept by ``_RedactedTail``, so the trim happens on
+#: redacted text: on raw bytes it cut through whatever had arrived, and a cut
+#: inside a long URL left a scheme-less remainder that no pattern here matches
+#: and that ``BrowserSetupFailedError`` then carried to an MCP client.
+_MAX_START_ERROR_CHARS = 8192
+#: A run of output this long with no newline in it is emitted as one line rather
+#: than buffered further. Bounds memory for output that never terminates a line.
+_MAX_LINE_CHARS = 64 * 1024
+#: Any userinfo in a URL, not only the ``user:password`` form. Patchright prints
+#: the download URL it resolved, and ``PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST`` may
+#: carry credentials for an internal mirror. A bare ``//TOKEN@host`` is as much
+#: a secret as a pair, and so are ``//TOKEN:@host`` and ``//:TOKEN@host``, which
+#: a pattern requiring both halves lets through. Greedy to the *last* ``@``: a
+#: password may contain one, and stopping at the first leaves the rest of it in
+#: the line. Backslashes too, which Node normalises to slashes before
+#: authenticating, so ``https:\\user:pw@host`` is a working credential.
+_CREDENTIALS_IN_URL = re.compile(r"[/\\]{2}[^/\\\s]*@")
+#: Any absolute HTTP(S) URL, from its scheme to the first whitespace.
+#: Everything the origin does not name is replaced, because nothing here can
+#: tell a public build path from a capability.
+#:
+#: The configured mirror is not the only URL that reaches this output.
+#: Patchright's download client follows redirects and interpolates the location
+#: it *ended* on into its timeout and its error, so a mirror answering 302 with
+#: ``https://cdn.example/another-bearer-token/chromium.zip`` puts a path
+#: credential nobody configured into the debug log, into the retained failure
+#: that becomes ``BrowserSetupFailedError``, and from there into whatever an MCP
+#: client shows. Redacting the configured prefix cannot reach that URL, and no
+#: parameter or path-segment list ever will either: ``?token=``, ``?api_key=``,
+#: ``?X-Amz-Signature=`` and bare path tokens are all in use. So the whole URL
+#: below the origin goes, and the part that says which mirror answered stays.
+#:
+#: Whitespace is the only boundary. An apostrophe used to end the run as well,
+#: to protect the ``'. URL: `` that closes a response body, and it cost the rest
+#: of every URL holding one: Node keeps an apostrophe in a path and in userinfo
+#: alike, and a redirect to ``https://cdn.example/browser's.zip?X-Amz-Signature=
+#: SECRET`` therefore printed everything from the quote onwards. What the closing
+#: marker actually needs is held back in ``_held_back_closer`` instead, which is
+#: two characters rather than the whole tail.
+_URL_IN_TEXT = re.compile(r"(?i)\b(https?):[/\\]{2}(\S*)")
+#: Where an authority ends. Backslashes are normalised to slashes first, as Node
+#: does before resolving, so they are not in this class.
+_AUTHORITY_ENDS = re.compile(r"[/?#]")
+#: Where a redactable run opens. Both patterns above are represented, because a
+#: cut is unsafe from whichever of them starts earlier: ``_URL_IN_TEXT`` needs
+#: the scheme, so ``https:`` | ``//h/?token=SECRET`` leaves a remainder it
+#: cannot see, and ``_CREDENTIALS_IN_URL`` needs the ``//``, so ``//us`` |
+#: ``er:pw@h`` puts the ``@`` it matches on beyond the cut.
+#:
+#: The lookahead is the liveness test, and it is what keeps this off ordinary
+#: text: a URL run ends at whitespace and a userinfo ends at the first slash as
+#: well, so an opener with either of those between itself and the cut can no
+#: longer reach across it, and the cut in front of it is free.
+_SCHEME_OPENS = re.compile(r"(?i)\bhttps?:[/\\]{2}(?=\S*\Z)")
+_CREDENTIAL_OPENS = re.compile(r"[/\\]{2}(?=[^/\\\s]*\Z)")
+#: An opener that has not finished arriving, anchored at the cut. A buffer
+#: ending in ``h`` can be the first character of ``https://SECRET``, and a cut
+#: between them leaves neither half recognisable while no opener is in the text
+#: yet for anything above to find. Every proper prefix of one is here, which
+#: covers a cut inside a whole opener as the same case.
+_OPENER_PENDING = re.compile(r"(?i)(?:\b(?:h|ht|htt|https?:?[/\\]?)|[/\\])\Z")
+#: Where a run ends. The ``\S`` of ``_URL_IN_TEXT``, so the two agree on what
+#: one run is.
+_WHITESPACE = re.compile(r"\s")
+_NON_SPACE = re.compile(r"\S")
+#: Where a run begins, scanned backwards for rather than matched. ``\S*\Z``
+#: reads better and backtracks once per starting position, which is quadratic
+#: on exactly the runs this exists for: measured at 9.9 seconds against 0.09
+#: milliseconds on one 60 000-character token. Only the ASCII spaces are looked
+#: for, so a rarer one merely widens the window; that costs a longer scan and
+#: can hide nothing, because the searches above carry their own ``\S``.
+_ASCII_SPACES = (" ", "\t", "\n", "\r")
+#: Stands in for a run that was dropped or lost its head. Not an origin, because
+#: the part of a URL that names one is exactly the part that is not there.
+_OMITTED_RUN_HEAD = "***"
+#: C0 and C1 controls and escape sequences. The eight-bit C1 forms do the same
+#: work as their ESC pairs on terminals that accept them, so U+009B followed by
+#: "2J" clears a screen exactly as "\x1b[2J" does. Patchright quotes a whole non-200 response
+#: body, and a body can carry the sequence that clears a terminal or renames
+#: its window. rich strips these from what it renders; the debug log writes
+#: straight to a stream and would not.
+_TERMINAL_CONTROLS = re.compile(
+    r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[a-zA-Z]|[\x00-\x08\x0b-\x1f\x7f\x80-\x9f]"
+)
+#: ``Download failed: server returned code 403 body '…'. URL: …``, patchright's
+#: one message that quotes what a server sent it (``coreBundle.js``, in
+#: ``downloadFile``; every other download error carries a status code, a size
+#: or a URL). Whatever is between those two markers is a stranger's bytes on a
+#: developer's terminal, so it is dropped rather than sanitised: it is where the
+#: escape sequences, the reflected credentials, the markup and the absurd
+#: numbers all came from, and none of it says anything the status code does not.
+#: The body is not one line: ``content += chunk`` collects an HTML error page
+#: with its newlines intact, so the closing marker can arrive thousands of lines
+#: later.
+#: Split into its literal halves so the pending form below is built from the
+#: same strings: a marker cut by a read has to be recognised out of its head.
+_OPENER_HEAD = "server returned code "
+_OPENER_TAIL = " body '"
+_RESPONSE_BODY_OPENS = re.compile(
+    re.escape(_OPENER_HEAD) + r"\d{1,3}" + re.escape(_OPENER_TAIL)
+)
+_RESPONSE_BODY_CLOSES = "'. URL: "
+#: The closing marker as patchright writes it: the marker, the download URL,
+#: end of line. A response body can forge that exact shape after it has emitted
+#: a newline, so a multiline body stays elided through EOF. A single physical
+#: line is unambiguous: patchright's real closer is the final marker on that line.
+_RESPONSE_BODY_CLOSED = re.compile(r"'\. URL: \S*\Z")
+#: One short of the marker, which is the most of it that a forced cut can leave
+#: on the far side of a fragment boundary.
+_CLOSER_CARRY = len(_RESPONSE_BODY_CLOSES) - 1
+#: How far into the closing marker a URL run can reach, longest first. Sanitation
+#: runs on the raw buffer and ``_installer_lines`` reads the markers out of what
+#: it returns, so a redaction that eats the opening quote of ``'. URL: `` deletes
+#: the only evidence that a body ended and elides the rest of the stream. A run
+#: stops at whitespace and the marker's first space is its third character, so
+#: ``'.`` and ``'`` are the entire overlap. Derived from the marker rather than
+#: written out, so a reworded marker moves both together.
+_CLOSER_HEAD = _RESPONSE_BODY_CLOSES.split(" ", 1)[0]
+_CLOSER_HEADS = tuple(_CLOSER_HEAD[:size] for size in range(len(_CLOSER_HEAD), 0, -1))
+_OMITTED_BODY = "<response body omitted>"
+
+
+def _prefixes_of(literal: str) -> str:
+    """A pattern for any prefix of *literal*, longest first."""
+    return "|".join(re.escape(literal[:size]) for size in range(len(literal), 0, -1))
+
+
+#: A marker that has not finished arriving, anchored at the end of the buffer.
+#: Sanitation runs on a buffer that is still growing, so a marker can be split by
+#: a read the way a URL can, and an edit to the half already folded sticks: the
+#: next pass joins the rest onto text the marker is gone from.
+_PENDING_MARKER = (
+    rf"(?:{_prefixes_of(_OPENER_HEAD)}"
+    rf"|{re.escape(_OPENER_HEAD)}\d{{1,3}}(?:{_prefixes_of(_OPENER_TAIL)})?"
+    rf"|{_prefixes_of(_RESPONSE_BODY_CLOSES)})\Z"
+)
+_MARKERS_HELD = re.compile(
+    rf"{_RESPONSE_BODY_OPENS.pattern}|{re.escape(_RESPONSE_BODY_CLOSES)}"
+    rf"|{_PENDING_MARKER}"
+)
+#: Stands in for a marker while a configured value is replaced. NUL is the one
+#: character that cannot collide: ``_TERMINAL_CONTROLS`` strips it out before any
+#: of this runs, and an environment value cannot carry one, so every NUL here was
+#: written by ``_held_markers`` and no configured value can match across it.
+_MARKER_HELD = "\x00"
+
+
+#: ``|■■■■    |  30% of 187.2 MiB``: the progress line patchright writes when
+#: its stdout is a pipe, which is always the case here. The digit counts are the
+#: guard: patchright's error output carries a whole response body, and a
+#: progress-shaped line from one raised ``OverflowError`` on a 400-digit size
+#: and hit Python's 4300-digit integer limit on a long percentage. Bounded here,
+#: neither can be constructed.
+_PATCHRIGHT_PERCENT = re.compile(r"\|\s*(\d{1,3})%\s+of\s+([\d.]{1,15})\s*([KMG]i?B)")
+#: ``Downloading Chrome for Testing 149.0.7827.55 (…) from https://…``
+_PATCHRIGHT_DOWNLOAD = re.compile(r"^Downloading (.+?) from ")
+#: ``Chrome for Testing 149.0.7827.55 (…) downloaded to /…/chromium-1228``. The
+#: only completion signal there is when no percentage was ever reported.
+_PATCHRIGHT_DONE = re.compile(r" downloaded to ")
+_BINARY_UNITS = {"KiB": 1024, "MiB": 1024**2, "GiB": 1024**3}
+#: LinkedIn's dark-mode blue, for the bar and the spinner alike. The brand blue
+#: #0A66C2 is meant for light backgrounds and reads muted on a dark terminal,
+#: which is where this runs. Only honoured where the terminal advertises
+#: truecolor; rich approximates it to the nearest ANSI colour otherwise.
+_PROGRESS_STYLE = "#70B5F9"
+#: Everything non-ASCII this draws. The bar downgrades itself to "-" wherever
+#: the console encoding is not utf (``ConsoleOptions.ascii_only``); the spinner
+#: does not, and its braille goes into ``write`` as it is. Read off the spinner
+#: rather than copied, so a rich release that redraws "dots" is measured here
+#: instead of assumed.
+_BAR_GLYPHS = "".join(Spinner("dots").frames)
 
 
 class RuntimePolicy(str, Enum):
@@ -120,7 +359,11 @@ class BootstrapState:
     auth_started_at: str | None = None
     auth_completed_at: str | None = None
     setup_task: asyncio.Task[None] | None = None
+    setup_check_complete: asyncio.Event | None = None
+    setup_requires_stand_down: bool = False
+    setup_stand_down_reason: str | None = None
     cache_report_task: asyncio.Task[None] | None = None
+    cache_report_attempted: bool = False
     login_task: asyncio.Task[None] | None = None
     import_task: asyncio.Task[bool] | None = None
     import_attempted: bool = False
@@ -165,9 +408,10 @@ def reset_bootstrap_for_testing() -> None:
     _auth_quiescent_generation = None
     os.environ.pop("PLAYWRIGHT_BROWSERS_PATH", None)
     # Tolerate monkeypatched stand-ins that lack `cache_clear`.
-    clear = getattr(_patchright_install_targets, "cache_clear", None)
-    if clear is not None:
-        clear()
+    for cached in (_patchright_install_targets, _patchright_registry_entries):
+        clear = getattr(cached, "cache_clear", None)
+        if clear is not None:
+            clear()
 
 
 def get_runtime_policy() -> RuntimePolicy:
@@ -214,17 +458,12 @@ def _patchright_pkg_version() -> str | None:
 
 
 @functools.cache
-def _patchright_install_targets() -> dict[str, str] | None:
-    """Resolve {dir_prefix: revision} from patchright's bundled browsers.json.
+def _patchright_registry_entries() -> tuple[Mapping[str, Any], ...] | None:
+    """Return the entries of patchright's bundled ``browsers.json``, or ``None``.
 
-    Reads ``<patchright>/driver/package/browsers.json`` — the authoritative
-    file patchright itself consults to know which revision it expects.
-    Returns ``None`` if the registry can't be read; callers treat ``None``
-    as "not ready" so the next gate triggers reinstall.
-
-    Cached for the process lifetime: the patchright revision only changes on
-    package upgrade, which requires a process restart. Tests reset the cache
-    via ``reset_bootstrap_for_testing()``.
+    The file patchright itself consults, so every revision and platform
+    override below is read from it rather than written down. Cached for the
+    process lifetime; tests reset it via ``reset_bootstrap_for_testing()``.
     """
     try:
         import patchright
@@ -237,16 +476,68 @@ def _patchright_install_targets() -> dict[str, str] | None:
         return None
     if not isinstance(payload, dict):
         return None
+    browsers = payload.get("browsers")
+    if not isinstance(browsers, list):
+        return None
+    return tuple(entry for entry in browsers if isinstance(entry, dict))
+
+
+@functools.cache
+def _patchright_install_targets() -> dict[str, str] | None:
+    """Resolve {dir_prefix: revision} for the browsers this server launches.
+
+    Readiness, install metadata and the retained-revision report are built on
+    this, so it names only launchable binaries; ffmpeg and winldd are accounted
+    for separately. ``None`` means "not ready", so the next gate reinstalls.
+    """
+    entries = _patchright_registry_entries()
+    if entries is None:
+        return None
 
     targets: dict[str, str] = {}
-    for entry in payload.get("browsers", []):
-        if not isinstance(entry, dict) or not entry.get("installByDefault"):
+    for entry in entries:
+        if not entry.get("installByDefault"):
             continue
-        prefix = _REGISTRY_NAME_TO_DIR_PREFIX.get(entry.get("name"))
+        name = entry.get("name")
+        if not isinstance(name, str):
+            continue
+        prefix = _REGISTRY_NAME_TO_DIR_PREFIX.get(name)
         if prefix is None or entry.get("revision") is None:
             continue
         targets[prefix] = str(entry["revision"])
     return targets or None
+
+
+def _installer_auxiliary_names(browser_selected: bool) -> tuple[str, ...]:
+    """Directory names of the non-browser targets one install also extracts.
+
+    ``readDescriptors`` names a target ``<name>-<revision>``, or
+    ``<name>_<hostPlatform>_special-<override>`` where ``revisionOverrides``
+    covers the host, dashes in that prefix rewritten to underscores.
+    ``hostPlatform`` is computed inside the driver, so every candidate the
+    entry allows is named: a wrong one is absent from disk and costs nothing,
+    while missing the real one is what lets an oversized target through.
+    """
+    wanted: list[str] = [_FFMPEG_REGISTRY_NAME] if browser_selected else []
+    if sys.platform == "win32":  # patchright's own `process.platform` check
+        wanted.append(_WINDOWS_TOOL_REGISTRY_NAME)
+    names: list[str] = []
+    for registry_name in wanted:
+        for entry in _patchright_registry_entries() or ():
+            if entry.get("name") != registry_name:
+                continue
+            revision = entry.get("revision")
+            if revision is not None:
+                names.append(f"{registry_name.replace('-', '_')}-{revision}")
+            overrides = entry.get("revisionOverrides")
+            if not isinstance(overrides, dict):
+                continue
+            for host, override in overrides.items():
+                if override is None:
+                    continue
+                prefix = f"{registry_name}_{host}_special".replace("-", "_")
+                names.append(f"{prefix}-{override}")
+    return tuple(dict.fromkeys(names))
 
 
 def _has_install_for(configured: Path, prefix: str, revision: str) -> bool:
@@ -430,15 +721,90 @@ def _report_retained_browser_revisions() -> None:
             _release_locked_fd(lock_fd)
 
 
+_ThreadResult = TypeVar("_ThreadResult")
+
+
+async def _run_in_daemon_thread(
+    function: Callable[..., _ThreadResult],
+    *args: Any,
+    discard: Callable[[_ThreadResult], None] | None = None,
+) -> _ThreadResult:
+    """Run blocking work without waiting for its thread during interpreter exit."""
+    loop = asyncio.get_running_loop()
+    result: asyncio.Future[_ThreadResult] = loop.create_future()
+
+    def discard_safely(value: _ThreadResult) -> None:
+        if discard is None:
+            return
+        try:
+            discard(value)
+        except BaseException:  # noqa: BLE001 - cleanup must not escape the thread
+            logger.warning("Discarding late browser setup work failed", exc_info=True)
+
+    def run() -> None:
+        try:
+            value = function(*args)
+        except BaseException as exc:  # noqa: BLE001 - delivered to the event loop
+
+            def fail(error: BaseException = exc) -> None:
+                if not result.done():
+                    result.set_exception(error)
+
+            complete = fail
+        else:
+
+            def succeed(answer: _ThreadResult = value) -> None:
+                if result.done():
+                    discard_safely(answer)
+                else:
+                    result.set_result(answer)
+
+            complete = succeed
+        try:
+            loop.call_soon_threadsafe(complete)
+        except RuntimeError:
+            if "value" in locals():
+                discard_safely(value)
+
+    threading.Thread(target=run, name="browser-setup-io", daemon=True).start()
+    try:
+        return await result
+    except BaseException:
+        # A cancellation delivered after the thread set the result still throws
+        # here, because a task cancelled while its future is already done is
+        # resumed with the cancellation rather than the value. Without this the
+        # answer is dropped where nobody ever accepted ownership of it, which
+        # for the installer root means a pinned handle held to process exit.
+        if result.done() and not result.cancelled() and result.exception() is None:
+            discard_safely(result.result())
+        raise
+
+
 def _schedule_retained_browser_revision_report() -> None:
-    """Run the cache inventory off the event loop without delaying startup."""
+    """Run the cache inventory once per process, away from the event loop."""
+    if _state.cache_report_attempted:
+        return
     task = _state.cache_report_task
     if task is not None and not task.done():
         return
+    _state.cache_report_attempted = True
     _state.cache_report_task = asyncio.create_task(
-        asyncio.to_thread(_report_retained_browser_revisions),
+        _report_retained_browser_revisions_safely(),
         name="browser-cache-report",
     )
+
+
+async def _report_retained_browser_revisions_safely() -> None:
+    """Inventory the cache where an escape would go to nobody.
+
+    Same reason as the readiness variant below: this task is never awaited, so
+    an exception on it is reported by the loop when the task is dropped. The
+    attempt is already recorded, and a diagnostic is not worth a retry.
+    """
+    try:
+        await _run_in_daemon_thread(_report_retained_browser_revisions)
+    except Exception:
+        logger.warning("Could not inspect the retained browser cache", exc_info=True)
 
 
 def initialize_bootstrap(runtime_policy: RuntimePolicy | str | None = None) -> None:
@@ -455,6 +821,74 @@ def get_bootstrap_state() -> BootstrapState:
     return _state
 
 
+async def _report_retained_browser_revisions_if_ready() -> None:
+    try:
+        ready = await _run_in_daemon_thread(_owned_browser_setup_ready)
+        if ready:
+            _state.cache_report_attempted = True
+            await _run_in_daemon_thread(_report_retained_browser_revisions)
+    except ProfileRootRefusedError:
+        # Not attempted: a root that cannot be claimed now may be claimable
+        # later, and this is the only failure worth asking about again.
+        logger.warning(
+            "Refusing to inspect the browser cache under an unclaimed profile root"
+        )
+    except Exception:
+        # Nobody awaits this task. An exception left on it is reported by the
+        # loop when the task is dropped, and an unset flag would schedule the
+        # same unreadable file again at the next setup. Malformed JSON in either
+        # inventory arrives here.
+        _state.cache_report_attempted = True
+        logger.warning("Could not inspect the retained browser cache", exc_info=True)
+
+
+def report_retained_browser_revisions_if_ready() -> None:
+    """Check and report in the background without starting an installer."""
+    initialize_bootstrap()
+    if get_runtime_policy() != RuntimePolicy.MANAGED or _uses_custom_chrome():
+        return
+    if _state.cache_report_attempted:
+        return
+    task = _state.cache_report_task
+    if task is not None and not task.done():
+        return
+    _state.cache_report_task = asyncio.create_task(
+        _report_retained_browser_revisions_if_ready(),
+        name="browser-cache-report-if-ready",
+    )
+
+
+async def stop_background_browser_setup() -> None:
+    """Cancel and await the owner's setup task before its lifespan can finish."""
+    task = _state.setup_task
+    if task is None:
+        return
+    caller_cancel: asyncio.CancelledError | None = None
+    if not task.done():
+        task.cancel()
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            caller = asyncio.current_task()
+            if caller is not None and caller.cancelling():
+                caller_cancel = exc
+            elif task.done():
+                break
+    _state.setup_task = None
+    _state.setup_check_complete = None
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        _state.setup_state = SetupState.FAILED
+        _state.last_error = "Browser setup task was cancelled during shutdown"
+    except Exception as exc:
+        _state.setup_state = SetupState.FAILED
+        _state.last_error = str(exc)
+    if caller_cancel is not None:
+        raise caller_cancel
+
+
 async def start_background_browser_setup_if_needed() -> None:
     """Start shared background browser setup for managed runtimes if needed."""
     initialize_bootstrap()
@@ -466,17 +900,39 @@ async def start_background_browser_setup_if_needed() -> None:
         _state.setup_completed_at = _state.setup_completed_at or utcnow_iso()
         return
 
+    await _refresh_background_task_state()
+
     async with _lock:
-        if _browser_setup_ready():
-            _schedule_retained_browser_revision_report()
-            _state.setup_state = SetupState.READY
-            _state.setup_completed_at = _state.setup_completed_at or utcnow_iso()
-            return
-        if _state.setup_state == SetupState.READY:
-            invalidate_browser_setup()
-        if _state.setup_task is not None and not _state.setup_task.done():
-            return
-        _start_browser_setup_task_locked()
+        if _state.setup_task is None or _state.setup_task.done():
+            deadline_at = (
+                asyncio.get_running_loop().time() + _BACKGROUND_BROWSER_SETUP_SECONDS
+            )
+            _start_browser_setup_task_locked(deadline_at)
+        checked = _state.setup_check_complete
+        assert checked is not None
+
+    # The readiness phase belongs to the shared task, so a timed-out tool caller
+    # cannot abandon it or start another filesystem thread on the next retry.
+    # Awaited directly and not through ``asyncio.shield``: the shield is what
+    # protects ``setup_task``, and this is an Event that nothing here cancels
+    # anyway. Shielding it wrapped ``wait()`` in an anonymous task that outlived
+    # the cancelled caller and stayed on ``_waiters`` until the Event was set,
+    # once per abandoned tool call. ``Event.wait`` removes its own waiter in a
+    # ``finally``, so cancellation here leaves nothing behind and leaves the
+    # shared task untouched.
+    await checked.wait()
+    task = _state.setup_task
+    if task is not None and task.done():
+        try:
+            task.result()
+        except BaseException as exc:
+            await _refresh_background_task_state()
+            detail = _consume_background_setup_failure()
+            if isinstance(exc, LinkedInMCPError):
+                raise
+            if detail is not None:
+                raise BrowserSetupFailedError(detail) from exc
+            raise
 
 
 def _metadata_shape_ok() -> Path | None:
@@ -539,6 +995,24 @@ def browser_ready() -> bool:
     return _has_install_for(configured, _FULL_DIR_PREFIX, revision)
 
 
+def browser_setup_in_progress() -> bool:
+    """Return whether this process is still installing the managed browser."""
+    task = _state.setup_task
+    return task is not None and not task.done()
+
+
+def browser_setup_failure_pending() -> bool:
+    """Return whether a completed setup failure still needs a client response."""
+    if _state.setup_state is SetupState.FAILED or _state.setup_requires_stand_down:
+        return True
+    task = _state.setup_task
+    if task is None or not task.done():
+        return False
+    if task.cancelled():
+        return True
+    return task.exception() is not None
+
+
 def browser_setup_ready() -> bool:
     """Return whether the browser this server launches is installed and current.
 
@@ -550,12 +1024,26 @@ def browser_setup_ready() -> bool:
     return browser_ready()
 
 
-def invalidate_browser_setup() -> None:
-    """Mark browser setup as not-ready: drop install metadata and reset cached READY state."""
-    install_metadata_path().unlink(missing_ok=True)
+def _discard_browser_install_metadata() -> None:
+    profile = _owned(get_profile_dir())
+    (auth_root_dir(profile) / _BROWSER_INSTALL_METADATA).unlink(missing_ok=True)
+
+
+def _mark_browser_setup_invalid() -> None:
     if _state.setup_state == SetupState.READY:
         _state.setup_state = SetupState.IDLE
         _state.setup_completed_at = None
+
+
+def invalidate_browser_setup() -> None:
+    """Mark browser setup as not-ready and drop metadata only under an owned root."""
+    try:
+        _discard_browser_install_metadata()
+    except ProfileRootRefusedError:
+        logger.warning(
+            "Refusing to delete browser install metadata under an unclaimed profile root"
+        )
+    _mark_browser_setup_invalid()
 
 
 def _browser_setup_ready() -> bool:
@@ -563,39 +1051,2568 @@ def _browser_setup_ready() -> bool:
     return browser_setup_ready()
 
 
-def _start_browser_setup_task_locked() -> None:
+def _owned_browser_setup_ready() -> bool:
+    """Verify the source root before reading managed cache state beside it."""
+    _owned(get_profile_dir())
+    return _browser_setup_ready()
+
+
+_BACKGROUND_BROWSER_SETUP_SECONDS = 30 * 60.0
+#: Absolute ceiling on one setup attempt, which no activity can reschedule. The
+#: inactivity deadline above is pushed forward by every byte that lands, so a
+#: response that keeps trickling holds it open for as long as it wants to; this
+#: one is armed once and expires. Twelve hours against a measured install of
+#: well under a minute. The 170 MiB download needs about five at 10 KiB/s,
+#: already below any link this server is usable on, and patchright answers a
+#: reset near the end of one by starting a clean attempt: six hours cancelled
+#: that recovery, which is the only thing this bound must not do.
+_BROWSER_SETUP_LIFETIME_SECONDS = 12 * 60 * 60.0
+
+#: Whether an outer scope already holds the lifetime, so one attempt arms one
+#: timer: the background task around the whole attempt, a direct install at the
+#: installer.
+_setup_lifetime_armed: ContextVar[bool] = ContextVar(
+    "linkedin_mcp_setup_lifetime_armed", default=False
+)
+
+
+class _SetupLifetimeExceeded(BrowserSetupFailedError):
+    """The lifetime, which no progress reschedules, not the inactivity deadline."""
+
+
+@contextlib.asynccontextmanager
+async def _setup_lifetime() -> AsyncIterator[None]:
+    """Bound one managed setup attempt, wherever that attempt is entered."""
+    if _setup_lifetime_armed.get():
+        yield
+        return
+    token = _setup_lifetime_armed.set(True)
+    scope = asyncio.timeout_at(
+        asyncio.get_running_loop().time() + _BROWSER_SETUP_LIFETIME_SECONDS
+    )
+    try:
+        async with scope:
+            yield
+    except TimeoutError as exc:
+        if scope.expired():
+            raise _SetupLifetimeExceeded(
+                "Patchright Chromium browser setup exceeded its absolute lifetime"
+            ) from exc
+        raise
+    finally:
+        _setup_lifetime_armed.reset(token)
+
+
+def _mark_background_setup_timed_out(reason: str) -> None:
+    _state.setup_requires_stand_down = process_role() is ServerRole.OWNER
+    _state.setup_stand_down_reason = reason
+
+
+async def _run_background_browser_setup(deadline_at: float | None = None) -> None:
+    """Run managed setup under an inactivity deadline and an absolute ceiling."""
+    loop = asyncio.get_running_loop()
+    if deadline_at is None:
+        deadline_at = loop.time() + _BACKGROUND_BROWSER_SETUP_SECONDS
+    checked = _state.setup_check_complete
+    if checked is None:
+        checked = asyncio.Event()
+        _state.setup_check_complete = checked
+    deadline = asyncio.timeout_at(deadline_at)
+
+    def record_installer_activity() -> None:
+        if not deadline.expired():
+            deadline.reschedule(loop.time() + _BACKGROUND_BROWSER_SETUP_SECONDS)
+
+    try:
+        async with _setup_lifetime(), deadline:
+            if await _run_in_daemon_thread(_owned_browser_setup_ready):
+                _schedule_retained_browser_revision_report()
+                _state.setup_state = SetupState.READY
+                _state.setup_completed_at = _state.setup_completed_at or utcnow_iso()
+                return
+            # A readiness miss is enough to start setup. Keep any existing
+            # metadata in place until a successful install replaces it; deleting
+            # here would be both unnecessary and destructive for an unclaimed
+            # programmatic profile root.
+            _mark_browser_setup_invalid()
+            checked.set()
+            await _run_browser_setup(activity_callback=record_installer_activity)
+    except _SetupLifetimeExceeded:
+        # First, because the lifetime cancels the inactivity scope on its way
+        # out and a caller that only asked the inner one would name the wrong
+        # bound. It arrives already told apart, from whichever layer armed it.
+        _mark_background_setup_timed_out(
+            "managed browser setup exceeded its absolute lifetime"
+        )
+        raise
+    except TimeoutError as exc:
+        if not deadline.expired():
+            raise
+        _mark_background_setup_timed_out(
+            "managed browser setup exceeded its background deadline"
+        )
+        raise BrowserSetupFailedError(
+            "Patchright Chromium browser setup exceeded its background deadline"
+        ) from exc
+    finally:
+        checked.set()
+        if process_role() is ServerRole.OWNER:
+            from linkedin_mcp_server.daemon_liveness import get_liveness
+
+            get_liveness().background_activity_finished()
+
+
+def _start_browser_setup_task_locked(deadline_at: float) -> None:
     _state.setup_state = SetupState.RUNNING
     _state.setup_started_at = utcnow_iso()
     _state.last_error = None
     _state.setup_completed_at = None
-    _state.setup_task = asyncio.create_task(_run_browser_setup(), name="browser-setup")
+    _state.setup_requires_stand_down = False
+    _state.setup_stand_down_reason = None
+    _state.setup_check_complete = asyncio.Event()
+    _state.setup_task = asyncio.create_task(
+        _run_background_browser_setup(deadline_at), name="browser-setup"
+    )
 
 
-async def _run_patchright_install(extra_arg: str) -> None:
-    """Run one ``patchright install chromium`` stage with the given flag.
+_INSTALLER_START_SECONDS = 30.0
+_INSTALLER_STOP_SECONDS = 10.0
+
+
+@dataclass(slots=True)
+class _InstallerProcess:
+    process: asyncio.subprocess.Process
+    windows_job: WindowsJob | None = None
+    windows_popen: subprocess.Popen[Any] | None = None
+    windows_wait: asyncio.Future[Any] | None = None
+    assigned: bool = False
+    windows_cleanup: asyncio.Task[None] | None = None
+
+    @property
+    def pid(self) -> int:
+        return self.process.pid
+
+    @property
+    def stdin(self) -> asyncio.StreamWriter | None:
+        return self.process.stdin
+
+    @property
+    def stdout(self) -> asyncio.StreamReader | None:
+        return self.process.stdout
+
+    @property
+    def stderr(self) -> asyncio.StreamReader | None:
+        return self.process.stderr
+
+    @property
+    def returncode(self) -> int | None:
+        return self.process.returncode
+
+    async def wait(self) -> int:
+        return await self.process.wait()
+
+    def kill(self) -> None:
+        self.process.kill()
+
+
+def _managed_installer(proc: Any) -> _InstallerProcess:
+    if isinstance(proc, _InstallerProcess):
+        return proc
+    return _InstallerProcess(proc)
+
+
+def _capture_windows_process_wait(
+    process: asyncio.subprocess.Process, popen: subprocess.Popen[Any]
+) -> asyncio.Future[Any]:
+    """Pin CPython's registered wait for the process handle we will release."""
+    transport = getattr(process, "_transport", None)
+    loop = getattr(transport, "_loop", None)
+    proactor = getattr(loop, "_proactor", None)
+    cache = getattr(proactor, "_cache", None)
+    process_handle = getattr(popen, "_handle", None)
+    if proactor is None or not isinstance(cache, dict) or process_handle is None:
+        raise ProcessTreeError(
+            "Windows asyncio exposed no registered process wait contract"
+        )
+    try:
+        expected_handle = int(process_handle)
+    except (TypeError, ValueError) as exc:
+        raise ProcessTreeError(
+            "Windows asyncio exposed an invalid process wait handle"
+        ) from exc
+
+    matches: list[asyncio.Future[Any]] = []
+    for address, entry in cache.items():
+        if not isinstance(entry, tuple) or len(entry) < 2:
+            continue
+        future, overlapped = entry[:2]
+        if (
+            getattr(future, "_handle", None) == expected_handle
+            and getattr(future, "_proactor", None) is proactor
+            and getattr(future, "_ov", None) is overlapped
+            and getattr(overlapped, "address", None) == address
+            and hasattr(future, "_event_fut")
+        ):
+            matches.append(future)
+    if len(matches) != 1:
+        raise ProcessTreeError(
+            "Windows asyncio did not expose one registered process wait"
+        )
+
+    future = matches[0]
+    if (
+        future.done()
+        or getattr(future, "_registered", None) is not True
+        or getattr(future, "_event_fut", None) is not None
+    ):
+        raise ProcessTreeError(
+            "Windows asyncio process wait was not pending at assignment"
+        )
+    return future
+
+
+def _windows_wait_unregistered(future: asyncio.Future[Any]) -> bool:
+    """Whether CPython's UnregisterWaitEx completion callback has finished."""
+    return (
+        future.done()
+        and getattr(future, "_registered", None) is False
+        and getattr(future, "_wait_handle", object()) is None
+        and getattr(future, "_event", object()) is None
+        and getattr(future, "_event_fut", object()) is None
+        and getattr(future, "_proactor", object()) is None
+        and getattr(future, "_ov", object()) is None
+    )
+
+
+async def _prove_windows_wait_unregistered(
+    proc: _InstallerProcess, deadline: float
+) -> None:
+    """Wait within the stop deadline for CPython's OS unregister completion."""
+    future = proc.windows_wait
+    if future is None:
+        raise ProcessTreeError("Windows asyncio process wait was not retained")
+    if _windows_wait_unregistered(future):
+        return
+    if not future.done():
+        raise ProcessTreeError(
+            "Windows published process exit before completing its registered wait"
+        )
+
+    event_fut = getattr(future, "_event_fut", None)
+    proactor = getattr(future, "_proactor", None)
+    overlapped = getattr(future, "_ov", None)
+    callback = getattr(event_fut, "_done_callback", None)
+    if (
+        not isinstance(event_fut, asyncio.Future)
+        or proactor is None
+        or overlapped is None
+        or getattr(callback, "__self__", None) is not future
+    ):
+        raise ProcessTreeError(
+            "Windows asyncio process wait unregister contract was incomplete"
+        )
+
+    remaining = _installer_stop_remaining(deadline)
+    if remaining <= 0:
+        raise ProcessTreeError(
+            "Windows process wait unregister exceeded the cleanup deadline"
+        )
+    done, _pending = await asyncio.wait({event_fut}, timeout=remaining)
+    if event_fut not in done:
+        raise ProcessTreeError(
+            "Windows process wait unregister exceeded the cleanup deadline"
+        )
+    # CPython 3.12-3.14 invokes the owner callback synchronously from
+    # _WaitCancelFuture.set_result. Yield once as well so a callback already
+    # queued when the future completed cannot be mistaken for OS completion.
+    await asyncio.sleep(0)
+    if not _windows_wait_unregistered(future):
+        raise ProcessTreeError(
+            "Windows process wait unregister completion could not be proved"
+        )
+
+
+async def _close_installer_lease(proc: _InstallerProcess) -> None:
+    stream = proc.stdin
+    if stream is None or stream.is_closing():
+        return
+    stream.close()
+    with contextlib.suppress(BrokenPipeError, ConnectionError, OSError):
+        await stream.wait_closed()
+
+
+async def _wait_for_direct_process_exit(proc: _InstallerProcess) -> int:
+    """Observe the proactor exit callback without waiting for inherited pipe EOF."""
+    while proc.returncode is None:
+        await asyncio.sleep(0.01)
+    return proc.returncode
+
+
+async def _wait_for_direct_process_exit_within(
+    proc: _InstallerProcess, seconds: float
+) -> int | None:
+    if proc.returncode is not None:
+        return proc.returncode
+    if seconds <= 0:
+        return None
+    try:
+        return await asyncio.wait_for(_wait_for_direct_process_exit(proc), seconds)
+    except TimeoutError:
+        return None
+
+
+async def _cleanup_assigned_windows_job_once(
+    proc: _InstallerProcess, deadline: float
+) -> None:
+    """Terminate, release, and drain one assigned Windows process tree."""
+    job = proc.windows_job
+    popen = proc.windows_popen
+    if job is None or popen is None or not proc.assigned:
+        return
+
+    try:
+        await asyncio.to_thread(job.terminate)
+    except BaseException:
+        # Kill-on-close is the independent containment mechanism. If the explicit
+        # API refuses termination, closing the owner handle is the last
+        # deterministic action that can still end the tree.
+        await asyncio.to_thread(job.close)
+        proc.assigned = False
+        raise
+    returncode = await _wait_for_direct_process_exit_within(
+        proc, _installer_stop_remaining(deadline)
+    )
+    if returncode is None:
+        raise ProcessTreeError(
+            "The browser installer supervisor did not exit after Job termination"
+        )
+
+    # CPython 3.12-3.14 publishes Process.returncode from the registered wait's
+    # result callback before the UnregisterWaitEx completion callback clears its
+    # proactor and Overlapped ownership. The handle stays live through that proof.
+    await _prove_windows_wait_unregistered(proc, deadline)
+    job.release_popen_handle(popen)
+    proc.windows_popen = None
+    proc.windows_wait = None
+    await asyncio.to_thread(
+        job.wait_until_empty,
+        timeout=_installer_stop_remaining(deadline),
+    )
+    proc.assigned = False
+
+
+def _assigned_windows_cleanup(
+    proc: _InstallerProcess, deadline: float
+) -> asyncio.Task[None]:
+    cleanup = proc.windows_cleanup
+    if cleanup is None:
+        cleanup = asyncio.create_task(
+            _cleanup_assigned_windows_job_once(proc, deadline),
+            name="drain-browser-installer-job",
+        )
+        proc.windows_cleanup = cleanup
+    return cleanup
+
+
+async def _wait_for_installer_exit(proc: _InstallerProcess, seconds: float) -> bool:
+    try:
+        await asyncio.wait_for(proc.wait(), seconds)
+    except TimeoutError:
+        return False
+    return True
+
+
+async def _drain_installer_stream(
+    stream: asyncio.StreamReader | None,
+) -> None:
+    if stream is None:
+        return
+    try:
+        while await stream.read(_READ_CHUNK):
+            pass
+    except (BrokenPipeError, ConnectionError, OSError, ValueError):
+        return
+
+
+def _installer_stop_remaining(deadline: float) -> float:
+    return max(deadline - asyncio.get_running_loop().time(), 0.0)
+
+
+async def _stop_installer_once(proc: _InstallerProcess | Any) -> None:
+    proc = _managed_installer(proc)
+    deadline = asyncio.get_running_loop().time() + _INSTALLER_STOP_SECONDS
+    drains = [
+        asyncio.create_task(
+            _drain_installer_stream(stream), name="drain-browser-installer"
+        )
+        for stream in (proc.stdout, proc.stderr)
+        if stream is not None
+    ]
+    try:
+        if proc.windows_job is not None and proc.assigned:
+            # Shield one shared cleanup task. A cancellation during to_thread does
+            # not stop that worker; starting a second drain would race the same Job
+            # handle while the first still owns it.
+            await asyncio.shield(_assigned_windows_cleanup(proc, deadline))
+        else:
+            try:
+                await asyncio.wait_for(
+                    _close_installer_lease(proc),
+                    _installer_stop_remaining(deadline),
+                )
+            except TimeoutError:
+                pass
+            if not await _wait_for_installer_exit(
+                proc, _installer_stop_remaining(deadline)
+            ):
+                with contextlib.suppress(ProcessLookupError, OSError):
+                    proc.kill()
+                if not await _wait_for_installer_exit(
+                    proc, _installer_stop_remaining(deadline)
+                ):
+                    logger.warning(
+                        "The browser installer supervisor did not exit after kill"
+                    )
+            if proc.windows_job is not None and not proc.windows_job.closed:
+                proc.windows_job.close()
+    finally:
+        for drain in drains:
+            try:
+                await asyncio.wait_for(drain, _installer_stop_remaining(deadline))
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                if not drain.done():
+                    drain.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await drain
+                logger.warning(
+                    "The browser installer worker streams did not close after cleanup"
+                )
+
+
+async def _stop_installer(proc: _InstallerProcess | Any) -> None:
+    """End and reap a supervised installer tree before cancellation continues."""
+    proc = _managed_installer(proc)
+    cleanup = asyncio.create_task(
+        _stop_installer_once(proc), name="stop-browser-installer"
+    )
+    cancellation: asyncio.CancelledError | None = None
+    while not cleanup.done():
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+
+    if cancellation is not None:
+        cleanup_error = cleanup.exception()
+        if cleanup_error is not None:
+            logger.error(
+                "Browser installer cleanup failed while cancellation was pending",
+                exc_info=cleanup_error,
+            )
+        raise cancellation
+    cleanup.result()
+
+
+async def _settle_installer_tasks(
+    tasks: tuple[asyncio.Task[Any], ...],
+) -> asyncio.CancelledError | None:
+    """Cancel and retrieve installer tasks without letting another cancel skip them."""
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    settling = asyncio.gather(*tasks, return_exceptions=True)
+    cancellation: asyncio.CancelledError | None = None
+    while not settling.done():
+        try:
+            await asyncio.shield(settling)
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+    settling.result()
+    return cancellation
+
+
+async def _supervisor_start_error(
+    proc: _InstallerProcess, captured: _RedactedTail
+) -> BrowserSetupFailedError:
+    """Why the supervisor never answered, out of what it printed before that.
+
+    The tail arrives already redacted and already bounded, and both have to
+    happen in that order. Sanitising the last line of a raw 8 KiB window meant
+    sanitising whatever that window had left of a URL, and a credential-bearing
+    one longer than the window kept its secret suffix and lost the scheme that
+    would have identified it.
+    """
+    assert proc.stderr is not None
+    try:
+        async with asyncio.timeout(1.0):
+            while chunk := await proc.stderr.read(_READ_CHUNK):
+                captured.feed(chunk)
+    except TimeoutError:
+        pass
+    await _stop_installer(proc)
+    lines = captured.finish().splitlines()
+    detail = lines[-1] if lines else "the supervisor exited before it was ready"
+    return BrowserSetupFailedError(
+        f"Patchright Chromium browser setup could not start: {detail}"
+    )
+
+
+async def _read_supervisor_frame(
+    stream: asyncio.StreamReader,
+    *,
+    marker: bytes,
+    accept: Callable[[bytes], bool],
+    timeout: float,
+) -> tuple[bytes | None, _RedactedTail]:
+    """Extract one authenticated frame from bounded arbitrary startup bytes.
+
+    The frame is matched on the raw bytes, which is the only thing an
+    authenticated marker can be matched on. The diagnostics that come back
+    alongside it are redacted as they arrive instead, because the only use they
+    have is a failure message and the bound on them is a truncation.
+    """
+    if not marker or len(marker) >= 128:
+        raise ValueError("invalid supervisor status marker")
+    deadline = asyncio.get_running_loop().time() + max(timeout, 0.0)
+    captured = _RedactedTail(_MAX_START_ERROR_CHARS)
+    buffered = bytearray()
+    while True:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise TimeoutError
+        chunk = await asyncio.wait_for(stream.read(_READ_CHUNK), remaining)
+        if not chunk:
+            return None, captured
+        captured.feed(chunk)
+        buffered.extend(chunk)
+
+        while True:
+            start = buffered.find(marker)
+            if start < 0:
+                keep = min(len(buffered), len(marker) - 1)
+                if len(buffered) > keep:
+                    del buffered[: len(buffered) - keep]
+                break
+            if start:
+                del buffered[:start]
+
+            newline = buffered.find(b"\n", len(marker))
+            if newline < 0:
+                if len(buffered) <= 128:
+                    break
+                del buffered[0]
+                continue
+
+            candidate = bytes(buffered[: newline + 1])
+            if accept(candidate):
+                return candidate, captured
+            del buffered[0]
+
+
+def _armed_supervisor(frame: bytes, nonce: str) -> bool:
+    return frame == f"armed {nonce}\n".encode("ascii")
+
+
+def _started_worker_pid(frame: bytes, nonce: str) -> int | None:
+    if not frame.endswith(b"\n"):
+        return None
+    try:
+        label, reported_nonce, value = frame.decode("ascii").strip().split(maxsplit=2)
+        worker_pid = int(value)
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if label != "started" or reported_nonce != nonce:
+        return None
+    return worker_pid if worker_pid > 0 else None
+
+
+def _installer_supervisor_command(worker_target: list[str]) -> list[str]:
+    """Start the supervisor so no interpreter startup hook precedes it.
+
+    On POSIX the supervisor is its own session leader while the worker leads a
+    separate process group, and each side drains only what it owns: the parent
+    signals the supervisor pid, the supervisor drains the worker group. A
+    ``sitecustomize`` or ``usercustomize`` hook runs before
+    :func:`installer_supervisor.main`, so anything it spawns lands in the
+    supervisor's own group, where it inherits the installer output pipes and
+    nothing ever reaps it. It would hold output EOF open after the supervisor
+    exits and survive cancellation.
+
+    ``-S`` is what closes that, and nothing weaker does. ``-P``,
+    ``PYTHONNOUSERSITE`` and a popped ``PYTHONPATH`` never touch
+    ``sitecustomize``, and ``-I`` only takes away the user-site copy: the one a
+    virtual environment or a system install ships still runs. ``-I`` earns its
+    place beside it because the file below re-adds an import root by hand, and
+    an inherited ``PYTHONPATH`` would otherwise be searched in front of it.
+
+    Because ``site`` is then gone, the module cannot be reached by name, so the
+    file runs by absolute path from next to this one and re-adds that one root
+    itself. ``-u`` matches :func:`windows_gate_command`, the other launcher that
+    starts a stdlib-only helper this way, and keeps the framed stderr the parent
+    parses independent of how the interpreter would buffer it. The worker keeps
+    ordinary startup: its whole group is contained.
+
+    Windows keeps the module form. There the supervisor runs under the gate
+    inside the parent-owned kill-on-close Job, which already contains whatever
+    a startup hook spawns, and the package import there probes the greenlet C
+    runtime through modules that ``-S`` would put out of reach.
+    """
+    if os.name == "nt":
+        return [
+            sys.executable,
+            "-P",
+            "-m",
+            "linkedin_mcp_server.installer_supervisor",
+            "--",
+            *worker_target,
+        ]
+    supervisor = Path(__file__).with_name("installer_supervisor.py").resolve()
+    return [sys.executable, "-I", "-S", "-u", str(supervisor), "--", *worker_target]
+
+
+def _installer_environment(temporary_root: Path) -> dict[str, str]:
+    """Return the inherited environment with one private temporary root."""
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+    for name in ("TMPDIR", "TMP", "TEMP"):
+        environment[name] = str(temporary_root)
+    return environment
+
+
+async def _start_installer_supervisor(
+    extra_arg: str,
+    environment: Mapping[str, str],
+) -> _InstallerProcess:
+    target = _installer_supervisor_command(
+        [
+            sys.executable,
+            "-P",
+            "-m",
+            "patchright",
+            "install",
+            "chromium",
+            extra_arg,
+        ]
+    )
+    windows_job = WindowsJob.anonymous() if os.name == "nt" else None
+    gate_nonce = release_nonce() if windows_job is not None else None
+    command = (
+        windows_gate_command(target, gate_nonce)
+        if windows_job is not None and gate_nonce is not None
+        else target
+    )
+    # The supervisor creates no target until the `start` reply below. If this
+    # await is cancelled while asyncio is still constructing its transports,
+    # direct-process teardown or stdin EOF ends an empty supervisor.
+    try:
+        raw_proc = await asyncio.create_subprocess_exec(
+            *command,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=environment,
+            # The cleanup process must survive an ordinary parent-group death long
+            # enough to consume lease EOF. This also means terminal Ctrl+Z pauses
+            # the parent rather than the installer tree; #792 tracks coordinated
+            # suspend/resume forwarding without weakening containment.
+            start_new_session=os.name != "nt",
+        )
+    except BaseException:
+        if windows_job is not None:
+            windows_job.close()
+        raise
+    proc = _InstallerProcess(raw_proc, windows_job=windows_job)
+    assert proc.stdin is not None and proc.stderr is not None
+    supervisor_nonce = new_nonce()
+    waiting_for = "become ready"
+    try:
+        if windows_job is not None and gate_nonce is not None:
+            proc.windows_popen = windows_job.assign_asyncio_process(raw_proc)
+            proc.assigned = True
+            proc.windows_wait = _capture_windows_process_wait(
+                raw_proc, proc.windows_popen
+            )
+            # The supervisor cannot import or spawn until assignment is verified.
+            release_windows_gate(proc.stdin, gate_nonce)
+            await proc.stdin.drain()
+
+        # This nonce exists only after Popen returns. Interpreter startup hooks can
+        # write diagnostics before the supervisor imports, but cannot pre-frame an
+        # acknowledgement carrying a value absent from argv and the environment.
+        proc.stdin.write(f"{supervisor_nonce}\n".encode("ascii"))
+        await proc.stdin.drain()
+        armed_marker = f"armed {supervisor_nonce}".encode("ascii")
+        armed, startup_output = await _read_supervisor_frame(
+            proc.stderr,
+            marker=armed_marker,
+            accept=lambda frame: _armed_supervisor(frame, supervisor_nonce),
+            timeout=_INSTALLER_START_SECONDS,
+        )
+        if armed is None:
+            raise await _supervisor_start_error(proc, startup_output)
+
+        proc.stdin.write(f"start {supervisor_nonce}\n".encode("ascii"))
+        await proc.stdin.drain()
+
+        waiting_for = "start its worker"
+        started_marker = f"started {supervisor_nonce} ".encode("ascii")
+        started, startup_output = await _read_supervisor_frame(
+            proc.stderr,
+            marker=started_marker,
+            accept=lambda frame: (
+                _started_worker_pid(frame, supervisor_nonce) is not None
+            ),
+            timeout=_INSTALLER_START_SECONDS,
+        )
+        if started is None:
+            raise await _supervisor_start_error(proc, startup_output)
+        worker_pid = _started_worker_pid(started, supervisor_nonce)
+        if worker_pid is None:  # pragma: no cover - predicate proved it above
+            raise ValueError("invalid worker pid")
+    except BrowserSetupFailedError:
+        raise
+    except TimeoutError as exc:
+        await _stop_installer(proc)
+        raise BrowserSetupFailedError(
+            "Patchright Chromium browser setup supervisor did not "
+            f"{waiting_for} before its startup deadline"
+        ) from exc
+    except ValueError as exc:
+        await _stop_installer(proc)
+        raise BrowserSetupFailedError(
+            "Patchright Chromium browser setup returned an invalid process id"
+        ) from exc
+    except BaseException:
+        await _stop_installer(proc)
+        raise
+    return proc
+
+
+_INSTALLER_ACTIVITY_POLL_SECONDS = 5.0
+#: Ceiling on what one install may hold, across its private download archive
+#: and the cache directory it extracts into. Patchright enforces no byte limit
+#: of its own, so a successful chunked response that never ends is written until
+#: the disk is full. Measured on macOS arm64 at revision 1228: 344 MiB extracted
+#: beside a 170 MiB archive, about 515 MiB while both exist. Eight times that
+#: leaves room for a larger platform and a later revision and still bounds the
+#: damage. A footprint rather than a delta, so a refused tree stays refused.
+#: The counterpart bound is the setup lifetime; neither implies the other,
+#: because bytes can arrive slowly and time can pass without any.
+_INSTALLER_MAX_WRITTEN_BYTES = 4 * 1024**3
+
+
+def _installer_extraction_paths(
+    extra_arg: str, environment: Mapping[str, str]
+) -> tuple[Path, ...]:
+    """Return the cache paths this Patchright command is locked to install.
+
+    More than the browser it names: ffmpeg rides along with a browser argument
+    and winldd is added on Windows, both extracting here under this
+    invocation's byte ceiling. Nothing beyond them, so an unrelated Firefox or
+    WebKit in the shared cache stays somebody else's install to answer for.
+    """
+    targets = _patchright_install_targets() or {}
+    if extra_arg == "--no-shell":
+        prefixes = (_FULL_DIR_PREFIX,)
+    elif extra_arg == "--only-shell":
+        prefixes = (_SHELL_DIR_PREFIX,)
+    else:
+        prefixes = tuple(targets)
+    names = [f"{prefix}{targets[prefix]}" for prefix in prefixes if prefix in targets]
+    names.extend(_installer_auxiliary_names(browser_selected=bool(names)))
+    configured = _configured_browsers_path(environment)
+    return tuple(configured / name for name in dict.fromkeys(names))
+
+
+#: Scan failures an ordinary install produces on its own: an entry it removed
+#: between two of this walk's syscalls.
+_TOLERABLE_SCAN_ERRNOS = frozenset(
+    {errno.ENOENT, errno.ENOTDIR, errno.ESTALE, errno.ELOOP}
+)
+#: And the same race on Windows, which has no way to say it. ``CreateFileW``
+#: answers ERROR_ACCESS_DENIED for a file whose delete is pending, and CPython
+#: maps that to ``EACCES`` like any other refusal, so an ordinary install would
+#: otherwise be refused for a file that is on its way out. The cost is that a
+#: genuinely unreadable entry stays uncounted there; both roots this walks are
+#: written by this account, so producing one takes an operator.
+_TOLERABLE_SCAN_ERRNOS |= {errno.EACCES} if os.name == "nt" else frozenset()
+
+
+def _refuse_unmeasurable_scan(error: OSError) -> None:
+    """Re-raise a scan failure that would silently shrink the measured tree.
+
+    Bytes this walk cannot see are bytes the ceiling does not count, so an
+    unreadable entry has to stop the install rather than read as an absent one.
+    """
+    if error.errno in _TOLERABLE_SCAN_ERRNOS:
+        return
+    raise BrowserSetupFailedError(
+        "Patchright Chromium browser setup could not be measured against its size limit"
+    ) from error
+
+
+def _installer_download_snapshot(
+    temporary_root: Path, extraction_paths: tuple[Path, ...]
+) -> tuple[tuple[str, int, int], ...]:
+    """Return activity markers attributable to one Patchright invocation."""
+    roots: list[Path] = []
+    try:
+        # scandir rather than Path.glob, which answers an unreadable directory
+        # with no matches: the archive would then weigh nothing at all.
+        with os.scandir(temporary_root) as entries:
+            roots.extend(
+                Path(entry.path)
+                for entry in entries
+                if entry.name.startswith("playwright-download-")
+            )
+    except OSError as error:
+        _refuse_unmeasurable_scan(error)
+    roots.extend(extraction_paths)
+
+    entries: list[tuple[str, int, int]] = []
+    for root in roots:
+        if root.is_symlink():
+            continue
+        try:
+            root_details = root.stat()
+        except OSError as error:
+            _refuse_unmeasurable_scan(error)
+            continue
+        if stat.S_ISREG(root_details.st_mode):
+            entries.append((str(root), root_details.st_size, root_details.st_mtime_ns))
+            continue
+        if not stat.S_ISDIR(root_details.st_mode):
+            continue
+        # onerror, or a directory this walk cannot open is simply not descended
+        # into and its subtree leaves the count without a trace.
+        for current, directories, files in os.walk(
+            root, followlinks=False, onerror=_refuse_unmeasurable_scan
+        ):
+            current_path = Path(current)
+            try:
+                details = current_path.stat()
+            except OSError as error:
+                _refuse_unmeasurable_scan(error)
+                directories.clear()
+                continue
+            entries.append((current, details.st_size, details.st_mtime_ns))
+            for name in files:
+                child = current_path / name
+                try:
+                    # The link's own metadata, never its target's: ``os.walk``
+                    # refuses to descend through a directory symlink, and a
+                    # foreign file that grows would otherwise hold the
+                    # inactivity deadline open for as long as it is written to.
+                    # The cost is measured and accepted: an archive whose
+                    # entries are symlinks out of these roots writes bytes this
+                    # ceiling never counts. Producing one means substituting
+                    # patchright's download host, and that already ends in this
+                    # server launching a Chromium binary of the attacker's
+                    # choosing, which no size bound was ever going to answer.
+                    details = child.lstat()
+                except OSError as error:
+                    _refuse_unmeasurable_scan(error)
+                    continue
+                entries.append((str(child), details.st_size, details.st_mtime_ns))
+    return tuple(sorted(entries))
+
+
+def _snapshot_bytes(snapshot: tuple[tuple[str, int, int], ...]) -> int:
+    """Bytes one activity snapshot accounts for, counting each path once."""
+    return sum({name: size for name, size, _mtime in snapshot}.values())
+
+
+def _configured_browsers_path(environment: Mapping[str, str]) -> Path:
+    """Where this install writes, which an operator can move away from default."""
+    return Path(environment.get("PLAYWRIGHT_BROWSERS_PATH") or browsers_path())
+
+
+def _refuse_oversized_install(
+    snapshot: tuple[tuple[str, int, int], ...], *, standing: Path | None = None
+) -> None:
+    """Refuse an install whose attributable footprint passes the byte ceiling.
+
+    The footprint, never growth: a refused tree keeps its ``INSTALLATION_COMPLETE``
+    marker, so the retry patchright skips writes nothing. Only this install's own
+    targets and its private archive are counted.
+
+    *standing* is the tree a retry will find exactly as it is, which is what the
+    caller judging one before the installer starts is looking at. Every later
+    attempt refuses it here again, so the message has to name the thing to
+    remove rather than leave the caller retrying an install that cannot begin.
+    """
+    held = _snapshot_bytes(snapshot)
+    if held > _INSTALLER_MAX_WRITTEN_BYTES:
+        remedy = f"; remove {standing} to retry" if standing is not None else ""
+        raise BrowserSetupFailedError(
+            f"Patchright Chromium browser setup holds {_format_size(held)}, "
+            f"past its {_format_size(_INSTALLER_MAX_WRITTEN_BYTES)} limit{remedy}"
+        )
+
+
+async def _watch_installer_activity(
+    callback: Callable[[], None],
+    temporary_root: Path,
+    extraction_paths: tuple[Path, ...],
+    opening: tuple[tuple[str, int, int], ...],
+) -> None:
+    """Report installer progress and refuse an install that never stops growing.
+
+    The caller takes *opening* before anything can write, so the first poll
+    already compares against a tree this install has not touched.
+
+    Progress reporting is optional and the ceiling it rides along with is not,
+    so a poll that cannot run at all refuses the install too. Otherwise the one
+    bound that can stop a still-running installer disappears with the thread it
+    could not start, and the tree grows until the process ends on its own.
+    """
+    previous = opening
+    try:
+        while True:
+            await asyncio.sleep(_INSTALLER_ACTIVITY_POLL_SECONDS)
+            current = await _run_in_daemon_thread(
+                _installer_download_snapshot, temporary_root, extraction_paths
+            )
+            _refuse_oversized_install(current)
+            if current != previous:
+                callback()
+                previous = current
+    except BrowserSetupFailedError:
+        raise
+    except Exception as unmeasurable:
+        raise BrowserSetupFailedError(
+            "Patchright Chromium browser setup can no longer be measured "
+            "against its size limit"
+        ) from unmeasurable
+
+
+@dataclass(frozen=True, slots=True)
+class _InstallerTemporaryRoot:
+    path: Path
+    device: int
+    inode: int
+    pin: Any | None
+
+
+def _installer_temporary_parent() -> Path:
+    """Return a temp parent whose pathname other local accounts cannot replace.
+
+    The walk below is the POSIX half. Windows asks the same question through
+    ``windows_acl.verify_ancestry_cannot_be_replaced``, and it is asked there
+    rather than here because the answer is only worth anything while the chain
+    is pinned, and the pins have to be held across the creation that happens
+    after this function has already returned.
+    """
+    parent = Path(tempfile.gettempdir()).resolve(strict=True)
+    if os.name == "nt":
+        return parent
+
+    trusted_owners = {0, os.geteuid()}
+    parent_info = parent.stat()
+    if not stat.S_ISDIR(parent_info.st_mode):
+        raise PrivateStateError(
+            f"Installer temporary parent is not a directory: {parent}"
+        )
+    if parent_info.st_uid not in trusted_owners:
+        raise PrivateStateError(
+            f"Installer temporary parent {parent} is controlled by another account"
+        )
+    if sys.platform == "darwin":
+        verify_no_extended_acl(parent)
+    if parent_info.st_mode & 0o022 and not parent_info.st_mode & stat.S_ISVTX:
+        raise PrivateStateError(
+            f"Installer temporary roots can be replaced by another account in {parent}"
+        )
+
+    current = parent
+    while current.parent != current:
+        container = current.parent
+        container_info = container.stat()
+        if not stat.S_ISDIR(container_info.st_mode):
+            raise PrivateStateError(
+                f"Installer temporary parent is not a directory: {container}"
+            )
+        if container_info.st_uid not in trusted_owners:
+            raise PrivateStateError(
+                f"Installer temporary parent {container} is controlled by another account"
+            )
+        if sys.platform == "darwin":
+            verify_no_extended_acl(container)
+        if container_info.st_mode & 0o022:
+            current_info = current.stat()
+            sticky = bool(container_info.st_mode & stat.S_ISVTX)
+            if not sticky or current_info.st_uid not in trusted_owners:
+                raise PrivateStateError(
+                    f"Installer temporary path {current} can be replaced by another "
+                    f"account through {container}"
+                )
+        current = container
+    return parent
+
+
+def _create_installer_temporary_root() -> _InstallerTemporaryRoot:
+    parent = _installer_temporary_parent()
+    pin: Any | None = None
+    if os.name == "nt":
+        # Not ``tempfile.mkdtemp``, which is why no Python version floor applies
+        # here: ``create_owner_only_directory`` names the current user as owner
+        # and hands ``CreateDirectoryW`` a protected DACL of its own, so the
+        # directory is never inheriting from its parent in the first place. The
+        # 3.12.4 change to ``mkdtemp`` decides nothing on this path.
+        from linkedin_mcp_server.windows_acl import create_owner_only_directory
+
+        path, pin = create_owner_only_directory(
+            parent, prefix="linkedin-mcp-installer-"
+        )
+    else:
+        path = Path(tempfile.mkdtemp(prefix="linkedin-mcp-installer-", dir=parent))
+    try:
+        if os.name == "nt":
+            details = path.lstat()
+            attributes = getattr(details, "st_file_attributes", None)
+            if attributes is None:
+                raise PrivateStateError(
+                    f"Windows did not report file attributes for installer root {path}"
+                )
+            if (
+                stat.S_ISLNK(details.st_mode)
+                or attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
+            ):
+                raise PrivateStateError(
+                    f"Installer temporary root {path} is a Windows reparse point"
+                )
+            if not stat.S_ISDIR(details.st_mode):
+                raise PrivateStateError(
+                    f"Installer temporary root is not a directory: {path}"
+                )
+        else:
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+            )
+            pin = os.open(path, flags)
+            details = os.fstat(pin)
+    except BaseException:
+        if pin is not None:
+            if os.name == "nt":
+                from linkedin_mcp_server.windows_acl import close_directory_pin
+
+                with contextlib.suppress(OSError, PrivateStateError):
+                    close_directory_pin(pin)
+            else:
+                with contextlib.suppress(OSError):
+                    os.close(pin)
+        # No pinned identity means recursive cleanup cannot be aimed safely.
+        # Removing only an empty directory cannot consume substituted contents.
+        with contextlib.suppress(OSError):
+            path.rmdir()
+        raise
+    temporary_root = _InstallerTemporaryRoot(path, details.st_dev, details.st_ino, pin)
+    if os.name != "nt":
+        try:
+            harden_created_directory(path)
+        except BaseException:
+            _remove_installer_temporary_root(temporary_root)
+            raise
+    return temporary_root
+
+
+def _close_installer_temporary_root_pin(
+    temporary_root: _InstallerTemporaryRoot,
+) -> None:
+    pin = temporary_root.pin
+    if pin is None:
+        return
+    if os.name == "nt":
+        from linkedin_mcp_server.windows_acl import close_directory_pin
+
+        with contextlib.suppress(OSError, PrivateStateError):
+            close_directory_pin(pin)
+    else:
+        with contextlib.suppress(OSError):
+            os.close(pin)
+
+
+def _remove_installer_temporary_root(temporary_root: _InstallerTemporaryRoot) -> None:
+    path = temporary_root.path
+    pin = temporary_root.pin
+    if pin is None:
+        with contextlib.suppress(OSError):
+            path.rmdir()
+        return
+
+    refused: list[str] = []
+
+    def record(function: Any, name: Any, error: BaseException) -> None:
+        """Note an entry this removal could not take, and carry on past it.
+
+        ``onexc`` rather than ``ignore_errors``, which cannot tell a tree that
+        is gone from one nothing could touch: the archive this bounds would
+        then be left behind in silence. Recording continues the walk exactly as
+        ignoring did, so one locked file does not strand the rest.
+        """
+        if function is os.rmdir and str(name) in (".", str(path)):
+            # Every run ends here, because rmtree finishes by removing its own
+            # start point and that is the one entry this keeps: POSIX cannot
+            # name it through the descriptor being walked, and the Windows
+            # handle refuses its deletion. The pathname rmdir below takes it
+            # once the pin is released.
+            return
+        refused.append(f"{name}: {error}")
+
+    if os.name == "nt":
+        try:
+            try:
+                details = path.stat()
+            except FileNotFoundError:
+                return
+            except OSError as error:
+                # Anything else and this leaves without reaching rmtree at all,
+                # so the refusal report below never sees the download it left.
+                logger.warning(
+                    "Could not identify the browser installer temp root %s; its "
+                    "download stays until the temporary directory is cleared (%s)",
+                    path,
+                    error,
+                )
+                return
+            if (details.st_dev, details.st_ino) != (
+                temporary_root.device,
+                temporary_root.inode,
+            ):
+                return
+            # The retained handle has denied replacement and root deletion since
+            # creation. rmtree can remove only this directory's children.
+            shutil.rmtree(path, onexc=record)
+        finally:
+            _close_installer_temporary_root_pin(temporary_root)
+    else:
+        try:
+            details = os.fstat(pin)
+            if (details.st_dev, details.st_ino) != (
+                temporary_root.device,
+                temporary_root.inode,
+            ):
+                return
+            # Anchor traversal to the handle retained since creation. A rename or
+            # pathname substitution cannot redirect recursive deletion elsewhere.
+            shutil.rmtree(".", dir_fd=pin, onexc=record)
+        finally:
+            _close_installer_temporary_root_pin(temporary_root)
+
+    # Recursive deletion deliberately leaves the pinned root itself behind.
+    # Once the pin is released, remove only an empty directory at the pathname;
+    # a last-moment substitution can therefore never delete unrelated contents.
+    with contextlib.suppress(OSError):
+        path.rmdir()
+    if refused:
+        # Named, because nothing later looks for this root: a retry measures a
+        # fresh one, so bytes stranded here are outside every ceiling.
+        logger.warning(
+            "Could not remove the browser installer temp root %s; its download "
+            "stays until the temporary directory is cleared (%s)",
+            path,
+            "; ".join(refused[:3]),
+        )
+
+
+_INSTALLER_CLEANUP_EXIT_SECONDS = 5.0
+_installer_cleanups: set[threading.Thread] = set()
+_installer_cleanups_lock = threading.Lock()
+_installer_cleanups_awaited = False
+
+
+def _await_installer_temporary_root_cleanups() -> None:
+    """Give the archive removals a bounded chance before the process leaves.
+
+    They run on daemon threads, which the interpreter does not wait for, and a
+    one-shot CLI mode reaches exit within milliseconds of a refused or
+    cancelled install. The root abandoned that way holds the download the
+    ceiling exists to bound, and nothing later looks for it.
+    """
+    deadline = time.monotonic() + _INSTALLER_CLEANUP_EXIT_SECONDS
+    with _installer_cleanups_lock:
+        pending = tuple(_installer_cleanups)
+    for cleanup in pending:
+        cleanup.join(max(deadline - time.monotonic(), 0.0))
+        if cleanup.is_alive():
+            logger.warning(
+                "Browser installer temp cleanup did not finish before exit; "
+                "its download stays until the temporary directory is cleared"
+            )
+            return
+
+
+def _start_installer_temporary_root_cleanup(
+    temporary_root: _InstallerTemporaryRoot,
+) -> None:
+    """Remove an installer temp root without extending its process lifetime."""
+    global _installer_cleanups_awaited
+    cleanup = threading.Thread(
+        target=_clean_installer_temporary_root,
+        args=(temporary_root,),
+        name="browser-installer-temp-cleanup",
+        daemon=True,
+    )
+    with _installer_cleanups_lock:
+        if not _installer_cleanups_awaited:
+            atexit.register(_await_installer_temporary_root_cleanups)
+            _installer_cleanups_awaited = True
+        _installer_cleanups.add(cleanup)
+    try:
+        cleanup.start()
+    except RuntimeError:
+        with _installer_cleanups_lock:
+            _installer_cleanups.discard(cleanup)
+        logger.warning(
+            "Could not start browser installer temp cleanup; leaving %s for later removal",
+            temporary_root.path,
+            exc_info=True,
+        )
+        _close_installer_temporary_root_pin(temporary_root)
+
+
+def _clean_installer_temporary_root(temporary_root: _InstallerTemporaryRoot) -> None:
+    """Remove one root and stop the exit above from waiting for it again."""
+    try:
+        _remove_installer_temporary_root(temporary_root)
+    finally:
+        with _installer_cleanups_lock:
+            _installer_cleanups.discard(threading.current_thread())
+
+
+def _installer_bound_breached(activity: asyncio.Task[None]) -> bool:
+    """Whether the activity watcher stopped because a hard bound was exceeded.
+
+    Only a bound stops the installer. The watcher converts everything it can
+    catch into one, so what is left here is a backstop for what it cannot: a
+    ``BaseException`` raised inside it leaves the installer's own result in
+    place rather than becoming a refusal nobody decided on.
+    """
+    if not activity.done() or activity.cancelled():
+        return False
+    return isinstance(activity.exception(), BrowserSetupFailedError)
+
+
+def _no_installer_progress() -> None:
+    """Progress sink for an install nobody is holding a deadline open for."""
+
+
+async def _run_patchright_install(
+    extra_arg: str,
+    *,
+    line_callback: Callable[[str], None] | None = None,
+    activity_callback: Callable[[], None] | None = None,
+) -> None:
+    """Run one ``patchright install chromium`` stage under both hard bounds.
+
+    Every managed install arrives here, so the byte ceiling and the lifetime
+    apply whether or not the caller passes a progress callback.
+    """
+    async with _setup_lifetime():
+        await _install_under_supervision(
+            extra_arg,
+            line_callback=line_callback,
+            activity_callback=activity_callback,
+        )
+
+
+async def _install_under_supervision(
+    extra_arg: str,
+    *,
+    line_callback: Callable[[str], None] | None = None,
+    activity_callback: Callable[[], None] | None = None,
+) -> None:
+    """Run the installer subprocess and account for what it puts on disk.
 
     The patchright registry lock serializes concurrent installs, so two
     processes reaching this at once queue on the same browsers path rather than
     corrupting it.
+
+    Output is streamed line by line to ``logger.debug`` as it arrives, so a
+    download that used to run behind a blank line reports its progress under
+    ``--log-level DEBUG`` (#533). ``stderr`` is folded into ``stdout`` so the
+    two interleave in the order patchright wrote them, and the collected lines
+    become the failure message when the installer exits non-zero. A
+    *line_callback* (``print`` for the CLI modes) receives each line too, so
+    those modes show progress regardless of the log level.
     """
-    proc = await asyncio.create_subprocess_exec(
-        sys.executable,
-        "-m",
-        "patchright",
-        "install",
-        "chromium",
-        extra_arg,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+    temporary = await _run_in_daemon_thread(
+        _create_installer_temporary_root,
+        discard=_remove_installer_temporary_root,
     )
-    stdout, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        output = "\n".join(
-            text for text in (stderr.decode().strip(), stdout.decode().strip()) if text
+    temporary_root = temporary.path
+    activity: asyncio.Task[None] | None = None
+    bound_raised = False
+    try:
+        environment = _installer_environment(temporary_root)
+        extraction_paths = await _run_in_daemon_thread(
+            _installer_extraction_paths, extra_arg, environment
         )
-        raise BrowserSetupFailedError(
-            output or "Patchright Chromium browser setup failed."
+        # Before the supervisor exists, so the watcher's first poll compares
+        # against a tree this install has not touched.
+        opening = await _run_in_daemon_thread(
+            _installer_download_snapshot, temporary_root, extraction_paths
         )
+        # And judged here, or a complete oversized target passes as a retry
+        # patchright skips and nothing had to write. The private root is empty
+        # at this point, so everything counted is the cache the caller keeps.
+        _refuse_oversized_install(
+            opening, standing=_configured_browsers_path(environment)
+        )
+        proc = _managed_installer(
+            await _start_installer_supervisor(extra_arg, environment)
+        )
+        assert proc.stdout is not None
+        lines: deque[str] = deque()
+
+        async def collect_output() -> None:
+            retained = 0
+            assert proc.stdout is not None
+            async for raw in _installer_lines(proc.stdout):
+                text = raw
+                if not text:
+                    continue
+                if activity_callback is not None:
+                    activity_callback()
+                if line_callback is None:
+                    # The background path has nothing else to show it in. On the
+                    # CLI path the bar is the display, and logging each line too
+                    # would print every percentage permanently above it.
+                    logger.debug("patchright: %s", text)
+                lines.append(text)
+                retained += len(text)
+                # A running total, because summing the deque per line is quadratic
+                # in the output: measured, a multi-megabyte error body spent
+                # seconds of CPU inside this bound while the point of it was to be
+                # cheap. One line always survives, so a failure still quotes
+                # something.
+                while len(lines) > 1 and (
+                    len(lines) > _MAX_RETAINED_LINES or retained > _MAX_RETAINED_CHARS
+                ):
+                    retained -= len(lines.popleft())
+                if line_callback is not None:
+                    line_callback(text)
+
+        # Unconditional: the progress callback is optional, the byte ceiling it
+        # rides along with is not.
+        activity = asyncio.create_task(
+            _watch_installer_activity(
+                activity_callback or _no_installer_progress,
+                temporary_root,
+                extraction_paths,
+                opening,
+            ),
+            name="browser-installer-activity",
+        )
+
+        async def wait_for_process() -> int:
+            # Give both pipe consumers one turn before a fast process is collected.
+            # Real subprocess pipes can fill before wait(), and the ordering is the
+            # same contract the streaming path already relies on.
+            await asyncio.sleep(0)
+            if proc.windows_job is not None and proc.assigned:
+                return await _wait_for_direct_process_exit(proc)
+            return await proc.wait()
+
+        output = asyncio.create_task(collect_output(), name="browser-installer-output")
+        stderr = asyncio.create_task(
+            _drain_installer_stream(proc.stderr), name="browser-installer-control"
+        )
+        waiting = asyncio.create_task(
+            wait_for_process(), name="browser-installer-process"
+        )
+        tasks = (output, stderr, waiting)
+        try:
+            while not waiting.done():
+                # Before the wait, not after it: a watcher that has already
+                # refused this install would otherwise be read only once the
+                # installer it is trying to stop had exited on its own.
+                if _installer_bound_breached(activity):
+                    bound_raised = True
+                    await activity
+                watched: set[asyncio.Task[Any]] = {waiting}
+                if not output.done():
+                    watched.add(output)
+                if not activity.done():
+                    watched.add(activity)
+                done, _pending = await asyncio.wait(
+                    watched, return_when=asyncio.FIRST_COMPLETED
+                )
+                if output in done:
+                    await output
+            returncode = await waiting
+            if proc.windows_job is not None and proc.assigned:
+                # On CPython 3.12, Process.wait() registered before exit resolves only
+                # after pipe EOF. Direct returncode observation lets the Job end
+                # descendants that still hold those pipes before awaiting them.
+                deadline = asyncio.get_running_loop().time() + _INSTALLER_STOP_SECONDS
+                await asyncio.shield(_assigned_windows_cleanup(proc, deadline))
+            await output
+            await stderr
+        except BaseException as original:
+            # Request task cancellation first so no reader keeps competing for the
+            # same pipes. Start tree cleanup before awaiting task settlement: a second
+            # cancellation can interrupt either await, while _stop_installer keeps its
+            # own cleanup task shielded until the containment work is done.
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            cleanup_error: BaseException | None = None
+            cleanup_cancellation: asyncio.CancelledError | None = None
+            try:
+                await _stop_installer(proc)
+            except asyncio.CancelledError as exc:
+                cleanup_cancellation = exc
+            except BaseException as exc:
+                cleanup_error = exc
+
+            settle_cancellation = await _settle_installer_tasks(tasks)
+            if isinstance(original, asyncio.CancelledError):
+                if cleanup_error is not None:
+                    logger.error(
+                        "Browser installer cleanup failed while cancellation was pending",
+                        exc_info=cleanup_error,
+                    )
+                raise original
+            if cleanup_error is not None:
+                raise cleanup_error
+            if cleanup_cancellation is not None:
+                raise cleanup_cancellation
+            if settle_cancellation is not None:
+                raise settle_cancellation
+            raise
+        await _close_installer_lease(proc)
+        # Precedence, deliberately in this order. A nonzero exit keeps its own
+        # message, which says what went wrong, and it is read before the scan
+        # below so an unreadable tree cannot answer in its place. A breach then
+        # beats success, because accepting returncode 0 is what records an
+        # oversized tree as ready.
+        if returncode != 0:
+            raise BrowserSetupFailedError(
+                "\n".join(lines) or "Patchright Chromium browser setup failed."
+            )
+        # Taken whatever the watcher saw, because a poll can miss the final
+        # growth: CPython can publish returncode before pipe EOF, so the loop
+        # above leaves with the watcher parked between two sleeps. The tree has
+        # settled by here.
+        final = await _run_in_daemon_thread(
+            _installer_download_snapshot, temporary_root, extraction_paths
+        )
+        try:
+            _refuse_oversized_install(final)
+        except BrowserSetupFailedError:
+            # The bound decided this install, so the watcher carrying the same
+            # breach into the cleanup below is not a missed one to warn about.
+            bound_raised = True
+            raise
+    finally:
+        try:
+            if activity is not None:
+                activity.cancel()
+                try:
+                    await activity
+                except asyncio.CancelledError:
+                    task = asyncio.current_task()
+                    if task is not None and task.cancelling():
+                        raise
+                except BrowserSetupFailedError:
+                    if not bound_raised:
+                        # The installer finished before the bound could stop it,
+                        # so it keeps its own result and this is only a warning.
+                        logger.warning(
+                            "Browser installer exceeded a setup bound", exc_info=True
+                        )
+                except Exception:
+                    # The watcher converts its own failures into bounds, so this
+                    # is reached only through a substituted one. Left in place
+                    # because the alternative is an unhandled exception during
+                    # cleanup replacing the installer's own result.
+                    logger.warning(
+                        "Browser installer activity watcher failed", exc_info=True
+                    )
+        finally:
+            # The normal path has reaped the supervisor, and every exceptional
+            # path above stops its tree before reaching this point. Cleanup is
+            # best-effort and must never extend cancellation or shutdown.
+            _start_installer_temporary_root_cleanup(temporary)
+
+
+def _finish(progress: Progress, task: TaskID | None) -> None:
+    """Drive a task to completion, including one that never had a total."""
+    if task is None:
+        return
+    active = next((t for t in progress.tasks if t.id == task), None)
+    if active is None or active.finished:
+        return
+    total = active.total if active.total is not None else max(active.completed, 1)
+    progress.update(task, total=total, completed=total)
+
+
+def _parsed_total(found: re.Match[str] | None) -> int | None:
+    """The download size a progress line names, or None if it names none.
+
+    Patchright's current format always reports binary units and a plain decimal,
+    but its error output can carry anything, and this runs inside a render
+    callback where an exception costs the remaining retries. So an unknown unit
+    or an unparseable number is treated as "not a progress line" and printed.
+    """
+    if found is None:
+        return None
+    unit = _BINARY_UNITS.get(found.group(3))
+    if unit is None:
+        return None
+    try:
+        return int(float(found.group(2)) * unit)
+    except ValueError:
+        return None
+
+
+def _writes_to_the_terminal(stream: object) -> bool:
+    """Whether this stream ends up on the screen. Never raises."""
+    isatty = getattr(stream, "isatty", None)
+    if not callable(isatty):
+        return False
+    try:
+        return bool(isatty())
+    except Exception:
+        return False
+
+
+def _device_of(stream: object) -> tuple[int, int] | None:
+    """Where this stream physically writes, or None if it cannot say.
+
+    ``(0, 0)`` is *cannot say* rather than a device. Windows only fills these
+    two in for a handle on disk: ``_Py_fstat_noraise`` zeroes the struct and
+    then sets ``st_mode`` alone for ``FILE_TYPE_PIPE`` and ``FILE_TYPE_CHAR``
+    (``Python/fileutils.c``, unchanged across the supported range). Two
+    unrelated pipes would otherwise answer identically, and so would a console
+    and a pipe, which is the pairing a redirect actually produces.
+    """
+    fileno = getattr(stream, "fileno", None)
+    if not callable(fileno):
+        return None
+    try:
+        status = os.fstat(fileno())
+    except Exception:
+        return None
+    if status.st_dev == 0 and status.st_ino == 0:
+        return None
+    return (status.st_dev, status.st_ino)
+
+
+def _same_destination(one: object, other: object) -> bool:
+    """Whether two streams end up in the same place. Never raises.
+
+    The device and inode rather than the descriptor number: stdout and stderr
+    on a terminal are two descriptors on one device, and ``>log 2>&1`` is two
+    descriptors on one file. Two *different* files answer differently, which is
+    the case that must not be treated as a collision.
+
+    One identity and one unknown is *not* the same place. Falling back to the
+    terminal guess there would answer yes for a wrapper that hides its
+    descriptor while writing to a second pane. This direction is the cheap one
+    to get wrong: a false no draws a log record through the bar, a false yes
+    takes it out of the destination the operator chose.
+    """
+    if one is other:
+        return True
+    first, second = _device_of(one), _device_of(other)
+    if first is None and second is None:
+        # Neither can name a device, which in practice means an in-memory
+        # stream or a wrapper that hides the descriptor. Two streams that both
+        # claim a terminal are the same terminal often enough to keep the old
+        # answer here.
+        return _writes_to_the_terminal(one) and _writes_to_the_terminal(other)
+    # Identity against unknown is never equal, which `None` gives for free.
+    #
+    # Two *names* for one terminal are missed by this and stay missed: a
+    # handler reopened through `/dev/tty` shares the screen with the pty slave
+    # under it and carries a different inode (measured on macOS). Widening the
+    # rule to same-device-and-both-a-terminal would close that and would also
+    # merge two genuinely different ptys, which is the losing direction above.
+    return first == second
+
+
+@contextlib.contextmanager
+def _log_handlers_follow_the_live_region(
+    before: tuple[object, object],
+    destination: object,
+) -> Iterator[None]:
+    """Let stream log handlers follow the streams rich redirects.
+
+    rich swaps ``sys.stdout`` and ``sys.stderr`` for proxies while a live region
+    is up, so anything written lands above the bar instead of through it. A
+    ``StreamHandler`` built earlier holds the stream object it was given and
+    never sees the swap, so a record emitted while the bar is live is drawn into
+    the middle of it. Measured in a pty: without this the record and the bar
+    ended up on the same physical line.
+
+    *before* is what the two streams were just before the swap, which is what
+    the handlers can be holding. Comparing against ``sys.__stderr__`` instead
+    would only match when nothing else had wrapped it: and something usually
+    has: pytest captures it, and the detached owner points it at the daemon log.
+
+    *destination* is where the bar is drawn, and a handler only moves if it
+    writes there too. Asking ``isatty`` instead was wrong in both directions
+    once ``FORCE_COLOR`` or ``TTY_COMPATIBLE`` is set, which is how CI runners
+    keep colour through a redirect: rich then draws into a file, so under
+    ``>build.log 2>&1`` a handler that answers False stayed put and wrote its
+    records into the middle of a rendered frame (measured), while with
+    ``2>errors.log`` on a terminal a handler that answers True would be moved
+    and its records taken out of the file the operator chose.
+
+    Only handlers on those two streams move, so a file handler keeps its file.
+    Restored on the way out, because the proxies stop working once the live
+    region is gone.
+    """
+    old_stdout, old_stderr = before
+    moved: list[tuple[logging.StreamHandler[Any], object, object]] = []
+    for candidate in logging.getLogger().handlers:
+        if not isinstance(candidate, logging.StreamHandler):
+            continue
+        # Re-bound because the isinstance narrowing leaves the stream type
+        # unsolved, and `setStream` is declared against it.
+        handler: logging.StreamHandler[Any] = candidate
+        if handler.stream is old_stderr:
+            proxy = sys.stderr
+        elif handler.stream is old_stdout:
+            proxy = sys.stdout
+        else:
+            continue
+        # Only a handler writing where the bar is drawn can collide with it.
+        # Both proxies write through the progress console, so moving one that
+        # writes somewhere else would take its records out of the destination
+        # the operator chose and put them where the bar is.
+        if not _same_destination(handler.stream, destination):
+            continue
+        # `setStream` rather than the attribute: it takes the handler's lock
+        # and flushes what is still buffered, so a record being emitted from
+        # another thread is not split across the two streams. It answers None
+        # when there was nothing to change, which is the case where rich left
+        # the stream alone because something had already wrapped it.
+        replaced = handler.setStream(proxy)
+        if replaced is not None:
+            moved.append((handler, replaced, proxy))
+    try:
+        yield
+    finally:
+        for handler, stream, proxy in moved:
+            # Only if the handler is still where it was put. A host that
+            # reconfigured logging during the download chose the newer stream,
+            # and restoring over it would discard that choice and can leave
+            # records pointed at a stream closed along with the old config.
+            if handler.stream is proxy:
+                handler.setStream(stream)
+
+
+def _print_whatever_the_stream_takes(line: str) -> None:
+    """Print a line, replacing anything the stream cannot encode."""
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        try:
+            print(line, flush=True)
+        except UnicodeEncodeError:
+            print(line.encode(encoding, "replace").decode(encoding), flush=True)
+    except (OSError, ValueError):
+        # A closed or broken stdout is not a reason to fail an install, and the
+        # replacement attempt can meet the same closed pipe as the first.
+        # ``ValueError`` because that is what a closed ``TextIOBase`` raises:
+        # only a real pipe answers with ``BrokenPipeError``, and a stdout
+        # already closed by the host answers "I/O operation on closed file".
+        pass
+
+
+def _bar_is_encodable() -> bool:
+    """Whether the glyphs rich draws survive this stdout's encoding.
+
+    rich does not consult the encoding before rendering, and it does not fall
+    back either: the bar's U+2501 and the spinner's braille go straight into
+    ``write`` and raise ``UnicodeEncodeError`` from inside the live region.
+    That leaves the read loop, kills the installer, and reports an encoding
+    error in place of a browser. ``PYTHONIOENCODING=ascii`` on a real terminal
+    is enough to reach it, so the answer decides between the bar and the lines.
+    """
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        _BAR_GLYPHS.encode(encoding)
+    except (UnicodeEncodeError, LookupError):
+        return False
+    return True
+
+
+class _ConsoleThatGoesQuiet(Console):
+    """A console that falls silent on a closed pipe instead of exiting.
+
+    rich's default ``on_broken_pipe`` points ``sys.stdout`` at ``os.devnull``
+    and raises ``SystemExit(1)``. Piping ``--install-browser`` into ``head``
+    reaches it whenever the bar is drawn at all, which ``FORCE_COLOR=1`` or
+    ``TTY_COMPATIBLE=1`` arranges for a redirected stdout: measured, exit code
+    1 with an empty stderr, mid-download, with the archive half unpacked. Going
+    quiet leaves the install running, which is the same answer the plain-line
+    path already gives a stream that will not take a line.
+    """
+
+    def on_broken_pipe(self) -> None:
+        self.quiet = True
+
+    def _check_buffer(self) -> None:
+        """Go quiet for the other ways a stream stops taking bytes, too.
+
+        rich catches ``BrokenPipeError`` here and nothing else, so a stdout the
+        host has closed (``ValueError``) or a pseudo-terminal whose other end
+        detached (``OSError`` EIO) raises out of the bar's own refresh:
+        measured against rich 15.0.0, both escape ``Console.print``. From there
+        it leaves the read loop, kills the installer and reports a failed
+        install for a browser already unpacked on disk. ``BrokenPipeError`` is
+        an ``OSError``, so the base class has taken it before this sees it.
+        """
+        try:
+            super()._check_buffer()
+        except (OSError, ValueError):
+            self.on_broken_pipe()
+            del self._buffer[:]
+
+
+@contextlib.contextmanager
+def _cli_progress() -> Iterator[Callable[[str], None]]:
+    """A live progress bar for a terminal, plain lines for anything else.
+
+    Patchright writes to a pipe here, so it picks its newline-delimited
+    progress: one line per ten percent, eleven lines per download. That reads
+    fine in a log and poorly on a terminal, where eleven lines are one bar drawn
+    eleven times. This reads the percentage back out and draws it once.
+
+    Only for a terminal. Redirected output keeps the lines themselves, because a
+    bar redrawn in place is noise in a file, and the background path never
+    reaches here at all: its output goes to a debug log.
+
+    Anything that does not parse as progress is printed unchanged, so a change
+    in patchright's format costs the bar and never the message.
+    """
+    try:
+        console = _ConsoleThatGoesQuiet(
+            # rich's defaults give the three fields three different colours :
+            # magenta, red, blue: which reads as noise beside a single-colour
+            # bar. TransferSpeedColumn hardcodes its style name rather than
+            # taking one, so the theme is the only place all three can be set.
+            theme=Theme(
+                {
+                    "progress.percentage": _PROGRESS_STYLE,
+                    "progress.data.speed": "grey58",
+                    "progress.remaining": "grey58",
+                }
+            )
+        )
+        there_is_a_screen = console.is_terminal and not console.is_dumb_terminal
+    except OSError:
+        # A stream whose ``isatty`` raises instead of answering, which a
+        # detached pseudo-terminal does with ``EIO``. rich guards that call for
+        # ``ValueError`` alone (measured in 15.0.0), so an ``OSError`` comes
+        # back out here. Not knowing whether there is a terminal is exactly the
+        # plain-line case; raising would take the browser install with it.
+        yield _print_whatever_the_stream_takes
+        return
+
+    if not there_is_a_screen or not _bar_is_encodable():
+        # Whether there is a terminal at all is rich's judgement rather than
+        # ``sys.stdout``'s, because where rich will not draw it does not fall
+        # back either: ``Live.refresh`` renders through ``elif not
+        # self._started``, which is to say once, on the way out. A dumb
+        # terminal (``TERM=dumb`` or ``unknown``, common on CI consoles) passes
+        # ``isatty`` and would then show nothing at all for the whole download,
+        # which is the silence this change removes. What the stream can encode
+        # is the one part rich does not decide, and it is asked separately.
+        #
+        # Not bare ``print`` on the way out: patchright draws its own bar with
+        # U+25A0, and an ascii stream raises ``UnicodeEncodeError`` on it.
+        # Raising here would leave the read loop, kill the installer, and
+        # report an encoding error in place of the download. Reporting is never
+        # worth that.
+        yield _print_whatever_the_stream_takes
+        return
+
+    progress = Progress(
+        SpinnerColumn(style=_PROGRESS_STYLE),
+        TextColumn("[white]{task.description}"),
+        BarColumn(
+            bar_width=24,
+            complete_style=_PROGRESS_STYLE,
+            finished_style=_PROGRESS_STYLE,
+            # The pulse is what shows while no percentage has arrived, which
+            # is the whole of a chunked download and the whole of a failing
+            # one. Left alone it shimmers in rich's magenta beside a blue bar.
+            pulse_style=_PROGRESS_STYLE,
+        ),
+        TaskProgressColumn(),
+        TransferSpeedColumn(),
+        TimeRemainingColumn(),
+        # rich's default 30s averaging window is deliberate here. Shortening it
+        # to 10s makes a stall show up sooner, and costs far more than it buys:
+        # rich drops samples older than the window before adding the next one,
+        # so once one of patchright's ten-percent steps takes longer than the
+        # window, a single sample is left, the elapsed span is zero, and both
+        # the rate and the estimate become unavailable for the whole download.
+        # Measured against the sample interval: at 6.6 MB/s a step takes 2.7s
+        # and either window works; at 1.0 MB/s it takes 17.9s and only the 30s
+        # window still reports anything. The slow connection is the one that
+        # needs an estimate most.
+        console=console,
+        # rich redirects both streams while the bar is up, so that a direct
+        # write lands above it rather than through it. Right for a stream that
+        # shares the bar's screen and wrong for one that does not: under
+        # ``2>errors.log`` rich would take a `sys.stderr.write` out of the file
+        # the operator named and print it on the terminal instead, and leave a
+        # handler built during the download pointed there afterwards. Same
+        # question as the log handlers below, asked once, before rich swaps the
+        # streams and the answer stops being available.
+        redirect_stderr=_same_destination(sys.stderr, console.file),
+    )
+    described = "Installing browser"
+    # Created before a single line arrives. Patchright can be silent for the
+    # whole download: `npm_config_loglevel=warn` suppresses its announcements
+    # and a chunked response suppresses its percentages, and it waits up to ten
+    # minutes on the registry lock without saying anything either. A bar that
+    # only appears once a line is recognised leaves all of those blank.
+    task: TaskID | None = progress.add_task(described, total=None)
+
+    def report(line: str) -> None:
+        nonlocal task, described
+        started = _PATCHRIGHT_DOWNLOAD.match(line)
+        if started:
+            # Patchright fetches ffmpeg after the browser, and retries a failed
+            # download up to five times, announcing each attempt the same way.
+            # A finished bar stays as a record; an unfinished one belonged to an
+            # attempt that died, and leaving it would spin at 40% forever
+            # beside its own retry.
+            announced = started.group(1).split(" (")[0]
+            placeholder = next(
+                (t for t in progress.tasks if t.id == task and t.completed == 0),
+                None,
+            )
+            if (
+                task is not None
+                and placeholder is not None
+                and placeholder.total is None
+            ):
+                # Still the bar this context opened with. Name it rather than
+                # stacking a second one beside it.
+                progress.update(task, description=escape(announced))
+                described = announced
+                return
+            if task is not None:
+                active = next((t for t in progress.tasks if t.id == task), None)
+                # Unfinished means the attempt died. Finished under the same
+                # name means a retry after patchright reported 100% and then
+                # failed to unpack, which it does on a corrupt archive: five of
+                # those would leave four completed bars for one browser.
+                same_artifact = active is not None and active.description == escape(
+                    announced
+                )
+                if active is not None and (not active.finished or same_artifact):
+                    with contextlib.suppress(KeyError):
+                        progress.remove_task(task)
+            # Escaped where it is used: the column renders the description as
+            # markup, so an error body announcing "Downloading [/red] from …"
+            # would raise out of the render callback and take patchright's
+            # remaining retries with it.
+            described = announced
+            # Started here rather than at the first percentage. A mirror
+            # serving the archive with ``Transfer-Encoding: chunked`` makes
+            # patchright suppress progress altogether: its reporter is guarded
+            # by ``if (!chunked && reportProgress)``: so a bar created on the
+            # first percentage would never appear, and the download would run
+            # behind the silence this change exists to remove. Without a total
+            # rich pulses, and the total is filled in if a percentage arrives.
+            task = progress.add_task(escape(described), total=None)
+            return
+
+        if _PATCHRIGHT_DONE.search(line):
+            # The archive is in place. Without percentages this is the only
+            # thing that says so, and a bar left pulsing would read as a
+            # download that never ended.
+            _finish(progress, task)
+            progress.console.print(line, highlight=False, markup=False)
+            return
+        found = _PATCHRIGHT_PERCENT.search(line)
+        total = _parsed_total(found)
+        if total is None:
+            # markup=False: the installer's text is data, not rich markup. An
+            # error body containing "[/red]" would otherwise raise MarkupError
+            # from inside the render callback, which aborts patchright's
+            # remaining retries and reports rich instead of the download.
+            progress.console.print(line, highlight=False, markup=False)
+            return
+        percent = int(found.group(1)) if found else 0
+        active = next((t for t in progress.tasks if t.id == task), None)
+        going_backwards = (
+            active is not None
+            and active.total is not None
+            and int(total * percent / 100) < active.completed
+        )
+        if (
+            going_backwards
+            and task is not None
+            and active is not None
+            and (not active.finished or active.total == total)
+        ):
+            # An unfinished bar going backwards is the same artifact starting
+            # over, which patchright does up to five times. Reuse it, or five
+            # abandoned bars pile up for one download.
+            #
+            # A *finished* one going backwards to the same total is the same
+            # thing seen without its announcements, which a raised npm log
+            # level suppresses: ``logPolitely`` is silent from "warn" up while
+            # the percentages keep coming. Patchright reports 100% before it
+            # unpacks, so a corrupt archive finishes the bar and then retries,
+            # and without this the failure ends under five completed bars. The
+            # total is what tells the two apart: a retry re-downloads the same
+            # bytes, and the next artifact is a different archive.
+            progress.reset(task, total=total, description=active.description)
+        elif task is None or going_backwards:
+            # Backwards from a finished bar with a different total is the next
+            # artifact, whose announcement never arrived for the same reason.
+            task = progress.add_task(escape(described), total=total)
+        elif task is not None:
+            progress.update(task, total=total)
+        # Bytes rather than percent, so the rate and the estimate have
+        # something to divide. Both are as coarse as the ten-percent steps
+        # patchright reports, which is honest: it is what the installer says.
+        progress.update(task, completed=int(total * percent / 100))
+
+    # Captured before entering, because that is what the handlers can be
+    # holding; inside, rich has already replaced both. The console's own file
+    # is read here for the same reason, though it unwraps the proxy either way.
+    streams_before = (sys.stdout, sys.stderr)
+    drawn_on = console.file
+    with progress, _log_handlers_follow_the_live_region(streams_before, drawn_on):
+        yield report
+        # Reached only when the caller left without raising, so the install
+        # succeeded. It can succeed in silence: patchright prints nothing at
+        # all when every browser is already on disk and only the metadata was
+        # stale, and the bar this context opens would then pulse under
+        # "Browser installed." as its last frame.
+        _finish(progress, task)
+
+
+def _origin_of(scheme: str, authority: str) -> str | None:
+    """``scheme://[***@]host[:port]``, or ``None`` when that cannot be read.
+
+    Userinfo is reported as present rather than dropped: that a credential was
+    in the URL is the diagnosis, and its value is not.
+    """
+    try:
+        parsed = urlsplit(f"{scheme}://{authority}")
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return None
+    if not hostname:
+        return None
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    netloc = hostname if port is None else f"{hostname}:{port}"
+    userinfo = "***@" if "@" in authority else ""
+    return f"{scheme}://{userinfo}{netloc}"
+
+
+def _redacted_origin(scheme: str, rest: str) -> str:
+    """One URL reduced to its origin and a marker for everything after it.
+
+    The first delimiter after the authority survives the redaction, and that is
+    load-bearing rather than cosmetic. ``_safe_to_print`` runs on a buffer that
+    is still growing, so a URL split across two reads is redacted once per read;
+    turning ``https://host/`` into ``https://host`` would let the next read's
+    ``secret`` land against the host and print as part of it. Keeping the
+    delimiter means the second pass sees ``/***secret`` and collapses it again,
+    which is what makes the redaction stable under append.
+    """
+    # Node normalises backslashes to slashes before it resolves a URL, so
+    # ``https:\\host\path`` is that same URL and is read as one.
+    rest = rest.replace("\\", "/")
+    authority = _AUTHORITY_ENDS.split(rest, maxsplit=1)[0]
+    remainder = rest[len(authority) :]
+    origin = _origin_of(scheme, authority)
+    if origin is None:
+        # An authority this cannot parse is one this cannot vouch for either, so
+        # none of it is kept. A delimiter is *added* rather than dropped, for the
+        # same append stability: ``https://[bad`` reduced to ``https://***``
+        # would let the next read complete a plausible hostname out of the
+        # marker and print the rest of the URL as part of it. Measured.
+        return f"{scheme}://***/***"
+    return f"{origin}{remainder[0]}***" if remainder else origin
+
+
+def _held_back_closer(text: str, end: int, tail: str) -> int:
+    """How many of a URL run's last characters begin the body's closing marker.
+
+    Sanitation runs on the raw buffer and ``_installer_lines`` looks for
+    ``'. URL: `` in what comes back, so a run that swallows the apostrophe
+    opening that marker deletes the only signal that a response body ended, and
+    every later line is elided as body. Those characters are therefore left
+    where they are and only the URL in front of them is redacted.
+
+    Both shapes are load-bearing. A whole marker follows the run when a body
+    ends on a URL; a bare ``'`` or ``'.`` at the end of the text is the same
+    marker split by a read, and ``_safe_to_print`` runs again on the joined
+    buffer, so holding it back once is what lets the next pass see it whole.
+    """
+    for head in _CLOSER_HEADS:
+        if not tail.endswith(head):
+            continue
+        following = text[end - len(head) :]
+        if following.startswith(
+            _RESPONSE_BODY_CLOSES
+        ) or _RESPONSE_BODY_CLOSES.startswith(following):
+            return len(head)
+    return 0
+
+
+def _redacted_url(found: re.Match[str]) -> str:
+    rest = found.group(2)
+    held = _held_back_closer(found.string, found.end(), rest)
+    if not held:
+        return _redacted_origin(found.group(1).lower(), rest)
+    return _redacted_origin(found.group(1).lower(), rest[:-held]) + rest[-held:]
+
+
+#: A configured mirror is not required to be HTTP, so its scheme is read as a
+#: scheme rather than matched against one.
+_CONFIGURED_SCHEME = re.compile(r"(?s)([A-Za-z][A-Za-z0-9+.\-]*):[/\\]{2}(.*)\Z")
+#: Every variable patchright reads a download mirror out of. Both spellings of
+#: both hosts, and the npm-config forms of each, because npm exports a
+#: ``.npmrc`` entry into the environment under those names.
+_DOWNLOAD_HOST_VARIABLES = (
+    "PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST",
+    "npm_config_playwright_chromium_download_host",
+    "npm_package_config_playwright_chromium_download_host",
+    "PLAYWRIGHT_DOWNLOAD_HOST",
+    "npm_config_playwright_download_host",
+    "npm_package_config_playwright_download_host",
+)
+
+
+def _redacted_download_host(configured: str) -> str:
+    """Preserve a mirror's origin while removing its configured private path."""
+    found = _CONFIGURED_SCHEME.match(configured)
+    if found is None:
+        return "***"
+    return _redacted_origin(found.group(1).lower(), found.group(2))
+
+
+def _configured_download_hosts() -> tuple[str, ...]:
+    """Every mirror value configured now, each with the form patchright joins on.
+
+    Patchright strips a trailing slash before it builds a download URL, so the
+    configured string and its slash-less form are two different literals that
+    can both appear in the output, and both are secrets.
+
+    Read from the environment on every call rather than cached: tests set these
+    per case, and the cost is six lookups against a work unit that is already a
+    scan of the buffer.
+    """
+    values: list[str] = []
+    for variable in _DOWNLOAD_HOST_VARIABLES:
+        configured = os.getenv(variable, "").strip()
+        if not configured:
+            continue
+        values.append(configured)
+        without_slash = configured.rstrip("/")
+        # A value that is nothing but slashes leaves an empty string here, and
+        # an empty needle matches between every pair of characters: `str.replace`
+        # would splice the marker through the whole buffer, and the prefix scan
+        # below would call every position the start of a secret.
+        if without_slash and without_slash != configured:
+            values.append(without_slash)
+    return tuple(values)
+
+
+@functools.lru_cache(maxsize=32)
+def _configured_borders(value: str) -> tuple[int, ...]:
+    """The KMP prefix function of one configured value.
+
+    Cached on the value, which does not change within a process, so the table
+    is built once however many boundaries the stream produces.
+    """
+    table = [0] * len(value)
+    match = 0
+    for index in range(1, len(value)):
+        while match and value[index] != value[match]:
+            match = table[match - 1]
+        if value[index] == value[match]:
+            match += 1
+        table[index] = match
+    return tuple(table)
+
+
+def _pending_value_start(text: str, cut: int) -> int | None:
+    """Where a configured mirror value that has not finished arriving begins.
+
+    ``_safe_to_print`` removes a configured value by exact replacement, so it
+    can only act once the whole value sits in the buffer. A boundary drawn while
+    one is still arriving splits it: the head is emitted or trimmed away and the
+    tail that remains carries the private path past every pattern here, out
+    through the debug log, the line callback, the retained failure and the MCP
+    error it becomes.
+
+    The run machinery above cannot cover this, because it keys on an HTTP(S)
+    scheme. A download host is not required to have one: the loader accepts a
+    scheme-less ``mirror.example/TOKEN``, a scheme-relative ``//mirror.example``
+    and another scheme entirely, and dropping every over-long ``//`` run to
+    reach those would delete the base64 blobs and path lists that ``_is_a_url``
+    exists to keep.
+
+    So the known values are matched instead of guessed at. Returns the leftmost
+    position at or before *cut* where the buffer's tail is still a proper prefix
+    of one, or ``None`` when a boundary at *cut* cannot split any of them.
+
+    A value carrying whitespace is only partly covered, and that is a property
+    of the model rather than an oversight: a run ends at whitespace everywhere
+    in this file, so the drop that follows stops there too. No mirror URL has
+    any.
+    """
+    earliest: int | None = None
+    for value in _configured_download_hosts():
+        # Only the last ``len(value) - 1`` characters can begin an occurrence
+        # that is still arriving, since a whole one was replaced already. That
+        # window is what keeps this linear in the configured value's length
+        # instead of quadratic in the buffer's.
+        window = text[-(len(value) - 1) :] if len(value) > 1 else ""
+        table = _configured_borders(value)
+        match = 0
+        for char in window:
+            while match and char != value[match]:
+                match = table[match - 1]
+            if char == value[match]:
+                match += 1
+        if not match:
+            continue
+        start = len(text) - match
+        if start <= cut and (earliest is None or start < earliest):
+            earliest = start
+    return earliest
+
+
+def _held_markers(text: str) -> tuple[str, list[str]]:
+    """The text with every structural marker swapped for a sentinel."""
+    held: list[str] = []
+
+    def _hold(found: re.Match[str]) -> str:
+        held.append(found.group())
+        return _MARKER_HELD
+
+    return _MARKERS_HELD.sub(_hold, text), held
+
+
+def _restored_markers(text: str, held: list[str]) -> str:
+    """The sentinels swapped back, in the order they were taken out."""
+    parts = text.split(_MARKER_HELD)
+    return "".join(part + marker for part, marker in zip(parts, held)) + parts[-1]
+
+
+def _safe_to_print(text: str) -> str:
+    """Text with its terminal controls and its URL credentials taken out.
+
+    Controls go first. A credential can be reassembled out of the fragments an
+    escape sequence separates, so redacting before stripping would leave
+    ``//us\x1b[0mer:pw@host`` unmatched and then hand the stripper a whole
+    credential to put back together.
+
+    Every HTTP(S) URL then keeps its origin and loses the rest, because the URL
+    patchright prints is not always the one an operator configured: its download
+    client follows redirects and reports the location it ended on. A mirror can
+    therefore introduce a path credential this process was never told about, and
+    only a rule that holds for every URL covers that.
+
+    The configured mirror base is still handled separately, for the case that
+    rule cannot reach: a download host given without a scheme is not a URL to
+    any pattern here, and its path would print as ordinary text. That
+    replacement is exact and therefore needs the whole value present, which is
+    what ``_pending_value_start`` keeps true across a boundary.
+
+    The markers are held out of the way while that runs, because an operator
+    names the value and a stranger writes the body it would otherwise delete:
+    ``PLAYWRIGHT_DOWNLOAD_HOST=body`` took the ``body '`` out of the opener and
+    the whole quoted page printed. A value reaching across a marker's edge then
+    matches nothing and stays, which is the residue this accepts: the overlap
+    has to spell patchright's own constant, and a value carrying a scheme still
+    loses everything below its origin in the pass underneath.
+    """
+    text = _TERMINAL_CONTROLS.sub("", text)
+    configured_values = _configured_download_hosts()
+    if configured_values:
+        text, held = _held_markers(text)
+        for configured in configured_values:
+            text = text.replace(configured, _redacted_download_host(configured))
+        text = _restored_markers(text, held)
+    text = _URL_IN_TEXT.sub(_redacted_url, text)
+    # Last, for what is not an HTTP(S) URL: another scheme's userinfo, and the
+    # scheme-relative ``//user@host`` form.
+    return _CREDENTIALS_IN_URL.sub("//***@", text)
+
+
+def _run_opening(text: str, cut: int) -> re.Match[str] | None:
+    """The redactable run a cut at *cut* would split, or ``None``.
+
+    ``None`` means nothing a pattern here recognises reaches across that point.
+    A match is the one damage sanitation cannot repair afterwards, because it
+    only ever runs on a buffer: both halves of a split run print, the near one
+    as ``https://cdn.exa`` and the far one as ``mple/p?token=SECRET``, which
+    matches nothing at all.
+    """
+    if cut <= 0 or _NON_SPACE.match(text, cut) is None:
+        return None
+    # From the run's own start rather than from zero, so the lookaheads below
+    # never scan a stretch they can only fail on. That bound is what keeps this
+    # linear in the length of one fragment.
+    start = max(text.rfind(space, 0, cut) for space in _ASCII_SPACES) + 1
+    # Leftmost first: a whole opener earlier in the same run keeps more of it in
+    # the buffer than a prefix of one at the cut, and covers that prefix anyway.
+    return (
+        _SCHEME_OPENS.search(text, start, cut)
+        or _CREDENTIAL_OPENS.search(text, start, cut)
+        or _OPENER_PENDING.search(text, start, cut)
+    )
+
+
+def _is_a_url(opening: re.Match[str]) -> bool:
+    """Whether a run opener carries a scheme, rather than only a ``//``.
+
+    That difference decides what may be dropped. A scheme is patchright naming
+    a URL, and everything behind it is path, query or userinfo. A bare ``//``
+    is a coincidence as often as not: it occurs in base64, in a path list and
+    in a Windows share, and dropping a run that long on that evidence would
+    take ordinary output with it.
+    """
+    return opening.group()[:1].lower() == "h"
+
+
+def _run_end(text: str, start: int) -> int:
+    """Where the run at *start* ends: its first whitespace, or the whole text."""
+    found = _WHITESPACE.search(text, start)
+    return len(text) if found is None else found.start()
+
+
+def _dropped_run(text: str) -> tuple[str, bool]:
+    """Remove the rest of a run whose marker has already gone out.
+
+    Returns what is left of *text* and whether the run continues past it. The
+    closing marker of a response body is the one thing kept: sanitation holds
+    those one or two characters back for ``_installer_lines`` to read, and a
+    drop that swallowed them would elide every later line of the install.
+
+    The body's *opening* marker cannot be reached from here, and that is a
+    property of the marker rather than a check: it carries four spaces, so no
+    whitespace-free run holds more of it than the single word it starts with,
+    and patchright writes ``Download failed: `` in front of that word.
+    """
+    end = _run_end(text, 0)
+    held = _held_back_closer(text, end, text[:end])
+    return text[end - held :], end == len(text)
+
+
+def _forced_fragment(text: str, cut: int) -> tuple[str, str, bool]:
+    """One bounded piece of an over-long line, and what is left of the buffer.
+
+    Returns the piece to emit, the remaining buffer, and whether a redacted run
+    continues into what has not been read yet.
+
+    Cutting at *cut* is what leaks. Sanitation has already reduced every URL
+    whose authority is complete to an origin, so the one that can still be whole
+    in the buffer is the run the cut lands in, and cutting it prints both halves
+    verbatim. The cut therefore moves to where that run begins, which costs a
+    shorter fragment and nothing else.
+
+    A run already at the front of the buffer has no such point: it is a whole
+    cap long with its authority still unread, and holding it back would grow the
+    buffer without bound. A scheme in front of it says it is a URL, so the
+    marker goes out and the run is dropped for as long as it lasts. Without one
+    the cut stands, because a whitespace-free run of that length is ordinary
+    output far more often than it is a credential.
+
+    A configured mirror value still arriving is the second thing a cut must not
+    split, and it is the one the scheme test cannot see: the loader takes a
+    download host with no scheme at all. It is recognised by name rather than by
+    shape, so an over-long ``//`` token that is not one still comes through
+    whole.
+    """
+    pending = _pending_value_start(text, cut)
+    opening = _run_opening(text, cut)
+    opened = None if opening is None else opening.start()
+    if pending == 0 or (opened == 0 and opening is not None and _is_a_url(opening)):
+        remaining, running = _dropped_run(text)
+        return _OMITTED_RUN_HEAD, remaining, running
+    # Whichever of the two opens first, and never at zero: an opener there that
+    # reached this line is the ordinary-output case, which keeps the plain cut.
+    stops = [start for start in (pending, opened) if start]
+    stop = min(stops) if stops else cut
+    return text[:stop], text[stop:], False
+
+
+class _RedactedTail:
+    """A bounded, redacted view of a byte stream that is still arriving.
+
+    Truncation is the hazard this exists for. ``_safe_to_print`` recognises a
+    URL by its scheme, so a tail cut out of the middle of one carries a
+    remainder that matches nothing here and prints its path, its query and its
+    userinfo in full. Redaction therefore runs before every trim, while a URL is
+    still whole, and the trim itself moves off any run it would cut through.
+
+    Decoding is incremental for the same reason it is in
+    ``_split_installer_output``: a UTF-8 sequence split by a read is one
+    character, not two replacement marks.
+
+    Holds ``limit`` characters between reads plus whatever one read adds, and
+    ``limit`` plus the marker afterwards.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        self._limit = limit
+        self._text = ""
+        self._dropping = False
+
+    def feed(self, chunk: bytes) -> None:
+        self._append(self._decoder.decode(chunk))
+        if len(self._text) > self._limit:
+            self._bound()
+
+    def finish(self) -> str:
+        """The retained text, redacted, with a partial character resolved."""
+        self._append(self._decoder.decode(b"", final=True))
+        self._bound()
+        return self._text
+
+    def _append(self, decoded: str) -> None:
+        if self._dropping:
+            # The rest of a run this already dropped the head of. Its scheme
+            # went with that head, so keeping it would mean keeping a secret
+            # that nothing here can still recognise as one.
+            decoded, self._dropping = _dropped_run(decoded)
+        self._text += decoded
+
+    def _bound(self) -> None:
+        """Redact, then trim, and never in the other order.
+
+        Deferred until a trim is due or the text is asked for, because text only
+        ever grows at its end: a pass over the whole of it then sees every URL
+        that has arrived whole, which is the same set an eager pass per chunk
+        would have seen, and a startup that never overruns pays nothing for it.
+        """
+        self._text = _safe_to_print(self._text)
+        if len(self._text) <= self._limit:
+            return
+        cut = len(self._text) - self._limit
+        opening = _run_opening(self._text, cut)
+        # A configured mirror value that is still arriving is a secret this trim
+        # would behead: the part that names it is in front of the cut and the
+        # private path is behind it, and the exact replacement above can never
+        # match either half afterwards. The value has no scheme to find it by,
+        # so it is looked up by name.
+        pending = _pending_value_start(self._text, cut)
+        if pending is None and (opening is None or not _is_a_url(opening)):
+            self._text = self._text[cut:]
+            return
+        # Keeping a tail means dropping heads, and the head of a URL is the part
+        # that names it. What a cut here would leave prints as ordinary text, so
+        # the whole run goes and the marker says that something did.
+        #
+        # Measured from the cut in both cases, and never from where the value
+        # begins. This keeps ``self._text[end:]``, so the later end is the one
+        # that discards more, and a value still arriving reaches the end of the
+        # text: the two agree unless the value carries whitespace, where
+        # starting earlier would hand back the piece behind it.
+        end = _run_end(self._text, cut)
+        self._dropping = end == len(self._text)
+        self._text = _OMITTED_RUN_HEAD + self._text[end:]
+
+
+async def _installer_lines(stream: asyncio.StreamReader) -> AsyncIterator[str]:
+    """The installer's lines, with any quoted response body dropped.
+
+    A body is the one part of this output a stranger writes, and patchright
+    prints it verbatim, five times, once per retry. Dropping it here rather
+    than defending against it downstream is what keeps the rest of this file
+    honest: the escape sequences, the reflected credentials, the markup that
+    would raise out of a render callback and the 400-digit sizes were all the
+    same bytes arriving through the same quotes.
+
+    Stateful across fragments because one physical line can exceed the output
+    cap. A body that crosses a real newline keeps the rest of the stream elided:
+    remote bytes can forge the same line shape as Patchright's closer, so there
+    is no safe point to resume. Every body fragment is dropped whole, which also
+    bounds what a mirror can make this process hold.
+    """
+    eliding = False
+    crossed_body_line = False
+    carry = ""
+    async for line, line_ended in _split_installer_output(stream):
+        if eliding:
+            # A forced fragment is still part of the opener's physical line. Keep
+            # only enough of its tail to recognize a closer split by the cap, and
+            # believe that closer only when the real line ends. Once body content
+            # has crossed a newline, its own line can forge the exact close shape,
+            # so confidentiality requires eliding the rest of the stream.
+            joined = carry + line
+            if not crossed_body_line and line_ended:
+                found = _RESPONSE_BODY_CLOSED.search(joined)
+                if found is not None:
+                    eliding = False
+                    carry = ""
+                    line = joined[found.start() :]
+                else:
+                    crossed_body_line = True
+                    carry = ""
+                    continue
+            else:
+                if not crossed_body_line:
+                    carry = joined[-_CLOSER_CARRY:]
+                continue
+        kept: list[str] = []
+        # Scanning forward from ``pos`` rather than over the result: the marker
+        # stays in what is kept, so a search from the front would find the same
+        # opener again and never terminate.
+        pos = 0
+        while True:
+            opened = _RESPONSE_BODY_OPENS.search(line, pos)
+            if opened is None:
+                kept.append(line[pos:])
+                break
+            kept.append(line[pos : opened.end()])
+            kept.append(_OMITTED_BODY)
+            found = _RESPONSE_BODY_CLOSED.search(line, opened.end())
+            if found is None:
+                eliding = True
+                crossed_body_line = line_ended
+                carry = "" if line_ended else line[-_CLOSER_CARRY:]
+                break
+            pos = found.start()
+        # Yielded even when empty, so what a caller sees is still the line
+        # structure the installer wrote.
+        yield "".join(kept)
+
+
+async def _split_installer_output(
+    stream: asyncio.StreamReader,
+) -> AsyncIterator[tuple[str, bool]]:
+    """The installer's output, split into lines, with no limit on line length.
+
+    Deliberately not ``async for line in stream``. That reads through
+    ``readline``, which raises ``ValueError`` once a single line passes the
+    reader's 64 KiB limit: mid-download, out of the loop, and with the child
+    still running and unreaped. Patchright puts an entire non-200 response body
+    into one error line, so a captive portal or a mirror answering with minified
+    HTML reaches that limit, and the server would report an asyncio error
+    instead of the download failure. Measured: a 70 000-byte line raises
+    ``Separator is found, but chunk is longer than limit`` and leaves the child
+    alive.
+
+    Reads are staged rather than folded in one at a time. ``StreamReader.read``
+    answers with whatever has arrived, which is a single byte as readily as a
+    full chunk, and appending each one to a string and re-sanitising the result
+    made the work quadratic in the length of the line: measured on this
+    function, 2 000 bytes delivered one at a time scanned 2.0 million
+    characters, 4 000 scanned 8.0 million and 8 000 scanned 32.0 million, so a
+    64 KiB unterminated line would have scanned about 2.1 billion. Nothing is
+    emitted out of the staging area, so deferring costs no confidentiality: the
+    fold happens before every boundary that produces output, which is the same
+    set of points as before, and the buffer that reaches sanitation is the same
+    buffer.
+    """
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    #: Sanitised, holding what has not reached a boundary yet. Never contains a
+    #: newline between reads: the loop below consumes every one it can reach.
+    buffer = ""
+    #: Decoded reads not folded into ``buffer`` yet, and their total length.
+    staged: list[str] = []
+    staged_chars = 0
+    dropping = False
+    while True:
+        chunk = await stream.read(_READ_CHUNK)
+        if not chunk:
+            break
+        decoded = decoder.decode(chunk)
+        if not decoded:
+            continue
+        if dropping:
+            # The rest of a run whose marker went out with an earlier fragment.
+            # It has no scheme and no ``//`` of its own, so nothing below would
+            # recognise it a second time; printing it is what the marker was
+            # emitted instead of.
+            #
+            # Joining here is bounded rather than quadratic: a run still being
+            # dropped leaves only the held-back closer behind, so ``buffer`` is
+            # at most two characters and ``staged`` is empty, the fold below
+            # having just cleared it.
+            decoded, dropping = _dropped_run(buffer + "".join(staged) + decoded)
+            buffer = ""
+            staged.clear()
+            staged_chars = 0
+        staged.append(decoded)
+        staged_chars += len(decoded)
+        if "\n" not in decoded and len(buffer) + staged_chars <= _MAX_LINE_CHARS:
+            continue
+        # Sanitised here, on the whole buffer, while a credential is still whole.
+        # Per fragment it would be too late: the cut below is a split point like
+        # any other, and half a URL matches no pattern. Together with the tail
+        # held back, any userinfo shorter than that tail is either redacted
+        # before anything is emitted or still sitting in the buffer when the
+        # rest of it arrives.
+        buffer = _safe_to_print(buffer + "".join(staged))
+        staged.clear()
+        staged_chars = 0
+        while True:
+            end = buffer.find("\n")
+            if 0 <= end <= _MAX_LINE_CHARS:
+                # rstrip here, where the line genuinely ends. A forced fragment
+                # below ends where the cap fell, and trimming there would eat
+                # whitespace the installer wrote.
+                line, buffer = buffer[:end].rstrip(), buffer[end + 1 :]
+                yield line, True
+                continue
+            if len(buffer) <= _MAX_LINE_CHARS:
+                break
+            # Past the cap with no newline in reach: emit a bounded piece and
+            # keep going. Checking the newline first is what a size check alone
+            # got wrong: two reads under the read size could still meet as one
+            # fragment of twice the cap.
+            #
+            # A credential whole in the buffer was redacted above, before any
+            # of this. One whose "@" has not been read yet used to be split by
+            # the cut and print in halves, because a URL cut here loses its
+            # scheme with the near fragment and the query the far one completes
+            # then matches no pattern: a token split across two reads at the cut
+            # printed whole, measured. ``_forced_fragment`` moves the cut off
+            # that run instead. Not to the last space, which would keep tokens
+            # together and split the body's opening marker instead, since that
+            # marker ends in one; the cut goes to where the run itself opens,
+            # which is inside the same token and in front of nothing else.
+            fragment, buffer, dropping = _forced_fragment(buffer, _MAX_LINE_CHARS)
+            yield fragment, False
+    # EOF is the last boundary, so it folds like any other and fragments like
+    # any other too. Sanitation is not only a shortening: an authority it cannot
+    # parse becomes a marker longer than the text it stood for, and 64 KiB of
+    # ``http://[ `` came back as about 109 000 characters, yielded whole.
+    trailing = decoder.decode(b"", final=True)
+    if dropping:
+        trailing, dropping = _dropped_run(buffer + "".join(staged) + trailing)
+        buffer = ""
+        staged.clear()
+    if staged or trailing:
+        buffer = _safe_to_print(buffer + "".join(staged) + trailing)
+    fragmented = False
+    while len(buffer) > _MAX_LINE_CHARS:
+        fragment, buffer, _running = _forced_fragment(buffer, _MAX_LINE_CHARS)
+        yield fragment, False
+        fragmented = True
+    # The remainder ends the physical line even when it is empty, so a consumer
+    # holding elision state sees that line end where the stream did.
+    if buffer or fragmented:
+        yield buffer.rstrip(), True
 
 
 def _write_install_metadata(
@@ -612,13 +3629,18 @@ def _write_install_metadata(
         "patchright_version": _patchright_pkg_version(),
         "installed_targets": installed_targets,
     }
+    profile = _owned(get_profile_dir())
     secure_write_text(
-        install_metadata_path(),
+        auth_root_dir(profile) / _BROWSER_INSTALL_METADATA,
         json.dumps(metadata, indent=2, sort_keys=True) + "\n",
     )
 
 
-async def _run_browser_setup() -> None:
+async def _run_browser_setup(
+    *,
+    line_callback: Callable[[str], None] | None = None,
+    activity_callback: Callable[[], None] | None = None,
+) -> None:
     """Install full Chrome for Testing, in one stage.
 
     The two-stage shell-first arrangement existed to make the headless path
@@ -640,12 +3662,28 @@ async def _run_browser_setup() -> None:
     anywhere user-facing means re-measuring them for the platform in question.
     """
     browser_dir = configure_browser_environment()
-    secure_mkdir(browser_dir)
+    await _run_in_daemon_thread(secure_mkdir, browser_dir)
 
-    await _run_patchright_install("--no-shell")
-    _write_install_metadata(
+    # Timed here, right where the download runs, rather than at the state
+    # reconciliation that flips this to READY: that reconciliation happens on
+    # the next tool or auth call, which can arrive minutes after the install
+    # actually finished, and would report the idle gap as setup time.
+    started = time.monotonic()
+    await _run_patchright_install(
+        "--no-shell",
+        line_callback=line_callback,
+        activity_callback=activity_callback,
+    )
+    await _run_in_daemon_thread(
+        _write_install_metadata,
         browser_dir,
         {_SHELL_DIR_PREFIX: False, _FULL_DIR_PREFIX: True},
+    )
+    # After the metadata, which is what makes the browser count as installed.
+    # Before it, a failing write would follow "setup completed" with a failure.
+    logger.info(
+        "Patchright Chromium browser setup completed in %.0fs",
+        time.monotonic() - started,
     )
     # After the installer, because that is the moment a bump has just added a
     # revision beside the old one and patchright has already had its chance to
@@ -654,11 +3692,14 @@ async def _run_browser_setup() -> None:
     _schedule_retained_browser_revision_report()
 
 
-async def _ensure_browser_installed() -> None:
+async def _ensure_browser_installed(
+    *, line_callback: Callable[[str], None] | None = None
+) -> None:
     """Install the browser on demand. A no-op once it is present."""
+    _owned(get_profile_dir())
     if browser_ready():
         return
-    await _run_browser_setup()
+    await _run_browser_setup(line_callback=line_callback)
 
 
 def ensure_browser_installed() -> None:
@@ -678,16 +3719,25 @@ def ensure_browser_installed() -> None:
     # difference between signing in and not.
     if _uses_custom_chrome():
         return
+    _owned(get_profile_dir())
     if browser_ready():
         _report_retained_browser_revisions()
         return
-    print("   Installing Patchright Chromium browser...")
+    # Through the helper, not ``print``: these three sit on the same stdout the
+    # bar does, so ``--install-browser | head`` reaches them with the pipe
+    # already gone. Measured: a *successful* install then ended in a
+    # ``BrokenPipeError`` traceback, and a failed one raised it in place of the
+    # ``BrowserSetupFailedError`` that says what went wrong. The helper also
+    # carries the encoding fallback, which the cross mark below needs on an
+    # ascii terminal for the same reason.
+    _print_whatever_the_stream_takes("   Installing Patchright Chromium browser...")
     try:
-        asyncio.run(_ensure_browser_installed())
+        with _cli_progress() as report:
+            asyncio.run(_ensure_browser_installed(line_callback=report))
     except Exception as exc:
-        print(f"   ❌ Browser installation failed: {exc}")
+        _print_whatever_the_stream_takes(f"   ❌ Browser installation failed: {exc}")
         raise
-    print("   Browser installed.")
+    _print_whatever_the_stream_takes("   Browser installed.")
 
 
 def _safe_task_done(task: asyncio.Task[None] | None) -> bool:
@@ -699,6 +3749,7 @@ async def _refresh_background_task_state() -> None:
         task = _state.setup_task
         assert task is not None
         _state.setup_task = None
+        _state.setup_check_complete = None
         try:
             task.result()
         except asyncio.CancelledError:
@@ -732,12 +3783,46 @@ async def _refresh_background_task_state() -> None:
             _state.auth_completed_at = utcnow_iso()
 
 
+def _consume_background_setup_failure() -> str | None:
+    if _state.setup_state is not SetupState.FAILED:
+        return None
+    detail = _state.last_error or "Patchright Chromium browser setup failed"
+    stand_down = _state.setup_requires_stand_down
+    # The bound that armed this, not the one that usually does: the lifetime and
+    # the inactivity deadline both stand an owner down, and the log is where
+    # anyone later asks which of them ran out.
+    reason = (
+        _state.setup_stand_down_reason
+        or "managed browser setup exceeded its background deadline"
+    )
+    _state.setup_state = SetupState.IDLE
+    _state.last_error = None
+    _state.setup_requires_stand_down = False
+    _state.setup_stand_down_reason = None
+    if stand_down:
+        ask_this_process_to_stand_down(reason)
+    return detail
+
+
 async def ensure_tool_ready_or_raise(
     tool_name: str, ctx: Context | None = None
 ) -> None:
     """Gate scrape/search tools on browser setup and authentication readiness."""
     initialize_bootstrap()
     await _refresh_background_task_state()
+    detail = _consume_background_setup_failure()
+    if detail is not None:
+        # Surface each completed failure before a later call is allowed to retry.
+        raise BrowserSetupFailedError(detail)
+
+    if process_role() is ServerRole.OWNER and stand_down_reason() is not None:
+        # A deadline failure requests owner replacement before it is consumed. A
+        # queued call can enter during the serving loop's next poll, but starting a
+        # task here would only let lifespan shutdown cancel the promised retry.
+        raise OwnerStandingDownError(
+            "This daemon owner is restarting before it can serve this request. Call "
+            "this tool again so the replacement owner can continue."
+        )
 
     # Before any branch that could reach a browser. A quiescent owner has closed
     # Chromium and is waiting for a client to sign in; every path below would open
@@ -760,15 +3845,9 @@ async def ensure_tool_ready_or_raise(
         await _start_login_if_needed(ctx, superseded_by=current_login_generation())
         return
 
-    if _browser_setup_ready():
-        _state.setup_state = SetupState.READY
-    else:
-        if _state.setup_state == SetupState.READY:
-            invalidate_browser_setup()
-        if _state.setup_state in {SetupState.IDLE, SetupState.FAILED} and (
-            _state.setup_task is None or _state.setup_task.done()
-        ):
-            await start_background_browser_setup_if_needed()
+    await start_background_browser_setup_if_needed()
+    await _refresh_background_task_state()
+    if _state.setup_state is not SetupState.READY:
         if ctx is not None:
             await ctx.report_progress(
                 progress=5,

@@ -2,6 +2,7 @@ import asyncio
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, call
 
@@ -282,33 +283,64 @@ class TestTheRoleAsProcessState:
         still believed it had a terminal.
 
         Driven rather than read: an earlier version of this asserted on the source
-        text of `main`, which stayed green when the call was made unreachable.
-        `configure_logging` is the first thing after the claim, so it serves as a
-        checkpoint to observe the role at and abort from.
+        text of `main`, which stayed green when the call was made unreachable. The
+        child opens its log before taking the lock, so that boundary records the
+        role before its expected startup failure is translated into a verdict.
         """
-        from linkedin_mcp_server import daemon_owner
+        from linkedin_mcp_server import daemon_config, daemon_owner
         from linkedin_mcp_server.config.schema import AppConfig
 
-        class Checkpoint(Exception):
+        class Checkpoint(BaseException):
             pass
 
         seen: list[ServerRole] = []
 
-        def at_checkpoint(**_kwargs):
+        def at_checkpoint(*_args, **_kwargs):
             seen.append(process_role())
             raise Checkpoint
 
-        monkeypatch.setattr(daemon_owner, "_read_config", lambda: AppConfig())
+        monkeypatch.setattr(
+            daemon_owner,
+            "_read_handover",
+            lambda: daemon_config.OwnerHandover(AppConfig(), "0123456789abcdef" * 4),
+        )
         monkeypatch.setattr(daemon_owner, "set_headless", lambda _headless: None)
-        monkeypatch.setattr(daemon_owner, "configure_logging", at_checkpoint)
+        monkeypatch.setattr(daemon_owner, "_attach_daemon_log", at_checkpoint)
+        monkeypatch.setattr(daemon_owner, "_claim_bootstrap_stream", lambda: None)
         monkeypatch.setattr(
             daemon_owner, "_claim_handshake_stream", lambda: MagicMock()
         )
 
-        with pytest.raises(Checkpoint):
-            daemon_owner.main([])
-
+        assert daemon_owner.main([]) == 1
         assert seen == [ServerRole.OWNER]
+
+    def test_the_windows_owner_verifies_membership_before_reading_config(
+        self, monkeypatch
+    ):
+        from linkedin_mcp_server import daemon_owner
+
+        class Checkpoint(BaseException):
+            pass
+
+        events: list[str] = []
+
+        def read_config():
+            assert events == ["verified:named-job"]
+            raise Checkpoint
+
+        monkeypatch.setattr(daemon_owner, "os", SimpleNamespace(name="nt"))
+        monkeypatch.setattr(
+            daemon_owner.WindowsJob,
+            "verify_current_process",
+            lambda name: events.append(f"verified:{name}"),
+        )
+        monkeypatch.setattr(daemon_owner, "_read_handover", read_config)
+        monkeypatch.setattr(
+            daemon_owner, "_claim_handshake_stream", lambda: MagicMock()
+        )
+
+        assert daemon_owner.main(["--job-name", "named-job"]) == 1
+        assert events == ["verified:named-job"]
 
     def test_the_state_is_readable_without_importing_the_server(self):
         # Same reason the enum lives here: `bootstrap` reads this, and `server`
@@ -638,12 +670,93 @@ class TestBrowserLifespan:
         monkeypatch.setattr(server_module, "initialize_bootstrap", MagicMock())
         monkeypatch.setattr(server_module, "get_runtime_policy", MagicMock())
         monkeypatch.setattr(
-            server_module, "start_background_browser_setup_if_needed", AsyncMock()
+            server_module, "report_retained_browser_revisions_if_ready", MagicMock()
         )
+        setup = AsyncMock()
+        monkeypatch.setattr(
+            server_module, "start_background_browser_setup_if_needed", setup
+        )
+        stop_setup = AsyncMock()
+        monkeypatch.setattr(server_module, "stop_background_browser_setup", stop_setup)
         monkeypatch.setattr(server_module, "watch_for_handoff_requests", watcher)
         close_browser = AsyncMock()
         monkeypatch.setattr(server_module, "close_browser", close_browser)
-        return close_browser
+        return close_browser, setup, stop_setup
+
+    async def test_a_direct_server_starts_browser_setup(self, monkeypatch):
+        from linkedin_mcp_server.server import browser_lifespan
+
+        async def watcher():
+            await asyncio.sleep(3600)
+
+        _, setup, stop_setup = self._patched(monkeypatch, watcher)
+
+        async with browser_lifespan(MagicMock()):
+            setup.assert_awaited_once()
+            stop_setup.assert_not_awaited()
+        stop_setup.assert_awaited_once()
+
+    async def test_cancelled_direct_startup_stops_shared_setup(self, monkeypatch):
+        from linkedin_mcp_server.server import browser_lifespan
+
+        started = asyncio.Event()
+
+        async def watcher():
+            pytest.fail("the handoff watcher must not start before setup readiness")
+
+        close_browser, setup, stop_setup = self._patched(monkeypatch, watcher)
+
+        async def blocked_setup() -> None:
+            started.set()
+            await asyncio.Event().wait()
+
+        setup.side_effect = blocked_setup
+        lifespan = browser_lifespan(MagicMock())
+        entering = asyncio.create_task(lifespan.__aenter__())
+        await started.wait()
+        entering.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await entering
+
+        stop_setup.assert_awaited_once()
+        close_browser.assert_awaited_once()
+
+    async def test_an_owner_defers_browser_setup_until_first_use(self, monkeypatch):
+        import linkedin_mcp_server.server as server_module
+        from linkedin_mcp_server.server import browser_lifespan
+        from linkedin_mcp_server.server_role import ServerRole, set_process_role
+
+        async def watcher():
+            await asyncio.sleep(3600)
+
+        _, setup, stop_setup = self._patched(monkeypatch, watcher)
+        set_process_role(ServerRole.OWNER)
+
+        async with browser_lifespan(MagicMock()):
+            setup.assert_not_awaited()
+            stop_setup.assert_not_awaited()
+            getattr(
+                server_module.report_retained_browser_revisions_if_ready,
+                "assert_called_once",
+            )()
+        stop_setup.assert_awaited_once()
+
+    async def test_setup_cleanup_finishes_before_browser_close(self, monkeypatch):
+        from linkedin_mcp_server.server import browser_lifespan
+
+        async def watcher():
+            await asyncio.sleep(3600)
+
+        order: list[str] = []
+        close_browser, _, stop_setup = self._patched(monkeypatch, watcher)
+        stop_setup.side_effect = lambda: order.append("setup")
+        close_browser.side_effect = lambda: order.append("browser")
+
+        async with browser_lifespan(MagicMock()):
+            pass
+
+        assert order == ["setup", "browser"]
 
     async def test_poller_runs_for_the_life_of_the_server(self, monkeypatch):
         from linkedin_mcp_server.server import browser_lifespan
@@ -659,7 +772,7 @@ class TestBrowserLifespan:
                 cancelled.set()
                 raise
 
-        close_browser = self._patched(monkeypatch, watcher)
+        close_browser, _, _ = self._patched(monkeypatch, watcher)
 
         async with browser_lifespan(MagicMock()):
             await asyncio.wait_for(started.wait(), timeout=1)
@@ -682,7 +795,7 @@ class TestBrowserLifespan:
         async def watcher():
             raise RuntimeError("poller crashed")
 
-        close_browser = self._patched(monkeypatch, watcher)
+        close_browser, _, _ = self._patched(monkeypatch, watcher)
 
         async with browser_lifespan(MagicMock()):
             # Let the doomed task reach its exception before teardown.
@@ -706,7 +819,7 @@ class TestBrowserLifespan:
         async def watcher():
             raise Fatal("fatal")
 
-        close_browser = self._patched(monkeypatch, watcher)
+        close_browser, _, _ = self._patched(monkeypatch, watcher)
 
         with pytest.raises(Fatal):
             async with browser_lifespan(MagicMock()):
@@ -735,7 +848,7 @@ class TestBrowserLifespan:
                 await asyncio.sleep(0.5)
                 raise
 
-        close_browser = self._patched(monkeypatch, watcher)
+        close_browser, _, _ = self._patched(monkeypatch, watcher)
 
         async def run_server() -> None:
             # Entered and exited by hand so the cancellation lands *during*
@@ -770,7 +883,7 @@ class TestBrowserLifespan:
         async def watcher():
             await asyncio.sleep(3600)
 
-        close_browser = self._patched(monkeypatch, watcher)
+        close_browser, _, _ = self._patched(monkeypatch, watcher)
 
         with pytest.raises(RuntimeError, match="boom"):
             async with browser_lifespan(MagicMock()):

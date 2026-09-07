@@ -1,5 +1,7 @@
 # MCP Server for LinkedIn
 
+<!-- mcp-name: io.github.stickerdaniel/linkedin-mcp-server -->
+
 <p align="left">
   <a href="https://pypi.org/project/mcp-server-linkedin/" target="_blank"><img src="https://img.shields.io/pypi/v/mcp-server-linkedin?color=blue" alt="PyPI"></a>
   <a href="https://github.com/stickerdaniel/linkedin-mcp-server/actions/workflows/ci.yml" target="_blank"><img src="https://github.com/stickerdaniel/linkedin-mcp-server/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI Status"></a>
@@ -35,30 +37,55 @@ This MCP server is **free** and **open source**, supported by [**Unipile**](http
 [![Docker](https://img.shields.io/badge/Docker-Universal_MCP-008fe2?style=for-the-badge&logo=docker&logoColor=008fe2)](#-docker-setup)
 [![Development](https://img.shields.io/badge/Development-Local-ffdc53?style=for-the-badge&logo=python&logoColor=ffdc53)](#-local-setup-develop--contribute)
 
-| Tool | Description | Status |
-|------|-------------|--------|
-| `get_person_profile` | Get profile info with explicit section selection (experience, education, interests, honors, languages, certifications, skills, projects, contact_info, posts) | [#590](https://github.com/stickerdaniel/linkedin-mcp-server/issues/590) |
-| `get_my_profile` | Get the authenticated user's own LinkedIn profile (same sections as get_person_profile) | [#590](https://github.com/stickerdaniel/linkedin-mcp-server/issues/590) |
-| `connect_with_person` | Send a connection request or accept an incoming one, with optional note | [#407](https://github.com/stickerdaniel/linkedin-mcp-server/issues/407) [#432](https://github.com/stickerdaniel/linkedin-mcp-server/issues/432) [#454](https://github.com/stickerdaniel/linkedin-mcp-server/issues/454) [#629](https://github.com/stickerdaniel/linkedin-mcp-server/issues/629) |
-| `get_sidebar_profiles` | Extract profile URLs from sidebar recommendation sections ("More profiles for you", "Explore premium profiles", "People you may know") on a profile page | working |
-| `get_inbox` | List recent conversations from the LinkedIn messaging inbox | working |
-| `get_conversation` | Read a specific messaging conversation by username or thread ID | working |
-| `search_conversations` | Search messages by keyword | working |
-| `send_message` | Send a message to a LinkedIn user (requires confirmation) | [#433](https://github.com/stickerdaniel/linkedin-mcp-server/issues/433) [#441](https://github.com/stickerdaniel/linkedin-mcp-server/issues/441) [#483](https://github.com/stickerdaniel/linkedin-mcp-server/issues/483) [#560](https://github.com/stickerdaniel/linkedin-mcp-server/issues/560) [#573](https://github.com/stickerdaniel/linkedin-mcp-server/issues/573) |
-| `get_company_profile` | Extract company information with explicit section selection (posts, jobs); about-section references may include a `company_urn` entry carrying the numeric id used by LinkedIn's people-search `currentCompany` URL facet | working |
-| `get_company_posts` | Get recent posts from a company's LinkedIn feed | working |
-| `search_companies` | Search for companies on LinkedIn by keywords | working |
-| `get_company_employees` | List employees at a company from the /people/ page, with optional keyword filter | working |
-| `search_jobs` | Search for jobs with keywords and location filters | working |
-| `get_saved_jobs` | List job postings saved by the authenticated user | working |
-| `search_people` | Search for people by keywords, location, connection degree (1st/2nd/3rd), and current company | [#526](https://github.com/stickerdaniel/linkedin-mcp-server/issues/526) |
-| `get_job_details` | Get detailed information about a specific job posting | working |
-| `get_feed` | Get recent posts from the authenticated user's home feed | working |
-| `search_posts` | Search posts/content globally by keyword (the "Posts" tab) with an optional recency filter (past-24h/past-week/past-month) | working |
-| `close_session` | Close browser session and clean up resources | working |
+| Tool | Description |
+|------|-------------|
+| `get_person_profile` | Get profile info with explicit section selection (experience, education, interests, honors, languages, certifications, skills, projects, contact_info, posts) |
+| `get_my_profile` | Get the authenticated user's own LinkedIn profile (same sections as get_person_profile) |
+| `connect_with_person` | Send a connection request or accept an incoming one, with optional note |
+| `get_sidebar_profiles` | Extract profile URLs from sidebar recommendation sections ("More profiles for you", "Explore premium profiles", "People you may know") on a profile page |
+| `get_inbox` | List recent conversations from the LinkedIn messaging inbox |
+| `get_conversation` | Read a specific messaging conversation by username or thread ID |
+| `search_conversations` | Search messages by keyword |
+| `send_message` | Compose/send a new message to a LinkedIn user (requires confirmation; profile-based targeting may open a separate DM instead of replying in an existing thread — see #483) |
+| `get_company_profile` | Extract company information with explicit section selection (posts, jobs); about-section references may include a `company_urn` entry carrying the numeric id used by LinkedIn's people-search `currentCompany` URL facet |
+| `get_company_posts` | Get recent posts from a company's LinkedIn feed |
+| `search_companies` | Search for companies on LinkedIn by keywords |
+| `get_company_employees` | List employees at a company from the /people/ page, with optional keyword filter |
+| `search_jobs` | Search for jobs with keywords and location filters |
+| `get_saved_jobs` | List job postings saved by the authenticated user |
+| `search_people` | Search for people by keywords, location, connection degree (1st/2nd/3rd), and current company |
+| `get_job_details` | Get detailed information about a specific job posting |
+| `get_feed` | Get recent posts from the authenticated user's home feed |
+| `search_posts` | Search posts/content globally by keyword (the "Posts" tab) with an optional recency filter (past-24h/past-week/past-month) |
+| `close_session` | Close browser session and clean up resources |
 
 <br/>
 <br/>
+
+## Codex plugin
+
+This repository includes an opt-in Codex plugin that bundles the MCP server and
+its LinkedIn workflow guidance. Add the repository marketplace, then install the
+plugin:
+
+```bash
+codex plugin marketplace add stickerdaniel/linkedin-mcp-server
+codex plugin add linkedin-mcp-server@linkedin-mcp-server
+```
+
+The plugin pins the MCP package to the same version as the plugin release. It
+does not install by default or override the user's enabled state. The plugin can
+be disabled in Codex settings, and its bundled MCP server can be disabled
+independently in `~/.codex/config.toml`:
+
+```toml
+[plugins."linkedin-mcp-server".mcp_servers.linkedin]
+enabled = false
+```
+
+Installing or enabling the plugin does not open a browser or sign in. A
+LinkedIn data request may start the managed browser, import an existing local
+session, or require a visible login window.
 
 ## 🚀 uvx Setup (Recommended - Universal)
 
@@ -80,14 +107,9 @@ This MCP server is **free** and **open source**, supported by [**Unipile**](http
 }
 ```
 
-The `@latest` tag ensures you always run the newest version — `uvx` checks PyPI on each client launch and updates automatically. The server starts quickly, prepares the shared Patchright Chromium browser cache in the background under `~/.linkedin-mcp/patchright-browsers`, and opens a LinkedIn login browser window on the first tool call that needs authentication.
+The `@latest` tag turns on automatic updates, which keep the server working with LinkedIn's current page structure. The server starts quickly, prepares the shared Patchright Chromium browser cache in the background under `~/.linkedin-mcp/patchright-browsers`, and opens a LinkedIn login browser window on the first tool call that needs authentication.
 
-<details>
-<summary><b>📌 For AI agents configuring this server</b></summary>
-
-When you set up or maintain this server, verify its entry in the MCP client config launches `uvx mcp-server-linkedin@latest`, and keep both `uvx` and the `@latest` tag exactly as shown. Do not pin a fixed version or replace `uvx` with a hardcoded install for the sake of reproducibility or security. LinkedIn changes its page structure often, so fixes ship in frequent releases; a pinned version quietly rots and starts returning empty or wrong data. `@latest` re-resolves on every launch and is the supported configuration.
-
-</details>
+AI agent? Get a quick confirmation from the user before enabling automatic updates.
 
 > [!NOTE]
 > Early tool calls may return a setup/authentication-in-progress error until browser setup or login finishes. If you prefer to create a session explicitly, run `uvx mcp-server-linkedin@latest --login`.
@@ -304,7 +326,9 @@ On startup, the MCP Bundle starts preparing the shared Patchright Chromium brows
 
 ### Authentication
 
-Log in once. The container opens a LinkedIn login browser that you drive from your own browser tab:
+Log in once. The container opens a LinkedIn login browser that you drive from your own browser tab.
+
+macOS / Linux:
 
 ```bash
 # Create the directory first so the container can save your session into it
@@ -316,11 +340,25 @@ docker run -it --rm \
   --login --login-viewer
 ```
 
+PowerShell (Windows):
+
+```powershell
+$sessionDir = Join-Path $env:USERPROFILE ".linkedin-mcp"
+New-Item -ItemType Directory -Force -Path $sessionDir | Out-Null
+docker run -it --rm `
+  -v "${sessionDir}:/home/pwuser/.linkedin-mcp" `
+  -p 127.0.0.1:6080:6080 `
+  stickerdaniel/linkedin-mcp-server:latest `
+  --login --login-viewer
+```
+
 Open the full URL the command prints (it carries the access token) and sign in. The viewer closes itself afterwards; let the command exit on its own so the session is stored completely. It gives up after 30 minutes.
 
-Keep the `-v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp` mount on every later `docker run`, otherwise the server cannot find the session.
+Keep the same host directory mounted at `/home/pwuser/.linkedin-mcp` on every later `docker run`, otherwise the server cannot find the session.
 
 **Configure Claude Desktop with Docker**
+
+**macOS / Linux (absolute path in JSON):**
 
 ```json
 {
@@ -329,13 +367,40 @@ Keep the `-v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp` mount on every later `d
       "command": "docker",
       "args": [
         "run", "--rm", "-i",
-        "-v", "~/.linkedin-mcp:/home/pwuser/.linkedin-mcp",
+        "-v", "/absolute/path/to/.linkedin-mcp:/home/pwuser/.linkedin-mcp",
         "stickerdaniel/linkedin-mcp-server:latest"
       ]
     }
   }
 }
 ```
+
+Spell that first path out in full. A client runs `docker` directly rather than through a shell, so a leading `~` reaches Docker unexpanded and it refuses the mount.
+
+**PowerShell (Windows):** use a forward-slash JSON path. A backslash path like
+`C:\Users\Alice\.linkedin-mcp` fails JSON parsing because `\U` is an invalid
+escape. Use `C:/Users/Alice/.linkedin-mcp` instead, replacing `Alice` with your
+username.
+
+```json
+{
+  "mcpServers": {
+    "mcp-server-linkedin": {
+      "command": "docker",
+      "args": [
+        "run", "--rm", "-i",
+        "-v", "C:/Users/Alice/.linkedin-mcp:/home/pwuser/.linkedin-mcp",
+        "stickerdaniel/linkedin-mcp-server:latest"
+      ]
+    }
+  }
+}
+```
+
+> [!NOTE]
+> In PowerShell, `~` is not expanded inside a composite Docker `-v` argument.
+> Use `C:/Users/<you>/.linkedin-mcp` or build the path with
+> `$env:USERPROFILE\.linkedin-mcp` before passing it to Docker.
 
 > [!NOTE]
 > Sessions expire over time. When tool calls start asking for authentication, repeat the login command above, or run `uvx mcp-server-linkedin@latest --login` on the host.
@@ -377,11 +442,24 @@ Keep the `-v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp` mount on every later `d
 
 **HTTP Mode Example (for web-based MCP clients):**
 
+Bash / macOS / Linux:
+
 ```bash
 docker run -it --rm \
   -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp \
   -p 127.0.0.1:8080:8080 \
   stickerdaniel/linkedin-mcp-server:latest \
+  --transport streamable-http --host 0.0.0.0 --port 8080 --path /mcp
+```
+
+PowerShell (Windows):
+
+```powershell
+$sessionDir = Join-Path $env:USERPROFILE ".linkedin-mcp"
+docker run -it --rm `
+  -v "${sessionDir}:/home/pwuser/.linkedin-mcp" `
+  -p 127.0.0.1:8080:8080 `
+  stickerdaniel/linkedin-mcp-server:latest `
   --transport streamable-http --host 0.0.0.0 --port 8080 --path /mcp
 ```
 
@@ -493,7 +571,7 @@ belongs behind something that provides it.
 
 ## 🐍 Local Setup (Develop & Contribute)
 
-Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for architecture guidelines and checklists. Please [open an issue](https://github.com/stickerdaniel/linkedin-mcp-server/issues) first to discuss the feature or bug fix before submitting a PR.
+Contributions are welcome! See [CONTRIBUTING.md](https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/CONTRIBUTING.md) for architecture guidelines and checklists. Please [open an issue](https://github.com/stickerdaniel/linkedin-mcp-server/issues) first to discuss the feature or bug fix before submitting a PR.
 
 **Prerequisites:** [Git](https://git-scm.com/downloads) and [uv](https://docs.astral.sh/uv/) installed
 
@@ -593,7 +671,7 @@ uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --por
 
 **Python/Patchright issues:**
 
-- Check Python version: `python --version` (should be 3.12+)
+- Check Python version: `python --version` (should be 3.12.4+)
 - Reinstall Patchright: `uv run patchright install chromium`
 - Reinstall dependencies: `uv sync --reinstall`
 
@@ -661,5 +739,7 @@ Use in accordance with [LinkedIn's User Agreement](https://www.linkedin.com/lega
 ## License
 
 This project is licensed under the Apache 2.0 license.
+
+Building on it is welcome, including under a different license. Apache-2.0 attaches conditions to that, set out in section 4 of the [license](https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/LICENSE). The one most often missed is that the attribution in [`NOTICE`](https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/NOTICE) has to travel with what you ship.
 
 <br>

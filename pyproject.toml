@@ -1,13 +1,23 @@
 [project]
 name = "mcp-server-linkedin"
-version = "4.22.0"
+version = "4.23.3"
 description = "MCP server that gives AI assistants like Claude access to LinkedIn profiles, companies, and job postings through the user's own browser session."
 readme = "README.md"
-requires-python = ">=3.12,<3.15"
+requires-python = ">=3.12.4,<3.15"
 authors = [
     { name = "Daniel Sticker", email = "daniel@sticker.name" }
 ]
 license = "Apache-2.0"
+# Declared rather than left to setuptools' default globs, which happen to cover
+# NOTICE* today. Apache-2.0 §4(d) binds a derivative only to the notices this
+# project actually distributes, so whether the file reaches the wheel is the
+# whole point and not an incidental of the build backend.
+#
+# Measured with `uv build` at 4.23.0: the wheel carries
+# mcp_server_linkedin-4.23.0.dist-info/licenses/NOTICE with a matching
+# `License-File: NOTICE` in METADATA, and the sdist carries NOTICE at its root.
+# Worth re-running when the build backend or its version changes.
+license-files = ["LICENSE", "NOTICE"]
 keywords = [
     "mcp",
     "model-context-protocol",
@@ -30,12 +40,15 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
+    "anyio>=4.13.0",
     "cryptography>=48.0.1",
-    "fastmcp>=3.4.4",
+    "fastmcp>=3.4.4,<4",
     "inquirer>=3.4.0",
     "packaging>=26.2",
     "patchright>=1.55.0",
     "python-dotenv>=1.1.1",
+    "pywin32>=312 ; sys_platform == 'win32'",
+    "rich>=15.0.0",
 ]
 
 [project.urls]

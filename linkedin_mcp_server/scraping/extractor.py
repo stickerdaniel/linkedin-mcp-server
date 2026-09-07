@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+from collections.abc import Iterator
 from dataclasses import dataclass
 import json
 import logging
 import re
+import time
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
 
+import anyio
+import anyio.lowlevel
 from patchright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
+from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.core import (
     detect_auth_barrier,
     detect_auth_barrier_quick,
@@ -28,14 +34,28 @@ from linkedin_mcp_server.debug_trace import record_page_trace
 from linkedin_mcp_server.debug_utils import stabilize_navigation
 from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
 from linkedin_mcp_server.core.utils import (
+    _JOB_CARD_SELECTOR,
+    _RAIL_PICK_JS,
     detect_rate_limit,
     handle_modal_close,
     scroll_job_sidebar,
     scroll_to_bottom,
 )
 from linkedin_mcp_server.scraping.connection import ActionSignals
+from linkedin_mcp_server.scraping.identifiers import (
+    company_page_url,
+    job_view_url,
+    messaging_thread_url,
+    normalize_company_identifier,
+    normalize_job_id,
+    normalize_thread_id,
+    normalize_person_identifier,
+    person_profile_url,
+)
 from linkedin_mcp_server.scraping.link_metadata import (
+    JOB_PATH_RE,
     Reference,
+    _SEARCH_RESULTS_REFERENCE_CAP,
     build_references,
     dedupe_references,
 )
@@ -74,6 +94,100 @@ _RATE_LIMIT_RETRY_DELAY = 5.0
 _RATE_LIMITED_MSG = "[Rate limited] LinkedIn blocked this section. Try again later or request fewer sections."
 
 
+def _reconcile_search_references(
+    references: list[Reference], ids: list[str]
+) -> list[Reference]:
+    """Align one page's references with the job ids read from its rail.
+
+    References come from the whole `<main>`, which also holds the detail pane;
+    ids come from the selected results rail. The rail therefore decides which
+    jobs exist, while the DOM references supply richer labels when available.
+    Non-job references share the search-results cap's remaining allowance.
+    """
+    ordered_ids = list(dict.fromkeys(ids))
+    kept_ids = set(ordered_ids)
+    emitted_ids: set[str] = set()
+    ancillary_left = max(0, _SEARCH_RESULTS_REFERENCE_CAP - len(ordered_ids))
+    out: list[Reference] = []
+
+    for ref in references:
+        if ref.get("kind") == "job":
+            match = JOB_PATH_RE.match(str(ref.get("url", "")))
+            if match is None:
+                continue
+            job_id = match.group(1)
+            if job_id not in kept_ids or job_id in emitted_ids:
+                continue
+            out.append(ref)
+            emitted_ids.add(job_id)
+            continue
+
+        if ancillary_left:
+            out.append(ref)
+            ancillary_left -= 1
+
+    for job_id in ordered_ids:
+        if job_id not in emitted_ids:
+            out.append({"kind": "job", "url": f"/jobs/view/{job_id}/"})
+
+    return out
+
+
+def lost_keywords_section_error(asked: str, landed: str) -> dict[str, str]:
+    """The ``section_errors`` entry for a search that is not the one asked for.
+
+    Both values are named, because the one shape this cannot rule out is
+    LinkedIn re-encoding a query rather than changing it. `parse_qs` folds
+    `%20` and `+` together, so ordinary spacing differences are already gone
+    by the time they are compared; an unencoded `C++` read back as `C` and
+    two spaces is the measured exception, and naming both sides is what makes
+    that diagnosable from the response instead of from a debugger.
+    """
+    return {
+        "error_type": "search_replaced",
+        "error_message": (
+            f"LinkedIn answered a search for {landed!r} where {asked!r} was "
+            "asked for, so the results are about something else."
+        ),
+    }
+
+
+def dropped_offset_section_error(offset: int, landed: str) -> dict[str, str]:
+    """The ``section_errors`` entry for a list that cannot be paged further.
+
+    LinkedIn dropping the offset serves the first page again, so the loop
+    stops there. Stopping quietly is also what an exhausted list does, and the
+    caller cannot tell the two apart: it reads a short list as the whole list
+    and never asks again. Being told is what lets a client decide.
+    """
+    return {
+        "error_type": "pagination_stopped",
+        "error_message": (
+            f"LinkedIn did not keep offset {offset} (landed on {landed}), "
+            "so the list stops at the results already read."
+        ),
+    }
+
+
+def dropped_filters_section_error(names: list[str], landed: str) -> dict[str, str]:
+    """The ``section_errors`` entry for filters LinkedIn did not keep.
+
+    Reported rather than raised, and the results kept: they are broader than
+    the caller asked for and still about the same keywords, so a location or
+    a work type LinkedIn dropped costs relevance rather than correctness.
+    Saying nothing is what cannot be defended, since a search for remote
+    Python in Berlin then returns Python anywhere and reads as though Berlin
+    had none.
+    """
+    return {
+        "error_type": "filters_dropped",
+        "error_message": (
+            f"LinkedIn did not keep {', '.join(names)} (landed on {landed}), "
+            "so the results are broader than the search asked for."
+        ),
+    }
+
+
 def rate_limited_section_error() -> dict[str, str]:
     """The ``section_errors`` entry for a section that came back empty.
 
@@ -94,10 +208,157 @@ def rate_limited_section_error() -> dict[str, str]:
     }
 
 
-# LinkedIn shows 25 results per page
-_PAGE_SIZE = 25
+# LinkedIn's offset stride in the search URL. It is NOT how many cards a
+# page renders: a live search served 11 per navigation while advertising 25
+# per page, so paging by this number skipped 13 of every 24 jobs. Only the
+# "are we past the last page" check may use it.
+_RESULTS_PER_LINKEDIN_PAGE = 25
+
+# The id is the trailing run of digits, and LinkedIn serves the same job under
+# both `/jobs/view/1967281839/` and `/jobs/view/<title>-at-<company>-1967281839/`.
+# Anchoring the digits to the front of the segment loses the slugged form
+# entirely, and reads `2026` out of a title that opens with a year.
+#
+# The slug is anything but a separator, not `[\w-]`: JS `\w` is ASCII, and a
+# localized title reaches this as `d%C3%A9veloppeur-web-at-koul-3510216552`,
+# where the `%` ends the match and the id is lost. Measured on the guest
+# search API for `developpeur`, where 6 of 10 hrefs were percent-encoded.
+# The authenticated pages this server visits serve bare ids today (measured
+# across job search, collections and a French search: 0 slugs in 27 anchors),
+# so this branch is defensive on both counts.
+# `scoped` runs the sidebar's own rule again and reads only the container it
+# names, because everything outside it is not a search result: the detail pane
+# holds its own permalink and, once opened, a similar-jobs module, and counting
+# those as rendered results advances the offset past results the rail never
+# showed. Re-run rather than remembered, so a rail replaced between the scroll
+# and this call is followed instead of silently widening the scope back to the
+# document. `get_saved_jobs` reads the document, having no sidebar to scroll
+# and no second list to be confused with.
+_JOB_IDS_JS = (
+    r"""(opts) => {
+    const {selector, scoped} = opts;
+"""
+    + _RAIL_PICK_JS
+    + r"""
+    const picked = scoped ? pickRail() : null;
+    const scope = picked || document;
+    const cards = scope.querySelectorAll(selector);
+    const seen = new Set();
+    const ids = [];
+    for (const card of cards) {
+        // `idOf` from the rail rule above, rather than a second copy of the
+        // pattern: the rail is picked by counting ids, so a card shape one
+        // side understands and the other does not would have extraction read
+        // a container the pick never considered.
+        const id = idOf(card);
+        if (id && !seen.has(id)) {
+            seen.add(id);
+            ids.push(id);
+        }
+    }
+    return {ids: ids, scoped: Boolean(picked)};
+}"""
+)
+
+# The routes a job search may legitimately end on. `/jobs/search` is what the
+# URL builder produces; `/jobs/search-results` is where LinkedIn's redesigned
+# experience redirects it. Compared as parsed paths rather than as a prefix,
+# because `/jobs/search?keywords=x` is the same route and puts a `?` where a
+# prefix test wants the slash.
+_JOB_SEARCH_PATHS = frozenset({"/jobs/search", "/jobs/search-results"})
+
+# How long to let `page.url` catch up with a navigation the sidebar scroll
+# suppressed. The lag itself measured 6ms across ten runs, min and max alike;
+# the rest of the budget is for a redirect chain that is still hopping. Only a
+# page that already looks wrong pays it, so the ceiling costs a healthy
+# ten-page search nothing and a broken one 25s of its 180s tool timeout.
+_URL_SETTLE_TIMEOUT = 2.5
+_URL_SETTLE_POLL = 0.01
+# How long the route has to hold still before it counts as the destination. A
+# redirect chain hops through intermediate documents, and judging one of those
+# calls a checkpoint healthy, or a healthy page a checkpoint.
+_URL_SETTLE_QUIET = 0.5
+# How long a navigation has to announce itself before the page counts as
+# going nowhere. Measured across 300 evaluations destroyed by a navigation:
+# 0.37ms at worst idle, 0.81ms at the 99th percentile with twenty-four
+# workers saturating the machine. Paid in full only by a failure with no
+# navigation behind it, and by a page that only rewrote its own address.
+#
+# It is also the whole window: a redirect committing later than this after
+# the scroll returns is not seen here, and falls to the route comparison at
+# the end, which a reload leaves nothing for. Three hundred times the
+# measured announcement is the trade, the other side of it being the wait
+# every ordinary DOM failure pays before it can report itself.
+_URL_SETTLE_LAG = 0.3
+# How long the replacement document gets to reach `domcontentloaded`. It
+# renders after it commits, and an account picker was measured 200ms behind
+# its own navigation, so a page judged on arrival is judged empty.
+_DOCUMENT_READY_TIMEOUT = 5.0
+
+
+def _route(target: str) -> tuple[str, str]:
+    """Host and path, which is what identifies a LinkedIn page.
+
+    Not the whole URL: LinkedIn appends `currentJobId` to the query of a
+    search page by itself, measured across three live searches where neither
+    the path nor the rest of the query moved. The host has to come along, or
+    a redirect that keeps the path reads as no redirect at all.
+    """
+    parsed = urlparse(target)
+    return parsed.netloc, parsed.path.rstrip("/")
+
+
+def _same_job_search(before: tuple[str, str], after: tuple[str, str]) -> bool:
+    """Whether a route change is LinkedIn moving a search to its redesign.
+
+    `/jobs/search/` 302s to `/jobs/search-results/` for accounts on the new
+    experience. The destination is the same search: it keeps the keywords,
+    honours `start`, and renders the same results, so treating the hop as a
+    page replacement ended every such search on its first page.
+
+    Only between those two, and only on one host. The point of the comparison
+    around it is that a search which ends up somewhere else is not a search,
+    and an account picker served in place of one moves the route exactly like
+    this redirect does.
+    """
+    return (
+        before[0] == after[0]
+        and before[1] in _JOB_SEARCH_PATHS
+        and after[1] in _JOB_SEARCH_PATHS
+    )
+
+
+# Scrolling is bounded per navigation and across a whole search, because
+# max_pages reaches 10 and tool_timeout_seconds defaults to 180.
+_SCROLL_DEADLINE_MAX = 12.0
+_SCROLL_BUDGET_TOTAL = 60.0
+
+# A cancelled tool returns nothing, so the search stops itself while there is
+# still time to hand back what it has. Measured: ten navigations of a Paris
+# developer search take 83s in total, 6.5s each, so this leaves the normal case
+# untouched and only catches a run that is genuinely running out.
+#
+# This predicts, it does not guarantee. Only the decision to *start* a page is
+# bounded; once started, a page runs to its own timeouts, and `goto` alone
+# allows 30s. The reserve is what covers that gap, and it has three claims on
+# it: the extraction and assembly after the last navigation, a page slower than
+# every page before it, and the browser startup inside `get_ready_extractor`,
+# which FastMCP is already timing before this budget begins. A page that
+# overruns the reserve is still cancelled and still loses every page gathered.
+# Bounding that too means handing the remaining budget down into navigation
+# and the rate-limit retry; see #754 rather than the margin. Scrolling is
+# already handed a deadline, so it takes what is left of this budget when
+# that is less than its own cap.
+#
+# The timeout arrives as an argument because `get_config()` parses `sys.argv`
+# on its first call, and a scraping path is the wrong place to discover that.
+_SEARCH_TIMEOUT_FRACTION = 0.8
 
 _SAVED_JOBS_URL = "https://www.linkedin.com/my-items/saved-jobs/"
+# Where a saved-jobs navigation may legitimately end. LinkedIn redirects the
+# first to the second and drops the query doing so, so the tool navigates to
+# one and arrives at the other.
+_SAVED_JOBS_PATHS = frozenset({"/my-items/saved-jobs", "/jobs-tracker"})
 
 # The my-items lists page in 10s, unlike job search. Verified live: ?start=10
 # returns the 11th saved job, while ?start=25 lands past the end of a two-page
@@ -573,19 +834,52 @@ async def _drain_listener_tasks(pending: list[asyncio.Task[None]]) -> None:
     """
     if not pending:
         return
-    _done, leftover = await asyncio.wait(pending, timeout=2.0)
-    for task in leftover:
-        task.cancel()
     try:
-        await asyncio.wait_for(
-            asyncio.gather(*pending, return_exceptions=True),
-            timeout=1.0,
-        )
-    except asyncio.TimeoutError:
-        logger.warning(
-            "SDUI feed listener tasks did not drain after cancel; leaking %d task(s)",
-            sum(1 for t in pending if not t.done()),
-        )
+        await asyncio.wait(pending, timeout=2.0)
+    finally:
+        # Cancel on *every* exit of that wait, the caller's own cancellation
+        # included. The response listener is unsubscribed before we get here,
+        # so no one else will ever ask these reads to stop; returning through
+        # the cancelled path without asking left a real ``resp.body()``
+        # running with no cancellation requested at all.
+        for task in pending:
+            if not task.done():
+                task.cancel()
+        # FastMCP wraps each tool call in ``anyio.fail_after``, whose scope
+        # re-delivers its cancellation on every loop iteration until the task
+        # leaves it. Unshielded, the wait below would be cancelled before the
+        # reads it watches can act on the cancel above, which is the case the
+        # budget exists for. The shield covers a bounded wait only, and the
+        # outer cancellation resumes as soon as the scope closes.
+        with anyio.CancelScope(shield=True):
+            try:
+                await asyncio.wait(pending, timeout=1.0)
+            finally:
+                # A shield only holds off AnyIO's own delivery, so a second
+                # plain ``Task.cancel()`` still cuts that wait short. Read
+                # and report the reads as they actually stand, or a failure
+                # that arrived before the cancel is left for the loop to
+                # report and a task still running is left unmentioned.
+                leftover = [task for task in pending if not task.done()]
+                for task in pending:
+                    if task.done() and not task.cancelled():
+                        # Consume the failure; unretrieved, it reaches the
+                        # loop's handler long after the feed call returned.
+                        task.exception()
+                if leftover:
+                    logger.warning(
+                        "SDUI feed listener tasks did not drain after cancel; leaking %d task(s)",
+                        len(leftover),
+                    )
+    # A deadline that first comes due inside the shield has nowhere to land:
+    # AnyIO skips a shielded scope while delivering, and the restart on the
+    # way out runs in this very task, so it can only schedule delivery for the
+    # next turn. get_feed's next step is report_progress, which never suspends
+    # when the client sent no progress token, and the expired call would then
+    # return a result. This unshielded checkpoint is that next turn. It is
+    # outside the block above so that a cancellation already on its way keeps
+    # propagating without waiting on anything.
+    await anyio.lowlevel.checkpoint()
 
 
 class FilterValidationError(ValueError):
@@ -744,6 +1038,9 @@ class LinkedInExtractor:
 
     def __init__(self, page: Page):
         self._page = page
+        # What the sidebar scroll spent on the page being read, so that a
+        # multi-page search charges its scroll budget for scrolling alone.
+        self._scroll_seconds = 0.0
 
     @staticmethod
     def _normalize_body_marker(value: Any) -> str:
@@ -1737,6 +2034,7 @@ class LinkedInExtractor:
         max_scrolls: int | None = None,
         *,
         main_profile_already_loaded: bool = False,
+        allow_self_alias: bool = False,
     ) -> dict[str, Any]:
         """Scrape a person profile with configurable sections.
 
@@ -1751,7 +2049,10 @@ class LinkedInExtractor:
             {url, sections: {name: text}, profile_urn?: str}
         """
         requested = requested | {"main_profile"}
-        base_url = f"https://www.linkedin.com/in/{username}"
+        username = normalize_person_identifier(
+            username, allow_self_alias=allow_self_alias
+        )
+        base_url = person_profile_url(username)
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}
         section_errors: dict[str, dict[str, Any]] = {}
@@ -1779,7 +2080,7 @@ class LinkedInExtractor:
                         section_name == "main_profile"
                         and main_profile_already_loaded
                         and urlparse(self._page.url).path.rstrip("/")
-                        == f"/in/{username}"
+                        == urlparse(base_url).path.rstrip("/")
                     )
                     if can_reuse_main:
                         extracted = await self._extract_loaded_section(
@@ -1902,6 +2203,10 @@ class LinkedInExtractor:
             callbacks=callbacks,
             max_scrolls=max_scrolls,
             main_profile_already_loaded=True,
+            # The redirect is what resolves the alias. When it has not, this is
+            # still the tool the user asked for, so "me" stays usable here and
+            # nowhere else.
+            allow_self_alias=True,
         )
 
     async def _read_action_signals(self, username: str) -> ActionSignals:
@@ -2134,7 +2439,8 @@ class LinkedInExtractor:
         """
         from linkedin_mcp_server.scraping.connection import detect_connection_state
 
-        url = f"https://www.linkedin.com/in/{username}/"
+        username = normalize_person_identifier(username)
+        url = person_profile_url(username, "/")
 
         profile = await self.scrape_person(username, {"main_profile"})
         page_text = profile.get("sections", {}).get("main_profile", "")
@@ -2348,7 +2654,8 @@ class LinkedInExtractor:
             Dict with url and sidebar_profiles mapping section key to list of
             /in/username/ paths. Sections absent from the page are omitted.
         """
-        url = f"https://www.linkedin.com/in/{username}/"
+        username = normalize_person_identifier(username)
+        url = person_profile_url(username, "/")
         await self._navigate_to_page(url)
         await detect_rate_limit(self._page)
 
@@ -2445,6 +2752,8 @@ class LinkedInExtractor:
 
             try:
                 await self._navigate_to_page(show_all_url)
+            except LinkedInScraperException:
+                raise
             except Exception:
                 logger.debug(
                     "Failed to navigate to Show all for section %s: %s",
@@ -2858,7 +3167,8 @@ class LinkedInExtractor:
         if index < 0:
             raise LinkedInScraperException(f"index must be non-negative (got {index}).")
 
-        profile_url = f"https://www.linkedin.com/in/{linkedin_username}/"
+        linkedin_username = normalize_person_identifier(linkedin_username)
+        profile_url = person_profile_url(linkedin_username, "/")
         await self._navigate_to_page(profile_url)
         await detect_rate_limit(self._page)
 
@@ -2904,7 +3214,8 @@ class LinkedInExtractor:
             {url, sections: {name: text}}
         """
         requested = requested | {"about"}
-        base_url = f"https://www.linkedin.com/company/{company_name}"
+        company_name = normalize_company_identifier(company_name)
+        base_url = company_page_url(company_name)
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}
         section_errors: dict[str, dict[str, Any]] = {}
@@ -2995,7 +3306,8 @@ class LinkedInExtractor:
         Returns:
             {url, sections: {employees: text}, references: {employees: [...]}}
         """
-        url = f"https://www.linkedin.com/company/{company_name}/people/"
+        company_name = normalize_company_identifier(company_name)
+        url = company_page_url(company_name, "/people/")
         if keywords:
             url += f"?keywords={quote_plus(keywords)}"
         extracted = await self.extract_page(url, section_name="employees")
@@ -3028,7 +3340,8 @@ class LinkedInExtractor:
         Returns:
             {url, sections: {name: text}}
         """
-        url = f"https://www.linkedin.com/jobs/view/{job_id}/"
+        job_id = normalize_job_id(job_id)
+        url = job_view_url(job_id, "/")
         extracted = await self.extract_page(url, section_name="job_posting")
 
         sections: dict[str, str] = {}
@@ -3053,32 +3366,159 @@ class LinkedInExtractor:
             result["section_errors"] = section_errors
         return result
 
-    async def _extract_job_ids(self) -> list[str]:
+    @contextlib.contextmanager
+    def _watching_navigations(self) -> Iterator[list[str]]:
+        """Record main-frame navigations for the duration of the block.
+
+        The address is not the signal. A reload replaces the document and
+        leaves `page.url` exactly as it was, so a check that samples the URL
+        calls the replacement the same page and reads whatever it renders. The
+        browser says so directly, and this is the same listener
+        `_goto_with_auth_checks` uses.
+        """
+        hops: list[str] = []
+
+        def record(frame: Any) -> None:
+            if frame == self._page.main_frame:
+                hops.append(self._page.url)
+
+        self._page.on("framenavigated", record)
+        try:
+            yield hops
+        finally:
+            try:
+                self._page.remove_listener("framenavigated", record)
+            except Exception:
+                logger.debug("Could not remove navigation listener", exc_info=True)
+
+    async def _document_origin(self) -> float | None:
+        """A reading that is fixed when the document is created.
+
+        `framenavigated` fires for a same-document history change as readily
+        as for a replacement, and LinkedIn appends `currentJobId` to a search
+        URL that way by itself: measured locally, `pushState`, `replaceState`
+        and a bare hash change each raise the event on the main frame. Acting
+        on the event alone would make every healthy search page wait out a
+        chain that never ran.
+
+        `performance.timeOrigin` separates them, and separates them without
+        writing anything into the page. Measured against the same four
+        changes: identical across all three same-document ones, different
+        after a reload and after a navigation elsewhere.
+
+        `None` when the reading cannot be taken, which is what a context
+        destroyed by a navigation in flight looks like from here.
+        """
+        try:
+            origin = await self._page.evaluate("() => performance.timeOrigin")
+        except Exception:
+            return None
+        return origin if isinstance(origin, (int, float)) else None
+
+    async def _settle_navigation(self, hops: list[str], origin: float | None) -> bool:
+        """Wait out a navigation the page is in the middle of.
+
+        Returns whether one happened at all.
+
+        Three waits, and each answers a question the one before it cannot.
+
+        Whether the page navigated is answered by the listener and the
+        document identity together, the listener firing for a reload as well
+        as for a redirect. It is dispatched over the
+        channel that also updates `page.url`, so it arrives at the same moment
+        the address would have: measured across 300 destroyed evaluations,
+        0.37ms at worst on an idle machine and 0.81ms with twenty-four workers
+        saturating it. `_URL_SETTLE_LAG` is three hundred times that, and an
+        ordinary failure with nothing behind it pays exactly that and no more.
+
+        The listener overreports, so `_document_origin` decides which hop
+        counts: a page rewriting its own address raises the same event and
+        leaves nothing to settle.
+
+        Where it stopped is answered by the hops falling quiet. Counting them
+        rather than comparing addresses, or a chain that returns to the route
+        it started on reads as one that never left.
+
+        What the destination holds is answered by the document being ready. A
+        replacement renders after it commits, and the account picker measured
+        200ms behind its own navigation; judging that page on arrival calls a
+        barrier a loading screen.
+        """
+        # A hop says something moved, not that the document was replaced, so
+        # the wait is for a replacement and not for an event. Leaving on the
+        # first same-document hop is what a page rewriting its own address
+        # would buy, and it costs the redirect arriving right behind it: the
+        # search page announces `currentJobId` the moment a card is selected,
+        # and a checkpoint committing fifty milliseconds later would then be
+        # judged by a route comparison that has not been told yet.
+        #
+        # Each hop is read at most once, so a healthy page pays one evaluate
+        # and the wait, and only a page that keeps moving pays more.
+        lag_deadline = time.monotonic() + _URL_SETTLE_LAG
+        judged = 0
+        replaced = False
+        while time.monotonic() < lag_deadline:
+            if len(hops) > judged:
+                judged = len(hops)
+                if origin is None or await self._document_origin() != origin:
+                    replaced = True
+                    break
+            await asyncio.sleep(_URL_SETTLE_POLL)
+        if not replaced:
+            if hops:
+                logger.debug("Same document after %d history change(s)", len(hops))
+            return False
+
+        deadline = time.monotonic() + _URL_SETTLE_TIMEOUT
+        seen = len(hops)
+        quiet_since = time.monotonic()
+        while time.monotonic() < deadline:
+            await asyncio.sleep(_URL_SETTLE_POLL)
+            if len(hops) != seen:
+                seen = len(hops)
+                quiet_since = time.monotonic()
+            elif time.monotonic() - quiet_since >= _URL_SETTLE_QUIET:
+                break
+
+        try:
+            await self._page.wait_for_load_state(
+                "domcontentloaded", timeout=_DOCUMENT_READY_TIMEOUT * 1000
+            )
+        except Exception:
+            logger.debug("Replacement document was not ready in time", exc_info=True)
+        return True
+
+    async def _extract_job_ids(self, *, scoped: bool = False) -> list[str]:
         """Extract unique job IDs from job card links on the current page.
 
         Finds all `a[href*="/jobs/view/"]` links and extracts the numeric
         job ID from each href. Returns deduplicated IDs in DOM order.
+
+        Args:
+            scoped: Read only the results rail, chosen by the same rule the
+                sidebar scroll uses. Off for lists that have no rail.
         """
-        return await self._page.evaluate(
-            """() => {
-                const links = document.querySelectorAll('a[href*="/jobs/view/"]');
-                const seen = new Set();
-                const ids = [];
-                for (const a of links) {
-                    const match = a.href.match(/\\/jobs\\/view\\/(\\d+)/);
-                    if (match && !seen.has(match[1])) {
-                        seen.add(match[1]);
-                        ids.push(match[1]);
-                    }
-                }
-                return ids;
-            }"""
+        result = await self._page.evaluate(
+            _JOB_IDS_JS, {"selector": _JOB_CARD_SELECTOR, "scoped": scoped}
         )
+        if scoped and not result["scoped"]:
+            # The whole document, because a page with nothing scrollable
+            # rendered everything it has and returning no ids at all would
+            # lose the results along with the detail pane's links. Said out
+            # loud, because it is the one path where the offset can count
+            # something the rail never showed, and it has not been observed:
+            # live a search page has two scrollable candidates.
+            logger.warning(
+                "No results rail on %s, reading job ids from the whole document",
+                self._page.url,
+            )
+        return result["ids"]
 
     async def _extract_search_page(
         self,
         url: str,
         section_name: str,
+        scroll_deadline: float = _SCROLL_DEADLINE_MAX,
     ) -> ExtractedSection:
         """Extract innerText from a job search page with soft rate-limit retry.
 
@@ -3087,7 +3527,9 @@ class LinkedInExtractor:
         ``_RATE_LIMITED_MSG`` sentinel instead of silent empty results.
         """
         try:
-            result = await self._extract_search_page_once(url, section_name)
+            result = await self._extract_search_page_once(
+                url, section_name, scroll_deadline
+            )
             if result.text != _RATE_LIMITED_MSG:
                 return result
 
@@ -3097,7 +3539,9 @@ class LinkedInExtractor:
                 _RATE_LIMIT_RETRY_DELAY,
             )
             await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
-            result = await self._extract_search_page_once(url, section_name)
+            result = await self._extract_search_page_once(
+                url, section_name, scroll_deadline / 2
+            )
             if result.text == _RATE_LIMITED_MSG:
                 logger.warning("Search page %s still rate-limited after retry", url)
             return result
@@ -3121,10 +3565,16 @@ class LinkedInExtractor:
         self,
         url: str,
         section_name: str,
+        scroll_deadline: float = _SCROLL_DEADLINE_MAX,
     ) -> ExtractedSection:
         """Single attempt to navigate, scroll sidebar, and extract innerText."""
         await self._navigate_to_page(url)
         await detect_rate_limit(self._page)
+        # Above the selector wait and the modal close, so the window this
+        # opens covers everything read from here on. Taken between them, a
+        # reload committing during either one became the baseline itself, and
+        # `main_found` then described a document that no longer existed.
+        origin = await self._document_origin()
 
         main_found = True
         try:
@@ -3134,10 +3584,85 @@ class LinkedInExtractor:
             main_found = False
 
         await handle_modal_close(self._page)
-        if main_found:
-            await scroll_job_sidebar(self._page, pause_time=0.5, max_scrolls=5)
+
+        # `scroll_job_sidebar` swallows whatever its evaluate raises, so that a
+        # rail replaced mid-flight does not cost the caller the page it is
+        # about to read. A navigation destroys that context the same way and is
+        # not the same thing: what waits to be read is then an authwall or a
+        # checkpoint, and extracting it returns login text under
+        # `search_results` with nothing beside it to say so.
+        #
+        # The route is compared as well as watched, because a redirect can
+        # finish before the listener is registered. Host and path, and not the
+        # whole URL, because LinkedIn appends `currentJobId` to the query of a
+        # search page by itself. Measured across three live searches: the path
+        # never moved, and neither did the query. The host has to come along,
+        # or a redirect that keeps the path reads as no redirect at all.
+        #
+        # Against the URL that was asked for, and not the one the page held
+        # after navigating, or a redirect finishing before the scroll becomes
+        # its own baseline and passes. Outside the `main_found` branch for the
+        # same reason: a landing page with no `<main>` extracts to nothing, and
+        # an empty section is what an exhausted search looks like.
+        before = _route(url)
+        moved = False
+        navigated = False
+        with self._watching_navigations() as hops:
+            if main_found:
+                scroll_started = time.monotonic()
+                try:
+                    moved = await scroll_job_sidebar(
+                        self._page, deadline=scroll_deadline
+                    )
+                finally:
+                    # Only what the scroll spent. Charging the whole page
+                    # charged navigation and extraction to a budget that
+                    # exists to bound scrolling, so five slow navigations that
+                    # scrolled instantly still left the pages behind them with
+                    # nothing. Accumulated, because a retry scrolls a second
+                    # time.
+                    self._scroll_seconds += time.monotonic() - scroll_started
+            # `hops` is read and not waited on, so a healthy page pays
+            # nothing for it. It is what a scroll that finished cleanly leaves
+            # behind when the document was replaced anyway: the scroll never
+            # raised, so it reports no movement, and a reload moves no route,
+            # so neither of the other two says anything happened.
+            if moved or hops or before != _route(self._page.url):
+                navigated = await self._settle_navigation(hops, origin)
+
+        after = _route(self._page.url)
+        if navigated or moved or not main_found or before != after:
+            # Any of the three is enough, and none implies the others. A reload
+            # keeps the address, so an account picker served in place of the
+            # search page changes nothing the comparison below can see; a
+            # redirect that completed during the navigation moves the route
+            # without the scroll ever raising; and a barrier page carries no
+            # `<main>`, so the scroll it would have raised from never ran.
+            # That third one is the shape this check exists for and the one it
+            # missed: an exhausted search renders no `<main>` either, which is
+            # why the check has to decide it rather than the absence alone.
+            await self._raise_if_auth_barrier(url)
+        if before != after and not _same_job_search(before, after):
+            # An expired session lands here as often as a layout change does,
+            # and the two need different answers. A plain error is caught by
+            # the generic handler above and returned as a section diagnostic,
+            # so the browser stays registered and no re-login is offered; the
+            # caller then repeats the search against the same barrier.
+            raise RuntimeError(
+                f"Page navigated to {self._page.url} while scrolling {url}"
+            )
 
         raw_result = await self._extract_root_content(["main"])
+
+        # The watcher covers the scroll and nothing else, and the read sits
+        # outside it at both ends: a reload committing after the listener came
+        # off, or during the extraction itself, moves no route and raises
+        # nothing. The document says what neither the address nor the listener
+        # can, and it is asked about the text that was actually read.
+        if origin is not None and await self._document_origin() != origin:
+            logger.debug("The search document was replaced before it was read")
+            await self._raise_if_auth_barrier(url)
+
         raw = raw_result["text"]
         if raw_result["source"] == "body":
             logger.debug("No <main> at evaluation time on %s, using body fallback", url)
@@ -3159,7 +3684,9 @@ class LinkedInExtractor:
         cleaned = _filter_linkedin_noise_lines(truncated)
         return ExtractedSection(
             text=cleaned,
-            references=build_references(raw_result["references"], section_name),
+            references=build_references(
+                raw_result["references"], section_name, apply_cap=False
+            ),
         )
 
     async def _get_total_search_pages(self) -> int | None:
@@ -3235,6 +3762,7 @@ class LinkedInExtractor:
         work_type: str | None = None,
         easy_apply: bool = False,
         sort_by: str | None = None,
+        tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS,
     ) -> dict[str, Any]:
         """Search for jobs with pagination and job ID extraction.
 
@@ -3271,38 +3799,217 @@ class LinkedInExtractor:
         page_texts: list[str] = []
         page_references: list[Reference] = []
         section_errors: dict[str, dict[str, Any]] = {}
+        # Kept beside the errors rather than in them. A filter LinkedIn
+        # dropped describes the results that came back, and those stay in the
+        # response whatever stops the loop later, so a rate limit on page two
+        # used to hide that page one had been unfiltered all along.
+        filters_warning: dict[str, str] | None = None
         total_pages: int | None = None
         total_pages_queried = False
 
+        # The search-wide scroll budget is spent as it goes rather than
+        # divided up front, because dividing it charges every navigation for
+        # navigations that may never run. At max_pages=10 each page got 6s,
+        # and a first card that takes 4.5s leaves no room for the batch behind
+        # it, so asking for more pages returned fewer jobs than asking for
+        # three. Each page now takes the per-page cap or what is left,
+        # whichever is smaller, and the total is the same 60s.
+        scroll_budget_left = _SCROLL_BUDGET_TOTAL
+        self._scroll_seconds = 0.0
+        # The offset follows what the pages actually rendered. LinkedIn's own
+        # stride would skip every result it renders beyond it.
+        offset = 0
+
+        # The next navigation is costed from the slowest one so far rather than
+        # a constant: the real figure is 6.5s and the `goto` timeout alone is
+        # 30s, so a fixed guess is wrong in both directions.
+        started = time.monotonic()
+        budget = tool_timeout * _SEARCH_TIMEOUT_FRACTION
+        slowest_page = 0.0
+
         for page_num in range(max_pages):
-            # Stop if we already know we've reached the last page
-            if total_pages is not None and page_num >= total_pages:
-                logger.debug("All %d pages fetched, stopping", total_pages)
+            # Stop once the offset is past the last advertised result
+            if (
+                total_pages is not None
+                and offset >= total_pages * _RESULTS_PER_LINKEDIN_PAGE
+            ):
+                logger.debug(
+                    "Offset %d is past the %d advertised pages, stopping",
+                    offset,
+                    total_pages,
+                )
+                break
+
+            elapsed = time.monotonic() - started
+            if page_num > 0 and elapsed + _NAV_DELAY + slowest_page > budget:
+                logger.debug(
+                    "Stopping after %d pages: %.1fs spent, another page costs "
+                    "up to %.1fs and the budget is %.1fs",
+                    page_num,
+                    elapsed,
+                    _NAV_DELAY + slowest_page,
+                    budget,
+                )
                 break
 
             if page_num > 0:
                 await asyncio.sleep(_NAV_DELAY)
 
-            url = (
-                base_url
-                if page_num == 0
-                else f"{base_url}&start={page_num * _PAGE_SIZE}"
+            # Started after the delay, because the prediction above adds
+            # `_NAV_DELAY` to `slowest_page` itself. Timing from before the
+            # sleep folds it into every page after the first and then charges
+            # it a second time, which stops a page early for every two seconds
+            # of delay the run has already paid for.
+            page_started = time.monotonic()
+
+            url = base_url if offset == 0 else f"{base_url}&start={offset}"
+            # Against what is left of the tool's own timeout as well. The
+            # per-page cap is twelve seconds and the whole search gets
+            # `tool_timeout` times the fraction above, so a caller passing ten
+            # seconds had the first scroll alone allowed to outlast the call
+            # and take every page gathered with it. Scrolling is the one part
+            # already told how long it may run, so it is the one part this can
+            # bound without handing the budget down into navigation.
+            scroll_deadline = min(
+                _SCROLL_DEADLINE_MAX,
+                scroll_budget_left,
+                max(0.0, budget - (time.monotonic() - started)),
             )
+            self._scroll_seconds = 0.0
 
             try:
                 extracted = await self._extract_search_page(
-                    url, section_name="search_results"
+                    url,
+                    section_name="search_results",
+                    scroll_deadline=scroll_deadline,
                 )
+                slowest_page = max(slowest_page, time.monotonic() - page_started)
+                scroll_budget_left = max(0.0, scroll_budget_left - self._scroll_seconds)
 
-                if not extracted.text or extracted.text == _RATE_LIMITED_MSG:
-                    # Rate limit first: it is the more specific diagnosis, and a
-                    # page that was throttled may carry a generic error too.
-                    if extracted.text == _RATE_LIMITED_MSG:
-                        section_errors["search_results"] = rate_limited_section_error()
-                    elif extracted.error:
-                        section_errors["search_results"] = extracted.error
-                    # Navigation failed or rate-limited; skip ID extraction.
-                    # Pages gathered so far are kept and returned.
+                # Rate limits and extraction failures are already classified;
+                # they win over route diagnostics. A clean empty page is not
+                # accepted yet, because a redirect that dropped the keywords,
+                # filters or offset can render empty too. Calling that "no jobs"
+                # is a successful answer to a different search.
+                if extracted.text == _RATE_LIMITED_MSG:
+                    section_errors["search_results"] = rate_limited_section_error()
+                    break
+                if not extracted.text and extracted.error:
+                    section_errors["search_results"] = extracted.error
+                    break
+
+                # Prove the destination still represents the requested search
+                # before accepting even an empty result. The id extraction is
+                # later, after a clean empty page has stopped the loop.
+                #
+                # The parsed path, like the redirect check above, and not a
+                # prefix: `/jobs/search?keywords=x` is the same route, and the
+                # `?` sits where a prefix test wants the slash. That page is
+                # healthy, passes the redirect check, and yields its text,
+                # while this guard skipped extraction and ended pagination,
+                # so the search returned `job_ids: []` with nothing to say
+                # why. LinkedIn was not observed serving the slashless form,
+                # but a same-document `replaceState` can produce it.
+                #
+                # Both routes, because LinkedIn 302s `/jobs/search/` to
+                # `/jobs/search-results` for the redesigned experience. The
+                # destination is the search, serves the same results and
+                # honours `start`, so refusing it skipped extraction on every
+                # account already moved over.
+                parsed_url = urlparse(self._page.url)
+                if (
+                    parsed_url.netloc != "www.linkedin.com"
+                    or parsed_url.path.rstrip("/") not in _JOB_SEARCH_PATHS
+                ):
+                    logger.debug(
+                        "Unexpected page URL after extraction: %s — "
+                        "skipping job ID extraction",
+                        self._page.url,
+                    )
+                    # Dropped whole. Keeping its text and references handed a
+                    # page that is not the search back under `search_results`,
+                    # carrying whatever job links it held. Raised rather than
+                    # broken out of, because a result with no ids and nothing
+                    # beside it is what an exhausted search looks like.
+                    await self._raise_if_auth_barrier(self._page.url)
+                    raise RuntimeError(f"Search navigation ended on {self._page.url}")
+
+                # The offset has to have survived as well as the route. A
+                # navigation canonicalised back to the bare search URL serves
+                # the first page again, and the loop then reads it a second
+                # time, appends its text to itself under `search_results`, and
+                # stops on the repeated ids with no error to say so. The
+                # saved list does exactly this since LinkedIn moved it, so
+                # this is not hypothetical; job search was measured honouring
+                # `start` at 0, 10 and 21, which is why the mismatch stops the
+                # loop rather than raising. Only `start` is compared, because
+                # LinkedIn appends `currentJobId` to the query by itself.
+                # The filters have to have survived too, and their presence
+                # is what can be checked: a redirect to the bare search page
+                # keeps the route and drops the query whole, and generic
+                # recommendations then come back as a filtered search. Not
+                # their values, because a query LinkedIn re-encodes on its way
+                # would fail a comparison every healthy call makes.
+                #
+                # Losing the keywords ends the search, since what comes back
+                # is not a narrower answer to the question but an answer to a
+                # different one. Losing any other filter is reported and the
+                # results kept: they are broader than asked for and still
+                # about the same keywords, and stopping on a parameter
+                # LinkedIn merely renamed would return nothing at all.
+                landed_query = parse_qs(parsed_url.query)
+                asked = parse_qs(urlparse(base_url).query)
+                asked_keywords = asked.get("keywords", [""])[0]
+                landed_keywords = landed_query.get("keywords", [""])[0]
+                if asked_keywords and landed_keywords != asked_keywords:
+                    logger.debug(
+                        "Search keywords did not survive navigation "
+                        "(asked %r, landed %r on %s), stopping",
+                        asked_keywords,
+                        landed_keywords,
+                        self._page.url,
+                    )
+                    section_errors["search_results"] = lost_keywords_section_error(
+                        asked_keywords, landed_keywords
+                    )
+                    break
+
+                # Presence only for the rest, where the keywords are compared
+                # by value: LinkedIn encodes several of these itself, a
+                # location becoming a `geoUrn`, so a value comparison would
+                # fail on every healthy call that used one.
+                lost = sorted(
+                    name
+                    for name in asked
+                    if name not in ("keywords", "start") and not landed_query.get(name)
+                )
+                if lost:
+                    logger.debug(
+                        "Search filters %s did not survive navigation to %s",
+                        lost,
+                        self._page.url,
+                    )
+                    filters_warning = dropped_filters_section_error(
+                        lost, self._page.url
+                    )
+
+                landed_start = landed_query.get("start", ["0"])[0]
+                if landed_start != str(offset):
+                    logger.debug(
+                        "Search offset %d did not survive navigation "
+                        "(landed on %s), stopping",
+                        offset,
+                        self._page.url,
+                    )
+                    section_errors["search_results"] = dropped_offset_section_error(
+                        offset, self._page.url
+                    )
+                    break
+
+                if not extracted.text:
+                    # The route and query survived, so this is a real empty
+                    # result rather than a redirect that silently replaced the
+                    # search. Do not read ids from a DOM that supplied no text.
                     break
 
                 # Read total pages from pagination state (once only, best-effort)
@@ -3316,26 +4023,26 @@ class LinkedInExtractor:
                         if total_pages is not None:
                             logger.debug("LinkedIn reports %d total pages", total_pages)
 
-                # Extract job IDs from hrefs (page is already loaded)
-                if not self._page.url.startswith(
-                    "https://www.linkedin.com/jobs/search/"
-                ):
-                    logger.debug(
-                        "Unexpected page URL after extraction: %s — "
-                        "skipping job ID extraction",
-                        self._page.url,
-                    )
-                    page_texts.append(extracted.text)
-                    if extracted.references:
-                        page_references.extend(extracted.references)
-                    break
-                page_ids = await self._extract_job_ids()
+                page_ids = list(dict.fromkeys(await self._extract_job_ids(scoped=True)))
+                # Advance by what this navigation rendered, including ids seen
+                # on earlier pages: the next unseen result sits right behind them.
+                #
+                # This counts the whole document because everything the page
+                # holds also sits in the rail. That is only true while the
+                # next URL is built from `base_url`. LinkedIn appends
+                # `currentJobId` to `self._page.url` after a navigation, and
+                # carrying that forward opens a detail pane for a job the
+                # rail has not reached, whose permalink is then counted as a
+                # result and skips one. Keep paging from `base_url`.
+                offset += len(page_ids)
                 new_ids = [jid for jid in page_ids if jid not in seen_ids]
+
+                page_refs = _reconcile_search_references(extracted.references, page_ids)
 
                 if not new_ids:
                     page_texts.append(extracted.text)
-                    if extracted.references:
-                        page_references.extend(extracted.references)
+                    if page_refs:
+                        page_references.extend(page_refs)
                     logger.debug("No new job IDs on page %d, stopping", page_num + 1)
                     break
 
@@ -3344,8 +4051,8 @@ class LinkedInExtractor:
                     all_job_ids.append(jid)
 
                 page_texts.append(extracted.text)
-                if extracted.references:
-                    page_references.extend(extracted.references)
+                if page_refs:
+                    page_references.extend(page_refs)
 
             except LinkedInScraperException:
                 raise
@@ -3368,8 +4075,19 @@ class LinkedInExtractor:
         }
         if page_references:
             result["references"] = {
-                "search_results": dedupe_references(page_references, cap=15)
+                "search_results": dedupe_references(page_references)
             }
+        if filters_warning is not None:
+            existing = section_errors.get("search_results")
+            if existing is None:
+                section_errors["search_results"] = filters_warning
+            else:
+                # Both are true of this response, and only one slot holds
+                # them. The stop reason leads, since it explains why the list
+                # ends where it does, and the filter note follows it whole.
+                existing["error_message"] = (
+                    f"{existing['error_message']} {filters_warning['error_message']}"
+                )
         if section_errors:
             result["section_errors"] = section_errors
         return result
@@ -3380,36 +4098,67 @@ class LinkedInExtractor:
         section_name: str,
     ) -> ExtractedSection:
         """Extract innerText from a saved-jobs page with soft rate-limit retry."""
-        try:
-            result = await self._extract_saved_jobs_page_once(url, section_name)
-            if result.text != _RATE_LIMITED_MSG:
+        with self._watching_navigations() as hops:
+            try:
+                result = await self._extract_saved_jobs_page_once(url, section_name)
+                if result.text != _RATE_LIMITED_MSG:
+                    return result
+
+                logger.info(
+                    "Retrying saved jobs page %s after %.0fs backoff",
+                    url,
+                    _RATE_LIMIT_RETRY_DELAY,
+                )
+                await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
+                result = await self._extract_saved_jobs_page_once(url, section_name)
+                if result.text == _RATE_LIMITED_MSG:
+                    logger.warning(
+                        "Saved jobs page %s still rate-limited after retry", url
+                    )
                 return result
 
-            logger.info(
-                "Retrying saved jobs page %s after %.0fs backoff",
-                url,
-                _RATE_LIMIT_RETRY_DELAY,
-            )
-            await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
-            result = await self._extract_saved_jobs_page_once(url, section_name)
-            if result.text == _RATE_LIMITED_MSG:
-                logger.warning("Saved jobs page %s still rate-limited after retry", url)
-            return result
-
-        except LinkedInScraperException:
-            raise
-        except Exception as e:
-            logger.warning("Failed to extract saved jobs page %s: %s", url, e)
-            return ExtractedSection(
-                text="",
-                references=[],
-                error=build_issue_diagnostics(
-                    e,
-                    context="extract_saved_jobs_page",
-                    target_url=url,
-                    section_name=section_name,
-                ),
-            )
+            except LinkedInScraperException:
+                raise
+            except Exception as e:
+                logger.warning("Failed to extract saved jobs page %s: %s", url, e)
+                # A navigation destroys the scroll's execution context, and
+                # what waits behind it is a checkpoint as often as a layout
+                # change. Turning that into a section diagnostic hands the
+                # caller an empty list, leaves the browser registered and
+                # offers no relogin, so the next call meets the same barrier.
+                #
+                # Whether one happened is the listener's answer and not the
+                # address's: this list reaches `/jobs-tracker/` by a redirect
+                # LinkedIn makes on purpose, so comparing against the URL that
+                # was asked for finds a difference on every ordinary failure
+                # and waits out a chain that is not running.
+                #
+                # No document baseline, so every hop counts. One is taken
+                # before the search scroll, where the page is already loaded
+                # and the only navigation to expect is one going wrong. Here
+                # the block opens before this page's own navigation, so a
+                # reading from the top belongs to the document that was left
+                # and would call every ordinary failure a replacement. `None`
+                # says so, and settling costs a moment on a path that has
+                # already failed.
+                try:
+                    await self._settle_navigation(hops, None)
+                except Exception:
+                    logger.debug(
+                        "Could not settle the route after a saved-jobs failure",
+                        exc_info=True,
+                    )
+                await self._raise_if_auth_barrier(self._page.url, navigation_error=e)
+                return ExtractedSection(
+                    text="",
+                    references=[],
+                    error=build_issue_diagnostics(
+                        e,
+                        context="extract_saved_jobs_page",
+                        target_url=url,
+                        section_name=section_name,
+                    ),
+                )
 
     async def _extract_saved_jobs_page_once(
         self,
@@ -3419,6 +4168,9 @@ class LinkedInExtractor:
         """Single attempt: navigate, scroll list, and extract innerText."""
         await self._navigate_to_page(url)
         await detect_rate_limit(self._page)
+        # Taken after this page's own navigation, so it belongs to the
+        # document about to be read rather than to the one that was left.
+        origin = await self._document_origin()
 
         main_found = True
         try:
@@ -3430,8 +4182,28 @@ class LinkedInExtractor:
         await handle_modal_close(self._page)
         if main_found:
             await scroll_to_bottom(self._page, pause_time=0.5, max_scrolls=5)
+        else:
+            # A picker served in place of the list keeps the list's address
+            # and its title, so the route guard below sees an allowed page and
+            # the body fallback returns the picker under `saved_jobs`. Missing
+            # `<main>` is what is left, and an emptied list has none either,
+            # which is why the check decides it rather than the absence.
+            await self._raise_if_auth_barrier(self._page.url)
 
+        # A picker served by a reload keeps this page's address and this
+        # page's title, so the route guard reads it as the list. Nothing else
+        # notices either: the scroll pauses half a second between rounds, and
+        # a document replaced in that gap leaves no evaluation to raise, so
+        # the extraction succeeds against the replacement and returns it under
+        # `saved_jobs` with the browser left on a barrier.
+        #
+        # Asked after the read rather than before it, or the gap between the
+        # two is a window of its own and the text that came back is not the
+        # text the check judged.
         raw_result = await self._extract_root_content(["main"])
+        if origin is not None and await self._document_origin() != origin:
+            logger.debug("The saved-jobs document was replaced before it was read")
+            await self._raise_if_auth_barrier(self._page.url)
         raw = raw_result["text"]
         if raw_result["source"] == "body":
             logger.debug("No <main> at evaluation time on %s, using body fallback", url)
@@ -3525,11 +4297,58 @@ class LinkedInExtractor:
                     url, section_name="saved_jobs"
                 )
 
-                if not extracted.text or extracted.text == _RATE_LIMITED_MSG:
-                    if extracted.text == _RATE_LIMITED_MSG:
-                        section_errors["saved_jobs"] = rate_limited_section_error()
-                    elif extracted.error:
-                        section_errors["saved_jobs"] = extracted.error
+                # Rate limit first: it is the more specific diagnosis, and a
+                # page that was throttled may carry a generic error too. Then
+                # the extraction error, which names what actually failed and
+                # would be masked by the route guard below.
+                if extracted.text == _RATE_LIMITED_MSG:
+                    section_errors["saved_jobs"] = rate_limited_section_error()
+                    break
+                if extracted.error:
+                    section_errors["saved_jobs"] = extracted.error
+                    break
+
+                # Host and parsed path, like the job-search guard: a
+                # substring test accepts any origin that happens to serve
+                # this path, and an interstitial carrying a single
+                # /jobs/view/ anchor would come back as the account's saved
+                # jobs.
+                #
+                # Both destinations, because LinkedIn now answers
+                # /my-items/saved-jobs/ with a redirect to /jobs-tracker/ and
+                # drops the query on the way. Measured on 2026-08-21 against
+                # an authenticated profile, for the bare URL and for
+                # ?start=10 alike. The old route is kept because the redirect
+                # is a rollout and the server still navigates to it.
+                parsed_url = urlparse(self._page.url)
+                if (
+                    parsed_url.netloc != "www.linkedin.com"
+                    or parsed_url.path.rstrip("/") not in _SAVED_JOBS_PATHS
+                ):
+                    logger.debug(
+                        "Unexpected page URL after saved-jobs extraction: %s "
+                        "(requested %s) — skipping job ID extraction",
+                        self._page.url,
+                        url,
+                    )
+                    # The page is dropped whole. Keeping its text and
+                    # references put a stranger's page under `saved_jobs`
+                    # with the job links it happened to carry, which reads
+                    # as the account's own list. Raised and not broken out
+                    # of, because an empty result with nothing beside it is
+                    # what an account with nothing saved looks like.
+                    # Classified first, so an expired session reaches the
+                    # relogin path instead of a diagnostic. Against the page
+                    # that answered, because that is where the barrier is; the
+                    # address that was asked for is on the line above.
+                    await self._raise_if_auth_barrier(self._page.url)
+                    raise RuntimeError(
+                        f"Saved jobs navigation ended on {self._page.url}"
+                    )
+
+                if not extracted.text:
+                    # Nothing to read, and the page is the one that was asked
+                    # for: an account with nothing saved.
                     break
 
                 if not total_pages_queried:
@@ -3544,15 +4363,29 @@ class LinkedInExtractor:
                                 "LinkedIn reports %d saved-jobs pages", total_pages
                             )
 
-                if "/my-items/saved-jobs" not in self._page.url:
+                # An offset that did not survive the navigation means this
+                # is the first page again, and reading it a second time
+                # appends the whole list to itself under `saved_jobs` before
+                # the no-new-ids branch stops the loop. Measured on
+                # 2026-08-21: `/jobs-tracker/?start=10` lands on
+                # `/jobs-tracker/`, and so does the old route, so the offset
+                # is gone from the list rather than from one address for it.
+                # Judged from where the page landed and not from that
+                # measurement, so an account still served the old route keeps
+                # paginating.
+                landed_start = parse_qs(urlparse(self._page.url).query).get(
+                    "start", ["0"]
+                )[0]
+                if landed_start != str(page_num * _SAVED_JOBS_PAGE_SIZE):
                     logger.debug(
-                        "Unexpected page URL after saved-jobs extraction: %s — "
-                        "skipping job ID extraction",
+                        "Saved-jobs offset %d did not survive navigation "
+                        "(landed on %s), stopping",
+                        page_num * _SAVED_JOBS_PAGE_SIZE,
                         self._page.url,
                     )
-                    page_texts.append(extracted.text)
-                    if extracted.references:
-                        page_references.extend(extracted.references)
+                    section_errors["saved_jobs"] = dropped_offset_section_error(
+                        page_num * _SAVED_JOBS_PAGE_SIZE, self._page.url
+                    )
                     break
 
                 page_ids = await self._extract_job_ids()
@@ -4002,9 +4835,8 @@ class LinkedInExtractor:
             )
 
         if thread_id:
-            await self._navigate_to_page(
-                f"https://www.linkedin.com/messaging/thread/{thread_id}/"
-            )
+            thread_id = normalize_thread_id(thread_id)
+            await self._navigate_to_page(messaging_thread_url(thread_id, "/"))
         else:
             await self._open_conversation_by_username(
                 linkedin_username or "", index=index
@@ -4093,7 +4925,11 @@ class LinkedInExtractor:
         confirm_send: bool,
         profile_urn: str | None = None,
     ) -> dict[str, Any]:
-        """Send a message to a LinkedIn user with explicit confirmation gating.
+        """Compose and send a new message with explicit confirmation gating.
+
+        Opens LinkedIn's profile-based compose flow. That may create a separate
+        DM instead of replying in an existing recruiter/InMail or messaging
+        thread.
 
         Args:
             linkedin_username: LinkedIn username of the recipient.
@@ -4102,7 +4938,8 @@ class LinkedInExtractor:
             profile_urn: Optional profile URN (e.g. ACoAAB...) to construct the
                 compose URL directly, bypassing the Message-button lookup.
         """
-        profile_url = f"https://www.linkedin.com/in/{linkedin_username}/"
+        linkedin_username = normalize_person_identifier(linkedin_username)
+        profile_url = person_profile_url(linkedin_username, "/")
         await self._navigate_to_page(profile_url)
         await detect_rate_limit(self._page)
 
@@ -4123,7 +4960,7 @@ class LinkedInExtractor:
             compose_url: str | None = (
                 f"https://www.linkedin.com/messaging/compose/"
                 f"?profileUrn={_encoded}"
-                f"&recipient={profile_urn}"
+                f"&recipient={quote_plus(profile_urn)}"
                 f"&screenContext=NON_SELF_PROFILE_VIEW"
                 f"&interop=msgOverlay"
             )

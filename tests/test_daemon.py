@@ -247,6 +247,30 @@ class TestWaitingForAStartingOwner:
         assert published.is_set()
         assert lookup.attachment is not None
 
+    def test_a_blocked_descriptor_read_is_bounded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        profile = tmp_path / "profile"
+        profile.mkdir()
+        blocked = threading.Event()
+        release = threading.Event()
+
+        def inspect(*_args: object) -> None:
+            blocked.set()
+            release.wait()
+
+        monkeypatch.setattr(daemon_module, "_inspect", inspect)
+        monkeypatch.setattr(daemon_module, "_DESCRIPTOR_READ_SECONDS", 0.01)
+        started = time.monotonic()
+        try:
+            lookup = look_up_owner(tmp_path, profile, _config(profile))
+        finally:
+            release.set()
+
+        assert blocked.is_set()
+        assert lookup.state is OwnerState.UNTRUSTED
+        assert time.monotonic() - started < 0.1
+
     def test_waiting_gives_up_rather_than_hanging(self, tmp_path: Path):
         # Nothing ever publishes. The caller has to get an answer, because a
         # client blocked here is a client whose first tool call never returns.

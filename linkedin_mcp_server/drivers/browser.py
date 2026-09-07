@@ -18,6 +18,7 @@ from linkedin_mcp_server.common_utils import harden_linkedin_tree, secure_mkdir
 from linkedin_mcp_server.core import (
     AuthenticationError,
     BrowserManager,
+    await_deferring_cancels,
     detect_auth_barrier_quick,
     detect_rate_limit,
     goto_reporting_proxy_errors,
@@ -40,6 +41,10 @@ from linkedin_mcp_server.exceptions import (
     BrowserDowngradeError,
     BrowserShutdownUnconfirmedError,
     ProfileRootRefusedError,
+)
+from linkedin_mcp_server.process_tree import (
+    release_browser_guardian,
+    start_browser_guardian,
 )
 from linkedin_mcp_server.profile_lease import ProfileLease, get_profile_lease
 from linkedin_mcp_server.server_role import a_held_profile_means_this_owner_must_go
@@ -134,7 +139,7 @@ def experimental_persist_derived_runtime() -> bool:
 
 
 def _apply_browser_settings(browser: BrowserManager) -> None:
-    """Apply configuration settings to browser instance."""
+    """Apply settings to an authenticated browser."""
     config = get_config()
     browser.page.set_default_timeout(config.browser.default_timeout)
 
@@ -287,6 +292,26 @@ def _make_browser(
     )
 
 
+async def _close_holding_back_cancels(browser: BrowserManager) -> tuple[bool, bool]:
+    """Get one browser's close verdict even while cancels keep arriving.
+
+    Every caller below is holding somebody else's profile, and the verdict is
+    the only thing that says whether it may be handed back. ``close()`` takes
+    its handles before its first await, so a cancel landing inside it escapes
+    with the manager already emptied and the browser unproven: the local manager
+    is dropped, ``_create_browser`` releases the guardian and the lease on the
+    way out, and the next launch opens a second Chromium on a profile the first
+    may still be sitting on. Two cancels are enough and are not exotic -- one to
+    fail the startup, one from the shutdown racing it -- and the second one has
+    nothing left to close, which is exactly why it reads as clean.
+
+    Returns the verdict and whether a cancel was held back. Nothing is
+    swallowed: the caller re-raises the failure it was already handling, or the
+    cancellation where there was no other failure.
+    """
+    return await await_deferring_cancels(browser.close())
+
+
 async def _authenticate_existing_profile(
     profile_dir: Path,
     *,
@@ -310,7 +335,8 @@ async def _authenticate_existing_profile(
     except BaseException as exc:
         # BaseException so a cancelled startup still tears Chromium down. Left
         # running it would hold the profile that the caller is about to release.
-        if not await browser.close():
+        closed, _ = await _close_holding_back_cancels(browser)
+        if not closed:
             # The original failure is replaced deliberately: the caller's
             # recovery for it releases the profile, which is unsafe while this
             # browser may still be on it. Chained so the cause is not lost.
@@ -318,6 +344,8 @@ async def _authenticate_existing_profile(
                 "The browser did not shut down cleanly after a failed startup, "
                 "so the profile is kept. Restart the server to recover."
             ) from exc
+        # The original goes back out, cancellation included: when the
+        # interruption was a cancel, *exc* already is one.
         raise
 
 
@@ -362,7 +390,8 @@ async def validate_imported_cookies(cookie_path: Path, profile_dir: Path) -> boo
         # would re-raise before it ran, and the caller would then treat an
         # unconfirmed close as an ordinary failure: wipe the profile, try the
         # next candidate, restore over it.
-        if not await browser.close():
+        closed, _ = await _close_holding_back_cancels(browser)
+        if not closed:
             raise BrowserShutdownUnconfirmedError(
                 "The validation browser did not shut down cleanly, so the "
                 "profile is kept. Restart the server to retry."
@@ -372,11 +401,17 @@ async def validate_imported_cookies(cookie_path: Path, profile_dir: Path) -> boo
     # Raised rather than returned False: a rejected cookie makes the caller wipe
     # the profile and try the next candidate, and doing that over a Chromium
     # that may still be running is the corruption we are avoiding.
-    if not await browser.close():
+    closed, cancelled = await _close_holding_back_cancels(browser)
+    if not closed:
         raise BrowserShutdownUnconfirmedError(
             "The validation browser did not shut down cleanly, so the imported "
             "session cannot be committed. Restart the server to retry."
         )
+    if cancelled:
+        # Nothing failed, so there is no original to re-raise and the held-back
+        # cancel is the answer. Returning *accepted* here would commit an
+        # imported session on behalf of a caller that has already gone.
+        raise asyncio.CancelledError
     return accepted
 
 
@@ -453,13 +488,19 @@ async def _bridge_runtime_profile(
             )
         await stabilize_navigation("runtime storage-state export", logger)
         logger.info("Checkpoint-restarting derived runtime profile %s", profile_dir)
-        if not await browser.close():
+        closed, cancelled = await _close_holding_back_cancels(browser)
+        if not closed:
             # Reopening the same directory while the first Chromium may still be
             # running is the concurrent-profile corruption in miniature.
             raise BrowserShutdownUnconfirmedError(
                 "The bridge browser did not shut down cleanly, so its profile "
                 "cannot be reopened. Restart the server to retry."
             )
+        if cancelled:
+            # Held back only long enough to prove the first browser is gone. A
+            # reopen from here would put a second Chromium on this profile for
+            # a caller that is no longer waiting for one.
+            raise asyncio.CancelledError
         reopened = _make_browser(
             profile_dir,
             launch_options=launch_options,
@@ -493,22 +534,25 @@ async def _bridge_runtime_profile(
             reopened.is_authenticated = True
             return reopened
         except BaseException as exc:
-            if not await reopened.close():
+            closed, _ = await _close_holding_back_cancels(reopened)
+            if not closed:
                 raise BrowserShutdownUnconfirmedError(
                     "The reopened bridge browser did not shut down cleanly, so "
                     "its profile is kept. Restart the server to recover."
                 ) from exc
             raise
     except BrowserShutdownUnconfirmedError:
-        # Chromium may still be running on this runtime profile. Closing again
-        # would report success — the manager has already dropped its handles —
-        # and deleting the directory underneath a live browser is exactly what
-        # this guard exists to prevent. Leave everything for the operator.
+        # Chromium may still be running on this runtime profile, and deleting
+        # the directory underneath a live browser is exactly what this guard
+        # exists to prevent. The manager keeps that answer across calls, so a
+        # second close cannot talk this path out of it either. Leave everything
+        # for the operator.
         raise
     except BaseException as exc:
         # BaseException so a cancelled bridge still closes Chromium before the
         # caller releases the profile, and before the runtime dir is removed.
-        if not await browser.close():
+        closed, _ = await _close_holding_back_cancels(browser)
+        if not closed:
             # Deleting the runtime directory under a browser that may still be
             # running is the corruption this guard exists for, so stop instead.
             raise BrowserShutdownUnconfirmedError(
@@ -587,6 +631,7 @@ async def _create_browser() -> BrowserManager:
         took_lease = True
 
     try:
+        start_browser_guardian(lease.guardian_fd())
         browser = await _create_browser_locked()
     except BrowserShutdownUnconfirmedError:
         # A browser from this attempt may still be running on the profile. Keep
@@ -615,6 +660,7 @@ async def _create_browser() -> BrowserManager:
         # BaseException, not Exception: a cancelled startup would otherwise
         # leave the reference held with nothing tracking it, wedging every other
         # process until this one exits.
+        release_browser_guardian()
         if took_lease:
             lease.release()
         raise
@@ -779,15 +825,12 @@ async def _run_deferring_cancels(coroutine: Coroutine[Any, Any, T]) -> T:
     The caller holds the lifecycle lock. Splitting this out of ``close_browser``
     lets the conditional close run its own coroutine under the same protection,
     rather than duplicating the shield loop.
+
+    One primitive, two callers with different endings: here the cancel is always
+    re-raised, because there is nothing else to report, while a failed startup's
+    cleanup re-raises the failure it was already handling instead.
     """
-    task = asyncio.create_task(coroutine)
-    cancelled = False
-    while True:
-        try:
-            result = await asyncio.shield(task)
-            break
-        except asyncio.CancelledError:
-            cancelled = True
+    result, cancelled = await await_deferring_cancels(coroutine)
     if cancelled:
         raise asyncio.CancelledError
     return result
@@ -818,9 +861,13 @@ def _settle_the_profile(*, confirmed: bool) -> None:
     global _browser_lease
 
     lease, _browser_lease = _browser_lease, None
+    if confirmed:
+        release_browser_guardian()
     if lease is None:
-        # Nothing was ever taken, so nothing is owed. A browser created while the
-        # middleware already held a reference is the ordinary case.
+        # The middleware may own the lease instead. An unconfirmed browser still
+        # requires an owner hard exit before that outer reference is released.
+        if not confirmed:
+            a_held_profile_means_this_owner_must_go()
         return
 
     if confirmed:

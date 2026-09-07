@@ -20,6 +20,10 @@ from linkedin_mcp_server.scraping.extractor import (
     _RATE_LIMITED_MSG,
     rate_limited_section_error,
 )
+from linkedin_mcp_server.scraping.identifiers import (
+    company_page_url,
+    normalize_company_identifier,
+)
 from linkedin_mcp_server.scraping.link_metadata import Reference
 
 logger = logging.getLogger(__name__)
@@ -47,7 +51,7 @@ def register_company_tools(
         Get a specific company's LinkedIn profile.
 
         Args:
-            company_name: LinkedIn company name (e.g., "docker", "anthropic", "microsoft")
+            company_name: LinkedIn company name (e.g., "docker", "anthropic", "microsoft"). A full company URL is accepted too and is reduced to the slug.
             ctx: FastMCP context for progress reporting
             sections: Comma-separated list of extra sections to scrape.
                 The about page is always included.
@@ -114,7 +118,7 @@ def register_company_tools(
         Get recent posts from a company's LinkedIn feed.
 
         Args:
-            company_name: LinkedIn company name (e.g., "docker", "anthropic", "microsoft")
+            company_name: LinkedIn company name (e.g., "docker", "anthropic", "microsoft"). A full company URL is accepted too and is reduced to the slug.
             ctx: FastMCP context for progress reporting
 
         Returns:
@@ -131,7 +135,8 @@ def register_company_tools(
                 progress=0, total=100, message="Starting company posts scrape"
             )
 
-            url = f"https://www.linkedin.com/company/{company_name}/posts/"
+            company_name = normalize_company_identifier(company_name)
+            url = company_page_url(company_name, "/posts/")
             extracted = await extractor.extract_page(url, section_name="posts")
 
             sections: dict[str, str] = {}
@@ -246,7 +251,7 @@ def register_company_tools(
         from the returned references.
 
         Args:
-            company_name: LinkedIn company URL slug (e.g., "docker", "anthropicresearch", "microsoft")
+            company_name: LinkedIn company URL slug (e.g., "docker", "anthropicresearch", "microsoft"). A full company URL is accepted too and is reduced to the slug.
             ctx: FastMCP context for progress reporting
             keywords: Optional filter by name, job title, or skill (e.g., "engineer", "sales")
 

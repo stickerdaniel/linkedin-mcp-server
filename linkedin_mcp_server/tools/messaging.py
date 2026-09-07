@@ -104,7 +104,7 @@ def register_messaging_tools(
 
         Args:
             ctx: FastMCP context for progress reporting
-            linkedin_username: LinkedIn username of the conversation participant
+            linkedin_username: LinkedIn username of the conversation participant; a full profile URL is accepted too
             thread_id: LinkedIn messaging thread ID
             index: 0-based selector for which thread to open when the
                 participant has multiple threads (e.g. an organic 1-on-1 plus
@@ -227,13 +227,20 @@ def register_messaging_tools(
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
-        Send a message to a LinkedIn user.
+        Compose and send a new message to a LinkedIn user.
+
+        Profile-based targeting opens LinkedIn's compose flow. It is not a safe
+        reply path for an existing recruiter/InMail or messaging thread: it may
+        create a separate DM even after you inspect that thread with
+        get_conversation or search_conversations. Those tools only read an
+        existing thread; they do not send a reply. Until a thread-targeted send
+        path is available, do not treat profile-based send_message as a reply.
 
         The recipient must be directly messageable from the profile page. This is a
         write operation when confirm_send is True.
 
         Args:
-            linkedin_username: LinkedIn username of the recipient
+            linkedin_username: LinkedIn username of the recipient; a full profile URL is accepted too
             message: The message text to send
             confirm_send: Must be True to send the message
             ctx: FastMCP context for progress reporting

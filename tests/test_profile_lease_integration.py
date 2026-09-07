@@ -798,6 +798,57 @@ class TestConfirmedClose:
         assert lease.held, "the lease was released on an unconfirmed close"
         lease.release()
 
+    async def test_a_cancelled_close_keeps_the_lease_on_the_retry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The real manager, because the hole was in its answer, not the caller's.
+
+        A cancel mid-teardown leaves the handles taken and Chromium possibly
+        running. The retry that follows used to find nothing left to close and
+        report success from that alone, which released the profile to the next
+        process.
+        """
+        import asyncio
+
+        from linkedin_mcp_server.core.browser import BrowserManager
+        from linkedin_mcp_server.drivers import browser as browser_module
+
+        lease = get_profile_lease(tmp_path / "profile")
+        assert lease.try_acquire()
+
+        entered = asyncio.Event()
+
+        async def never_returns() -> None:
+            entered.set()
+            await asyncio.sleep(3600)
+
+        manager = BrowserManager(user_data_dir=tmp_path / "profile")
+        manager._context = MagicMock(close=AsyncMock(side_effect=never_returns))
+        manager._playwright = MagicMock(stop=AsyncMock())
+        monkeypatch.setattr(
+            "linkedin_mcp_server.core.browser.drain_browser_process_marker",
+            # Chromium is still there to be found
+            lambda _marker, **_containment: False,
+        )
+
+        cancelled = asyncio.ensure_future(manager.close())
+        await entered.wait()
+        cancelled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled
+
+        with patch.multiple(
+            browser_module,
+            _browser=manager,
+            _browser_cookie_export_path=None,
+            _browser_lease=lease,
+        ):
+            with patch.object(browser_module, "get_profile_lease", return_value=lease):
+                await browser_module.close_browser()
+
+        assert lease.held, "the retry released the profile it could not prove free"
+        lease.release()
+
     async def test_confirmed_close_releases_the_lease(self, tmp_path: Path) -> None:
         from linkedin_mcp_server.drivers import browser as browser_module
 
@@ -1195,6 +1246,100 @@ class TestALateImportDoesNotUndoALogin:
         )
 
         assert committed == [True]
+
+
+class TestEveryLaunchPathStartsAGuardian:
+    """A crash frees the lease; the guardian is what keeps holding the profile.
+
+    ``drivers.browser`` starts one for the shared launch. The CLI login and the
+    session import each build a ``BrowserManager`` of their own and never reach
+    that code, so each has to start its own. Asserted on the descriptor rather
+    than on the call alone, because a guardian handed anything else holds
+    nothing, and on the release because there is one guardian per process: kept
+    past a proved teardown it would hold an unlocked descriptor while every
+    later launch reused it.
+    """
+
+    async def test_the_login_starts_one_holding_its_own_lease(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        import linkedin_mcp_server.setup as setup_module
+        from linkedin_mcp_server.config import set_config
+        from linkedin_mcp_server.config.schema import AppConfig
+
+        # Read for the launch options this stubs past; without it the loader
+        # parses pytest's own argv and the test dies in the argument parser.
+        set_config(AppConfig())
+
+        lease = get_profile_lease(isolate_profile_dir)
+        assert lease.try_acquire()
+        try:
+            events: list[str] = []
+            monkeypatch.setattr(
+                setup_module,
+                "start_browser_guardian",
+                lambda fd: events.append(f"start {fd}"),
+            )
+            monkeypatch.setattr(
+                setup_module,
+                "release_browser_guardian",
+                lambda: events.append("release"),
+            )
+            monkeypatch.setattr(
+                setup_module, "rotate_shielded", AsyncMock(return_value=None)
+            )
+            state = setup_module._LoginState()
+
+            async def signed_in(*_args, **_kwargs) -> bool:
+                # What the real teardown reports, and the flag the release is
+                # guarded by: a login whose browser is not provably gone must
+                # keep its guardian.
+                state.close_confirmed = True
+                return True
+
+            monkeypatch.setattr(setup_module, "_login_into_fresh_profile", signed_in)
+
+            assert await setup_module._login_holding_the_profile(
+                isolate_profile_dir, lease, state
+            )
+
+            assert events == [f"start {lease.guardian_fd()}", "release"]
+        finally:
+            lease.release()
+
+    async def test_the_import_starts_one_holding_its_own_lease(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        import linkedin_mcp_server.browser_import.orchestrate as orchestrate
+
+        lease = get_profile_lease(isolate_profile_dir)
+        assert lease.try_acquire()
+        try:
+            events: list[str] = []
+            monkeypatch.setattr(
+                orchestrate,
+                "start_browser_guardian",
+                lambda fd: events.append(f"start {fd}"),
+            )
+            monkeypatch.setattr(
+                orchestrate,
+                "release_browser_guardian",
+                lambda: events.append("release"),
+            )
+            monkeypatch.setattr(
+                orchestrate, "rotate_shielded", AsyncMock(return_value=None)
+            )
+            monkeypatch.setattr(
+                orchestrate, "_import_first_accepted", AsyncMock(return_value=True)
+            )
+
+            assert await orchestrate._import_holding_the_profile(
+                [], isolate_profile_dir / "cookies.json", isolate_profile_dir, lease
+            )
+
+            assert events == [f"start {lease.guardian_fd()}", "release"]
+        finally:
+            lease.release()
 
 
 class TestAMomentaryHolderDoesNotCancelTheRepair:

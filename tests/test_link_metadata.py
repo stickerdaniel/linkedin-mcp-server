@@ -2,7 +2,9 @@
 
 from urllib.parse import quote
 
+from linkedin_mcp_server.scraping.fields import COMPANY_SECTIONS, PERSON_SECTIONS
 from linkedin_mcp_server.scraping.link_metadata import (
+    _REFERENCE_CAPS,
     RawReference,
     build_references,
     classify_link,
@@ -427,6 +429,23 @@ class TestBuildReferences:
         assert references[0]["url"] == "/company/test-0/"
         assert references[-1]["url"] == "/company/test-11/"
 
+    def test_search_results_cap_can_be_disabled(self):
+        raw: list[RawReference] = [
+            {
+                "href": f"https://www.linkedin.com/jobs/view/{idx}/",
+                "text": f"Job {idx}",
+            }
+            for idx in range(20)
+        ]
+
+        capped = build_references(raw, "search_results")
+        uncapped = build_references(raw, "search_results", apply_cap=False)
+
+        assert len(capped) == 15
+        assert capped[-1]["url"] == "/jobs/view/14/"
+        assert len(uncapped) == 20
+        assert uncapped[-1]["url"] == "/jobs/view/19/"
+
     def test_caps_jobs_section_more_tightly(self):
         raw: list[RawReference] = [
             {
@@ -528,6 +547,102 @@ class TestBuildReferences:
                 "context": "job posting",
             }
         ]
+
+    def test_uses_person_detail_section_contexts(self):
+        """certifications, skills and projects joined PERSON_SECTIONS after
+        this table was written, so their references carried no context while
+        every sibling detail section named itself."""
+        for section in ("certifications", "skills", "projects"):
+            references = build_references(
+                [
+                    {
+                        "href": "https://www.linkedin.com/company/aws/",
+                        "text": "Amazon Web Services",
+                    }
+                ],
+                section,
+            )
+
+            assert references == [
+                {
+                    "kind": "company",
+                    "url": "/company/aws/",
+                    "text": "Amazon Web Services",
+                    "context": section,
+                }
+            ]
+
+    def test_uses_employees_context_for_company_people_pages(self):
+        references = build_references(
+            [
+                {
+                    "href": "https://www.linkedin.com/in/stickerdaniel/",
+                    "text": "Daniel Sticker",
+                }
+            ],
+            "employees",
+        )
+
+        assert references == [
+            {
+                "kind": "person",
+                "url": "/in/stickerdaniel/",
+                "text": "Daniel Sticker",
+                "context": "employees",
+            }
+        ]
+
+    def test_names_the_context_for_jobs_saved_jobs_and_feed(self):
+        """The structural guard below only proves a context key exists, so it
+        survives a wrong label. These are the values themselves."""
+        raw: list[RawReference] = [
+            {
+                "href": "https://www.linkedin.com/jobs/view/123/",
+                "text": "Senior Engineer",
+            }
+        ]
+
+        contexts = {
+            section: build_references(raw, section)[0]["context"]
+            for section in ("jobs", "saved_jobs", "feed")
+        }
+
+        assert contexts == {
+            "jobs": "jobs",
+            "saved_jobs": "saved jobs",
+            "feed": "feed",
+        }
+
+    def test_every_scraped_section_gives_its_references_a_context(self):
+        """Nothing tied the context table to the section tables, which is how
+        seven sections have now reached main without an entry. A context-less
+        reference also scores below every duplicate that has one, so it loses
+        cross-page dedupe ties it should win.
+
+        Section names are declared in three separate places, and `saved_jobs`
+        is declared in none of them -- it exists only as a literal in the
+        extractor -- so it is named here explicitly."""
+        raw: list[RawReference] = [
+            {
+                "href": "https://www.linkedin.com/company/aws/",
+                "text": "Amazon Web Services",
+            }
+        ]
+
+        sections = (
+            set(PERSON_SECTIONS)
+            | set(COMPANY_SECTIONS)
+            | set(_REFERENCE_CAPS)
+            | {"saved_jobs"}
+        )
+
+        missing = sorted(
+            section
+            for section in sections
+            if "context" not in build_references(raw, section)[0]
+        )
+
+        assert missing == []
 
     def test_does_not_treat_lookalike_domains_as_linkedin(self):
         references = build_references(
@@ -714,6 +829,50 @@ class TestBuildReferences:
 
 
 class TestClassifyLink:
+    def test_a_slugged_job_url_keeps_its_id(self):
+        """LinkedIn serves a job under a bare id and under a slugged path.
+
+        Both 301 to the same page, so the slugged form is just as real, and
+        anchoring the id to the front of the segment dropped it: the link
+        vanished from ``references`` entirely.
+        """
+        assert classify_link(
+            "https://www.linkedin.com/jobs/view/senior-ai-engineer-at-acme-1967281839/"
+        ) == ("job", "/jobs/view/1967281839/")
+
+    def test_a_title_opening_with_a_number_is_not_the_job_id(self):
+        """The quiet half of the same bug, and the worse one.
+
+        A title starting with a year matched the front anchor, so the link
+        was kept and pointed at a different job. A dropped reference is
+        visibly missing; this one looks like a result.
+        """
+        assert classify_link(
+            "https://www.linkedin.com/jobs/view/2026-software-engineer-at-acme-4252026496/"
+        ) == ("job", "/jobs/view/4252026496/")
+
+    def test_unicode_digits_are_not_a_job_id(self):
+        """Python's ``\\d`` matches more than JavaScript's does.
+
+        Arabic-Indic digits pass ``\\d`` here and fail it in the two
+        JavaScript copies of this pattern, and ``normalize_job_id`` accepts
+        only ``[0-9]``. Classifying such a link produces a reference whose
+        very next use raises, so the digits are ASCII on purpose.
+        """
+        assert (
+            classify_link(
+                "https://www.linkedin.com/jobs/view/\u0645\u0647\u0646\u062f\u0633-"
+                "\u0664\u0662\u0665\u0662\u0660\u0662\u0666\u0664\u0669\u0666/"
+            )
+            is None
+        )
+
+    def test_a_bare_job_url_is_unchanged(self):
+        assert classify_link("https://www.linkedin.com/jobs/view/1967281839/") == (
+            "job",
+            "/jobs/view/1967281839/",
+        )
+
     def test_messaging_thread_url(self):
         result = classify_link(
             "https://www.linkedin.com/messaging/thread/2-NjAwMDAyMDEtZWVh/"

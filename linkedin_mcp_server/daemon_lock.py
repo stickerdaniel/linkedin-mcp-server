@@ -43,15 +43,19 @@ them rather than share one path that is only true on one of them.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import weakref
 from pathlib import Path
 from types import TracebackType
 
-from linkedin_mcp_server.daemon_descriptor import daemon_dir, daemon_state_root
+from linkedin_mcp_server.daemon_descriptor import (
+    daemon_dir,
+    prepare_daemon_state,
+)
 from linkedin_mcp_server.common_utils import is_still_at
-from linkedin_mcp_server.private_state import harden_directory
+from linkedin_mcp_server.private_state import harden_created_file, harden_file
 from linkedin_mcp_server.profile_lease import (
     acquire_locked_fd,
     open_lock_file,
@@ -127,6 +131,16 @@ def daemon_lock_path(auth_root: Path) -> Path:
     return daemon_dir(auth_root) / _DAEMON_LOCK_FILE
 
 
+def _harden_existing_lock(path: Path) -> bool:
+    """Harden a pre-existing lock entry, returning whether one was present."""
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    harden_file(path)
+    return True
+
+
 class DaemonLock:
     """Exclusive ownership of one auth root's daemon, for as long as it is held.
 
@@ -168,11 +182,43 @@ class DaemonLock:
             # exactly one holder exists.
             raise DaemonLockError("This process already holds the daemon lock")
 
-        harden_directory(daemon_state_root())
-        harden_directory(daemon_dir(self._auth_root))
+        directory = prepare_daemon_state(self._auth_root)
+        self._path = directory / _DAEMON_LOCK_FILE
+        existed = _harden_existing_lock(self._path)
         fd = acquire_locked_fd(self._path, exclusive=True)
         if fd is None:
             return False
+
+        try:
+            # A fresh file inherits the private directory ACL on Windows and is
+            # created 0600 on POSIX. Verify that promise explicitly before using
+            # it as the account's ownership record. Existing entries were checked
+            # before open so links and special files never reach the lock backend.
+            if not existed:
+                harden_created_file(self._path)
+            if not is_still_at(fd, self._path):
+                raise DaemonLockError(
+                    "The daemon lock file changed while its private access was "
+                    "being established"
+                )
+        except BaseException:
+            remove = not existed and is_still_at(fd, self._path)
+            closed = False
+            if remove and os.name == "nt":
+                # Windows refuses to unlink a file this process still holds
+                # open, so there the descriptor goes first and the file this
+                # just created is left behind otherwise. What the removal rests
+                # on is the identity check above, and that was made while the
+                # descriptor still held the file. POSIX keeps the stronger
+                # order, where nothing at all can come between the two.
+                os.close(fd)
+                closed = True
+            if remove:
+                with contextlib.suppress(OSError):
+                    self._path.unlink()
+            if not closed:
+                os.close(fd)
+            raise
 
         self._fd = fd
         self._owner_pid = os.getpid()
@@ -266,6 +312,9 @@ class DaemonLock:
         if self._fd is not None:
             raise DaemonLockError("This process already holds the daemon lock")
 
+        directory = prepare_daemon_state(self._auth_root)
+        self._path = directory / _DAEMON_LOCK_FILE
+        _harden_existing_lock(self._path)
         try:
             inherited = os.fstat(fd)
         except OSError as exc:
@@ -416,8 +465,9 @@ def daemon_is_running(auth_root: Path) -> bool:
     Says nothing about whether a browser is still running either. The kernel
     frees the lock the moment the holder dies, and Chromium can outlive it.
     """
-    path = daemon_lock_path(auth_root)
-    if not path.exists():
+    directory = prepare_daemon_state(auth_root)
+    path = directory / _DAEMON_LOCK_FILE
+    if not _harden_existing_lock(path):
         return False
 
     fd = open_lock_file(path)

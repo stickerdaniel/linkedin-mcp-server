@@ -146,6 +146,22 @@ Optional additional keys:
 - `job_ids: [id, ...]` (search_jobs and get_saved_jobs)
 - `references["feed"]` (get_feed only) — every entry is `kind: "feed_post"`; non-post anchors (sidebar profiles, employer logos) are filtered. URLs may carry either `/feed/update/<urn>/` (DOM-anchor-derived) or `/posts/<slug>` (SDUI-derived) form; both are valid LinkedIn permalinks. Cap is 50 entries, matching `get_feed`'s `num_posts` ceiling.
 
+## Tests
+
+- **A test that cannot fail is not a test.** Before committing one, mutate
+  the code it covers and watch it fail. A test that survives the mutation
+  asserts something every implementation satisfies (a count that holds
+  either way, a branch merely touched), and the usual repair is to assert
+  the log line, the elapsed time, or a count scoped to the thing under
+  test. Fixtures that reload on every scroll event mask a premature stop:
+  slow them down until one batch lands per round, or the mutation survives
+  for the wrong reason.
+- **Browser-DOM tests belong where the unit suite mocks `page.evaluate`.**
+  Extractor JS never executes under a mock, so a `browser_dom` test is its
+  only coverage. Prefer a unit test elsewhere, and keep in mind that a
+  fixture imitating LinkedIn's markup is a claim about LinkedIn, while one
+  driving a synthetic container is a claim about the algorithm only.
+
 ## Verifying Bug Reports
 
 Always verify scraping bugs end-to-end against live LinkedIn, not just code analysis. Use `uv run`, not `uvx`, so the running process reflects your workspace. Use `uvx` only for packaged distribution verification. For live Docker investigations, refresh the source session first with `uv run -m linkedin_mcp_server --login` before testing each materially different approach. Assume a valid login profile already exists at `~/.linkedin-mcp/profile/`.
@@ -180,9 +196,50 @@ gt create -m "chore: Bump version to X.Y.Z"
 gt submit                        # merge PR to trigger release workflow
 ```
 
-The CI release workflow automatically updates `manifest.json` and `docker-compose.yml` with the new version — do not update them manually.
+The CI release workflow automatically updates `manifest.json`, `docker-compose.yml` and `server.json` with the new version. Do not update them manually.
 
-After the workflow completes, file a PR in the MCP registry to update the version.
+After the workflow completes, file a PR against
+[`docker/mcp-registry`](https://github.com/docker/mcp-registry) updating
+`servers/linkedin-mcp-server/server.yaml`. Docker's own sweep refreshes
+`source.commit` only, and only for images in its `mcp/` namespace
+(`cmd/ci/update_pins.go`); this entry names `stickerdaniel/linkedin-mcp-server`,
+so neither its tag nor its pin ever moves on its own. Skipping it is why that
+entry sat on 1.4.0 for a year.
+
+The first such PR is more than a tag: that entry still advertises a
+`LINKEDIN_COOKIE` secret and a `USER_AGENT` field for an authentication path
+this server no longer has, and `USER_AGENT` now refuses to start
+(`config/loaders.py`). It needs the session directory as a mount instead. Docker
+validates a changed entry by pulling the image and listing its tools over stdio,
+so the tag it moves to has to be a release where that works.
+
+`server.json` is a different registry: the official one at
+`registry.modelcontextprotocol.io`, which is a service reached through
+`mcp-publisher` and has no PR flow. This server has never been listed there.
+Publishing is a maintainer decision rather than a release step, and it cannot
+succeed before a release that carries the `mcp-name` token in `README.md` and
+the `io.modelcontextprotocol.server.name` label in the `Dockerfile`: ownership
+is proved against the *published* PyPI description and image config, so the
+markers have to ship first and no local edit can repair an artifact already on
+PyPI.
+
+Two things about that entry are outside its own control, both measured against
+Docker MCP Gateway, which converts official-registry entries into its catalog.
+Neither is a reason to write the entry differently, and both are reasons not to
+promise that listing alone makes the server work everywhere.
+
+An `isSecret` variable loses its optionality on the way in, because the catalog
+secret keeps only a name and an environment variable, and the add flow then
+treats every converted secret as required. The three optional proxy credentials
+therefore read as missing for anyone who does not use a proxy, which is nearly
+everyone.
+
+A writable host bind needs the operator to name its exact path in
+`MCP_GATEWAY_DOCKER_BIND_ALLOW_WRITABLE_PATHS`. By default the gateway allows
+binds only under the temporary directories and mounts those read-only, and a
+separate variable widens the read-only set without making anything writable. The
+session directory has to be written to, and no field in `server.json` can ask
+for that.
 
 ## Commit Messages
 
@@ -233,12 +290,36 @@ one pointing at it.
 
 ## PR Reviews
 
+Greptile reviews no draft on its own, so converting the PR out of draft is
+what starts the first pass. A session that opens a draft and then waits for
+the bot waits forever.
+
+A later push to a non-draft PR is reviewed again, but Greptile edits its
+existing comment instead of posting a new one. A check that looks for a new
+comment therefore finds nothing and reads exactly like a pass that never
+ran. Verify that its `Last reviewed commit` SHA equals the PR's current head;
+a timestamp cannot associate an edit with a pushed revision.
+
 Greptile posts initial reviews as PR review comments, but follow-ups as **issue comments**. Always check both.
 
 ```bash
 gh api repos/{owner}/{repo}/pulls/{pr}/reviews    # initial reviews
 gh api repos/{owner}/{repo}/pulls/{pr}/comments   # inline comments
 gh api repos/{owner}/{repo}/issues/{pr}/comments   # follow-up reviews
+
+# A re-review after a push edits the existing comment. Prove which head it saw.
+sha='^[0-9a-f]{40}$'
+head=$(gh pr view {pr} --json headRefOid --jq .headRefOid) &&
+reviewed=$(gh api repos/{owner}/{repo}/issues/{pr}/comments \
+  --jq '[.[]
+         | select(.user.login == "greptile-apps[bot]")
+         | select(.body | contains("Last reviewed commit:"))
+         | .body
+         | capture("Last reviewed commit:.*?/commit/(?<sha>[0-9a-f]{40})").sha]
+        | last') &&
+printf '%s\n' "$head" | grep -Eq "$sha" &&
+printf '%s\n' "$reviewed" | grep -Eq "$sha" &&
+test "$reviewed" = "$head"
 ```
 
 ## btca

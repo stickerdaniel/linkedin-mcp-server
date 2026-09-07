@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from linkedin_mcp_server.core.exceptions import RateLimitError
-from linkedin_mcp_server.core.utils import detect_rate_limit
+from linkedin_mcp_server.core.utils import detect_rate_limit, scroll_job_sidebar
 
 
 @pytest.fixture
@@ -109,3 +109,35 @@ class TestDetectRateLimit:
 
         mock_page.locator = MagicMock(side_effect=locator_side_effect)
         await detect_rate_limit(mock_page)
+
+
+class TestScrollDeadline:
+    """A spent scroll budget must not turn into no deadline at all."""
+
+    @staticmethod
+    def _page() -> MagicMock:
+        page = MagicMock()
+        page.url = "https://www.linkedin.com/jobs/search/?keywords=python"
+        page.wait_for_selector = AsyncMock()
+        page.evaluate = AsyncMock(return_value={"status": "gone"})
+        return page
+
+    async def test_a_spent_budget_skips_the_scroll(self):
+        """Patchright reads a zero timeout as no timeout.
+
+        A search that has spent its budget would then wait on a page with no
+        job card until the tool is cancelled, and cancellation throws away
+        every page gathered before it.
+        """
+        page = self._page()
+
+        assert await scroll_job_sidebar(page, deadline=0) is False
+        page.wait_for_selector.assert_not_called()
+
+    async def test_a_sliver_of_budget_is_still_a_timeout(self):
+        """`int(0.0004 * 1000)` is zero, which the guard above does not catch."""
+        page = self._page()
+
+        await scroll_job_sidebar(page, deadline=0.0004)
+
+        assert page.wait_for_selector.await_args.kwargs["timeout"] == 1

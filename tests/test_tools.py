@@ -1,5 +1,7 @@
+import asyncio
+from types import SimpleNamespace
 from typing import Any, Callable, Coroutine, cast
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastmcp import FastMCP
@@ -551,6 +553,45 @@ class TestCompanyTools:
         assert "about" in result["sections"]
         assert "pages_visited" not in result
 
+    async def test_get_company_posts_normalizes_a_pasted_link(self, mock_context):
+        """get_company_posts builds its URL in the tool, not in the extractor.
+
+        That makes it the one wiring point the extractor tests cannot reach, and
+        the only place a pasted company link would still become
+        /company/https://de.linkedin.com/company/testcorp/posts/.
+        """
+        mock_extractor = _make_mock_extractor({})
+
+        from linkedin_mcp_server.tools.company import register_company_tools
+
+        mcp = FastMCP("test")
+        register_company_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_company_posts")
+        result = await tool_fn(
+            "https://de.linkedin.com/company/testcorp/",
+            mock_context,
+            extractor=mock_extractor,
+        )
+        assert result["url"] == "https://www.linkedin.com/company/testcorp/posts/"
+        assert (
+            mock_extractor.extract_page.call_args.args[0]
+            == "https://www.linkedin.com/company/testcorp/posts/"
+        )
+
+    async def test_get_company_posts_refuses_a_traversal_value(self, mock_context):
+        mock_extractor = _make_mock_extractor({})
+
+        from linkedin_mcp_server.tools.company import register_company_tools
+
+        mcp = FastMCP("test")
+        register_company_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_company_posts")
+        with pytest.raises(Exception):
+            await tool_fn("../../feed", mock_context, extractor=mock_extractor)
+        mock_extractor.extract_page.assert_not_called()
+
     async def test_get_company_profile_passes_callbacks(self, mock_context):
         """Verify tool wires MCPContextProgressCallback to the extractor."""
         expected = {
@@ -707,6 +748,76 @@ class TestJobTools:
         )
         assert "search_results" in result["sections"]
         assert "pages_visited" not in result
+
+    async def test_search_jobs_is_bounded_by_the_registered_timeout(self, mock_context):
+        """The loop stops itself by the same figure FastMCP cancels on.
+
+        Registered with a non-default timeout, because dropping the argument
+        leaves the extractor budgeting against its own 180s default while
+        FastMCP still cancels at 60s. The search would then be killed mid-page
+        and every page already gathered thrown away, which is the loss the
+        bound exists to prevent.
+
+        What arrives is what is left of it: FastMCP starts its clock before
+        this tool runs, and acquiring the browser is spent from the same 60s.
+        A cold start of three seconds passed on as a full sixty is the same
+        defect one layer down.
+        """
+        mock_extractor = _make_mock_extractor(
+            {
+                "url": "https://www.linkedin.com/jobs/search/?keywords=python",
+                "sections": {"search_results": "Job 1"},
+            }
+        )
+
+        from linkedin_mcp_server.tools.job import register_job_tools
+
+        mcp = FastMCP("test")
+        register_job_tools(mcp, tool_timeout=60.0)
+
+        tool_fn = await get_tool_fn(mcp, "search_jobs")
+        await tool_fn("python", mock_context, extractor=mock_extractor)
+
+        passed = mock_extractor.search_jobs.await_args.kwargs["tool_timeout"]
+        assert passed <= 60.0
+        assert passed == pytest.approx(60.0, abs=1.0)
+
+    async def test_the_search_budget_pays_for_the_browser_it_waited_on(
+        self, mock_context
+    ):
+        """FastMCP starts its clock before this tool runs.
+
+        Acquiring the browser is spent from the same figure, so passing it on
+        whole leaves the extractor planning against time it no longer has. A
+        cold start is where this bites: warm, the wait is nothing and the
+        budget is the full timeout either way, which is why asserting the
+        figure alone cannot see the defect.
+        """
+        mock_extractor = _make_mock_extractor(
+            {
+                "url": "https://www.linkedin.com/jobs/search/?keywords=python",
+                "sections": {"search_results": "Job 1"},
+            }
+        )
+
+        async def slow_start(*args, **kwargs):
+            await asyncio.sleep(0.3)
+            return mock_extractor
+
+        from linkedin_mcp_server.tools.job import register_job_tools
+
+        mcp = FastMCP("test")
+        register_job_tools(mcp, tool_timeout=60.0)
+
+        tool_fn = await get_tool_fn(mcp, "search_jobs")
+        with patch(
+            "linkedin_mcp_server.tools.job.get_ready_extractor",
+            side_effect=slow_start,
+        ):
+            await tool_fn("python", mock_context)
+
+        passed = mock_extractor.search_jobs.await_args.kwargs["tool_timeout"]
+        assert passed < 59.9
 
     async def test_get_saved_jobs(self, mock_context):
         expected = {
@@ -1120,6 +1231,86 @@ class TestGetCompanyEmployeesTool:
         tool_fn = await get_tool_fn(mcp, "get_company_employees")
         with pytest.raises(ToolError, match="Session expired"):
             await tool_fn("anthropic", mock_context, extractor=mock_extractor)
+
+
+class TestFeedToolDeadline:
+    """A tool deadline that comes due inside the cleanup shield.
+
+    ``_drain_listener_tasks`` shields its bounded teardown, and AnyIO does
+    not deliver into a shielded scope: on the way out it can only schedule
+    delivery for the next turn. ``get_feed`` then calls ``report_progress``,
+    which suspends only when the client sent a progress token, so the two
+    cases have to be driven separately. Both go over a real client session
+    against a real ``anyio.fail_after``; nothing about the timeout is mocked.
+    """
+
+    @staticmethod
+    def _server_and_reads(mcp_timeout: float, cleanup: float):
+        from linkedin_mcp_server.scraping.extractor import _drain_listener_tasks
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        reads: list[asyncio.Task[None]] = []
+
+        async def extract_feed(num_posts: int = 1) -> ExtractedSection:
+            started = asyncio.Event()
+
+            async def read() -> None:
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    # Holds the shield open across the deadline.
+                    await asyncio.sleep(cleanup)
+
+            task = asyncio.create_task(read())
+            reads.append(task)
+            await started.wait()
+            await _drain_listener_tasks([task])
+            return ExtractedSection(text="synthetic feed", references=[])
+
+        mcp = FastMCP("deadline-test")
+        register_feed_tools(mcp, tool_timeout=mcp_timeout)
+        return mcp, reads, SimpleNamespace(extract_feed=extract_feed)
+
+    async def _call(self, use_session: bool):
+        from fastmcp import Client
+
+        from linkedin_mcp_server.tools import feed as feed_tools
+
+        mcp, reads, extractor = self._server_and_reads(2.5, 0.7)
+        try:
+            with patch.object(
+                feed_tools,
+                "get_ready_extractor",
+                AsyncMock(return_value=extractor),
+            ):
+                async with Client(mcp) as client:
+                    if use_session:
+                        # No progress token: report_progress never suspends.
+                        return await client.session.call_tool(
+                            "get_feed", {"num_posts": 1}
+                        )
+                    # Client.call_tool installs a progress handler, so the
+                    # request carries a token and report_progress awaits.
+                    return await client.call_tool("get_feed", {"num_posts": 1})
+        finally:
+            for task in reads:
+                if not task.done():
+                    task.cancel()
+            if reads:
+                await asyncio.wait(reads, timeout=2.0)
+
+    async def test_the_deadline_fires_without_a_progress_token(self):
+        result = await self._call(use_session=True)
+
+        assert result.isError, "expired call returned a feed result"
+        assert "timed out" in str(result.content)
+
+    async def test_the_deadline_fires_with_a_progress_token(self):
+        from fastmcp.exceptions import ToolError
+
+        with pytest.raises(ToolError, match="timed out"):
+            await self._call(use_session=False)
 
 
 class TestFeedTools:

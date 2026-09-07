@@ -25,6 +25,10 @@ from linkedin_mcp_server.core import (
 )
 from linkedin_mcp_server.exceptions import BrowserBusyError
 from linkedin_mcp_server.login_viewer import LoginViewer, VIEWER_WALL_SECONDS
+from linkedin_mcp_server.process_tree import (
+    release_browser_guardian,
+    start_browser_guardian,
+)
 from linkedin_mcp_server.profile_lease import ProfileLease, get_profile_lease
 from linkedin_mcp_server.session_state import (
     UNGUARDED,
@@ -171,6 +175,13 @@ async def _login_holding_the_profile(
     # make every re-login fail to retire the profile it is replacing.
     retired = await rotate_shielded(user_data_dir)
 
+    # The lease lives in this process, so a crash between here and the browser's
+    # exit frees the profile while Chromium is still on it. The guardian holds a
+    # second reference and lets go once every marked group is gone. Started on
+    # this path as well because the login builds its own manager below instead of
+    # going through the shared launch, which is where the only other start sits.
+    start_browser_guardian(lease.guardian_fd())
+
     succeeded = False
     # The lease reference alone stops other processes; this additionally stops
     # rotation and logout inside *this* one, which the reference cannot express.
@@ -197,6 +208,12 @@ async def _login_holding_the_profile(
         # profile is not. Restore would also raise from this finally and mask
         # whatever actually failed.
         if state.close_confirmed:
+            # Only a proved teardown lets the guardian go, and letting it go is
+            # not optional: it is started once per process, so a guardian left
+            # behind here holds a descriptor this login has already unlocked and
+            # every later launch reuses it instead of starting one that holds
+            # anything.
+            release_browser_guardian()
             # Cleared before restore, which now takes the profile exclusively
             # and would otherwise refuse against our own liveness flag. The
             # lease reference is still held, so no other process can slip in.
@@ -272,9 +289,14 @@ async def _login_into_fresh_profile(
     )
     viewer = LoginViewer() if login_viewer else None
     failure: BaseException | None = None
+    handed_over = False
     try:
         if viewer is not None:
             viewer.start_window_manager()
+        # ``_run_login`` opens the manager on its first line, so from here on
+        # the manager's verdict is an answer about this profile. Before here it
+        # is only its pessimistic default, which is not the same thing.
+        handed_over = True
         result = await _run_login(
             manager, user_data_dir, config, login_timeout_ms, viewer=viewer
         )
@@ -289,8 +311,13 @@ async def _login_into_fresh_profile(
         # teardown that did complete; otherwise an ordinary timeout would leave
         # the profile held for the rest of this process's life. Defaults to
         # confirmed for a manager that does not report it, so a stand-in cannot
-        # wedge the profile.
-        state.close_confirmed = bool(getattr(manager, "close_confirmed", True))
+        # wedge the profile, and for one never opened, which cannot be holding
+        # anything: a window manager that fails to come up ends the login
+        # before any browser exists, and reading the default off that manager
+        # would keep the profile over a Chromium that never ran.
+        state.close_confirmed = (
+            bool(getattr(manager, "close_confirmed", True)) if handed_over else True
+        )
         if viewer is not None:
             try:
                 viewer.stop_window_manager()

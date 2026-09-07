@@ -23,7 +23,9 @@ from linkedin_mcp_server import __version__
 from linkedin_mcp_server.bootstrap import (
     get_runtime_policy,
     initialize_bootstrap,
+    report_retained_browser_revisions_if_ready,
     start_background_browser_setup_if_needed,
+    stop_background_browser_setup,
 )
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.drivers.browser import (
@@ -38,7 +40,11 @@ from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.sequential_tool_middleware import (
     SequentialToolExecutionMiddleware,
 )
-from linkedin_mcp_server.server_role import ServerRole, set_process_role
+from linkedin_mcp_server.server_role import (
+    ServerRole,
+    process_role,
+    set_process_role,
+)
 from linkedin_mcp_server.update_check import UpdateNoticeMiddleware
 from linkedin_mcp_server.tools.company import register_company_tools
 from linkedin_mcp_server.tools.feed import register_feed_tools
@@ -94,42 +100,54 @@ async def browser_lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:
     del app
     logger.info("LinkedIn MCP Server starting...")
     initialize_bootstrap(get_runtime_policy())
-    await start_background_browser_setup_if_needed()
-    # Hands the browser to another process that asks for it, and closes it when
-    # idle. Both need a timer: once tool calls stop arriving, nothing else would
-    # ever notice a waiter.
-    handoff_watch = asyncio.create_task(
-        watch_for_handoff_requests(), name="linkedin-profile-handoff"
-    )
+    handoff_watch: asyncio.Task[None] | None = None
     try:
+        # A detached owner must become attachable before it starts any managed
+        # installer descendants. Its first browser-backed tool starts setup through
+        # the ordinary readiness gate; a direct server keeps the eager install.
+        if process_role() is ServerRole.OWNER:
+            report_retained_browser_revisions_if_ready()
+        else:
+            await start_background_browser_setup_if_needed()
+        # Hands the browser to another process that asks for it, and closes it when
+        # idle. Both need a timer: once tool calls stop arriving, nothing else would
+        # ever notice a waiter.
+        handoff_watch = asyncio.create_task(
+            watch_for_handoff_requests(), name="linkedin-profile-handoff"
+        )
         yield {}
     finally:
         logger.info("LinkedIn MCP Server shutting down...")
-        handoff_watch.cancel()
         try:
-            try:
-                await handoff_watch
-            except asyncio.CancelledError:
-                # Only the cancellation we just asked for is ours to absorb.
-                # While the watcher winds down, one aimed at this task arrives
-                # as the same exception, and a bare pass would swallow it,
-                # leaving whoever asked us to stop with a teardown that
-                # reported success. cancelling() counts the requests made
-                # against *this* task, which is what tells the two apart.
-                task = asyncio.current_task()
-                if task is not None and task.cancelling():
-                    raise
-            except Exception:
-                # A poller that already died re-raises here. Swallowing it keeps
-                # shutdown on course; leaving Chromium running on the shared
-                # profile is the corruption this whole mechanism exists to
-                # prevent, and it matters more than the reason the poll failed.
-                logger.warning("Profile handoff watcher failed", exc_info=True)
+            if handoff_watch is not None:
+                handoff_watch.cancel()
+                try:
+                    await handoff_watch
+                except asyncio.CancelledError:
+                    # Only the cancellation we just asked for is ours to absorb.
+                    # While the watcher winds down, one aimed at this task arrives
+                    # as the same exception, and a bare pass would swallow it,
+                    # leaving whoever asked us to stop with a teardown that
+                    # reported success. cancelling() counts the requests made
+                    # against *this* task, which is what tells the two apart.
+                    task = asyncio.current_task()
+                    if task is not None and task.cancelling():
+                        raise
+                except Exception:
+                    # A poller that already died re-raises here. Swallowing it keeps
+                    # shutdown on course; leaving Chromium running on the shared
+                    # profile is the corruption this whole mechanism exists to
+                    # prevent, and it matters more than the reason the poll failed.
+                    logger.warning("Profile handoff watcher failed", exc_info=True)
         finally:
-            # In a finally, not after the except, so a BaseException the poller
-            # raised still closes the browser on its way out. Those are not ours
-            # to swallow, but they are also no reason to abandon the profile.
-            await close_browser()
+            # Setup is owned by this lifespan. This also covers cancellation while
+            # direct-server startup is still waiting on its shared readiness task.
+            try:
+                await stop_background_browser_setup()
+            finally:
+                # A BaseException from either background task still closes the
+                # browser; it is no reason to abandon the shared profile.
+                await close_browser()
 
 
 def create_mcp_server(

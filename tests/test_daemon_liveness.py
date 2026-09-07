@@ -623,7 +623,7 @@ class TestTheOwnersOwnLoop:
             await asyncio.sleep(0.35)
 
         serving = asyncio.create_task(serves())
-        await _serve_until_stopped(MagicMock(), serving, [])
+        await _serve_until_stopped(MagicMock(), serving, [], lock=None)
 
         assert abandoned.cancelled(), "the owner never expired an abandoned call"
         assert marker not in liveness._waiting
@@ -649,7 +649,7 @@ class TestGoingAwayWhenNobodyNeedsIt:
             await asyncio.sleep(ticks)
 
         serving = asyncio.create_task(serves())
-        await _serve_until_stopped(server, serving, [], idle_timeout)
+        await _serve_until_stopped(server, serving, [], idle_timeout, lock=None)
         return bool(server.should_exit)
 
     async def test_an_owner_nobody_ever_called_still_exits(self):
@@ -664,6 +664,68 @@ class TestGoingAwayWhenNobodyNeedsIt:
         liveness._quiet_since = liveness._quiet_since - 60  # ty: ignore
 
         assert await self._run_loop(idle_timeout=5.0) is True
+
+    async def test_browser_setup_in_progress_holds_the_owner_open(self):
+        from linkedin_mcp_server import bootstrap, daemon_liveness
+
+        liveness = daemon_liveness.get_liveness()
+        liveness.the_endpoint_is_live()
+        liveness._quiet_since = liveness._quiet_since - 60  # ty: ignore
+
+        async def pending_setup() -> None:
+            await asyncio.Event().wait()
+
+        setup = asyncio.create_task(pending_setup())
+        bootstrap.get_bootstrap_state().setup_task = setup
+        try:
+            assert await self._run_loop(idle_timeout=0.05, ticks=0.2) is False
+        finally:
+            setup.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await setup
+            bootstrap.get_bootstrap_state().setup_task = None
+
+    async def test_unconsumed_setup_failure_holds_the_owner_then_lets_it_go(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Both halves, because each one alone is a different bug. A failure is
+        # only reported on the *next* tool call, and the message it follows asks
+        # for that call in a minute or two: an owner with a shorter configured
+        # idle timeout that exits inside that window sends the retry to a fresh
+        # owner, which starts setup over and hides the diagnostic again. And a
+        # failure nobody ever comes back for must not pin the owner forever,
+        # which is what makes the grace bounded rather than a second wedge.
+        from linkedin_mcp_server import bootstrap, daemon_liveness, daemon_owner
+
+        grace = 1.0
+        monkeypatch.setattr(daemon_owner, "_SETUP_FAILURE_RETRY_GRACE_SECONDS", grace)
+
+        async def failed_setup() -> None:
+            raise RuntimeError("install failed")
+
+        setup = asyncio.create_task(failed_setup())
+        with pytest.raises(RuntimeError, match="install failed"):
+            await setup
+        bootstrap.get_bootstrap_state().setup_task = setup
+
+        liveness = daemon_liveness.get_liveness()
+        liveness.the_endpoint_is_live()
+        liveness._quiet_since = liveness._quiet_since - 60  # ty: ignore
+        # Where the quiet period starts in production: setup completion resets
+        # the idle clock, so the grace is measured from the failure rather than
+        # from whenever the endpoint was published.
+        liveness.background_activity_finished()
+
+        try:
+            assert bootstrap.browser_setup_failure_pending()
+            held = await self._run_loop(idle_timeout=0.05, ticks=0.3)
+            quiet = liveness.quiet_for()
+            assert quiet is not None and 0.05 <= quiet < grace
+            assert held is False, "the owner exited before the retry could arrive"
+
+            assert await self._run_loop(idle_timeout=0.05, ticks=grace) is True
+        finally:
+            bootstrap.get_bootstrap_state().setup_task = None
 
     async def test_it_does_not_exit_before_the_endpoint_is_published(self):
         # The clock has not started. An owner spends its first seconds importing
@@ -735,6 +797,19 @@ class TestGoingAwayWhenNobodyNeedsIt:
         assert quiet is not None and quiet < 1
         assert await self._run_loop(idle_timeout=5.0) is False
 
+    async def test_the_clock_restarts_when_background_activity_finishes(self):
+        from linkedin_mcp_server import daemon_liveness
+
+        liveness = daemon_liveness.get_liveness()
+        liveness.the_endpoint_is_live()
+        liveness._quiet_since = liveness._quiet_since - 60  # ty: ignore
+
+        liveness.background_activity_finished()
+
+        quiet = liveness.quiet_for()
+        assert quiet is not None and quiet < 1
+        assert await self._run_loop(idle_timeout=5.0) is False
+
     async def test_a_zero_timeout_keeps_the_owner_forever(self):
         # The documented way to switch it off, and the same value that already
         # disables the browser's own idle close.
@@ -760,8 +835,10 @@ from pathlib import Path
 
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon_election import obtain_owner
+from linkedin_mcp_server.profile_claim import ensure_profile_claim
 
 profile = Path(sys.argv[1])
+ensure_profile_claim(profile, claim_anyway=True)
 config = AppConfig()
 config.browser.user_data_dir = str(profile)
 config.browser.browser_idle_timeout_seconds = float(sys.argv[2])
@@ -978,7 +1055,9 @@ class TestAnAbandonedCallStillExpiresUnderTheLoop:
             await stop.wait()
 
         serving = asyncio.create_task(serves())
-        loop = asyncio.create_task(_serve_until_stopped(MagicMock(), serving, []))
+        loop = asyncio.create_task(
+            _serve_until_stopped(MagicMock(), serving, [], lock=None)
+        )
         try:
             # The first scan has to be behind us, so the decision is taken on a
             # later tick with a real and short gap in front of it.

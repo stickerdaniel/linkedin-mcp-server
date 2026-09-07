@@ -27,6 +27,7 @@ from linkedin_mcp_server.daemon_lock import (
     daemon_is_running,
     daemon_lock_path,
 )
+from linkedin_mcp_server.private_state import PrivateStateError
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -119,6 +120,98 @@ class TestScope:
         assert first.parent.parent == daemon_state_root()
         assert second.parent.parent == daemon_state_root()
         assert first != second
+
+    @pytest.mark.skipif(
+        os.name == "nt", reason="POSIX permission bits do not exist on Windows"
+    )
+    def test_fresh_lock_state_is_private_under_umask_zero(self, tmp_path: Path):
+        previous = os.umask(0)
+        lock = DaemonLock(tmp_path / "auth")
+        try:
+            assert lock.try_acquire()
+        finally:
+            os.umask(previous)
+            lock.release()
+
+        assert stat.S_IMODE(daemon_state_root().stat().st_mode) == 0o700
+        assert stat.S_IMODE(lock.path.parent.stat().st_mode) == 0o700
+        assert stat.S_IMODE(lock.path.stat().st_mode) == 0o600
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks are required")
+    def test_a_planted_lock_symlink_is_refused(self, tmp_path: Path):
+        path = daemon_lock_path(tmp_path / "auth")
+        path.parent.mkdir(parents=True, mode=0o777)
+        path.parent.chmod(0o777)
+        victim = tmp_path / "victim.lock"
+        victim.write_text("untouched")
+        victim.chmod(0o644)
+        path.symlink_to(victim)
+
+        with pytest.raises(PrivateStateError, match="symbolic link"):
+            DaemonLock(tmp_path / "auth").try_acquire()
+
+        assert stat.S_IMODE(victim.stat().st_mode) == 0o644
+
+    @pytest.mark.skipif(
+        not hasattr(os, "mkfifo"), reason="named pipes are a POSIX mechanism"
+    )
+    def test_a_planted_lock_fifo_is_refused_without_blocking(self, tmp_path: Path):
+        path = daemon_lock_path(tmp_path / "auth")
+        path.parent.mkdir(parents=True, mode=0o777)
+        path.parent.chmod(0o777)
+        os.mkfifo(path)
+        started = time.monotonic()
+
+        with pytest.raises(PrivateStateError, match="not a regular file"):
+            DaemonLock(tmp_path / "auth").try_acquire()
+
+        assert time.monotonic() - started < 0.1
+        assert path.is_fifo()
+
+    @pytest.mark.skipif(
+        os.name == "nt", reason="POSIX permission bits do not exist on Windows"
+    )
+    def test_an_existing_regular_lock_is_hardened_before_use(self, tmp_path: Path):
+        path = daemon_lock_path(tmp_path / "auth")
+        path.parent.mkdir(parents=True, mode=0o777)
+        path.parent.chmod(0o777)
+        path.touch(mode=0o666)
+        path.chmod(0o666)
+        lock = DaemonLock(tmp_path / "auth")
+
+        assert lock.try_acquire()
+        try:
+            assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+            assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        finally:
+            lock.release()
+
+    def test_failed_fresh_lock_hardening_removes_the_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        def refuse(_path: Path) -> None:
+            raise PrivateStateError("ACL failure")
+
+        monkeypatch.setattr(daemon_lock_module, "harden_created_file", refuse)
+        lock = DaemonLock(tmp_path / "auth")
+
+        with pytest.raises(PrivateStateError, match="ACL failure"):
+            lock.try_acquire()
+
+        assert not lock.path.exists()
+
+    @pytest.mark.skipif(os.name != "nt", reason="Windows ACLs are required")
+    def test_lock_file_uses_the_private_file_acl(self, tmp_path: Path):
+        from linkedin_mcp_server.windows_acl import describe_dacl
+
+        lock = DaemonLock(tmp_path / "auth")
+        assert lock.try_acquire()
+        try:
+            described = describe_dacl(lock.path)
+            assert described.protected is True
+            assert len(described.entries) == 1
+        finally:
+            lock.release()
 
     @pytest.mark.skipif(
         os.name == "nt", reason="POSIX permission bits do not exist on Windows"

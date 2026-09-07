@@ -32,9 +32,69 @@ jobs:
       - name: Optimize uv cache for CI
         run: uv cache prune --ci
 
+  windows-daemon:
+    name: Windows daemon (Python ${{ matrix.python-version }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.12.4 exactly, because it is the declared floor and the one version
+        # where private state creation on Windows became possible at all. The
+        # others follow their newest patch, so nothing else here would notice a
+        # daemon path reaching for something added after it.
+        python-version: ["3.12.4", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+
+      - run: uv sync --group dev
+
+      - name: Run daemon protocol and containment tests
+        run: >-
+          uv run pytest
+          tests/test_daemon_election.py::TestAtomicStartupCommit
+          tests/test_daemon_election.py::TestPublishingLast
+          tests/test_daemon_election.py::TestRealOwner::test_an_owner_is_started_and_answers
+          tests/test_daemon_election.py::TestRealOwner::test_a_crashed_owner_is_replaced
+          tests/test_daemon_election.py::TestRealOwner::test_many_clients_starting_at_once_elect_exactly_one_owner
+          tests/test_bootstrap.py::TestInstallerSupervisorLaunch::test_real_cpython_wait_unregister_contract
+          tests/test_daemon_descriptor.py::TestPreparedCommit
+          tests/test_daemon_descriptor.py::TestStateLocation
+          tests/test_daemon_lock.py
+          tests/test_installer_supervisor.py
+          tests/test_installer_worker.py
+          tests/test_process_tree.py
+          tests/test_private_state.py
+
+      - run: uv cache prune --ci
+
+  # Branch protection on `main` requires `lint-and-check` and `test` only, and
+  # that list is a repository setting no workflow file can edit. So this job is
+  # where a contract that has to block a merge gets attached: it fails unless
+  # every job it names succeeded, which makes those jobs required without
+  # renaming anything. `if: always()` so a failure upstream still reaches the
+  # check below rather than skipping it, because a skipped required check is a
+  # green one.
   test:
+    needs: [windows-daemon, platform-behaviour]
+    if: always()
     runs-on: ubuntu-latest
     steps:
+      - name: Require the Windows daemon tests
+        run: test '${{ needs.windows-daemon.result }}' = success
+
+      # Real browser containment on Windows and macOS runs nowhere else: the
+      # POSIX environment marker and the Windows Job a Chromium joins are
+      # facts only those platforms can confirm, and the lease and owner-only
+      # storage are a different implementation on each. Reading the result of
+      # the whole matrix, so one red leg fails this.
+      - name: Require the platform behaviour tests
+        run: test '${{ needs.platform-behaviour.result }}' = success
+
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
@@ -82,10 +142,11 @@ jobs:
           cat /tmp/xvfb.log >&2
           exit 1
 
-      # `--dist loadgroup` keeps the identity tests on one worker. They share
-      # two cached browser launches, and under plain `load` every worker that
-      # received one of them would pay for its own pair. Tests carrying no
-      # group mark are distributed exactly as before.
+      # `--dist loadgroup` keeps every test that launches Chromium on one
+      # worker. The identity cases share two cached launches; the DOM and auth
+      # contracts launch per case, and the DOM timers use wall-clock deadlines
+      # that concurrent browser startups made flaky. Tests without the group
+      # mark are distributed exactly as before.
       - name: Run tests
         env:
           DISPLAY: ":99"
@@ -103,6 +164,12 @@ jobs:
   platform-behaviour:
     name: Platform behaviour (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # Long enough for a cold browser download and far short of the six hours
+    # a job without one is allowed to sit. These tests spawn real processes
+    # and wait on them, so a contract that stops holding turns into a wedged
+    # job rather than a red one, and a wedged job reads as work in progress
+    # for as long as anyone is willing to wait.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -127,8 +194,20 @@ jobs:
 
       - run: uv sync --group dev
 
+      # ``faulthandler_timeout`` rather than a plugin: it is pytest's own, and
+      # what it buys is the stack of every thread at the moment a test stops
+      # making progress. These tests wait on processes they started, so the
+      # difference between a slow one and a stuck one is not visible from the
+      # outside and the report is the only way to tell them apart.
       - name: Run platform behaviour tests
-        run: uv run pytest tests/test_profile_lease.py tests/test_profile_lease_integration.py tests/test_private_state.py tests/test_daemon_lock.py tests/test_greenlet_runtime.py
+        run: >-
+          uv run pytest -v -o faulthandler_timeout=120
+          tests/test_profile_lease.py
+          tests/test_profile_lease_integration.py
+          tests/test_private_state.py
+          tests/test_daemon_lock.py
+          tests/test_process_tree.py
+          tests/test_greenlet_runtime.py
 
       # The identity gate runs on every leg, because every leg's browser is a
       # different one from the Ubuntu job's. macOS is the only platform with a
@@ -142,12 +221,12 @@ jobs:
       # headless mode like Linux does; that is true of one case in that file
       # and says nothing about the rest of them.
       #
-      # None of these three legs blocks a merge. Branch protection on `main`
-      # requires `lint-and-check` and `test` only, which is how this job has
-      # always stood, so a red leg here is visible on the pull request and does
-      # not stop anyone. The Linux x64 half of the gate is inside `test` and
-      # does block. Adding these names to the required list is a repository
-      # setting rather than anything this file can do.
+      # Every leg blocks a merge, through `test` rather than by name. Branch
+      # protection requires `lint-and-check` and `test`, and `test` fails
+      # unless this whole matrix succeeded, so the required list stays as it is
+      # while a red leg here stops the merge. Before that it did not: this job
+      # held the only real browser containment run on Windows and macOS and
+      # nothing depended on it, so those contracts were advisory.
       #
       # `shell: bash` because one of the legs is Windows, where the default is
       # PowerShell and none of the syntax below means anything.
@@ -185,6 +264,15 @@ jobs:
           echo "Xvfb never created /tmp/.X11-unix/X99:" >&2
           cat /tmp/xvfb.log >&2
           exit 1
+
+      # Separate from the process tests above, which run before a browser
+      # exists and would skip this. It belongs on every leg because the
+      # attribution differs per platform: POSIX scans for an environment
+      # marker the browser carries, while Windows has no such marker and
+      # depends on Chromium joining the Job its Node driver was assigned to
+      # -- a fact about Windows that only Windows can confirm.
+      - name: Run the browser containment test
+        run: uv run pytest tests/test_browser_containment.py
 
       - name: Run the identity gate
         env:

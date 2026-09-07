@@ -128,6 +128,7 @@ def process_role() -> ServerRole:
 #: attaches straight back to it. So the process that cannot recover has to remove
 #: itself, and the serve loop is the only place that can do it cleanly.
 _must_stand_down: list[str] = []
+_must_hard_exit = False
 
 
 def ask_this_process_to_stand_down(why: str) -> None:
@@ -148,6 +149,11 @@ def ask_this_process_to_stand_down(why: str) -> None:
 def stand_down_reason() -> str | None:
     """Why this process must exit, or ``None`` while it may keep serving."""
     return _must_stand_down[0] if _must_stand_down else None
+
+
+def hard_exit_required() -> bool:
+    """Whether normal shutdown would release locks before Chromium is gone."""
+    return _must_hard_exit
 
 
 def a_held_profile_means_this_owner_must_go(lease: Any | None = None) -> None:
@@ -187,6 +193,8 @@ def a_held_profile_means_this_owner_must_go(lease: Any | None = None) -> None:
     Never raises. The caller is mid-teardown or mid-failure and has its own
     exception to deliver.
     """
+    global _must_hard_exit
+
     if process_role() is not ServerRole.OWNER:
         return
 
@@ -200,6 +208,7 @@ def a_held_profile_means_this_owner_must_go(lease: Any | None = None) -> None:
         held = True
     if not held:
         return
+    _must_hard_exit = True
     ask_this_process_to_stand_down(
         "the browser did not shut down cleanly, so the profile is held"
     )
@@ -211,6 +220,7 @@ def reset_process_role_for_testing() -> None:
     Without this an ``OWNER`` claimed by one test would refuse logins in every
     test after it, in a suite where most never mention a role at all.
     """
-    global _role
+    global _must_hard_exit, _role
     _role = None
     _must_stand_down.clear()
+    _must_hard_exit = False

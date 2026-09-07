@@ -79,13 +79,21 @@ _SECTION_CONTEXTS = {
     "interests": "interests",
     "honors": "honors",
     "languages": "languages",
+    "certifications": "certifications",
+    "skills": "skills",
+    "projects": "projects",
     "contact_info": "contact info",
+    "employees": "employees",
     "job_posting": "job posting",
     "inbox": "inbox",
     "conversation": "conversation",
+    "jobs": "jobs",
+    "saved_jobs": "saved jobs",
+    "feed": "feed",
 }
 
 _DEFAULT_REFERENCE_CAP = 12
+_SEARCH_RESULTS_REFERENCE_CAP = 15
 _REFERENCE_CAPS = {
     "main_profile": 12,
     "about": 12,
@@ -94,9 +102,13 @@ _REFERENCE_CAPS = {
     "interests": 12,
     "honors": 12,
     "languages": 12,
+    "certifications": 12,
+    "skills": 12,
+    "projects": 12,
     "posts": 12,
     "jobs": 8,
-    "search_results": 15,
+    "employees": 12,
+    "search_results": _SEARCH_RESULTS_REFERENCE_CAP,
     "job_posting": 8,
     "contact_info": 8,
     "inbox": 30,
@@ -123,7 +135,17 @@ _CONNECTIONS_FOLLOW_RE = re.compile(r"\bconnections follow this page\b", re.IGNO
 _COMPANY_PATH_RE = re.compile(r"^/company/([^/?#]+)")
 _PERSON_PATH_RE = re.compile(r"^/in/([^/?#]+)")
 _SCHOOL_PATH_RE = re.compile(r"^/school/([^/?#]+)")
-_JOB_PATH_RE = re.compile(r"^/jobs/view/(\d+)")
+# LinkedIn serves a job under both /jobs/view/<id>/ and
+# /jobs/view/<title>-at-<company>-<id>/, and both 301 to the same page, so the
+# id is the trailing number of the segment rather than its start. Anchoring to
+# the start dropped the slugged form, and matched the wrong number whenever a
+# title opened with one: "2026-software-engineer-at-acme-4252026496" read as
+# job 2026. Same shape as the pattern the job-id extraction uses, with one
+# difference that has to stay: `[0-9]` and not `\d`, because Python's `\d`
+# also matches Arabic-Indic and other Unicode decimal digits while
+# JavaScript's does not, and `normalize_job_id` refuses anything outside
+# `[0-9]`. Matching them here only produces a reference the next call rejects.
+JOB_PATH_RE = re.compile(r"^/jobs/view/(?:[^/?#]*-)?([0-9]+)(?=[/?#]|$)")
 _NEWSLETTER_PATH_RE = re.compile(r"^/newsletters/([^/?#]+)")
 _PULSE_PATH_RE = re.compile(r"^/pulse/([^/?#]+)")
 _FEED_PATH_RE = re.compile(r"^/feed/update/([^/?#]+)")
@@ -155,9 +177,13 @@ def _first_company_urn_from_query(query: str) -> str | None:
 def build_references(
     raw_references: list[RawReference],
     section_name: str,
+    *,
+    apply_cap: bool = True,
 ) -> list[Reference]:
     """Filter and normalize raw DOM anchors into compact references."""
-    cap = _REFERENCE_CAPS.get(section_name, _DEFAULT_REFERENCE_CAP)
+    cap = (
+        _REFERENCE_CAPS.get(section_name, _DEFAULT_REFERENCE_CAP) if apply_cap else None
+    )
     normalized_references: list[Reference] = []
 
     for raw in raw_references:
@@ -288,7 +314,7 @@ def classify_link(href: str) -> tuple[ReferenceKind, str] | None:
     if match := _SCHOOL_PATH_RE.match(path):
         return "school", f"/school/{match.group(1)}/"
 
-    if match := _JOB_PATH_RE.match(path):
+    if match := JOB_PATH_RE.match(path):
         return "job", f"/jobs/view/{match.group(1)}/"
 
     if match := _NEWSLETTER_PATH_RE.match(path):

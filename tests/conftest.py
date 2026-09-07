@@ -1,3 +1,5 @@
+import sys
+
 import pytest
 
 
@@ -6,6 +8,9 @@ def reset_singletons():
     """Reset global state for test isolation."""
     from linkedin_mcp_server.bootstrap import reset_bootstrap_for_testing
     from linkedin_mcp_server.config import reset_config
+    from linkedin_mcp_server.daemon_descriptor import (
+        reset_daemon_descriptor_for_testing,
+    )
     from linkedin_mcp_server.daemon_liveness import reset_liveness_for_testing
     from linkedin_mcp_server.debug_trace import reset_trace_state_for_testing
     from linkedin_mcp_server.logging_config import teardown_trace_logging
@@ -14,6 +19,7 @@ def reset_singletons():
     from linkedin_mcp_server.server_role import reset_process_role_for_testing
 
     reset_bootstrap_for_testing()
+    reset_daemon_descriptor_for_testing()
     # The owner's call tracker is process state like the rest. Left standing, a
     # call one test watched is still in flight for the next, which reads as an
     # owner that is never idle, and the moment of one test's last expiry scan
@@ -38,6 +44,7 @@ def reset_singletons():
     reset_trace_state_for_testing()
     yield
     reset_bootstrap_for_testing()
+    reset_daemon_descriptor_for_testing()
     reset_browser_for_testing()
     # After the browser, so a lease the browser still held is released by its
     # own bookkeeping first rather than yanked out from under it.
@@ -189,3 +196,46 @@ def mock_context():
     ctx = MagicMock()
     ctx.report_progress = AsyncMock()
     return ctx
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """Fail a test that leaves ``sys.stdout`` or ``sys.stderr`` unusable.
+
+    A test that closes one of them breaks every test that runs after it in the
+    same process, and the traceback lands on the innocent one. The failure
+    reads as unrelated: ``uvicorn`` asks ``sys.stdout.isatty()`` while building
+    its log config, so a closed stream surfaces as ``Unable to configure
+    formatter 'default'`` in a daemon test.
+
+    Under pytest's own capturing every test gets a fresh ``sys.stdout``, which
+    repairs the damage before anything can trip over it. CI runs with ``-s``,
+    where nothing repairs it, so this class of defect passes locally and fails
+    there. The usual cause is ``capsys`` in the signature of a test that also
+    monkeypatches ``sys.stdout``: ``capsys`` installs the object that
+    ``monkeypatch`` then records as the one to restore, tears down first, and
+    closes it, so the undo reinstalls a closed stream.
+
+    Checked on the teardown report rather than in a fixture, because a fixture
+    cannot see what the teardown of another fixture did after it, and reported
+    against the test that caused it rather than raised from a hook, which would
+    abort the whole session as an internal error.
+    """
+    report = yield
+    if call.when != "teardown" or report.get_result().failed:
+        return
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name)
+        try:
+            stream.write("")
+            stream.flush()
+        except Exception as exc:  # noqa: BLE001 - any failure is the same defect
+            result = report.get_result()
+            result.outcome = "failed"
+            result.longrepr = (
+                f"{item.nodeid} left sys.{name} unusable "
+                f"({type(exc).__name__}: {exc}). Every later test in this "
+                f"process would print into it. A `capsys` argument on a test "
+                f"that also monkeypatches sys.{name} is the usual cause."
+            )
+            return

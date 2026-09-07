@@ -10,10 +10,12 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
 import sys
 import unicodedata
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -22,27 +24,75 @@ from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon_descriptor import (
     PROTOCOL_VERSION,
     SCHEMA_VERSION,
+    CommitPreflightError,
     DaemonDescriptor,
     DescriptorError,
     build,
+    commit_prepared,
     config_fingerprint,
     daemon_dir,
     daemon_state_root,
     descriptor_path,
+    discard_prepared,
     mismatched_fields,
     new_instance_id,
     new_token,
+    pending_descriptor_path,
+    prepare,
+    prepare_daemon_state,
     profile_identity,
     publish,
     read,
     read_token,
     token_path,
+    validate_prepared,
+)
+from linkedin_mcp_server.private_state import (
+    PrivateStateError,
+    harden_created_file,
 )
 
 posix_only = pytest.mark.skipif(
     os.name == "nt", reason="POSIX permission bits do not exist on Windows"
 )
+windows_only = pytest.mark.skipif(
+    os.name != "nt", reason="Windows reparse points do not exist on POSIX"
+)
+account_database_only = pytest.mark.skipif(
+    os.name == "nt", reason="Windows has no pwd account database"
+)
 _REAL_ACCOUNT_HOME = daemon_descriptor_module._account_home
+
+
+def _planted_daemon_dir(auth_root: Path) -> Path:
+    """The per-auth state directory, made the way production makes it.
+
+    Not ``mkdir(parents=True)``. The application namespace above it is state
+    ``prepare_daemon_state`` creates and then verifies as its own, so one
+    planted by hand is foreign content to that verification: on Windows it
+    comes back owned by a different account and the ownership check refuses it,
+    which is the check working rather than a fixture detail.
+    """
+    return prepare_daemon_state(auth_root)
+
+
+def _stub_windows_hardening(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Take out the ACL write and the ACL read back together.
+
+    Stubbing only the write leaves the read back real, so it reads a DACL that
+    nothing wrote. On POSIX that is harmless because the simulated branch never
+    reaches it; on Windows it refuses whatever the test planted, and on a
+    machine whose token default owner is the Administrators group it refuses it
+    for the ownership rather than for the permissions. The tests that call this
+    assert the order of the namespace and tombstone steps, so neither half of
+    the pair is their subject.
+    """
+    from linkedin_mcp_server import windows_acl
+
+    monkeypatch.setattr(
+        windows_acl, "restrict_to_current_user", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(windows_acl, "verify_owner_only", lambda *args, **kwargs: None)
 
 
 @pytest.fixture(autouse=True)
@@ -106,6 +156,43 @@ class TestRoundTrip:
         assert stat.S_IMODE(file.stat().st_mode) == 0o600
         assert stat.S_IMODE(file.parent.stat().st_mode) == 0o700
 
+    @posix_only
+    def test_existing_descriptor_and_token_are_hardened_before_use(
+        self, tmp_path: Path
+    ):
+        token = new_token()
+        descriptor = _descriptor(tmp_path, token)
+        publish(tmp_path, descriptor, token)
+        descriptor_file = descriptor_path(tmp_path)
+        token_file = token_path(tmp_path, descriptor.instance_id)
+        descriptor_file.chmod(0o666)
+        token_file.chmod(0o666)
+        descriptor_file.parent.chmod(0o777)
+
+        loaded = read(tmp_path)
+        assert loaded is not None
+        assert read_token(tmp_path, loaded) == token
+
+        assert stat.S_IMODE(descriptor_file.parent.stat().st_mode) == 0o700
+        assert stat.S_IMODE(descriptor_file.stat().st_mode) == 0o600
+        assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
+
+    @pytest.mark.skipif(os.name != "nt", reason="Windows ACLs are required")
+    def test_descriptor_and_token_use_the_private_file_acl(self, tmp_path: Path):
+        from linkedin_mcp_server.windows_acl import describe_dacl
+
+        token = new_token()
+        descriptor = _descriptor(tmp_path, token)
+        publish(tmp_path, descriptor, token)
+
+        for path in (
+            descriptor_path(tmp_path),
+            token_path(tmp_path, descriptor.instance_id),
+        ):
+            described = describe_dacl(path)
+            assert described.protected is True
+            assert len(described.entries) == 1
+
     def test_the_token_is_not_in_the_descriptor(self, tmp_path: Path):
         # The descriptor is the readable half of the pair on purpose, so the
         # secret must not be in it. Only its digest is.
@@ -114,6 +201,352 @@ class TestRoundTrip:
         publish(tmp_path, _descriptor(tmp_path, token), token)
 
         assert token not in descriptor_path(tmp_path).read_text()
+
+
+class TestPreparedCommit:
+    def test_pending_state_is_invisible_until_committed(self, tmp_path: Path):
+        token = new_token()
+        profile = tmp_path / "profile"
+        config = _config(user_data_dir=str(profile))
+        descriptor = _descriptor(tmp_path, token, profile=profile)
+
+        prepare(tmp_path, descriptor, token)
+
+        assert read(tmp_path) is None
+        assert (
+            validate_prepared(
+                tmp_path,
+                descriptor.instance_id,
+                profile=profile,
+                config=config,
+            )
+            == descriptor
+        )
+
+        commit_prepared(tmp_path, descriptor.instance_id)
+        assert read(tmp_path) == descriptor
+
+    def test_commit_is_one_same_directory_replacement(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        token = new_token()
+        descriptor = _descriptor(tmp_path, token)
+        prepare(tmp_path, descriptor, token)
+        replacements: list[tuple[object, object]] = []
+        monkeypatch.setattr(
+            daemon_descriptor_module.os,
+            "replace",
+            lambda source, destination: replacements.append((source, destination)),
+        )
+
+        committed = commit_prepared(tmp_path, descriptor.instance_id)
+
+        assert committed == descriptor_path(tmp_path)
+        assert replacements == [
+            (
+                pending_descriptor_path(tmp_path, descriptor.instance_id),
+                descriptor_path(tmp_path),
+            )
+        ]
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            PermissionError("descriptor stat denied"),
+            OSError(5, "descriptor stat failed"),
+        ],
+    )
+    def test_preflight_stat_failure_never_attempts_replacement(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        failure: OSError,
+    ):
+        token = new_token()
+        descriptor = _descriptor(tmp_path, token)
+        prepare(tmp_path, descriptor, token)
+        published = descriptor_path(tmp_path)
+        real_stat = Path.stat
+        replacements: list[tuple[object, object]] = []
+
+        def stat_path(path: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+            if path == published:
+                raise failure
+            return real_stat(path, follow_symlinks=follow_symlinks)
+
+        monkeypatch.setattr(Path, "stat", stat_path)
+        monkeypatch.setattr(
+            daemon_descriptor_module.os,
+            "replace",
+            lambda source, destination: replacements.append((source, destination)),
+        )
+
+        with pytest.raises(CommitPreflightError) as stopped:
+            commit_prepared(tmp_path, descriptor.instance_id)
+
+        assert stopped.value.__cause__ is failure
+        assert replacements == []
+        assert pending_descriptor_path(tmp_path, descriptor.instance_id).exists()
+
+    def test_initial_state_preparation_failure_is_commit_preflight(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        failure = OSError("account home is unavailable")
+        replacements: list[tuple[object, object]] = []
+        monkeypatch.setattr(
+            daemon_descriptor_module,
+            "prepare_daemon_state",
+            lambda root: (_ for _ in ()).throw(failure),
+        )
+        monkeypatch.setattr(
+            daemon_descriptor_module.os,
+            "replace",
+            lambda source, destination: replacements.append((source, destination)),
+        )
+
+        with pytest.raises(CommitPreflightError) as stopped:
+            commit_prepared(tmp_path, new_instance_id())
+
+        assert stopped.value.__cause__ is failure
+        assert replacements == []
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            CommitPreflightError("already classified"),
+            IsADirectoryError("descriptor path is a directory"),
+            NotADirectoryError("state root is not a directory"),
+        ],
+    )
+    def test_an_existing_commit_failure_classification_is_preserved(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        failure: BaseException,
+    ):
+        monkeypatch.setattr(
+            daemon_descriptor_module,
+            "prepare_daemon_state",
+            lambda root: (_ for _ in ()).throw(failure),
+        )
+
+        with pytest.raises(type(failure)) as stopped:
+            commit_prepared(tmp_path, new_instance_id())
+
+        assert stopped.value is failure
+
+    @windows_only
+    def test_a_junction_cannot_redirect_commit_or_pending_cleanup(self, tmp_path: Path):
+        instance_id = new_instance_id()
+        directory = _planted_daemon_dir(tmp_path)
+        # Removed again so the junction can take its name. It has to exist
+        # first, because what this test plants is a redirection of the state
+        # directory production would otherwise have made here.
+        directory.rmdir()
+        redirected = tmp_path / "redirected-daemon-state"
+        redirected.mkdir()
+        published = redirected / "daemon.json"
+        pending = redirected / pending_descriptor_path(tmp_path, instance_id).name
+        token = redirected / token_path(tmp_path, instance_id).name
+        published.write_text("predecessor")
+        pending.write_text("replacement")
+        token.write_text("secret")
+        subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/J", str(directory), str(redirected)],
+            check=True,
+            capture_output=True,
+        )
+        try:
+            assert directory.is_junction()
+
+            with pytest.raises(CommitPreflightError) as commit_failure:
+                commit_prepared(tmp_path, instance_id)
+            with pytest.raises(PrivateStateError, match="Windows reparse point"):
+                discard_prepared(tmp_path, instance_id)
+
+            assert isinstance(commit_failure.value.__cause__, PrivateStateError)
+            assert published.read_text() == "predecessor"
+            assert pending.read_text() == "replacement"
+            assert token.read_text() == "secret"
+        finally:
+            directory.rmdir()
+
+    def test_commit_replaces_a_symlink_to_a_directory(self, tmp_path: Path):
+        token = new_token()
+        descriptor = _descriptor(tmp_path, token)
+        prepare(tmp_path, descriptor, token)
+        target = tmp_path / "directory-target"
+        target.mkdir()
+        published = descriptor_path(tmp_path)
+        try:
+            published.symlink_to(target, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"directory symlinks are unavailable: {exc}")
+
+        if os.name == "nt":
+            # Windows refuses to rename over a link naming a directory, so the
+            # link survives and the commit reports the structural refusal that
+            # a real directory in that place reports.
+            with pytest.raises(IsADirectoryError):
+                commit_prepared(tmp_path, descriptor.instance_id)
+            assert published.is_symlink()
+            assert target.is_dir()
+            return
+
+        commit_prepared(tmp_path, descriptor.instance_id)
+
+        assert target.is_dir()
+        assert not published.is_symlink()
+        assert read(tmp_path) == descriptor
+
+    def test_publish_keeps_token_when_interrupted_after_replacement(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        token = new_token()
+        descriptor = _descriptor(tmp_path, token)
+        replace = os.replace
+
+        def replace_then_interrupt(
+            source: str | os.PathLike[str], destination: str | os.PathLike[str]
+        ) -> None:
+            replace(source, destination)
+            if Path(destination) == descriptor_path(tmp_path):
+                raise KeyboardInterrupt
+
+        monkeypatch.setattr(
+            daemon_descriptor_module.os, "replace", replace_then_interrupt
+        )
+
+        with pytest.raises(KeyboardInterrupt):
+            publish(tmp_path, descriptor, token)
+
+        assert read(tmp_path) == descriptor
+        assert read_token(tmp_path, descriptor) == token
+
+    def test_publish_keeps_token_when_replace_reports_error_after_success(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        old_token = new_token()
+        old = _descriptor(tmp_path, old_token)
+        publish(tmp_path, old, old_token)
+
+        token = new_token()
+        descriptor = _descriptor(tmp_path, token)
+        replace = os.replace
+
+        def replace_then_error(
+            source: str | os.PathLike[str], destination: str | os.PathLike[str]
+        ) -> None:
+            replace(source, destination)
+            if Path(destination) == descriptor_path(tmp_path):
+                raise OSError("rename result was lost")
+
+        monkeypatch.setattr(daemon_descriptor_module.os, "replace", replace_then_error)
+
+        with pytest.raises(OSError, match="rename result was lost"):
+            publish(tmp_path, descriptor, token)
+
+        assert token_path(tmp_path, descriptor.instance_id).read_text() == token
+        assert descriptor.instance_id in descriptor_path(tmp_path).read_text()
+
+    def test_publish_discards_generation_after_structural_replace_error(
+        self, tmp_path: Path
+    ):
+        token = new_token()
+        descriptor = _descriptor(tmp_path, token)
+        _planted_daemon_dir(tmp_path)
+        descriptor_path(tmp_path).mkdir()
+
+        with pytest.raises(IsADirectoryError):
+            publish(tmp_path, descriptor, token)
+
+        assert not pending_descriptor_path(tmp_path, descriptor.instance_id).exists()
+        assert not token_path(tmp_path, descriptor.instance_id).exists()
+
+    def test_validation_rejects_another_profile(self, tmp_path: Path):
+        token = new_token()
+        profile = tmp_path / "profile"
+        descriptor = _descriptor(tmp_path, token, profile=profile)
+        prepare(tmp_path, descriptor, token)
+
+        with pytest.raises(DescriptorError, match="another profile"):
+            validate_prepared(
+                tmp_path,
+                descriptor.instance_id,
+                profile=tmp_path / "other-profile",
+                config=None,
+            )
+
+    def test_validation_rejects_another_configuration(self, tmp_path: Path):
+        token = new_token()
+        profile = tmp_path / "profile"
+        descriptor = _descriptor(tmp_path, token, profile=profile)
+        prepare(tmp_path, descriptor, token)
+        other = _config(user_data_dir=str(profile), headless=False)
+
+        with pytest.raises(DescriptorError, match="different configuration"):
+            validate_prepared(
+                tmp_path,
+                descriptor.instance_id,
+                profile=profile,
+                config=other,
+            )
+
+    def test_validation_rejects_malformed_pending_json(self, tmp_path: Path):
+        instance_id = new_instance_id()
+        pending = pending_descriptor_path(tmp_path, instance_id)
+        _planted_daemon_dir(tmp_path)
+        pending.write_text("{ not json")
+        # Hardened the way production hardens what it writes here. A new file
+        # belongs to the token's default owner, which is not always this
+        # account, and the verification this test runs into refuses one it does
+        # not own before it ever looks at the contents that are the subject.
+        harden_created_file(pending)
+
+        with pytest.raises(DescriptorError, match="not valid JSON"):
+            validate_prepared(
+                tmp_path,
+                instance_id,
+                profile=tmp_path / "profile",
+                config=None,
+            )
+
+    def test_validation_rejects_a_descriptor_for_another_generation(
+        self, tmp_path: Path
+    ):
+        token = new_token()
+        first = _descriptor(tmp_path, token)
+        second_id = new_instance_id()
+        _planted_daemon_dir(tmp_path)
+        pending_descriptor_path(tmp_path, second_id).write_text(first.to_json())
+        # Same reason as above: hardened so the ownership check does not speak
+        # before the generation mismatch this is about.
+        harden_created_file(pending_descriptor_path(tmp_path, second_id))
+
+        with pytest.raises(DescriptorError, match="another generation"):
+            validate_prepared(
+                tmp_path,
+                second_id,
+                profile=Path(first.profile_path),
+                config=None,
+            )
+
+    def test_discard_removes_only_its_generation(self, tmp_path: Path):
+        first_token = new_token()
+        second_token = new_token()
+        first = _descriptor(tmp_path, first_token)
+        second = replace(
+            _descriptor(tmp_path, second_token), instance_id=new_instance_id()
+        )
+        prepare(tmp_path, first, first_token)
+        prepare(tmp_path, second, second_token)
+
+        discard_prepared(tmp_path, first.instance_id)
+
+        assert not pending_descriptor_path(tmp_path, first.instance_id).exists()
+        assert not token_path(tmp_path, first.instance_id).exists()
+        assert pending_descriptor_path(tmp_path, second.instance_id).exists()
+        assert token_path(tmp_path, second.instance_id).exists()
 
 
 class TestRefusals:
@@ -212,7 +645,7 @@ class TestRefusals:
         # have taken it for a first start and elected a second owner while the
         # first was still running. Absence and untrustworthy have to stay
         # distinguishable, because only one of them means "go ahead".
-        descriptor_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        _planted_daemon_dir(tmp_path)
         descriptor_path(tmp_path).symlink_to(tmp_path / "nowhere")
 
         with pytest.raises(DescriptorError, match="symbolic link"):
@@ -228,7 +661,7 @@ class TestRefusals:
         # whoever could write the link.
         elsewhere = tmp_path / "planted.json"
         elsewhere.write_text("{}")
-        descriptor_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        _planted_daemon_dir(tmp_path)
         descriptor_path(tmp_path).symlink_to(elsewhere)
 
         with pytest.raises(DescriptorError, match="symbolic link"):
@@ -243,7 +676,7 @@ class TestRefusals:
         # Discovery runs on every cold start, so a named pipe left at this path
         # would stall it inside open() with no timeout and no error, rather
         # than being reported as something the daemon did not write.
-        descriptor_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        _planted_daemon_dir(tmp_path)
         os.mkfifo(descriptor_path(tmp_path))
 
         with pytest.raises(DescriptorError, match="not something this daemon wrote"):
@@ -254,7 +687,7 @@ class TestRefusals:
         # fragment, and a fragment of JSON reads as malformed. That sends
         # whoever reads the message looking for a corrupt descriptor rather
         # than for whatever wrote something this size.
-        descriptor_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        _planted_daemon_dir(tmp_path)
         descriptor_path(tmp_path).write_text(json.dumps({"pad": "x" * 200_000}))
 
         with pytest.raises(DescriptorError, match="larger than anything"):
@@ -264,7 +697,7 @@ class TestRefusals:
         # A caller telling absence from untrusted state through DescriptorError
         # would otherwise meet a decoding error, which says nothing about which
         # of the two it is looking at.
-        descriptor_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        _planted_daemon_dir(tmp_path)
         descriptor_path(tmp_path).write_bytes(b"\xff\xfe")
 
         with pytest.raises(DescriptorError, match="not text this daemon wrote"):
@@ -370,6 +803,528 @@ class TestEndpointUrl:
 
 
 class TestStateLocation:
+    def test_windows_uses_a_fresh_state_namespace(self):
+        assert (
+            daemon_descriptor_module._application_state_dir("nt")
+            == ".mcp-server-linkedin-v2"
+        )
+        assert (
+            daemon_descriptor_module._application_state_dir("posix")
+            == ".mcp-server-linkedin"
+        )
+
+    def test_windows_account_home_pin_retains_every_replaceable_component(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import windows_acl
+
+        real_lstat = Path.lstat
+        opened: list[Path] = []
+        closed: list[object] = []
+
+        def windows_lstat(path: Path):
+            entry = real_lstat(path)
+            return SimpleNamespace(
+                st_mode=entry.st_mode,
+                st_dev=entry.st_dev,
+                st_ino=entry.st_ino,
+                st_file_attributes=0,
+            )
+
+        monkeypatch.setattr(Path, "lstat", windows_lstat)
+        monkeypatch.setattr(
+            windows_acl,
+            "pin_directory",
+            lambda path: (opened.append(path), object())[1],
+        )
+        monkeypatch.setattr(
+            windows_acl, "close_directory_pin", lambda pin: closed.append(pin)
+        )
+
+        daemon_descriptor_module._pin_windows_account_home(tmp_path)
+        daemon_descriptor_module._pin_windows_account_home(tmp_path)
+
+        expected: list[Path] = []
+        current = tmp_path
+        while current.parent != current:
+            expected.append(current)
+            current = current.parent
+        assert opened == list(reversed(expected))
+        daemon_descriptor_module.reset_daemon_descriptor_for_testing()
+        assert len(closed) == len(opened)
+
+    def test_windows_account_home_on_a_volume_root_needs_no_pin(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A home like ``D:\\`` has no parent edge, so nothing is pinned there."""
+        from linkedin_mcp_server import windows_acl
+
+        root = Path(tmp_path.anchor)
+        assert root.parent == root
+        real_lstat = Path.lstat
+        opened: list[Path] = []
+        inode = [2]
+
+        def windows_lstat(path: Path):
+            entry = real_lstat(path)
+            return SimpleNamespace(
+                st_mode=entry.st_mode,
+                st_dev=1,
+                st_ino=inode[0],
+                st_file_attributes=0,
+            )
+
+        monkeypatch.setattr(Path, "lstat", windows_lstat)
+        monkeypatch.setattr(
+            windows_acl, "pin_directory", lambda path: opened.append(path)
+        )
+
+        daemon_descriptor_module._pin_windows_account_home(root)
+        daemon_descriptor_module._pin_windows_account_home(root)
+
+        assert opened == []
+
+        # The root's own identity was recorded, so a volume swapped in behind
+        # the same letter is still caught.
+        inode[0] = 3
+        with pytest.raises(PrivateStateError, match="changed while daemon state"):
+            daemon_descriptor_module._pin_windows_account_home(root)
+
+    @windows_only
+    def test_windows_pins_the_account_home_against_replacement(self, tmp_path: Path):
+        moved = tmp_path.with_name(f"{tmp_path.name}-moved")
+
+        prepare_daemon_state(tmp_path / "auth")
+
+        with pytest.raises(OSError):
+            tmp_path.rename(moved)
+
+    def test_windows_refuses_an_unsafe_account_home_before_writing_state(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import windows_acl
+
+        monkeypatch.setattr(daemon_descriptor_module, "_WINDOWS", True)
+        monkeypatch.setattr(
+            daemon_descriptor_module,
+            "_APPLICATION_STATE_DIR",
+            ".mcp-server-linkedin-v2",
+        )
+
+        def refuse(_path: Path) -> None:
+            raise PrivateStateError("unsafe home")
+
+        monkeypatch.setattr(windows_acl, "verify_children_cannot_be_replaced", refuse)
+
+        with pytest.raises(PrivateStateError, match="unsafe home"):
+            prepare_daemon_state(tmp_path / "auth")
+
+        assert not (tmp_path / ".mcp-server-linkedin").exists()
+        assert not (tmp_path / ".mcp-server-linkedin-v2").exists()
+
+    def test_windows_refuses_legacy_state_before_creating_the_new_namespace(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        legacy = tmp_path / ".mcp-server-linkedin"
+        legacy.mkdir()
+        marker = legacy / "legacy-marker"
+        marker.write_text("untouched")
+        from linkedin_mcp_server import windows_acl
+
+        monkeypatch.setattr(daemon_descriptor_module, "_WINDOWS", True)
+        monkeypatch.setattr(
+            daemon_descriptor_module,
+            "_APPLICATION_STATE_DIR",
+            ".mcp-server-linkedin-v2",
+        )
+        monkeypatch.setattr(
+            windows_acl, "verify_children_cannot_be_replaced", lambda _path: None
+        )
+
+        with pytest.raises(PrivateStateError, match="Stop every mcp-server-linkedin"):
+            prepare_daemon_state(tmp_path / "auth")
+
+        assert not (tmp_path / ".mcp-server-linkedin-v2").exists()
+        assert marker.read_text() == "untouched"
+
+    @windows_only
+    def test_windows_does_not_reuse_legacy_state(self, tmp_path: Path):
+        legacy = tmp_path / ".mcp-server-linkedin"
+        legacy.mkdir()
+
+        with pytest.raises(PrivateStateError, match="Legacy Windows daemon state"):
+            prepare_daemon_state(tmp_path / "auth")
+
+        assert not (tmp_path / ".mcp-server-linkedin-v2").exists()
+
+    def test_windows_tombstone_blocks_an_old_namespace_from_reappearing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import windows_acl
+        from linkedin_mcp_server.common_utils import secure_mkdir
+
+        monkeypatch.setattr(daemon_descriptor_module, "_WINDOWS", True)
+        monkeypatch.setattr(
+            daemon_descriptor_module,
+            "_APPLICATION_STATE_DIR",
+            ".mcp-server-linkedin-v2",
+        )
+        monkeypatch.setattr(
+            windows_acl, "verify_children_cannot_be_replaced", lambda _path: None
+        )
+        _stub_windows_hardening(monkeypatch)
+
+        first = prepare_daemon_state(tmp_path / "auth")
+        second = prepare_daemon_state(tmp_path / "auth")
+        legacy = tmp_path / ".mcp-server-linkedin"
+
+        assert first == second
+        assert legacy.read_bytes() == daemon_descriptor_module._LEGACY_WINDOWS_TOMBSTONE
+        # Windows reports a path whose parent is a file as ERROR_PATH_NOT_FOUND
+        # rather than as a directory error, so the exception differs while the
+        # refusal this asserts is the same on both.
+        refusals = (
+            (NotADirectoryError, FileNotFoundError)
+            if os.name == "nt"
+            else NotADirectoryError
+        )
+        with pytest.raises(refusals):
+            secure_mkdir(legacy / "daemon")
+
+    def test_windows_records_the_exclusion_only_once_it_exists(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The question the election asks before it may start a child, so the
+        # answer has to follow the file rather than the intention to write it.
+        # Yes before the tombstone lands puts the whole guard back where it was.
+        from linkedin_mcp_server import windows_acl
+
+        monkeypatch.setattr(daemon_descriptor_module, "_WINDOWS", True)
+        monkeypatch.setattr(
+            daemon_descriptor_module,
+            "_APPLICATION_STATE_DIR",
+            ".mcp-server-linkedin-v2",
+        )
+        monkeypatch.setattr(
+            windows_acl, "verify_children_cannot_be_replaced", lambda _path: None
+        )
+        _stub_windows_hardening(monkeypatch)
+        observed: list[bool] = []
+        real_ensure = daemon_descriptor_module._ensure_legacy_windows_tombstone
+
+        def ensure(home: Path, staging_root: Path) -> None:
+            observed.append(daemon_descriptor_module.windows_exclusion_established())
+            real_ensure(home, staging_root)
+
+        monkeypatch.setattr(
+            daemon_descriptor_module, "_ensure_legacy_windows_tombstone", ensure
+        )
+
+        assert not daemon_descriptor_module.windows_exclusion_established()
+
+        prepare_daemon_state(tmp_path / "auth")
+
+        assert observed == [False], "and not while the file was still being written"
+        assert daemon_descriptor_module.windows_exclusion_established()
+        assert (tmp_path / ".mcp-server-linkedin").is_file()
+
+    def test_windows_claims_no_exclusion_while_legacy_state_stands(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The permanent migration error. Nothing was excluded, and saying so is
+        # what lets a caller tell this apart from a namespace it may build on.
+        from linkedin_mcp_server import windows_acl
+
+        (tmp_path / ".mcp-server-linkedin").mkdir()
+        monkeypatch.setattr(daemon_descriptor_module, "_WINDOWS", True)
+        monkeypatch.setattr(
+            daemon_descriptor_module,
+            "_APPLICATION_STATE_DIR",
+            ".mcp-server-linkedin-v2",
+        )
+        monkeypatch.setattr(
+            windows_acl, "verify_children_cannot_be_replaced", lambda _path: None
+        )
+
+        with pytest.raises(PrivateStateError, match="Stop every mcp-server-linkedin"):
+            prepare_daemon_state(tmp_path / "auth")
+
+        assert not daemon_descriptor_module.windows_exclusion_established()
+
+    @posix_only
+    def test_no_exclusion_is_claimed_off_windows(self, tmp_path: Path):
+        # There is no second namespace to exclude anywhere else, so the answer
+        # stays no and the election's wait for it never applies.
+        prepare_daemon_state(tmp_path / "auth")
+
+        assert not daemon_descriptor_module.windows_exclusion_established()
+
+    def test_windows_tombstone_is_hardened_before_publication(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import windows_acl
+
+        legacy = tmp_path / ".mcp-server-linkedin"
+        application = tmp_path / ".mcp-server-linkedin-v2"
+        hardened: list[Path] = []
+        real_harden = daemon_descriptor_module.harden_created_file
+
+        def harden(staged: Path) -> None:
+            assert staged.parent == application
+            assert staged != legacy
+            assert not legacy.exists()
+            hardened.append(staged)
+            real_harden(staged)
+
+        monkeypatch.setattr(daemon_descriptor_module, "_WINDOWS", True)
+        monkeypatch.setattr(
+            daemon_descriptor_module,
+            "_APPLICATION_STATE_DIR",
+            application.name,
+        )
+        monkeypatch.setattr(
+            windows_acl, "verify_children_cannot_be_replaced", lambda _path: None
+        )
+        _stub_windows_hardening(monkeypatch)
+        monkeypatch.setattr(daemon_descriptor_module, "harden_created_file", harden)
+
+        prepare_daemon_state(tmp_path / "auth")
+
+        assert len(hardened) == 1
+        assert not hardened[0].exists()
+        assert legacy.read_bytes() == daemon_descriptor_module._LEGACY_WINDOWS_TOMBSTONE
+
+    def test_windows_removes_a_fresh_tombstone_when_hardening_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import windows_acl
+
+        monkeypatch.setattr(daemon_descriptor_module, "_WINDOWS", True)
+        monkeypatch.setattr(
+            daemon_descriptor_module,
+            "_APPLICATION_STATE_DIR",
+            ".mcp-server-linkedin-v2",
+        )
+        monkeypatch.setattr(
+            daemon_descriptor_module, "_pin_windows_account_home", lambda _path: None
+        )
+        monkeypatch.setattr(
+            windows_acl, "verify_children_cannot_be_replaced", lambda _path: None
+        )
+        monkeypatch.setattr(
+            daemon_descriptor_module,
+            "harden_created_file",
+            lambda _path: (_ for _ in ()).throw(PrivateStateError("ACL failure")),
+        )
+
+        with pytest.raises(PrivateStateError, match="ACL failure"):
+            prepare_daemon_state(tmp_path / "auth")
+
+        assert not (tmp_path / ".mcp-server-linkedin").exists()
+
+    def test_a_tombstone_from_this_release_is_accepted_by_the_next(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The bytes on disk outlive the constant that wrote them.
+
+        Written literally rather than through the constant, because a test that
+        writes what it reads passes whatever the marker is changed to, while a
+        machine upgrading over one from this release does not.
+        """
+        from linkedin_mcp_server import windows_acl
+
+        monkeypatch.setattr(daemon_descriptor_module, "_WINDOWS", True)
+        monkeypatch.setattr(
+            daemon_descriptor_module,
+            "_APPLICATION_STATE_DIR",
+            ".mcp-server-linkedin-v2",
+        )
+        monkeypatch.setattr(
+            daemon_descriptor_module, "_pin_windows_account_home", lambda _path: None
+        )
+        monkeypatch.setattr(
+            windows_acl, "verify_children_cannot_be_replaced", lambda _path: None
+        )
+        _stub_windows_hardening(monkeypatch)
+        legacy = tmp_path / ".mcp-server-linkedin"
+        legacy.write_bytes(b"mcp-server-linkedin-v2\n")
+        legacy.chmod(0o600)
+        before = legacy.stat().st_ino
+
+        prepare_daemon_state(tmp_path / "auth")
+
+        assert legacy.stat().st_ino == before, "it was accepted, not replaced"
+        assert daemon_descriptor_module.windows_exclusion_established()
+
+    def test_windows_keeps_a_tombstone_it_could_not_verify(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Publication hands the marker over, so this start stops owning it.
+
+        Another start can already have read this inode and recorded that the
+        exclusion exists. Withdrawing it leaves that process trusting a file
+        this one removed, while the marker itself is something every later
+        start verifies for itself anyway.
+        """
+        from linkedin_mcp_server import windows_acl
+
+        monkeypatch.setattr(daemon_descriptor_module, "_WINDOWS", True)
+        monkeypatch.setattr(
+            daemon_descriptor_module,
+            "_APPLICATION_STATE_DIR",
+            ".mcp-server-linkedin-v2",
+        )
+        monkeypatch.setattr(
+            daemon_descriptor_module, "_pin_windows_account_home", lambda _path: None
+        )
+        monkeypatch.setattr(
+            windows_acl, "verify_children_cannot_be_replaced", lambda _path: None
+        )
+        legacy = tmp_path / ".mcp-server-linkedin"
+
+        def refuse(path: Path) -> None:
+            assert path == legacy, "only the published marker is verified here"
+            raise PrivateStateError("unreadable marker")
+
+        monkeypatch.setattr(
+            daemon_descriptor_module, "_verify_legacy_tombstone", refuse
+        )
+
+        with pytest.raises(PrivateStateError, match="unreadable marker"):
+            prepare_daemon_state(tmp_path / "auth")
+
+        assert legacy.read_bytes() == (
+            daemon_descriptor_module._LEGACY_WINDOWS_TOMBSTONE
+        )
+        assert not list(
+            (tmp_path / ".mcp-server-linkedin-v2").glob(".legacy-exclusion-*")
+        ), "and only the staged marker was withdrawn"
+
+    def test_windows_refuses_an_invalid_legacy_tombstone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import windows_acl
+
+        legacy = tmp_path / ".mcp-server-linkedin"
+        legacy.write_text("foreign marker")
+        monkeypatch.setattr(daemon_descriptor_module, "_WINDOWS", True)
+        monkeypatch.setattr(
+            daemon_descriptor_module,
+            "_APPLICATION_STATE_DIR",
+            ".mcp-server-linkedin-v2",
+        )
+        monkeypatch.setattr(
+            windows_acl, "verify_children_cannot_be_replaced", lambda _path: None
+        )
+
+        with pytest.raises(PrivateStateError, match="Legacy Windows daemon state"):
+            prepare_daemon_state(tmp_path / "auth")
+
+        assert not (tmp_path / ".mcp-server-linkedin-v2").exists()
+
+    @pytest.mark.skipif(os.name == "nt", reason="portable symbolic-link contract")
+    def test_windows_refuses_a_link_at_the_application_namespace(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import windows_acl
+
+        target = tmp_path / "redirected"
+        target.mkdir()
+        application = tmp_path / ".mcp-server-linkedin-v2"
+        application.symlink_to(target, target_is_directory=True)
+        monkeypatch.setattr(daemon_descriptor_module, "_WINDOWS", True)
+        monkeypatch.setattr(
+            daemon_descriptor_module,
+            "_APPLICATION_STATE_DIR",
+            ".mcp-server-linkedin-v2",
+        )
+        monkeypatch.setattr(
+            windows_acl, "verify_children_cannot_be_replaced", lambda _path: None
+        )
+        _stub_windows_hardening(monkeypatch)
+
+        with pytest.raises(PrivateStateError, match="symbolic link"):
+            prepare_daemon_state(tmp_path / "auth")
+
+        assert list(target.iterdir()) == []
+
+    @windows_only
+    def test_windows_refuses_a_permissive_application_namespace(self, tmp_path: Path):
+        from linkedin_mcp_server.windows_acl import describe_dacl
+
+        application = tmp_path / ".mcp-server-linkedin-v2"
+        application.mkdir()
+        subprocess.run(
+            ["icacls", str(application), "/grant", "*S-1-1-0:(OI)(CI)F"],
+            check=True,
+            capture_output=True,
+        )
+
+        # Either refusal is this test passing, and which one arrives first is a
+        # property of the machine: a namespace planted by hand is not this
+        # account's own state, so the ownership check can speak before the
+        # permissions are read. The line below is the subject, that nothing was
+        # repaired on the way out.
+        with pytest.raises(PrivateStateError, match="grants access|is owned by"):
+            prepare_daemon_state(tmp_path / "auth")
+
+        assert "S-1-1-0" in {entry.sid for entry in describe_dacl(application).entries}
+
+    @windows_only
+    def test_windows_refuses_a_junction_at_the_application_namespace(
+        self, tmp_path: Path
+    ):
+        target = tmp_path / "redirected"
+        target.mkdir()
+        application = tmp_path / ".mcp-server-linkedin-v2"
+        subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/J", str(application), str(target)],
+            check=True,
+            capture_output=True,
+        )
+        try:
+            with pytest.raises(PrivateStateError, match="Windows reparse point"):
+                prepare_daemon_state(tmp_path / "auth")
+            assert list(target.iterdir()) == []
+        finally:
+            application.rmdir()
+
+    @posix_only
+    def test_fresh_state_is_private_under_umask_zero(self, tmp_path: Path):
+        previous = os.umask(0)
+        try:
+            directory = prepare_daemon_state(tmp_path / "auth")
+        finally:
+            os.umask(previous)
+
+        assert stat.S_IMODE(daemon_state_root().stat().st_mode) == 0o700
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+
+    @posix_only
+    @pytest.mark.parametrize("planted", ["symlink", "file"])
+    def test_a_planted_per_auth_entry_is_refused_after_root_hardening(
+        self, tmp_path: Path, planted: str
+    ):
+        auth_root = tmp_path / "auth"
+        directory = daemon_dir(auth_root)
+        root = daemon_state_root()
+        root.mkdir(parents=True, mode=0o777)
+        root.chmod(0o777)
+        target = tmp_path / "attacker-target"
+        if planted == "symlink":
+            target.mkdir(mode=0o777)
+            target.chmod(0o777)
+            directory.symlink_to(target, target_is_directory=True)
+        else:
+            directory.write_text("attacker state")
+
+        with pytest.raises(PrivateStateError):
+            prepare_daemon_state(auth_root)
+
+        assert stat.S_IMODE(root.stat().st_mode) == 0o700
+        if planted == "symlink":
+            assert stat.S_IMODE(target.stat().st_mode) == 0o777
+
     def test_state_is_outside_the_configured_auth_root(self, tmp_path: Path):
         # The auth root can be /tmp, a home directory, or another shared parent.
         # Daemon state must not change it or trust entries planted inside it.
@@ -464,6 +1419,7 @@ class TestStateLocation:
         assert root == root.resolve()
         assert real in (root, *root.parents)
 
+    @account_database_only
     def test_a_home_that_is_not_there_is_refused(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ):
@@ -487,6 +1443,7 @@ class TestStateLocation:
             daemon_state_root()
         assert not missing.exists()
 
+    @account_database_only
     def test_an_account_without_an_absolute_home_is_refused(
         self, monkeypatch: pytest.MonkeyPatch
     ):
