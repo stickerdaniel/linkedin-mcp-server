@@ -26,17 +26,19 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
         run: |
-          # Read the type from the title via a parameter expansion rather than
-          # interpolating it into a pattern, so a crafted title cannot inject.
-          TYPE="${PR_TITLE%%[(:]*}"
-          TYPE="${TYPE// /}"
+          # Match only a type at the exact start of a structurally valid prefix.
+          # The title stays in a variable, so a crafted value cannot inject shell.
+          TYPE=""
+          if [[ "$PR_TITLE" =~ ^([a-z]+)(\([^()]+\))?!?:\ [^[:space:]] ]]; then
+            TYPE="${BASH_REMATCH[1]}"
+          fi
 
           case "$TYPE" in
             feat)           LABEL="enhancement" ;;
             fix)            LABEL="bug" ;;
             docs)           LABEL="documentation" ;;
             refactor)       LABEL="refactoring" ;;
-            chore|ci|style|test|build|perf) LABEL="chore" ;;
+            chore|ci|style|test|perf) LABEL="chore" ;;
             *)              LABEL="" ;;
           esac
 
