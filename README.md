@@ -62,6 +62,31 @@ This MCP server is **free** and **open source**, supported by [**Unipile**](http
 <br/>
 <br/>
 
+## Codex plugin
+
+This repository includes an opt-in Codex plugin that bundles the MCP server and
+its LinkedIn workflow guidance. Add the repository marketplace, then install the
+plugin:
+
+```bash
+codex plugin marketplace add stickerdaniel/linkedin-mcp-server
+codex plugin add linkedin-mcp-server@linkedin-mcp-server
+```
+
+The plugin pins the MCP package to the same version as the plugin release. It
+does not install by default or override the user's enabled state. The plugin can
+be disabled in Codex settings, and its bundled MCP server can be disabled
+independently in `~/.codex/config.toml`:
+
+```toml
+[plugins."linkedin-mcp-server".mcp_servers.linkedin]
+enabled = false
+```
+
+Installing or enabling the plugin does not open a browser or sign in. A
+LinkedIn data request may start the managed browser, import an existing local
+session, or require a visible login window.
+
 ## 🚀 uvx Setup (Recommended - Universal)
 
 **Prerequisites:** [Install uv](https://docs.astral.sh/uv/getting-started/installation/).
