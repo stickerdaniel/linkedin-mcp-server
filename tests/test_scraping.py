@@ -7025,6 +7025,120 @@ class TestCompanyPeopleExtraction:
         assert result.text  # non-empty placeholder text from the mock
 
 
+class TestGroupMembersExtraction:
+    """Tests for get_group_members and the /groups/<id>/members/ hydration wait."""
+
+    async def test_waits_for_member_listing(self, mock_page):
+        """Group members pages share the company-people hydration wait:
+        wait until an /in/ profile anchor appears inside <main> (5s)."""
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "source": "root",
+                "text": "AI Builders\nMembers\nJane Doe\nResearch Engineer",
+                "references": [],
+            }
+        )
+        mock_page.wait_for_function = AsyncMock()
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ) as mock_scroll,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            await extractor._extract_page_once(
+                "https://www.linkedin.com/groups/12345/members/",
+                section_name="members",
+            )
+
+        mock_page.wait_for_function.assert_awaited_once()
+        wait_predicate = mock_page.wait_for_function.call_args[0][0]
+        wait_kwargs = mock_page.wait_for_function.call_args.kwargs
+        assert "/in/" in wait_predicate
+        assert wait_kwargs["timeout"] == 5000
+        mock_scroll.assert_awaited_once()
+
+    async def test_get_group_members_builds_url_and_result(self, mock_page):
+        """get_group_members navigates to /groups/<id>/members/ and wraps
+        the extracted section in the standard {url, sections, references}
+        result shape, passing max_scrolls through to extract_page."""
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=ExtractedSection(
+                text="Jane Doe\nResearch Engineer",
+                references=[
+                    {
+                        "kind": "person",
+                        "url": "/in/janedoe/",
+                        "text": "Jane Doe",
+                        "context": "group member",
+                    }
+                ],
+            ),
+        ) as mock_extract:
+            result = await extractor.get_group_members("12345", max_scrolls=20)
+
+        mock_extract.assert_awaited_once_with(
+            "https://www.linkedin.com/groups/12345/members/",
+            section_name="members",
+            max_scrolls=20,
+        )
+        assert result["url"] == "https://www.linkedin.com/groups/12345/members/"
+        assert result["sections"]["members"] == "Jane Doe\nResearch Engineer"
+        assert result["references"]["members"][0]["url"] == "/in/janedoe/"
+
+    async def test_get_group_members_keywords_routes_to_filtered_path(self, mock_page):
+        """A keywords value routes through the search-box filter helper
+        instead of the plain extract_page path."""
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_extract_group_members_filtered",
+                new_callable=AsyncMock,
+                return_value=ExtractedSection(text="Maria Doe", references=[]),
+            ) as mock_filtered,
+            patch.object(
+                extractor, "extract_page", new_callable=AsyncMock
+            ) as mock_plain,
+        ):
+            result = await extractor.get_group_members(
+                "12345", keywords="maria", max_scrolls=10
+            )
+
+        mock_filtered.assert_awaited_once_with(
+            "https://www.linkedin.com/groups/12345/members/", "maria", 10
+        )
+        mock_plain.assert_not_awaited()
+        assert result["sections"]["members"] == "Maria Doe"
+
+    async def test_get_group_members_rate_limited_omits_section(self, mock_page):
+        """The _RATE_LIMITED_MSG sentinel is not surfaced as member text."""
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=ExtractedSection(text=_RATE_LIMITED_MSG, references=[]),
+        ):
+            result = await extractor.get_group_members("12345")
+
+        assert result["sections"] == {}
+        assert "references" not in result
+
+
 class TestSearchResultsExtraction:
     """Tests for search results page detection and wait behavior in _extract_page_once."""
 

@@ -87,6 +87,7 @@ _SECTION_CONTEXTS = {
     "job_posting": "job posting",
     "inbox": "inbox",
     "conversation": "conversation",
+    "members": "group member",
 }
 
 _DEFAULT_REFERENCE_CAP = 12
@@ -110,6 +111,11 @@ _REFERENCE_CAPS = {
     "contact_info": 8,
     "inbox": 30,
     "conversation": 12,
+    # Group member listings are the payload of get_group_members: profile
+    # URLs per member are the point of the tool, so the cap matches
+    # LinkedIn's ~500-row serving limit per (optionally keyword-filtered)
+    # listing rather than the compact default.
+    "members": 500,
     # Headroom for get_feed's num_posts ceiling (Field(ge=1, le=50)).
     # Kept in sync with the literal cap=50 in extractor._build_feed_references
     # where SDUI-derived /posts/<slug> permalinks are appended.

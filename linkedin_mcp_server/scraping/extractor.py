@@ -1860,8 +1860,13 @@ class LinkedInExtractor:
         # timeout instead of the 10s pattern shared with is_search/is_details
         # — empty/restricted listings are common here (small companies,
         # privacy settings) and a full 10s wait per call adds up.
+        # Group members pages (/groups/<id>/members/) hydrate the same way:
+        # the group header renders first and the member list fills in via JS,
+        # so they share the wait. Restricted listings (non-member visitors)
+        # are common there too, matching the short-timeout rationale.
         is_company_people = "/company/" in url and "/people/" in url
-        if is_company_people:
+        is_group_members = "/groups/" in url and "/members/" in url
+        if is_company_people or is_group_members:
             try:
                 await self._page.wait_for_function(
                     """() => {
@@ -1924,6 +1929,14 @@ class LinkedInExtractor:
         if is_activity:
             scrolls = max_scrolls if max_scrolls is not None else 10
             await scroll_to_bottom(self._page, pause_time=1.0, max_scrolls=scrolls)
+        elif is_group_members:
+            # Deep member pulls need the slower pause plus stall tolerance:
+            # at 0.5s a slow pagination XHR reads as "no new content" and the
+            # loop stops hundreds of members early (verified live).
+            scrolls = max_scrolls if max_scrolls is not None else 5
+            await scroll_to_bottom(
+                self._page, pause_time=1.0, max_scrolls=scrolls, max_stalls=3
+            )
         else:
             scrolls = max_scrolls if max_scrolls is not None else 5
             await scroll_to_bottom(self._page, pause_time=0.5, max_scrolls=scrolls)
@@ -3333,6 +3346,112 @@ class LinkedInExtractor:
         if section_errors:
             result["section_errors"] = section_errors
         return result
+
+    async def get_group_members(
+        self,
+        group_id: str,
+        keywords: str | None = None,
+        max_scrolls: int | None = None,
+    ) -> dict[str, Any]:
+        """List members of a LinkedIn group from the /members/ page.
+
+        The member list is only fully visible when the logged-in account
+        is a member of the group; otherwise LinkedIn redirects to the
+        group's landing page or shows a restricted listing. Either way
+        the extracted text reflects what the page actually served.
+
+        LinkedIn serves at most ~500 rows per listing regardless of scroll
+        depth (verified live). ``keywords`` filters server-side via the
+        page's member search box — the only filter mechanism the page has;
+        a ``?q=`` URL param is accepted but ignored by LinkedIn. Each
+        keyword slice gets its own ~500-row budget, so slicing is the way
+        to enumerate groups larger than the cap.
+
+        Returns:
+            {url, sections: {members: text}, references: {members: [...]}}
+        """
+        url = f"https://www.linkedin.com/groups/{group_id}/members/"
+        if keywords:
+            extracted = await self._extract_group_members_filtered(
+                url, keywords, max_scrolls
+            )
+        else:
+            extracted = await self.extract_page(
+                url, section_name="members", max_scrolls=max_scrolls
+            )
+
+        sections: dict[str, str] = {}
+        references: dict[str, list[Reference]] = {}
+        section_errors: dict[str, dict[str, Any]] = {}
+        if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+            sections["members"] = extracted.text
+            if extracted.references:
+                references["members"] = extracted.references
+        elif extracted.error:
+            section_errors["members"] = extracted.error
+
+        result: dict[str, Any] = {
+            "url": url,
+            "sections": sections,
+        }
+        if references:
+            result["references"] = references
+        if section_errors:
+            result["section_errors"] = section_errors
+        return result
+
+    async def _extract_group_members_filtered(
+        self,
+        url: str,
+        keywords: str,
+        max_scrolls: int | None,
+    ) -> ExtractedSection:
+        """Filter the group member list via the page's search box, then extract.
+
+        The members page exposes exactly one text input inside <main> (the
+        member search box), so the structural ``main input[type="text"]``
+        selector is locale-independent — placeholder/aria text is not.
+        Filling it triggers a server-side filtered fetch that replaces the
+        listing in place (the URL does not change).
+        """
+        try:
+            await self._navigate_to_page(url)
+            await detect_rate_limit(self._page)
+            try:
+                await self._page.wait_for_selector(
+                    'main input[type="text"]', timeout=5000
+                )
+            except PlaywrightTimeoutError:
+                logger.debug("Member search input did not appear on %s", url)
+
+            search_box = self._page.locator('main input[type="text"]').first
+            if await search_box.count() > 0:
+                await search_box.click()
+                await search_box.fill(keywords)
+                # Debounced server-side fetch replaces the listing in place.
+                await asyncio.sleep(2.5)
+            else:
+                logger.warning(
+                    "No member search input on %s; returning unfiltered list", url
+                )
+
+            return await self._extract_loaded_section(
+                url, "members", max_scrolls=max_scrolls
+            )
+        except LinkedInScraperException:
+            raise
+        except Exception as e:
+            logger.warning("Failed to extract filtered group members %s: %s", url, e)
+            return ExtractedSection(
+                text="",
+                references=[],
+                error=build_issue_diagnostics(
+                    e,
+                    context="get_group_members",
+                    target_url=url,
+                    section_name="members",
+                ),
+            )
 
     async def scrape_job(self, job_id: str) -> dict[str, Any]:
         """Scrape a single job posting.
