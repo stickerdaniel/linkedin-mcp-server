@@ -10,9 +10,9 @@ on:
 # from the conventional-commit type in the PR title so the filtering works
 # without anyone remembering to label by hand.
 # pull_request_target is required so PRs from forks get a writable token.
-# It is safe here only because this job never checks out the PR branch and
-# never runs its code: current API data is matched against a fixed case list,
-# so an untrusted title can at worst yield no label.
+# It is safe here only because the job checks out the trusted workflow revision,
+# never the PR branch, and matches current API data against a fixed case list.
+# An untrusted title can at worst yield no label.
 concurrency:
   group: label-pr-${{ github.event.pull_request.number }}
   cancel-in-progress: true
@@ -21,8 +21,15 @@ jobs:
   label:
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       pull-requests: write
     steps:
+      - name: Checkout the trusted workflow revision
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
       - name: Apply label for the current conventional-commit type
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -35,6 +42,11 @@ jobs:
           ATTACHED_DERIVED="$RUNNER_TEMP/attached-derived-labels.txt"
 
           gh api --method GET "repos/${REPO}/pulls/${PR_NUMBER}" > "$PR_JSON"
+          TITLE_VALID=true
+          if ! python3 scripts/check_pr_title.py --pr-json "$PR_JSON" >/dev/null; then
+            TITLE_VALID=false
+          fi
+
           gh api --method GET --paginate --slurp \
             "repos/${REPO}/issues/${PR_NUMBER}/labels?per_page=100" > "$LABELS_JSON"
 
@@ -78,9 +90,11 @@ jobs:
           # The title stays in a variable, so a crafted value cannot inject shell.
           TYPE=""
           BREAKING=""
-          if [[ "$PR_TITLE" =~ ^([a-z]+)(\([^()]+\))?(!)?:\ [^[:space:]] ]]; then
-            TYPE="${BASH_REMATCH[1]}"
-            BREAKING="${BASH_REMATCH[3]-}"
+          if [ "$TITLE_VALID" = true ]; then
+            if [[ "$PR_TITLE" =~ ^([a-z]+)(\([^()]+\))?(!)?:\ [^[:space:]] ]]; then
+              TYPE="${BASH_REMATCH[1]}"
+              BREAKING="${BASH_REMATCH[3]-}"
+            fi
           fi
 
           if [ "$BREAKING" = "!" ]; then
@@ -96,7 +110,9 @@ jobs:
             esac
           fi
 
-          if [ -n "$LABEL" ]; then
+          if [ "$TITLE_VALID" != true ]; then
+            echo "Title is invalid; clearing derived labels."
+          elif [ -n "$LABEL" ]; then
             echo "Title type '$TYPE' -> label '$LABEL'"
           else
             echo "No conventional-commit type in title; clearing derived labels."

@@ -602,13 +602,49 @@ def test_pr_title_label_release_lifecycle(
     assert rerun_calls == []
 
 
-def test_label_workflow_uses_current_title_and_per_pr_concurrency() -> None:
+@pytest.mark.parametrize(
+    "title",
+    [
+        "fix: Subject.",
+        "build: Unsupported",
+        "fix: \N{NO-BREAK SPACE}Boundary",
+        "fix: Invisible\N{ZERO WIDTH SPACE}",
+        "fix: First line\nsecond line",
+        "fix: Before\rAfter",
+    ],
+)
+def test_invalid_pr_title_label_lifecycle(tmp_path: Path, title: str) -> None:
+    assert validate_title(title) is not None
+    attached = _DERIVED_LABELS | {"triage"}
+
+    result, final_labels, calls = _run_label_workflow(tmp_path, title, attached)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "::error::" not in result.stdout + result.stderr
+    assert "Title is invalid; clearing derived labels." in result.stdout
+    assert final_labels == {"triage"}
+    assert {call[-1] for call in calls} == _DERIVED_LABELS
+    assert all("--remove-label" in call for call in calls)
+
+
+def test_label_workflow_uses_trusted_validator_and_current_title() -> None:
     workflow = _LABEL_WORKFLOW.read_text(encoding="utf-8")
 
     assert "group: label-pr-${{ github.event.pull_request.number }}" in workflow
     assert "cancel-in-progress: true" in workflow
     assert "set -euo pipefail" in workflow
+    assert "      contents: read\n      pull-requests: write\n" in workflow
+    assert "contents: write" not in workflow
+    assert _CHECKOUT in workflow
+    assert "ref: ${{ github.workflow_sha }}" in workflow
+    assert "persist-credentials: false" in workflow
+    assert "github.event.pull_request.head" not in workflow
+    assert "github.head_ref" not in workflow
+    assert "refs/pull/" not in workflow
     assert '"repos/${REPO}/pulls/${PR_NUMBER}" > "$PR_JSON"' in workflow
+    assert (
+        'python3 scripts/check_pr_title.py --pr-json "$PR_JSON" >/dev/null' in workflow
+    )
     assert "--paginate --slurp" in workflow
     assert (
         '"repos/${REPO}/issues/${PR_NUMBER}/labels?per_page=100" > "$LABELS_JSON"'
