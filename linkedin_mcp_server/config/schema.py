@@ -194,6 +194,9 @@ class BrowserConfig:
     # being readable, so it can never be asked to stand down. Both can go once
     # owner turnover survives a fingerprint change.
     eager_full_chromium: bool = False
+    # Temporary directory parent used during browser installation bootstrap.
+    # Defaults to system tempdir (tempfile.gettempdir()) when None.
+    installer_temp_dir: str | None = None
 
     def validate(self) -> None:
         """Validate browser configuration values."""

@@ -145,6 +145,7 @@ class EnvironmentKeys:
     AUTO_IMPORT_FROM_BROWSER = "AUTO_IMPORT_FROM_BROWSER"
     EAGER_FULL_CHROMIUM = "EAGER_FULL_CHROMIUM"
     DAEMON_ENABLED = "DAEMON_ENABLED"
+    INSTALLER_TEMP_DIR = "INSTALLER_TEMP_DIR"
 
 
 # What ``manifest.json`` fills from ``user_config``, and the exact string each
@@ -250,6 +251,10 @@ def load_from_env(config: AppConfig) -> AppConfig:
     # Persistent browser profile directory
     if user_data_dir := os.environ.get(EnvironmentKeys.USER_DATA_DIR):
         config.browser.user_data_dir = user_data_dir
+
+    # Temporary directory parent used during browser installation bootstrap
+    if installer_temp_dir := os.environ.get(EnvironmentKeys.INSTALLER_TEMP_DIR):
+        config.browser.installer_temp_dir = installer_temp_dir
 
     # Timeout for page operations (validated in BrowserConfig.validate())
     if timeout_env := os.environ.get(EnvironmentKeys.TIMEOUT):
@@ -654,6 +659,14 @@ def load_from_args(config: AppConfig) -> AppConfig:
     )
 
     parser.add_argument(
+        "--installer-temp-dir",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Path to temporary parent directory for browser installation bootstrap",
+    )
+
+    parser.add_argument(
         "--claim-profile-root",
         action="store_true",
         help=(
@@ -831,6 +844,9 @@ def load_from_args(config: AppConfig) -> AppConfig:
 
     if args.user_data_dir:
         config.browser.user_data_dir = args.user_data_dir
+
+    if args.installer_temp_dir:
+        config.browser.installer_temp_dir = args.installer_temp_dir
 
     if args.claim_profile_root:
         config.server.claim_profile_root = True
