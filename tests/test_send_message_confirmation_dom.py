@@ -280,17 +280,124 @@ class TestSendConfirmationAgainstRealDom:
         # Issue #861: the composer belongs to someone else. Nothing may be
         # typed and nothing may be clicked, so the message the caller wrote
         # cannot reach a person they never named.
-        page = compose_page(DELIVERING_SEND_JS).replace(
-            f'href="https://www.linkedin.com{PROFILE_PATH}"',
-            'href="https://www.linkedin.com/in/someone-else/"',
+        draft = "Private foreign draft"
+        page = (
+            compose_page(DELIVERING_SEND_JS, draft=draft)
+            .replace(
+                f'href="https://www.linkedin.com{PROFILE_PATH}"',
+                'href="https://www.linkedin.com/in/someone-else/"',
+            )
+            .replace(
+                "</section>",
+                """<button aria-label="Close your draft conversation"
+              onclick="document.body.dataset.closed = String(
+                Number(document.body.dataset.closed || 0) + 1);
+                document.getElementById('composer').remove()">Close</button>
+              </section>""",
+            )
         )
         result = await send(dom_page, page)
 
+        observed = await dom_page.evaluate(
+            """() => ({
+                draft: document.getElementById('composer')?.innerText ?? null,
+                closed: Number(document.body.dataset.closed || 0),
+            })"""
+        )
         assert result["sent"] is False
         assert result["status"] == "composer_unavailable"
         assert await dom_page.evaluate("document.body.dataset.clicked") is None
-        assert await text_of(dom_page, "#composer") == ""
+        assert observed == {"draft": draft, "closed": 0}
         assert await dom_page.locator("#thread .msg").count() == 1
+
+    async def test_focus_restored_draft_is_left_untouched(self, dom_page):
+        draft = "Confidential restored draft"
+        page = compose_page(
+            DELIVERING_SEND_JS
+            + f"""
+              document.getElementById('composer').addEventListener('focus', () => {{
+                document.getElementById('composer').textContent = '{draft}';
+              }});
+            """
+        ).replace(
+            "</section>",
+            """<button aria-label="Close your draft conversation"
+              onclick="document.body.dataset.closed = String(
+                Number(document.body.dataset.closed || 0) + 1);
+                document.getElementById('composer').remove()">Close</button>
+              </section>""",
+        )
+
+        result = await send(dom_page, page)
+
+        observed = await dom_page.evaluate(
+            """() => ({
+                draft: document.getElementById('composer')?.innerText ?? null,
+                closed: Number(document.body.dataset.closed || 0),
+                clicked: document.body.dataset.clicked ?? null,
+            })"""
+        )
+        assert result["status"] == "composer_occupied"
+        assert result["sent"] is False
+        assert result["retry_safe"] is True
+        assert observed == {"draft": draft, "closed": 0, "clicked": None}
+        assert await dom_page.locator("#thread .msg").count() == 1
+
+    async def test_state_error_before_newline_typing_is_retryable(self, dom_page):
+        original = LinkedInExtractor._read_message_composer_state
+        calls = 0
+
+        async def fail_last_pretyping_read(extractor, target):
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                raise RuntimeError("synthetic pre-typing state failure")
+            return await original(extractor, target)
+
+        with (
+            patch.object(
+                LinkedInExtractor,
+                "_read_message_composer_state",
+                autospec=True,
+                side_effect=fail_last_pretyping_read,
+            ),
+            pytest.raises(RuntimeError, match="pre-typing state failure"),
+        ):
+            await send(dom_page, compose_page(""), message="First\nSecond")
+
+        assert await dom_page.evaluate("document.body.dataset.clicked") is None
+        assert await text_of(dom_page, "#composer") == ""
+
+    @pytest.mark.parametrize(
+        ("button_html", "case"),
+        [
+            ('<button id="send" type="submit" disabled>Send</button>', "disabled"),
+            (
+                '<button id="send" type="submit">Send</button>'
+                '<button type="submit">Other</button>',
+                "ambiguous",
+            ),
+        ],
+        ids=lambda value: value if value in {"disabled", "ambiguous"} else None,
+    )
+    @pytest.mark.parametrize(
+        ("message", "retry_safe"),
+        [("Single line", True), ("First\nSecond", False)],
+        ids=["single-line", "newline"],
+    )
+    async def test_blocked_submit_preserves_retry_policy(
+        self, dom_page, button_html, case, message, retry_safe
+    ):
+        page = compose_page("").replace(
+            '<button id="send" type="submit">Send</button>', button_html
+        )
+
+        result = await send(dom_page, page, message=message)
+
+        assert result["status"] == "send_unavailable", case
+        assert result["sent"] is False
+        assert result["retry_safe"] is retry_safe
+        assert await dom_page.evaluate("document.body.dataset.clicked") is None
 
     async def test_existing_draft_is_never_sent_along(self, dom_page):
         # Measured, and the reason this fixture carries a draft at all:

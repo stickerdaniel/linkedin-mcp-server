@@ -7,10 +7,12 @@ is loaded and no account action is performed.
 
 from __future__ import annotations
 
+import os
 import time
+from unittest.mock import AsyncMock, patch
 
 import pytest
-from patchright.async_api import async_playwright
+from patchright.async_api import BrowserType, async_playwright
 
 from linkedin_mcp_server.scraping.extractor import (
     LinkedInExtractor,
@@ -39,8 +41,7 @@ def _message_target() -> _ProfileMessageTarget:
     )
 
 
-@pytest.fixture
-async def dom_page():
+async def _dom_page():
     async with async_playwright() as playwright:
         try:
             browser = await playwright.chromium.launch(
@@ -48,11 +49,55 @@ async def dom_page():
             )
             page = await browser.new_page()
         except Exception as exc:
+            if os.environ.get("CI"):
+                raise
             pytest.skip(f"chromium unavailable: {exc}")
         try:
             yield page
         finally:
             await browser.close()
+
+
+@pytest.fixture
+async def dom_page():
+    async for page in _dom_page():
+        yield page
+
+
+async def test_dom_page_launch_failure_raises_in_ci(monkeypatch):
+    monkeypatch.setenv("CI", "1")
+    fixture = _dom_page()
+    with (
+        patch.object(
+            BrowserType,
+            "launch",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("injected launch failure"),
+        ),
+        patch.object(
+            pytest,
+            "skip",
+            side_effect=AssertionError("CI launch failure was skipped"),
+        ) as skip,
+        pytest.raises(RuntimeError, match="injected launch failure"),
+    ):
+        await fixture.__anext__()
+    skip.assert_not_called()
+
+
+async def test_dom_page_launch_failure_skips_locally(monkeypatch):
+    monkeypatch.delenv("CI", raising=False)
+    fixture = _dom_page()
+    with (
+        patch.object(
+            BrowserType,
+            "launch",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("injected launch failure"),
+        ),
+        pytest.raises(pytest.skip.Exception, match="injected launch failure"),
+    ):
+        await fixture.__anext__()
 
 
 def _composer(*, identity: str, buttons: str = "", extra: str = "") -> str:

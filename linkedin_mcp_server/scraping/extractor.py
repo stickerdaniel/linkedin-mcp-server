@@ -432,12 +432,6 @@ _DIALOG_PREMIUM_LINK_SELECTOR = (
 _DIALOG_TEXTAREA_SELECTOR = '[role="dialog"] textarea, dialog textarea'
 
 _MESSAGING_COMPOSE_SELECTOR = '[role="textbox"][contenteditable="true"]'
-_MESSAGING_CLOSE_SELECTOR = (
-    'button[aria-label*="Close your draft conversation"], '
-    'button[aria-label="Dismiss"], '
-    'button[aria-label*="Dismiss"], '
-    'button[aria-label*="Close"]'
-)
 
 # A submission is in flight from the moment the send is dispatched until the
 # whole path has produced a result, cleanup included, and an interruption in
@@ -618,9 +612,6 @@ _MESSAGE_COMPOSER_OWNER_JS = (
     }"""
 )
 
-# Baseline und Bestätigung bleiben an dieselbe konkrete Owner-Instanz gebunden.
-# Ein gleich identifizierter Ersatzknoten darf eine vorhandene Bubble daher
-# nicht als Zustellung des ursprünglichen Sends bestätigen.
 _MESSAGE_OCCURRENCES_JS = (
     "(arg) => {"
     + _MESSAGE_COMPOSER_INSPECT_JS
@@ -3431,16 +3422,6 @@ class LinkedInExtractor:
             logger.debug("Message delivery could not be confirmed", exc_info=True)
             return False
 
-    async def _dismiss_message_ui(self) -> None:
-        """Best-effort dismissal for the profile messaging UI."""
-        if not await self._locator_is_visible(_MESSAGING_CLOSE_SELECTOR, timeout=750):
-            return
-        try:
-            await self._click_first(_MESSAGING_CLOSE_SELECTOR, timeout=1500)
-            await asyncio.sleep(0.5)
-        except Exception:
-            logger.debug("Could not dismiss LinkedIn messaging UI", exc_info=True)
-
     @staticmethod
     def _extract_thread_id(url: str) -> str | None:
         """Parse a LinkedIn thread id from a messaging thread URL."""
@@ -5316,7 +5297,6 @@ class LinkedInExtractor:
         except PlaywrightTimeoutError:
             logger.debug("Profile page did not load for %s", linkedin_username)
 
-        await handle_modal_close(self._page)
         target = await self._read_profile_message_target()
         if target is None:
             return self._message_action_result(
@@ -5341,9 +5321,7 @@ class LinkedInExtractor:
         except PlaywrightTimeoutError:
             logger.debug("Compose page did not fully load for %s", linkedin_username)
 
-        await handle_modal_close(self._page)
         if not _message_page_url_is_safe(self._page.url, target.profile_urn):
-            await self._dismiss_message_ui()
             return self._message_action_result(
                 self._page.url,
                 "recipient_resolution_failed",
@@ -5355,7 +5333,6 @@ class LinkedInExtractor:
             "Message surface for %s was %s", linkedin_username, message_surface
         )
         if message_surface != "composer":
-            await self._dismiss_message_ui()
             return self._message_action_result(
                 self._page.url,
                 "composer_unavailable",
@@ -5369,7 +5346,6 @@ class LinkedInExtractor:
                 linkedin_username,
                 state.get("status"),
             )
-            await self._dismiss_message_ui()
             return self._message_action_result(
                 self._page.url,
                 "recipient_resolution_failed",
@@ -5386,7 +5362,6 @@ class LinkedInExtractor:
             )
 
         if not _message_page_url_is_safe(self._page.url, target.profile_urn):
-            await self._dismiss_message_ui()
             return self._message_action_result(
                 self._page.url,
                 "recipient_resolution_failed",
@@ -5410,7 +5385,6 @@ class LinkedInExtractor:
         if state.get(
             "status"
         ) != "valid" or not await self._focus_verified_message_editor(target):
-            await self._dismiss_message_ui()
             return self._message_action_result(
                 self._page.url,
                 "compose_interact_failed",
@@ -5419,26 +5393,9 @@ class LinkedInExtractor:
             )
         await asyncio.sleep(0.1)
 
-        # Typing is inside the window, and not as a precaution.
-        # `keyboard.type()` presses one key per character, and patchright maps
-        # "\n" and "\r" onto Enter through its alias table, which this
-        # composer submits on: the send below relies on that very behaviour.
-        # A message carrying a newline therefore delivers its first paragraph
-        # *during* typing, and typing is slow enough for that to matter — at
-        # 15ms per character a 20k-character message runs past the 180s tool
-        # deadline long before the send call is reached. Splitting the text so
-        # a newline cannot submit is issue #441 and a change of its own; until
-        # then the flag below is what keeps the interruption reportable.
-        may_have_submitted = "\n" in message or "\r" in message
-
-        # Everything from here on can leave a message delivered, so any exit
-        # that carries no result leaves the caller unable to tell whether one
-        # went out. The cleanup awaits between the branches below are inside
-        # this window for that reason: an interruption during
-        # `_dismiss_message_ui` is as unreportable as one during the send.
+        may_have_submitted = False
         try:
             if not _message_page_url_is_safe(self._page.url, target.profile_urn):
-                await self._dismiss_message_ui()
                 return self._message_action_result(
                     self._page.url,
                     "recipient_resolution_failed",
@@ -5446,8 +5403,15 @@ class LinkedInExtractor:
                     recipient_selected=recipient_selected,
                 )
             state = await self._read_message_composer_state(target)
+            if state.get("status") == "valid" and state.get("empty") is not True:
+                return self._message_action_result(
+                    self._page.url,
+                    "composer_occupied",
+                    "The composer already holds a draft that would be sent along "
+                    "with the message. The draft was left untouched.",
+                    recipient_selected=recipient_selected,
+                )
             if state.get("status") != "valid" or state.get("active") is not True:
-                await self._dismiss_message_ui()
                 return self._message_action_result(
                     self._page.url,
                     "compose_interact_failed",
@@ -5456,11 +5420,13 @@ class LinkedInExtractor:
                 )
             allow_enter = state.get("submitCount") == 0
 
+            # `keyboard.type()` maps newlines onto Enter, which can submit the
+            # first paragraph before the explicit submit path runs.
+            may_have_submitted = "\n" in message or "\r" in message
             await self._page.keyboard.type(message, delay=15)
             await asyncio.sleep(0.3)
             await asyncio.sleep(1.0)  # allow React to process keyboard input
             if not _message_page_url_is_safe(self._page.url, target.profile_urn):
-                await self._dismiss_message_ui()
                 if may_have_submitted:
                     return self._message_action_result(
                         self._page.url,
@@ -5480,7 +5446,6 @@ class LinkedInExtractor:
 
             owner = await self._resolve_message_owner(target)
             if owner is None:
-                await self._dismiss_message_ui()
                 if may_have_submitted:
                     return self._message_action_result(
                         self._page.url,
@@ -5510,7 +5475,6 @@ class LinkedInExtractor:
                     owner=owner,
                 )
                 if previous_occurrences is None:
-                    await self._dismiss_message_ui()
                     if may_have_submitted:
                         return self._message_action_result(
                             self._page.url,
@@ -5529,51 +5493,16 @@ class LinkedInExtractor:
                         recipient_selected=recipient_selected,
                     )
 
+                may_have_submitted_before_submit = may_have_submitted
                 try:
-                    # The click is dispatched inside the call that may then fail,
-                    # so the flag is set before it rather than after.
+                    # A click can dispatch before the evaluate call reports an
+                    # error, so an exception from this round trip is ambiguous.
                     may_have_submitted = True
                     submission = await self._submit_verified_message(
                         target, allow_enter=allow_enter
                     )
-                    if submission == "enter":
-                        state = await self._read_message_composer_state(target)
-                        if (
-                            not allow_enter
-                            or not _message_page_url_is_safe(
-                                self._page.url, target.profile_urn
-                            )
-                            or state.get("status") != "valid"
-                            or state.get("active") is not True
-                            or state.get("submitCount") != 0
-                        ):
-                            submission = "invalid"
-                        else:
-                            # The read and the keypress are two round trips, so the
-                            # editor could in principle lose focus between them.
-                            # Nothing a caller or recipient controls reaches that
-                            # window, and closing it would need the keystroke and
-                            # check to be one operation, which no input API offers.
-                            await self._page.keyboard.press("Enter")
-                    if submission not in {"clicked", "enter"}:
-                        await self._dismiss_message_ui()
-                        return self._message_action_result(
-                            self._page.url,
-                            "send_unavailable",
-                            "The local submit path was missing, disabled, or ambiguous.",
-                            recipient_selected=recipient_selected,
-                            retry_safe=False,
-                        )
                 except Exception:
-                    # Both submissions dispatch their input event inside the very
-                    # call that then fails, so a context that dies here says
-                    # nothing about whether the message left: a send that navigates
-                    # the page away looks exactly like one that never started.
-                    # Letting the error out would reach the caller as a plain tool
-                    # failure and invite the retry that delivers a second message
-                    # to a real person.
                     logger.debug("Message submission did not complete", exc_info=True)
-                    await self._dismiss_message_ui()
                     return self._message_action_result(
                         self._page.url,
                         "send_unconfirmed",
@@ -5584,6 +5513,54 @@ class LinkedInExtractor:
                         retry_safe=False,
                     )
 
+                if submission == "enter":
+                    may_have_submitted = may_have_submitted_before_submit
+                    state = await self._read_message_composer_state(target)
+                    if (
+                        not allow_enter
+                        or not _message_page_url_is_safe(
+                            self._page.url, target.profile_urn
+                        )
+                        or state.get("status") != "valid"
+                        or state.get("active") is not True
+                        or state.get("submitCount") != 0
+                    ):
+                        submission = "invalid"
+                    else:
+                        # The read and the keypress are two round trips, so the
+                        # editor could in principle lose focus between them.
+                        # Nothing a caller or recipient controls reaches that
+                        # window, and closing it would need the keystroke and
+                        # check to be one operation, which no input API offers.
+                        may_have_submitted = True
+                        try:
+                            await self._page.keyboard.press("Enter")
+                        except Exception:
+                            logger.debug(
+                                "Message submission did not complete", exc_info=True
+                            )
+                            return self._message_action_result(
+                                self._page.url,
+                                "send_unconfirmed",
+                                "The message submission was interrupted and LinkedIn "
+                                "did not confirm delivery. Check the conversation "
+                                "before retrying; retrying may deliver the message "
+                                "twice.",
+                                recipient_selected=recipient_selected,
+                                retry_safe=False,
+                            )
+                elif submission != "clicked":
+                    may_have_submitted = may_have_submitted_before_submit
+
+                if submission not in {"clicked", "enter"}:
+                    return self._message_action_result(
+                        self._page.url,
+                        "send_unavailable",
+                        "The local submit path was missing, disabled, or ambiguous.",
+                        recipient_selected=recipient_selected,
+                        retry_safe=not may_have_submitted,
+                    )
+
                 confirmed = await self._message_text_visible(
                     message,
                     target=target,
@@ -5592,7 +5569,6 @@ class LinkedInExtractor:
                 )
 
                 if not confirmed:
-                    await self._dismiss_message_ui()
                     # Submission already happened, so this is not evidence that
                     # nothing was sent: a thread that renders the delivered bubble
                     # slower than the page timeout arrives here having delivered.
@@ -5620,20 +5596,8 @@ class LinkedInExtractor:
             finally:
                 await self._dispose_message_owner(owner)
         except Exception:
-            # Reached where a message may already be gone and no result says
-            # so: an error while typing, which a newline has by then turned
-            # into a submission; one from the baseline read; or one from the
-            # cleanup call in a branch above, whose own guard does not cover
-            # the visibility probe it opens with. The inner handler covers the
-            # send call alone, and `_message_text_visible` answers False for
-            # every failure it can observe, so none of these three has an
-            # answer of its own. Letting the error out would reach the caller
-            # as a plain tool failure and invite the retry that delivers a
-            # second message to a real person.
-            #
-            # Cleanup is not attempted here. Its own failure is one of the
-            # ways into this handler, and a second attempt would replace the
-            # answer with the error it was raised for.
+            # A newline can submit while typing. Later reads can therefore fail
+            # after a message may already have left, before a result says so.
             if not may_have_submitted:
                 # Nothing can have been submitted yet, so the error itself is
                 # the useful answer and the caller can retry on it.
