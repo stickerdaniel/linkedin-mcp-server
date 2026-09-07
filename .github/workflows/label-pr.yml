@@ -43,7 +43,14 @@ jobs:
           import sys
           from pathlib import Path
 
-          derived = {"enhancement", "bug", "documentation", "refactoring", "chore"}
+          derived = {
+              "breaking-change",
+              "enhancement",
+              "bug",
+              "documentation",
+              "refactoring",
+              "chore",
+          }
           try:
               pr = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
               label_pages = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
@@ -70,18 +77,24 @@ jobs:
           # Match only a type at the exact start of a structurally valid prefix.
           # The title stays in a variable, so a crafted value cannot inject shell.
           TYPE=""
-          if [[ "$PR_TITLE" =~ ^([a-z]+)(\([^()]+\))?!?:\ [^[:space:]] ]]; then
+          BREAKING=""
+          if [[ "$PR_TITLE" =~ ^([a-z]+)(\([^()]+\))?(!)?:\ [^[:space:]] ]]; then
             TYPE="${BASH_REMATCH[1]}"
+            BREAKING="${BASH_REMATCH[3]-}"
           fi
 
-          case "$TYPE" in
-            feat)           LABEL="enhancement" ;;
-            fix)            LABEL="bug" ;;
-            docs)           LABEL="documentation" ;;
-            refactor)       LABEL="refactoring" ;;
-            chore|ci|style|test|perf) LABEL="chore" ;;
-            *)              LABEL="" ;;
-          esac
+          if [ "$BREAKING" = "!" ]; then
+            LABEL="breaking-change"
+          else
+            case "$TYPE" in
+              feat)           LABEL="enhancement" ;;
+              fix)            LABEL="bug" ;;
+              docs)           LABEL="documentation" ;;
+              refactor)       LABEL="refactoring" ;;
+              chore|ci|style|test|perf) LABEL="chore" ;;
+              *)              LABEL="" ;;
+            esac
+          fi
 
           if [ -n "$LABEL" ]; then
             echo "Title type '$TYPE' -> label '$LABEL'"
@@ -96,7 +109,7 @@ jobs:
           # Idempotency is explicit: only attached stale derived labels are
           # removed, and the desired label is added only when it is absent.
           # Labels outside this fixed derived set are untouched.
-          for stale in enhancement bug documentation refactoring chore; do
+          for stale in breaking-change enhancement bug documentation refactoring chore; do
             [ "$stale" = "$LABEL" ] && continue
             if is_attached "$stale"; then
               gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label "$stale"

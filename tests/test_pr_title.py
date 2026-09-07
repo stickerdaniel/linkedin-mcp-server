@@ -31,8 +31,17 @@ validate_title = cast(Callable[[str], str | None], _VALIDATOR.validate_title)
 
 _CHECK_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "check-pr-title.yml"
 _LABEL_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "label-pr.yml"
+_RELEASE_CONFIG = _REPO_ROOT / ".github" / "release.yml"
 _RELEASE_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "release.yml"
 _CHECKOUT = "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803"
+_DERIVED_LABELS = {
+    "breaking-change",
+    "enhancement",
+    "bug",
+    "documentation",
+    "refactoring",
+    "chore",
+}
 
 
 @pytest.mark.parametrize(
@@ -271,6 +280,120 @@ def _run_cli(
     )
 
 
+def _label_workflow_script() -> str:
+    lines = _LABEL_WORKFLOW.read_text(encoding="utf-8").splitlines()
+    start = lines.index("        run: |") + 1
+    script: list[str] = []
+    for line in lines[start:]:
+        if line and not line.startswith("          "):
+            break
+        script.append(line[10:] if line else "")
+    return "\n".join(script)
+
+
+def _run_label_workflow(
+    tmp_path: Path, title: str, attached: set[str]
+) -> tuple[subprocess.CompletedProcess[str], set[str], list[list[str]]]:
+    state_path = tmp_path / "labels.json"
+    calls_path = tmp_path / "calls.jsonl"
+    state_path.write_text(
+        json.dumps({"title": title, "labels": sorted(attached)}), encoding="utf-8"
+    )
+    bin_path = tmp_path / "bin"
+    bin_path.mkdir()
+    gh_path = bin_path / "gh"
+    gh_path.write_text(
+        """#!/usr/bin/env python3
+import json
+import os
+import sys
+from pathlib import Path
+
+state_path = Path(os.environ["FAKE_GH_STATE"])
+calls_path = Path(os.environ["FAKE_GH_CALLS"])
+state = json.loads(state_path.read_text(encoding="utf-8"))
+args = sys.argv[1:]
+if args[:3] == ["api", "--method", "GET"]:
+    endpoint = args[-1]
+    if "/pulls/" in endpoint:
+        print(json.dumps({"title": state["title"]}))
+    elif "/issues/" in endpoint:
+        print(json.dumps([[{"name": label} for label in state["labels"]]]))
+    else:
+        raise SystemExit(f"Unexpected API endpoint: {endpoint}")
+elif args[:2] == ["pr", "edit"]:
+    if "--add-label" in args:
+        flag = "--add-label"
+        state["labels"].append(args[args.index(flag) + 1])
+    elif "--remove-label" in args:
+        flag = "--remove-label"
+        state["labels"].remove(args[args.index(flag) + 1])
+    else:
+        raise SystemExit(f"Unexpected edit: {args}")
+    state["labels"].sort()
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    with calls_path.open("a", encoding="utf-8") as calls:
+        calls.write(json.dumps(args) + "\\n")
+else:
+    raise SystemExit(f"Unexpected gh invocation: {args}")
+""",
+        encoding="utf-8",
+    )
+    gh_path.chmod(0o755)
+    env = os.environ.copy()
+    env.update(
+        {
+            "FAKE_GH_CALLS": str(calls_path),
+            "FAKE_GH_STATE": str(state_path),
+            "GH_TOKEN": "fixed-test-token",
+            "PATH": f"{bin_path}{os.pathsep}{env['PATH']}",
+            "PR_NUMBER": "900",
+            "REPO": "stickerdaniel/linkedin-mcp-server",
+            "RUNNER_TEMP": str(tmp_path),
+        }
+    )
+    result = subprocess.run(
+        ["bash", "-c", _label_workflow_script()],
+        cwd=_REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    calls = (
+        [
+            json.loads(line)
+            for line in calls_path.read_text(encoding="utf-8").splitlines()
+        ]
+        if calls_path.exists()
+        else []
+    )
+    return result, set(state["labels"]), calls
+
+
+def _release_category(label: str) -> str | None:
+    release = _RELEASE_CONFIG.read_text(encoding="utf-8")
+    exclude, categories = release.split("  categories:\n", maxsplit=1)
+    excluded = {
+        line.removeprefix("      - ")
+        for line in exclude.splitlines()
+        if line.startswith("      - ")
+    }
+    if label in excluded:
+        return None
+
+    current_title: str | None = None
+    for line in categories.splitlines():
+        if line.startswith("    - title: "):
+            current_title = json.loads(line.removeprefix("    - title: "))
+        elif line.startswith("        - ") and current_title is not None:
+            category_label = line.removeprefix("        - ").strip('"')
+            if category_label in {label, "*"}:
+                return current_title
+    return None
+
+
 @pytest.mark.parametrize(
     "title",
     [
@@ -418,17 +541,65 @@ def test_pr_title_workflow_documents_sha_like_branch_recovery() -> None:
     workflow = _CHECK_WORKFLOW.read_text(encoding="utf-8")
 
     assert "suppresses pull_request_target for SHA-like source branch names" in workflow
-    assert "Rename the source branch" in workflow
+    assert "Renaming a head branch closes its pull request" in workflow
+    assert "Open a replacement pull" in workflow
+    assert "request from a non-SHA-like source branch" in workflow
+    assert "resume this required check" not in workflow
+    assert "Rename the source branch" not in workflow
 
 
 def test_label_workflow_matches_breaking_marker_without_normalizing() -> None:
     workflow = _LABEL_WORKFLOW.read_text(encoding="utf-8")
 
-    assert '[[ "$PR_TITLE" =~ ^([a-z]+)(\\([^()]+\\))?!?:\\ [^[:space:]] ]]' in workflow
+    assert (
+        '[[ "$PR_TITLE" =~ ^([a-z]+)(\\([^()]+\\))?(!)?:\\ [^[:space:]] ]]' in workflow
+    )
     assert 'TYPE="${BASH_REMATCH[1]}"' in workflow
+    assert 'BREAKING="${BASH_REMATCH[3]-}"' in workflow
+    assert 'if [ "$BREAKING" = "!" ]; then' in workflow
+    assert 'LABEL="breaking-change"' in workflow
     assert 'TYPE="${TYPE// /}"' not in workflow
     assert "|build|" not in workflow
     assert 'test|perf) LABEL="chore"' in workflow
+
+
+@pytest.mark.parametrize(
+    ("title", "expected_label", "expected_category"),
+    [
+        ("refactor: Keep internals tidy", "refactoring", None),
+        (
+            "refactor(config)!: Change configuration",
+            "breaking-change",
+            "⚠️ Breaking Changes",
+        ),
+        ("feat!: Replace the public contract", "breaking-change", "⚠️ Breaking Changes"),
+    ],
+)
+def test_pr_title_label_release_lifecycle(
+    tmp_path: Path,
+    title: str,
+    expected_label: str,
+    expected_category: str | None,
+) -> None:
+    assert validate_title(title) is None
+    attached = (_DERIVED_LABELS - {expected_label}) | {"triage"}
+
+    result, final_labels, calls = _run_label_workflow(tmp_path, title, attached)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert final_labels == {expected_label, "triage"}
+    assert _release_category(expected_label) == expected_category
+    edited_labels = {call[-1] for call in calls}
+    assert edited_labels == _DERIVED_LABELS
+
+    idempotent_path = tmp_path / "idempotent"
+    idempotent_path.mkdir()
+    rerun, rerun_labels, rerun_calls = _run_label_workflow(
+        idempotent_path, title, final_labels
+    )
+    assert rerun.returncode == 0, rerun.stdout + rerun.stderr
+    assert rerun_labels == final_labels
+    assert rerun_calls == []
 
 
 def test_label_workflow_uses_current_title_and_per_pr_concurrency() -> None:
@@ -451,6 +622,11 @@ def test_label_workflow_uses_current_title_and_per_pr_concurrency() -> None:
 def test_label_workflow_removes_only_attached_stale_labels() -> None:
     workflow = _LABEL_WORKFLOW.read_text(encoding="utf-8")
 
+    assert '"breaking-change",' in workflow
+    assert (
+        "for stale in breaking-change enhancement bug documentation refactoring chore;"
+        in workflow
+    )
     assert "ATTACHED_DERIVED=" in workflow
     assert 'if is_attached "$stale"; then' in workflow
     assert '[ -n "$LABEL" ] && ! is_attached "$LABEL"' in workflow
@@ -458,6 +634,18 @@ def test_label_workflow_removes_only_attached_stale_labels() -> None:
     assert "|| true" not in workflow
     assert "2>/dev/null" not in workflow
     assert "Labels outside this fixed derived set are untouched." in workflow
+
+
+def test_release_notes_put_breaking_changes_first() -> None:
+    release = _RELEASE_CONFIG.read_text(encoding="utf-8")
+    exclude, categories = release.split("  categories:\n", maxsplit=1)
+
+    assert "breaking-change" not in exclude
+    assert categories.startswith(
+        '    - title: "⚠️ Breaking Changes"\n      labels:\n        - breaking-change\n'
+    )
+    assert _release_category("breaking-change") == "⚠️ Breaking Changes"
+    assert _release_category("refactoring") is None
 
 
 def test_release_restores_pr_title_required_check() -> None:

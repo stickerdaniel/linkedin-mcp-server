@@ -1,7 +1,8 @@
 name: PR Title
 
 # GitHub suppresses pull_request_target for SHA-like source branch names.
-# Rename the source branch to resume this required check and Label PR.
+# Renaming a head branch closes its pull request. Open a replacement pull
+# request from a non-SHA-like source branch so this check and Label PR can run.
 on:
   pull_request_target:
     types: [opened, edited, reopened, synchronize]
