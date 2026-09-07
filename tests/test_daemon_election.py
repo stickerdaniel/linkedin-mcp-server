@@ -1435,7 +1435,7 @@ if len(sys.argv) >= 4:
         time.sleep(0.01)
     # Timed out without ``go``: the parent is failing the barrier and will
     # kill frontends. Entering obtain_owner here can spawn a detached owner
-    # that fixture cleanup then misses (#881 / Greptile).
+    # that fixture cleanup then misses (#881).
     if not go.exists():
         raise SystemExit("launch barrier timed out waiting for go signal")
 auth_root = profile.parent

@@ -363,7 +363,8 @@ jobs:
                 "strict": true,
                 "checks": [
                   {"context": "lint-and-check", "app_id": 15368},
-                  {"context": "test", "app_id": 15368}
+                  {"context": "test", "app_id": 15368},
+                  {"context": "PR Title", "app_id": 15368}
                 ]
               },
               "enforce_admins": true,
