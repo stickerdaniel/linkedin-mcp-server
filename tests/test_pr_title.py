@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 from pathlib import Path
 
 import pytest
 
-_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "validate_pr_title.py"
+_ROOT = Path(__file__).resolve().parents[1]
+_SCRIPT = _ROOT / "scripts" / "validate_pr_title.py"
+_LABEL_PR = _ROOT / ".github" / "workflows" / "label-pr.yml"
 
 
 def _load():
@@ -83,21 +86,38 @@ class TestValidatePrTitle:
         assert error is not None
         assert "scope" in error.lower() or "Conventional Commit" in error
 
-    def test_label_workflow_types_are_covered(self):
-        """label-pr.yml maps these types; the validator must accept them all."""
-        for commit_type in (
-            "feat",
-            "fix",
-            "docs",
-            "refactor",
-            "chore",
-            "ci",
-            "style",
-            "test",
-            "build",
-            "perf",
+    def test_rejects_long_subject(self):
+        subject = "A" * 50
+        error = validate_pr_title(f"feat: {subject}")
+        assert error is not None
+        assert "under 50" in error
+        assert validate_pr_title(f"feat: {'A' * 49}") is None
+
+    def test_label_workflow_types_match_validator(self):
+        """Fail if CONVENTIONAL_TYPES drifts from label-pr.yml's case list."""
+        text = _LABEL_PR.read_text(encoding="utf-8")
+        case_block = re.search(
+            r'case "\$TYPE" in\n(?P<body>.*?)\n\s*esac',
+            text,
+            flags=re.DOTALL,
+        )
+        assert case_block is not None, "label-pr.yml TYPE case block not found"
+        label_types: set[str] = set()
+        for arm in re.finditer(
+            r"^\s*(?P<names>[a-z|]+)\)",
+            case_block.group("body"),
+            flags=re.MULTILINE,
         ):
-            assert commit_type in CONVENTIONAL_TYPES
+            names = arm.group("names")
+            if names == "*":
+                continue
+            label_types.update(names.split("|"))
+        assert label_types, "no conventional types parsed from label-pr.yml"
+        assert CONVENTIONAL_TYPES == frozenset(label_types), (
+            f"validator types {sorted(CONVENTIONAL_TYPES)} != "
+            f"label-pr.yml types {sorted(label_types)}"
+        )
+        for commit_type in sorted(label_types):
             assert validate_pr_title(f"{commit_type}: Subject") is None
 
 

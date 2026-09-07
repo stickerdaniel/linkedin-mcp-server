@@ -2,8 +2,9 @@
 """Validate a GitHub pull request title as a Conventional Commit subject.
 
 PRs in this repository are squash-merged, so the title becomes the permanent
-commit subject on ``main``. Types match ``AGENTS.md`` / ``CLAUDE.md``, plus
-``build`` so Renovate and the label workflow stay aligned.
+commit subject on ``main``. Allowed types match ``AGENTS.md`` / ``CLAUDE.md``
+and ``label-pr.yml`` (including ``build`` for Renovate). Subject length is
+capped under 50 characters; imperative mood remains human guidance.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import os
 import re
 import sys
 
-# Keep in sync with label-pr.yml's case list and AGENTS.md commit types.
+# Keep in sync with label-pr.yml's case list and AGENTS.md / CLAUDE.md.
 CONVENTIONAL_TYPES = frozenset(
     {
         "feat",
@@ -28,6 +29,9 @@ CONVENTIONAL_TYPES = frozenset(
         "build",
     }
 )
+
+# AGENTS.md / CLAUDE.md: keep subject <50 chars (the text after ": ").
+_MAX_SUBJECT_LEN = 49
 
 _TITLE_RE = re.compile(
     r"^(?P<type>[a-z]+)"
@@ -94,6 +98,13 @@ def validate_pr_title(title: str) -> str | None:
         return (
             "PR title subject is empty after ': '. "
             f"Add an imperative summary, e.g. {_EXAMPLE!r}."
+        )
+    # Imperative mood is documented guidance, not enforced here: a reliable
+    # check needs NLP and would reject valid titles. Length is mechanical.
+    if len(subject) > _MAX_SUBJECT_LEN:
+        return (
+            f"PR title subject is {len(subject)} characters; keep it under 50 "
+            f"(got {subject!r}). Shorten it, e.g. {_EXAMPLE!r}."
         )
     return None
 

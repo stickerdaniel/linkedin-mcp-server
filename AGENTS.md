@@ -244,7 +244,8 @@ for that.
 ## Commit Messages
 
 - Follow conventional commits: `type(scope): subject`
-- Types: feat, fix, docs, style, refactor, test, chore, perf, ci
+- Types: feat, fix, docs, style, refactor, test, chore, perf, ci, build
+  (`build` is for Renovate titles and matches `label-pr.yml`)
 - Keep subject <50 chars, imperative mood
 
 ## Development Workflow
