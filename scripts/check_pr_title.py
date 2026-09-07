@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import argparse
+import json
 import os
 import re
+from pathlib import Path
 
 ALLOWED_TYPES = (
     "feat",
@@ -18,6 +21,7 @@ ALLOWED_TYPES = (
 )
 
 MISSING_TITLE = "PR title is missing."
+INVALID_PR_DATA = "Unable to read current pull request data."
 UNSAFE_CHARACTER = "PR title contains an unsafe character."
 INVALID_SHAPE = "PR title must use an accepted conventional-commit shape."
 UNSUPPORTED_TYPE = "PR title uses an unsupported type."
@@ -57,7 +61,7 @@ def _is_unsafe(character: str) -> bool:
     return (
         codepoint <= 0x001F
         or 0x007F <= codepoint <= 0x009F
-        or codepoint in {0x2028, 0x2029, 0xFEFF, 0xFFFD}
+        or codepoint in {0x200B, 0x2028, 0x2029, 0xFEFF, 0xFFFD}
         or codepoint in _BIDI_FORMATTING
     )
 
@@ -96,9 +100,35 @@ def validate_title(title: str) -> str | None:
     return None
 
 
+def _load_pr_title(path: Path) -> str | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+
+    if not isinstance(data, dict):
+        return None
+    title = data.get("title")
+    if not isinstance(title, str) or not title:
+        return None
+    return title
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--pr-json", type=Path)
+    return parser.parse_args()
+
+
 def main() -> int:
-    title = os.environ.get("PR_TITLE")
-    diagnostic = MISSING_TITLE if not title else validate_title(title)
+    args = _parse_args()
+    if args.pr_json is not None:
+        title = _load_pr_title(args.pr_json)
+        diagnostic = INVALID_PR_DATA if title is None else validate_title(title)
+    else:
+        title = os.environ.get("PR_TITLE")
+        diagnostic = MISSING_TITLE if not title else validate_title(title)
+
     if diagnostic is None:
         return 0
 
