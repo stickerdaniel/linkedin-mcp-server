@@ -1,0 +1,40 @@
+name: PR Title
+
+# GitHub suppresses pull_request_target for SHA-like source branch names.
+# Renaming a head branch closes its pull request. Open a replacement pull
+# request from a non-SHA-like source branch so this check and Label PR can run.
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: pr-title-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: PR Title
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the trusted workflow revision
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Fetch current pull request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          gh api --method GET \
+            "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" \
+            > "$RUNNER_TEMP/pull-request.json"
+
+      - name: Validate current pull request title
+        run: python3 scripts/check_pr_title.py --pr-json "$RUNNER_TEMP/pull-request.json"

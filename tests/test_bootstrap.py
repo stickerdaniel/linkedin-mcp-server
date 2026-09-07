@@ -4179,6 +4179,52 @@ class TestPatchrightInstallStreaming:
         assert root.path == temporary_root
         assert created == [tmp_path]
 
+    def test_installer_temporary_parent_respects_configured_installer_temp_dir(
+        self, tmp_path, monkeypatch
+    ):
+        from linkedin_mcp_server import bootstrap
+
+        custom_temp = tmp_path / "custom_temp"
+        custom_temp.mkdir()
+
+        fake_config = SimpleNamespace(
+            browser=SimpleNamespace(installer_temp_dir=str(custom_temp))
+        )
+        monkeypatch.setattr(bootstrap, "get_config", lambda: fake_config)
+
+        assert bootstrap._installer_temporary_parent() == custom_temp.resolve()
+
+    def test_installer_temporary_parent_prefers_config_over_env(
+        self, tmp_path, monkeypatch
+    ):
+        from linkedin_mcp_server import bootstrap
+
+        cli_temp = tmp_path / "cli_temp"
+        cli_temp.mkdir()
+        env_temp = tmp_path / "env_temp"
+        env_temp.mkdir()
+
+        monkeypatch.setenv("INSTALLER_TEMP_DIR", str(env_temp))
+        fake_config = SimpleNamespace(
+            browser=SimpleNamespace(installer_temp_dir=str(cli_temp))
+        )
+        monkeypatch.setattr(bootstrap, "get_config", lambda: fake_config)
+
+        assert bootstrap._installer_temporary_parent() == cli_temp.resolve()
+
+    def test_installer_temporary_parent_defaults_to_gettempdir_when_unset(
+        self, tmp_path, monkeypatch
+    ):
+        from linkedin_mcp_server import bootstrap
+
+        fake_config = SimpleNamespace(browser=SimpleNamespace(installer_temp_dir=None))
+        monkeypatch.setattr(bootstrap, "get_config", lambda: fake_config)
+        default_temp = tmp_path / "default_temp"
+        default_temp.mkdir()
+        monkeypatch.setattr(bootstrap.tempfile, "gettempdir", lambda: str(default_temp))
+
+        assert bootstrap._installer_temporary_parent() == default_temp.resolve()
+
     @pytest.mark.skipif(os.name == "nt", reason="POSIX directory modes are required")
     def test_replaceable_temporary_parent_is_refused_before_creation(
         self, tmp_path, monkeypatch
@@ -6632,6 +6678,12 @@ class TestRendererSurvivesOddOutput:
 class TestCliProgress:
     """The terminal bar, and the plain lines everywhere else."""
 
+    @staticmethod
+    def _enable_rich_terminal(monkeypatch) -> None:
+        """Remove host settings that deliberately select plain output."""
+        monkeypatch.setenv("TERM", "xterm-256color")
+        monkeypatch.delenv("NO_COLOR", raising=False)
+
     def _terminal(self, monkeypatch) -> list:
         """Make the CLI path believe it is on a terminal, and capture it.
 
@@ -6643,6 +6695,7 @@ class TestCliProgress:
 
         from linkedin_mcp_server import bootstrap
 
+        self._enable_rich_terminal(monkeypatch)
         buffer = io.StringIO()
         built: list = [buffer]
         monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
@@ -6699,6 +6752,8 @@ class TestCliProgress:
         the plain-line path already gives a stream that will not take a line.
         """
         from linkedin_mcp_server import bootstrap
+
+        self._enable_rich_terminal(monkeypatch)
 
         class _Pipe(io.StringIO):
             def isatty(self) -> bool:

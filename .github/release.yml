@@ -12,6 +12,9 @@ changelog:
     authors:
       - renovate[bot]
   categories:
+    - title: "⚠️ Breaking Changes"
+      labels:
+        - breaking-change
     - title: "🚀 Features"
       labels:
         - enhancement

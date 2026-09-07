@@ -2,8 +2,9 @@
 
 from urllib.parse import quote
 
-from linkedin_mcp_server.scraping.fields import PERSON_SECTIONS
+from linkedin_mcp_server.scraping.fields import COMPANY_SECTIONS, PERSON_SECTIONS
 from linkedin_mcp_server.scraping.link_metadata import (
+    _REFERENCE_CAPS,
     RawReference,
     build_references,
     classify_link,
@@ -591,11 +592,36 @@ class TestBuildReferences:
             }
         ]
 
-    def test_every_person_section_gives_its_references_a_context(self):
-        """Nothing tied the context table to the section table, which is how
-        three sections reached main without an entry. A context-less reference
-        also scores below every duplicate that has one, so it loses cross-page
-        dedupe ties it should win."""
+    def test_names_the_context_for_jobs_saved_jobs_and_feed(self):
+        """The structural guard below only proves a context key exists, so it
+        survives a wrong label. These are the values themselves."""
+        raw: list[RawReference] = [
+            {
+                "href": "https://www.linkedin.com/jobs/view/123/",
+                "text": "Senior Engineer",
+            }
+        ]
+
+        contexts = {
+            section: build_references(raw, section)[0]["context"]
+            for section in ("jobs", "saved_jobs", "feed")
+        }
+
+        assert contexts == {
+            "jobs": "jobs",
+            "saved_jobs": "saved jobs",
+            "feed": "feed",
+        }
+
+    def test_every_scraped_section_gives_its_references_a_context(self):
+        """Nothing tied the context table to the section tables, which is how
+        seven sections have now reached main without an entry. A context-less
+        reference also scores below every duplicate that has one, so it loses
+        cross-page dedupe ties it should win.
+
+        Section names are declared in three separate places, and `saved_jobs`
+        is declared in none of them -- it exists only as a literal in the
+        extractor -- so it is named here explicitly."""
         raw: list[RawReference] = [
             {
                 "href": "https://www.linkedin.com/company/aws/",
@@ -603,11 +629,18 @@ class TestBuildReferences:
             }
         ]
 
-        missing = [
+        sections = (
+            set(PERSON_SECTIONS)
+            | set(COMPANY_SECTIONS)
+            | set(_REFERENCE_CAPS)
+            | {"saved_jobs"}
+        )
+
+        missing = sorted(
             section
-            for section in PERSON_SECTIONS
+            for section in sections
             if "context" not in build_references(raw, section)[0]
-        ]
+        )
 
         assert missing == []
 

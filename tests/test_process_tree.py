@@ -201,8 +201,12 @@ def test_gate_preserves_payload_streams_and_target_site_startup(tmp_path: Path):
     user_site = Path(probe.stdout.strip())
     user_site.mkdir(parents=True)
     sentinel = tmp_path / "site-started.txt"
-    (user_site / "sitecustomize.py").write_text(
+    hook_module = "_linkedin_mcp_test_gate_startup"
+    (user_site / f"{hook_module}.py").write_text(
         f"import os\nopen({str(sentinel)!r}, 'a').write(str(os.getpid()) + '\\n')\n"
+    )
+    (user_site / "linkedin-mcp-test-gate-startup.pth").write_text(
+        f"import {hook_module}\n"
     )
     target = [
         base_executable,
