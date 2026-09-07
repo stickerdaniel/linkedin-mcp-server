@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import re
+import unicodedata
 from pathlib import Path
 
 ALLOWED_TYPES = (
@@ -38,15 +39,6 @@ _TITLE = re.compile(
     r"^(?P<type>[a-z]+)(?:\((?P<scope>[^()]*)\))?(?P<breaking>!)?: "
     r"(?P<subject>.*)$"
 )
-_BOUNDARY_WHITESPACE = {
-    0x0020,
-    0x00A0,
-    0x1680,
-    *range(0x2000, 0x200B),
-    0x202F,
-    0x205F,
-    0x3000,
-}
 _BIDI_FORMATTING = {
     0x061C,
     0x200E,
@@ -61,17 +53,27 @@ def _is_unsafe(character: str) -> bool:
     return (
         codepoint <= 0x001F
         or 0x007F <= codepoint <= 0x009F
-        or codepoint in {0x200B, 0x2028, 0x2029, 0xFEFF, 0xFFFD}
+        or codepoint in {0x200B, 0x2028, 0x2029, 0x2060, 0xFEFF, 0xFFFD}
         or codepoint in _BIDI_FORMATTING
     )
 
 
-def _has_boundary_whitespace(value: str) -> bool:
-    return bool(value) and (
-        ord(value[0]) in _BOUNDARY_WHITESPACE
-        or ord(value[-1]) in _BOUNDARY_WHITESPACE
-        or _is_unsafe(value[0])
-        or _is_unsafe(value[-1])
+def _is_substantive(character: str) -> bool:
+    return unicodedata.category(character)[0] not in {"C", "M", "Z"}
+
+
+def _last_substantive(value: str) -> str | None:
+    return next(
+        (character for character in reversed(value) if _is_substantive(character)),
+        None,
+    )
+
+
+def _has_invalid_boundary(value: str) -> bool:
+    return bool(value) and any(
+        unicodedata.category(character) == "Cf"
+        or unicodedata.category(character).startswith("Z")
+        for character in (value[0], value[-1])
     )
 
 
@@ -88,14 +90,19 @@ def validate_title(title: str) -> str | None:
         return UNSUPPORTED_TYPE
 
     scope = match["scope"]
-    if scope is not None and (not scope or _has_boundary_whitespace(scope)):
+    if scope is not None and (
+        _last_substantive(scope) is None or _has_invalid_boundary(scope)
+    ):
         return INVALID_SCOPE
 
     subject = match["subject"]
-    if not subject or _has_boundary_whitespace(subject):
+    last_substantive = _last_substantive(subject)
+    if last_substantive is None:
         return INVALID_SUBJECT
-    if subject.endswith("."):
+    if last_substantive == ".":
         return FINAL_PERIOD
+    if _has_invalid_boundary(subject):
+        return INVALID_SUBJECT
 
     return None
 

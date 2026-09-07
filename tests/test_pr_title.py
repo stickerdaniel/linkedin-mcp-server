@@ -139,6 +139,7 @@ def test_subject_boundary_whitespace_is_rejected(space: str) -> None:
         "‮",
         "⁦",
         "⁩",
+        "\N{WORD JOINER}",
         "﻿",
         "�",
     ],
@@ -177,6 +178,61 @@ def test_zero_width_space_cli_input_is_rejected(title: str) -> None:
 
 def test_unsafe_character_precedes_other_diagnostics() -> None:
     assert validate_title("build: Invalid.\n") == UNSAFE_CHARACTER
+
+
+def test_word_joiner_is_globally_unsafe() -> None:
+    assert validate_title("fix: Before\N{WORD JOINER}after") == UNSAFE_CHARACTER
+
+
+@pytest.mark.parametrize(
+    "character",
+    ["\N{SOFT HYPHEN}", "\N{ZERO WIDTH JOINER}"],
+)
+def test_format_characters_at_boundaries_are_rejected(character: str) -> None:
+    assert validate_title(f"fix({character}scope): Keep boundaries") == INVALID_SCOPE
+    assert validate_title(f"fix(scope{character}): Keep boundaries") == INVALID_SCOPE
+    assert validate_title(f"fix: {character}Keep boundaries") == INVALID_SUBJECT
+    assert validate_title(f"fix: Keep boundaries{character}") == INVALID_SUBJECT
+
+
+@pytest.mark.parametrize(
+    ("title", "diagnostic"),
+    [
+        ("fix(\N{COMBINING ACUTE ACCENT}): Subject", INVALID_SCOPE),
+        ("fix: \N{COMBINING ACUTE ACCENT}", INVALID_SUBJECT),
+    ],
+)
+def test_scope_and_subject_require_substantive_content(
+    title: str, diagnostic: str
+) -> None:
+    assert validate_title(title) == diagnostic
+
+
+@pytest.mark.parametrize(
+    "trailing",
+    ["\N{SOFT HYPHEN}", "\N{COMBINING ACUTE ACCENT}"],
+)
+def test_final_period_uses_last_substantive_codepoint(trailing: str) -> None:
+    assert validate_title(f"fix: Do not hide.{trailing}") == FINAL_PERIOD
+
+
+def test_decomposed_accents_are_accepted() -> None:
+    assert (
+        validate_title(
+            "fix(cafe\N{COMBINING ACUTE ACCENT}): "
+            "Handle resume\N{COMBINING ACUTE ACCENT}"
+        )
+        is None
+    )
+
+
+def test_internal_emoji_zwj_sequence_is_accepted() -> None:
+    assert (
+        validate_title(
+            "fix: Support \N{WOMAN}\N{ZERO WIDTH JOINER}\N{PERSONAL COMPUTER} profiles"
+        )
+        is None
+    )
 
 
 @pytest.mark.parametrize(
@@ -297,29 +353,27 @@ def test_cli_rejects_missing_pr_json_file(tmp_path: Path) -> None:
     assert "missing.json" not in result.stdout + result.stderr
 
 
-def test_pr_title_workflow_runs_only_trusted_validator() -> None:
+def test_pr_title_workflow_is_automatic_required_check() -> None:
     workflow = _CHECK_WORKFLOW.read_text(encoding="utf-8")
 
-    assert workflow.startswith("name: Validate PR title\n")
-    assert "pull_request_target:" in workflow
-    assert "types: [opened, edited, reopened, synchronize]" in workflow
-    assert "issue_comment:" in workflow
-    assert "types: [created]" in workflow
+    assert workflow.startswith("name: PR Title\n")
+    assert workflow.count("name: PR Title") == 2
+    assert workflow.count("pull_request_target:") == 1
+    assert workflow.count("types: [opened, edited, reopened, synchronize]") == 1
+    assert "issue_comment:" not in workflow
+    assert "types: [created]" not in workflow
+    assert "workflow_dispatch:" not in workflow
     assert "contents: read" in workflow
     assert "pull-requests: read" in workflow
-    assert "statuses: write" in workflow
     assert "pull-requests: write" not in workflow
-    assert (
-        "group: pr-title-${{ github.event.pull_request.number || "
-        "github.event.issue.number }}" in workflow
-    )
+    assert "group: pr-title-${{ github.event.pull_request.number }}" in workflow
     assert "cancel-in-progress: true" in workflow
-    assert "name: PR Title" not in workflow
-    assert "name: Check current PR title" in workflow
     assert _CHECKOUT in workflow
     assert "ref: ${{ github.workflow_sha }}" in workflow
     assert "persist-credentials: false" in workflow
     assert "github.event.pull_request.head" not in workflow
+    assert "github.head_ref" not in workflow
+    assert "refs/pull/" not in workflow
     assert "uv " not in workflow
     assert "pip " not in workflow
 
@@ -327,51 +381,44 @@ def test_pr_title_workflow_runs_only_trusted_validator() -> None:
 def test_pr_title_workflow_fetches_current_api_data() -> None:
     workflow = _CHECK_WORKFLOW.read_text(encoding="utf-8")
 
-    assert 'PR_JSON="$RUNNER_TEMP/pull-request.json"' in workflow
-    assert '"repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" > "$PR_JSON"' in workflow
+    assert "GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}" in workflow
+    assert "PR_NUMBER: ${{ github.event.pull_request.number }}" in workflow
+    assert '"repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}"' in workflow
+    assert '> "$RUNNER_TEMP/pull-request.json"' in workflow
     assert (
         'python3 scripts/check_pr_title.py --pr-json "$RUNNER_TEMP/pull-request.json"'
         in workflow
     )
     assert "PR_TITLE: ${{ github.event.pull_request.title }}" not in workflow
     assert "github.event.pull_request.title" not in workflow
-    assert "Unable to read current pull request data." in workflow
 
     validator_step = workflow.split(
         "- name: Validate current pull request title", maxsplit=1
-    )[1].split("- name: Publish final PR Title status", maxsplit=1)[0]
+    )[1]
     assert "GH_TOKEN" not in validator_step
+    assert "secrets.GITHUB_TOKEN" not in validator_step
 
 
-def test_pr_title_workflow_publishes_required_status() -> None:
+def test_pr_title_workflow_has_no_fallback_or_status_layer() -> None:
     workflow = _CHECK_WORKFLOW.read_text(encoding="utf-8")
 
-    assert workflow.count('"repos/${GITHUB_REPOSITORY}/statuses/${HEAD_SHA}"') == 2
-    assert workflow.count('-f context="PR Title"') == 2
-    assert "-f state=pending" in workflow
-    assert "STATE=success" in workflow
-    assert "STATE=failure" in workflow
-    assert "if: always()" in workflow
-    assert workflow.count("GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}") == 3
-    assert (
-        workflow.count(
-            "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-        )
-        == 2
-    )
+    assert "issue_comment:" not in workflow
+    assert "github.event.comment" not in workflow
+    assert "/check-pr-title" not in workflow
+    assert "statuses: write" not in workflow
+    assert "/statuses/" not in workflow
+    assert "HEAD_SHA" not in workflow
+    assert "head_sha" not in workflow
+    assert '["head"]["sha"]' not in workflow
+    assert "Publish pending PR Title status" not in workflow
+    assert "Publish final PR Title status" not in workflow
 
 
-def test_pr_title_comment_fallback_is_exact_and_pr_only() -> None:
+def test_pr_title_workflow_documents_sha_like_branch_recovery() -> None:
     workflow = _CHECK_WORKFLOW.read_text(encoding="utf-8")
 
-    assert "github.event_name == 'pull_request_target' ||" in workflow
-    assert "github.event_name == 'issue_comment'" in workflow
-    assert "github.event.issue.pull_request &&" in workflow
-    assert "github.event.comment.body == '/check-pr-title'" in workflow
-    assert "contains(github.event.comment.body" not in workflow
-    assert "startsWith(github.event.comment.body" not in workflow
-    assert "github.event.comment.body }}" not in workflow
-    assert "SHA-like fork branch names" in workflow
+    assert "suppresses pull_request_target for SHA-like source branch names" in workflow
+    assert "Rename the source branch" in workflow
 
 
 def test_label_workflow_matches_breaking_marker_without_normalizing() -> None:

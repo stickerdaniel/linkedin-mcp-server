@@ -1,30 +1,22 @@
-name: Validate PR title
+name: PR Title
 
+# GitHub suppresses pull_request_target for SHA-like source branch names.
+# Rename the source branch to resume this required check and Label PR.
 on:
   pull_request_target:
     types: [opened, edited, reopened, synchronize]
-  # SHA-like fork branch names can suppress pull_request_target. An exact
-  # comment on a PR reruns this trusted default-branch workflow as a fallback.
-  issue_comment:
-    types: [created]
 
 permissions:
   contents: read
   pull-requests: read
-  statuses: write
 
 concurrency:
-  group: pr-title-${{ github.event.pull_request.number || github.event.issue.number }}
+  group: pr-title-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   check:
-    name: Check current PR title
-    if: >-
-      github.event_name == 'pull_request_target' ||
-      (github.event_name == 'issue_comment' &&
-      github.event.issue.pull_request &&
-      github.event.comment.body == '/check-pr-title')
+    name: PR Title
     runs-on: ubuntu-latest
     steps:
       - name: Checkout the trusted workflow revision
@@ -34,71 +26,14 @@ jobs:
           persist-credentials: false
 
       - name: Fetch current pull request
-        id: pr
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          PR_JSON="$RUNNER_TEMP/pull-request.json"
           gh api --method GET \
-            "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" > "$PR_JSON"
-          HEAD_SHA=$(python3 - "$PR_JSON" <<'PY'
-          import json
-          import re
-          import sys
-          from pathlib import Path
-
-          try:
-              data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-              head_sha = data["head"]["sha"]
-          except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError):
-              raise SystemExit("Unable to read current pull request data.") from None
-          if not isinstance(head_sha, str) or re.fullmatch(r"[0-9a-f]{40}", head_sha) is None:
-              raise SystemExit("Unable to read current pull request data.")
-          print(head_sha)
-          PY
-          )
-          echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
-
-      - name: Publish pending PR Title status
-        id: pending
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
-          TARGET_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          gh api --method POST \
-            "repos/${GITHUB_REPOSITORY}/statuses/${HEAD_SHA}" \
-            -f state=pending \
-            -f context="PR Title" \
-            -f description="Checking pull request title" \
-            -f target_url="$TARGET_URL"
+            "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" \
+            > "$RUNNER_TEMP/pull-request.json"
 
       - name: Validate current pull request title
-        id: validate
         run: python3 scripts/check_pr_title.py --pr-json "$RUNNER_TEMP/pull-request.json"
-
-      - name: Publish final PR Title status
-        if: always()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
-          PENDING_OUTCOME: ${{ steps.pending.outcome }}
-          VALIDATION_OUTCOME: ${{ steps.validate.outcome }}
-          TARGET_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          STATE=failure
-          DESCRIPTION="PR title validation failed"
-          if [ "$PENDING_OUTCOME" = success ] && [ "$VALIDATION_OUTCOME" = success ]; then
-            STATE=success
-            DESCRIPTION="PR title is valid"
-          fi
-          gh api --method POST \
-            "repos/${GITHUB_REPOSITORY}/statuses/${HEAD_SHA}" \
-            -f state="$STATE" \
-            -f context="PR Title" \
-            -f description="$DESCRIPTION" \
-            -f target_url="$TARGET_URL"
