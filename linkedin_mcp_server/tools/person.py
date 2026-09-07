@@ -5,12 +5,13 @@ Uses innerText extraction for resilient profile data capture
 with configurable section selection.
 """
 
+import json
 import logging
 from typing import Annotated, Any
 
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
-from pydantic import Field
+from pydantic import BeforeValidator, Field
 
 from linkedin_mcp_server.callbacks import MCPContextProgressCallback
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
@@ -21,6 +22,38 @@ from linkedin_mcp_server.scraping import parse_person_sections
 from linkedin_mcp_server.scraping.extractor import FilterValidationError
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_str_list(value: Any) -> Any:
+    """Accept a string where a list of strings is declared.
+
+    ``network`` is published as ``anyOf: [array, null]``, which is a correct
+    JSON Schema. Some MCP clients collapse an ``anyOf``-with-null union to an
+    untyped ``{}`` and then transmit the value as a string, so the array the
+    caller wrote never arrives as one and pydantic rejects it (#739).
+
+    Coercing at the tool boundary keeps the transport quirk here and leaves
+    ``LinkedInExtractor.search_people`` strictly ``list[str]``. Only the
+    container shape is repaired; token values are still validated downstream,
+    so an invalid token fails with the same message it always did.
+    """
+    if not isinstance(value, str):
+        return value
+
+    text = value.strip()
+    if text.startswith("["):
+        try:
+            decoded = json.loads(text)
+        except ValueError:
+            pass
+        else:
+            if isinstance(decoded, list):
+                return decoded
+
+    return [part.strip() for part in text.split(",") if part.strip()]
+
+
+StrList = Annotated[list[str], BeforeValidator(_coerce_str_list)]
 
 
 def register_person_tools(
@@ -112,7 +145,7 @@ def register_person_tools(
         keywords: str,
         ctx: Context,
         location: str | None = None,
-        network: list[str] | None = None,
+        network: StrList | None = None,
         current_company: str | None = None,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
@@ -125,7 +158,9 @@ def register_person_tools(
             location: Optional location filter (e.g., "New York", "Remote")
             network: Optional connection-degree filter. Each element is one of
                 "F" (1st-degree), "S" (2nd-degree), "O" (3rd-degree and beyond).
-                Example: ["F"] to only return 1st-degree connections.
+                Example: ["F"] to only return 1st-degree connections. A single
+                token ("F") or a comma-separated string ("F,S") is also
+                accepted, for clients that cannot transmit an array.
             current_company: Optional current-employer filter. LinkedIn's
                 currentCompany facet only filters on the numeric company URN id
                 (e.g. "1115" for SAP); plain company names are accepted by the
