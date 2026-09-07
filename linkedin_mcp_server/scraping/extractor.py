@@ -5312,14 +5312,43 @@ class LinkedInExtractor:
                 sent=True,
                 retry_safe=False,
             )
+        except Exception:
+            # Reached where a message may already be gone and no result says
+            # so: an error while typing, which a newline has by then turned
+            # into a submission; one from the baseline read; or one from the
+            # cleanup call in a branch above, whose own guard does not cover
+            # the visibility probe it opens with. The inner handler covers the
+            # send call alone, and `_message_text_visible` answers False for
+            # every failure it can observe, so none of these three has an
+            # answer of its own. Letting the error out would reach the caller
+            # as a plain tool failure and invite the retry that delivers a
+            # second message to a real person.
+            #
+            # Cleanup is not attempted here. Its own failure is one of the
+            # ways into this handler, and a second attempt would replace the
+            # answer with the error it was raised for.
+            if not may_have_submitted:
+                # Nothing can have been submitted yet, so the error itself is
+                # the useful answer and the caller can retry on it.
+                raise
+            logger.debug(
+                "Message send failed after a possible submission", exc_info=True
+            )
+            return self._message_action_result(
+                self._page.url,
+                "send_unconfirmed",
+                "The message may already have been submitted when the send "
+                "failed, and LinkedIn did not confirm delivery. Check the "
+                "conversation before retrying; retrying may deliver the "
+                "message twice.",
+                recipient_selected=recipient_selected,
+                retry_safe=False,
+            )
         except BaseException:
-            # Reached only where the window produced no result at all. An
-            # ordinary submission failure returns from the inner handler, and
-            # `_message_text_visible` answers False for every failure it can
-            # observe, so what arrives here is cancellation or the rare error
-            # escaping cleanup. Both leave the same question behind, and both
-            # are re-raised rather than reported, because a cancelled scope
-            # discards a return value.
+            # Cancellation only. FastMCP runs the tool inside
+            # `anyio.fail_after()` and a cancelled scope discards whatever it
+            # returns, so the answer the branch above gives cannot be given
+            # here and the log line is all that is left.
             #
             # Silent for an interruption while typing a message without a
             # newline: nothing can have submitted yet, and a warning that

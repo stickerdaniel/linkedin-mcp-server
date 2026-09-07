@@ -9169,6 +9169,87 @@ class TestSendMessageComposerInteraction:
         hit = any("retry may deliver the message twice" in w for w in warnings)
         assert hit is warns, warnings
 
+    @pytest.mark.parametrize(
+        "stage",
+        ["typing", "baseline", "cleanup"],
+        ids=["typing", "baseline", "cleanup"],
+    )
+    async def test_ordinary_error_after_a_possible_submission_still_answers(
+        self, mock_page, stage
+    ):
+        """An error a caller could retry on gets an answer, not a raise.
+
+        Three awaits inside the destructive window have no guard of their own.
+        Typing raises before the send call is reached, and a newline has by
+        then submitted a paragraph. The baseline read sits between the two.
+        And `_dismiss_message_ui` guards its click but not the visibility
+        probe it opens with, so a page that dies during cleanup escapes it.
+
+        All three reach the caller as a plain tool failure unless the window
+        answers, and a plain failure invites the retry that delivers a second
+        message to a real person.
+        """
+        extractor = LinkedInExtractor(mock_page)
+        mock_keyboard = MagicMock()
+        mock_keyboard.type = AsyncMock()
+        mock_keyboard.press = AsyncMock()
+        mock_page.keyboard = mock_keyboard
+        mock_page.evaluate = AsyncMock(return_value="focused")
+        occurrences = AsyncMock(return_value=1)
+        visible = AsyncMock(return_value=False)
+        dismiss = AsyncMock()
+        if stage == "typing":
+            mock_keyboard.type = AsyncMock(side_effect=RuntimeError("page closed"))
+        elif stage == "baseline":
+            occurrences = AsyncMock(side_effect=RuntimeError("context destroyed"))
+        else:
+            # The send went out unconfirmed and cleanup then failed, which is
+            # the branch that was about to return `retry_safe=False`.
+            mock_page.evaluate = AsyncMock(side_effect=["focused", True])
+            dismiss = AsyncMock(side_effect=RuntimeError("page closed"))
+        patches = self._patch_send_message_to_compose(extractor, mock_page)
+
+        with ExitStack() as stack:
+            for entered in patches:
+                stack.enter_context(entered)
+            stack.enter_context(
+                patch.object(extractor, "_message_text_occurrences", occurrences)
+            )
+            stack.enter_context(
+                patch.object(extractor, "_message_text_visible", visible)
+            )
+            stack.enter_context(patch.object(extractor, "_dismiss_message_ui", dismiss))
+            result = await extractor.send_message(
+                "testuser", "First\nSecond", confirm_send=True
+            )
+
+        assert result["status"] == "send_unconfirmed"
+        assert result["sent"] is False
+        assert result["retry_safe"] is False
+
+    async def test_an_error_before_anything_can_submit_is_raised(self, mock_page):
+        """Without a newline nothing has submitted yet, so the error is the answer.
+
+        The pair to the case above. Reporting `send_unconfirmed` here would
+        claim a duplicate-delivery risk that cannot exist and take the real
+        error away from a caller who can simply retry.
+        """
+        extractor = LinkedInExtractor(mock_page)
+        mock_keyboard = MagicMock()
+        mock_keyboard.type = AsyncMock(side_effect=RuntimeError("page closed"))
+        mock_keyboard.press = AsyncMock()
+        mock_page.keyboard = mock_keyboard
+        mock_page.evaluate = AsyncMock(return_value="focused")
+        patches = self._patch_send_message_to_compose(extractor, mock_page)
+
+        with (
+            ExitStack() as stack,
+            pytest.raises(RuntimeError, match="page closed"),
+        ):
+            for entered in patches:
+                stack.enter_context(entered)
+            await extractor.send_message("testuser", "Single line", confirm_send=True)
+
     async def test_send_unconfirmed_when_click_adds_nothing(self, mock_page):
         """A clicked Send button that changes nothing is not a sent message."""
         extractor = LinkedInExtractor(mock_page)

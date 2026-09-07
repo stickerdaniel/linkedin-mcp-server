@@ -1060,12 +1060,16 @@ class TestMessagingTools:
         assert str(excinfo.value) == str(cause) != ""
 
     @pytest.mark.parametrize(
-        ("retry_safe", "warns"),
-        [(False, True), (True, False)],
-        ids=["submitted", "retry-safe"],
+        ("result", "warns"),
+        [
+            ({"status": "sent", "sent": True, "retry_safe": False}, True),
+            ({"status": "send_unconfirmed", "sent": False, "retry_safe": False}, True),
+            ({"status": "composer_occupied", "sent": False, "retry_safe": True}, False),
+        ],
+        ids=["sent", "unconfirmed", "refused"],
     )
     async def test_cancelled_completion_notification_warns(
-        self, mock_context, caplog, retry_safe, warns
+        self, mock_context, caplog, result, warns
     ):
         """The last await can discard an answer that says a message went out.
 
@@ -1076,18 +1080,21 @@ class TestMessagingTools:
         the log line is then the only record.
 
         Silent where the result says a retry is safe: nothing was submitted,
-        so there is no duplicate delivery to warn about.
+        so there is no duplicate delivery to warn about. That is `retry_safe`
+        and not the status, which is why a confirmed send is parametrized
+        here alongside an unconfirmed one.
         """
         from linkedin_mcp_server.scraping.extractor import SEND_INTERRUPTED_WARNING
         from linkedin_mcp_server.tools.messaging import register_messaging_tools
 
         mock_extractor = _make_mock_extractor({})
+        # Only shapes the extractor can actually return. A confirmed send is
+        # the one that most needs the warning and the one an implementation
+        # keyed on `status == "send_unconfirmed"` would silently drop.
         mock_extractor.send_message = AsyncMock(
             return_value={
                 "url": "https://www.linkedin.com/messaging/compose/",
-                "status": "send_unconfirmed" if retry_safe is False else "sent",
-                "sent": False,
-                "retry_safe": retry_safe,
+                **result,
             }
         )
         # Only the completion notification is cancelled; the one before the
