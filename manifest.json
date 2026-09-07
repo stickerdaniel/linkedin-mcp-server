@@ -109,7 +109,7 @@
     },
     {
       "name": "send_message",
-      "description": "Send a message to a LinkedIn user with explicit confirmation and optional profile URN support"
+      "description": "Compose and send a new message to a LinkedIn user with explicit confirmation and optional profile URN support; profile-based targeting may create a separate DM instead of replying in an existing thread"
     },
     {
       "name": "get_feed",

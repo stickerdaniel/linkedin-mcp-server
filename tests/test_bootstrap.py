@@ -6632,6 +6632,12 @@ class TestRendererSurvivesOddOutput:
 class TestCliProgress:
     """The terminal bar, and the plain lines everywhere else."""
 
+    @staticmethod
+    def _enable_rich_terminal(monkeypatch) -> None:
+        """Remove host settings that deliberately select plain output."""
+        monkeypatch.setenv("TERM", "xterm-256color")
+        monkeypatch.delenv("NO_COLOR", raising=False)
+
     def _terminal(self, monkeypatch) -> list:
         """Make the CLI path believe it is on a terminal, and capture it.
 
@@ -6643,6 +6649,7 @@ class TestCliProgress:
 
         from linkedin_mcp_server import bootstrap
 
+        self._enable_rich_terminal(monkeypatch)
         buffer = io.StringIO()
         built: list = [buffer]
         monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
@@ -6699,6 +6706,8 @@ class TestCliProgress:
         the plain-line path already gives a stream that will not take a line.
         """
         from linkedin_mcp_server import bootstrap
+
+        self._enable_rich_terminal(monkeypatch)
 
         class _Pipe(io.StringIO):
             def isatty(self) -> bool:
