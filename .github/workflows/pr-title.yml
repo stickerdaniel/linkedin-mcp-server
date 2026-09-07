@@ -1,0 +1,24 @@
+name: PR title
+
+on:
+  pull_request:
+    # `edited` is what makes a retitle re-run the check. Without it a fixed
+    # title stays red until the next push.
+    types: [opened, edited, reopened, synchronize]
+
+# Read-only status check. No pull_request_target and no write token: the title
+# comes from the event payload, and the only code executed is from the PR
+# checkout under the default fork-safe permissions.
+permissions:
+  contents: read
+
+jobs:
+  pr-title:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Validate pull request title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: python3 scripts/validate_pr_title.py
