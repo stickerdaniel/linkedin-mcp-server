@@ -6,7 +6,9 @@ runs there: the JS focus, the keyboard typing into a contenteditable, the
 Send click and the occurrence count taken across the resulting DOM. These
 cases drive the production ``send_message`` path in headless chromium and
 replace navigation and recipient discovery only, so every step the
-confirmation depends on executes unchanged. Skipped automatically when
+confirmation depends on executes unchanged: recipient verification reads
+this page's own identity and submission clicks this page's own button.
+Skipped automatically when
 chromium is not installed; run locally after
 ``uv run patchright install chromium --no-shell``.
 
@@ -24,7 +26,10 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from patchright.async_api import async_playwright
 
-from linkedin_mcp_server.scraping.extractor import LinkedInExtractor
+from linkedin_mcp_server.scraping.extractor import (
+    LinkedInExtractor,
+    _ProfileMessageTarget,
+)
 
 #: CI uses ``--dist loadgroup``. Keep every test that launches Chromium on one
 #: worker so browser startups cannot compete with the DOM cases' wall-clock
@@ -39,6 +44,13 @@ DISPLAY_NAME = "Fadi Al Eliwi"
 MESSAGE = "UNDELIVERED SENTINEL"
 DRAFT = "Draft: "
 COMPOSE_URL = "https://www.linkedin.com/messaging/compose/?recipient=ACoAAB"
+PROFILE_PATH = "/in/fadi-eliwi/"
+TARGET = _ProfileMessageTarget(
+    profile_path=PROFILE_PATH,
+    profile_urn="ACoAAB",
+    compose_url=COMPOSE_URL,
+    display_name=DISPLAY_NAME,
+)
 
 # Records the click as a body attribute and does nothing else: the button is
 # visible and enabled, so the production JS click path succeeds while the
@@ -88,21 +100,87 @@ DELIVERING_SEND_JS = """
   });
 """
 
+FOREIGN_DELIVERING_SEND_JS = """
+  document.getElementById('send').addEventListener('click', () => {
+    document.body.setAttribute('data-clicked', 'true');
+    const composer = document.getElementById('composer');
+    const text = composer.innerText;
+    if (!text.trim()) return;
+    const entry = document.createElement('div');
+    entry.className = 'msg';
+    entry.textContent = text;
+    document.getElementById('foreign-thread').appendChild(entry);
+    composer.textContent = '';
+  });
+"""
+
+REMOVING_OWNER_SEND_JS = """
+  document.getElementById('send').addEventListener('click', () => {
+    document.body.setAttribute('data-clicked', 'true');
+    const text = document.getElementById('composer').innerText;
+    const entry = document.createElement('div');
+    entry.className = 'msg';
+    entry.textContent = text;
+    document.getElementById('outside').appendChild(entry);
+    document.getElementById('conversation').remove();
+  });
+"""
+
+REPLACING_OWNER_SEND_JS = """
+  document.getElementById('send').addEventListener('click', () => {
+    document.body.setAttribute('data-clicked', 'true');
+    const owner = document.getElementById('conversation');
+    const replacement = owner.cloneNode(true);
+    const composer = replacement.querySelector('#composer');
+    const entry = document.createElement('div');
+    entry.className = 'msg';
+    entry.textContent = composer.innerText;
+    replacement.querySelector('#thread').appendChild(entry);
+    composer.textContent = '';
+    owner.replaceWith(replacement);
+  });
+"""
+
+STATUS_GROWTH_SEND_JS = """
+  document.getElementById('send').addEventListener('click', () => {
+    document.body.setAttribute('data-clicked', 'true');
+    document.getElementById('conversation').insertAdjacentHTML(
+      'beforeend', '<span>available</span>');
+  });
+"""
+
+CLEARING_STATUS_GROWTH_SEND_JS = """
+  document.getElementById('send').addEventListener('click', () => {
+    document.body.setAttribute('data-clicked', 'true');
+    document.getElementById('composer').textContent = '';
+    document.getElementById('conversation').insertAdjacentHTML(
+      'beforeend', '<span>available</span>');
+  });
+"""
+
 
 def compose_page(send_js: str, *, draft: str = "") -> str:
-    """A compose surface holding one earlier copy of the same message."""
+    """A compose surface holding one earlier copy of the same message.
+
+    The recipient link sits beside the editor rather than inside it, which is
+    what lets the production verification resolve an identity at all: draft
+    content never authorizes anyone.
+    """
     return f"""<!DOCTYPE html>
 <html lang="en">
   <head><meta charset="utf-8"><title>Messaging</title></head>
   <body>
     <main>
-      <h2 id="recipient">{DISPLAY_NAME}</h2>
-      <div id="thread">
-        <div class="msg">{MESSAGE}</div>
-      </div>
-      <div id="composer" role="textbox" contenteditable="true"
-        aria-label="Write a message…">{draft}</div>
-      <button id="send" type="submit">Send</button>
+      <section id="conversation">
+        <a id="recipient" href="https://www.linkedin.com{PROFILE_PATH}">
+          {DISPLAY_NAME}</a>
+        <div id="thread">
+          <div class="msg">{MESSAGE}</div>
+        </div>
+        <div id="composer" role="textbox" contenteditable="true"
+          aria-label="Write a message…">{draft}</div>
+        <button id="send" type="submit">Send</button>
+      </section>
     </main>
     <script>{send_js}</script>
   </body>
@@ -145,26 +223,34 @@ async def dom_page():
             await browser.close()
 
 
-async def send(page, html: str, *, message: str = MESSAGE) -> dict:
-    """Run the real send path against `html`, mocking discovery only."""
+async def send(
+    page, html: str, *, message: str = MESSAGE, confirm_send: bool = True
+) -> dict:
+    """Run the real send path against `html`, mocking discovery only.
+
+    Only the two steps that need a live LinkedIn are replaced: reading the
+    target off a profile page, and the messaging-URL guard, which cannot pass
+    for the ``about:blank`` a ``set_content`` page reports. Both have their own
+    unit tests. Everything the confirmation rests on runs here for real.
+    """
     await page.set_content(html)
     extractor = LinkedInExtractor(page)
     with (
         patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
         patch.object(
             extractor,
-            "_read_profile_display_name",
+            "_read_profile_message_target",
             new_callable=AsyncMock,
-            return_value=DISPLAY_NAME,
+            return_value=TARGET,
         ),
-        patch.object(
-            extractor,
-            "_resolve_message_compose_href",
-            new_callable=AsyncMock,
-            return_value=COMPOSE_URL,
+        patch(
+            "linkedin_mcp_server.scraping.extractor._message_page_url_is_safe",
+            return_value=True,
         ),
     ):
-        return await extractor.send_message("fadi-eliwi", message, confirm_send=True)
+        return await extractor.send_message(
+            "fadi-eliwi", message, confirm_send=confirm_send
+        )
 
 
 async def text_of(page, selector: str) -> str:
@@ -190,6 +276,22 @@ class TestSendConfirmationAgainstRealDom:
         assert await text_of(dom_page, "#composer") == draft
         assert await dom_page.locator("#thread .msg").count() == 1
 
+    async def test_foreign_recipient_never_reaches_the_composer(self, dom_page):
+        # Issue #861: the composer belongs to someone else. Nothing may be
+        # typed and nothing may be clicked, so the message the caller wrote
+        # cannot reach a person they never named.
+        page = compose_page(DELIVERING_SEND_JS).replace(
+            f'href="https://www.linkedin.com{PROFILE_PATH}"',
+            'href="https://www.linkedin.com/in/someone-else/"',
+        )
+        result = await send(dom_page, page)
+
+        assert result["sent"] is False
+        assert result["status"] == "composer_unavailable"
+        assert await dom_page.evaluate("document.body.dataset.clicked") is None
+        assert await text_of(dom_page, "#composer") == ""
+        assert await dom_page.locator("#thread .msg").count() == 1
+
     async def test_existing_draft_is_never_sent_along(self, dom_page):
         # Measured, and the reason this fixture carries a draft at all:
         # `element.focus()` leaves the caret at the *start* of a
@@ -207,6 +309,37 @@ class TestSendConfirmationAgainstRealDom:
         assert await dom_page.evaluate("document.body.dataset.clicked") is None
         assert await text_of(dom_page, "#composer") == DRAFT.strip()
         assert await dom_page.locator("#thread .msg").count() == 1
+
+    @pytest.mark.parametrize(
+        ("confirm_send", "status"),
+        [(True, "composer_occupied"), (False, "confirmation_required")],
+        ids=["occupied", "dry-run"],
+    )
+    async def test_draft_refusal_never_closes_the_composer(
+        self, dom_page, confirm_send, status
+    ):
+        draft = "Private draft"
+        page = compose_page("", draft=draft).replace(
+            "</section>",
+            """<button aria-label="Close your draft conversation"
+              onclick="document.body.dataset.closed = String(
+                Number(document.body.dataset.closed || 0) + 1);
+                document.getElementById('composer').remove()">Close</button>
+              </section>""",
+        )
+
+        result = await send(dom_page, page, confirm_send=confirm_send)
+
+        observed = await dom_page.evaluate(
+            """() => ({
+                draft: document.getElementById('composer')?.innerText ?? null,
+                closed: document.body.dataset.closed ?? null,
+            })"""
+        )
+        assert result["status"] == status
+        assert result["sent"] is False
+        assert result["retry_safe"] is True
+        assert observed == {"draft": draft, "closed": None}
 
     async def test_ineffective_send_is_not_confirmed(self, dom_page):
         # The reported failure: Send is clicked, the handler does nothing,
@@ -253,6 +386,105 @@ class TestSendConfirmationAgainstRealDom:
         assert result["retry_safe"] is False
         assert await text_of(dom_page, "#composer") == ""
         assert await dom_page.locator("#thread .msg").count() == 1
+
+    @pytest.mark.parametrize(
+        "send_js",
+        [STATUS_GROWTH_SEND_JS, CLEARING_STATUS_GROWTH_SEND_JS],
+        ids=["draft-remains", "draft-cleared"],
+    )
+    async def test_status_substring_growth_is_not_confirmed(self, dom_page, send_js):
+        result = await send(dom_page, compose_page(send_js), message="a")
+
+        assert await dom_page.evaluate("document.body.dataset.clicked") == "true"
+        assert result["status"] == "send_unconfirmed"
+        assert result["sent"] is False
+        assert result["retry_safe"] is False
+        assert await text_of(dom_page, "#thread") == MESSAGE
+        assert await text_of(dom_page, "#conversation span") == "available"
+
+    async def test_delivered_short_message_is_confirmed(self, dom_page):
+        result = await send(dom_page, compose_page(DELIVERING_SEND_JS), message="a")
+
+        assert result["status"] == "sent"
+        assert result["sent"] is True
+        assert result["retry_safe"] is False
+        entries = dom_page.locator("#thread .msg")
+        assert await entries.count() == 2
+        assert (await entries.last.inner_text()).strip() == "a"
+
+    async def test_multiline_whitespace_units_are_normalized(self, dom_page):
+        await dom_page.set_content(compose_page(""))
+        await dom_page.evaluate(
+            """() => {
+                const entry = document.createElement('div');
+                entry.innerHTML = 'First<br>Second';
+                document.getElementById('thread').appendChild(entry);
+            }"""
+        )
+        extractor = LinkedInExtractor(dom_page)
+        owner = await extractor._resolve_message_owner(TARGET)
+        assert owner is not None
+        try:
+            count = await extractor._message_text_occurrences(
+                "  First \n  Second  ", target=TARGET, owner=owner
+            )
+        finally:
+            await extractor._dispose_message_owner(owner)
+
+        assert count == 1
+
+    async def test_foreign_thread_growth_is_not_confirmed(self, dom_page):
+        console_errors: list[str] = []
+        dom_page.on(
+            "console",
+            lambda message: (
+                console_errors.append(message.text) if message.type == "error" else None
+            ),
+        )
+        page = compose_page(FOREIGN_DELIVERING_SEND_JS).replace(
+            "</main>",
+            '<aside id="foreign-thread"></aside></main>',
+        )
+        result = await send(dom_page, page)
+
+        assert console_errors == []
+        assert await dom_page.evaluate("document.body.dataset.clicked") == "true"
+        assert result["status"] == "send_unconfirmed"
+        assert result["sent"] is False
+        assert result["retry_safe"] is False
+        assert await text_of(dom_page, "#composer") == ""
+        assert await dom_page.locator("#thread .msg").count() == 1
+        entries = dom_page.locator("#foreign-thread .msg")
+        assert await entries.count() == 1
+        assert (await entries.last.inner_text()).strip() == MESSAGE
+
+    async def test_removed_owner_with_matching_text_is_not_confirmed(self, dom_page):
+        page = compose_page(REMOVING_OWNER_SEND_JS).replace(
+            "</main>",
+            '<aside id="outside"></aside></main>',
+        )
+        result = await send(dom_page, page)
+
+        assert await dom_page.evaluate("document.body.dataset.clicked") == "true"
+        assert result["status"] == "send_unconfirmed"
+        assert result["sent"] is False
+        assert result["retry_safe"] is False
+        assert await dom_page.locator("#conversation").count() == 0
+        assert await text_of(dom_page, "#outside .msg") == MESSAGE
+
+    async def test_replacement_owner_with_copied_bubble_is_not_confirmed(
+        self, dom_page
+    ):
+        result = await send(dom_page, compose_page(REPLACING_OWNER_SEND_JS))
+
+        assert await dom_page.evaluate("document.body.dataset.clicked") == "true"
+        assert result["status"] == "send_unconfirmed"
+        assert result["sent"] is False
+        assert result["retry_safe"] is False
+        assert await text_of(dom_page, "#composer") == ""
+        entries = dom_page.locator("#thread .msg")
+        assert await entries.count() == 2
+        assert (await entries.last.inner_text()).strip() == MESSAGE
 
     async def test_delivered_message_is_confirmed(self, dom_page):
         # Same page, same earlier copy, but the Send handler moves the text
