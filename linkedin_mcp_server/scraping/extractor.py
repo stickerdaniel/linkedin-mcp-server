@@ -5302,7 +5302,9 @@ class LinkedInExtractor:
             return self._message_action_result(
                 profile_url,
                 "message_unavailable",
-                "LinkedIn did not expose one usable Message action for this profile.",
+                "LinkedIn did not expose a normal Message action for this profile. "
+                "Use connect_with_person first, then retry only after the connection "
+                "request is accepted.",
             )
 
         supplied_urn = _normalize_profile_urn(profile_urn) if profile_urn else None

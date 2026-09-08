@@ -988,6 +988,22 @@ class TestMessagingTools:
             "testuser", "Hello!", confirm_send=True, profile_urn=None
         )
 
+    async def test_send_message_description_explains_connection_handoff(self):
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool = await mcp.get_tool("send_message")
+        assert tool is not None
+        assert tool.description is not None
+        description = " ".join(tool.description.split())
+        assert (
+            "If LinkedIn does not expose a normal Message action, use "
+            "connect_with_person first, then retry send_message only after the "
+            "connection request is accepted."
+        ) in description
+
     @pytest.mark.parametrize("message", ["", "   \t\n"], ids=["empty", "whitespace"])
     async def test_send_message_refuses_blank_before_a_session(
         self, mock_context, message

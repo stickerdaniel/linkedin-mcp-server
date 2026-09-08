@@ -8620,6 +8620,65 @@ class TestSendMessage:
         keyboard.type.assert_not_called()
         keyboard.press.assert_not_called()
 
+    async def test_unavailable_message_action_returns_connection_handoff(
+        self, mock_page
+    ):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.keyboard = MagicMock(type=AsyncMock(), press=AsyncMock())
+
+        with (
+            patch.object(
+                extractor, "_navigate_to_page", new_callable=AsyncMock
+            ) as navigate,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                extractor,
+                "_read_profile_message_target",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch.object(
+                extractor, "_wait_for_message_surface", new_callable=AsyncMock
+            ) as surface,
+            patch.object(
+                extractor, "_read_message_composer_state", new_callable=AsyncMock
+            ) as state,
+            patch.object(
+                extractor,
+                "_focus_verified_message_editor",
+                new_callable=AsyncMock,
+            ) as focus,
+            patch.object(
+                extractor, "_submit_verified_message", new_callable=AsyncMock
+            ) as submit,
+        ):
+            result = await extractor.send_message(
+                "testuser", "Hello!", confirm_send=True
+            )
+
+        assert result == {
+            "url": "https://www.linkedin.com/in/testuser/",
+            "status": "message_unavailable",
+            "message": (
+                "LinkedIn did not expose a normal Message action for this profile. "
+                "Use connect_with_person first, then retry only after the connection "
+                "request is accepted."
+            ),
+            "recipient_selected": False,
+            "sent": False,
+            "retry_safe": True,
+        }
+        navigate.assert_awaited_once_with("https://www.linkedin.com/in/testuser/")
+        surface.assert_not_awaited()
+        state.assert_not_awaited()
+        focus.assert_not_awaited()
+        submit.assert_not_awaited()
+        mock_page.keyboard.type.assert_not_awaited()
+        mock_page.keyboard.press.assert_not_awaited()
+
     @staticmethod
     def _target():
         return extractor_module._ProfileMessageTarget(

@@ -240,10 +240,13 @@ def register_messaging_tools(
         existing thread; they do not send a reply. Until a thread-targeted send
         path is available, do not treat profile-based send_message as a reply.
 
-        The recipient must be directly messageable from the profile page. Nothing
-        is typed or submitted until the loaded profile and the open composer
-        identify the same person; on any disagreement the tool returns without
-        touching the editor. This is a write operation when confirm_send is True.
+        The recipient must be directly messageable from the profile page. If
+        LinkedIn does not expose a normal Message action, use connect_with_person
+        first, then retry send_message only after the connection request is
+        accepted. Nothing is typed or submitted until the loaded profile and the
+        open composer identify the same person; on any disagreement the tool
+        returns without touching the editor. This is a write operation when
+        confirm_send is True.
 
         Args:
             linkedin_username: LinkedIn username of the recipient; a full profile URL is accepted too
