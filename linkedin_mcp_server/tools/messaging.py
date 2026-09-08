@@ -19,7 +19,7 @@ from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_er
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.scraping.extractor import (
     SEND_INTERRUPTED_WARNING,
-    refuse_a_blank_message,
+    refuse_an_invalid_message,
 )
 
 logger = logging.getLogger(__name__)
@@ -261,22 +261,24 @@ def register_messaging_tools(
 
         Returns:
             Dict with url, status, message, recipient_selected, sent, and
-            retry_safe. ``sent`` is true only where delivery was observed, so
-            it is false both where nothing was submitted and where the outcome
-            is unknown. ``retry_safe`` separates the two: it is false from the
-            moment a submission is attempted, and calling again while it is
+            retry_safe. ``sent`` is true only after the submitted message's DOM
+            node gains a different opaque event ID; this does not claim delivery
+            or read status. It is false both where nothing was submitted and
+            where the outcome is unknown. ``retry_safe`` separates the two: it
+            is false from the moment a submission is attempted, and calling
+            again while it is
             false can deliver the message twice.
         """
         try:
-            # Answered before a session is acquired. Nothing about a blank
-            # message needs a browser, and acquiring one can spend a login
+            # Answered before a session is acquired. Caller-owned message
+            # validation needs no browser, and acquiring one can spend a login
             # attempt and come back as an authentication error instead of the
             # refusal the caller can act on. Inside the `try` because building
             # the refusal normalizes the recipient, and an unusable one raises
             # `InvalidReferenceError`; outside, that error would skip
             # `raise_tool_error` and reach the caller masked by
             # `mask_error_details` instead of naming the correction.
-            refusal = refuse_a_blank_message(linkedin_username, message)
+            refusal = refuse_an_invalid_message(linkedin_username, message)
             if refusal is not None:
                 return refusal
             extractor = extractor or await get_ready_extractor(
@@ -302,8 +304,8 @@ def register_messaging_tools(
             except BaseException:
                 # The send has already answered, and this notification is the
                 # last await inside FastMCP's `anyio.fail_after()`. A deadline
-                # landing here discards a result that may say a message was
-                # delivered, and nothing can hand it back afterwards, so the
+                # landing here discards a result that may say the send was
+                # confirmed, and nothing can hand it back afterwards, so the
                 # log line is all that is left. Quiet where the result says a
                 # retry is safe, because then there is nothing to warn about.
                 if result.get("retry_safe") is False:

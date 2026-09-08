@@ -1035,6 +1035,33 @@ class TestMessagingTools:
         assert result["url"] == "https://www.linkedin.com/in/testuser/"
 
     @pytest.mark.parametrize(
+        "message",
+        ["First\nSecond", "First\rSecond", "First\tSecond", "First\x7fSecond"],
+        ids=["newline", "carriage-return", "tab", "del"],
+    )
+    async def test_send_message_refuses_controls_before_a_session(
+        self, mock_context, message
+    ):
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "send_message")
+        with patch(
+            "linkedin_mcp_server.tools.messaging.get_ready_extractor",
+            new_callable=AsyncMock,
+        ) as ready:
+            result = await tool_fn("testuser", message, True, mock_context)
+
+        ready.assert_not_awaited()
+        assert result["status"] == "invalid_message"
+        assert result["message"] == (
+            "Message must not contain control characters or line breaks."
+        )
+        assert result["retry_safe"] is True
+
+    @pytest.mark.parametrize(
         "username",
         ["", "me", "https://www.linkedin.com/company/microsoft/"],
         ids=["empty", "self-alias", "not-a-person"],

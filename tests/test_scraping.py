@@ -32,8 +32,9 @@ from linkedin_mcp_server.scraping.extractor import (
     LinkedInExtractor,
     _CONTENT_DATE_POSTED_MAP,
     _MESSAGE_COMPOSER_OWNER_JS,
-    _MESSAGE_OCCURRENCES_INCREASED_JS,
-    _MESSAGE_OCCURRENCES_JS,
+    _MESSAGE_CONFIRMATION_DISPOSE_JS,
+    _MESSAGE_CONFIRMATION_PREPARE_JS,
+    _MESSAGE_CONFIRMATION_READY_JS,
     _RATE_LIMITED_MSG,
     _build_feed_references,
     _truncate_linkedin_noise,
@@ -8620,6 +8621,34 @@ class TestSendMessage:
         keyboard.type.assert_not_called()
         keyboard.press.assert_not_called()
 
+    @pytest.mark.parametrize(
+        "message",
+        ["First\nSecond", "First\rSecond", "First\tSecond", "First\x7fSecond"],
+        ids=["newline", "carriage-return", "tab", "del"],
+    )
+    async def test_control_message_is_rejected_before_browser_interaction(
+        self, mock_page, message
+    ):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.keyboard = MagicMock(type=AsyncMock(), press=AsyncMock())
+
+        with patch.object(
+            extractor, "_navigate_to_page", new_callable=AsyncMock
+        ) as navigate:
+            result = await extractor.send_message(
+                "testuser", message, confirm_send=True
+            )
+
+        assert result["status"] == "invalid_message"
+        assert result["message"] == (
+            "Message must not contain control characters or line breaks."
+        )
+        assert result["retry_safe"] is True
+        navigate.assert_not_awaited()
+        mock_page.evaluate.assert_not_awaited()
+        mock_page.keyboard.type.assert_not_awaited()
+        mock_page.keyboard.press.assert_not_awaited()
+
     async def test_unavailable_message_action_returns_connection_handoff(
         self, mock_page
     ):
@@ -8765,13 +8794,13 @@ class TestSendMessage:
             ),
             patch.object(
                 extractor,
-                "_message_text_occurrences",
+                "_prepare_message_confirmation",
                 new_callable=AsyncMock,
-                return_value=0,
+                return_value="confirmation-token",
             ),
             patch.object(
                 extractor,
-                "_message_text_visible",
+                "_message_send_confirmed",
                 new_callable=AsyncMock,
                 return_value=True,
             ),
@@ -9060,13 +9089,13 @@ class TestSendMessage:
             patches[8],
             patch.object(
                 extractor,
-                "_message_text_occurrences",
+                "_prepare_message_confirmation",
                 new_callable=AsyncMock,
                 return_value=0,
             ),
             patch.object(
                 extractor,
-                "_message_text_visible",
+                "_message_send_confirmed",
                 new_callable=AsyncMock,
                 return_value=True,
             ),
@@ -9078,17 +9107,7 @@ class TestSendMessage:
         assert result["status"] == "compose_interact_failed"
         mock_page.keyboard.type.assert_not_awaited()
 
-    @pytest.mark.parametrize(
-        ("message", "status", "retry_safe"),
-        [
-            ("Hello!", "recipient_resolution_failed", True),
-            ("First\nSecond", "send_unconfirmed", False),
-        ],
-        ids=["before-dispatch", "newline-may-have-submitted"],
-    )
-    async def test_missing_owner_preserves_retry_policy(
-        self, mock_page, message, status, retry_safe
-    ):
+    async def test_missing_owner_is_retryable_before_dispatch(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         patches = self._patch_to_composer(extractor, mock_page)
         owner = mock_page.evaluate_handle.return_value
@@ -9096,23 +9115,16 @@ class TestSendMessage:
         with ExitStack() as stack:
             entered = [stack.enter_context(item) for item in patches[1:]]
             result = await extractor.send_message(
-                "testuser", message, confirm_send=True
+                "testuser", "Hello!", confirm_send=True
             )
 
-        assert result["status"] == status
+        assert result["status"] == "recipient_resolution_failed"
         assert result["sent"] is False
-        assert result["retry_safe"] is retry_safe
+        assert result["retry_safe"] is True
         entered[6].assert_not_awaited()
         owner.dispose.assert_awaited_once_with()
 
-    @pytest.mark.parametrize(
-        ("message", "retry_safe"),
-        [("Hello!", True), ("First\nSecond", False)],
-        ids=["single-line", "newline"],
-    )
-    async def test_rejects_ambiguous_submit_after_text_entry(
-        self, mock_page, message, retry_safe
-    ):
+    async def test_rejects_ambiguous_submit_after_text_entry(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         patches = self._patch_to_composer(extractor, mock_page, submission="invalid")
         with (
@@ -9128,12 +9140,12 @@ class TestSendMessage:
             patches[10],
         ):
             result = await extractor.send_message(
-                "testuser", message, confirm_send=True
+                "testuser", "Hello!", confirm_send=True
             )
 
         assert result["status"] == "send_unavailable"
-        assert result["retry_safe"] is retry_safe
-        mock_page.keyboard.type.assert_awaited_once_with(message, delay=15)
+        assert result["retry_safe"] is True
+        mock_page.keyboard.type.assert_awaited_once_with("Hello!", delay=15)
         mock_page.keyboard.press.assert_not_awaited()
 
     async def test_removed_submit_candidate_cannot_switch_to_enter(self, mock_page):
@@ -9168,14 +9180,7 @@ class TestSendMessage:
         submit.assert_awaited_once_with(self._target(), allow_enter=False)
         mock_page.keyboard.press.assert_not_awaited()
 
-    @pytest.mark.parametrize(
-        ("message", "retry_safe"),
-        [("Hello!", True), ("First\nSecond", False)],
-        ids=["single-line", "newline"],
-    )
-    async def test_enter_revalidates_active_editor_before_press(
-        self, mock_page, message, retry_safe
-    ):
+    async def test_enter_revalidates_active_editor_before_press(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         states = [
             {"status": "valid", "active": False, "submitCount": 0},
@@ -9199,11 +9204,11 @@ class TestSendMessage:
             patches[10],
         ):
             result = await extractor.send_message(
-                "testuser", message, confirm_send=True
+                "testuser", "Hello!", confirm_send=True
             )
 
         assert result["status"] == "send_unavailable"
-        assert result["retry_safe"] is retry_safe
+        assert result["retry_safe"] is True
         assert state.await_count == 4
         mock_page.keyboard.press.assert_not_awaited()
 
@@ -9226,13 +9231,13 @@ class TestSendMessage:
             patches[8],
             patch.object(
                 extractor,
-                "_message_text_occurrences",
+                "_prepare_message_confirmation",
                 new_callable=AsyncMock,
                 return_value=0,
             ),
             patch.object(
                 extractor,
-                "_message_text_visible",
+                "_message_send_confirmed",
                 new_callable=AsyncMock,
                 return_value=True,
             ),
@@ -9245,15 +9250,10 @@ class TestSendMessage:
         submit.assert_awaited_once_with(self._target(), allow_enter=True)
         mock_page.keyboard.press.assert_awaited_once_with("Enter")
 
-    async def test_baseline_is_taken_after_typing_and_before_submission(
+    async def test_observer_is_prepared_after_typing_and_before_submission(
         self, mock_page
     ):
-        """The occurrence baseline is captured between typing and submission.
-
-        Taken any earlier it would miss what the verified composer already
-        holds; taken after submission it could already include the delivered
-        message, and the confirmation would compare that copy against itself.
-        """
+        """The mutation observer starts immediately before the only submit."""
         extractor = LinkedInExtractor(mock_page)
         steps: list[str] = []
         patches = self._patch_to_composer(extractor, mock_page)
@@ -9261,20 +9261,22 @@ class TestSendMessage:
             "type"
         )
 
-        async def occurrences(message, *, target, owner):
+        async def prepare(message, *, target, owner):
+            assert message == "Hello!"
             assert target == self._target()
             assert owner is mock_page.evaluate_handle.return_value
-            steps.append("baseline")
-            return 2
+            steps.append("prepare")
+            return "confirmation-token"
 
         async def submit(target, *, allow_enter):
             steps.append("submit")
             return "clicked"
 
-        async def visible(message, *, target, owner, previous_occurrences):
+        async def confirmed(message, *, target, owner, confirmation):
+            assert message == "Hello!"
             assert target == self._target()
             assert owner is mock_page.evaluate_handle.return_value
-            steps.append(f"confirm:{previous_occurrences}")
+            steps.append(f"confirm:{confirmation}")
             return True
 
         with (
@@ -9293,15 +9295,15 @@ class TestSendMessage:
             patches[8],
             patch.object(
                 extractor,
-                "_message_text_occurrences",
+                "_prepare_message_confirmation",
                 new_callable=AsyncMock,
-                side_effect=occurrences,
+                side_effect=prepare,
             ),
             patch.object(
                 extractor,
-                "_message_text_visible",
+                "_message_send_confirmed",
                 new_callable=AsyncMock,
-                side_effect=visible,
+                side_effect=confirmed,
             ),
         ):
             result = await extractor.send_message(
@@ -9309,8 +9311,12 @@ class TestSendMessage:
             )
 
         assert result["status"] == "sent"
-        # The confirmation receives exactly the baseline taken before submission.
-        assert steps == ["type", "baseline", "submit", "confirm:2"]
+        assert steps == [
+            "type",
+            "prepare",
+            "submit",
+            "confirm:confirmation-token",
+        ]
 
     @pytest.mark.parametrize(
         "submit_effect",
@@ -9347,13 +9353,13 @@ class TestSendMessage:
             stack.enter_context(
                 patch.object(
                     extractor,
-                    "_message_text_occurrences",
+                    "_prepare_message_confirmation",
                     new_callable=AsyncMock,
                     return_value=1,
                 )
             )
             stack.enter_context(
-                patch.object(extractor, "_message_text_visible", visible)
+                patch.object(extractor, "_message_send_confirmed", visible)
             )
             result = await extractor.send_message(
                 "testuser", "Hello!", confirm_send=True
@@ -9398,11 +9404,11 @@ class TestSendMessage:
             ExitStack() as stack,
             patch.object(
                 extractor,
-                "_message_text_occurrences",
+                "_prepare_message_confirmation",
                 new_callable=AsyncMock,
                 return_value=1,
             ),
-            patch.object(extractor, "_message_text_visible", visible_effect),
+            patch.object(extractor, "_message_send_confirmed", visible_effect),
             caplog.at_level(
                 logging.WARNING, logger="linkedin_mcp_server.scraping.extractor"
             ),
@@ -9420,29 +9426,8 @@ class TestSendMessage:
             warnings
         )
 
-    @pytest.mark.parametrize(
-        ("message", "warns"),
-        [("Hello\nthere!", True), ("Hello there!", False)],
-        ids=["newline", "single-line"],
-    )
-    async def test_cancellation_while_typing_warns_only_for_a_newline(
-        self, mock_page, caplog, message, warns
-    ):
-        """Typing can submit, so the window has to start before it.
-
-        ``keyboard.type()`` presses one key per character and patchright maps
-        ``"\n"`` onto Enter, which this composer submits on: the send path
-        relies on that very behaviour. A message carrying a newline therefore
-        delivers its first paragraph *while* it is being typed, long before
-        the send call, and typing is slow enough for the tool deadline to land
-        in there — at 15ms per character a 20k-character message runs past
-        180s on its own.
-
-        The single-line case is what makes this a test rather than a blanket
-        warning: nothing can have submitted yet, and a warning that cries
-        duplicate delivery where none is possible is the kind that gets
-        ignored when it is right.
-        """
+    async def test_cancellation_while_typing_does_not_warn(self, mock_page, caplog):
+        """Validated text cannot submit before the explicit submit path."""
         extractor = LinkedInExtractor(mock_page)
         mock_keyboard = MagicMock()
         mock_keyboard.type = AsyncMock(side_effect=asyncio.CancelledError())
@@ -9460,42 +9445,33 @@ class TestSendMessage:
         ):
             for entered in patches:
                 stack.enter_context(entered)
-            await extractor.send_message("testuser", message, confirm_send=True)
+            await extractor.send_message("testuser", "Hello there!", confirm_send=True)
 
         warnings = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
-        hit = any("retry may deliver the message twice" in w for w in warnings)
-        assert hit is warns, warnings
+        assert not any("retry may deliver the message twice" in w for w in warnings)
 
-    @pytest.mark.parametrize("stage", ["typing", "baseline"])
-    async def test_ordinary_error_after_a_possible_submission_still_answers(
-        self, mock_page, stage
-    ):
-        """A newline keeps later typing and baseline failures non-retryable."""
+    async def test_ordinary_error_after_dispatch_still_answers(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         mock_keyboard = MagicMock()
         mock_keyboard.type = AsyncMock()
         mock_keyboard.press = AsyncMock()
         mock_page.keyboard = mock_keyboard
-        mock_page.evaluate = AsyncMock(return_value="focused")
-        occurrences = AsyncMock(return_value=1)
-        visible = AsyncMock(return_value=False)
-        if stage == "typing":
-            mock_keyboard.type = AsyncMock(side_effect=RuntimeError("page closed"))
-        else:
-            occurrences = AsyncMock(side_effect=RuntimeError("context destroyed"))
+        mock_page.evaluate = AsyncMock(return_value="clicked")
+        prepare = AsyncMock(return_value="confirmation-token")
+        confirmed = AsyncMock(side_effect=RuntimeError("context destroyed"))
         patches = self._patch_send_message_to_compose(extractor, mock_page)
 
         with ExitStack() as stack:
             for entered in patches:
                 stack.enter_context(entered)
             stack.enter_context(
-                patch.object(extractor, "_message_text_occurrences", occurrences)
+                patch.object(extractor, "_prepare_message_confirmation", prepare)
             )
             stack.enter_context(
-                patch.object(extractor, "_message_text_visible", visible)
+                patch.object(extractor, "_message_send_confirmed", confirmed)
             )
             result = await extractor.send_message(
-                "testuser", "First\nSecond", confirm_send=True
+                "testuser", "Hello!", confirm_send=True
             )
 
         assert result["status"] == "send_unconfirmed"
@@ -9540,13 +9516,13 @@ class TestSendMessage:
             patches[8],
             patch.object(
                 extractor,
-                "_message_text_occurrences",
+                "_prepare_message_confirmation",
                 new_callable=AsyncMock,
                 return_value=1,
             ),
             patch.object(
                 extractor,
-                "_message_text_visible",
+                "_message_send_confirmed",
                 new_callable=AsyncMock,
                 return_value=False,
             ) as visible,
@@ -9565,7 +9541,7 @@ class TestSendMessage:
             "Hello!",
             target=self._target(),
             owner=mock_page.evaluate_handle.return_value,
-            previous_occurrences=1,
+            confirmation=1,
         )
 
 
@@ -9583,8 +9559,8 @@ class TestResolveMessageComposeBox:
         )
 
 
-class TestMessageTextOccurrences:
-    """Tests for the owner-scoped send confirmation."""
+class TestMessageConfirmation:
+    """Tests for the owner-pinned message-list mutation contract."""
 
     @staticmethod
     def _arguments():
@@ -9623,20 +9599,19 @@ class TestMessageTextOccurrences:
 
         owner.dispose.assert_awaited_once_with()
 
-    async def test_occurrences_run_inside_the_target_owner(self, mock_page):
+    async def test_prepare_installs_observer_in_the_target_owner(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         target, owner = self._arguments()
-        mock_page.evaluate = AsyncMock(return_value={"status": "valid", "count": 3})
+        mock_page.evaluate = AsyncMock(return_value="confirmation-token")
 
         assert (
-            await extractor._message_text_occurrences(
+            await extractor._prepare_message_confirmation(
                 "Hello!", target=target, owner=owner
             )
-            == 3
+            == "confirmation-token"
         )
-
         mock_page.evaluate.assert_awaited_once_with(
-            _MESSAGE_OCCURRENCES_JS,
+            _MESSAGE_CONFIRMATION_PREPARE_JS,
             {
                 "profilePath": target.profile_path,
                 "profileUrn": target.profile_urn,
@@ -9645,60 +9620,43 @@ class TestMessageTextOccurrences:
             },
         )
 
-    @pytest.mark.parametrize(
-        "result",
-        [None, {"status": "invalid"}, {"status": "valid", "count": None}],
-    )
-    async def test_invalid_baseline_is_distinct_from_zero(self, mock_page, result):
+    @pytest.mark.parametrize("result", [None, "", 0, {"token": "wrong"}])
+    async def test_invalid_prepare_result_fails_closed(self, mock_page, result):
         extractor = LinkedInExtractor(mock_page)
         target, owner = self._arguments()
         mock_page.evaluate = AsyncMock(return_value=result)
 
         assert (
-            await extractor._message_text_occurrences(
+            await extractor._prepare_message_confirmation(
                 "Hello!", target=target, owner=owner
             )
             is None
         )
 
-    async def test_valid_zero_baseline_stays_zero(self, mock_page):
-        extractor = LinkedInExtractor(mock_page)
-        target, owner = self._arguments()
-        mock_page.evaluate = AsyncMock(return_value={"status": "valid", "count": 0})
-
-        assert (
-            await extractor._message_text_occurrences(
-                "Hello!", target=target, owner=owner
-            )
-            == 0
-        )
-
-    async def test_confirmation_waits_for_more_than_the_baseline(self, mock_page):
+    async def test_confirmation_waits_for_the_exact_token(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         target, owner = self._arguments()
         mock_page.wait_for_function = AsyncMock(return_value=None)
 
         assert (
-            await extractor._message_text_visible(
+            await extractor._message_send_confirmed(
                 "Hello!",
                 target=target,
                 owner=owner,
-                previous_occurrences=2,
+                confirmation="confirmation-token",
             )
             is True
         )
-
         mock_page.wait_for_function.assert_awaited_once_with(
-            _MESSAGE_OCCURRENCES_INCREASED_JS,
+            _MESSAGE_CONFIRMATION_READY_JS,
             arg={
                 "profilePath": target.profile_path,
                 "profileUrn": target.profile_urn,
                 "expected": "Hello!",
                 "owner": owner,
-                "previous": 2,
+                "token": "confirmation-token",
             },
         )
-        assert _MESSAGE_OCCURRENCES_JS in _MESSAGE_OCCURRENCES_INCREASED_JS
 
     @pytest.mark.parametrize(
         "error",
@@ -9714,13 +9672,25 @@ class TestMessageTextOccurrences:
         mock_page.wait_for_function = AsyncMock(side_effect=error)
 
         assert (
-            await extractor._message_text_visible(
+            await extractor._message_send_confirmed(
                 "Hello!",
                 target=target,
                 owner=owner,
-                previous_occurrences=0,
+                confirmation="confirmation-token",
             )
             is False
+        )
+
+    async def test_dispose_disconnects_the_owner_token(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        _target, owner = self._arguments()
+        mock_page.evaluate = AsyncMock()
+
+        await extractor._dispose_message_confirmation(owner, "confirmation-token")
+
+        mock_page.evaluate.assert_awaited_once_with(
+            _MESSAGE_CONFIRMATION_DISPOSE_JS,
+            {"owner": owner, "token": "confirmation-token"},
         )
 
 

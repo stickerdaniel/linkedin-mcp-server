@@ -442,9 +442,9 @@ _MESSAGING_COMPOSE_SELECTOR = '[role="textbox"][contenteditable="true"]'
 # is then the only record that a message may already have left. Answering the
 # caller instead needs the tool to know its own deadline, which is issue #889.
 SEND_INTERRUPTED_WARNING = (
-    "Message submission was interrupted while in flight. Delivery is unknown; "
-    "check the conversation before retrying, as a retry may deliver the "
-    "message twice."
+    "Message submission was interrupted while in flight. The send outcome is "
+    "unknown; check the conversation before retrying, as a retry may deliver "
+    "the message twice."
 )
 
 _PROFILE_MESSAGE_TARGET_JS = r"""() => {
@@ -452,20 +452,42 @@ _PROFILE_MESSAGE_TARGET_JS = r"""() => {
         element &&
         (element.offsetWidth || element.offsetHeight || element.getClientRects().length)
     );
+    const active = anchor =>
+        visible(anchor) &&
+        !anchor.hasAttribute('disabled') &&
+        (anchor.getAttribute('aria-disabled') || '').toLowerCase() !== 'true';
     const normalize = value => (value || '').replace(/\s+/g, ' ').trim();
     const main = document.querySelector('main');
     if (!main) return null;
-    const scope = main.querySelector('section') || main.firstElementChild || main;
-    const composeHrefs = Array.from(
-        scope.querySelectorAll('a[href*="/messaging/compose/"]')
-    )
+
+    const candidates = Array.from(main.querySelectorAll('section'))
         .filter(visible)
-        .map(anchor => anchor.getAttribute('href') || anchor.href || '');
-    const heading = scope.querySelector('h1');
+        .map(section => {
+            const headings = Array.from(section.querySelectorAll('h1')).filter(
+                heading => visible(heading) && heading.closest('section') === section
+            );
+            const composeAnchors = Array.from(
+                section.querySelectorAll('a[href*="/messaging/compose/"]')
+            ).filter(
+                anchor => active(anchor) && anchor.closest('section') === section
+            );
+            return {section, headings, composeAnchors};
+        })
+        .filter(
+            candidate =>
+                candidate.headings.length === 1 &&
+                candidate.composeAnchors.length === 1
+        );
+    if (candidates.length !== 1) return null;
+
+    const candidate = candidates[0];
+    const anchor = candidate.composeAnchors[0];
     return {
         pageUrl: window.location.href,
-        displayName: normalize(heading?.innerText || heading?.textContent || ''),
-        composeHrefs,
+        displayName: normalize(
+            candidate.headings[0].innerText || candidate.headings[0].textContent || ''
+        ),
+        composeHrefs: [anchor.getAttribute('href') || anchor.href || ''],
     };
 }"""
 
@@ -497,11 +519,6 @@ _MESSAGE_COMPOSER_INSPECT_JS = r"""
             ) {
                 return null;
             }
-            // Everything under /in/<slug>/ belongs to that member, so the
-            // canonical path is the identity. Measured on a live profile:
-            // four of its own anchors point at /overlay/... and
-            // /recent-activity/, and reading those as an unknown member let
-            // the recipient contradict themselves.
             const match = /^\/in\/([^/?#]+)(?:\/.*)?$/.exec(url.pathname);
             return match ? `/in/${match[1]}/` : null;
         } catch {
@@ -514,82 +531,84 @@ _MESSAGE_COMPOSER_INSPECT_JS = r"""
         ).filter(visible);
         if (editors.length !== 1) return {status: 'ambiguous_editor'};
         const editor = editors[0];
-        const outsideEditor = element =>
-            element !== editor && !editor.contains(element);
-        const readIdentity = owner => ({
-            // Draft content is untrusted. Neither the editor nor anything
-            // inside it may authorize or contradict the outer recipient.
-            paths: Array.from(owner.querySelectorAll('a[href*="/in/"]'))
-                .filter(element => visible(element) && outsideEditor(element))
+        const localScopes = [];
+        let ancestor = editor.parentElement;
+        while (ancestor) {
+            if (ancestor.matches('form, dialog, [role="dialog"]')) {
+                localScopes.push(ancestor);
+            }
+            ancestor = ancestor.parentElement;
+        }
+        if (localScopes.length === 0) return {status: 'missing_owner'};
+
+        const outsideDraftAndHistory = element =>
+            element !== editor &&
+            !editor.contains(element) &&
+            !element.closest('[data-view-name="message-list-item"]');
+        const readIdentity = scope => ({
+            paths: Array.from(scope.querySelectorAll('a[href*="/in/"]'))
+                .filter(element => visible(element) && outsideDraftAndHistory(element))
                 .map(anchor => profilePath(anchor.getAttribute('href') || anchor.href || '')),
-            // Every identity attribute an element carries is read, never only
-            // the first one present: a matching data-profile-urn must not hide
-            // a contradicting data-recipient-urn on the same element. An
-            // absent attribute is skipped, while a present one that is empty
-            // or malformed normalizes to null and so fails closed.
             urns: [
-                ...(owner.matches('[data-profile-urn], [data-recipient-urn]')
-                    ? [owner]
+                ...(scope.matches('[data-profile-urn], [data-recipient-urn]')
+                    ? [scope]
                     : []),
-                ...owner.querySelectorAll(
-                    '[data-profile-urn], [data-recipient-urn]'
-                ),
-            ].filter(element => visible(element) && outsideEditor(element)).flatMap(
-                element => ['data-profile-urn', 'data-recipient-urn']
+                ...scope.querySelectorAll('[data-profile-urn], [data-recipient-urn]'),
+            ].filter(
+                element => visible(element) && outsideDraftAndHistory(element)
+            ).flatMap(element =>
+                ['data-profile-urn', 'data-recipient-urn']
                     .filter(name => element.hasAttribute(name))
                     .map(name => normalizeUrn(element.getAttribute(name)))
             ),
         });
-        // The walk climbs until a dialog closes it, and every identity it
-        // finds on the way has to agree with the target. That scope is
-        // deliberate and it is not free. A thread rendered inside the same
-        // section as the editor puts its message history in the walk, so a
-        // profile mention anyone can drop into a conversation refuses every
-        // later send to that person. The refusal is the safe half of the
-        // trade: adding identities can only ever make this stricter, so the
-        // recipient cannot use it to redirect a message. The unsafe half
-        // needs the real recipient to expose no identity at all in the whole
-        // chain while a mention of the target does, which no measurement has
-        // reached: the live compose surface has not been read yet, so what
-        // LinkedIn actually puts between the editor and its dialog is
-        // unknown. Narrowing the walk to the innermost owner would cut the
-        // false refusals and give up that asymmetry, which is a design
-        // decision and not a repair.
-        const identities = [];
-        let ancestor = editor.parentElement;
-        while (ancestor) {
-            if (ancestor.matches('dialog, [role="dialog"], form, section, article')) {
-                const identity = readIdentity(ancestor);
-                if (identity.paths.length + identity.urns.length > 0) {
-                    identities.push({owner: ancestor, ...identity});
-                }
-                if (ancestor.matches('dialog, [role="dialog"]')) break;
-            }
-            ancestor = ancestor.parentElement;
-        }
-        if (identities.length === 0) return {status: 'missing_recipient'};
-        const owner = identities[0].owner;
-        const paths = identities.flatMap(identity => identity.paths);
-        const urns = identities.flatMap(identity => identity.urns);
-        if (
-            paths.some(path => path !== target.profilePath) ||
-            urns.some(urn => urn !== target.profileUrn)
-        ) {
-            return {status: 'recipient_mismatch'};
-        }
 
-        const buttons = Array.from(
-            owner.querySelectorAll('button[type="submit"], button[data-control-name="send"]')
-        ).filter(visible);
+        const submitButtons = scope => Array.from(
+            scope.querySelectorAll(
+                'button[type="submit"], button[data-control-name="send"]'
+            )
+        ).filter(button =>
+            visible(button) &&
+            !button.closest('[data-view-name="message-list-item"]')
+        );
+        let localScope = null;
+        let identity = null;
+        let buttons = [];
+        let enterScope = null;
+        let enterIdentity = null;
+        for (const scope of localScopes) {
+            const candidate = readIdentity(scope);
+            if (candidate.paths.length + candidate.urns.length === 0) continue;
+            if (
+                candidate.paths.some(path => path !== target.profilePath) ||
+                candidate.urns.some(urn => urn !== target.profileUrn)
+            ) {
+                return {status: 'recipient_mismatch'};
+            }
+            if (!enterScope) {
+                enterScope = scope;
+                enterIdentity = candidate;
+            }
+            const candidateButtons = submitButtons(scope);
+            if (!localScope && candidateButtons.length > 0) {
+                localScope = scope;
+                identity = candidate;
+                buttons = candidateButtons;
+            }
+        }
+        localScope = localScope || enterScope;
+        identity = identity || enterIdentity;
+        if (!localScope || !identity) return {status: 'missing_recipient'};
+        const owner = localScopes.find(scope =>
+            scope.matches('dialog, [role="dialog"]')
+        ) || localScope;
         return {
             status: 'valid',
             editor,
+            localScope,
             owner,
             buttons,
             active: document.activeElement === editor,
-            // Reported, never required: the send path refuses a composer that
-            // already holds a draft, and the same routine runs again after
-            // typing, when the editor is of course no longer empty.
             empty: !(editor.innerText || '').replace(/\s+/g, ' ').trim(),
         };
     };
@@ -612,70 +631,226 @@ _MESSAGE_COMPOSER_OWNER_JS = (
     }"""
 )
 
-_MESSAGE_OCCURRENCES_JS = (
+_MESSAGE_CONFIRMATION_PREPARE_JS = (
     "(arg) => {"
     + _MESSAGE_COMPOSER_INSPECT_JS
     + r"""
-        const state = inspect(arg);
+        const composer = inspect(arg);
         if (
-            state.status !== 'valid' ||
+            composer.status !== 'valid' ||
             !arg.owner ||
-            state.owner !== arg.owner ||
+            composer.owner !== arg.owner ||
             !arg.owner.isConnected ||
-            !state.editor.isConnected ||
-            !arg.owner.contains(state.editor)
+            !composer.editor.isConnected ||
+            !arg.owner.contains(composer.editor)
         ) {
-            return {status: 'invalid'};
+            return null;
         }
 
-        const normalize = value => (value || '').replace(/\s+/g, ' ').trim();
-        const textUnits = value => (value || '')
-            .split(/\r?\n/)
-            .map(normalize)
-            .filter(Boolean);
-        const expectedUnits = textUnits(arg.expected);
-        if (expectedUnits.length === 0) {
-            return {status: 'valid', count: 0};
-        }
-        const countIn = value => {
-            const renderedUnits = textUnits(value);
-            let count = 0;
-            for (
-                let index = 0;
-                index <= renderedUnits.length - expectedUnits.length;
-                index += 1
-            ) {
-                if (
-                    expectedUnits.every(
-                        (unit, offset) => renderedUnits[index + offset] === unit
-                    )
-                ) {
-                    count += 1;
+        const counter = (arg.owner.__linkedinMcpConfirmationCounter || 0) + 1;
+        arg.owner.__linkedinMcpConfirmationCounter = counter;
+        const token = String(counter);
+        const marker = document.createElement('span');
+        marker.hidden = true;
+        marker.setAttribute('data-linkedin-mcp-confirmation', token);
+        marker.setAttribute('data-linkedin-mcp-invalid', 'false');
+        arg.owner.appendChild(marker);
+        composer.editor.setAttribute('data-linkedin-mcp-editor', token);
+        const state = {
+            owner: arg.owner,
+            editor: composer.editor,
+            expected: arg.expected,
+            candidates: new Map(),
+            invalid: false,
+        };
+        const exactUnit = (node, requireVisible) => {
+            if (requireVisible && !visible(node)) return false;
+            const elements = [node, ...node.querySelectorAll('*')].filter(
+                element => !requireVisible || visible(element)
+            );
+            const matches = elements.filter(
+                element => (element.innerText || '') === state.expected
+            );
+            const smallest = matches.filter(
+                element => !matches.some(
+                    other => other !== element && element.contains(other)
+                )
+            );
+            return smallest.length === 1;
+        };
+        const remember = node => {
+            if (!(node instanceof Element)) return;
+            const items = [
+                ...(node.matches('[data-view-name="message-list-item"]')
+                    ? [node]
+                    : []),
+                ...node.querySelectorAll('[data-view-name="message-list-item"]'),
+            ];
+            for (const item of items) {
+                if (!state.candidates.has(item)) {
+                    item.setAttribute('data-linkedin-mcp-candidate', token);
+                    state.candidates.set(item, {
+                        transitioned: false,
+                        matched: false,
+                    });
                 }
             }
-            return count;
         };
-        const isVisible = element => !!(
-            element &&
-            (element.offsetWidth ||
-                element.offsetHeight ||
-                element.getClientRects().length)
-        );
-
-        let total = countIn(arg.owner.innerText);
-        for (const editor of arg.owner.querySelectorAll('[contenteditable]')) {
-            if (isVisible(editor)) total -= countIn(editor.innerText);
+        const refresh = () => {
+            for (const [node, candidate] of state.candidates) {
+                if (
+                    node.isConnected &&
+                    state.owner.contains(node) &&
+                    exactUnit(node, true)
+                ) {
+                    candidate.matched = true;
+                    node.setAttribute('data-linkedin-mcp-matched', token);
+                }
+                if (candidate.matched && !node.isConnected) {
+                    state.invalid = true;
+                    marker.setAttribute('data-linkedin-mcp-invalid', 'true');
+                }
+            }
+            if (
+                Array.from(state.candidates.values()).filter(
+                    candidate => candidate.matched
+                ).length > 1
+            ) {
+                state.invalid = true;
+                marker.setAttribute('data-linkedin-mcp-invalid', 'true');
+            }
+        };
+        state.observer = new MutationObserver(records => {
+            for (const record of records) {
+                if (record.type !== 'childList') continue;
+                for (const node of record.addedNodes) remember(node);
+                for (const removed of record.removedNodes) {
+                    if (!(removed instanceof Element)) continue;
+                    if (removed === state.editor || removed.contains(state.editor)) {
+                        state.invalid = true;
+                        marker.setAttribute('data-linkedin-mcp-invalid', 'true');
+                    }
+                    for (const [candidate] of state.candidates) {
+                        if (
+                            (removed === candidate || removed.contains(candidate)) &&
+                            exactUnit(candidate, false)
+                        ) {
+                            state.invalid = true;
+                            marker.setAttribute(
+                                'data-linkedin-mcp-invalid', 'true'
+                            );
+                        }
+                    }
+                }
+            }
+            for (const record of records) {
+                if (
+                    record.type !== 'attributes' ||
+                    !state.candidates.has(record.target)
+                ) {
+                    continue;
+                }
+                const before = (record.oldValue || '').trim();
+                const after = (
+                    record.target.getAttribute('data-event-urn') || ''
+                ).trim();
+                if (before && after && before !== after) {
+                    state.candidates.get(record.target).transitioned = true;
+                    record.target.setAttribute(
+                        'data-linkedin-mcp-transitioned', token
+                    );
+                }
+            }
+            refresh();
+        });
+        state.observer.observe(state.owner, {
+            attributes: true,
+            attributeFilter: ['data-event-urn'],
+            attributeOldValue: true,
+            childList: true,
+            subtree: true,
+        });
+        if (!arg.owner.__linkedinMcpConfirmations) {
+            arg.owner.__linkedinMcpConfirmations = new Map();
         }
-        return {status: 'valid', count: total > 0 ? total : 0};
+        arg.owner.__linkedinMcpConfirmations.set(token, state);
+        return token;
     }"""
 )
 
-_MESSAGE_OCCURRENCES_INCREASED_JS = (
+_MESSAGE_CONFIRMATION_READY_JS = (
     "(arg) => {"
-    f"const result = ({_MESSAGE_OCCURRENCES_JS})(arg);"
-    "return result.status === 'valid' && result.count > arg.previous;"
-    "}"
+    + _MESSAGE_COMPOSER_INSPECT_JS
+    + r"""
+        if (!arg.owner?.isConnected) return false;
+        const markers = Array.from(
+            arg.owner.querySelectorAll('[data-linkedin-mcp-confirmation]')
+        ).filter(
+            marker => marker.getAttribute('data-linkedin-mcp-confirmation') === arg.token
+        );
+        if (
+            markers.length !== 1 ||
+            markers[0].getAttribute('data-linkedin-mcp-invalid') !== 'false'
+        ) {
+            return false;
+        }
+        const composer = inspect(arg);
+        if (
+            composer.status !== 'valid' ||
+            composer.owner !== arg.owner ||
+            composer.editor.getAttribute('data-linkedin-mcp-editor') !== arg.token
+        ) {
+            return false;
+        }
+        const exactVisibleUnit = node => {
+            if (!visible(node)) return false;
+            const elements = [node, ...node.querySelectorAll('*')].filter(visible);
+            const matches = elements.filter(
+                element => (element.innerText || '') === arg.expected
+            );
+            return matches.filter(
+                element => !matches.some(
+                    other => other !== element && element.contains(other)
+                )
+            ).length === 1;
+        };
+        const candidates = Array.from(
+            arg.owner.querySelectorAll('[data-linkedin-mcp-candidate]')
+        ).filter(node =>
+            node.getAttribute('data-linkedin-mcp-candidate') === arg.token &&
+            node.getAttribute('data-linkedin-mcp-matched') === arg.token &&
+            node.getAttribute('data-linkedin-mcp-transitioned') === arg.token &&
+            (node.getAttribute('data-event-urn') || '').trim() &&
+            exactVisibleUnit(node)
+        );
+        return candidates.length === 1;
+    }"""
 )
+
+_MESSAGE_CONFIRMATION_DISPOSE_JS = r"""arg => {
+    const confirmations = arg.owner?.__linkedinMcpConfirmations;
+    const state = confirmations?.get(arg.token);
+    if (state?.observer) state.observer.disconnect();
+    confirmations?.delete(arg.token);
+    for (const element of arg.owner?.querySelectorAll(
+        '[data-linkedin-mcp-candidate], [data-linkedin-mcp-editor], '
+        + '[data-linkedin-mcp-confirmation]'
+    ) || []) {
+        for (const attribute of [
+            'data-linkedin-mcp-candidate',
+            'data-linkedin-mcp-matched',
+            'data-linkedin-mcp-transitioned',
+            'data-linkedin-mcp-editor',
+        ]) {
+            if (element.getAttribute(attribute) === arg.token) {
+                element.removeAttribute(attribute);
+            }
+        }
+        if (element.getAttribute('data-linkedin-mcp-confirmation') === arg.token) {
+            element.remove();
+        }
+    }
+}"""
 
 _MESSAGE_COMPOSER_STATE_JS = (
     "(target) => {"
@@ -3338,7 +3513,7 @@ class LinkedInExtractor:
         return result if result in {"clicked", "enter"} else "invalid"
 
     async def _resolve_message_owner(self, target: _ProfileMessageTarget) -> Any | None:
-        """Hold the verified owner node across baseline and confirmation."""
+        """Hold the verified owner node across submission and confirmation."""
         owner = await self._page.evaluate_handle(
             _MESSAGE_COMPOSER_OWNER_JS,
             arg=self._message_target_argument(target),
@@ -3356,7 +3531,7 @@ class LinkedInExtractor:
         except Exception:
             logger.debug("Could not release message owner handle", exc_info=True)
 
-    def _message_occurrence_argument(
+    def _message_confirmation_argument(
         self,
         message: str,
         target: _ProfileMessageTarget,
@@ -3368,59 +3543,62 @@ class LinkedInExtractor:
             "owner": owner,
         }
 
-    async def _message_text_occurrences(
+    async def _prepare_message_confirmation(
         self,
         message: str,
         *,
         target: _ProfileMessageTarget,
         owner: Any,
-    ) -> int | None:
-        """Count message copies inside the pinned verified owner."""
-        result = await self._page.evaluate(
-            _MESSAGE_OCCURRENCES_JS,
-            self._message_occurrence_argument(message, target, owner),
+    ) -> str | None:
+        """Start the owner-scoped DOM observer immediately before submission."""
+        token = await self._page.evaluate(
+            _MESSAGE_CONFIRMATION_PREPARE_JS,
+            self._message_confirmation_argument(message, target, owner),
         )
-        if not isinstance(result, dict) or result.get("status") != "valid":
-            return None
-        count = result.get("count")
-        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
-            return None
-        return count
+        return token if isinstance(token, str) and token else None
 
-    async def _message_text_visible(
+    async def _message_send_confirmed(
         self,
         message: str,
         *,
         target: _ProfileMessageTarget,
         owner: Any,
-        previous_occurrences: int,
+        confirmation: str,
     ) -> bool:
-        """Wait for a new message copy inside the pinned verified owner.
+        """Wait for one message-list node to gain a different opaque event ID.
 
-        ``previous_occurrences`` is the baseline taken after typing and before
-        the send attempt, so the requirement is strictly more occurrences than
-        before: the typed text sitting in the composer cannot confirm itself,
-        and neither can an identical message already in the thread.
-
-        Uses the page-level default timeout (``BrowserConfig.default_timeout``).
-
-        Every failure answers "not observed" rather than raising, because this
-        runs only after a submission was attempted. An execution context that
-        dies mid-wait, which is what an SPA remount looks like from here, would
-        otherwise reach the caller as a plain tool error and invite the one
-        retry that delivers the message twice.
+        The observer accepts only a node inserted after it was installed whose
+        exact visible message unit equals the typed text. That same connected
+        node must then change from one non-empty ``data-event-urn`` value to a
+        different non-empty value. Every timeout, remount, replacement or
+        ambiguity answers "not observed" because submission already happened.
         """
-        argument = self._message_occurrence_argument(message, target, owner)
-        argument["previous"] = previous_occurrences
         try:
             await self._page.wait_for_function(
-                _MESSAGE_OCCURRENCES_INCREASED_JS,
-                arg=argument,
+                _MESSAGE_CONFIRMATION_READY_JS,
+                arg={
+                    **self._message_target_argument(target),
+                    "expected": message,
+                    "owner": owner,
+                    "token": confirmation,
+                },
             )
             return True
         except Exception:
-            logger.debug("Message delivery could not be confirmed", exc_info=True)
+            logger.debug("Message send could not be confirmed", exc_info=True)
             return False
+
+    async def _dispose_message_confirmation(
+        self, owner: Any, confirmation: str
+    ) -> None:
+        """Disconnect a request-local confirmation observer."""
+        try:
+            await self._page.evaluate(
+                _MESSAGE_CONFIRMATION_DISPOSE_JS,
+                {"owner": owner, "token": confirmation},
+            )
+        except Exception:
+            logger.debug("Could not disconnect message observer", exc_info=True)
 
     @staticmethod
     def _extract_thread_id(url: str) -> str | None:
@@ -5283,7 +5461,7 @@ class LinkedInExtractor:
             profile_urn: Optional profile URN (e.g. ACoAAB...) to verify against
                 the recipient resolved from the loaded profile snapshot.
         """
-        refusal = refuse_a_blank_message(linkedin_username, message)
+        refusal = refuse_an_invalid_message(linkedin_username, message)
         if refusal is not None:
             return refusal
         linkedin_username = normalize_person_identifier(linkedin_username)
@@ -5422,9 +5600,6 @@ class LinkedInExtractor:
                 )
             allow_enter = state.get("submitCount") == 0
 
-            # `keyboard.type()` maps newlines onto Enter, which can submit the
-            # first paragraph before the explicit submit path runs.
-            may_have_submitted = "\n" in message or "\r" in message
             await self._page.keyboard.type(message, delay=15)
             await asyncio.sleep(0.3)
             await asyncio.sleep(1.0)  # allow React to process keyboard input
@@ -5467,27 +5642,12 @@ class LinkedInExtractor:
                 )
 
             try:
-                # Baseline immediately before the send attempt: how often the
-                # message is already visible in the verified owner. The click
-                # below only tries to send; delivery is proven by this count
-                # growing, never by the text the editor still holds.
-                previous_occurrences = await self._message_text_occurrences(
+                confirmation = await self._prepare_message_confirmation(
                     message,
                     target=target,
                     owner=owner,
                 )
-                if previous_occurrences is None:
-                    if may_have_submitted:
-                        return self._message_action_result(
-                            self._page.url,
-                            "send_unconfirmed",
-                            "The message may already have been submitted before "
-                            "its verified composer owner disappeared. Check the "
-                            "conversation before retrying; retrying may deliver "
-                            "the message twice.",
-                            recipient_selected=recipient_selected,
-                            retry_safe=False,
-                        )
+                if confirmation is None:
                     return self._message_action_result(
                         self._page.url,
                         "recipient_resolution_failed",
@@ -5495,111 +5655,108 @@ class LinkedInExtractor:
                         recipient_selected=recipient_selected,
                     )
 
-                may_have_submitted_before_submit = may_have_submitted
                 try:
-                    # A click can dispatch before the evaluate call reports an
-                    # error, so an exception from this round trip is ambiguous.
-                    may_have_submitted = True
-                    submission = await self._submit_verified_message(
-                        target, allow_enter=allow_enter
-                    )
-                except Exception:
-                    logger.debug("Message submission did not complete", exc_info=True)
-                    return self._message_action_result(
-                        self._page.url,
-                        "send_unconfirmed",
-                        "The message submission was interrupted and LinkedIn did "
-                        "not confirm delivery. Check the conversation before "
-                        "retrying; retrying may deliver the message twice.",
-                        recipient_selected=recipient_selected,
-                        retry_safe=False,
-                    )
-
-                if submission == "enter":
-                    may_have_submitted = may_have_submitted_before_submit
-                    state = await self._read_message_composer_state(target)
-                    if (
-                        not allow_enter
-                        or not _message_page_url_is_safe(
-                            self._page.url, target.profile_urn
-                        )
-                        or state.get("status") != "valid"
-                        or state.get("active") is not True
-                        or state.get("submitCount") != 0
-                    ):
-                        submission = "invalid"
-                    else:
-                        # The read and the keypress are two round trips, so the
-                        # editor could in principle lose focus between them.
-                        # Nothing a caller or recipient controls reaches that
-                        # window, and closing it would need the keystroke and
-                        # check to be one operation, which no input API offers.
+                    may_have_submitted_before_submit = may_have_submitted
+                    try:
+                        # A click can dispatch before the evaluate call reports an
+                        # error, so an exception from this round trip is ambiguous.
                         may_have_submitted = True
-                        try:
-                            await self._page.keyboard.press("Enter")
-                        except Exception:
-                            logger.debug(
-                                "Message submission did not complete", exc_info=True
-                            )
-                            return self._message_action_result(
-                                self._page.url,
-                                "send_unconfirmed",
-                                "The message submission was interrupted and LinkedIn "
-                                "did not confirm delivery. Check the conversation "
-                                "before retrying; retrying may deliver the message "
-                                "twice.",
-                                recipient_selected=recipient_selected,
-                                retry_safe=False,
-                            )
-                elif submission != "clicked":
-                    may_have_submitted = may_have_submitted_before_submit
+                        submission = await self._submit_verified_message(
+                            target, allow_enter=allow_enter
+                        )
+                    except Exception:
+                        logger.debug(
+                            "Message submission did not complete", exc_info=True
+                        )
+                        return self._message_action_result(
+                            self._page.url,
+                            "send_unconfirmed",
+                            "The message submission was interrupted and LinkedIn did "
+                            "not confirm the send. Check the conversation before "
+                            "retrying; retrying may deliver the message twice.",
+                            recipient_selected=recipient_selected,
+                            retry_safe=False,
+                        )
 
-                if submission not in {"clicked", "enter"}:
-                    return self._message_action_result(
-                        self._page.url,
-                        "send_unavailable",
-                        "The local submit path was missing, disabled, or ambiguous.",
-                        recipient_selected=recipient_selected,
-                        retry_safe=not may_have_submitted,
+                    if submission == "enter":
+                        may_have_submitted = may_have_submitted_before_submit
+                        state = await self._read_message_composer_state(target)
+                        if (
+                            not allow_enter
+                            or not _message_page_url_is_safe(
+                                self._page.url, target.profile_urn
+                            )
+                            or state.get("status") != "valid"
+                            or state.get("active") is not True
+                            or state.get("submitCount") != 0
+                        ):
+                            submission = "invalid"
+                        else:
+                            # The read and the keypress are two round trips, so the
+                            # editor could in principle lose focus between them.
+                            # Nothing a caller or recipient controls reaches that
+                            # window, and closing it would need the keystroke and
+                            # check to be one operation, which no input API offers.
+                            may_have_submitted = True
+                            try:
+                                await self._page.keyboard.press("Enter")
+                            except Exception:
+                                logger.debug(
+                                    "Message submission did not complete", exc_info=True
+                                )
+                                return self._message_action_result(
+                                    self._page.url,
+                                    "send_unconfirmed",
+                                    "The message submission was interrupted and "
+                                    "LinkedIn did not confirm the send. Check the "
+                                    "conversation before retrying; retrying may "
+                                    "deliver the message twice.",
+                                    recipient_selected=recipient_selected,
+                                    retry_safe=False,
+                                )
+                    elif submission != "clicked":
+                        may_have_submitted = may_have_submitted_before_submit
+
+                    if submission not in {"clicked", "enter"}:
+                        return self._message_action_result(
+                            self._page.url,
+                            "send_unavailable",
+                            "The local submit path was missing, disabled, or ambiguous.",
+                            recipient_selected=recipient_selected,
+                            retry_safe=not may_have_submitted,
+                        )
+
+                    confirmed = await self._message_send_confirmed(
+                        message,
+                        target=target,
+                        owner=owner,
+                        confirmation=confirmation,
                     )
+                    if not confirmed:
+                        return self._message_action_result(
+                            self._page.url,
+                            "send_unconfirmed",
+                            "The message was submitted but LinkedIn did not confirm "
+                            "the message-list transition in time. Check the "
+                            "conversation before retrying; retrying may deliver the "
+                            "message twice.",
+                            recipient_selected=recipient_selected,
+                            retry_safe=False,
+                        )
 
-                confirmed = await self._message_text_visible(
-                    message,
-                    target=target,
-                    owner=owner,
-                    previous_occurrences=previous_occurrences,
-                )
-
-                if not confirmed:
-                    # Submission already happened, so this is not evidence that
-                    # nothing was sent: a thread that renders the delivered bubble
-                    # slower than the page timeout arrives here having delivered.
-                    # Reporting a plain failure invites a retry, and a retry sends a
-                    # second real message to a real person, so the status says
-                    # unknown rather than no.
                     return self._message_action_result(
                         self._page.url,
-                        "send_unconfirmed",
-                        "The message was submitted but LinkedIn did not confirm "
-                        "delivery in time. Check the conversation before retrying; "
-                        "retrying may deliver the message twice.",
+                        "sent",
+                        "Message submitted and confirmed in the conversation UI.",
                         recipient_selected=recipient_selected,
+                        sent=True,
                         retry_safe=False,
                     )
-
-                return self._message_action_result(
-                    self._page.url,
-                    "sent",
-                    "Message sent.",
-                    recipient_selected=recipient_selected,
-                    sent=True,
-                    retry_safe=False,
-                )
+                finally:
+                    await self._dispose_message_confirmation(owner, confirmation)
             finally:
                 await self._dispose_message_owner(owner)
         except Exception:
-            # A newline can submit while typing. Later reads can therefore fail
-            # after a message may already have left, before a result says so.
             if not may_have_submitted:
                 # Nothing can have been submitted yet, so the error itself is
                 # the useful answer and the caller can retry on it.
@@ -5611,7 +5768,7 @@ class LinkedInExtractor:
                 self._page.url,
                 "send_unconfirmed",
                 "The message may already have been submitted when the send "
-                "failed, and LinkedIn did not confirm delivery. Check the "
+                "failed, and LinkedIn did not confirm the outcome. Check the "
                 "conversation before retrying; retrying may deliver the "
                 "message twice.",
                 recipient_selected=recipient_selected,
@@ -5623,10 +5780,8 @@ class LinkedInExtractor:
             # returns, so the answer the branch above gives cannot be given
             # here and the log line is all that is left.
             #
-            # Silent for an interruption while typing a message without a
-            # newline: nothing can have submitted yet, and a warning that
-            # cries duplicate delivery where none is possible is the kind
-            # that gets ignored when it is right.
+            # Silent before explicit submission: nothing can have left yet,
+            # and a warning about duplicate delivery would be false.
             if may_have_submitted:
                 logger.warning(SEND_INTERRUPTED_WARNING)
             raise
@@ -5741,24 +5896,22 @@ class LinkedInExtractor:
         return result
 
 
-def refuse_a_blank_message(
+def refuse_an_invalid_message(
     linkedin_username: str, message: str
 ) -> dict[str, Any] | None:
-    """The refusal for a whitespace-only message, or None if there is none.
-
-    Shared between the MCP tool and `LinkedInExtractor.send_message` so the
-    two cannot answer the same input differently. The tool calls it before
-    acquiring a session: the input is the caller's own and needs no browser
-    to judge, while acquiring one can spend a login attempt and answer with
-    an authentication error the caller then has to interpret instead.
-    """
-    if message.strip():
+    """Return the shared browser-free refusal for an unsafe message."""
+    reason = None
+    if not message.strip():
+        reason = "Message must contain non-whitespace characters."
+    elif any(ord(character) < 32 or ord(character) == 127 for character in message):
+        # `keyboard.type()` maps line breaks onto Enter, which can submit while
+        # text is still being entered. Reject every C0 control and DEL before a
+        # session is acquired so no input can reach that implicit submit path.
+        reason = "Message must not contain control characters or line breaks."
+    if reason is None:
         return None
-    # Not `message_unavailable`, which says the *recipient* exposes no
-    # Message action and tells a caller to give up on this person. A blank
-    # message is the caller's own input and the repair is theirs.
     return LinkedInExtractor._message_action_result(
         person_profile_url(normalize_person_identifier(linkedin_username), "/"),
         "invalid_message",
-        "Message must contain non-whitespace characters.",
+        reason,
     )
