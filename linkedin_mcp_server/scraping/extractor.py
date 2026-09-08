@@ -460,32 +460,23 @@ _PROFILE_MESSAGE_TARGET_JS = r"""() => {
     const main = document.querySelector('main');
     if (!main) return null;
 
-    const candidates = Array.from(main.querySelectorAll('section'))
-        .filter(visible)
-        .map(section => {
-            const headings = Array.from(section.querySelectorAll('h1')).filter(
-                heading => visible(heading) && heading.closest('section') === section
-            );
-            const composeAnchors = Array.from(
-                section.querySelectorAll('a[href*="/messaging/compose/"]')
-            ).filter(
-                anchor => active(anchor) && anchor.closest('section') === section
-            );
-            return {section, headings, composeAnchors};
-        })
-        .filter(
-            candidate =>
-                candidate.headings.length === 1 &&
-                candidate.composeAnchors.length === 1
-        );
-    if (candidates.length !== 1) return null;
+    const section = Array.from(main.children).find(
+        element => element.matches('section') && visible(element)
+    );
+    if (!section) return null;
+    const headings = Array.from(section.querySelectorAll('h1')).filter(
+        heading => visible(heading) && heading.closest('section') === section
+    );
+    const composeAnchors = Array.from(
+        section.querySelectorAll('a[href*="/messaging/compose/"]')
+    ).filter(anchor => active(anchor) && anchor.closest('section') === section);
+    if (headings.length !== 1 || composeAnchors.length !== 1) return null;
 
-    const candidate = candidates[0];
-    const anchor = candidate.composeAnchors[0];
+    const anchor = composeAnchors[0];
     return {
         pageUrl: window.location.href,
         displayName: normalize(
-            candidate.headings[0].innerText || candidate.headings[0].textContent || ''
+            headings[0].innerText || headings[0].textContent || ''
         ),
         composeHrefs: [anchor.getAttribute('href') || anchor.href || ''],
     };
@@ -525,6 +516,33 @@ _MESSAGE_COMPOSER_INSPECT_JS = r"""
             return null;
         }
     };
+    const messageUrlSafe = target => {
+        try {
+            const url = new URL(window.location.href);
+            const hostname = url.hostname.toLowerCase().replace(/\.$/, '');
+            if (
+                url.protocol !== 'https:' ||
+                !/(^|\.)linkedin\.com$/.test(hostname) ||
+                url.username ||
+                url.password ||
+                (url.port && url.port !== '443') ||
+                url.hash ||
+                !(
+                    url.pathname === '/messaging/compose/' ||
+                    /^\/messaging\/thread\/[A-Za-z0-9_=-]+\/$/.test(url.pathname)
+                )
+            ) {
+                return false;
+            }
+            const values = [
+                ...url.searchParams.getAll('recipient'),
+                ...url.searchParams.getAll('profileUrn'),
+            ];
+            return values.every(value => normalizeUrn(value) === target.profileUrn);
+        } catch {
+            return false;
+        }
+    };
     const inspect = target => {
         const editors = Array.from(
             document.querySelectorAll('[role="textbox"][contenteditable="true"]')
@@ -541,27 +559,34 @@ _MESSAGE_COMPOSER_INSPECT_JS = r"""
         }
         if (localScopes.length === 0) return {status: 'missing_owner'};
 
+        const owner = localScopes.find(scope =>
+            scope.matches('dialog, [role="dialog"]')
+        ) || localScopes[0];
         const outsideDraftAndHistory = element =>
             element !== editor &&
             !editor.contains(element) &&
             !element.closest('[data-view-name="message-list-item"]');
-        const readIdentity = scope => ({
-            paths: Array.from(scope.querySelectorAll('a[href*="/in/"]'))
-                .filter(element => visible(element) && outsideDraftAndHistory(element))
-                .map(anchor => profilePath(anchor.getAttribute('href') || anchor.href || '')),
-            urns: [
-                ...(scope.matches('[data-profile-urn], [data-recipient-urn]')
-                    ? [scope]
-                    : []),
-                ...scope.querySelectorAll('[data-profile-urn], [data-recipient-urn]'),
-            ].filter(
-                element => visible(element) && outsideDraftAndHistory(element)
-            ).flatMap(element =>
-                ['data-profile-urn', 'data-recipient-urn']
-                    .filter(name => element.hasAttribute(name))
-                    .map(name => normalizeUrn(element.getAttribute(name)))
-            ),
-        });
+        const paths = Array.from(owner.querySelectorAll('a[href*="/in/"]'))
+            .filter(element => visible(element) && outsideDraftAndHistory(element))
+            .map(anchor => profilePath(anchor.getAttribute('href') || anchor.href || ''));
+        const urns = [
+            ...(owner.matches('[data-profile-urn], [data-recipient-urn]')
+                ? [owner]
+                : []),
+            ...owner.querySelectorAll('[data-profile-urn], [data-recipient-urn]'),
+        ].filter(
+            element => visible(element) && outsideDraftAndHistory(element)
+        ).flatMap(element =>
+            ['data-profile-urn', 'data-recipient-urn']
+                .filter(name => element.hasAttribute(name))
+                .map(name => normalizeUrn(element.getAttribute(name)))
+        );
+        if (
+            paths.some(path => path !== target.profilePath) ||
+            urns.some(urn => urn !== target.profileUrn)
+        ) {
+            return {status: 'recipient_mismatch'};
+        }
 
         const submitButtons = scope => Array.from(
             scope.querySelectorAll(
@@ -571,37 +596,9 @@ _MESSAGE_COMPOSER_INSPECT_JS = r"""
             visible(button) &&
             !button.closest('[data-view-name="message-list-item"]')
         );
-        let localScope = null;
-        let identity = null;
-        let buttons = [];
-        let enterScope = null;
-        let enterIdentity = null;
-        for (const scope of localScopes) {
-            const candidate = readIdentity(scope);
-            if (candidate.paths.length + candidate.urns.length === 0) continue;
-            if (
-                candidate.paths.some(path => path !== target.profilePath) ||
-                candidate.urns.some(urn => urn !== target.profileUrn)
-            ) {
-                return {status: 'recipient_mismatch'};
-            }
-            if (!enterScope) {
-                enterScope = scope;
-                enterIdentity = candidate;
-            }
-            const candidateButtons = submitButtons(scope);
-            if (!localScope && candidateButtons.length > 0) {
-                localScope = scope;
-                identity = candidate;
-                buttons = candidateButtons;
-            }
-        }
-        localScope = localScope || enterScope;
-        identity = identity || enterIdentity;
-        if (!localScope || !identity) return {status: 'missing_recipient'};
-        const owner = localScopes.find(scope =>
-            scope.matches('dialog, [role="dialog"]')
-        ) || localScope;
+        const localScope = localScopes.find(scope => submitButtons(scope).length > 0)
+            || localScopes[0];
+        const buttons = submitButtons(localScope);
         return {
             status: 'valid',
             editor,
@@ -610,6 +607,7 @@ _MESSAGE_COMPOSER_INSPECT_JS = r"""
             buttons,
             active: document.activeElement === editor,
             empty: !(editor.innerText || '').replace(/\s+/g, ' ').trim(),
+            messageUrlSafe: messageUrlSafe(target),
         };
     };
 """
@@ -621,12 +619,30 @@ _MESSAGE_COMPOSER_OWNER_JS = (
         const state = inspect(target);
         if (
             state.status !== 'valid' ||
+            state.messageUrlSafe !== true ||
             !state.owner.isConnected ||
             !state.editor.isConnected ||
-            !state.owner.contains(state.editor)
+            !state.owner.contains(state.editor) ||
+            state.buttons.length !== 1
         ) {
             return null;
         }
+        const button = state.buttons[0];
+        if (
+            !button.isConnected ||
+            !state.localScope.contains(button) ||
+            button.disabled ||
+            (button.getAttribute('aria-disabled') || '').toLowerCase() === 'true'
+        ) {
+            return null;
+        }
+        state.owner.__linkedinMcpComposer = {
+            editor: state.editor,
+            button,
+            localScope: state.localScope,
+            profilePath: target.profilePath,
+            profileUrn: target.profileUrn,
+        };
         return state.owner;
     }"""
 )
@@ -636,13 +652,21 @@ _MESSAGE_CONFIRMATION_PREPARE_JS = (
     + _MESSAGE_COMPOSER_INSPECT_JS
     + r"""
         const composer = inspect(arg);
+        const pinned = arg.owner?.__linkedinMcpComposer;
         if (
             composer.status !== 'valid' ||
-            !arg.owner ||
+            composer.messageUrlSafe !== true ||
+            !pinned ||
             composer.owner !== arg.owner ||
+            composer.editor !== pinned.editor ||
+            composer.localScope !== pinned.localScope ||
+            composer.buttons.length !== 1 ||
+            composer.buttons[0] !== pinned.button ||
             !arg.owner.isConnected ||
-            !composer.editor.isConnected ||
-            !arg.owner.contains(composer.editor)
+            !pinned.editor.isConnected ||
+            !arg.owner.contains(pinned.editor) ||
+            document.activeElement !== pinned.editor ||
+            (pinned.editor.innerText || pinned.editor.textContent || '') !== arg.expected
         ) {
             return null;
         }
@@ -655,11 +679,14 @@ _MESSAGE_CONFIRMATION_PREPARE_JS = (
         marker.setAttribute('data-linkedin-mcp-confirmation', token);
         marker.setAttribute('data-linkedin-mcp-invalid', 'false');
         arg.owner.appendChild(marker);
-        composer.editor.setAttribute('data-linkedin-mcp-editor', token);
+        pinned.editor.setAttribute('data-linkedin-mcp-editor', token);
         const state = {
             owner: arg.owner,
-            editor: composer.editor,
+            editor: pinned.editor,
             expected: arg.expected,
+            baseline: new Set(
+                arg.owner.querySelectorAll('[data-view-name="message-list-item"]')
+            ),
             candidates: new Map(),
             invalid: false,
         };
@@ -687,6 +714,7 @@ _MESSAGE_CONFIRMATION_PREPARE_JS = (
                 ...node.querySelectorAll('[data-view-name="message-list-item"]'),
             ];
             for (const item of items) {
+                if (state.baseline.has(item)) continue;
                 if (!state.candidates.has(item)) {
                     item.setAttribute('data-linkedin-mcp-candidate', token);
                     state.candidates.set(item, {
@@ -797,7 +825,9 @@ _MESSAGE_CONFIRMATION_READY_JS = (
         const composer = inspect(arg);
         if (
             composer.status !== 'valid' ||
+            composer.messageUrlSafe !== true ||
             composer.owner !== arg.owner ||
+            composer.buttons.length !== 1 ||
             composer.editor.getAttribute('data-linkedin-mcp-editor') !== arg.token
         ) {
             return false;
@@ -832,6 +862,7 @@ _MESSAGE_CONFIRMATION_DISPOSE_JS = r"""arg => {
     const state = confirmations?.get(arg.token);
     if (state?.observer) state.observer.disconnect();
     confirmations?.delete(arg.token);
+    if (arg.owner) delete arg.owner.__linkedinMcpComposer;
     for (const element of arg.owner?.querySelectorAll(
         '[data-linkedin-mcp-candidate], [data-linkedin-mcp-editor], '
         + '[data-linkedin-mcp-confirmation]'
@@ -862,6 +893,10 @@ _MESSAGE_COMPOSER_STATE_JS = (
             active: state.active === true,
             empty: state.empty === true,
             submitCount: state.buttons ? state.buttons.length : 0,
+            submitUsable: state.buttons?.length === 1 &&
+                !state.buttons[0].disabled &&
+                (state.buttons[0].getAttribute('aria-disabled') || '').toLowerCase()
+                    !== 'true',
         };
     }"""
 )
@@ -885,31 +920,184 @@ _MESSAGE_COMPOSER_FOCUS_JS = (
     }"""
 )
 
-_MESSAGE_COMPOSER_SUBMIT_JS = (
-    "(target) => {"
-    + _MESSAGE_COMPOSER_INSPECT_JS
-    + """
-        const state = inspect(target);
+_MESSAGE_COMPOSER_PINNED_JS = r"""
+    const visible = element => !!(
+        element &&
+        (element.offsetWidth || element.offsetHeight || element.getClientRects().length)
+    );
+    const normalizeUrn = value => {
+        const text = (value || '').trim();
+        const prefix = 'urn:li:fsd_profile:';
+        const identifier = text.startsWith(prefix) ? text.slice(prefix.length) : text;
+        return /^[A-Za-z0-9_-]+$/.test(identifier) ? identifier : null;
+    };
+    const profilePath = value => {
+        if (typeof value !== 'string' || /[\\\x00-\x1f\x7f]/.test(value)) {
+            return null;
+        }
+        try {
+            const url = new URL(value, window.location.href);
+            const hostname = url.hostname.toLowerCase().replace(/\.$/, '');
+            if (
+                url.protocol !== 'https:' ||
+                !/(^|\.)linkedin\.com$/.test(hostname) ||
+                url.username ||
+                url.password ||
+                (url.port && url.port !== '443') ||
+                url.hash
+            ) {
+                return null;
+            }
+            const match = /^\/in\/([^/?#]+)(?:\/.*)?$/.exec(url.pathname);
+            return match ? `/in/${match[1]}/` : null;
+        } catch {
+            return null;
+        }
+    };
+    const messageUrlSafe = target => {
+        try {
+            const url = new URL(window.location.href);
+            const hostname = url.hostname.toLowerCase().replace(/\.$/, '');
+            if (
+                url.protocol !== 'https:' ||
+                !/(^|\.)linkedin\.com$/.test(hostname) ||
+                url.username ||
+                url.password ||
+                (url.port && url.port !== '443') ||
+                url.hash ||
+                !(
+                    url.pathname === '/messaging/compose/' ||
+                    /^\/messaging\/thread\/[A-Za-z0-9_=-]+\/$/.test(url.pathname)
+                )
+            ) {
+                return false;
+            }
+            const values = [
+                ...url.searchParams.getAll('recipient'),
+                ...url.searchParams.getAll('profileUrn'),
+            ];
+            return values.every(value => normalizeUrn(value) === target.profileUrn);
+        } catch {
+            return false;
+        }
+    };
+    const validatePinned = target => {
+        const pinned = owner?.__linkedinMcpComposer;
         if (
-            state.status !== 'valid' ||
-            !state.editor.isConnected ||
-            document.activeElement !== state.editor
+            !pinned ||
+            pinned.profilePath !== target.profilePath ||
+            pinned.profileUrn !== target.profileUrn ||
+            !messageUrlSafe(target)
         ) {
-            return 'invalid';
+            return null;
         }
-        if (state.buttons.length === 0) {
-            return target.allowEnter === true ? 'enter' : 'invalid';
-        }
-        if (state.buttons.length !== 1) return 'invalid';
-        const button = state.buttons[0];
+        const {editor, button, localScope} = pinned;
         if (
-            !button.isConnected ||
+            !owner.isConnected ||
+            !editor?.isConnected ||
+            !button?.isConnected ||
+            !localScope?.isConnected ||
+            !owner.contains(editor) ||
+            !owner.contains(localScope) ||
+            !localScope.contains(button) ||
+            !visible(editor) ||
+            !visible(button) ||
+            !editor.matches('[role="textbox"][contenteditable="true"]')
+        ) {
+            return null;
+        }
+        const outsideDraftAndHistory = element =>
+            element !== editor &&
+            !editor.contains(element) &&
+            !element.closest('[data-view-name="message-list-item"]');
+        const paths = Array.from(owner.querySelectorAll('a[href*="/in/"]'))
+            .filter(element => visible(element) && outsideDraftAndHistory(element))
+            .map(anchor => profilePath(anchor.getAttribute('href') || anchor.href || ''));
+        const urns = [
+            ...(owner.matches('[data-profile-urn], [data-recipient-urn]')
+                ? [owner]
+                : []),
+            ...owner.querySelectorAll('[data-profile-urn], [data-recipient-urn]'),
+        ].filter(
+            element => visible(element) && outsideDraftAndHistory(element)
+        ).flatMap(element =>
+            ['data-profile-urn', 'data-recipient-urn']
+                .filter(name => element.hasAttribute(name))
+                .map(name => normalizeUrn(element.getAttribute(name)))
+        );
+        if (
+            paths.some(path => path !== target.profilePath) ||
+            urns.some(urn => urn !== target.profileUrn)
+        ) {
+            return null;
+        }
+        const buttons = Array.from(localScope.querySelectorAll(
+            'button[type="submit"], button[data-control-name="send"]'
+        )).filter(candidate =>
+            visible(candidate) &&
+            !candidate.closest('[data-view-name="message-list-item"]')
+        );
+        if (
+            buttons.length !== 1 ||
+            buttons[0] !== button ||
             button.disabled ||
-            button.getAttribute('aria-disabled') === 'true'
+            (button.getAttribute('aria-disabled') || '').toLowerCase() === 'true'
+        ) {
+            return null;
+        }
+        return pinned;
+    };
+"""
+
+_MESSAGE_COMPOSER_WRITE_JS = (
+    "(owner, arg) => {"
+    + _MESSAGE_COMPOSER_PINNED_JS
+    + r"""
+        let pinned = validatePinned(arg);
+        if (!pinned) return 'invalid';
+        const {editor} = pinned;
+        if ((editor.innerText || '').replace(/\s+/g, ' ').trim()) {
+            return 'occupied';
+        }
+        editor.focus();
+        pinned = validatePinned(arg);
+        if (!pinned || document.activeElement !== editor) return 'invalid';
+        if ((editor.innerText || '').replace(/\s+/g, ' ').trim()) {
+            return 'occupied';
+        }
+        if (
+            typeof document.queryCommandSupported !== 'function' ||
+            !document.queryCommandSupported('insertText') ||
+            typeof document.execCommand !== 'function' ||
+            document.execCommand('insertText', false, arg.message) !== true
+        ) {
+            return 'unsupported';
+        }
+        pinned = validatePinned(arg);
+        if (
+            !pinned ||
+            document.activeElement !== editor ||
+            (editor.innerText || editor.textContent || '') !== arg.message
         ) {
             return 'invalid';
         }
-        button.click();
+        return 'written';
+    }"""
+)
+
+_MESSAGE_COMPOSER_SUBMIT_JS = (
+    "(owner, arg) => {"
+    + _MESSAGE_COMPOSER_PINNED_JS
+    + r"""
+        const pinned = validatePinned(arg);
+        if (
+            !pinned ||
+            document.activeElement !== pinned.editor ||
+            (pinned.editor.innerText || pinned.editor.textContent || '') !== arg.message
+        ) {
+            return 'invalid';
+        }
+        pinned.button.click();
         return 'clicked';
     }"""
 )
@@ -1637,10 +1825,10 @@ class LinkedInExtractor:
     ) -> dict[str, Any]:
         """Build a structured response for the send_message tool.
 
-        ``sent`` answers whether delivery was proven, so it is false both
-        where nothing was submitted and where submission happened but
-        delivery could not be observed. A caller keying a retry on it alone
-        therefore re-sends a message that may already have arrived, which is
+        ``sent`` is true only when the narrowly defined message-list UI
+        transition was observed after submission. It does not prove delivery
+        or that the recipient read the message. A caller keying a retry on it
+        alone can re-send a message that may already have arrived, which is
         what ``retry_safe`` exists to say: it is false from the moment a
         submission is attempted, and true only while nothing can have left
         the composer.
@@ -3503,14 +3691,33 @@ class LinkedInExtractor:
         )
         return focused is True
 
-    async def _submit_verified_message(
-        self, target: _ProfileMessageTarget, *, allow_enter: bool
+    async def _write_verified_message(
+        self,
+        message: str,
+        *,
+        target: _ProfileMessageTarget,
+        owner: Any,
     ) -> str:
-        """Click one local submit button or authorize the strict Enter fallback."""
-        argument = self._message_target_argument(target)
-        argument["allowEnter"] = allow_enter
-        result = await self._page.evaluate(_MESSAGE_COMPOSER_SUBMIT_JS, argument)
-        return result if result in {"clicked", "enter"} else "invalid"
+        """Insert text synchronously into the pinned local editor."""
+        result = await owner.evaluate(
+            _MESSAGE_COMPOSER_WRITE_JS,
+            {**self._message_target_argument(target), "message": message},
+        )
+        return result if result in {"written", "occupied", "unsupported"} else "invalid"
+
+    async def _submit_verified_message(
+        self,
+        message: str,
+        *,
+        target: _ProfileMessageTarget,
+        owner: Any,
+    ) -> str:
+        """Click the one active submit button pinned with the local editor."""
+        result = await owner.evaluate(
+            _MESSAGE_COMPOSER_SUBMIT_JS,
+            {**self._message_target_argument(target), "message": message},
+        )
+        return "clicked" if result == "clicked" else "invalid"
 
     async def _resolve_message_owner(self, target: _ProfileMessageTarget) -> Any | None:
         """Hold the verified owner node across submission and confirmation."""
@@ -3525,7 +3732,11 @@ class LinkedInExtractor:
 
     @staticmethod
     async def _dispose_message_owner(owner: Any) -> None:
-        """Release a request-local owner handle without replacing its result."""
+        """Release the pinned composer nodes without replacing their result."""
+        try:
+            await owner.evaluate("owner => { delete owner.__linkedinMcpComposer; }")
+        except Exception:
+            logger.debug("Could not clear pinned message nodes", exc_info=True)
         try:
             await owner.dispose()
         except Exception:
@@ -5545,16 +5756,13 @@ class LinkedInExtractor:
             return self._message_action_result(
                 self._page.url,
                 "recipient_resolution_failed",
-                "The messaging URL changed before the editor could be focused.",
+                "The messaging URL changed before text entry.",
                 recipient_selected=recipient_selected,
             )
         state = await self._read_message_composer_state(target)
         if state.get("status") == "valid" and state.get("empty") is not True:
-            # Text already in the editor belongs to whoever typed it.
-            # Chromium leaves the caret at the start of a contenteditable
-            # after focus(), so the message would land in front of that draft
-            # and LinkedIn would deliver the two as one. Clearing it would
-            # trade the leak for destroying it, so refuse and leave it.
+            # Text already in the editor belongs to whoever typed it. Clearing
+            # it would trade a recipient leak for destroying their draft.
             return self._message_action_result(
                 self._page.url,
                 "composer_occupied",
@@ -5562,86 +5770,68 @@ class LinkedInExtractor:
                 "with the message. The draft was left untouched.",
                 recipient_selected=recipient_selected,
             )
-        if state.get(
-            "status"
-        ) != "valid" or not await self._focus_verified_message_editor(target):
+        if state.get("status") != "valid":
             return self._message_action_result(
                 self._page.url,
                 "compose_interact_failed",
-                "The verified message editor could not be focused.",
+                "The verified message composer changed before text entry.",
                 recipient_selected=recipient_selected,
             )
-        await asyncio.sleep(0.1)
+        if not _message_page_url_is_safe(self._page.url, target.profile_urn):
+            return self._message_action_result(
+                self._page.url,
+                "recipient_resolution_failed",
+                "The messaging URL changed before the composer could be pinned.",
+                recipient_selected=recipient_selected,
+            )
+        if state.get("submitCount") != 1 or state.get("submitUsable") is not True:
+            return self._message_action_result(
+                self._page.url,
+                "send_unavailable",
+                "The local submit path was missing, disabled, or ambiguous.",
+                recipient_selected=recipient_selected,
+            )
 
         may_have_submitted = False
         try:
-            if not _message_page_url_is_safe(self._page.url, target.profile_urn):
-                return self._message_action_result(
-                    self._page.url,
-                    "recipient_resolution_failed",
-                    "The messaging URL changed before text entry.",
-                    recipient_selected=recipient_selected,
-                )
-            state = await self._read_message_composer_state(target)
-            if state.get("status") == "valid" and state.get("empty") is not True:
-                return self._message_action_result(
-                    self._page.url,
-                    "composer_occupied",
-                    "The composer already holds a draft that would be sent along "
-                    "with the message. The draft was left untouched.",
-                    recipient_selected=recipient_selected,
-                )
-            if state.get("status") != "valid" or state.get("active") is not True:
-                return self._message_action_result(
-                    self._page.url,
-                    "compose_interact_failed",
-                    "The verified message editor changed before text entry.",
-                    recipient_selected=recipient_selected,
-                )
-            allow_enter = state.get("submitCount") == 0
-
-            await self._page.keyboard.type(message, delay=15)
-            await asyncio.sleep(0.3)
-            await asyncio.sleep(1.0)  # allow React to process keyboard input
-            if not _message_page_url_is_safe(self._page.url, target.profile_urn):
-                if may_have_submitted:
-                    return self._message_action_result(
-                        self._page.url,
-                        "send_unconfirmed",
-                        "The message may already have been submitted before the "
-                        "messaging URL changed. Check the conversation before "
-                        "retrying; retrying may deliver the message twice.",
-                        recipient_selected=recipient_selected,
-                        retry_safe=False,
-                    )
-                return self._message_action_result(
-                    self._page.url,
-                    "recipient_resolution_failed",
-                    "The messaging URL changed before submission.",
-                    recipient_selected=recipient_selected,
-                )
-
             owner = await self._resolve_message_owner(target)
             if owner is None:
-                if may_have_submitted:
-                    return self._message_action_result(
-                        self._page.url,
-                        "send_unconfirmed",
-                        "The message may already have been submitted before the "
-                        "verified composer owner disappeared. Check the "
-                        "conversation before retrying; retrying may deliver "
-                        "the message twice.",
-                        recipient_selected=recipient_selected,
-                        retry_safe=False,
-                    )
                 return self._message_action_result(
                     self._page.url,
                     "recipient_resolution_failed",
-                    "The verified message composer changed before submission.",
+                    "The verified message composer changed before text entry.",
                     recipient_selected=recipient_selected,
                 )
 
             try:
+                write_result = await self._write_verified_message(
+                    message,
+                    target=target,
+                    owner=owner,
+                )
+                if not _message_page_url_is_safe(self._page.url, target.profile_urn):
+                    return self._message_action_result(
+                        self._page.url,
+                        "recipient_resolution_failed",
+                        "The messaging URL changed during text entry.",
+                        recipient_selected=recipient_selected,
+                    )
+                if write_result == "occupied":
+                    return self._message_action_result(
+                        self._page.url,
+                        "composer_occupied",
+                        "The composer already holds a draft that would be sent along "
+                        "with the message. The draft was left untouched.",
+                        recipient_selected=recipient_selected,
+                    )
+                if write_result != "written":
+                    return self._message_action_result(
+                        self._page.url,
+                        "compose_interact_failed",
+                        "The verified message editor could not accept the message.",
+                        recipient_selected=recipient_selected,
+                    )
+
                 confirmation = await self._prepare_message_confirmation(
                     message,
                     target=target,
@@ -5656,13 +5846,14 @@ class LinkedInExtractor:
                     )
 
                 try:
-                    may_have_submitted_before_submit = may_have_submitted
                     try:
                         # A click can dispatch before the evaluate call reports an
                         # error, so an exception from this round trip is ambiguous.
                         may_have_submitted = True
                         submission = await self._submit_verified_message(
-                            target, allow_enter=allow_enter
+                            message,
+                            target=target,
+                            owner=owner,
                         )
                     except Exception:
                         logger.debug(
@@ -5678,52 +5869,13 @@ class LinkedInExtractor:
                             retry_safe=False,
                         )
 
-                    if submission == "enter":
-                        may_have_submitted = may_have_submitted_before_submit
-                        state = await self._read_message_composer_state(target)
-                        if (
-                            not allow_enter
-                            or not _message_page_url_is_safe(
-                                self._page.url, target.profile_urn
-                            )
-                            or state.get("status") != "valid"
-                            or state.get("active") is not True
-                            or state.get("submitCount") != 0
-                        ):
-                            submission = "invalid"
-                        else:
-                            # The read and the keypress are two round trips, so the
-                            # editor could in principle lose focus between them.
-                            # Nothing a caller or recipient controls reaches that
-                            # window, and closing it would need the keystroke and
-                            # check to be one operation, which no input API offers.
-                            may_have_submitted = True
-                            try:
-                                await self._page.keyboard.press("Enter")
-                            except Exception:
-                                logger.debug(
-                                    "Message submission did not complete", exc_info=True
-                                )
-                                return self._message_action_result(
-                                    self._page.url,
-                                    "send_unconfirmed",
-                                    "The message submission was interrupted and "
-                                    "LinkedIn did not confirm the send. Check the "
-                                    "conversation before retrying; retrying may "
-                                    "deliver the message twice.",
-                                    recipient_selected=recipient_selected,
-                                    retry_safe=False,
-                                )
-                    elif submission != "clicked":
-                        may_have_submitted = may_have_submitted_before_submit
-
-                    if submission not in {"clicked", "enter"}:
+                    if submission != "clicked":
+                        may_have_submitted = False
                         return self._message_action_result(
                             self._page.url,
                             "send_unavailable",
                             "The local submit path was missing, disabled, or ambiguous.",
                             recipient_selected=recipient_selected,
-                            retry_safe=not may_have_submitted,
                         )
 
                     confirmed = await self._message_send_confirmed(
@@ -5904,9 +6056,9 @@ def refuse_an_invalid_message(
     if not message.strip():
         reason = "Message must contain non-whitespace characters."
     elif any(ord(character) < 32 or ord(character) == 127 for character in message):
-        # `keyboard.type()` maps line breaks onto Enter, which can submit while
-        # text is still being entered. Reject every C0 control and DEL before a
-        # session is acquired so no input can reach that implicit submit path.
+        # Keep the browser-side insertion contract to plain message text.
+        # Reject every C0 control and DEL before a session is acquired so no
+        # control input can reach the contenteditable surface.
         reason = "Message must not contain control characters or line breaks."
     if reason is None:
         return None

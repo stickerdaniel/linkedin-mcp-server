@@ -16,9 +16,7 @@ from patchright.async_api import BrowserType, async_playwright
 
 from linkedin_mcp_server.scraping.extractor import (
     LinkedInExtractor,
-    _MESSAGE_COMPOSER_FOCUS_JS,
     _MESSAGE_COMPOSER_STATE_JS,
-    _MESSAGE_COMPOSER_SUBMIT_JS,
     _PROFILE_MESSAGE_TARGET_JS,
     _ProfileMessageTarget,
 )
@@ -29,7 +27,6 @@ pytestmark = [
 ]
 
 TARGET = {"profilePath": "/in/testuser/", "profileUrn": "ACoAAB"}
-ENTER_TARGET = {**TARGET, "allowEnter": True}
 
 
 def _message_target() -> _ProfileMessageTarget:
@@ -52,6 +49,14 @@ async def _dom_page():
             if os.environ.get("CI"):
                 raise
             pytest.skip(f"chromium unavailable: {exc}")
+        await page.route(
+            "https://www.linkedin.com/**",
+            lambda route: route.fulfill(
+                status=200,
+                content_type="text/html",
+                body='<!DOCTYPE html><html><head><meta charset="utf-8"></head></html>',
+            ),
+        )
         try:
             yield page
         finally:
@@ -117,29 +122,31 @@ def _composer(*, identity: str, buttons: str = "", extra: str = "") -> str:
     """
 
 
-async def _state(page, html: str) -> dict:
+async def _set_composer_content(page, html: str) -> None:
+    await page.goto("https://www.linkedin.com/messaging/compose/?recipient=ACoAAB")
     await page.set_content(html)
+
+
+async def _state(page, html: str) -> dict:
+    await _set_composer_content(page, html)
     return await page.evaluate(_MESSAGE_COMPOSER_STATE_JS, TARGET)
 
 
 class TestMessageSurfaceDom:
-    async def test_waits_for_delayed_recipient_identity(self, dom_page):
-        await dom_page.set_content(
+    async def test_waits_for_delayed_editor(self, dom_page):
+        await _set_composer_content(
+            dom_page,
             """<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>
-              <section role="dialog">
-                <form>
-                  <div role="textbox" contenteditable="true"
-                       style="display:block;width:200px;height:30px"></div>
-                </form>
-              </section>
-            </body></html>"""
+              <section role="dialog"><form></form></section>
+            </body></html>""",
         )
         dom_page.set_default_timeout(1_000)
         await dom_page.evaluate(
             """() => setTimeout(() => {
                 document.querySelector('form').insertAdjacentHTML(
-                    'afterbegin',
-                    '<a href="https://www.linkedin.com/in/testuser/">Test</a>'
+                    'beforeend',
+                    '<div role="textbox" contenteditable="true" '
+                    + 'style="display:block;width:200px;height:30px"></div>'
                 );
             }, 250)"""
         )
@@ -153,14 +160,15 @@ class TestMessageSurfaceDom:
         assert time.monotonic() - started >= 0.2
 
     async def test_waits_for_multiple_editors_to_settle(self, dom_page):
-        await dom_page.set_content(
+        await _set_composer_content(
+            dom_page,
             _composer(
                 identity='<a href="https://www.linkedin.com/in/testuser/">Test</a>',
                 extra=(
                     '<div role="textbox" contenteditable="true" data-stale '
                     'style="display:block;width:200px;height:30px"></div>'
                 ),
-            )
+            ),
         )
         dom_page.set_default_timeout(1_000)
         await dom_page.evaluate(
@@ -178,7 +186,8 @@ class TestMessageSurfaceDom:
         assert time.monotonic() - started >= 0.2
 
     async def test_permanent_recipient_conflict_times_out(self, dom_page):
-        await dom_page.set_content(
+        await _set_composer_content(
+            dom_page,
             """<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>
               <section role="dialog" data-recipient-urn="OTHER">
                 <form>
@@ -187,7 +196,7 @@ class TestMessageSurfaceDom:
                        style="display:block;width:200px;height:30px"></div>
                 </form>
               </section>
-            </body></html>"""
+            </body></html>""",
         )
         dom_page.set_default_timeout(350)
         started = time.monotonic()
@@ -205,12 +214,14 @@ class TestMessageSurfaceDom:
             "active": False,
             "empty": False,
             "submitCount": 0,
+            "submitUsable": False,
         }
 
 
 class TestProfileMessageTargetDom:
     async def test_snapshot_stays_inside_first_top_card(self, dom_page):
-        await dom_page.set_content(
+        await _set_composer_content(
+            dom_page,
             """<!DOCTYPE html><html><head><meta charset="utf-8"></head><body><main>
               <section>
                 <h1>Test User</h1>
@@ -224,7 +235,7 @@ class TestProfileMessageTargetDom:
                 </a>
               </section>
             </main></body></html>
-            """
+            """,
         )
 
         result = await dom_page.evaluate(_PROFILE_MESSAGE_TARGET_JS)
@@ -235,10 +246,12 @@ class TestProfileMessageTargetDom:
 
 class TestMessageComposerDom:
     async def test_owner_handle_pins_one_dom_instance_and_disposes(self, dom_page):
-        await dom_page.set_content(
+        await _set_composer_content(
+            dom_page,
             _composer(
-                identity='<a href="https://www.linkedin.com/in/testuser/">Test</a>'
-            )
+                identity='<a href="https://www.linkedin.com/in/testuser/">Test</a>',
+                buttons='<button type="submit">Send</button>',
+            ),
         )
         extractor = LinkedInExtractor(dom_page)
         owner = await extractor._resolve_message_owner(_message_target())
@@ -262,7 +275,7 @@ class TestMessageComposerDom:
             _composer(identity='<span data-urn="ACoAAB">unrelated generic data</span>'),
         )
 
-        assert state["status"] == "missing_recipient"
+        assert state["status"] == "valid"
 
     async def test_native_dialog_accepts_explicit_recipient_urn(self, dom_page):
         state = await _state(
@@ -330,7 +343,8 @@ class TestMessageComposerDom:
         assert state["submitCount"] == 0
 
     async def test_nested_consistent_identity_keeps_submit_local(self, dom_page):
-        await dom_page.set_content(
+        await _set_composer_content(
+            dom_page,
             """<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>
               <section role="dialog" data-recipient-urn="ACoAAB">
                 <form>
@@ -342,13 +356,21 @@ class TestMessageComposerDom:
                 </form>
                 <button type="submit" data-outer>Outer</button>
               </section>
-            </body></html>"""
+            </body></html>""",
         )
 
-        focused = await dom_page.evaluate(_MESSAGE_COMPOSER_FOCUS_JS, TARGET)
-        submitted = await dom_page.evaluate(_MESSAGE_COMPOSER_SUBMIT_JS, TARGET)
+        extractor = LinkedInExtractor(dom_page)
+        owner = await extractor._resolve_message_owner(_message_target())
+        assert owner is not None
+        written = await extractor._write_verified_message(
+            "Hello!", target=_message_target(), owner=owner
+        )
+        submitted = await extractor._submit_verified_message(
+            "Hello!", target=_message_target(), owner=owner
+        )
+        await extractor._dispose_message_owner(owner)
 
-        assert focused is True
+        assert written == "written"
         assert submitted == "clicked"
         assert (
             await dom_page.locator("form button").get_attribute("data-clicked") == "yes"
@@ -371,7 +393,7 @@ class TestMessageComposerDom:
             </body></html>""",
         )
 
-        assert state["status"] == "missing_recipient"
+        assert state["status"] == "valid"
 
     @pytest.mark.parametrize("attribute", ["data-profile-urn", "data-recipient-urn"])
     @pytest.mark.parametrize("location", ["editor", "descendant"])
@@ -394,7 +416,7 @@ class TestMessageComposerDom:
             </body></html>""",
         )
 
-        assert state["status"] == "missing_recipient"
+        assert state["status"] == "valid"
 
     @pytest.mark.parametrize(
         "draft_identity",
@@ -437,7 +459,7 @@ class TestMessageComposerDom:
 
         state = await _state(dom_page, html)
 
-        assert state["status"] == "missing_recipient"
+        assert state["status"] == "valid"
 
     async def test_foreign_or_multiple_editor_fails_closed(self, dom_page):
         foreign = await _state(
@@ -491,7 +513,8 @@ class TestMessageComposerDom:
         assert state["status"] == expected
 
     async def test_focus_and_single_submit_stay_local(self, dom_page):
-        await dom_page.set_content(
+        await _set_composer_content(
+            dom_page,
             _composer(
                 identity='<a href="https://www.linkedin.com/in/testuser/">Test</a>',
                 buttons=(
@@ -499,13 +522,21 @@ class TestMessageComposerDom:
                     "this.setAttribute('data-clicked','yes')\">Senden</button>"
                 ),
                 extra=('<button type="submit" data-global="true">Global</button>'),
-            )
+            ),
         )
 
-        focused = await dom_page.evaluate(_MESSAGE_COMPOSER_FOCUS_JS, TARGET)
-        submitted = await dom_page.evaluate(_MESSAGE_COMPOSER_SUBMIT_JS, TARGET)
+        extractor = LinkedInExtractor(dom_page)
+        owner = await extractor._resolve_message_owner(_message_target())
+        assert owner is not None
+        written = await extractor._write_verified_message(
+            "Hello!", target=_message_target(), owner=owner
+        )
+        submitted = await extractor._submit_verified_message(
+            "Hello!", target=_message_target(), owner=owner
+        )
+        await extractor._dispose_message_owner(owner)
 
-        assert focused is True
+        assert written == "written"
         assert submitted == "clicked"
         assert (
             await dom_page.locator("form button").get_attribute("data-clicked") == "yes"
@@ -515,77 +546,96 @@ class TestMessageComposerDom:
             is None
         )
 
-    async def test_ambiguous_disabled_and_changed_recipient_never_submit(
-        self, dom_page
+    @pytest.mark.parametrize(
+        "buttons",
+        [
+            '<button type="submit">A</button><button type="submit">B</button>',
+            '<button type="submit" disabled>A</button>',
+            '<button type="submit" aria-disabled="true">A</button>',
+        ],
+        ids=["ambiguous", "disabled", "aria-disabled"],
+    )
+    async def test_ambiguous_or_disabled_submit_is_never_pinned(
+        self, dom_page, buttons
     ):
-        identity = '<a href="https://www.linkedin.com/in/testuser/">Test</a>'
-        await dom_page.set_content(
+        await _set_composer_content(
+            dom_page,
             _composer(
-                identity=identity,
-                buttons='<button type="submit">A</button><button type="submit">B</button>',
-            )
+                identity='<a href="https://www.linkedin.com/in/testuser/">Test</a>',
+                buttons=buttons,
+            ),
         )
-        assert await dom_page.evaluate(_MESSAGE_COMPOSER_FOCUS_JS, TARGET) is True
-        assert await dom_page.evaluate(_MESSAGE_COMPOSER_SUBMIT_JS, TARGET) == "invalid"
 
-        await dom_page.set_content(
-            _composer(
-                identity=identity, buttons='<button type="submit" disabled>A</button>'
-            )
-        )
-        assert await dom_page.evaluate(_MESSAGE_COMPOSER_FOCUS_JS, TARGET) is True
-        assert await dom_page.evaluate(_MESSAGE_COMPOSER_SUBMIT_JS, TARGET) == "invalid"
-
-        await dom_page.set_content(
-            _composer(
-                identity=identity,
-                buttons='<button type="submit" aria-disabled="true">A</button>',
-            )
-        )
-        assert await dom_page.evaluate(_MESSAGE_COMPOSER_FOCUS_JS, TARGET) is True
-        assert await dom_page.evaluate(_MESSAGE_COMPOSER_SUBMIT_JS, TARGET) == "invalid"
-
-        await dom_page.set_content(
-            _composer(identity=identity, buttons='<button type="submit">stale</button>')
-        )
-        assert await dom_page.evaluate(_MESSAGE_COMPOSER_FOCUS_JS, TARGET) is True
-        state = await dom_page.evaluate(_MESSAGE_COMPOSER_STATE_JS, TARGET)
-        await dom_page.locator("form button").evaluate("element => element.remove()")
-        submit_target = {**TARGET, "allowEnter": state["submitCount"] == 0}
         assert (
-            await dom_page.evaluate(_MESSAGE_COMPOSER_SUBMIT_JS, submit_target)
+            await LinkedInExtractor(dom_page)._resolve_message_owner(_message_target())
+            is None
+        )
+
+    async def test_removed_submit_or_changed_recipient_invalidates_pins(self, dom_page):
+        identity = '<a href="https://www.linkedin.com/in/testuser/">Test</a>'
+        await _set_composer_content(
+            dom_page,
+            _composer(identity=identity, buttons='<button type="submit">Send</button>'),
+        )
+        extractor = LinkedInExtractor(dom_page)
+        owner = await extractor._resolve_message_owner(_message_target())
+        assert owner is not None
+        assert (
+            await extractor._write_verified_message(
+                "Hello!", target=_message_target(), owner=owner
+            )
+            == "written"
+        )
+        await dom_page.locator("form button").evaluate("element => element.remove()")
+        assert (
+            await extractor._submit_verified_message(
+                "Hello!", target=_message_target(), owner=owner
+            )
             == "invalid"
         )
+        await extractor._dispose_message_owner(owner)
 
-        await dom_page.set_content(_composer(identity=identity))
-        assert await dom_page.evaluate(_MESSAGE_COMPOSER_FOCUS_JS, TARGET) is True
+        await _set_composer_content(
+            dom_page,
+            _composer(identity=identity, buttons='<button type="submit">Send</button>'),
+        )
+        owner = await extractor._resolve_message_owner(_message_target())
+        assert owner is not None
+        assert (
+            await extractor._write_verified_message(
+                "Hello!", target=_message_target(), owner=owner
+            )
+            == "written"
+        )
         await dom_page.locator('[role="dialog"] > a').evaluate(
             "element => element.setAttribute('href', 'https://www.linkedin.com/in/other/')"
         )
         assert (
-            await dom_page.evaluate(_MESSAGE_COMPOSER_SUBMIT_JS, ENTER_TARGET)
+            await extractor._submit_verified_message(
+                "Hello!", target=_message_target(), owner=owner
+            )
             == "invalid"
         )
+        await extractor._dispose_message_owner(owner)
 
-    async def test_enter_only_when_verified_editor_stays_active_without_buttons(
-        self, dom_page
-    ):
-        await dom_page.set_content(
+    async def test_missing_submit_never_falls_back_to_enter(self, dom_page):
+        await _set_composer_content(
+            dom_page,
             _composer(
                 identity=(
                     '<span data-profile-urn="urn:li:fsd_profile:ACoAAB">Test</span>'
-                )
-            )
+                ),
+                extra='<input id="foreign">',
+            ),
         )
+        await dom_page.locator("#foreign").evaluate(
+            "element => element.addEventListener('keydown', () => "
+            "document.body.dataset.foreignKey = 'true')"
+        )
+        await dom_page.locator("#foreign").focus()
 
-        assert await dom_page.evaluate(_MESSAGE_COMPOSER_FOCUS_JS, TARGET) is True
         assert (
-            await dom_page.evaluate(_MESSAGE_COMPOSER_SUBMIT_JS, ENTER_TARGET)
-            == "enter"
+            await LinkedInExtractor(dom_page)._resolve_message_owner(_message_target())
+            is None
         )
-
-        await dom_page.evaluate("document.activeElement.blur()")
-        assert (
-            await dom_page.evaluate(_MESSAGE_COMPOSER_SUBMIT_JS, ENTER_TARGET)
-            == "invalid"
-        )
+        assert await dom_page.evaluate("document.body.dataset.foreignKey") is None

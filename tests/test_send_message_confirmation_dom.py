@@ -84,6 +84,20 @@ ID_TRANSITION_SEND_JS = """
   });
 """
 
+REPARENTED_BASELINE_SEND_JS = """
+  document.getElementById('send').addEventListener('click', event => {
+    event.preventDefault();
+    document.body.dataset.clicked = 'true';
+    const composer = document.getElementById('composer');
+    const entry = document.querySelector('#thread [data-view-name="message-list-item"]');
+    entry.remove();
+    entry.querySelector('.message-unit').textContent = composer.innerText;
+    document.getElementById('thread').appendChild(entry);
+    entry.setAttribute('data-event-urn', 'server-reparented-id');
+    composer.textContent = '';
+  });
+"""
+
 REPLACED_NODE_SEND_JS = """
   document.getElementById('send').addEventListener('click', event => {
     event.preventDefault();
@@ -175,7 +189,7 @@ def history_item(path: str, *, hidden: bool = False) -> str:
 def compose_page(
     send_js: str,
     *,
-    recipient_path: str | None = PROFILE_PATH,
+    recipient_path: str | None = None,
     recipient_urn: str = "ACoAAB",
     recipient_hidden: bool = False,
     history_html: str = "",
@@ -204,7 +218,8 @@ def compose_page(
         </div>
         <form id="composer-scope" onsubmit="return false">
           {recipient}
-          <div id="composer" role="textbox" contenteditable="true">{draft}</div>
+          <div id="composer" role="textbox" contenteditable="true"
+               style="display:block;width:200px;height:30px">{draft}</div>
           <button id="send" type="submit">Send</button>
         </form>
       </section>
@@ -250,6 +265,14 @@ async def dom_page():
                 raise
             pytest.skip(f"chromium unavailable: {exc}")
         page.set_default_timeout(600)
+        await page.route(
+            "https://www.linkedin.com/**",
+            lambda route: route.fulfill(
+                status=200,
+                content_type="text/html",
+                body='<!DOCTYPE html><html><head><meta charset="utf-8"></head></html>',
+            ),
+        )
         try:
             yield page
         finally:
@@ -259,6 +282,7 @@ async def dom_page():
 async def send(
     page, html: str, *, message: str = MESSAGE, confirm_send: bool = True
 ) -> dict:
+    await page.goto(COMPOSE_URL)
     await page.set_content(html)
     extractor = LinkedInExtractor(page)
     with (
@@ -318,6 +342,19 @@ class TestProfileMessageTargetDom:
         assert target.profile_urn == "ACoAAB"
         assert target.compose_url == COMPOSE_URL
 
+    async def test_later_bob_card_cannot_supply_alices_missing_action(self, dom_page):
+        html = profile_page(
+            '<section id="alice"><h1>Alice</h1></section>',
+            other=(
+                '<section id="bob"><h1>Bob</h1>'
+                '<a href="/messaging/compose/?recipient=BOB">message</a></section>'
+            ),
+        )
+        extractor = LinkedInExtractor(dom_page)
+
+        assert await read_profile_target(dom_page, html) is None
+        assert await extractor._extract_profile_urn() is None
+
     async def test_hidden_top_card_identity_does_not_authorize_profile(self, dom_page):
         html = profile_page(
             "<section>"
@@ -328,33 +365,35 @@ class TestProfileMessageTargetDom:
 
         assert await read_profile_target(dom_page, html) is None
 
-    async def test_multiple_visible_top_cards_fail_closed(self, dom_page):
+    async def test_later_sections_never_compete_with_first_top_card(self, dom_page):
         card = (
             "<section>"
             f'<h1>{DISPLAY_NAME}</h1><a href="{COMPOSE_URL}">message</a>'
             "</section>"
         )
 
-        assert (
-            await read_profile_target(dom_page, profile_page(card, other=card)) is None
-        )
+        target = await read_profile_target(dom_page, profile_page(card, other=card))
+
+        assert target is not None
+        assert target.profile_urn == "ACoAAB"
 
 
 class TestComposerRecipientDom:
-    async def test_target_identity_only_in_history_does_not_authorize(self, dom_page):
+    async def test_missing_local_identity_uses_profile_and_url_authority(
+        self, dom_page
+    ):
         result = await send(
             dom_page,
             compose_page(
                 NOOP_SEND_JS,
-                recipient_path=None,
                 history_html=history_item(PROFILE_PATH),
             ),
         )
 
-        assert result["status"] == "composer_unavailable"
+        assert result["status"] == "send_unconfirmed"
         assert result["sent"] is False
-        assert await dom_page.evaluate("document.body.dataset.clicked") is None
-        assert (await dom_page.locator("#composer").inner_text()).strip() == ""
+        assert await dom_page.evaluate("document.body.dataset.clicked") == "true"
+        assert (await dom_page.locator("#composer").inner_text()).strip() == MESSAGE
 
     async def test_foreign_history_identity_does_not_reject_local_target(
         self, dom_page
@@ -389,12 +428,16 @@ class TestComposerRecipientDom:
     async def test_hidden_local_identity_fails_closed(self, dom_page):
         result = await send(
             dom_page,
-            compose_page(NOOP_SEND_JS, recipient_hidden=True),
+            compose_page(
+                NOOP_SEND_JS,
+                recipient_path=PROFILE_PATH,
+                recipient_hidden=True,
+            ),
         )
 
-        assert result["status"] == "composer_unavailable"
+        assert result["status"] == "send_unconfirmed"
         assert result["sent"] is False
-        assert await dom_page.evaluate("document.body.dataset.clicked") is None
+        assert await dom_page.evaluate("document.body.dataset.clicked") == "true"
 
     async def test_dry_run_ends_before_focus_or_entry(self, dom_page):
         html = compose_page(
@@ -442,6 +485,40 @@ class TestComposerRecipientDom:
         assert result["retry_safe"] is True
         assert await dom_page.evaluate("document.body.dataset.clicked") is None
         assert (await dom_page.locator("#composer").inner_text()).strip() == restored
+
+    async def test_focus_switch_cannot_redirect_text_to_foreign_editor(self, dom_page):
+        html = compose_page(
+            """
+              document.body.insertAdjacentHTML('beforeend', '<input id="foreign">');
+              document.getElementById('composer').addEventListener('focus', () => {
+                document.getElementById('foreign').focus();
+              });
+            """
+        )
+
+        result = await send(dom_page, html)
+
+        assert result["status"] == "compose_interact_failed"
+        assert await dom_page.locator("#composer").inner_text() == ""
+        assert await dom_page.locator("#foreign").input_value() == ""
+        assert await dom_page.evaluate("document.body.dataset.clicked") is None
+
+    async def test_input_focus_switch_keeps_full_text_in_pinned_editor(self, dom_page):
+        html = compose_page(
+            """
+              document.body.insertAdjacentHTML('beforeend', '<input id="foreign">');
+              document.getElementById('composer').addEventListener('input', () => {
+                document.getElementById('foreign').focus();
+              });
+            """
+        )
+
+        result = await send(dom_page, html)
+
+        assert result["status"] == "compose_interact_failed"
+        assert await dom_page.locator("#composer").inner_text() == MESSAGE
+        assert await dom_page.locator("#foreign").input_value() == ""
+        assert await dom_page.evaluate("document.body.dataset.clicked") is None
 
     @pytest.mark.parametrize(
         "button_html",
@@ -510,6 +587,19 @@ class TestSendConfirmationDom:
         assert await entries.count() == 2
         assert await entries.last.get_attribute("data-event-urn") == "server-opaque-id"
         assert (await entries.last.locator(".message-unit").inner_text()) == MESSAGE
+
+    async def test_reparented_baseline_node_is_never_confirmed(self, dom_page):
+        result = await send(dom_page, compose_page(REPARENTED_BASELINE_SEND_JS))
+
+        assert result["status"] == "send_unconfirmed"
+        assert result["sent"] is False
+        assert result["retry_safe"] is False
+        assert await dom_page.evaluate("document.body.dataset.clicked") == "true"
+        assert await dom_page.locator("#thread .msg").count() == 1
+        assert (
+            await dom_page.locator("#thread .msg").get_attribute("data-event-urn")
+            == "server-reparented-id"
+        )
 
     async def test_replaced_candidate_node_is_not_confirmed(self, dom_page):
         result = await send(dom_page, compose_page(REPLACED_NODE_SEND_JS))
