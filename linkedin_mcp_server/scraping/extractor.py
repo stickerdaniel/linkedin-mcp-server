@@ -4268,7 +4268,8 @@ class LinkedInExtractor:
 
     async def save_job(self, job_id: str) -> dict[str, Any]:
         """Save a single job posting to the authenticated LinkedIn account."""
-        url = f"https://www.linkedin.com/jobs/view/{job_id}/"
+        job_id = normalize_job_id(job_id)
+        url = job_view_url(job_id, "/")
         await self._navigate_to_page(url)
         await detect_rate_limit(self._page)
         await handle_modal_close(self._page)
@@ -4283,7 +4284,16 @@ class LinkedInExtractor:
                 "Could not find or click the LinkedIn Save button for this job."
             )
 
+        # The click helper only proves the DOM click dispatched. LinkedIn can
+        # swallow it (overlay, transient disable) without changing state, so
+        # report the observed state rather than the attempt. The tool is
+        # idempotent: a caller retry lands in the already-saved branch.
         await asyncio.sleep(1)
+        if await self._job_save_button_state() != "saved":
+            raise LinkedInScraperException(
+                "Clicked the LinkedIn Save button, but the control did not "
+                "switch to its saved state."
+            )
         return {"url": url, "job_id": job_id, "saved": True, "already_saved": False}
 
     async def _job_save_labels(self) -> dict[str, str]:
