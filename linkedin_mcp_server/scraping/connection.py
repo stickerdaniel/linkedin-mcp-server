@@ -111,9 +111,12 @@ def detect_connection_state(signals: ActionSignals) -> ConnectionState:
        as the primary action; there is no Follow/Connect button.)
     6. ``follow_only`` — compose anchor present in action root and at
        least one labeled action ``<button>`` (Follow / Save in Sales
-       Navigator), but no invite anchor anywhere. The
-       ``connect_with_person`` write-gate prevents the deeplink from
-       firing on this state.
+       Navigator), but no invite anchor anywhere. ``connect_with_person``
+       still routes this state through the custom-invite deeplink, because
+       Connect is often present as a button inside the More menu rather
+       than as a top-card anchor. The invite-dialog write-gate
+       (``_submit_invite_dialog``) only sends when LinkedIn actually opens
+       an invite dialog, so a genuinely follow-only profile does not send.
     7. ``unavailable`` — fallthrough (e.g. profile pages where the
        action area could not be located at all).
     """
