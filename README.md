@@ -296,7 +296,7 @@ On startup, the MCP Bundle starts preparing the shared Patchright Chromium brows
 <br/>
 <br/>
 
-## Codex plugin
+## 🧩 Codex plugin
 
 This repository includes an opt-in Codex plugin that bundles the MCP server and
 its LinkedIn workflow guidance. Add the repository marketplace, then install the
@@ -320,6 +320,9 @@ enabled = false
 Installing or enabling the plugin does not open a browser or sign in. A
 LinkedIn data request may start the managed browser, import an existing local
 session, or require a visible login window.
+
+<br/>
+<br/>
 
 ## 🐳 Docker Setup
 
