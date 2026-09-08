@@ -64,7 +64,7 @@ if TYPE_CHECKING:
 #: whole section: transport, host, port and the one-shot flags all describe the
 #: *frontend's* invocation, and an owner that adopted them would try to run the
 #: client's transport or re-run its ``--login``.
-_SERVER_FIELDS = ("tool_timeout_seconds", "log_level")
+_SERVER_FIELDS = ("tool_timeout_seconds", "min_tool_interval_seconds", "log_level")
 STARTUP_PROTOCOL_VERSION = 3
 _PREDECESSOR_STARTUP_PROTOCOL_VERSION = 1
 _PIPE_COMMIT_STARTUP_PROTOCOL_VERSION = 2

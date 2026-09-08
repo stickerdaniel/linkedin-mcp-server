@@ -233,6 +233,15 @@ class TestRoundTrip:
 
         assert restored.server.tool_timeout_seconds == 42.5
 
+    def test_the_min_tool_interval_crosses_with_the_owner(self):
+        original = AppConfig()
+        original.browser.user_data_dir = "~/p/profile"
+        original.server.min_tool_interval_seconds = 15.0
+
+        restored = daemon_config.decode(daemon_config.encode(original))
+
+        assert restored.server.min_tool_interval_seconds == 15.0
+
 
 class TestDaemonLogState:
     @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are required")
