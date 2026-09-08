@@ -21,6 +21,7 @@ from linkedin_mcp_server.scraping.identifiers import (
     normalize_job_id,
     normalize_opaque_id,
     normalize_person_identifier,
+    normalize_profile_urn,
     normalize_thread_id,
     person_profile_url,
 )
@@ -334,6 +335,13 @@ class TestReferencesThisServerEmits:
 
     def test_thread_id_still_passes_through(self):
         assert normalize_thread_id("2-abc123") == "2-abc123"
+
+    def test_profile_urn_is_trimmed(self):
+        assert normalize_profile_urn(f" {PROFILE_ID} ") == PROFILE_ID
+
+    def test_profile_urn_refuses_a_path(self):
+        with pytest.raises(InvalidReferenceError, match="profile_urn"):
+            normalize_profile_urn("/feed/")
 
     def test_job_reference_yields_the_id(self):
         assert normalize_job_id("/jobs/view/4252026496/") == "4252026496"

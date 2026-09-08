@@ -73,8 +73,8 @@ async def handle_auth_error(
 
     *nothing_ran_yet* says whether the tool had done any work before the failure,
     which decides whether a client may safely run the call again after signing in.
-    Only :func:`get_ready_extractor` can answer yes: it is the first statement of
-    every tool body, so a failure there means nothing has been scraped. The 18
+    Only :func:`get_ready_extractor` can answer yes: boundary validation may run
+    first, but no tool work has started when it fails. The 18
     catch sites in the tool bodies leave it at the default, because by then the
     scrape may be part done, and some of these tools send messages and connection
     requests. A 19th added later is non-replayable until someone says otherwise,
@@ -171,9 +171,8 @@ async def get_ready_extractor(
         await ensure_authenticated()
         return LinkedInExtractor(browser.page)
     except AuthenticationError as e:
-        # The first statement of every tool body, so a failure here means the
-        # scrape has not started and the client may safely run the call again once
-        # it has signed in.
+        # Boundary validation may run first, but no tool work has started here,
+        # so the client may safely run the call again once it has signed in.
         await handle_auth_error(e, ctx, nothing_ran_yet=True)  # always raises
     except Exception as e:
         if isinstance(e, NetworkError) and _is_browser_binary_missing_error(e):

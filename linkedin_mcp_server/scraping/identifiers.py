@@ -467,3 +467,8 @@ def normalize_job_id(value: str) -> str:
 def normalize_thread_id(value: str) -> str:
     """The id for a conversation, from the id or from a reference to it."""
     return normalize_opaque_id(value, field="thread_id", route=_THREAD_ROUTE)
+
+
+def normalize_profile_urn(value: str) -> str:
+    """The opaque profile id LinkedIn uses in a messaging compose URL."""
+    return normalize_opaque_id(value, field="profile_urn")
