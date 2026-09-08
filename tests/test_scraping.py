@@ -3333,8 +3333,8 @@ class TestSaveJob:
                 extractor,
                 "_job_save_button_state",
                 new_callable=AsyncMock,
-                return_value="unsaved",
-            ),
+                side_effect=["unsaved", "saved"],
+            ) as save_state,
             patch.object(
                 extractor,
                 "_click_job_save_button",
@@ -3348,9 +3348,83 @@ class TestSaveJob:
         ):
             result = await extractor.save_job("12345")
 
-        assert result["saved"] is True
-        assert result["already_saved"] is False
+        assert result == {
+            "url": "https://www.linkedin.com/jobs/view/12345/",
+            "job_id": "12345",
+            "saved": True,
+            "already_saved": False,
+        }
         click_save.assert_awaited_once_with("unsaved")
+        assert save_state.await_count == 2
+
+    async def test_save_job_raises_when_click_does_not_stick(self, mock_page):
+        """A dispatched click that leaves the control unsaved is a failure.
+
+        The click helper returns True the moment .click() goes out; LinkedIn
+        can swallow it. Reporting saved here would make callers treat the job
+        as persisted when it is not.
+        """
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                extractor,
+                "_job_save_button_state",
+                new_callable=AsyncMock,
+                side_effect=["unsaved", "unsaved"],
+            ),
+            patch.object(
+                extractor,
+                "_click_job_save_button",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            with pytest.raises(
+                LinkedInScraperException, match="did not switch to its saved state"
+            ):
+                await extractor.save_job("12345")
+
+    async def test_save_job_normalizes_a_job_reference(self, mock_page):
+        """A full job URL is accepted and reduced to the numeric id."""
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                extractor,
+                "_job_save_button_state",
+                new_callable=AsyncMock,
+                return_value="saved",
+            ),
+        ):
+            result = await extractor.save_job("/jobs/view/4252026496/")
+
+        assert result == {
+            "url": "https://www.linkedin.com/jobs/view/4252026496/",
+            "job_id": "4252026496",
+            "saved": True,
+            "already_saved": True,
+        }
 
     async def test_save_job_raises_when_save_button_missing(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
@@ -3430,8 +3504,8 @@ class TestUnsaveJob:
                 extractor,
                 "_job_save_button_state",
                 new_callable=AsyncMock,
-                return_value="saved",
-            ),
+                side_effect=["saved", "unsaved"],
+            ) as save_state,
             patch.object(
                 extractor,
                 "_click_job_save_button",
@@ -3445,9 +3519,53 @@ class TestUnsaveJob:
         ):
             result = await extractor.unsave_job("12345")
 
-        assert result["saved"] is False
-        assert result["already_unsaved"] is False
+        assert result == {
+            "url": "https://www.linkedin.com/jobs/view/12345/",
+            "job_id": "12345",
+            "saved": False,
+            "already_unsaved": False,
+        }
         click_unsave.assert_awaited_once_with("saved")
+        assert save_state.await_count == 2
+
+    async def test_unsave_job_raises_when_click_does_not_stick(self, mock_page):
+        """A dispatched click that leaves the control saved is a failure.
+
+        The tool would otherwise report a removal that never happened, and
+        the caller stops treating the job as saved.
+        """
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                extractor,
+                "_job_save_button_state",
+                new_callable=AsyncMock,
+                side_effect=["saved", "saved"],
+            ),
+            patch.object(
+                extractor,
+                "_click_job_save_button",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            with pytest.raises(
+                LinkedInScraperException, match="did not switch to its unsaved state"
+            ):
+                await extractor.unsave_job("12345")
 
     async def test_unsave_job_raises_when_saved_control_missing(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
@@ -9775,6 +9893,8 @@ class TestEveryNormalizedEntryPoint:
             ("scrape_company", ("../../feed", {"about"}), {}),
             ("get_company_employees", ("../../feed",), {}),
             ("scrape_job", ("../../feed",), {}),
+            ("save_job", ("../../feed",), {}),
+            ("unsave_job", ("../../feed",), {}),
             ("get_conversation", (), {"thread_id": "../../feed"}),
         ],
     )

@@ -837,7 +837,7 @@ class TestJobTools:
 
         tool_fn = await get_tool_fn(mcp, "save_job")
         result = await tool_fn("12345", mock_context, extractor=mock_extractor)
-        assert result["saved"] is True
+        assert result == expected
         mock_extractor.save_job.assert_awaited_once_with("12345")
 
     async def test_unsave_job(self, mock_context):
@@ -856,7 +856,7 @@ class TestJobTools:
 
         tool_fn = await get_tool_fn(mcp, "unsave_job")
         result = await tool_fn("12345", mock_context, extractor=mock_extractor)
-        assert result["saved"] is False
+        assert result == expected
         mock_extractor.unsave_job.assert_awaited_once_with("12345")
 
     async def test_get_saved_jobs(self, mock_context):
