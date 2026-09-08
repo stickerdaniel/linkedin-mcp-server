@@ -1,11 +1,15 @@
 """
-LinkedIn post/content search tool.
+LinkedIn post/content tools: global post search and immediate post creation.
 
-Performs LinkedIn's global content search (the "Posts" results tab) using
-innerText extraction, so informal "we're hiring" / "Buscamos ..." posts can
-be found before a formal job listing is published. Mirrors search_people:
-build a /search/results/content/ URL, scroll to load results, and return the
-raw innerText for the LLM to parse, plus post-permalink references.
+search_posts performs LinkedIn's global content search (the "Posts" results
+tab) using innerText extraction, so informal "we're hiring" / "Buscamos ..."
+posts can be found before a formal job listing is published. Mirrors
+search_people: build a /search/results/content/ URL, scroll to load results,
+and return the raw innerText for the LLM to parse, plus post-permalink
+references.
+
+create_post drives LinkedIn's native share composer to publish a feed post
+immediately (optionally as an organization page this account administers).
 """
 
 import logging
@@ -114,3 +118,76 @@ def register_post_tools(
                 raise_tool_error(relogin_exc, "search_posts")
         except Exception as e:
             raise_tool_error(e, "search_posts")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Create Post",
+        annotations={"destructiveHint": True, "openWorldHint": True},
+        tags={"post", "actions"},
+        exclude_args=["extractor"],
+    )
+    async def create_post(
+        text: str,
+        confirm_post: bool,
+        ctx: Context,
+        post_as: str | None = None,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        Publish a LinkedIn feed post immediately via the native share composer.
+
+        This is a write operation when confirm_post is True; with False it
+        performs the full flow as a dry run — opening the composer, optionally
+        switching the author, and typing the text — then discards the draft
+        without publishing.
+
+        Args:
+            text: The post body text.
+            confirm_post: Must be True to actually publish the post.
+            ctx: FastMCP context for progress reporting
+            post_as: Optional author to post as (e.g. "Peacock Labs"), matched
+                against the composer's author-switch control for organization
+                pages this account administers. Omit to post as the
+                signed-in profile. If given but no matching option is found,
+                the post is refused rather than publishing under the wrong
+                identity.
+
+        Returns:
+            Dict with url, status, message, posted (bool), and — once the
+            flow reaches the composer — author plus composer_text, the
+            composer dialog's raw text, for verification.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="create_post"
+            )
+            logger.info(
+                "Creating post: post_as=%s, confirm_post=%s, text_len=%d",
+                post_as,
+                confirm_post,
+                len(text),
+            )
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Opening share composer"
+            )
+
+            result = await extractor.create_post(
+                text,
+                confirm_post=confirm_post,
+                post_as=post_as,
+            )
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except ToolError:
+            raise
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "create_post")
+        except Exception as e:
+            raise_tool_error(e, "create_post")  # NoReturn
