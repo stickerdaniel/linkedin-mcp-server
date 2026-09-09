@@ -530,6 +530,37 @@ def _function_shadowed_names(
     return _argument_names(node.args) | local_bindings
 
 
+def _pattern_names(pattern: ast.pattern) -> set[str]:
+    return {
+        name
+        for item in ast.walk(pattern)
+        for name in (
+            item.name
+            if isinstance(item, (ast.MatchAs, ast.MatchStar))
+            else item.rest
+            if isinstance(item, ast.MatchMapping)
+            else None,
+        )
+        if name
+    }
+
+
+def _extractor_assignment_names(statement: ast.stmt, class_names: set[str]) -> set[str]:
+    if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+        return set()
+    value = statement.value
+    if not (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Name)
+        and value.func.id in class_names
+    ):
+        return set()
+    targets = (
+        statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+    )
+    return {target.id for target in targets if isinstance(target, ast.Name)}
+
+
 @dataclass(slots=True)
 class _ScopeFrame:
     kind: str
@@ -675,6 +706,13 @@ class _CalledMethodCollector(ast.NodeVisitor):
         if isinstance(statement, ast.AnnAssign) and statement.value is None:
             return
         collector = _LocalBindingCollector()
+        if isinstance(statement, ast.Match):
+            targets = set().union(
+                *(_pattern_names(case.pattern) for case in statement.cases)
+            )
+            self.bindings[-1].difference_update(targets)
+            self.ambiguous_names[-1].difference_update(targets)
+            return
         if isinstance(
             statement,
             (
@@ -716,6 +754,41 @@ class _CalledMethodCollector(ast.NodeVisitor):
         self.bindings[-1] = states[0][0] & states[1][0]
         self.ambiguous_names[-1] = states[0][1] | states[1][1]
         self.ambiguous_names[-1].update(states[0][0] ^ states[1][0])
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> Any:
+        if len(self.bindings) not in self.class_scope_depths or not node.name:
+            self.generic_visit(node)
+            return
+        if node.type is not None:
+            self.visit(node.type)
+        self.bindings[-1].discard(node.name)
+        self.ambiguous_names[-1].discard(node.name)
+        self._visit_class_suite(node.body)
+        self.bindings[-1].discard(node.name)
+        self.ambiguous_names[-1].discard(node.name)
+        if node.name in self.closure_bindings[-1]:
+            self.bindings[-1].add(node.name)
+        if node.name in self.closure_ambiguous_names[-1]:
+            self.ambiguous_names[-1].add(node.name)
+
+    def visit_match_case(self, node: ast.match_case) -> Any:
+        self.visit(node.pattern)
+        if len(self.bindings) not in self.class_scope_depths:
+            if node.guard is not None:
+                self.visit(node.guard)
+            for statement in node.body:
+                self.visit(statement)
+            return
+        targets = _pattern_names(node.pattern)
+        previous_bindings = set(self.bindings[-1])
+        previous_ambiguous = set(self.ambiguous_names[-1])
+        self.bindings[-1].difference_update(targets)
+        self.ambiguous_names[-1].difference_update(targets)
+        if node.guard is not None:
+            self.visit(node.guard)
+        self._visit_class_suite(node.body)
+        self.bindings[-1] = previous_bindings
+        self.ambiguous_names[-1] = previous_ambiguous
 
     def visit_ClassDef(self, node: ast.ClassDef) -> Any:
         for decorator in node.decorator_list:
@@ -1039,6 +1112,7 @@ class Scanner(ast.NodeVisitor):
         else:
             return
 
+        extractor_instances = _extractor_assignment_names(statement, frame.class_names)
         bindings = collector.bindings - collector.globals - collector.nonlocals
         frame.module_names.difference_update(bindings)
         frame.class_names.difference_update(bindings)
@@ -1070,6 +1144,7 @@ class Scanner(ast.NodeVisitor):
                 frame.instance_names.discard(name)
         frame.module_names.update(collector.module_aliases)
         frame.class_names.update(collector.class_aliases)
+        frame.instance_names.update(extractor_instances)
         frame.ambiguous_names.difference_update(
             collector.globals
             | collector.nonlocals
@@ -1085,23 +1160,21 @@ class Scanner(ast.NodeVisitor):
                 self.visit(statement)
             return
         frame = self.frames[-1]
-        previous = (
-            node.name in frame.module_names,
-            node.name in frame.class_names,
-            node.name in frame.instance_names,
-        )
         frame.module_names.discard(node.name)
         frame.class_names.discard(node.name)
         frame.instance_names.discard(node.name)
-        for statement in node.body:
-            self.visit(statement)
-        for names, present in zip(
-            (frame.module_names, frame.class_names, frame.instance_names),
-            previous,
-            strict=True,
-        ):
-            if present:
-                names.add(node.name)
+        frame.ambiguous_names.discard(node.name)
+        self._visit_class_suite(node.body)
+        frame.module_names.discard(node.name)
+        frame.class_names.discard(node.name)
+        frame.instance_names.discard(node.name)
+        frame.ambiguous_names.discard(node.name)
+        if node.name in frame.closure_module_names:
+            frame.module_names.add(node.name)
+        if node.name in frame.closure_class_names:
+            frame.class_names.add(node.name)
+        if node.name in frame.closure_instance_names:
+            frame.instance_names.add(node.name)
 
     def visit_match_case(self, node: ast.match_case) -> Any:
         self.visit(node.pattern)
@@ -1112,36 +1185,31 @@ class Scanner(ast.NodeVisitor):
                 self.visit(statement)
             return
         frame = self.frames[-1]
-        targets = {
-            name
-            for item in ast.walk(node.pattern)
-            for name in (
-                item.name
-                if isinstance(item, (ast.MatchAs, ast.MatchStar))
-                else item.rest
-                if isinstance(item, ast.MatchMapping)
-                else None,
-            )
-            if name
-        }
+        targets = _pattern_names(node.pattern)
         previous = {
             name: (
                 name in frame.module_names,
                 name in frame.class_names,
                 name in frame.instance_names,
+                name in frame.ambiguous_names,
             )
             for name in targets
         }
         frame.module_names.difference_update(targets)
         frame.class_names.difference_update(targets)
         frame.instance_names.difference_update(targets)
+        frame.ambiguous_names.difference_update(targets)
         if node.guard is not None:
             self.visit(node.guard)
-        for statement in node.body:
-            self.visit(statement)
+        self._visit_class_suite(node.body)
         for name, present in previous.items():
             for names, was_present in zip(
-                (frame.module_names, frame.class_names, frame.instance_names),
+                (
+                    frame.module_names,
+                    frame.class_names,
+                    frame.instance_names,
+                    frame.ambiguous_names,
+                ),
                 present,
                 strict=True,
             ):
@@ -1193,6 +1261,7 @@ class Scanner(ast.NodeVisitor):
         candidates.update(
             current.module_names | current.class_names | current.instance_names
         )
+        current.ambiguous_names = states[0].ambiguous_names | states[1].ambiguous_names
         current.ambiguous_names.update(
             name
             for name in candidates
@@ -1214,8 +1283,6 @@ class Scanner(ast.NodeVisitor):
         current.class_names.intersection_update(states[1].class_names)
         current.instance_names.intersection_update(states[0].instance_names)
         current.instance_names.intersection_update(states[1].instance_names)
-        current.ambiguous_names.update(states[0].ambiguous_names)
-        current.ambiguous_names.update(states[1].ambiguous_names)
 
     def visit_ClassDef(self, node: ast.ClassDef) -> Any:
         for decorator in node.decorator_list:

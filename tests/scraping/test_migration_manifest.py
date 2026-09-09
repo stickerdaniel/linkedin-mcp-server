@@ -713,6 +713,45 @@ class MatchShadow:
     ]
 
 
+def test_exception_target_cleanup_restores_outer_alias_not_class_shadow():
+    seams = _scan_synthetic(
+        """
+from linkedin_mcp_server.scraping import extractor as legacy
+
+class ExceptionCleanup:
+    legacy = object()
+    try:
+        raise RuntimeError
+    except RuntimeError as legacy:
+        inside = legacy._unknown
+    after = legacy._drain_listener_tasks
+"""
+    )
+
+    assert [seam.target for seam in seams if seam.kind == "module_attribute"] == [
+        "_drain_listener_tasks"
+    ]
+
+
+def test_class_assignments_track_new_extractor_instances():
+    seams = _scan_synthetic(
+        """
+from linkedin_mcp_server.scraping.extractor import LinkedInExtractor
+
+class ClassInstances:
+    worker = LinkedInExtractor(page)
+    worker._scroll_seconds += 1.0
+    annotated: LinkedInExtractor = LinkedInExtractor(page)
+    annotated._navigate_to_page
+"""
+    )
+
+    assert [seam.target for seam in seams if seam.kind == "private_facade_access"] == [
+        "_scroll_seconds",
+        "_navigate_to_page",
+    ]
+
+
 def test_annotation_only_class_assignment_does_not_shadow_alias():
     seams = _scan_synthetic(
         """
@@ -759,6 +798,25 @@ class ConditionalBranch:
     reader = legacy._drain_listener_tasks
 """
         )
+
+
+def test_matching_class_branches_clear_prior_ambiguity():
+    seams = _scan_synthetic(
+        """
+from linkedin_mcp_server.scraping import extractor as legacy
+
+class ReconciledBranch:
+    if first_condition:
+        legacy = object()
+    if second_condition:
+        legacy = object()
+    else:
+        legacy = object()
+    reader = legacy._unknown
+"""
+    )
+
+    assert not [seam for seam in seams if seam.kind == "module_attribute"]
 
 
 def test_unknown_class_access_before_later_binding_fails_closed():
@@ -1001,6 +1059,40 @@ async def scenario(page, condition):
             value = extractor.extract_feed()
 """
         )
+
+
+def test_boundary_callers_follow_class_exception_and_match_targets():
+    seams = _scan_synthetic(
+        """
+from unittest.mock import patch
+from linkedin_mcp_server.scraping import extractor as legacy_surface
+from linkedin_mcp_server.scraping.extractor import LinkedInExtractor
+
+async def scenario(page):
+    extractor = LinkedInExtractor(page)
+    with patch.object(legacy_surface, "detect_rate_limit"):
+        class ExceptionTarget:
+            extractor = object()
+            try:
+                raise RuntimeError
+            except RuntimeError as extractor:
+                inside = extractor.search_posts("query")
+            after = extractor.extract_feed()
+
+        class MatchTarget:
+            match object():
+                case extractor:
+                    inside = extractor.search_posts("query")
+            after = extractor.scrape_company("company")
+"""
+    )
+
+    boundary = [
+        seam
+        for seam in seams
+        if seam.kind == "boundary_patch_object" and seam.target == "detect_rate_limit"
+    ]
+    assert {seam.migration_stage for seam in boundary} == {5}
 
 
 def test_only_shadowed_boundary_callers_fail_closed():
