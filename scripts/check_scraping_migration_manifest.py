@@ -360,10 +360,25 @@ class UnresolvedSeamError(ValueError):
     """A seam could not be assigned to a verified migration owner."""
 
 
-def _is_extractor_module_import(node: ast.ImportFrom) -> bool:
-    return node.module == EXTRACTOR_MODULE or (
-        node.level == 1 and node.module == "extractor"
-    )
+def _resolved_import_module(path: Path, node: ast.ImportFrom) -> str | None:
+    if node.level == 0:
+        return node.module
+    package = list(path.parent.relative_to(ROOT).parts)
+    keep = len(package) - node.level + 1
+    if keep < 0:
+        return None
+    resolved = package[:keep]
+    if node.module:
+        resolved.extend(node.module.split("."))
+    return ".".join(resolved)
+
+
+def _is_extractor_module_import(path: Path, node: ast.ImportFrom) -> bool:
+    return _resolved_import_module(path, node) == EXTRACTOR_MODULE
+
+
+def _is_scraping_package_import(path: Path, node: ast.ImportFrom) -> bool:
+    return _resolved_import_module(path, node) == "linkedin_mcp_server.scraping"
 
 
 def _annotation_name(annotation: ast.expr | None) -> str | None:
@@ -380,6 +395,85 @@ def _walk_scope(node: ast.AST):
             continue
         yield child
         yield from _walk_scope(child)
+
+
+class _LocalBindingCollector(ast.NodeVisitor):
+    def __init__(self) -> None:
+        self.bindings: set[str] = set()
+        self.globals: set[str] = set()
+        self.nonlocals: set[str] = set()
+
+    def visit_Name(self, node: ast.Name) -> Any:
+        if isinstance(node.ctx, (ast.Store, ast.Del)):
+            self.bindings.add(node.id)
+
+    def visit_Import(self, node: ast.Import) -> Any:
+        self.bindings.update(
+            alias.asname or alias.name.split(".", 1)[0] for alias in node.names
+        )
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> Any:
+        self.bindings.update(alias.asname or alias.name for alias in node.names)
+
+    def visit_Global(self, node: ast.Global) -> Any:
+        self.globals.update(node.names)
+
+    def visit_Nonlocal(self, node: ast.Nonlocal) -> Any:
+        self.nonlocals.update(node.names)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> Any:
+        self.bindings.add(node.name)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> Any:
+        self.bindings.add(node.name)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> Any:
+        self.bindings.add(node.name)
+
+    def visit_Lambda(self, node: ast.Lambda) -> Any:
+        return None
+
+    def _visit_comprehension(
+        self, generators: list[ast.comprehension], values: list[ast.expr]
+    ) -> None:
+        for generator in generators:
+            self.visit(generator.iter)
+            for condition in generator.ifs:
+                self.visit(condition)
+        for value in values:
+            self.visit(value)
+
+    def visit_ListComp(self, node: ast.ListComp) -> Any:
+        self._visit_comprehension(node.generators, [node.elt])
+
+    def visit_SetComp(self, node: ast.SetComp) -> Any:
+        self._visit_comprehension(node.generators, [node.elt])
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> Any:
+        self._visit_comprehension(node.generators, [node.elt])
+
+    def visit_DictComp(self, node: ast.DictComp) -> Any:
+        self._visit_comprehension(node.generators, [node.key, node.value])
+
+
+def _function_shadowed_names(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+    arguments = {
+        argument.arg
+        for argument in [
+            *node.args.posonlyargs,
+            *node.args.args,
+            *node.args.kwonlyargs,
+        ]
+    }
+    if node.args.vararg:
+        arguments.add(node.args.vararg.arg)
+    if node.args.kwarg:
+        arguments.add(node.args.kwarg.arg)
+
+    collector = _LocalBindingCollector()
+    for statement in node.body:
+        collector.visit(statement)
+    return (arguments | collector.bindings | collector.globals) - collector.nonlocals
 
 
 def _extractor_bindings(
@@ -416,14 +510,14 @@ def _extractor_bindings(
     return bindings
 
 
-def _class_aliases(tree: ast.AST) -> set[str]:
+def _class_aliases(path: Path, tree: ast.AST) -> set[str]:
     aliases = {"LinkedInExtractor"}
     for node in ast.walk(tree):
         if not isinstance(node, ast.ImportFrom):
             continue
         if not (
-            _is_extractor_module_import(node)
-            or node.module == "linkedin_mcp_server.scraping"
+            _is_extractor_module_import(path, node)
+            or _is_scraping_package_import(path, node)
         ):
             continue
         for alias in node.names:
@@ -432,13 +526,13 @@ def _class_aliases(tree: ast.AST) -> set[str]:
     return aliases
 
 
-def module_aliases(tree: ast.AST) -> set[str]:
+def module_aliases(path: Path, tree: ast.AST) -> set[str]:
     """Collect every local name bound to the extractor module in one file."""
 
     aliases: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
-            if node.module == "linkedin_mcp_server.scraping":
+            if _is_scraping_package_import(path, node):
                 for alias in node.names:
                     if alias.name == "extractor":
                         aliases.add(alias.asname or alias.name)
@@ -523,7 +617,9 @@ class Scanner(ast.NodeVisitor):
 
     def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         self.functions.append(node)
-        bindings = _extractor_bindings(node, self.class_names)
+        inherited = self.instance_bindings[-1] if self.instance_bindings else set()
+        bindings = inherited - _function_shadowed_names(node)
+        bindings.update(_extractor_bindings(node, self.class_names))
         bindings.update(
             _EXPLICIT_INSTANCE_BINDINGS.get((self.relative_path, node.name), ())
         )
@@ -672,7 +768,7 @@ class Scanner(ast.NodeVisitor):
             )
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> Any:
-        if _is_extractor_module_import(node):
+        if _is_extractor_module_import(self.path, node):
             for alias in node.names:
                 if alias.name in PERMANENT_ALIASES:
                     self._add(
@@ -689,7 +785,7 @@ class Scanner(ast.NodeVisitor):
                     continue
                 owner, stage = owner_stage
                 self._add("direct_import", node, alias.name, owner, stage)
-        elif node.module == "linkedin_mcp_server.scraping":
+        elif _is_scraping_package_import(self.path, node):
             for alias in node.names:
                 if alias.name == "extractor":
                     self._add(
@@ -959,8 +1055,8 @@ def scan_source(
     tree = ast.parse(source, filename=str(path))
     scanner = Scanner(
         path,
-        module_aliases(tree),
-        _class_aliases(tree),
+        module_aliases(path, tree),
+        _class_aliases(path, tree),
         facade_publics,
         facade_privates,
     )

@@ -4019,6 +4019,14 @@
       "target": "asyncio.sleep"
     },
     {
+      "canonical_owner": "session.ScrapingSession._scroll_seconds",
+      "kind": "private_facade_access",
+      "line": 4307,
+      "migration_stage": 3,
+      "path": "tests/test_scraping.py",
+      "target": "_scroll_seconds"
+    },
+    {
       "canonical_owner": "jobs.JobScraper -> owner-local time module binding",
       "kind": "module_rebind_patch",
       "line": 4318,

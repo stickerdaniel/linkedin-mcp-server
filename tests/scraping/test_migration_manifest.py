@@ -19,6 +19,9 @@ from scripts import check_scraping_migration_manifest as migration  # noqa: E402
 MANIFEST = ROOT / "tests" / "fixtures" / "scraping-policy" / "migration-manifest.json"
 CHECKER = ROOT / "scripts" / "check_scraping_migration_manifest.py"
 POLICY_SCENARIOS = ROOT / "tests" / "scraping" / "policy_scenarios.py"
+SCRAPING_SYNTHETIC = (
+    ROOT / "linkedin_mcp_server" / "scraping" / "synthetic_inventory.py"
+)
 
 _SHARED_BOUNDARY_STAGES = {
     "detect_rate_limit": {4, 5, 6, 9, 11, 12},
@@ -378,7 +381,8 @@ async def scenario(page, replacement):
     build_url = Facade._build_job_search_url
     await extractor._goto_with_auth_checks("https://example.test")
     extractor._read_message_composer_state = replacement
-"""
+""",
+        path=SCRAPING_SYNTHETIC,
     )
 
     direct = [seam for seam in seams if seam.kind == "direct_import"]
@@ -418,7 +422,98 @@ async def scenario(page, replacement):
     with pytest.raises(
         migration.UnresolvedSeamError, match="unknown private facade access"
     ):
+        _scan_synthetic(source, path=SCRAPING_SYNTHETIC)
+
+
+def test_nested_functions_inherit_only_unshadowed_extractor_bindings():
+    seams = _scan_synthetic(
+        """
+from linkedin_mcp_server.scraping.extractor import LinkedInExtractor
+
+async def outer(page):
+    extractor = LinkedInExtractor(page)
+
+    async def inherited():
+        extractor._scroll_seconds += 1.0
+
+    async def parameter_shadow(extractor):
+        extractor._unknown_helper()
+
+    async def assignment_shadow():
+        extractor = object()
+        extractor._unknown_helper()
+"""
+    )
+
+    accesses = [seam for seam in seams if seam.kind == "private_facade_access"]
+    assert [
+        (seam.target, seam.canonical_owner, seam.migration_stage) for seam in accesses
+    ] == [("_scroll_seconds", "session.ScrapingSession._scroll_seconds", 3)]
+
+
+def test_unknown_private_closure_access_fails_closed():
+    source = """
+from linkedin_mcp_server.scraping.extractor import LinkedInExtractor
+
+async def outer(page):
+    extractor = LinkedInExtractor(page)
+
+    async def inherited():
+        extractor._unknown_helper()
+"""
+
+    with pytest.raises(
+        migration.UnresolvedSeamError, match="unknown private facade access"
+    ):
         _scan_synthetic(source)
+
+
+@pytest.mark.parametrize(
+    ("statement", "local_name"),
+    [
+        ("from . import extractor", "extractor"),
+        ("from . import extractor as legacy", "legacy"),
+        ("from ..scraping import extractor as legacy", "legacy"),
+    ],
+)
+def test_relative_extractor_module_aliases_are_inventoried(statement, local_name):
+    seams = _scan_synthetic(
+        f"{statement}\nreader = {local_name}._drain_listener_tasks\n",
+        path=SCRAPING_SYNTHETIC,
+    )
+
+    assert [(seam.kind, seam.target, seam.migration_stage) for seam in seams] == [
+        ("module_alias", local_name, 14),
+        ("module_attribute", "_drain_listener_tasks", 5),
+    ]
+
+
+def test_unknown_relative_module_alias_access_fails_closed():
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match="unknown direct extractor module attribute",
+    ):
+        _scan_synthetic(
+            "from . import extractor as legacy\nreader = legacy._unknown_helper\n",
+            path=SCRAPING_SYNTHETIC,
+        )
+
+
+def test_manifest_includes_extractor_access_from_nested_closure():
+    accesses = [
+        seam
+        for seam in migration.scan()["seams"]
+        if seam["path"] == "tests/test_scraping.py"
+        and seam["target"] == "_scroll_seconds"
+    ]
+
+    assert {
+        (seam["line"], seam["canonical_owner"], seam["migration_stage"])
+        for seam in accesses
+    } == {
+        (1009, "session.ScrapingSession._scroll_seconds", 3),
+        (4307, "session.ScrapingSession._scroll_seconds", 3),
+    }
 
 
 def test_caller_resolution_ignores_test_class_names():
