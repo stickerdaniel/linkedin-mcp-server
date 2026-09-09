@@ -668,6 +668,121 @@ def test_unknown_module_accesses_in_enclosing_evaluation_fail_closed(source):
         _scan_synthetic(source)
 
 
+def test_class_bodies_apply_alias_bindings_sequentially():
+    seams = _scan_synthetic(
+        """
+from linkedin_mcp_server.scraping import extractor as legacy
+
+class AssignmentShadow:
+    before = legacy._drain_listener_tasks
+    legacy = object()
+    after = legacy._unknown
+
+    def method(self):
+        return legacy._drain_listener_tasks
+
+class ImportShadow:
+    before = legacy._drain_listener_tasks
+    import types as legacy
+    after = legacy._unknown
+
+class ExceptionShadow:
+    before = legacy._drain_listener_tasks
+    try:
+        raise RuntimeError
+    except RuntimeError as legacy:
+        inside = legacy._unknown
+    after = legacy._drain_listener_tasks
+
+class MatchShadow:
+    before = legacy._drain_listener_tasks
+    match object():
+        case legacy:
+            inside = legacy._unknown
+    after = legacy._unknown
+"""
+    )
+
+    assert [seam.target for seam in seams if seam.kind == "module_attribute"] == [
+        "_drain_listener_tasks",
+        "_drain_listener_tasks",
+        "_drain_listener_tasks",
+        "_drain_listener_tasks",
+        "_drain_listener_tasks",
+        "_drain_listener_tasks",
+    ]
+
+
+def test_unknown_class_access_before_later_binding_fails_closed():
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match="unknown direct extractor module attribute",
+    ):
+        _scan_synthetic(
+            """
+from linkedin_mcp_server.scraping import extractor as legacy
+
+class ShadowLater:
+    before = legacy._unknown
+    legacy = object()
+"""
+        )
+
+
+def test_global_removes_instance_binding_and_nonlocal_keeps_it():
+    seams = _scan_synthetic(
+        """
+from linkedin_mcp_server.scraping import extractor as legacy
+from linkedin_mcp_server.scraping.extractor import LinkedInExtractor
+
+module_worker = object()
+
+async def outer(page):
+    legacy = LinkedInExtractor(page)
+    module_worker = LinkedInExtractor(page)
+
+    async def module_alias():
+        global legacy
+        return legacy._drain_listener_tasks
+
+    async def ordinary_global():
+        global module_worker
+        return module_worker._unknown
+
+    async def closure_instance():
+        nonlocal legacy
+        return legacy._scroll_seconds
+"""
+    )
+
+    assert [seam.target for seam in seams if seam.kind == "module_attribute"] == [
+        "_drain_listener_tasks"
+    ]
+    assert [seam.target for seam in seams if seam.kind == "private_facade_access"] == [
+        "_scroll_seconds"
+    ]
+
+
+def test_unknown_global_module_alias_access_fails_closed():
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match="unknown direct extractor module attribute",
+    ):
+        _scan_synthetic(
+            """
+from linkedin_mcp_server.scraping import extractor as legacy
+from linkedin_mcp_server.scraping.extractor import LinkedInExtractor
+
+async def outer(page):
+    legacy = LinkedInExtractor(page)
+
+    async def module_alias():
+        global legacy
+        return legacy._unknown
+"""
+        )
+
+
 def test_manifest_includes_extractor_access_from_nested_closure():
     accesses = [
         seam
@@ -708,6 +823,110 @@ class ArbitraryRenamedContainer:
         8,
         10,
     }
+
+
+def test_boundary_callers_ignore_workflow_calls_in_shadowed_scopes():
+    seams = _scan_synthetic(
+        """
+from unittest.mock import patch
+from linkedin_mcp_server.scraping import extractor as legacy_surface
+from linkedin_mcp_server.scraping.extractor import LinkedInExtractor
+
+async def scenario(page, values):
+    extractor = LinkedInExtractor(page)
+    with patch.object(legacy_surface, "detect_rate_limit"):
+        [
+            extractor.search_posts("query")
+            for extractor in values
+        ]
+        callback = lambda extractor: extractor.scrape_company("company")
+
+        async def nested(extractor):
+            await extractor.scrape_person("person")
+
+        class Holder:
+            extractor = object()
+            value = extractor.search_posts("query")
+
+        await extractor.extract_feed()
+"""
+    )
+
+    boundary = [
+        seam
+        for seam in seams
+        if seam.kind == "boundary_patch_object" and seam.target == "detect_rate_limit"
+    ]
+    assert {seam.migration_stage for seam in boundary} == {5}
+
+
+def test_boundary_callers_keep_outer_comprehension_iterator_calls():
+    seams = _scan_synthetic(
+        """
+from unittest.mock import patch
+from linkedin_mcp_server.scraping import extractor as legacy_surface
+from linkedin_mcp_server.scraping.extractor import LinkedInExtractor
+
+async def scenario(page):
+    extractor = LinkedInExtractor(page)
+    with patch.object(legacy_surface, "detect_rate_limit"):
+        [item for item in extractor.search_posts("query")]
+"""
+    )
+
+    boundary = [
+        seam
+        for seam in seams
+        if seam.kind == "boundary_patch_object" and seam.target == "detect_rate_limit"
+    ]
+    assert {seam.migration_stage for seam in boundary} == {10}
+
+
+def test_boundary_callers_keep_inherited_nested_scope_calls():
+    seams = _scan_synthetic(
+        """
+from unittest.mock import patch
+from linkedin_mcp_server.scraping import extractor as legacy_surface
+from linkedin_mcp_server.scraping.extractor import LinkedInExtractor
+
+async def scenario(page):
+    extractor = LinkedInExtractor(page)
+    with patch.object(legacy_surface, "detect_rate_limit"):
+        async def nested():
+            await extractor.search_posts("query")
+
+        class Holder:
+            async def method(self):
+                await extractor.scrape_person("person")
+"""
+    )
+
+    boundary = [
+        seam
+        for seam in seams
+        if seam.kind == "boundary_patch_object" and seam.target == "detect_rate_limit"
+    ]
+    assert {seam.migration_stage for seam in boundary} == {6, 10}
+
+
+def test_only_shadowed_boundary_callers_fail_closed():
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match="caller workflow could not be resolved",
+    ):
+        _scan_synthetic(
+            """
+from unittest.mock import patch
+from linkedin_mcp_server.scraping import extractor as legacy_surface
+from linkedin_mcp_server.scraping.extractor import LinkedInExtractor
+
+async def scenario(page, values):
+    extractor = LinkedInExtractor(page)
+    with patch.object(legacy_surface, "detect_rate_limit"):
+        [extractor.search_posts("query") for extractor in values]
+        callback = lambda extractor: extractor.scrape_company("company")
+"""
+        )
 
 
 def test_string_boundary_and_module_rebinds_follow_binding_semantics():

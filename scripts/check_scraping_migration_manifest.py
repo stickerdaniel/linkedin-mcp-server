@@ -532,6 +532,7 @@ def _function_shadowed_names(
 
 @dataclass(slots=True)
 class _ScopeFrame:
+    kind: str
     module_names: set[str]
     class_names: set[str]
     instance_names: set[str]
@@ -577,6 +578,171 @@ def _extractor_bindings(
                 target.id for target in targets if isinstance(target, ast.Name)
             )
     return bindings
+
+
+class _CalledMethodCollector(ast.NodeVisitor):
+    def __init__(self, bindings: set[str]) -> None:
+        self.bindings = [set(bindings)]
+        self.closure_bindings = [set(bindings)]
+        self.methods: set[str] = set()
+
+    def visit_Call(self, node: ast.Call) -> Any:
+        called = node.func
+        if (
+            isinstance(called, ast.Attribute)
+            and isinstance(called.value, ast.Name)
+            and called.value.id in self.bindings[-1]
+        ):
+            self.methods.add(called.attr)
+        elif (
+            isinstance(called, ast.Call)
+            and isinstance(called.func, ast.Name)
+            and called.func.id == "getattr"
+            and len(called.args) >= 2
+            and isinstance(called.args[0], ast.Name)
+            and called.args[0].id in self.bindings[-1]
+            and isinstance(called.args[1], ast.Constant)
+            and isinstance(called.args[1].value, str)
+        ):
+            self.methods.add(called.args[1].value)
+        self.generic_visit(node)
+
+    @staticmethod
+    def _visit_arguments(
+        visitor: _CalledMethodCollector, arguments: ast.arguments
+    ) -> None:
+        for argument in [
+            *arguments.posonlyargs,
+            *arguments.args,
+            *arguments.kwonlyargs,
+        ]:
+            if argument.annotation is not None:
+                visitor.visit(argument.annotation)
+        if arguments.vararg and arguments.vararg.annotation is not None:
+            visitor.visit(arguments.vararg.annotation)
+        if arguments.kwarg and arguments.kwarg.annotation is not None:
+            visitor.visit(arguments.kwarg.annotation)
+        for default in arguments.defaults:
+            visitor.visit(default)
+        for default in arguments.kw_defaults:
+            if default is not None:
+                visitor.visit(default)
+
+    def _visit_function_definition(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef
+    ) -> None:
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        self._visit_arguments(self, node.args)
+        if node.returns is not None:
+            self.visit(node.returns)
+        for type_parameter in getattr(node, "type_params", ()):
+            self.visit(type_parameter)
+        collector = _LocalBindingCollector()
+        for statement in node.body:
+            collector.visit(statement)
+        local_bindings = (
+            collector.bindings - collector.globals - collector.nonlocals
+        ) | _argument_names(node.args)
+        bindings = self.closure_bindings[-1] - local_bindings - collector.globals
+        self.bindings.append(bindings)
+        self.closure_bindings.append(set(bindings))
+        for statement in node.body:
+            self.visit(statement)
+        self.closure_bindings.pop()
+        self.bindings.pop()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> Any:
+        self._visit_function_definition(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> Any:
+        self._visit_function_definition(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> Any:
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for base in node.bases:
+            self.visit(base)
+        for keyword in node.keywords:
+            self.visit(keyword.value)
+        for type_parameter in getattr(node, "type_params", ()):
+            self.visit(type_parameter)
+        closure = set(self.closure_bindings[-1])
+        self.bindings.append(set(closure))
+        self.closure_bindings.append(closure)
+        for statement in node.body:
+            self.visit(statement)
+            collector = _LocalBindingCollector()
+            if isinstance(
+                statement,
+                (
+                    ast.Assign,
+                    ast.AnnAssign,
+                    ast.AugAssign,
+                    ast.Import,
+                    ast.ImportFrom,
+                    ast.FunctionDef,
+                    ast.AsyncFunctionDef,
+                    ast.ClassDef,
+                ),
+            ):
+                collector.visit(statement)
+                self.bindings[-1].difference_update(collector.bindings)
+        self.closure_bindings.pop()
+        self.bindings.pop()
+
+    def visit_Lambda(self, node: ast.Lambda) -> Any:
+        self._visit_arguments(self, node.args)
+        collector = _LocalBindingCollector()
+        collector.visit(node.body)
+        bindings = (
+            self.closure_bindings[-1] - collector.bindings - _argument_names(node.args)
+        )
+        self.bindings.append(bindings)
+        self.closure_bindings.append(set(bindings))
+        self.visit(node.body)
+        self.closure_bindings.pop()
+        self.bindings.pop()
+
+    @staticmethod
+    def _target_names(target: ast.expr) -> set[str]:
+        return {
+            item.id
+            for item in ast.walk(target)
+            if isinstance(item, ast.Name) and isinstance(item.ctx, ast.Store)
+        }
+
+    def _visit_comprehension(
+        self, generators: list[ast.comprehension], values: list[ast.expr]
+    ) -> None:
+        first, *remaining = generators
+        self.visit(first.iter)
+        bindings = set(self.closure_bindings[-1])
+        self.bindings.append(bindings)
+        self.closure_bindings.append(bindings)
+        for generator in (first, *remaining):
+            if generator is not first:
+                self.visit(generator.iter)
+            self.visit(generator.target)
+            self.bindings[-1].difference_update(self._target_names(generator.target))
+            for condition in generator.ifs:
+                self.visit(condition)
+        for value in values:
+            self.visit(value)
+        self.closure_bindings.pop()
+        self.bindings.pop()
+
+    def visit_ListComp(self, node: ast.ListComp) -> Any:
+        self._visit_comprehension(node.generators, [node.elt])
+
+    def visit_SetComp(self, node: ast.SetComp) -> Any:
+        self._visit_comprehension(node.generators, [node.elt])
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> Any:
+        self._visit_comprehension(node.generators, [node.elt])
+
+    def visit_DictComp(self, node: ast.DictComp) -> Any:
+        self._visit_comprehension(node.generators, [node.key, node.value])
 
 
 def module_aliases(path: Path, tree: ast.AST) -> set[str]:
@@ -637,6 +803,7 @@ class Scanner(ast.NodeVisitor):
         self.functions: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
         self.frames = [
             _ScopeFrame(
+                kind="module",
                 module_names=set(module_names),
                 class_names=set(class_names),
                 instance_names=set(),
@@ -760,9 +927,11 @@ class Scanner(ast.NodeVisitor):
         instance_names.update(
             _EXPLICIT_INSTANCE_BINDINGS.get((self.relative_path, node.name), ())
         )
+        instance_names.difference_update(collector.globals)
         self.functions.append(node)
         self.frames.append(
             _ScopeFrame(
+                kind="function",
                 module_names=module_names,
                 class_names=class_names,
                 instance_names=instance_names,
@@ -782,6 +951,132 @@ class Scanner(ast.NodeVisitor):
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> Any:
         self._visit_function(node)
 
+    def _apply_class_bindings(self, statement: ast.stmt, frame: _ScopeFrame) -> None:
+        collector = _LocalBindingCollector(self.path)
+        if isinstance(statement, ast.Match):
+            for case in statement.cases:
+                collector.visit(case.pattern)
+        elif isinstance(
+            statement,
+            (
+                ast.Assign,
+                ast.AnnAssign,
+                ast.AugAssign,
+                ast.Import,
+                ast.ImportFrom,
+                ast.FunctionDef,
+                ast.AsyncFunctionDef,
+                ast.ClassDef,
+                ast.Global,
+                ast.Nonlocal,
+            ),
+        ):
+            collector.visit(statement)
+        else:
+            return
+
+        bindings = collector.bindings - collector.globals - collector.nonlocals
+        frame.module_names.difference_update(bindings)
+        frame.class_names.difference_update(bindings)
+        frame.instance_names.difference_update(bindings)
+        for name in collector.globals:
+            if name in self.root_module_names:
+                frame.module_names.add(name)
+            else:
+                frame.module_names.discard(name)
+            if name in self.root_class_names:
+                frame.class_names.add(name)
+            else:
+                frame.class_names.discard(name)
+            frame.instance_names.discard(name)
+        parent = self.frames[-2]
+        for name in collector.nonlocals:
+            if name in parent.closure_module_names:
+                frame.module_names.add(name)
+            else:
+                frame.module_names.discard(name)
+            if name in parent.closure_class_names:
+                frame.class_names.add(name)
+            else:
+                frame.class_names.discard(name)
+            if name in parent.closure_instance_names:
+                frame.instance_names.add(name)
+            else:
+                frame.instance_names.discard(name)
+        frame.module_names.update(collector.module_aliases)
+        frame.class_names.update(collector.class_aliases)
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> Any:
+        if node.type is not None:
+            self.visit(node.type)
+        if not node.name or self.frames[-1].kind != "class":
+            for statement in node.body:
+                self.visit(statement)
+            return
+        frame = self.frames[-1]
+        previous = (
+            node.name in frame.module_names,
+            node.name in frame.class_names,
+            node.name in frame.instance_names,
+        )
+        frame.module_names.discard(node.name)
+        frame.class_names.discard(node.name)
+        frame.instance_names.discard(node.name)
+        for statement in node.body:
+            self.visit(statement)
+        for names, present in zip(
+            (frame.module_names, frame.class_names, frame.instance_names),
+            previous,
+            strict=True,
+        ):
+            if present:
+                names.add(node.name)
+
+    def visit_match_case(self, node: ast.match_case) -> Any:
+        self.visit(node.pattern)
+        if self.frames[-1].kind != "class":
+            if node.guard is not None:
+                self.visit(node.guard)
+            for statement in node.body:
+                self.visit(statement)
+            return
+        frame = self.frames[-1]
+        targets = {
+            name
+            for item in ast.walk(node.pattern)
+            for name in (
+                item.name
+                if isinstance(item, (ast.MatchAs, ast.MatchStar))
+                else item.rest
+                if isinstance(item, ast.MatchMapping)
+                else None,
+            )
+            if name
+        }
+        previous = {
+            name: (
+                name in frame.module_names,
+                name in frame.class_names,
+                name in frame.instance_names,
+            )
+            for name in targets
+        }
+        frame.module_names.difference_update(targets)
+        frame.class_names.difference_update(targets)
+        frame.instance_names.difference_update(targets)
+        if node.guard is not None:
+            self.visit(node.guard)
+        for statement in node.body:
+            self.visit(statement)
+        for name, present in previous.items():
+            for names, was_present in zip(
+                (frame.module_names, frame.class_names, frame.instance_names),
+                present,
+                strict=True,
+            ):
+                if was_present:
+                    names.add(name)
+
     def visit_ClassDef(self, node: ast.ClassDef) -> Any:
         for decorator in node.decorator_list:
             self.visit(decorator)
@@ -793,33 +1088,19 @@ class Scanner(ast.NodeVisitor):
             self.visit(type_parameter)
 
         parent = self.frames[-1]
-        collector = _scope_collector(self.path, node.body)
-        module_names = self._adjust_aliases(
-            parent.closure_module_names,
-            self.root_module_names,
-            collector,
-            collector.module_aliases,
+        frame = _ScopeFrame(
+            kind="class",
+            module_names=set(parent.closure_module_names),
+            class_names=set(parent.closure_class_names),
+            instance_names=set(parent.closure_instance_names),
+            closure_module_names=set(parent.closure_module_names),
+            closure_class_names=set(parent.closure_class_names),
+            closure_instance_names=set(parent.closure_instance_names),
         )
-        class_names = self._adjust_aliases(
-            parent.closure_class_names,
-            self.root_class_names,
-            collector,
-            collector.class_aliases,
-        )
-        local_bindings = collector.bindings - collector.globals - collector.nonlocals
-        instance_names = parent.closure_instance_names - local_bindings
-        self.frames.append(
-            _ScopeFrame(
-                module_names=module_names,
-                class_names=class_names,
-                instance_names=instance_names,
-                closure_module_names=set(parent.closure_module_names),
-                closure_class_names=set(parent.closure_class_names),
-                closure_instance_names=set(parent.closure_instance_names),
-            )
-        )
+        self.frames.append(frame)
         for statement in node.body:
             self.visit(statement)
+            self._apply_class_bindings(statement, frame)
         self.frames.pop()
 
     def visit_Lambda(self, node: ast.Lambda) -> Any:
@@ -846,6 +1127,7 @@ class Scanner(ast.NodeVisitor):
         instance_names = parent.closure_instance_names - local_bindings - parameters
         self.frames.append(
             _ScopeFrame(
+                kind="function",
                 module_names=module_names,
                 class_names=class_names,
                 instance_names=instance_names,
@@ -877,6 +1159,7 @@ class Scanner(ast.NodeVisitor):
         class_names = set(parent.closure_class_names)
         instance_names = set(parent.closure_instance_names)
         frame = _ScopeFrame(
+            kind="comprehension",
             module_names=module_names,
             class_names=class_names,
             instance_names=instance_names,
@@ -913,32 +1196,10 @@ class Scanner(ast.NodeVisitor):
 
     @staticmethod
     def _called_methods(nodes: list[ast.stmt], bindings: set[str]) -> set[str]:
-        methods: set[str] = set()
+        collector = _CalledMethodCollector(bindings)
         for node in nodes:
-            for item in (node, *_walk_scope(node)):
-                if not isinstance(item, ast.Call):
-                    continue
-                called = item.func
-                if (
-                    isinstance(called, ast.Attribute)
-                    and isinstance(called.value, ast.Name)
-                    and called.value.id in bindings
-                ):
-                    methods.add(called.attr)
-                    continue
-                if not (
-                    isinstance(called, ast.Call)
-                    and isinstance(called.func, ast.Name)
-                    and called.func.id == "getattr"
-                    and len(called.args) >= 2
-                    and isinstance(called.args[0], ast.Name)
-                    and called.args[0].id in bindings
-                    and isinstance(called.args[1], ast.Constant)
-                    and isinstance(called.args[1].value, str)
-                ):
-                    continue
-                methods.add(called.args[1].value)
-        return methods
+            collector.visit(node)
+        return collector.methods
 
     def _visit_with(self, node: ast.With | ast.AsyncWith) -> None:
         bindings = self.frames[-1].instance_names
