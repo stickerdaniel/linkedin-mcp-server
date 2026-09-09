@@ -691,13 +691,14 @@ _MESSAGE_COMPOSER_INSPECT_JS = r"""
 """
 
 _MESSAGE_COMPOSER_OWNER_JS = (
-    "(target) => {"
+    "(arg) => {"
     + _MESSAGE_COMPOSER_INSPECT_JS
     + """
+        const target = arg.target;
         const state = inspect(target);
         if (
             state.status !== 'valid' ||
-            state.messageRoute === null ||
+            state.messageRoute !== arg.expectedRoute ||
             !state.owner.isConnected ||
             !state.editor.isConnected ||
             !state.owner.contains(state.editor) ||
@@ -720,7 +721,7 @@ _MESSAGE_COMPOSER_OWNER_JS = (
             localScope: state.localScope,
             profilePath: target.profilePath,
             profileUrn: target.profileUrn,
-            route: state.messageRoute,
+            route: arg.expectedRoute,
             ownedMessage: null,
         };
         return state.owner;
@@ -3997,11 +3998,19 @@ class LinkedInExtractor:
             logger.warning("Timed out clearing tool-owned message text")
         await anyio.lowlevel.checkpoint()
 
-    async def _resolve_message_owner(self, target: _ProfileMessageTarget) -> Any | None:
+    async def _resolve_message_owner(
+        self,
+        target: _ProfileMessageTarget,
+        *,
+        expected_route: str,
+    ) -> Any | None:
         """Hold the verified owner node across submission and confirmation."""
         owner = await self._page.evaluate_handle(
             _MESSAGE_COMPOSER_OWNER_JS,
-            arg=self._message_target_argument(target),
+            arg={
+                "target": self._message_target_argument(target),
+                "expectedRoute": expected_route,
+            },
         )
         if owner.as_element() is None:
             await self._dispose_message_owner(owner)
@@ -6084,7 +6093,8 @@ class LinkedInExtractor:
                 "The verified message composer changed before text entry.",
                 recipient_selected=recipient_selected,
             )
-        if not _message_page_url_is_safe(self._page.url, target.profile_urn):
+        expected_route = self._page.url
+        if not _message_page_url_is_safe(expected_route, target.profile_urn):
             return self._message_action_result(
                 self._page.url,
                 "recipient_resolution_failed",
@@ -6101,7 +6111,9 @@ class LinkedInExtractor:
 
         may_have_submitted = False
         try:
-            owner = await self._resolve_message_owner(target)
+            owner = await self._resolve_message_owner(
+                target, expected_route=expected_route
+            )
             if owner is None:
                 return self._message_action_result(
                     self._page.url,

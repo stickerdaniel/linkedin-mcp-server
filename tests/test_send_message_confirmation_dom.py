@@ -503,6 +503,57 @@ class TestComposerRecipientDom:
         assert await dom_page.evaluate("document.body.dataset.clicked") == "true"
         assert (await dom_page.locator("#composer").inner_text()).strip() == MESSAGE
 
+    async def test_queryless_route_switch_before_owner_resolution_fails_closed(
+        self, dom_page
+    ):
+        alice_route = "https://www.linkedin.com/messaging/thread/ALICE/"
+        bob_route = "https://www.linkedin.com/messaging/thread/BOB/"
+        await dom_page.goto(alice_route)
+        await dom_page.set_content(compose_page(NOOP_SEND_JS))
+        await dom_page.evaluate(
+            """() => {
+                window.__originalComposer = document.getElementById('composer');
+                window.__originalSend = document.getElementById('send');
+            }"""
+        )
+        extractor = LinkedInExtractor(dom_page)
+        resolve_owner = extractor._resolve_message_owner
+
+        async def switch_route(target, *, expected_route):
+            assert target == TARGET
+            assert expected_route == alice_route
+            await dom_page.evaluate(
+                "history.replaceState({}, '', '/messaging/thread/BOB/')"
+            )
+            return await resolve_owner(target, expected_route=expected_route)
+
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor,
+                "_read_profile_message_target",
+                new_callable=AsyncMock,
+                return_value=_ProfileMessageTargetResolution("resolved", TARGET),
+            ),
+            patch.object(extractor, "_resolve_message_owner", side_effect=switch_route),
+        ):
+            result = await extractor.send_message(
+                "fadi-eliwi", MESSAGE, confirm_send=True
+            )
+
+        assert result["status"] == "recipient_resolution_failed"
+        assert result["sent"] is False
+        assert result["retry_safe"] is True
+        assert dom_page.url == bob_route
+        assert await dom_page.evaluate(
+            """() => (
+                document.getElementById('composer') === window.__originalComposer &&
+                document.getElementById('send') === window.__originalSend
+            )"""
+        )
+        assert (await dom_page.locator("#composer").inner_text()).strip() == ""
+        assert await dom_page.evaluate("document.body.dataset.clicked") is None
+
     async def test_foreign_history_identity_does_not_reject_local_target(
         self, dom_page
     ):
@@ -937,8 +988,8 @@ class TestSendConfirmationDom:
         resolve_owner = extractor._resolve_message_owner
         captured = {}
 
-        async def capture_owner(target):
-            owner = await resolve_owner(target)
+        async def capture_owner(target, *, expected_route):
+            owner = await resolve_owner(target, expected_route=expected_route)
             captured["owner"] = owner
             return owner
 

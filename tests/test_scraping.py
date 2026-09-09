@@ -9007,6 +9007,51 @@ class TestSendMessage:
         submit.assert_not_awaited()
         mock_page.keyboard.type.assert_not_awaited()
 
+    async def test_queryless_route_is_captured_before_owner_resolution(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        patches = self._patch_to_composer(extractor, mock_page)
+        alice_route = "https://www.linkedin.com/messaging/thread/ALICE/"
+        bob_route = "https://www.linkedin.com/messaging/thread/BOB/"
+        mock_page.url = alice_route
+
+        async def switch_route(target, *, expected_route):
+            assert target == self._target()
+            assert expected_route == alice_route
+            mock_page.url = bob_route
+            return None
+
+        with (
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6] as write,
+            patches[7] as submit,
+            patches[8],
+            patches[9],
+            patches[10],
+            patch.object(
+                extractor,
+                "_resolve_message_owner",
+                new_callable=AsyncMock,
+                side_effect=switch_route,
+            ) as resolve_owner,
+        ):
+            result = await extractor.send_message(
+                "testuser", "Hello!", confirm_send=True
+            )
+
+        assert result["status"] == "recipient_resolution_failed"
+        assert result["retry_safe"] is True
+        resolve_owner.assert_awaited_once_with(
+            self._target(), expected_route=alice_route
+        )
+        write.assert_not_awaited()
+        submit.assert_not_awaited()
+        mock_page.keyboard.type.assert_not_awaited()
+        mock_page.keyboard.press.assert_not_awaited()
+
     async def test_rejects_contradictory_url_before_submission(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         patches = self._patch_to_composer(extractor, mock_page)
@@ -9613,11 +9658,24 @@ class TestMessageConfirmation:
         owner.as_element.return_value = owner
         mock_page.evaluate_handle = AsyncMock(return_value=owner)
 
-        assert await extractor._resolve_message_owner(target) is owner
+        expected_route = "https://www.linkedin.com/messaging/thread/ALICE/"
+
+        assert (
+            await extractor._resolve_message_owner(
+                target, expected_route=expected_route
+            )
+            is owner
+        )
 
         mock_page.evaluate_handle.assert_awaited_once_with(
             _MESSAGE_COMPOSER_OWNER_JS,
-            arg={"profilePath": target.profile_path, "profileUrn": target.profile_urn},
+            arg={
+                "target": {
+                    "profilePath": target.profile_path,
+                    "profileUrn": target.profile_urn,
+                },
+                "expectedRoute": expected_route,
+            },
         )
 
     async def test_invalid_owner_handle_is_released(self, mock_page):
@@ -9627,7 +9685,13 @@ class TestMessageConfirmation:
         owner.dispose = AsyncMock()
         mock_page.evaluate_handle = AsyncMock(return_value=owner)
 
-        assert await extractor._resolve_message_owner(target) is None
+        assert (
+            await extractor._resolve_message_owner(
+                target,
+                expected_route="https://www.linkedin.com/messaging/thread/ALICE/",
+            )
+            is None
+        )
         owner.dispose.assert_awaited_once_with()
 
     async def test_owner_disposal_error_is_suppressed(self, mock_page):

@@ -254,7 +254,9 @@ class TestMessageComposerDom:
             ),
         )
         extractor = LinkedInExtractor(dom_page)
-        owner = await extractor._resolve_message_owner(_message_target())
+        owner = await extractor._resolve_message_owner(
+            _message_target(), expected_route=dom_page.url
+        )
 
         assert owner is not None
         assert owner.as_element() is not None
@@ -307,7 +309,9 @@ class TestMessageComposerDom:
         )
         extractor = LinkedInExtractor(dom_page)
 
-        owner = await extractor._resolve_message_owner(_message_target())
+        owner = await extractor._resolve_message_owner(
+            _message_target(), expected_route=dom_page.url
+        )
         assert owner is not None
         assert (
             await extractor._write_verified_message(
@@ -332,7 +336,9 @@ class TestMessageComposerDom:
         )
         extractor = LinkedInExtractor(dom_page)
 
-        owner = await extractor._resolve_message_owner(_message_target())
+        owner = await extractor._resolve_message_owner(
+            _message_target(), expected_route=dom_page.url
+        )
         assert owner is not None
         assert (
             await extractor._write_verified_message(
@@ -411,7 +417,9 @@ class TestMessageComposerDom:
         )
 
         extractor = LinkedInExtractor(dom_page)
-        owner = await extractor._resolve_message_owner(_message_target())
+        owner = await extractor._resolve_message_owner(
+            _message_target(), expected_route=dom_page.url
+        )
         assert owner is not None
         written = await extractor._write_verified_message(
             "Hello!", target=_message_target(), owner=owner
@@ -460,7 +468,9 @@ class TestMessageComposerDom:
             </body></html>""",
         )
         extractor = LinkedInExtractor(dom_page)
-        owner = await extractor._resolve_message_owner(_message_target())
+        owner = await extractor._resolve_message_owner(
+            _message_target(), expected_route=dom_page.url
+        )
         written = submitted = None
         if owner is not None:
             written = await extractor._write_verified_message(
@@ -630,7 +640,9 @@ class TestMessageComposerDom:
         )
 
         extractor = LinkedInExtractor(dom_page)
-        owner = await extractor._resolve_message_owner(_message_target())
+        owner = await extractor._resolve_message_owner(
+            _message_target(), expected_route=dom_page.url
+        )
         assert owner is not None
         written = await extractor._write_verified_message(
             "Hello!", target=_message_target(), owner=owner
@@ -662,7 +674,9 @@ class TestMessageComposerDom:
         )
 
         assert (
-            await LinkedInExtractor(dom_page)._resolve_message_owner(_message_target())
+            await LinkedInExtractor(dom_page)._resolve_message_owner(
+                _message_target(), expected_route=dom_page.url
+            )
             is None
         )
 
@@ -679,7 +693,9 @@ class TestMessageComposerDom:
         )
         extractor = LinkedInExtractor(dom_page)
 
-        owner = await extractor._resolve_message_owner(_message_target())
+        owner = await extractor._resolve_message_owner(
+            _message_target(), expected_route=dom_page.url
+        )
 
         assert owner is not None
         assert (
@@ -705,7 +721,9 @@ class TestMessageComposerDom:
             _composer(identity=identity, buttons='<button type="submit">Send</button>'),
         )
         extractor = LinkedInExtractor(dom_page)
-        owner = await extractor._resolve_message_owner(_message_target())
+        owner = await extractor._resolve_message_owner(
+            _message_target(), expected_route=dom_page.url
+        )
         assert owner is not None
         assert (
             await extractor._write_verified_message(
@@ -726,7 +744,9 @@ class TestMessageComposerDom:
             dom_page,
             _composer(identity=identity, buttons='<button type="submit">Send</button>'),
         )
-        owner = await extractor._resolve_message_owner(_message_target())
+        owner = await extractor._resolve_message_owner(
+            _message_target(), expected_route=dom_page.url
+        )
         assert owner is not None
         assert (
             await extractor._write_verified_message(
@@ -751,7 +771,9 @@ class TestMessageComposerDom:
             _composer(identity="", buttons='<button type="submit">Send</button>')
         )
         extractor = LinkedInExtractor(dom_page)
-        owner = await extractor._resolve_message_owner(_message_target())
+        owner = await extractor._resolve_message_owner(
+            _message_target(), expected_route=dom_page.url
+        )
 
         assert owner is not None
         assert (
@@ -790,7 +812,9 @@ class TestMessageComposerDom:
         await dom_page.locator("#foreign").focus()
 
         assert (
-            await LinkedInExtractor(dom_page)._resolve_message_owner(_message_target())
+            await LinkedInExtractor(dom_page)._resolve_message_owner(
+                _message_target(), expected_route=dom_page.url
+            )
             is None
         )
         assert await dom_page.evaluate("document.body.dataset.foreignKey") is None
