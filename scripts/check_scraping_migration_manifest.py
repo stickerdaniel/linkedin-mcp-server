@@ -34,6 +34,7 @@ PERMANENT_ALIASES = {
 }
 
 _PRIVATE_OWNERS: dict[str, tuple[str, int]] = {
+    "_message_action_result": ("contracts.message_action_result", 1),
     "_navigate_to_page": ("navigation.PageNavigator", 3),
     "_raise_if_auth_barrier": ("navigation.PageNavigator", 3),
     "_log_navigation_failure": ("navigation.PageNavigator", 3),
@@ -67,14 +68,24 @@ _PRIVATE_OWNERS: dict[str, tuple[str, int]] = {
     "_resolve_conversation_thread_urls": ("conversations.ConversationReader", 11),
     "_open_conversation_by_username": ("conversations.ConversationReader", 11),
     "_read_profile_display_name": ("profile_page.ProfilePageReader", 6),
+    "_read_profile_message_target": ("message_sender.MessageSender", 12),
     "_resolve_message_compose_href": ("message_sender.MessageSender", 12),
     "_wait_for_message_surface": ("message_sender.MessageSender", 12),
-    "_select_message_recipient": ("message_sender.MessageSender", 12),
+    "_wait_for_message_composer": ("message_sender.MessageSender", 12),
     "_resolve_message_compose_box": ("message_sender.MessageSender", 12),
-    "_compose_page_matches_recipient": ("message_sender.MessageSender", 12),
-    "_message_text_occurrences": ("message_sender.MessageSender", 12),
-    "_message_text_visible": ("message_sender.MessageSender", 12),
-    "_dismiss_message_ui": ("message_sender.MessageSender", 12),
+    "_message_target_argument": ("message_sender.MessageSender", 12),
+    "_read_message_composer_state": ("message_sender.MessageSender", 12),
+    "_focus_verified_message_editor": ("message_sender.MessageSender", 12),
+    "_write_verified_message": ("message_sender.MessageSender", 12),
+    "_wait_for_verified_submit": ("message_sender.MessageSender", 12),
+    "_submit_verified_message": ("message_sender.MessageSender", 12),
+    "_cleanup_owned_message": ("message_sender.MessageSender", 12),
+    "_resolve_message_owner": ("message_sender.MessageSender", 12),
+    "_dispose_message_owner": ("message_sender.MessageSender", 12),
+    "_message_confirmation_argument": ("message_sender.MessageSender", 12),
+    "_prepare_message_confirmation": ("message_sender.MessageSender", 12),
+    "_message_send_confirmed": ("message_sender.MessageSender", 12),
+    "_dispose_message_confirmation": ("message_sender.MessageSender", 12),
     "_drain_listener_tasks": ("feed.FeedScraper", 5),
     "_build_feed_references": ("feed_payload.build_feed_references", 1),
     "_truncate_linkedin_noise": ("text.truncate_linkedin_noise", 1),
@@ -108,9 +119,27 @@ _IMPORT_OWNERS = {
     "_ACTION_SIGNALS_JS": ("connection_actions.ACTION_SIGNALS_JS", 7),
     "_CLICK_INCOMING_ACCEPT_JS": ("connection_actions.CLICK_INCOMING_ACCEPT_JS", 7),
     "_JOB_IDS_JS": ("job_pages.JOB_IDS_JS", 9),
-    "_MESSAGE_OCCURRENCES_JS": ("message_sender.MESSAGE_OCCURRENCES_JS", 12),
-    "_MESSAGE_OCCURRENCES_INCREASED_JS": (
-        "message_sender.MESSAGE_OCCURRENCES_INCREASED_JS",
+    "SEND_INTERRUPTED_WARNING": ("contracts.SEND_INTERRUPTED_WARNING", 1),
+    "refuse_an_invalid_message": ("contracts.refuse_an_invalid_message", 1),
+    "_drain_listener_tasks": ("feed.FeedScraper._drain_listener_tasks", 5),
+    "_PROFILE_MESSAGE_TARGET_JS": ("message_sender.PROFILE_MESSAGE_TARGET_JS", 12),
+    "_MESSAGE_COMPOSER_STATE_JS": ("message_sender.MESSAGE_COMPOSER_STATE_JS", 12),
+    "_MESSAGE_COMPOSER_OWNER_JS": ("message_sender.MESSAGE_COMPOSER_OWNER_JS", 12),
+    "_MESSAGE_CONFIRMATION_PREPARE_JS": (
+        "message_sender.MESSAGE_CONFIRMATION_PREPARE_JS",
+        12,
+    ),
+    "_MESSAGE_CONFIRMATION_READY_JS": (
+        "message_sender.MESSAGE_CONFIRMATION_READY_JS",
+        12,
+    ),
+    "_MESSAGE_CONFIRMATION_DISPOSE_JS": (
+        "message_sender.MESSAGE_CONFIRMATION_DISPOSE_JS",
+        12,
+    ),
+    "_ProfileMessageTarget": ("message_sender.ProfileMessageTarget", 12),
+    "_ProfileMessageTargetResolution": (
+        "message_sender.ProfileMessageTargetResolution",
         12,
     ),
 }
@@ -118,15 +147,19 @@ _IMPORT_OWNERS = {
 _MODULE_ATTRIBUTE_OWNERS = {
     "_URL_SETTLE_LAG": ("navigation.PageNavigator.URL_SETTLE_LAG", 3),
     "_URL_SETTLE_QUIET": ("navigation.PageNavigator.URL_SETTLE_QUIET", 3),
-    "_MESSAGING_CLOSE_SELECTOR": ("message_sender.MESSAGE_CLOSE_SELECTOR", 12),
-    "_MESSAGING_COMPOSE_FALLBACK_SELECTORS": (
-        "message_sender.MESSAGE_COMPOSE_FALLBACK_SELECTORS",
+    "_MESSAGING_COMPOSE_SELECTOR": ("message_sender.MESSAGE_COMPOSE_SELECTOR", 12),
+    "_PROFILE_MESSAGE_TARGET_JS": ("message_sender.PROFILE_MESSAGE_TARGET_JS", 12),
+    "_ProfileMessageTarget": ("message_sender.ProfileMessageTarget", 12),
+    "_ProfileMessageTargetResolution": (
+        "message_sender.ProfileMessageTargetResolution",
         12,
     ),
-    "_MESSAGING_RECIPIENT_PICKER_SELECTOR": (
-        "message_sender.MESSAGE_RECIPIENT_PICKER_SELECTOR",
+    "_profile_urn_from_compose_url": (
+        "message_sender.profile_urn_from_compose_url",
         12,
     ),
+    "_profile_path_from_url": ("message_sender.profile_path_from_url", 12),
+    "_message_page_url_is_safe": ("message_sender.message_page_url_is_safe", 12),
 }
 
 _WORKFLOW_OWNERS: dict[str, tuple[str, int]] = {
@@ -166,7 +199,7 @@ _WORKFLOW_OWNERS: dict[str, tuple[str, int]] = {
 # helper/function rename becomes an unresolved seam instead of silently
 # changing its migration stage.
 _EXPLICIT_INSTANCE_BINDINGS = {
-    ("tests/test_scraping.py", "_patch_send_message_to_compose"): ("extractor",),
+    ("tests/test_scraping.py", "_patch_to_composer"): ("extractor",),
 }
 
 _EXPLICIT_CALLER_CONTEXTS: dict[tuple[str, str, str], tuple[str, ...]] = {
@@ -272,7 +305,7 @@ _EXPLICIT_CALLER_CONTEXTS: dict[tuple[str, str, str], tuple[str, ...]] = {
     ),
     (
         "tests/test_scraping.py",
-        "_patch_send_message_to_compose",
+        "_patch_to_composer",
         "*",
     ): ("send_message",),
 }
@@ -751,9 +784,11 @@ class Scanner(ast.NodeVisitor):
         if owner is not None:
             self._add_contextual("string_patch", node, value, owner)
             return
-        private = _PRIVATE_OWNERS.get(target)
-        if private is not None:
-            self._add("string_patch", node, value, *private)
+        owner_stage = _PRIVATE_OWNERS.get(target) or _MODULE_ATTRIBUTE_OWNERS.get(
+            target
+        )
+        if owner_stage is not None:
+            self._add("string_patch", node, value, *owner_stage)
             return
         self._error(node, value, "unknown string patch target")
 
@@ -898,7 +933,7 @@ def scan() -> dict[str, Any]:
     )
     return {
         "schema_version": 2,
-        "extractor_parent": "c5e5e5a6b142e910374b7b26558addfd49ed7f84",
+        "extractor_parent": "70e50ada68b9389f8d315df6ab1e56c08f6c985b",
         "seams": [asdict(seam) for seam in seams],
     }
 

@@ -31,6 +31,16 @@ def test_recorder_and_page_fail_fast_on_undeclared_operations():
         asyncio.run(page.evaluate("() => window.unknownPolicySurface"))
 
 
+def test_page_rejects_unused_required_script_outcomes():
+    recorder = TraceRecorder("unused-script", {"evaluate"})
+    page = ScriptedPage(recorder).script(
+        "evaluate:root_content", {"source": "root", "text": "unused"}
+    )
+
+    with pytest.raises(AssertionError, match="scripted outcomes unused"):
+        page.assert_clean()
+
+
 def test_listener_removal_requires_the_registered_callback_identity():
     recorder = TraceRecorder("listener-identity", {"listener.add", "listener.remove"})
     page = ScriptedPage(recorder)
@@ -96,8 +106,6 @@ async def test_listener_drain_waits_two_seconds_then_cancels_with_one_second_cap
     monkeypatch,
 ):
     waits: list[float | None] = []
-    wait_for_timeouts: list[float | None] = []
-    real_wait_for = asyncio.wait_for
 
     async def blocked() -> None:
         await asyncio.Event().wait()
@@ -110,18 +118,12 @@ async def test_listener_drain_waits_two_seconds_then_cancels_with_one_second_cap
         waits.append(timeout)
         return set(), set(pending)
 
-    async def wait_for(value: Any, timeout: float | None = None) -> Any:
-        wait_for_timeouts.append(timeout)
-        return await real_wait_for(value, timeout=timeout)
-
     monkeypatch.setattr(extractor_module.asyncio, "wait", wait)
-    monkeypatch.setattr(extractor_module.asyncio, "wait_for", wait_for)
 
     await extractor_module._drain_listener_tasks([task])
 
     assert task.cancelled()
-    assert waits == [2.0]
-    assert wait_for_timeouts == [1.0]
+    assert waits == [2.0, 1.0]
 
 
 async def test_listener_drain_logs_an_uncooperative_task(monkeypatch, caplog):
@@ -136,28 +138,19 @@ async def test_listener_drain_logs_an_uncooperative_task(monkeypatch, caplog):
 
     task = PendingTask()
 
+    waits: list[float | None] = []
+
     async def wait(
         _pending: Any, *, timeout: float | None = None
     ) -> tuple[set[Any], set[Any]]:
-        assert timeout == 2.0
+        waits.append(timeout)
         return set(), {task}
 
-    def gather(*pending: Any, return_exceptions: bool = False) -> object:
-        assert pending == (task,)
-        assert return_exceptions is True
-        return object()
-
-    async def wait_for(value: Any, timeout: float | None = None) -> None:
-        assert value is not None
-        assert timeout == 1.0
-        raise asyncio.TimeoutError
-
     monkeypatch.setattr(extractor_module.asyncio, "wait", wait)
-    monkeypatch.setattr(extractor_module.asyncio, "gather", gather)
-    monkeypatch.setattr(extractor_module.asyncio, "wait_for", wait_for)
 
     with caplog.at_level(logging.WARNING):
         await extractor_module._drain_listener_tasks([cast(asyncio.Task[None], task)])
 
     assert task.cancelled is True
+    assert waits == [2.0, 1.0]
     assert "leaking 1 task(s)" in caplog.text

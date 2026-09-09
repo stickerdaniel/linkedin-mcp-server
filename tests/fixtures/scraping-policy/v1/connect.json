@@ -103,10 +103,19 @@
       "section": "main_profile"
     },
     {
+      "arg": null,
+      "call": "connect_with_person",
+      "kind": "wait_for_function",
+      "operation": "profile_message_target_ready",
+      "program_digest": "96d99936369a",
+      "section": "main_profile",
+      "timeout_ms": 1000
+    },
+    {
       "call": "connect_with_person",
       "kind": "evaluate",
-      "operation": "profile_urn",
-      "program_digest": "adf1074697a7",
+      "operation": "profile_message_target",
+      "program_digest": "33b2fb160e45",
       "section": "main_profile"
     },
     {

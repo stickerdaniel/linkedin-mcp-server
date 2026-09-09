@@ -3,19 +3,19 @@
     "arguments": {
       "confirm_send": true,
       "linkedin_username": "ada-lovelace",
-      "message_case": "blank"
+      "message_case": "c0"
     },
     "method": "send_message"
   },
   "events": [],
   "result": {
-    "message": "Message must contain non-whitespace characters.",
+    "message": "Message must not contain control characters or line breaks.",
     "recipient_selected": false,
     "retry_safe": true,
     "sent": false,
     "status": "invalid_message",
     "url": "https://www.linkedin.com/in/ada-lovelace/"
   },
-  "scenario": "send_message__invalid_blank",
+  "scenario": "send_message__invalid_c0",
   "schema_version": 1
 }

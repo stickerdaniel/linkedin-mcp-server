@@ -110,10 +110,18 @@
       "program_digest": "e8a0e21ac6f5"
     },
     {
+      "arg": null,
+      "call": "scrape_person",
+      "kind": "wait_for_function",
+      "operation": "profile_message_target_ready",
+      "program_digest": "96d99936369a",
+      "timeout_ms": 1000
+    },
+    {
       "call": "scrape_person",
       "kind": "evaluate",
-      "operation": "profile_urn",
-      "program_digest": "adf1074697a7"
+      "operation": "profile_message_target",
+      "program_digest": "33b2fb160e45"
     },
     {
       "call": "scrape_person",

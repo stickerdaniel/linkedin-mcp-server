@@ -19,6 +19,19 @@ _MISSING = object()
 _REAL_ASYNCIO_SLEEP = asyncio.sleep
 
 
+def trace_value(value: Any) -> Any:
+    """Replace strict-fake object identities with portable semantic references."""
+
+    reference = getattr(value, "trace_reference", None)
+    if reference is not None:
+        return reference
+    if isinstance(value, dict):
+        return {key: trace_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [trace_value(item) for item in value]
+    return value
+
+
 class TraceRecorder:
     """Record declared semantic operations and reject every unknown operation."""
 
@@ -58,7 +71,7 @@ class TraceRecorder:
             event["call"] = self._call
         if self._section is not None:
             event["section"] = self._section
-        event.update(values)
+        event.update({key: trace_value(value) for key, value in values.items()})
         self.events.append(event)
 
     def trace(self, call: dict[str, Any], result: Any = None) -> dict[str, Any]:
@@ -90,6 +103,9 @@ class FakeClock:
         return self.now
 
     async def sleep(self, seconds: float) -> None:
+        if seconds == 0:
+            await _REAL_ASYNCIO_SLEEP(0)
+            return
         self.recorder.record("sleep", reason=self.reason, seconds=seconds)
         self.now += seconds
         await _REAL_ASYNCIO_SLEEP(0)
@@ -217,6 +233,60 @@ class _Keyboard:
         self.page._take("keyboard.type", default=None)
 
 
+class ScriptedHandle:
+    """A strict owner handle that keeps browser-node identity across operations."""
+
+    def __init__(
+        self,
+        page: ScriptedPage,
+        semantic_id: str,
+        *,
+        is_element: bool,
+    ):
+        self.page = page
+        self.semantic_id = semantic_id
+        self.is_element = is_element
+        self.disposed = False
+
+    @property
+    def trace_reference(self) -> dict[str, str]:
+        return {"handle": self.semantic_id}
+
+    def _assert_live(self) -> None:
+        if self.disposed:
+            raise AssertionError(
+                f"{self.page.recorder.scenario}: handle {self.semantic_id!r} was disposed"
+            )
+
+    def as_element(self) -> ScriptedHandle | None:
+        self._assert_live()
+        self.page.recorder.record(
+            "handle.as_element",
+            handle=self.semantic_id,
+            present=self.is_element,
+        )
+        return self if self.is_element else None
+
+    async def evaluate(self, expression: str, arg: Any = _MISSING) -> Any:
+        self._assert_live()
+        operation = semantic_program_id(expression)
+        values: dict[str, Any] = {
+            "handle": self.semantic_id,
+            "operation": operation,
+            "program_digest": program_digest(expression),
+        }
+        if arg is not _MISSING:
+            values["arg"] = arg
+        self.page.recorder.record("handle.evaluate", **values)
+        return self.page._take(f"{self.semantic_id}.evaluate:{operation}")
+
+    async def dispose(self) -> None:
+        self._assert_live()
+        self.page.recorder.record("handle.dispose", handle=self.semantic_id)
+        self.page._take(f"{self.semantic_id}.dispose", default=None)
+        self.disposed = True
+
+
 class ScriptedPage:
     """Strict Page subset with semantic JavaScript dispatch and exact listeners."""
 
@@ -239,6 +309,7 @@ class ScriptedPage:
         self.derived_ids: dict[tuple[str, str], str] = {}
         self.listeners: dict[str, list[Callable[..., Any]]] = defaultdict(list)
         self.goto_landings: deque[str] = deque()
+        self.handles: list[ScriptedHandle] = []
 
     def script(self, operation: str, *values: Any) -> ScriptedPage:
         self.scripts[operation] = Script(values)
@@ -397,6 +468,30 @@ class ScriptedPage:
             return self.time_origin
         return self._take(f"evaluate:{operation}")
 
+    async def evaluate_handle(
+        self, expression: str, *, arg: Any = _MISSING
+    ) -> ScriptedHandle:
+        operation = semantic_program_id(expression)
+        values: dict[str, Any] = {
+            "operation": operation,
+            "program_digest": program_digest(expression),
+        }
+        if arg is not _MISSING:
+            values["arg"] = arg
+        self.recorder.record("evaluate_handle", **values)
+        is_element = self._take(f"evaluate_handle:{operation}")
+        if not isinstance(is_element, bool):
+            raise AssertionError(
+                f"{self.recorder.scenario}: evaluate_handle outcome must be bool"
+            )
+        handle = ScriptedHandle(
+            self,
+            f"handle-{len(self.handles) + 1}",
+            is_element=is_element,
+        )
+        self.handles.append(handle)
+        return handle
+
     def emit(self, event: str, value: Any) -> None:
         callbacks = tuple(self.listeners[event])
         if not callbacks:
@@ -412,6 +507,20 @@ class ScriptedPage:
             name: len(values) for name, values in self.listeners.items() if values
         }
         assert not remaining, f"{self.recorder.scenario}: listeners remain: {remaining}"
+        unused = {
+            name: len(script.values)
+            for name, script in self.scripts.items()
+            if script.values
+        }
+        assert not unused, (
+            f"{self.recorder.scenario}: scripted outcomes unused: {unused}"
+        )
+        live_handles = [
+            handle.semantic_id for handle in self.handles if not handle.disposed
+        ]
+        assert not live_handles, (
+            f"{self.recorder.scenario}: browser handles remain: {live_handles}"
+        )
         self.recorder.assert_no_pending_reads()
 
 
@@ -496,14 +605,24 @@ def semantic_program_id(program: str) -> str:
         ("hasInvite", "connection_action_signals"),
         ("expanded === 'false'", "open_more_button"),
         ("hasIncomingActionRow", "incoming_accept"),
+        ("status === 'resolved'", "profile_message_target_ready"),
+        ("const validComposeHref", "profile_message_target"),
+        ("return inspect(target).status === 'valid'", "message_composer_ready"),
+        ("submitUsable", "message_composer_state"),
+        ("__linkedinMcpComposer =", "message_composer_owner"),
+        ("document.execCommand('insertText'", "message_composer_write"),
+        ("return pinned.button.disabled", "message_submit_ready"),
+        ("inputType: 'deleteContentBackward'", "message_composer_cleanup"),
+        ("pinned.button.click()", "message_submit"),
+        ("__linkedinMcpConfirmationCounter", "message_confirmation_prepare"),
+        ("return candidates.length === 1", "message_confirmation_ready"),
+        ("confirmations?.delete(arg.token)", "message_confirmation_dispose"),
+        ("delete owner.__linkedinMcpComposer", "message_composer_dispose"),
+        ("state.editor.focus()", "focus_message_composer"),
         ('main a[href*="/messaging/compose/"]', "profile_urn"),
         ("return {ids: ids, scoped", "job_ids"),
         ("querySelectorAll(selector)", "message_compose_href"),
         ("const heading = document.querySelector('main h1')", "profile_display_name"),
-        ("pickerInput", "select_message_recipient"),
-        ("targetValues", "compose_matches_recipient"),
-        ("el.focus()", "focus_message_composer"),
-        ('button[data-control-name="send"]', "click_send_button"),
         ("main li label[aria-label]", "conversation_thread_refs"),
         ("isScrollable", "scroll_main_region"),
         ("jobs-search-pagination__page-state", "job_total_pages"),

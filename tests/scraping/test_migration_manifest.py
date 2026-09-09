@@ -44,7 +44,7 @@ def test_manifest_matches_every_current_extractor_seam():
     current = json.loads(MANIFEST.read_text(encoding="utf-8"))
 
     assert result.returncode == 0, result.stderr
-    assert current["extractor_parent"] == ("c5e5e5a6b142e910374b7b26558addfd49ed7f84")
+    assert current["extractor_parent"] == ("70e50ada68b9389f8d315df6ab1e56c08f6c985b")
     assert current["seams"]
     assert {
         "string_patch",
@@ -81,6 +81,7 @@ def test_manifest_covers_production_callers_not_only_tests():
     assert production == {
         "linkedin_mcp_server/tools/company.py",
         "linkedin_mcp_server/tools/feed.py",
+        "linkedin_mcp_server/tools/messaging.py",
         "linkedin_mcp_server/tools/person.py",
         "linkedin_mcp_server/tools/post.py",
     }
@@ -88,7 +89,78 @@ def test_manifest_covers_production_callers_not_only_tests():
         seam["target"]
         for seam in current["seams"]
         if seam["path"].startswith("linkedin_mcp_server/")
-    } == {"_RATE_LIMITED_MSG", "rate_limited_section_error", "FilterValidationError"}
+    } == {
+        "_RATE_LIMITED_MSG",
+        "rate_limited_section_error",
+        "FilterValidationError",
+        "SEND_INTERRUPTED_WARNING",
+        "refuse_an_invalid_message",
+    }
+
+
+def test_final_messaging_seams_have_only_the_approved_stage_owners():
+    current = migration.scan()["seams"]
+    browser_free = {
+        seam["target"]: (seam["canonical_owner"], seam["migration_stage"])
+        for seam in current
+        if seam["path"] == "linkedin_mcp_server/tools/messaging.py"
+    }
+    assert browser_free == {
+        "SEND_INTERRUPTED_WARNING": ("contracts.SEND_INTERRUPTED_WARNING", 1),
+        "refuse_an_invalid_message": ("contracts.refuse_an_invalid_message", 1),
+    }
+
+    message_paths = {
+        "tests/test_message_recipient_dom.py",
+        "tests/test_send_message_confirmation_dom.py",
+    }
+    dom_seams = [
+        seam
+        for seam in current
+        if seam["path"] in message_paths
+        and seam["target"] not in {"LinkedInExtractor", "_navigate_to_page"}
+    ]
+    assert {seam["path"] for seam in dom_seams} == message_paths
+    assert all(seam["migration_stage"] == 12 for seam in dom_seams)
+    assert all(
+        seam["canonical_owner"].startswith("message_sender.") for seam in dom_seams
+    )
+
+    private_targets = {
+        seam["target"]
+        for seam in current
+        if seam["kind"] == "private_patch_object"
+        and seam["canonical_owner"] == "message_sender.MessageSender"
+    }
+    assert {
+        "_read_profile_message_target",
+        "_wait_for_message_surface",
+        "_read_message_composer_state",
+        "_focus_verified_message_editor",
+        "_write_verified_message",
+        "_wait_for_verified_submit",
+        "_submit_verified_message",
+        "_cleanup_owned_message",
+        "_resolve_message_owner",
+        "_dispose_message_owner",
+        "_prepare_message_confirmation",
+        "_message_send_confirmed",
+        "_dispose_message_confirmation",
+    } <= private_targets
+
+    obsolete = {
+        "_MESSAGING_RECIPIENT_PICKER_SELECTOR",
+        "_MESSAGING_COMPOSE_FALLBACK_SELECTORS",
+        "_MESSAGING_CLOSE_SELECTOR",
+        "_select_message_recipient",
+        "_compose_page_matches_recipient",
+        "_message_text_occurrences",
+        "_message_text_visible",
+        "_dismiss_message_ui",
+    }
+    assert not obsolete & {seam["target"] for seam in current}
+    assert not obsolete & set(migration._PRIVATE_OWNERS)
+    assert not obsolete & set(migration._MODULE_ATTRIBUTE_OWNERS)
 
 
 def test_module_boundary_patches_follow_their_callers():
@@ -337,9 +409,13 @@ async def boundaries(tasks):
     real_drain = legacy_surface._drain_listener_tasks
     real_scroll_body = legacy_surface.scroll_to_bottom
     real_scroll_sidebar = legacy_surface.scroll_job_sidebar
-    recipient_selector = legacy_surface._MESSAGING_RECIPIENT_PICKER_SELECTOR
-    compose_selectors = legacy_surface._MESSAGING_COMPOSE_FALLBACK_SELECTORS
-    close_selector = legacy_surface._MESSAGING_CLOSE_SELECTOR
+    compose_selector = legacy_surface._MESSAGING_COMPOSE_SELECTOR
+    target_program = legacy_surface._PROFILE_MESSAGE_TARGET_JS
+    target_type = legacy_surface._ProfileMessageTarget
+    resolution_type = legacy_surface._ProfileMessageTargetResolution
+    profile_urn = legacy_surface._profile_urn_from_compose_url
+    profile_path = legacy_surface._profile_path_from_url
+    safe_route = legacy_surface._message_page_url_is_safe
     settle_lag = legacy_surface._URL_SETTLE_LAG
     settle_quiet = legacy_surface._URL_SETTLE_QUIET
     await real_drain(tasks)
@@ -365,17 +441,19 @@ async def boundaries(tasks):
     assert {seam.canonical_owner for seam in matching("_URL_SETTLE_QUIET")} == {
         "navigation.PageNavigator.URL_SETTLE_QUIET"
     }
-    assert {
-        seam.migration_stage
-        for seam in matching("_MESSAGING_RECIPIENT_PICKER_SELECTOR")
-    } == {12}
-    assert {
-        seam.migration_stage
-        for seam in matching("_MESSAGING_COMPOSE_FALLBACK_SELECTORS")
-    } == {12}
-    assert {seam.migration_stage for seam in matching("_MESSAGING_CLOSE_SELECTOR")} == {
-        12
+    messaging_targets = {
+        "_MESSAGING_COMPOSE_SELECTOR",
+        "_PROFILE_MESSAGE_TARGET_JS",
+        "_ProfileMessageTarget",
+        "_ProfileMessageTargetResolution",
+        "_profile_urn_from_compose_url",
+        "_profile_path_from_url",
+        "_message_page_url_is_safe",
     }
+    assert all(
+        {seam.migration_stage for seam in matching(target)} == {12}
+        for target in messaging_targets
+    )
 
 
 def test_direct_private_helper_calls_and_stage_gate_are_inventoried():
@@ -390,8 +468,18 @@ def test_direct_private_helper_calls_and_stage_gate_are_inventoried():
     assert {seam["path"] for seam in drains} == {
         "tests/scraping/policy_scenarios.py",
         "tests/scraping/test_policy_trace_support.py",
+        "tests/test_scraping.py",
     }
     assert all(seam["migration_stage"] == 5 for seam in drains)
+    direct_drains = [
+        seam
+        for seam in current["seams"]
+        if seam["kind"] == "direct_import" and seam["target"] == "_drain_listener_tasks"
+    ]
+    assert {
+        (seam["path"], seam["canonical_owner"], seam["migration_stage"])
+        for seam in direct_drains
+    } == {("tests/test_tools.py", "feed.FeedScraper._drain_listener_tasks", 5)}
 
     result = subprocess.run(
         [sys.executable, str(CHECKER), "--check", "--stage", "5"],

@@ -135,15 +135,53 @@ def test_canonical_fixtures_are_portable_deterministic_json():
         assert '"seq"' not in decoded
 
 
+async def test_baseline_provenance_is_generated_from_the_final_production_parent():
+    provenance = (await build_policy_traces())["baseline-provenance.json"]["result"]
+
+    assert provenance["production_baseline"] == policy_scenarios.PRODUCTION_BASELINE
+    assert provenance["python_version"] == "3.13"
+    assert len(provenance["uv_lock_sha256"]) == 64
+    assert provenance["resolved_dependencies"]["fastmcp"] == ["3.4.4"]
+    assert provenance["resolved_dependencies"]["patchright"] == ["1.61.2"]
+    assert provenance["extractor_inventory"] == {
+        "line_count": 6436,
+        "method_count": 86,
+        "public_coroutine_count": 20,
+        "public_coroutines": sorted(
+            TOOL_FACADE_METHODS | {"get_page_text", "click_button_by_text"}
+        ),
+        "mutable_instance_attributes": ["_page", "_scroll_seconds"],
+    }
+
+
 async def test_trace_set_exercises_every_tool_facing_facade_method():
     traces = await build_policy_traces()
     called = {
         trace["call"]["method"]
         for trace in traces.values()
-        if trace["call"]["method"] != "LinkedInExtractor"
+        if trace["call"]["method"] in TOOL_FACADE_METHODS
     }
 
     assert called == TOOL_FACADE_METHODS
+
+
+async def test_tool_schema_trace_keeps_people_boundary_coercion_and_inventory():
+    schemas = (await build_policy_traces())["facade-contract.json"]["result"][
+        "tool_schemas"
+    ]
+
+    assert len(schemas) == 19
+    network = schemas["search_people"]["input"]["properties"]["network"]
+    assert network["anyOf"] == [
+        {"items": {"type": "string"}, "type": "array"},
+        {"type": "null"},
+    ]
+    assert 'comma-separated string ("F,S") is also' in network["description"]
+    assert schemas["send_message"]["input"]["required"] == [
+        "linkedin_username",
+        "message",
+        "confirm_send",
+    ]
 
 
 async def test_facade_results_keep_raw_values_and_optional_key_shape():
@@ -287,160 +325,144 @@ async def test_job_reference_caps_fallbacks_and_stopping_page_upgrade():
 async def test_saved_jobs_and_write_gate_keep_their_caps_and_ordering():
     traces = await build_policy_traces()
     saved = traces["saved-jobs.json"]
-    confirmation = traces["message-confirmation.json"]
-    sent = traces["message-append.json"]
+    dry_run = traces["message-dry-run.json"]
 
     assert len(saved["result"]["job_ids"]) == 20
     assert saved["result"]["reference_count"] == 15
     assert saved["result"]["references"]["saved_jobs"][0]["text"] == (
         "Senior policy engineer with richer duplicate metadata"
     )
-    assert not any(e["kind"] == "keyboard.type" for e in confirmation["events"])
-    assert confirmation["result"]["status"] == "confirmation_required"
-
-    type_index = next(
-        index
-        for index, event in enumerate(sent["events"])
-        if event["kind"] == "keyboard.type"
+    assert dry_run["result"]["status"] == "confirmation_required"
+    assert dry_run["result"]["recipient_selected"] is True
+    assert not any(
+        event["kind"] in {"evaluate_handle", "handle.evaluate"}
+        for event in dry_run["events"]
     )
-    send_index = next(
-        index
-        for index, event in enumerate(sent["events"])
-        if event.get("operation") == "click_send_button"
-    )
-    assert type_index < send_index
-    typed = next(e for e in sent["events"] if e["kind"] == "keyboard.type")
-    assert typed["text"] == "New text"
-    assert sent["result"]["status"] == "sent"
 
 
-async def test_message_delivery_evidence_is_ordered_and_gated():
+async def test_message_target_resolution_distinguishes_handoff_from_failure():
     traces = await build_policy_traces()
-    sent = traces["message-append.json"]
-    unconfirmed = traces["message-send-unavailable.json"]
-    blank = traces["message-blank.json"]
+    unavailable = traces["message-target-unavailable.json"]
+    unresolved = traces["message-target-unresolved.json"]
 
-    # Delivery is proven by a count that grew, so the baseline has to be taken
-    # after the text is in the composer and before anything tries to send it.
-    positions = _operation_positions(sent)
-    assert positions.get("message_occurrences"), "no baseline occurrence count"
-    assert (
-        positions["keyboard.type"][0]
-        < positions["message_occurrences"][0]
-        < positions["click_send_button"][0]
+    assert unavailable["result"]["status"] == "message_unavailable"
+    assert "connect_with_person" in unavailable["result"]["message"]
+    assert unresolved["result"]["status"] == "recipient_resolution_failed"
+    assert "connect_with_person" not in unresolved["result"]["message"]
+    assert unavailable["result"]["retry_safe"] is True
+    assert unresolved["result"]["retry_safe"] is True
+    assert all(
+        not any(event["kind"] == "evaluate_handle" for event in trace["events"])
+        for trace in (unavailable, unresolved)
     )
-    confirmations = [
+
+
+async def test_message_occupied_drafts_are_never_submitted_or_mutated():
+    traces = await build_policy_traces()
+    existing = traces["message-composer-occupied.json"]
+    restored = traces["message-composer-restored.json"]
+
+    assert existing["result"]["status"] == "composer_occupied"
+    assert restored["result"]["status"] == "composer_occupied"
+    assert all(trace["result"]["retry_safe"] is True for trace in (existing, restored))
+    assert not any(event["kind"] == "evaluate_handle" for event in existing["events"])
+    restored_operations = _operation_positions(restored)
+    assert restored_operations["message_composer_write"]
+    assert restored_operations["message_composer_cleanup"]
+    assert "message_submit" not in restored_operations
+    assert "message_confirmation_prepare" not in restored_operations
+
+
+async def test_message_pins_owner_route_and_submit_before_same_node_evidence():
+    sent = (await build_policy_traces())["message-sent.json"]
+    positions = _operation_positions(sent)
+
+    assert sent["result"]["status"] == "sent"
+    assert sent["result"]["sent"] is True
+    assert sent["result"]["retry_safe"] is False
+    assert (
+        positions["message_composer_owner"][0]
+        < positions["message_composer_write"][0]
+        < positions["message_submit_ready"][0]
+        < positions["message_confirmation_prepare"][0]
+        < positions["message_submit"][0]
+        < positions["message_confirmation_ready"][0]
+        < positions["message_confirmation_dispose"][0]
+        < positions["message_composer_dispose"][0]
+    )
+    readiness = [
         event
         for event in sent["events"]
-        if event.get("operation") == "message_occurrences_increased"
+        if event.get("operation") == "message_submit_ready"
     ]
-    assert [event["kind"] for event in confirmations] == ["wait_for_function"]
-    assert confirmations[0]["arg"] == {"expected": "New text", "previous": 0}
-
-    # An unconfirmed send reports failure and closes the draft it opened,
-    # rather than leaving the composer standing with unsent text in it.
-    assert unconfirmed["result"]["status"] == "send_unavailable"
-    assert unconfirmed["result"]["sent"] is False
-    unconfirmed_positions = _operation_positions(unconfirmed)
-    assert unconfirmed_positions.get("keyboard.type"), "no send was ever attempted"
-    dismissals = [
-        index
-        for index, event in enumerate(unconfirmed["events"])
-        if event["kind"] == "locator.click"
-        and event["locator"] == "message_close.first"
-    ]
-    assert len(dismissals) == 1, "the failed draft was not dismissed"
-    assert unconfirmed_positions["message_occurrences_increased"][0] < dismissals[0]
-
-    # The blank-message guard returns before the browser is touched at all.
-    assert blank["result"]["status"] == "message_unavailable"
-    assert blank["result"]["sent"] is False
-    assert not any(e["kind"] == "navigate" for e in blank["events"])
-    assert blank["events"] == []
-
-
-async def test_message_recipient_picker_selects_before_confirmation_gate():
-    selected = await policy_scenarios._recipient_picker_scenario(
-        recipient_selected=True
+    assert len(readiness) == 2
+    owner = next(
+        event for event in sent["events"] if event["kind"] == "evaluate_handle"
     )
-    failed = await policy_scenarios._recipient_picker_scenario(recipient_selected=False)
-
-    positions = _operation_positions(selected)
-    picker_wait = next(
-        index
-        for index, event in enumerate(selected["events"])
-        if event["kind"] == "locator.wait_for"
-        and event["locator"] == "recipient_picker.first"
+    assert owner["arg"] == {
+        "expectedRoute": policy_scenarios._MESSAGE_ROUTE,
+        "target": policy_scenarios._MESSAGE_TARGET,
+    }
+    confirmation = next(
+        event
+        for event in sent["events"]
+        if event.get("operation") == "message_confirmation_ready"
     )
-    composer_counts = [
-        index
-        for index, event in enumerate(selected["events"])
-        if event["kind"] == "locator.count" and event["locator"] == "composer.0"
-    ]
+    assert confirmation["arg"] == {
+        **policy_scenarios._MESSAGE_TARGET,
+        "expected": "New text",
+        "owner": {"handle": "handle-1"},
+        "token": "confirmation-1",
+    }
 
-    assert len(composer_counts) == 2
+
+async def test_message_retry_safety_and_cleanup_follow_dispatch_boundary():
+    traces = await build_policy_traces()
+    pre_submit = traces["message-pre-submit-cleanup.json"]
+    rejected = traces["message-submit-rejected.json"]
+    interrupted = traces["message-submit-interrupted.json"]
+    unconfirmed = traces["message-unconfirmed.json"]
+
+    for trace in (pre_submit, rejected):
+        assert trace["result"]["retry_safe"] is True
+        operations = _operation_positions(trace)
+        assert operations["message_composer_cleanup"]
+        assert operations["message_composer_dispose"]
+    assert "message_confirmation_prepare" not in _operation_positions(pre_submit)
+    assert rejected["result"]["status"] == "send_unavailable"
+
+    for trace in (interrupted, unconfirmed):
+        assert trace["result"]["status"] == "send_unconfirmed"
+        assert trace["result"]["sent"] is False
+        assert trace["result"]["retry_safe"] is False
+        operations = _operation_positions(trace)
+        assert operations["message_confirmation_dispose"]
+        assert operations["message_composer_dispose"]
+        assert "message_composer_cleanup" not in operations
+
+
+async def test_message_cancellation_propagates_after_owner_cleanup():
+    trace = (await build_policy_traces())["message-cancelled.json"]
+    positions = _operation_positions(trace)
+
+    assert trace["result"] == {"raised": "CancelledError"}
+    assert positions["message_submit"][0] < positions["message_confirmation_ready"][0]
     assert (
-        picker_wait
-        < positions["select_message_recipient"][0]
-        < composer_counts[0]
-        < composer_counts[1]
-        < positions["compose_matches_recipient"][0]
-    )
-    selection = selected["events"][positions["select_message_recipient"][0]]
-    assert selection["arg"] == {"candidates": ["Ada Lovelace", "ada-lovelace"]}
-    assert selected["result"]["status"] == "confirmation_required"
-    assert selected["result"]["recipient_selected"] is True
-    assert not any(event["kind"] == "keyboard.type" for event in selected["events"])
-
-    assert failed["result"]["status"] == "recipient_resolution_failed"
-    assert failed["result"]["recipient_selected"] is False
-    assert not any(
-        event.get("operation") == "compose_matches_recipient"
-        for event in failed["events"]
+        positions["message_confirmation_ready"][0]
+        < positions["message_confirmation_dispose"][0]
+        < positions["message_composer_dispose"][0]
+        < positions["handle.dispose"][0]
     )
 
 
-@pytest.mark.parametrize(
-    "fallback_index",
-    [
-        pytest.param(1, id="second-selector"),
-        pytest.param(2, id="third-selector"),
-    ],
-)
-async def test_message_composer_reaches_each_later_fallback(fallback_index: int):
-    trace = await policy_scenarios._messaging_compose_fallback_scenario(fallback_index)
-    expected_cycle = [f"composer.{index}" for index in range(fallback_index + 1)]
-    composer_counts = [
-        event["locator"]
-        for event in trace["events"]
-        if event["kind"] == "locator.count" and event["locator"].startswith("composer.")
-    ]
-    waits = [
-        event["locator"]
-        for event in trace["events"]
-        if event["kind"] == "locator.wait_for"
-        and event["locator"].startswith("composer.")
-    ]
-    created_selectors = [
-        event["selector"]
-        for event in trace["events"]
-        if event["kind"] == "locator.create"
-        and event["locator"].startswith("composer.")
-    ]
-
-    assert composer_counts == expected_cycle * 2
-    assert waits == [
-        f"composer.{index}.last" for _ in range(2) for index in range(fallback_index)
-    ]
-    assert created_selectors == [
-        policy_scenarios._EXPECTED_MESSAGE_COMPOSE_SELECTORS[index]
-        for _ in range(2)
-        for index in range(fallback_index + 1)
-    ]
-    assert composer_counts.count(f"composer.{fallback_index}") == 2
-    assert trace["result"]["status"] == "confirmation_required"
-    assert trace["result"]["recipient_selected"] is True
-    assert not any(event["kind"] == "keyboard.type" for event in trace["events"])
+async def test_invalid_message_guards_cover_blank_c0_and_del_before_browser():
+    traces = await build_policy_traces()
+    for name in ("message-blank.json", "message-c0.json", "message-del.json"):
+        trace = traces[name]
+        assert trace["result"]["status"] == "invalid_message"
+        assert trace["result"]["sent"] is False
+        assert trace["result"]["retry_safe"] is True
+        assert trace["events"] == []
 
 
 async def test_feed_stale_stop_and_listener_cleanup_are_bounded():

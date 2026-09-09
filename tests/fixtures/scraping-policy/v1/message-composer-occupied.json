@@ -1,10 +1,8 @@
 {
   "call": {
     "arguments": {
-      "confirm_send": false,
-      "linkedin_username": "ada-lovelace",
-      "message": "New text",
-      "profile_urn": "ACoAA-policy"
+      "composer_occupied": "existing_draft",
+      "confirm_send": true
     },
     "method": "send_message"
   },
@@ -80,16 +78,19 @@
       "timeout_ms": null
     },
     {
+      "arg": null,
       "call": "send_message",
-      "dismissed": false,
-      "kind": "boundary.modal",
-      "section": "message"
+      "kind": "wait_for_function",
+      "operation": "profile_message_target_ready",
+      "program_digest": "96d99936369a",
+      "section": "message",
+      "timeout_ms": 1000
     },
     {
       "call": "send_message",
       "kind": "evaluate",
-      "operation": "profile_display_name",
-      "program_digest": "a6e221fb7a22",
+      "operation": "profile_message_target",
+      "program_digest": "33b2fb160e45",
       "section": "message"
     },
     {
@@ -102,7 +103,7 @@
     {
       "call": "send_message",
       "extra": {
-        "target_url": "https://www.linkedin.com/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3AACoAA-policy&recipient=ACoAA-policy&screenContext=NON_SELF_PROFILE_VIEW&interop=msgOverlay",
+        "target_url": "https://www.linkedin.com/messaging/compose/?recipient=ACoAA-policy&profileUrn=urn%3Ali%3Afsd_profile%3AACoAA-policy",
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
@@ -112,15 +113,15 @@
     {
       "call": "send_message",
       "kind": "navigate",
-      "landed_url": "https://www.linkedin.com/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3AACoAA-policy&recipient=ACoAA-policy&screenContext=NON_SELF_PROFILE_VIEW&interop=msgOverlay",
-      "requested_url": "https://www.linkedin.com/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3AACoAA-policy&recipient=ACoAA-policy&screenContext=NON_SELF_PROFILE_VIEW&interop=msgOverlay",
+      "landed_url": "https://www.linkedin.com/messaging/thread/2-policy-thread==/",
+      "requested_url": "https://www.linkedin.com/messaging/compose/?recipient=ACoAA-policy&profileUrn=urn%3Ali%3Afsd_profile%3AACoAA-policy",
       "section": "message",
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
     },
     {
       "call": "send_message",
-      "description": "goto https://www.linkedin.com/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3AACoAA-policy&recipient=ACoAA-policy&screenContext=NON_SELF_PROFILE_VIEW&interop=msgOverlay",
+      "description": "goto https://www.linkedin.com/messaging/compose/?recipient=ACoAA-policy&profileUrn=urn%3Ali%3Afsd_profile%3AACoAA-policy",
       "kind": "boundary.stabilize",
       "result": null,
       "section": "message"
@@ -128,7 +129,7 @@
     {
       "call": "send_message",
       "extra": {
-        "target_url": "https://www.linkedin.com/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3AACoAA-policy&recipient=ACoAA-policy&screenContext=NON_SELF_PROFILE_VIEW&interop=msgOverlay",
+        "target_url": "https://www.linkedin.com/messaging/compose/?recipient=ACoAA-policy&profileUrn=urn%3Ali%3Afsd_profile%3AACoAA-policy",
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
@@ -163,76 +164,48 @@
       "timeout_ms": null
     },
     {
+      "arg": {
+        "profilePath": "/in/ada-lovelace/",
+        "profileUrn": "ACoAA-policy"
+      },
       "call": "send_message",
-      "dismissed": false,
-      "kind": "boundary.modal",
-      "section": "message"
-    },
-    {
-      "call": "send_message",
-      "kind": "locator.create",
-      "locator": "recipient_picker",
-      "parent": null,
+      "kind": "wait_for_function",
+      "operation": "message_composer_ready",
+      "program_digest": "55fbb455644d",
       "section": "message",
-      "selector": "input[placeholder*=\"Type a name\"], input[aria-label*=\"Type a name\"], input[placeholder*=\"multiple names\"]"
-    },
-    {
-      "call": "send_message",
-      "kind": "locator.count",
-      "locator": "recipient_picker",
-      "section": "message"
-    },
-    {
-      "call": "send_message",
-      "kind": "locator.derive",
-      "locator": "recipient_picker.first",
-      "operation": "first",
-      "parent": "recipient_picker",
-      "section": "message"
-    },
-    {
-      "call": "send_message",
-      "kind": "locator.wait_for",
-      "locator": "recipient_picker.first",
-      "section": "message",
-      "state": "visible",
-      "timeout_ms": 2000
+      "timeout_ms": null
     },
     {
       "arg": {
-        "candidates": [
-          "Ada Lovelace",
-          "ada-lovelace"
-        ]
+        "profilePath": "/in/ada-lovelace/",
+        "profileUrn": "ACoAA-policy"
       },
       "call": "send_message",
       "kind": "evaluate",
-      "operation": "select_message_recipient",
-      "program_digest": "63328e36296a",
+      "operation": "message_composer_state",
+      "program_digest": "5b716974716a",
       "section": "message"
     },
     {
+      "arg": {
+        "profilePath": "/in/ada-lovelace/",
+        "profileUrn": "ACoAA-policy"
+      },
       "call": "send_message",
-      "kind": "locator.create",
-      "locator": "message_close",
-      "parent": null,
-      "section": "message",
-      "selector": "button[aria-label*=\"Close your draft conversation\"], button[aria-label=\"Dismiss\"], button[aria-label*=\"Dismiss\"], button[aria-label*=\"Close\"]"
-    },
-    {
-      "call": "send_message",
-      "kind": "locator.count",
-      "locator": "message_close",
+      "kind": "evaluate",
+      "operation": "message_composer_state",
+      "program_digest": "5b716974716a",
       "section": "message"
     }
   ],
   "result": {
-    "message": "LinkedIn opened a compose page, but the visible recipient did not match the requested profile.",
-    "recipient_selected": false,
+    "message": "The composer already holds a draft that would be sent along with the message. The draft was left untouched.",
+    "recipient_selected": true,
+    "retry_safe": true,
     "sent": false,
-    "status": "recipient_resolution_failed",
-    "url": "https://www.linkedin.com/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3AACoAA-policy&recipient=ACoAA-policy&screenContext=NON_SELF_PROFILE_VIEW&interop=msgOverlay"
+    "status": "composer_occupied",
+    "url": "https://www.linkedin.com/messaging/thread/2-policy-thread==/"
   },
-  "scenario": "send_message__recipient_selection_failure",
+  "scenario": "send_message__existing_draft",
   "schema_version": 1
 }

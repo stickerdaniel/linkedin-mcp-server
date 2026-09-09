@@ -9,8 +9,14 @@ from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
 
+import ast
+import asyncio
 import inspect
 import json
+import subprocess
+import tomllib
+
+from hashlib import sha256
 
 from patchright.async_api import Page
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
@@ -19,6 +25,7 @@ from linkedin_mcp_server.callbacks import ProgressCallback
 from linkedin_mcp_server.scraping import extractor as extractor_module
 from linkedin_mcp_server.scraping.extractor import LinkedInExtractor
 from linkedin_mcp_server.scraping.fields import COMPANY_SECTIONS, PERSON_SECTIONS
+from linkedin_mcp_server.server import create_mcp_server
 
 from .support.policy_trace import (
     FakeClock,
@@ -29,7 +36,10 @@ from .support.policy_trace import (
 )
 
 
-TRACE_ROOT = Path(__file__).parents[1] / "fixtures" / "scraping-policy" / "v1"
+ROOT = Path(__file__).parents[2]
+TRACE_ROOT = ROOT / "tests" / "fixtures" / "scraping-policy" / "v1"
+PRODUCTION_BASELINE = "70e50ada68b9389f8d315df6ab1e56c08f6c985b"
+_TOOL_SCHEMAS: dict[str, dict[str, Any]] | None = None
 
 _COMMON_ALLOWED = {
     "boundary.auth",
@@ -45,6 +55,10 @@ _COMMON_ALLOWED = {
     "callback.progress",
     "callback.start",
     "evaluate",
+    "evaluate_handle",
+    "handle.as_element",
+    "handle.dispose",
+    "handle.evaluate",
     "keyboard.press",
     "keyboard.type",
     "listener.add",
@@ -243,10 +257,7 @@ async def _person_sections_scenario() -> dict[str, Any]:
         for section in PERSON_SECTIONS
     ]
     page.script("evaluate:root_content", *roots)
-    page.script(
-        "evaluate:profile_urn",
-        "/messaging/compose/?recipient=ACoAA-policy",
-    )
+    _script_profile_target(page)
     page.declare_locator("main button", "show_more")
     page.declare_derived(
         "show_more",
@@ -497,212 +508,271 @@ async def _feed_response_scenario(*, body_failure: bool) -> dict[str, Any]:
     )
 
 
-_EXPECTED_MESSAGE_COMPOSE_SELECTORS = (
-    'div[role="textbox"][contenteditable="true"][aria-label*="Write a message"]',
-    'main div[role="textbox"][contenteditable="true"]',
-    'main [contenteditable="true"][aria-label*="message"]',
+_MESSAGE_PROFILE_URL = "https://www.linkedin.com/in/ada-lovelace/"
+_MESSAGE_COMPOSE_URL = (
+    "https://www.linkedin.com/messaging/compose/"
+    "?recipient=ACoAA-policy&profileUrn=urn%3Ali%3Afsd_profile%3AACoAA-policy"
 )
+_MESSAGE_ROUTE = "https://www.linkedin.com/messaging/thread/2-policy-thread==/"
+_MESSAGE_TARGET = {
+    "profilePath": "/in/ada-lovelace/",
+    "profileUrn": "ACoAA-policy",
+}
+_VALID_COMPOSER = {
+    "status": "valid",
+    "active": False,
+    "empty": True,
+    "submitCount": 1,
+    "submitUsable": True,
+}
 
 
-def _script_message_composer(
-    page: ScriptedPage, *, fallback_index: int, resolutions: int = 2
-) -> None:
-    """Script exact misses before one successful production fallback."""
-    for selector in extractor_module._MESSAGING_COMPOSE_FALLBACK_SELECTORS:
-        index = _EXPECTED_MESSAGE_COMPOSE_SELECTORS.index(selector)
-        semantic_id = f"composer.{index}"
-        page.declare_locator(selector, semantic_id)
-        page.declare_derived(semantic_id, "last", f"{semantic_id}.last")
-        if index < fallback_index:
-            page.script(f"{semantic_id}.count", *([0] * resolutions))
-            page.script(
-                f"{semantic_id}.last.wait_for",
-                *(
-                    PlaywrightTimeoutError(f"composer fallback {index} unavailable")
-                    for _ in range(resolutions)
-                ),
-            )
-        elif index == fallback_index:
-            page.script(f"{semantic_id}.count", *([1] * resolutions))
-
-
-async def _messaging_safety_scenario(
-    confirm_send: bool, *, delivery_confirmed: bool = True
+def _profile_target(
+    status: str = "resolved", *, profile_urn: str = "ACoAA-policy"
 ) -> dict[str, Any]:
-    if not confirm_send:
-        suffix = "confirmation_gate"
-    elif delivery_confirmed:
-        suffix = "confirmed_append"
-    else:
-        suffix = "unconfirmed_delivery"
-    name = f"send_message__{suffix}"
-    recorder = TraceRecorder(name, _COMMON_ALLOWED)
-    clock = FakeClock(recorder)
-    page = _page(recorder)
-    page.script("evaluate:profile_display_name", "Ada Lovelace")
-    page.declare_locator(
-        extractor_module._MESSAGING_RECIPIENT_PICKER_SELECTOR, "recipient_picker"
-    )
-    page.script("recipient_picker.count", 0)
-    _script_message_composer(page, fallback_index=0)
-    page.script("evaluate:compose_matches_recipient", True)
-    page.declare_locator(extractor_module._MESSAGING_CLOSE_SELECTOR, "message_close")
-    if confirm_send:
-        page.script("evaluate:focus_message_composer", True)
-        # The baseline is taken after typing and before the click, so the
-        # composer already holds the text while this count is still zero:
-        # occurrences inside a visible editor do not count as delivery.
-        page.script("evaluate:message_occurrences", 0)
-        page.script("evaluate:click_send_button", True)
-        # A timeout is the only way the predicate reports "not delivered".
-        page.script(
-            "wait_for_function:message_occurrences_increased",
-            None
-            if delivery_confirmed
-            else PlaywrightTimeoutError("message never appeared outside the composer"),
+    if status == "resolved":
+        compose_url = (
+            _MESSAGE_COMPOSE_URL
+            if profile_urn == "ACoAA-policy"
+            else "https://www.linkedin.com/messaging/compose/?recipient=" + profile_urn
         )
-    if confirm_send and not delivery_confirmed:
-        # An unsent draft is the one path that reaches the close button itself.
-        # Every other exit dismisses against an empty locator, so the click and
-        # the sleep behind it would otherwise never appear in any trace.
-        page.script("message_close.count", 1)
-        page.declare_derived("message_close", "first", "message_close.first")
-        page.script("message_close.first.wait_for", None)
-        page.script("message_close.first.scroll_into_view", None)
-        page.script("message_close.first.click", None)
+        return {
+            "status": "resolved",
+            "pageUrl": _MESSAGE_PROFILE_URL,
+            "displayName": "Ada Lovelace",
+            "composeHrefs": [compose_url],
+        }
+    if status == "unavailable":
+        return {"status": "unavailable", "pageUrl": _MESSAGE_PROFILE_URL}
+    return {"status": "unresolved"}
+
+
+def _script_profile_target(
+    page: ScriptedPage,
+    status: str = "resolved",
+    *,
+    profile_urn: str = "ACoAA-policy",
+) -> None:
+    page.script(
+        "wait_for_function:profile_message_target_ready",
+        None
+        if status == "resolved"
+        else PlaywrightTimeoutError("profile Message action did not resolve"),
+    )
+    page.script(
+        "evaluate:profile_message_target",
+        _profile_target(status, profile_urn=profile_urn),
+    )
+
+
+def _script_message_surface(
+    page: ScriptedPage,
+    *,
+    states: tuple[dict[str, Any], ...],
+    route: str = _MESSAGE_ROUTE,
+) -> None:
+    page.goto_landings.append(_MESSAGE_PROFILE_URL)
+    page.goto_landings.append(route)
+    _script_profile_target(page)
+    page.script("wait_for_function:message_composer_ready", None)
+    page.script("evaluate:message_composer_state", *states)
+
+
+def _script_message_owner(page: ScriptedPage, *, write: str = "written") -> None:
+    page.script("evaluate_handle:message_composer_owner", True)
+    page.script("handle-1.evaluate:message_composer_write", write)
+    page.script("handle-1.evaluate:message_composer_dispose", None)
+
+
+def _script_confirmation_cleanup(page: ScriptedPage) -> None:
+    page.script("evaluate:message_confirmation_dispose", None)
+
+
+def _script_owned_text_cleanup(page: ScriptedPage, *, removed: bool) -> None:
+    page.script("handle-1.evaluate:message_composer_cleanup", removed)
+
+
+async def _message_target_scenario(status: str) -> dict[str, Any]:
+    recorder = TraceRecorder(f"send_message__target_{status}", _COMMON_ALLOWED)
+    clock = FakeClock(recorder)
+    page = _page(recorder)
+    page.goto_landings.append(_MESSAGE_PROFILE_URL)
+    _script_profile_target(page, status)
+    extractor = _extractor(page)
+    async with boundaries(recorder, clock):
+        with recorder.context("send_message", "message"):
+            result = await extractor.send_message(
+                "ada-lovelace",
+                "New text",
+                confirm_send=True,
+                profile_urn="ACoAA-policy",
+            )
+    page.assert_clean()
+    return recorder.trace(
+        {
+            "method": "send_message",
+            "arguments": {"target_resolution": status, "confirm_send": True},
+        },
+        result,
+    )
+
+
+async def _messaging_dry_run_scenario() -> dict[str, Any]:
+    recorder = TraceRecorder("send_message__dry_run", _COMMON_ALLOWED)
+    clock = FakeClock(recorder)
+    page = _page(recorder)
+    _script_message_surface(page, states=(_VALID_COMPOSER,))
+    extractor = _extractor(page)
+    async with boundaries(recorder, clock):
+        with recorder.context("send_message", "message"):
+            result = await extractor.send_message(
+                "ada-lovelace",
+                "New text",
+                confirm_send=False,
+                profile_urn="ACoAA-policy",
+            )
+    page.assert_clean()
+    return recorder.trace(
+        {
+            "method": "send_message",
+            "arguments": {
+                "linkedin_username": "ada-lovelace",
+                "message": "New text",
+                "confirm_send": False,
+                "profile_urn": "ACoAA-policy",
+            },
+        },
+        result,
+    )
+
+
+async def _occupied_message_scenario(*, restored_during_write: bool) -> dict[str, Any]:
+    suffix = "restored_during_write" if restored_during_write else "existing_draft"
+    recorder = TraceRecorder(f"send_message__{suffix}", _COMMON_ALLOWED)
+    clock = FakeClock(recorder)
+    page = _page(recorder)
+    second_state = (
+        _VALID_COMPOSER
+        if restored_during_write
+        else {**_VALID_COMPOSER, "empty": False}
+    )
+    _script_message_surface(page, states=(_VALID_COMPOSER, second_state))
+    if restored_during_write:
+        _script_message_owner(page, write="occupied")
+        _script_owned_text_cleanup(page, removed=False)
+    extractor = _extractor(page)
+    async with boundaries(recorder, clock):
+        with recorder.context("send_message", "message"):
+            result = await extractor.send_message(
+                "ada-lovelace", "New text", confirm_send=True
+            )
+    page.assert_clean()
+    return recorder.trace(
+        {
+            "method": "send_message",
+            "arguments": {
+                "confirm_send": True,
+                "composer_occupied": suffix,
+            },
+        },
+        result,
+    )
+
+
+async def _messaging_submission_scenario(outcome: str) -> dict[str, Any]:
+    recorder = TraceRecorder(f"send_message__{outcome}", _COMMON_ALLOWED)
+    clock = FakeClock(recorder)
+    page = _page(recorder)
+    _script_message_surface(page, states=(_VALID_COMPOSER, _VALID_COMPOSER))
+    _script_message_owner(page)
+
+    if outcome == "pre_submit_cleanup":
+        page.script("handle-1.evaluate:message_submit_ready", "invalid")
+        _script_owned_text_cleanup(page, removed=True)
     else:
-        page.script("message_close.count", 0)
+        ready_states = ("disabled", "ready") if outcome == "sent" else ("ready",)
+        page.script("handle-1.evaluate:message_submit_ready", *ready_states)
+        page.script("evaluate:message_confirmation_prepare", "confirmation-1")
+        if outcome == "submission_rejected":
+            page.script("handle-1.evaluate:message_submit", "invalid")
+            _script_confirmation_cleanup(page)
+            _script_owned_text_cleanup(page, removed=True)
+        elif outcome == "submission_interrupted":
+            page.script(
+                "handle-1.evaluate:message_submit",
+                RuntimeError("submission round trip interrupted"),
+            )
+            _script_confirmation_cleanup(page)
+        else:
+            page.script("handle-1.evaluate:message_submit", "clicked")
+            page.script(
+                "wait_for_function:message_confirmation_ready",
+                None
+                if outcome == "sent"
+                else PlaywrightTimeoutError("same-node transition not observed"),
+            )
+            _script_confirmation_cleanup(page)
+
     extractor = _extractor(page)
     async with boundaries(recorder, clock):
         with recorder.context("send_message", "message"):
             result = await extractor.send_message(
-                "ada-lovelace",
-                "New text",
-                confirm_send=confirm_send,
-                profile_urn="ACoAA-policy",
+                "ada-lovelace", "New text", confirm_send=True
             )
     page.assert_clean()
     return recorder.trace(
         {
             "method": "send_message",
-            "arguments": {
-                "linkedin_username": "ada-lovelace",
-                "message": "New text",
-                "confirm_send": confirm_send,
-                "profile_urn": "ACoAA-policy",
-                "composer_initial_text": "Existing text",
-            },
+            "arguments": {"confirm_send": True, "submission_outcome": outcome},
         },
         result,
     )
 
 
-async def _recipient_picker_scenario(*, recipient_selected: bool) -> dict[str, Any]:
-    """Record production recipient selection against synthetic picker outcomes."""
-    suffix = "selected" if recipient_selected else "selection_failure"
-    recorder = TraceRecorder(f"send_message__recipient_{suffix}", _COMMON_ALLOWED)
+async def _messaging_cancellation_scenario() -> dict[str, Any]:
+    recorder = TraceRecorder("send_message__confirmation_cancelled", _COMMON_ALLOWED)
     clock = FakeClock(recorder)
     page = _page(recorder)
-    page.script("evaluate:profile_display_name", "Ada Lovelace")
-    page.declare_locator(
-        extractor_module._MESSAGING_RECIPIENT_PICKER_SELECTOR, "recipient_picker"
+    _script_message_surface(page, states=(_VALID_COMPOSER, _VALID_COMPOSER))
+    _script_message_owner(page)
+    page.script("handle-1.evaluate:message_submit_ready", "ready")
+    page.script("evaluate:message_confirmation_prepare", "confirmation-1")
+    page.script("handle-1.evaluate:message_submit", "clicked")
+    page.script(
+        "wait_for_function:message_confirmation_ready", asyncio.CancelledError()
     )
-    page.declare_derived("recipient_picker", "first", "recipient_picker.first")
-    page.script("recipient_picker.count", 1, *([0] if recipient_selected else []))
-    page.script("recipient_picker.first.wait_for", None)
-    page.script("evaluate:select_message_recipient", recipient_selected)
-    _script_message_composer(
-        page, fallback_index=0, resolutions=2 if recipient_selected else 1
-    )
-    page.script("evaluate:compose_matches_recipient", True)
-    page.declare_locator(extractor_module._MESSAGING_CLOSE_SELECTOR, "message_close")
-    page.script("message_close.count", 0)
-
+    _script_confirmation_cleanup(page)
     extractor = _extractor(page)
     async with boundaries(recorder, clock):
         with recorder.context("send_message", "message"):
-            result = await extractor.send_message(
-                "ada-lovelace",
-                "New text",
-                confirm_send=False,
-                profile_urn="ACoAA-policy",
-            )
+            try:
+                await extractor.send_message(
+                    "ada-lovelace", "New text", confirm_send=True
+                )
+            except asyncio.CancelledError:
+                result = {"raised": "CancelledError"}
+            else:
+                raise AssertionError("message confirmation cancellation was swallowed")
     page.assert_clean()
     return recorder.trace(
         {
             "method": "send_message",
-            "arguments": {
-                "linkedin_username": "ada-lovelace",
-                "message": "New text",
-                "confirm_send": False,
-                "profile_urn": "ACoAA-policy",
-            },
+            "arguments": {"confirm_send": True, "cancelled_during": "confirmation"},
         },
         result,
     )
 
 
-async def _messaging_compose_fallback_scenario(
-    fallback_index: int,
-) -> dict[str, Any]:
-    """Record both production composer resolutions with synthetic misses."""
-    recorder = TraceRecorder(
-        f"send_message__composer_fallback_{fallback_index}", _COMMON_ALLOWED
-    )
+async def _invalid_message_scenario(message: str, label: str) -> dict[str, Any]:
+    recorder = TraceRecorder(f"send_message__invalid_{label}", _COMMON_ALLOWED)
     clock = FakeClock(recorder)
-    page = _page(recorder)
-    page.script("evaluate:profile_display_name", "Ada Lovelace")
-    page.declare_locator(
-        extractor_module._MESSAGING_RECIPIENT_PICKER_SELECTOR, "recipient_picker"
-    )
-    page.script("recipient_picker.count", 0)
-    _script_message_composer(page, fallback_index=fallback_index)
-    page.script("evaluate:compose_matches_recipient", True)
-    page.declare_locator(extractor_module._MESSAGING_CLOSE_SELECTOR, "message_close")
-    page.script("message_close.count", 0)
-
-    extractor = _extractor(page)
-    async with boundaries(recorder, clock):
-        with recorder.context("send_message", "message"):
-            result = await extractor.send_message(
-                "ada-lovelace",
-                "New text",
-                confirm_send=False,
-                profile_urn="ACoAA-policy",
-            )
-    page.assert_clean()
-    return recorder.trace(
-        {
-            "method": "send_message",
-            "arguments": {
-                "linkedin_username": "ada-lovelace",
-                "message": "New text",
-                "confirm_send": False,
-                "profile_urn": "ACoAA-policy",
-                "composer_fallback_index": fallback_index,
-            },
-        },
-        result,
-    )
-
-
-async def _blank_message_scenario() -> dict[str, Any]:
-    """Record that a whitespace-only message never reaches the browser."""
-
-    name = "send_message__blank_message"
-    recorder = TraceRecorder(name, _COMMON_ALLOWED)
-    clock = FakeClock(recorder)
-    # Nothing is declared or scripted: every browser operation the extractor
-    # could reach past the guard would fail the strict page instead of being
-    # recorded, so an empty trace is the assertion rather than an absence of
-    # setup.
     page = _page(recorder)
     extractor = _extractor(page)
     async with boundaries(recorder, clock):
         with recorder.context("send_message", "message"):
             result = await extractor.send_message(
                 "ada-lovelace",
-                "   ",
+                message,
                 confirm_send=True,
                 profile_urn="ACoAA-policy",
             )
@@ -712,9 +782,8 @@ async def _blank_message_scenario() -> dict[str, Any]:
             "method": "send_message",
             "arguments": {
                 "linkedin_username": "ada-lovelace",
-                "message": "   ",
+                "message_case": label,
                 "confirm_send": True,
-                "profile_urn": "ACoAA-policy",
             },
         },
         result,
@@ -779,7 +848,7 @@ async def _get_my_profile_scenario() -> dict[str, Any]:
     page = _page(recorder)
     page.goto_landings.append("https://www.linkedin.com/in/ada-lovelace/")
     page.script("evaluate:root_content", _root("Own profile"))
-    page.script("evaluate:profile_urn", "/messaging/compose/?recipient=ACoAA-self")
+    _script_profile_target(page, profile_urn="ACoAA-self")
     extractor = _extractor(page)
     async with boundaries(recorder, clock):
         with recorder.context("get_my_profile", "main_profile"):
@@ -797,7 +866,7 @@ async def _connect_scenario() -> dict[str, Any]:
     clock = FakeClock(recorder)
     page = _page(recorder)
     page.script("evaluate:root_content", _root("Own profile"))
-    page.script("evaluate:profile_urn", None)
+    _script_profile_target(page, "unavailable")
     page.script(
         "evaluate:connection_action_signals",
         {
@@ -843,12 +912,15 @@ async def _conversation_scenario(method: str) -> dict[str, Any]:
     recorder = TraceRecorder(name, _COMMON_ALLOWED)
     clock = FakeClock(recorder)
     page = _page(recorder)
-    page.script("evaluate:scroll_main_region", *([True] * 3))
+    if method != "search_conversations":
+        scrolls = 3 if method == "get_conversation" else 1
+        page.script("evaluate:scroll_main_region", *([True] * scrolls))
     page.script("evaluate:root_content", _root("Conversation content"))
-    page.script(
-        "wait_for_selector:conversation_rows",
-        PlaywrightTimeoutError("no scripted rows"),
-    )
+    if method != "get_conversation":
+        page.script(
+            "wait_for_selector:conversation_rows",
+            PlaywrightTimeoutError("no scripted rows"),
+        )
     extractor = _extractor(page)
     async with boundaries(recorder, clock):
         with recorder.context(method, "conversation"):
@@ -870,13 +942,101 @@ async def _conversation_scenario(method: str) -> dict[str, Any]:
     )
 
 
-def _facade_contract_trace() -> dict[str, Any]:
+def _baseline_file(path: str) -> bytes:
+    return subprocess.run(
+        ["git", "-C", str(ROOT), "show", f"{PRODUCTION_BASELINE}:{path}"],
+        check=True,
+        capture_output=True,
+    ).stdout
+
+
+def _baseline_provenance_trace() -> dict[str, Any]:
+    extractor_source = _baseline_file(
+        "linkedin_mcp_server/scraping/extractor.py"
+    ).decode("utf-8")
+    tree = ast.parse(extractor_source)
+    facade = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "LinkedInExtractor"
+    )
+    methods = [
+        node
+        for node in facade.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    public_coroutines = [
+        node
+        for node in methods
+        if isinstance(node, ast.AsyncFunctionDef) and not node.name.startswith("_")
+    ]
+    mutable_attributes = sorted(
+        {
+            target.attr
+            for node in ast.walk(facade)
+            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign))
+            for target in (
+                node.targets if isinstance(node, ast.Assign) else [node.target]
+            )
+            if isinstance(target, ast.Attribute)
+            and isinstance(target.value, ast.Name)
+            and target.value.id == "self"
+        }
+    )
+
+    lock_bytes = _baseline_file("uv.lock")
+    lock = tomllib.loads(lock_bytes.decode("utf-8"))
+    dependencies: dict[str, set[str]] = {}
+    for package in lock["package"]:
+        version = package.get("version")
+        if isinstance(version, str):
+            dependencies.setdefault(package["name"], set()).add(version)
+
+    result = {
+        "production_baseline": PRODUCTION_BASELINE,
+        "python_version": _baseline_file(".python-version").decode("utf-8").strip(),
+        "uv_lock_sha256": sha256(lock_bytes).hexdigest(),
+        "resolved_dependencies": {
+            name: sorted(versions) for name, versions in sorted(dependencies.items())
+        },
+        "extractor_inventory": {
+            "line_count": len(extractor_source.splitlines()),
+            "method_count": len(methods),
+            "public_coroutine_count": len(public_coroutines),
+            "public_coroutines": sorted(node.name for node in public_coroutines),
+            "mutable_instance_attributes": mutable_attributes,
+        },
+    }
+    return {
+        "schema_version": 1,
+        "scenario": "baseline_provenance",
+        "call": {
+            "method": "git_show",
+            "arguments": {"production_baseline": PRODUCTION_BASELINE},
+        },
+        "events": [],
+        "result": result,
+    }
+
+
+async def _facade_contract_trace() -> dict[str, Any]:
+    global _TOOL_SCHEMAS
+
     methods = {}
     for name in TOOL_FACADE_METHODS | COMPATIBILITY_METHODS:
         member = getattr(LinkedInExtractor, name)
         methods[name] = {
             "signature": str(inspect.signature(member)),
             "coroutine": inspect.iscoroutinefunction(member),
+        }
+    if _TOOL_SCHEMAS is None:
+        tools = await create_mcp_server().list_tools()
+        _TOOL_SCHEMAS = {
+            tool.name: {
+                "input": tool.parameters,
+                "output": tool.output_schema,
+            }
+            for tool in sorted(tools, key=lambda item: item.name)
         }
     return {
         "schema_version": 1,
@@ -887,6 +1047,7 @@ def _facade_contract_trace() -> dict[str, Any]:
             "tool_methods": sorted(TOOL_FACADE_METHODS),
             "compatibility_methods": sorted(COMPATIBILITY_METHODS),
             "methods": methods,
+            "tool_schemas": _TOOL_SCHEMAS,
         },
     }
 
@@ -916,7 +1077,8 @@ COMPATIBILITY_METHODS = {"get_page_text", "click_button_by_text"}
 
 async def build_policy_traces() -> dict[str, dict[str, Any]]:
     traces = {
-        "facade-contract.json": _facade_contract_trace(),
+        "baseline-provenance.json": _baseline_provenance_trace(),
+        "facade-contract.json": await _facade_contract_trace(),
         "generic-ordinary.json": await _generic_capture_scenario(
             "extract_page__ordinary", "https://www.linkedin.com/in/ada-lovelace/"
         ),
@@ -943,24 +1105,32 @@ async def build_policy_traces() -> dict[str, dict[str, Any]]:
         "feed-stale.json": await _feed_stale_scenario(),
         "feed-response-success.json": await _feed_response_scenario(body_failure=False),
         "feed-response-failure.json": await _feed_response_scenario(body_failure=True),
-        "message-confirmation.json": await _messaging_safety_scenario(False),
-        "message-append.json": await _messaging_safety_scenario(True),
-        "message-send-unavailable.json": await _messaging_safety_scenario(
-            True, delivery_confirmed=False
+        "message-target-unavailable.json": await _message_target_scenario(
+            "unavailable"
         ),
-        "message-recipient-picker.json": await _recipient_picker_scenario(
-            recipient_selected=True
+        "message-target-unresolved.json": await _message_target_scenario("unresolved"),
+        "message-dry-run.json": await _messaging_dry_run_scenario(),
+        "message-composer-occupied.json": await _occupied_message_scenario(
+            restored_during_write=False
         ),
-        "message-recipient-selection-failure.json": await _recipient_picker_scenario(
-            recipient_selected=False
+        "message-composer-restored.json": await _occupied_message_scenario(
+            restored_during_write=True
         ),
-        "message-composer-fallback-1.json": await _messaging_compose_fallback_scenario(
-            1
+        "message-pre-submit-cleanup.json": await _messaging_submission_scenario(
+            "pre_submit_cleanup"
         ),
-        "message-composer-fallback-2.json": await _messaging_compose_fallback_scenario(
-            2
+        "message-submit-rejected.json": await _messaging_submission_scenario(
+            "submission_rejected"
         ),
-        "message-blank.json": await _blank_message_scenario(),
+        "message-submit-interrupted.json": await _messaging_submission_scenario(
+            "submission_interrupted"
+        ),
+        "message-unconfirmed.json": await _messaging_submission_scenario("unconfirmed"),
+        "message-sent.json": await _messaging_submission_scenario("sent"),
+        "message-cancelled.json": await _messaging_cancellation_scenario(),
+        "message-blank.json": await _invalid_message_scenario("   ", "blank"),
+        "message-c0.json": await _invalid_message_scenario("line\nbreak", "c0"),
+        "message-del.json": await _invalid_message_scenario("text\x7f", "del"),
         "connect.json": await _connect_scenario(),
         "get-my-profile.json": await _get_my_profile_scenario(),
         "sidebar-profiles.json": await _sidebar_scenario(),

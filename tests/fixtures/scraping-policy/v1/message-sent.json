@@ -1,11 +1,8 @@
 {
   "call": {
     "arguments": {
-      "composer_initial_text": "Existing text",
       "confirm_send": true,
-      "linkedin_username": "ada-lovelace",
-      "message": "New text",
-      "profile_urn": "ACoAA-policy"
+      "submission_outcome": "sent"
     },
     "method": "send_message"
   },
@@ -81,16 +78,19 @@
       "timeout_ms": null
     },
     {
+      "arg": null,
       "call": "send_message",
-      "dismissed": false,
-      "kind": "boundary.modal",
-      "section": "message"
+      "kind": "wait_for_function",
+      "operation": "profile_message_target_ready",
+      "program_digest": "96d99936369a",
+      "section": "message",
+      "timeout_ms": 1000
     },
     {
       "call": "send_message",
       "kind": "evaluate",
-      "operation": "profile_display_name",
-      "program_digest": "a6e221fb7a22",
+      "operation": "profile_message_target",
+      "program_digest": "33b2fb160e45",
       "section": "message"
     },
     {
@@ -103,7 +103,7 @@
     {
       "call": "send_message",
       "extra": {
-        "target_url": "https://www.linkedin.com/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3AACoAA-policy&recipient=ACoAA-policy&screenContext=NON_SELF_PROFILE_VIEW&interop=msgOverlay",
+        "target_url": "https://www.linkedin.com/messaging/compose/?recipient=ACoAA-policy&profileUrn=urn%3Ali%3Afsd_profile%3AACoAA-policy",
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
@@ -113,15 +113,15 @@
     {
       "call": "send_message",
       "kind": "navigate",
-      "landed_url": "https://www.linkedin.com/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3AACoAA-policy&recipient=ACoAA-policy&screenContext=NON_SELF_PROFILE_VIEW&interop=msgOverlay",
-      "requested_url": "https://www.linkedin.com/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3AACoAA-policy&recipient=ACoAA-policy&screenContext=NON_SELF_PROFILE_VIEW&interop=msgOverlay",
+      "landed_url": "https://www.linkedin.com/messaging/thread/2-policy-thread==/",
+      "requested_url": "https://www.linkedin.com/messaging/compose/?recipient=ACoAA-policy&profileUrn=urn%3Ali%3Afsd_profile%3AACoAA-policy",
       "section": "message",
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
     },
     {
       "call": "send_message",
-      "description": "goto https://www.linkedin.com/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3AACoAA-policy&recipient=ACoAA-policy&screenContext=NON_SELF_PROFILE_VIEW&interop=msgOverlay",
+      "description": "goto https://www.linkedin.com/messaging/compose/?recipient=ACoAA-policy&profileUrn=urn%3Ali%3Afsd_profile%3AACoAA-policy",
       "kind": "boundary.stabilize",
       "result": null,
       "section": "message"
@@ -129,7 +129,7 @@
     {
       "call": "send_message",
       "extra": {
-        "target_url": "https://www.linkedin.com/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3AACoAA-policy&recipient=ACoAA-policy&screenContext=NON_SELF_PROFILE_VIEW&interop=msgOverlay",
+        "target_url": "https://www.linkedin.com/messaging/compose/?recipient=ACoAA-policy&profileUrn=urn%3Ali%3Afsd_profile%3AACoAA-policy",
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
@@ -164,154 +164,187 @@
       "timeout_ms": null
     },
     {
+      "arg": {
+        "profilePath": "/in/ada-lovelace/",
+        "profileUrn": "ACoAA-policy"
+      },
       "call": "send_message",
-      "dismissed": false,
-      "kind": "boundary.modal",
-      "section": "message"
-    },
-    {
-      "call": "send_message",
-      "kind": "locator.create",
-      "locator": "recipient_picker",
-      "parent": null,
+      "kind": "wait_for_function",
+      "operation": "message_composer_ready",
+      "program_digest": "55fbb455644d",
       "section": "message",
-      "selector": "input[placeholder*=\"Type a name\"], input[aria-label*=\"Type a name\"], input[placeholder*=\"multiple names\"]"
+      "timeout_ms": null
     },
     {
+      "arg": {
+        "profilePath": "/in/ada-lovelace/",
+        "profileUrn": "ACoAA-policy"
+      },
       "call": "send_message",
-      "kind": "locator.count",
-      "locator": "recipient_picker",
-      "section": "message"
-    },
-    {
-      "call": "send_message",
-      "kind": "locator.create",
-      "locator": "composer.0",
-      "parent": null,
-      "section": "message",
-      "selector": "div[role=\"textbox\"][contenteditable=\"true\"][aria-label*=\"Write a message\"]"
-    },
-    {
-      "call": "send_message",
-      "kind": "locator.count",
-      "locator": "composer.0",
-      "section": "message"
-    },
-    {
-      "call": "send_message",
-      "kind": "locator.derive",
-      "locator": "composer.0.last",
-      "operation": "last",
-      "parent": "composer.0",
-      "section": "message"
-    },
-    {
-      "call": "send_message",
-      "kind": "locator.create",
-      "locator": "composer.0",
-      "parent": null,
-      "section": "message",
-      "selector": "div[role=\"textbox\"][contenteditable=\"true\"][aria-label*=\"Write a message\"]"
-    },
-    {
-      "call": "send_message",
-      "kind": "locator.count",
-      "locator": "composer.0",
-      "section": "message"
-    },
-    {
-      "call": "send_message",
-      "kind": "locator.derive",
-      "locator": "composer.0.last",
-      "operation": "last",
-      "parent": "composer.0",
+      "kind": "evaluate",
+      "operation": "message_composer_state",
+      "program_digest": "5b716974716a",
       "section": "message"
     },
     {
       "arg": {
-        "candidates": [
-          "Ada Lovelace",
-          "ada-lovelace"
-        ]
+        "profilePath": "/in/ada-lovelace/",
+        "profileUrn": "ACoAA-policy"
       },
       "call": "send_message",
       "kind": "evaluate",
-      "operation": "compose_matches_recipient",
-      "program_digest": "72e8cfe97aec",
-      "section": "message"
-    },
-    {
-      "call": "send_message",
-      "kind": "evaluate",
-      "operation": "focus_message_composer",
-      "program_digest": "01421825590d",
-      "section": "message"
-    },
-    {
-      "call": "send_message",
-      "kind": "sleep",
-      "reason": "sleep",
-      "seconds": 0.1,
-      "section": "message"
-    },
-    {
-      "call": "send_message",
-      "delay_ms": 15,
-      "kind": "keyboard.type",
-      "section": "message",
-      "text": "New text"
-    },
-    {
-      "call": "send_message",
-      "kind": "sleep",
-      "reason": "sleep",
-      "seconds": 0.3,
-      "section": "message"
-    },
-    {
-      "call": "send_message",
-      "kind": "sleep",
-      "reason": "sleep",
-      "seconds": 1.0,
+      "operation": "message_composer_state",
+      "program_digest": "5b716974716a",
       "section": "message"
     },
     {
       "arg": {
-        "expected": "New text"
+        "expectedRoute": "https://www.linkedin.com/messaging/thread/2-policy-thread==/",
+        "target": {
+          "profilePath": "/in/ada-lovelace/",
+          "profileUrn": "ACoAA-policy"
+        }
       },
       "call": "send_message",
-      "kind": "evaluate",
-      "operation": "message_occurrences",
-      "program_digest": "b1263ac9a4f8",
+      "kind": "evaluate_handle",
+      "operation": "message_composer_owner",
+      "program_digest": "d311cb797c03",
       "section": "message"
     },
     {
       "call": "send_message",
-      "kind": "evaluate",
-      "operation": "click_send_button",
-      "program_digest": "cabf522492be",
+      "handle": "handle-1",
+      "kind": "handle.as_element",
+      "present": true,
+      "section": "message"
+    },
+    {
+      "arg": {
+        "message": "New text",
+        "profilePath": "/in/ada-lovelace/",
+        "profileUrn": "ACoAA-policy"
+      },
+      "call": "send_message",
+      "handle": "handle-1",
+      "kind": "handle.evaluate",
+      "operation": "message_composer_write",
+      "program_digest": "a3b97c3cbab7",
+      "section": "message"
+    },
+    {
+      "arg": {
+        "message": "New text",
+        "profilePath": "/in/ada-lovelace/",
+        "profileUrn": "ACoAA-policy"
+      },
+      "call": "send_message",
+      "handle": "handle-1",
+      "kind": "handle.evaluate",
+      "operation": "message_submit_ready",
+      "program_digest": "038e8c7845e3",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.05,
+      "section": "message"
+    },
+    {
+      "arg": {
+        "message": "New text",
+        "profilePath": "/in/ada-lovelace/",
+        "profileUrn": "ACoAA-policy"
+      },
+      "call": "send_message",
+      "handle": "handle-1",
+      "kind": "handle.evaluate",
+      "operation": "message_submit_ready",
+      "program_digest": "038e8c7845e3",
       "section": "message"
     },
     {
       "arg": {
         "expected": "New text",
-        "previous": 0
+        "owner": {
+          "handle": "handle-1"
+        },
+        "profilePath": "/in/ada-lovelace/",
+        "profileUrn": "ACoAA-policy"
+      },
+      "call": "send_message",
+      "kind": "evaluate",
+      "operation": "message_confirmation_prepare",
+      "program_digest": "93a3ae384427",
+      "section": "message"
+    },
+    {
+      "arg": {
+        "message": "New text",
+        "profilePath": "/in/ada-lovelace/",
+        "profileUrn": "ACoAA-policy"
+      },
+      "call": "send_message",
+      "handle": "handle-1",
+      "kind": "handle.evaluate",
+      "operation": "message_submit",
+      "program_digest": "2d48331602e5",
+      "section": "message"
+    },
+    {
+      "arg": {
+        "expected": "New text",
+        "owner": {
+          "handle": "handle-1"
+        },
+        "profilePath": "/in/ada-lovelace/",
+        "profileUrn": "ACoAA-policy",
+        "token": "confirmation-1"
       },
       "call": "send_message",
       "kind": "wait_for_function",
-      "operation": "message_occurrences_increased",
-      "program_digest": "2e7498d0e493",
+      "operation": "message_confirmation_ready",
+      "program_digest": "c5f34ff3f519",
       "section": "message",
       "timeout_ms": null
+    },
+    {
+      "arg": {
+        "owner": {
+          "handle": "handle-1"
+        },
+        "token": "confirmation-1"
+      },
+      "call": "send_message",
+      "kind": "evaluate",
+      "operation": "message_confirmation_dispose",
+      "program_digest": "6b3c7d577da9",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "handle": "handle-1",
+      "kind": "handle.evaluate",
+      "operation": "message_composer_dispose",
+      "program_digest": "ec7c454e506b",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "handle": "handle-1",
+      "kind": "handle.dispose",
+      "section": "message"
     }
   ],
   "result": {
-    "message": "Message sent.",
+    "message": "Message submitted and confirmed in the conversation UI.",
     "recipient_selected": true,
+    "retry_safe": false,
     "sent": true,
     "status": "sent",
-    "url": "https://www.linkedin.com/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3AACoAA-policy&recipient=ACoAA-policy&screenContext=NON_SELF_PROFILE_VIEW&interop=msgOverlay"
+    "url": "https://www.linkedin.com/messaging/thread/2-policy-thread==/"
   },
-  "scenario": "send_message__confirmed_append",
+  "scenario": "send_message__sent",
   "schema_version": 1
 }
