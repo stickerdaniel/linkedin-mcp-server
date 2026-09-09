@@ -6021,21 +6021,40 @@ class LinkedInExtractor:
             )
 
         await self._navigate_to_page(target.compose_url)
+        expected_route = self._page.url
+        if not _message_page_url_is_safe(expected_route, target.profile_urn):
+            return self._message_action_result(
+                expected_route,
+                "recipient_resolution_failed",
+                "LinkedIn opened an unexpected messaging URL.",
+            )
+
         await detect_rate_limit(self._page)
+        if self._page.url != expected_route:
+            return self._message_action_result(
+                self._page.url,
+                "recipient_resolution_failed",
+                "The messaging URL changed while the composer was loading.",
+            )
 
         try:
             await self._page.wait_for_selector("main")
         except PlaywrightTimeoutError:
             logger.debug("Compose page did not fully load for %s", linkedin_username)
-
-        if not _message_page_url_is_safe(self._page.url, target.profile_urn):
+        if self._page.url != expected_route:
             return self._message_action_result(
                 self._page.url,
                 "recipient_resolution_failed",
-                "LinkedIn opened an unexpected messaging URL.",
+                "The messaging URL changed while the composer was loading.",
             )
 
         message_surface = await self._wait_for_message_surface(target)
+        if self._page.url != expected_route:
+            return self._message_action_result(
+                self._page.url,
+                "recipient_resolution_failed",
+                "The messaging URL changed while the composer was loading.",
+            )
         logger.debug(
             "Message surface for %s was %s", linkedin_username, message_surface
         )
@@ -6047,6 +6066,12 @@ class LinkedInExtractor:
             )
 
         state = await self._read_message_composer_state(target)
+        if self._page.url != expected_route:
+            return self._message_action_result(
+                self._page.url,
+                "recipient_resolution_failed",
+                "The messaging URL changed during recipient verification.",
+            )
         if state.get("status") != "valid":
             logger.debug(
                 "Message recipient verification for %s returned %s",
@@ -6068,7 +6093,7 @@ class LinkedInExtractor:
                 recipient_selected=recipient_selected,
             )
 
-        if not _message_page_url_is_safe(self._page.url, target.profile_urn):
+        if self._page.url != expected_route:
             return self._message_action_result(
                 self._page.url,
                 "recipient_resolution_failed",
@@ -6076,6 +6101,13 @@ class LinkedInExtractor:
                 recipient_selected=recipient_selected,
             )
         state = await self._read_message_composer_state(target)
+        if self._page.url != expected_route:
+            return self._message_action_result(
+                self._page.url,
+                "recipient_resolution_failed",
+                "The messaging URL changed before text entry.",
+                recipient_selected=recipient_selected,
+            )
         if state.get("status") == "valid" and state.get("empty") is not True:
             # Text already in the editor belongs to whoever typed it. Clearing
             # it would trade a recipient leak for destroying their draft.
@@ -6091,14 +6123,6 @@ class LinkedInExtractor:
                 self._page.url,
                 "compose_interact_failed",
                 "The verified message composer changed before text entry.",
-                recipient_selected=recipient_selected,
-            )
-        expected_route = self._page.url
-        if not _message_page_url_is_safe(expected_route, target.profile_urn):
-            return self._message_action_result(
-                self._page.url,
-                "recipient_resolution_failed",
-                "The messaging URL changed before the composer could be pinned.",
                 recipient_selected=recipient_selected,
             )
         if state.get("submitCount") != 1:

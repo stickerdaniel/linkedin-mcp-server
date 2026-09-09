@@ -503,6 +503,50 @@ class TestComposerRecipientDom:
         assert await dom_page.evaluate("document.body.dataset.clicked") == "true"
         assert (await dom_page.locator("#composer").inner_text()).strip() == MESSAGE
 
+    async def test_queryless_route_switch_before_second_state_fails_closed(
+        self, dom_page
+    ):
+        alice_route = "https://www.linkedin.com/messaging/thread/ALICE/"
+        bob_route = "https://www.linkedin.com/messaging/thread/BOB/"
+        await dom_page.goto(alice_route)
+        await dom_page.set_content(compose_page(NOOP_SEND_JS))
+        extractor = LinkedInExtractor(dom_page)
+        read_state = extractor._read_message_composer_state
+        state_reads = 0
+
+        async def switch_route(target):
+            nonlocal state_reads
+            state_reads += 1
+            if state_reads == 2:
+                await dom_page.evaluate(
+                    "history.replaceState({}, '', '/messaging/thread/BOB/')"
+                )
+            return await read_state(target)
+
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor,
+                "_read_profile_message_target",
+                new_callable=AsyncMock,
+                return_value=_ProfileMessageTargetResolution("resolved", TARGET),
+            ),
+            patch.object(
+                extractor, "_read_message_composer_state", side_effect=switch_route
+            ),
+        ):
+            result = await extractor.send_message(
+                "fadi-eliwi", MESSAGE, confirm_send=True
+            )
+
+        assert result["status"] == "recipient_resolution_failed"
+        assert result["sent"] is False
+        assert result["retry_safe"] is True
+        assert state_reads == 2
+        assert dom_page.url == bob_route
+        assert (await dom_page.locator("#composer").inner_text()).strip() == ""
+        assert await dom_page.evaluate("document.body.dataset.clicked") is None
+
     async def test_queryless_route_switch_before_owner_resolution_fails_closed(
         self, dom_page
     ):

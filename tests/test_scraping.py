@@ -9007,6 +9007,45 @@ class TestSendMessage:
         submit.assert_not_awaited()
         mock_page.keyboard.type.assert_not_awaited()
 
+    async def test_queryless_route_switch_during_surface_wait_fails_closed(
+        self, mock_page
+    ):
+        extractor = LinkedInExtractor(mock_page)
+        patches = self._patch_to_composer(extractor, mock_page)
+        alice_route = "https://www.linkedin.com/messaging/thread/ALICE/"
+        bob_route = "https://www.linkedin.com/messaging/thread/BOB/"
+        mock_page.url = alice_route
+
+        async def switch_route(_target):
+            mock_page.url = bob_route
+            return "composer"
+
+        with (
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4] as surface,
+            patches[5] as state,
+            patches[6] as write,
+            patches[7] as submit,
+            patches[8],
+            patches[9],
+            patches[10],
+        ):
+            surface.side_effect = switch_route
+            result = await extractor.send_message(
+                "testuser", "Hello!", confirm_send=True
+            )
+
+        assert result["status"] == "recipient_resolution_failed"
+        assert result["retry_safe"] is True
+        assert result["url"] == bob_route
+        state.assert_not_awaited()
+        write.assert_not_awaited()
+        submit.assert_not_awaited()
+        mock_page.keyboard.type.assert_not_awaited()
+        mock_page.keyboard.press.assert_not_awaited()
+
     async def test_queryless_route_is_captured_before_owner_resolution(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         patches = self._patch_to_composer(extractor, mock_page)
