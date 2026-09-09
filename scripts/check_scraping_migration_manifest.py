@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from difflib import unified_diff
 from pathlib import Path
 from typing import Any
@@ -539,6 +539,7 @@ class _ScopeFrame:
     closure_module_names: set[str]
     closure_class_names: set[str]
     closure_instance_names: set[str]
+    ambiguous_names: set[str] = field(default_factory=set)
 
 
 def _extractor_bindings(
@@ -584,27 +585,34 @@ class _CalledMethodCollector(ast.NodeVisitor):
     def __init__(self, bindings: set[str]) -> None:
         self.bindings = [set(bindings)]
         self.closure_bindings = [set(bindings)]
+        self.ambiguous_names = [set[str]()]
+        self.closure_ambiguous_names = [set[str]()]
         self.methods: set[str] = set()
+        self.errors: list[tuple[ast.Call, str]] = []
+        self.class_scope_depths: set[int] = set()
 
     def visit_Call(self, node: ast.Call) -> Any:
         called = node.func
-        if (
-            isinstance(called, ast.Attribute)
-            and isinstance(called.value, ast.Name)
-            and called.value.id in self.bindings[-1]
-        ):
-            self.methods.add(called.attr)
+        receiver: str | None = None
+        method: str | None = None
+        if isinstance(called, ast.Attribute) and isinstance(called.value, ast.Name):
+            receiver = called.value.id
+            method = called.attr
         elif (
             isinstance(called, ast.Call)
             and isinstance(called.func, ast.Name)
             and called.func.id == "getattr"
             and len(called.args) >= 2
             and isinstance(called.args[0], ast.Name)
-            and called.args[0].id in self.bindings[-1]
             and isinstance(called.args[1], ast.Constant)
             and isinstance(called.args[1].value, str)
         ):
-            self.methods.add(called.args[1].value)
+            receiver = called.args[0].id
+            method = called.args[1].value
+        if receiver in self.ambiguous_names[-1]:
+            self.errors.append((node, receiver))
+        elif receiver in self.bindings[-1] and method is not None:
+            self.methods.add(method)
         self.generic_visit(node)
 
     @staticmethod
@@ -645,10 +653,15 @@ class _CalledMethodCollector(ast.NodeVisitor):
             collector.bindings - collector.globals - collector.nonlocals
         ) | _argument_names(node.args)
         bindings = self.closure_bindings[-1] - local_bindings - collector.globals
+        ambiguous = self.closure_ambiguous_names[-1] - local_bindings
         self.bindings.append(bindings)
         self.closure_bindings.append(set(bindings))
+        self.ambiguous_names.append(ambiguous)
+        self.closure_ambiguous_names.append(set(ambiguous))
         for statement in node.body:
             self.visit(statement)
+        self.closure_ambiguous_names.pop()
+        self.ambiguous_names.pop()
         self.closure_bindings.pop()
         self.bindings.pop()
 
@@ -657,6 +670,52 @@ class _CalledMethodCollector(ast.NodeVisitor):
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> Any:
         self._visit_function_definition(node)
+
+    def _apply_class_binding(self, statement: ast.stmt) -> None:
+        if isinstance(statement, ast.AnnAssign) and statement.value is None:
+            return
+        collector = _LocalBindingCollector()
+        if isinstance(
+            statement,
+            (
+                ast.Assign,
+                ast.AnnAssign,
+                ast.AugAssign,
+                ast.Import,
+                ast.ImportFrom,
+                ast.FunctionDef,
+                ast.AsyncFunctionDef,
+                ast.ClassDef,
+            ),
+        ):
+            collector.visit(statement)
+            self.bindings[-1].difference_update(collector.bindings)
+            self.ambiguous_names[-1].difference_update(collector.bindings)
+
+    def _visit_class_suite(self, statements: list[ast.stmt]) -> None:
+        for statement in statements:
+            self.visit(statement)
+            self._apply_class_binding(statement)
+
+    def visit_If(self, node: ast.If) -> Any:
+        if len(self.bindings) not in self.class_scope_depths:
+            self.generic_visit(node)
+            return
+        self.visit(node.test)
+        if isinstance(node.test, ast.Constant) and isinstance(node.test.value, bool):
+            self._visit_class_suite(node.body if node.test.value else node.orelse)
+            return
+        before = set(self.bindings[-1])
+        before_ambiguous = set(self.ambiguous_names[-1])
+        states: list[tuple[set[str], set[str]]] = []
+        for statements in (node.body, node.orelse):
+            self.bindings[-1] = set(before)
+            self.ambiguous_names[-1] = set(before_ambiguous)
+            self._visit_class_suite(statements)
+            states.append((self.bindings[-1], self.ambiguous_names[-1]))
+        self.bindings[-1] = states[0][0] & states[1][0]
+        self.ambiguous_names[-1] = states[0][1] | states[1][1]
+        self.ambiguous_names[-1].update(states[0][0] ^ states[1][0])
 
     def visit_ClassDef(self, node: ast.ClassDef) -> Any:
         for decorator in node.decorator_list:
@@ -668,26 +727,16 @@ class _CalledMethodCollector(ast.NodeVisitor):
         for type_parameter in getattr(node, "type_params", ()):
             self.visit(type_parameter)
         closure = set(self.closure_bindings[-1])
+        closure_ambiguous = set(self.closure_ambiguous_names[-1])
         self.bindings.append(set(closure))
         self.closure_bindings.append(closure)
-        for statement in node.body:
-            self.visit(statement)
-            collector = _LocalBindingCollector()
-            if isinstance(
-                statement,
-                (
-                    ast.Assign,
-                    ast.AnnAssign,
-                    ast.AugAssign,
-                    ast.Import,
-                    ast.ImportFrom,
-                    ast.FunctionDef,
-                    ast.AsyncFunctionDef,
-                    ast.ClassDef,
-                ),
-            ):
-                collector.visit(statement)
-                self.bindings[-1].difference_update(collector.bindings)
+        self.ambiguous_names.append(set(closure_ambiguous))
+        self.closure_ambiguous_names.append(closure_ambiguous)
+        self.class_scope_depths.add(len(self.bindings))
+        self._visit_class_suite(node.body)
+        self.class_scope_depths.remove(len(self.bindings))
+        self.closure_ambiguous_names.pop()
+        self.ambiguous_names.pop()
         self.closure_bindings.pop()
         self.bindings.pop()
 
@@ -698,9 +747,15 @@ class _CalledMethodCollector(ast.NodeVisitor):
         bindings = (
             self.closure_bindings[-1] - collector.bindings - _argument_names(node.args)
         )
+        local_bindings = collector.bindings | _argument_names(node.args)
+        ambiguous = self.closure_ambiguous_names[-1] - local_bindings
         self.bindings.append(bindings)
         self.closure_bindings.append(set(bindings))
+        self.ambiguous_names.append(ambiguous)
+        self.closure_ambiguous_names.append(set(ambiguous))
         self.visit(node.body)
+        self.closure_ambiguous_names.pop()
+        self.ambiguous_names.pop()
         self.closure_bindings.pop()
         self.bindings.pop()
 
@@ -718,17 +773,24 @@ class _CalledMethodCollector(ast.NodeVisitor):
         first, *remaining = generators
         self.visit(first.iter)
         bindings = set(self.closure_bindings[-1])
+        ambiguous = set(self.closure_ambiguous_names[-1])
         self.bindings.append(bindings)
         self.closure_bindings.append(bindings)
+        self.ambiguous_names.append(ambiguous)
+        self.closure_ambiguous_names.append(ambiguous)
         for generator in (first, *remaining):
             if generator is not first:
                 self.visit(generator.iter)
             self.visit(generator.target)
-            self.bindings[-1].difference_update(self._target_names(generator.target))
+            targets = self._target_names(generator.target)
+            self.bindings[-1].difference_update(targets)
+            self.ambiguous_names[-1].difference_update(targets)
             for condition in generator.ifs:
                 self.visit(condition)
         for value in values:
             self.visit(value)
+        self.closure_ambiguous_names.pop()
+        self.ambiguous_names.pop()
         self.closure_bindings.pop()
         self.bindings.pop()
 
@@ -953,6 +1015,8 @@ class Scanner(ast.NodeVisitor):
 
     def _apply_class_bindings(self, statement: ast.stmt, frame: _ScopeFrame) -> None:
         collector = _LocalBindingCollector(self.path)
+        if isinstance(statement, ast.AnnAssign) and statement.value is None:
+            return
         if isinstance(statement, ast.Match):
             for case in statement.cases:
                 collector.visit(case.pattern)
@@ -979,6 +1043,7 @@ class Scanner(ast.NodeVisitor):
         frame.module_names.difference_update(bindings)
         frame.class_names.difference_update(bindings)
         frame.instance_names.difference_update(bindings)
+        frame.ambiguous_names.difference_update(bindings)
         for name in collector.globals:
             if name in self.root_module_names:
                 frame.module_names.add(name)
@@ -1005,6 +1070,12 @@ class Scanner(ast.NodeVisitor):
                 frame.instance_names.discard(name)
         frame.module_names.update(collector.module_aliases)
         frame.class_names.update(collector.class_aliases)
+        frame.ambiguous_names.difference_update(
+            collector.globals
+            | collector.nonlocals
+            | collector.module_aliases
+            | collector.class_aliases
+        )
 
     def visit_ExceptHandler(self, node: ast.ExceptHandler) -> Any:
         if node.type is not None:
@@ -1077,6 +1148,75 @@ class Scanner(ast.NodeVisitor):
                 if was_present:
                     names.add(name)
 
+    @staticmethod
+    def _copy_frame(frame: _ScopeFrame) -> _ScopeFrame:
+        return _ScopeFrame(
+            kind=frame.kind,
+            module_names=set(frame.module_names),
+            class_names=set(frame.class_names),
+            instance_names=set(frame.instance_names),
+            closure_module_names=set(frame.closure_module_names),
+            closure_class_names=set(frame.closure_class_names),
+            closure_instance_names=set(frame.closure_instance_names),
+            ambiguous_names=set(frame.ambiguous_names),
+        )
+
+    def _visit_class_suite(self, statements: list[ast.stmt]) -> None:
+        frame = self.frames[-1]
+        for statement in statements:
+            self.visit(statement)
+            self._apply_class_bindings(statement, frame)
+
+    def visit_If(self, node: ast.If) -> Any:
+        if self.frames[-1].kind != "class":
+            self.generic_visit(node)
+            return
+        self.visit(node.test)
+        if isinstance(node.test, ast.Constant) and isinstance(node.test.value, bool):
+            self._visit_class_suite(node.body if node.test.value else node.orelse)
+            return
+
+        current = self.frames[-1]
+        states: list[_ScopeFrame] = []
+        for statements in (node.body, node.orelse):
+            branch = self._copy_frame(current)
+            self.frames[-1] = branch
+            self._visit_class_suite(statements)
+            states.append(branch)
+        self.frames[-1] = current
+        candidates = set().union(
+            *(
+                state.module_names | state.class_names | state.instance_names
+                for state in states
+            )
+        )
+        candidates.update(
+            current.module_names | current.class_names | current.instance_names
+        )
+        current.ambiguous_names.update(
+            name
+            for name in candidates
+            if len(
+                {
+                    (
+                        name in state.module_names,
+                        name in state.class_names,
+                        name in state.instance_names,
+                    )
+                    for state in states
+                }
+            )
+            > 1
+        )
+        current.module_names.intersection_update(states[0].module_names)
+        current.module_names.intersection_update(states[1].module_names)
+        current.class_names.intersection_update(states[0].class_names)
+        current.class_names.intersection_update(states[1].class_names)
+        current.instance_names.intersection_update(states[0].instance_names)
+        current.instance_names.intersection_update(states[1].instance_names)
+        current.ambiguous_names.update(states[0].ambiguous_names)
+        current.ambiguous_names.update(states[1].ambiguous_names)
+
     def visit_ClassDef(self, node: ast.ClassDef) -> Any:
         for decorator in node.decorator_list:
             self.visit(decorator)
@@ -1098,9 +1238,7 @@ class Scanner(ast.NodeVisitor):
             closure_instance_names=set(parent.closure_instance_names),
         )
         self.frames.append(frame)
-        for statement in node.body:
-            self.visit(statement)
-            self._apply_class_bindings(statement, frame)
+        self._visit_class_suite(node.body)
         self.frames.pop()
 
     def visit_Lambda(self, node: ast.Lambda) -> Any:
@@ -1194,11 +1332,16 @@ class Scanner(ast.NodeVisitor):
     def visit_DictComp(self, node: ast.DictComp) -> Any:
         self._visit_comprehension(node.generators, [node.key, node.value])
 
-    @staticmethod
-    def _called_methods(nodes: list[ast.stmt], bindings: set[str]) -> set[str]:
+    def _called_methods(self, nodes: list[ast.stmt], bindings: set[str]) -> set[str]:
         collector = _CalledMethodCollector(bindings)
         for node in nodes:
             collector.visit(node)
+        for node, name in collector.errors:
+            self._error(
+                node,
+                name,
+                "ambiguous workflow binding after conditional class control flow",
+            )
         return collector.methods
 
     def _visit_with(self, node: ast.With | ast.AsyncWith) -> None:
@@ -1355,7 +1498,13 @@ class Scanner(ast.NodeVisitor):
         if id(node) not in self.suppressed_module_attributes and isinstance(
             node.value, ast.Name
         ):
-            if node.value.id in self.module_names:
+            if node.value.id in self.frames[-1].ambiguous_names:
+                self._error(
+                    node,
+                    node.value.id,
+                    "ambiguous extractor binding after conditional class control flow",
+                )
+            elif node.value.id in self.module_names:
                 self._direct_module_attribute(node, node.attr)
             elif (
                 node.value.id in self.class_names
@@ -1482,6 +1631,16 @@ class Scanner(ast.NodeVisitor):
             self._error(node, ast.unparse(target), "dynamic patch.object attribute")
             return
         name = attribute.value
+        if (
+            isinstance(target, ast.Name)
+            and target.id in self.frames[-1].ambiguous_names
+        ):
+            self._error(
+                node,
+                target.id,
+                "ambiguous extractor binding after conditional class control flow",
+            )
+            return
         bindings = self.frames[-1].instance_names
         is_facade_class = isinstance(target, ast.Name) and target.id in self.class_names
         if isinstance(target, ast.Name) and (target.id in bindings or is_facade_class):

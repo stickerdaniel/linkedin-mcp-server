@@ -713,6 +713,54 @@ class MatchShadow:
     ]
 
 
+def test_annotation_only_class_assignment_does_not_shadow_alias():
+    seams = _scan_synthetic(
+        """
+from linkedin_mcp_server.scraping import extractor as legacy
+
+class AnnotationOnly:
+    legacy: object
+    reader = legacy._drain_listener_tasks
+"""
+    )
+
+    assert [seam.target for seam in seams if seam.kind == "module_attribute"] == [
+        "_drain_listener_tasks"
+    ]
+
+
+def test_constant_class_control_flow_applies_bindings_in_order():
+    seams = _scan_synthetic(
+        """
+from linkedin_mcp_server.scraping import extractor as legacy
+
+class ConstantBranch:
+    if True:
+        legacy = object()
+    reader = legacy._unknown
+"""
+    )
+
+    assert not [seam for seam in seams if seam.kind == "module_attribute"]
+
+
+def test_conditional_class_alias_state_fails_closed_as_ambiguous():
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match="ambiguous extractor binding after conditional class control flow",
+    ):
+        _scan_synthetic(
+            """
+from linkedin_mcp_server.scraping import extractor as legacy
+
+class ConditionalBranch:
+    if condition:
+        legacy = object()
+    reader = legacy._drain_listener_tasks
+"""
+        )
+
+
 def test_unknown_class_access_before_later_binding_fails_closed():
     with pytest.raises(
         migration.UnresolvedSeamError,
@@ -907,6 +955,52 @@ async def scenario(page):
         if seam.kind == "boundary_patch_object" and seam.target == "detect_rate_limit"
     ]
     assert {seam.migration_stage for seam in boundary} == {6, 10}
+
+
+def test_boundary_callers_keep_annotation_only_class_bindings():
+    seams = _scan_synthetic(
+        """
+from unittest.mock import patch
+from linkedin_mcp_server.scraping import extractor as legacy_surface
+from linkedin_mcp_server.scraping.extractor import LinkedInExtractor
+
+async def scenario(page):
+    extractor = LinkedInExtractor(page)
+    with patch.object(legacy_surface, "detect_rate_limit"):
+        class Holder:
+            extractor: object
+            value = extractor.extract_feed()
+"""
+    )
+
+    boundary = [
+        seam
+        for seam in seams
+        if seam.kind == "boundary_patch_object" and seam.target == "detect_rate_limit"
+    ]
+    assert {seam.migration_stage for seam in boundary} == {5}
+
+
+def test_ambiguous_class_workflow_callers_fail_closed():
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match="ambiguous workflow binding after conditional class control flow",
+    ):
+        _scan_synthetic(
+            """
+from unittest.mock import patch
+from linkedin_mcp_server.scraping import extractor as legacy_surface
+from linkedin_mcp_server.scraping.extractor import LinkedInExtractor
+
+async def scenario(page, condition):
+    extractor = LinkedInExtractor(page)
+    with patch.object(legacy_surface, "detect_rate_limit"):
+        class Holder:
+            if condition:
+                extractor = object()
+            value = extractor.extract_feed()
+"""
+        )
 
 
 def test_only_shadowed_boundary_callers_fail_closed():
