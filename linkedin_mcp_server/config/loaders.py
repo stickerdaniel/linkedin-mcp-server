@@ -145,11 +145,15 @@ class EnvironmentKeys:
     AUTO_IMPORT_FROM_BROWSER = "AUTO_IMPORT_FROM_BROWSER"
     EAGER_FULL_CHROMIUM = "EAGER_FULL_CHROMIUM"
     DAEMON_ENABLED = "DAEMON_ENABLED"
+    BLOCK_SUBRESOURCES = "BLOCK_SUBRESOURCES"
     INSTALLER_TEMP_DIR = "INSTALLER_TEMP_DIR"
     # Company-cache TTLs, in days. Firmographics move on the order of years, so
     # a long default is safe; open roles are the volatile signal, so a short one.
     COMPANY_FIRMOGRAPHICS_TTL_DAYS = "COMPANY_FIRMOGRAPHICS_TTL_DAYS"
     COMPANY_JOBS_TTL_DAYS = "COMPANY_JOBS_TTL_DAYS"
+    # Minimum gap between two tool calls, in seconds, jittered by +/-20%.
+    # 0 removes the spacing; see pacing.DEFAULT_TOOL_CALL_GAP for the default.
+    TOOL_CALL_GAP_SECONDS = "TOOL_CALL_GAP_SECONDS"
 
 
 # What ``manifest.json`` fills from ``user_config``, and the exact string each
@@ -433,6 +437,15 @@ def load_from_env(config: AppConfig) -> AppConfig:
             config.browser.eager_full_chromium = False
         elif eager_full_value in TRUTHY_VALUES:
             config.browser.eager_full_chromium = True
+
+    # Abort images, fonts and media instead of fetching them. On unless set
+    # falsy; text extraction does not read any of the three.
+    if block_subresources_env := os.environ.get(EnvironmentKeys.BLOCK_SUBRESOURCES):
+        block_subresources_value = _normalize_env(block_subresources_env)
+        if block_subresources_value in FALSY_VALUES:
+            config.browser.block_subresources = False
+        elif block_subresources_value in TRUTHY_VALUES:
+            config.browser.block_subresources = True
 
     # Share one browser-owning process across stdio clients.
     if daemon_env := os.environ.get(EnvironmentKeys.DAEMON_ENABLED):

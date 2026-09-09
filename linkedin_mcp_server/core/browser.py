@@ -23,6 +23,7 @@ from linkedin_mcp_server.common_utils import (
 )
 
 from linkedin_mcp_server.browser_downgrade import refuse_a_downgrade
+from linkedin_mcp_server.browser_launch import block_heavy_subresources
 from linkedin_mcp_server.exceptions import (
     BrowserDowngradeError,
     BrowserShutdownUnconfirmedError,
@@ -91,6 +92,7 @@ class BrowserManager:
         headless: bool = True,
         slow_mo: int = 0,
         viewport: dict[str, int] | None = None,
+        block_subresources: bool = True,
         **launch_options: Any,
     ):
         # ``launch_options`` is spread straight into the context options, so a
@@ -128,6 +130,11 @@ class BrowserManager:
         # measured contradiction: an outer window of 805 pixels standing on a
         # screen the same browser reported as 720 tall.
         self.viewport = viewport
+        # Named rather than left in ``launch_options``, which is spread into
+        # the context options: Patchright knows no such argument, and the
+        # builder puts it there because that dict is what both launch paths
+        # already forward.
+        self.block_subresources = block_subresources
         self.launch_options = launch_options
         self._process_marker, self._process_environment = new_browser_process_marker()
 
@@ -540,6 +547,12 @@ class BrowserManager:
                     "windowless page needs a browser that survives losing its "
                     "last window, which is measured only on macOS."
                 )
+
+            if self.block_subresources:
+                # Before any page is handed out, so the first navigation is
+                # already covered.
+                await block_heavy_subresources(self._context)
+                logger.debug("Images, fonts and media are aborted on this context")
 
             startup = (
                 self._context.pages[0]

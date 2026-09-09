@@ -59,6 +59,22 @@ DEFAULT_STEP_DELAY = (8.0, 25.0)
 MIN_BUNCH_PAUSE = 60.0
 MAX_BUNCH_PAUSE = 3600.0
 
+# Minimum spacing between two consecutive MCP tool calls, in seconds, before
+# jitter. Zero turns the spacing off. Nothing enforced any gap here until now:
+# a get_inbox followed straight by a get_conversation ran back to back and
+# LinkedIn answered 429.
+#
+# The commercial tools pace much harder -- Waalaxy publishes a minute between
+# profile visits and two and a half between messages -- but they drive
+# unattended campaigns where nobody waits on a result. This server is driven
+# interactively by an MCP client, and a minute of silence on every call reads
+# as a hung server. Five seconds is the compromise: it holds a burst to about
+# a dozen page loads a minute instead of as fast as Chromium can navigate,
+# while staying inside what a person waits through. An operator who wants
+# vendor spacing raises it; the jitter is theirs too, so no gap is a constant.
+DEFAULT_TOOL_CALL_GAP = 5.0
+TOOL_CALL_GAP_JITTER = 0.2
+
 
 @dataclass(frozen=True)
 class Schedule:
@@ -241,6 +257,43 @@ def step_delay(
     rng = rng or random.Random()
     low, high = delay_range
     return rng.uniform(low, high)
+
+
+def tool_call_gap(raw: str | None = None, rng: random.Random | None = None) -> float:
+    """Seconds to leave between the end of one tool call and the next.
+
+    ``raw`` is the configured gap in seconds as it arrives from the
+    environment, unparsed; anything unusable falls back to the default rather
+    than removing the spacing, since a typo must not be the way pacing is
+    turned off. An explicit ``0`` is that way.
+    """
+    base = _configured_tool_call_gap(raw)
+    if base <= 0:
+        return 0.0
+    spread = base * TOOL_CALL_GAP_JITTER
+    return step_delay((base - spread, base + spread), rng=rng)
+
+
+def _configured_tool_call_gap(raw: str | None) -> float:
+    if raw is None or not raw.strip():
+        return DEFAULT_TOOL_CALL_GAP
+    try:
+        seconds = float(raw)
+    except ValueError:
+        logger.warning(
+            "Ignoring non-numeric tool-call gap %r; using %ss",
+            raw,
+            DEFAULT_TOOL_CALL_GAP,
+        )
+        return DEFAULT_TOOL_CALL_GAP
+    if seconds < 0:
+        logger.warning(
+            "Ignoring negative tool-call gap %r; using %ss",
+            raw,
+            DEFAULT_TOOL_CALL_GAP,
+        )
+        return DEFAULT_TOOL_CALL_GAP
+    return seconds
 
 
 @dataclass

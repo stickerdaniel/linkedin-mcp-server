@@ -1,5 +1,7 @@
 """Tests for the LinkedInExtractor scraping engine."""
 
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 from urllib.parse import parse_qs, urlparse
@@ -20,6 +22,7 @@ from linkedin_mcp_server.core.exceptions import (
     InvalidReferenceError,
     LinkedInScraperException,
     ProxyConnectionError,
+    RateLimitError,
 )
 from linkedin_mcp_server.scraping.connection import (
     ActionSignals,
@@ -428,6 +431,103 @@ class TestExtractPage:
             )
 
         assert result.text == "Education\nHarvard University\n1973 – 1975"
+
+    async def test_soft_retry_budget_is_shared_across_sections(self, mock_page):
+        """The retry budget belongs to the scrape, not to each section.
+
+        Per section it was one retry each, so a throttled multi-section scrape
+        doubled its own request volume. Four throttled sections may spend the
+        two retries the extractor holds and no more.
+        """
+        noise_only = (
+            "More profiles for you\n\n"
+            "You've approached your profile search limit\n\n"
+            "About\nAccessibility\nTalent Solutions"
+        )
+        mock_page.evaluate = AsyncMock(
+            return_value={"source": "root", "text": noise_only, "references": []}
+        )
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            for section in ("experience", "education", "skills", "projects"):
+                result = await extractor.extract_page(
+                    f"https://www.linkedin.com/in/testuser/details/{section}/",
+                    section_name=section,
+                )
+                assert result.text == _RATE_LIMITED_MSG
+
+        # Four sections plus the scrape-wide budget of two, not four plus four.
+        assert (
+            mock_page.goto.await_count == 4 + extractor_module._RATE_LIMIT_RETRY_BUDGET
+        )
+
+    async def test_soft_retry_delay_escalates_within_one_scrape(self, mock_page):
+        """The second retry of a scrape waits twice as long as the first."""
+        noise_only = (
+            "More profiles for you\n\n"
+            "You've approached your profile search limit\n\n"
+            "About\nAccessibility\nTalent Solutions"
+        )
+        mock_page.evaluate = AsyncMock(
+            return_value={"source": "root", "text": noise_only, "references": []}
+        )
+        slept: list[float] = []
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            # Identity jitter, so the escalation is readable; the jitter itself
+            # is asserted by the hard-429 backoff test below.
+            patch(
+                "linkedin_mcp_server.scraping.extractor.jitter",
+                side_effect=lambda base, *a, **kw: base,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+                side_effect=lambda delay: slept.append(delay),
+            ),
+        ):
+            for section in ("experience", "education"):
+                await extractor.extract_page(
+                    f"https://www.linkedin.com/in/testuser/details/{section}/",
+                    section_name=section,
+                )
+
+        # Everything shorter is humanizer entropy, which is sub-second.
+        assert [d for d in slept if d >= 2.0] == [
+            extractor_module._RATE_LIMIT_RETRY_DELAY,
+            extractor_module._RATE_LIMIT_RETRY_DELAY * 2,
+        ]
 
     async def test_media_only_controls_are_not_misclassified_as_rate_limited(
         self, mock_page
@@ -1315,6 +1415,255 @@ class TestExtractPage:
 
         assert "Python Developer" in result.text
         assert result.error is None
+
+
+def _show_the_interstitial(page, status: int) -> None:
+    """Leave Chromium's own error page in the tab, the way a refusal does.
+
+    The classifier reads the status off this body, so a test that only makes
+    `goto` raise is describing a refusal with no status attached -- which is
+    every 4xx and 5xx, not a rate limit.
+    """
+    page.evaluate = AsyncMock(
+        return_value=(
+            f"This page isn't working If the problem continues, "
+            f"contact the site owner. HTTP ERROR {status} Reload"
+        )
+    )
+
+
+class TestHttp429Navigation:
+    """A 429 that never becomes a page the loaded-page detector could read."""
+
+    def test_retry_after_reads_seconds_and_http_date(self):
+        assert extractor_module._retry_after_seconds("120") == 120
+        soon = format_datetime(datetime.now(timezone.utc) + timedelta(seconds=90))
+        parsed = extractor_module._retry_after_seconds(soon)
+        assert parsed is not None and 80 <= parsed <= 90
+        # Nothing is invented when the header is absent or unreadable.
+        assert extractor_module._retry_after_seconds(None) is None
+        assert extractor_module._retry_after_seconds("") is None
+        assert extractor_module._retry_after_seconds("whenever") is None
+
+    async def test_navigation_failure_is_classified_as_rate_limit(self, mock_page):
+        """The live shape: Chromium refuses the 429 and `goto` raises."""
+        mock_page.goto = AsyncMock(
+            side_effect=PatchrightError(
+                "Page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at "
+                "https://www.linkedin.com/messaging/thread/2-abc/"
+            )
+        )
+        _show_the_interstitial(mock_page, 429)
+        extractor = LinkedInExtractor(mock_page)
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+            pytest.raises(RateLimitError) as raised,
+        ):
+            await extractor.extract_page(
+                "https://www.linkedin.com/messaging/thread/2-abc/",
+                section_name="conversation",
+            )
+
+        # No `Retry-After` is readable on this path, so the default stands.
+        assert raised.value.suggested_wait_time == 300
+        # Classified, not retried: a retry here is one more request into a
+        # limit that is still live.
+        assert mock_page.goto.await_count == 1
+
+    async def test_a_refusal_that_is_not_a_429_is_not_a_rate_limit(self, mock_page):
+        """The whole reason the interstitial is read.
+
+        Chromium raises the same net error for every status the navigation
+        stack refuses. Classifying on the token alone told someone who
+        mistyped a username to wait five minutes, and skipped the not-found
+        branch in `error_handler` on the way.
+        """
+        mock_page.goto = AsyncMock(
+            side_effect=PatchrightError(
+                "Page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at "
+                "https://www.linkedin.com/in/nosuchuser/"
+            )
+        )
+        _show_the_interstitial(mock_page, 404)
+        extractor = LinkedInExtractor(mock_page)
+
+        slept: list[float] = []
+
+        async def record(seconds: float) -> None:
+            slept.append(seconds)
+
+        # `extract_page` absorbs an ordinary navigation failure and reports the
+        # section; only a rate limit is raised through it. So the assertion is
+        # that nothing was raised at all -- before the fix this call raised
+        # `RateLimitError`.
+        with patch(
+            "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+            new=record,
+        ):
+            await extractor.extract_page(
+                "https://www.linkedin.com/in/nosuchuser/",
+                section_name="profile",
+            )
+
+        # And it does not pay the rate-limit backoff on the way out.
+        assert not slept
+
+    async def test_an_unreadable_body_is_not_a_rate_limit(self, mock_page):
+        """Fails closed: no evidence is not evidence of a limit."""
+        mock_page.goto = AsyncMock(
+            side_effect=PatchrightError(
+                "Page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at "
+                "https://www.linkedin.com/in/testuser/"
+            )
+        )
+        mock_page.evaluate = AsyncMock(side_effect=PatchrightError("no document"))
+        extractor = LinkedInExtractor(mock_page)
+
+        # Same shape as above: absorbed, not raised as a rate limit.
+        await extractor.extract_page(
+            "https://www.linkedin.com/in/testuser/",
+            section_name="profile",
+        )
+
+    async def test_retry_after_is_capped_and_unicode_digits_do_not_crash(self):
+        """Both halves failed as something other than a rate-limit report.
+
+        `"\u00b2".isdigit()` is True while `int("\u00b2")` raises, so a header
+        carrying one replaced the report with an unrelated traceback; and an
+        uncapped day-long wait relayed verbatim reads as the server hanging.
+        """
+        assert extractor_module._retry_after_seconds("\u00b2") is None
+        assert (
+            extractor_module._retry_after_seconds("86400")
+            == extractor_module._RETRY_AFTER_CEILING
+        )
+        far = format_datetime(datetime.now(timezone.utc) + timedelta(days=2))
+        assert (
+            extractor_module._retry_after_seconds(far)
+            == extractor_module._RETRY_AFTER_CEILING
+        )
+
+    async def test_navigation_failure_backs_off_with_jitter(self, mock_page):
+        mock_page.goto = AsyncMock(
+            side_effect=PatchrightError(
+                "Page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at "
+                "https://www.linkedin.com/messaging/thread/2-abc/"
+            )
+        )
+        _show_the_interstitial(mock_page, 429)
+        slept: list[float] = []
+        extractor = LinkedInExtractor(mock_page)
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+                side_effect=lambda delay: slept.append(delay),
+            ),
+            pytest.raises(RateLimitError),
+        ):
+            await extractor.extract_page(
+                "https://www.linkedin.com/messaging/thread/2-abc/",
+                section_name="conversation",
+            )
+
+        base = extractor_module._RATE_LIMIT_BACKOFF_DELAY
+        assert len(slept) == 1
+        assert base * 0.5 <= slept[0] <= base * 1.5
+
+    async def test_second_rate_limit_of_a_scrape_backs_off_longer(self, mock_page):
+        mock_page.goto = AsyncMock(
+            side_effect=PatchrightError(
+                "Page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at "
+                "https://www.linkedin.com/in/testuser/"
+            )
+        )
+        _show_the_interstitial(mock_page, 429)
+        slept: list[float] = []
+        extractor = LinkedInExtractor(mock_page)
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.jitter",
+                side_effect=lambda base, *a, **kw: base,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+                side_effect=lambda delay: slept.append(delay),
+            ),
+        ):
+            for _ in range(2):
+                with pytest.raises(RateLimitError):
+                    await extractor.extract_page(
+                        "https://www.linkedin.com/in/testuser/",
+                        section_name="main_profile",
+                    )
+
+        base = extractor_module._RATE_LIMIT_BACKOFF_DELAY
+        assert slept == [base, base * 2]
+
+    async def test_committed_429_honors_retry_after(self, mock_page):
+        """The other shape: Chromium commits the 429 and `goto` returns it."""
+        response = MagicMock()
+        response.status = 429
+        response.headers = {"retry-after": "120"}
+        mock_page.goto = AsyncMock(return_value=response)
+        extractor = LinkedInExtractor(mock_page)
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+            pytest.raises(RateLimitError) as raised,
+        ):
+            await extractor.extract_page(
+                "https://www.linkedin.com/in/testuser/",
+                section_name="main_profile",
+            )
+
+        assert raised.value.suggested_wait_time == 120
+
+    async def test_committed_200_is_not_a_rate_limit(self, mock_page):
+        response = MagicMock()
+        response.status = 200
+        response.headers = {}
+        mock_page.goto = AsyncMock(return_value=response)
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "source": "root",
+                "text": "Sample profile text",
+                "references": [],
+            }
+        )
+        extractor = LinkedInExtractor(mock_page)
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            result = await extractor.extract_page(
+                "https://www.linkedin.com/in/testuser/",
+                section_name="main_profile",
+            )
+
+        assert result.text == "Sample profile text"
 
 
 class TestNavigationDiagnostics:
