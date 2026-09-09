@@ -141,3 +141,40 @@ class TestScrollDeadline:
         await scroll_job_sidebar(page, deadline=0.0004)
 
         assert page.wait_for_selector.await_args.kwargs["timeout"] == 1
+
+
+class TestScrollToBottomToleratesAStaleRound:
+    """One unchanged height is a slow batch, not the bottom of the page.
+
+    Blocking images made this reachable rather than created it: without their
+    boxes the document is shorter, so the scroll arrives at the true bottom in
+    fewer rounds and asks the question while a batch is still in flight.
+    """
+
+    async def test_a_single_stale_round_does_not_stop_the_scroll(self):
+        from linkedin_mcp_server.core.utils import scroll_to_bottom
+
+        # Height stalls once, then grows again: a batch that landed late.
+        heights = [1000, 1000, 1000, 1000, 2000, 2000, 3000, 3000]
+        page = MagicMock()
+        page.evaluate = AsyncMock(
+            side_effect=lambda *_: heights.pop(0) if heights else 3000
+        )
+
+        await scroll_to_bottom(page, pause_time=0.01, max_scrolls=4)
+
+        # Four rounds ran; a version that broke on the first stale round would
+        # have stopped after the first and left the later batches unread.
+        assert not heights
+
+    async def test_two_stale_rounds_do_stop_the_scroll(self):
+        from linkedin_mcp_server.core.utils import scroll_to_bottom
+
+        page = MagicMock()
+        page.evaluate = AsyncMock(return_value=1000)
+
+        await scroll_to_bottom(page, pause_time=0.01, max_scrolls=10)
+
+        # 2 evaluates per round (read, scroll, read = 3 calls per round).
+        # Stopping after the second stale round means 6 calls, not 30.
+        assert page.evaluate.await_count == 6

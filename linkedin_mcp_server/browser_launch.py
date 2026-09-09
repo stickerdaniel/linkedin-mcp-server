@@ -7,12 +7,15 @@ the worse one to get wrong — a session created while leaking has been leaking
 since the moment it existed.
 """
 
+import contextlib
 import logging
 from typing import TYPE_CHECKING, Any
 
 from linkedin_mcp_server.session_state import get_runtime_id
 
 if TYPE_CHECKING:
+    from patchright.async_api import BrowserContext, Route
+
     from linkedin_mcp_server.config.schema import BrowserConfig
 
 logger = logging.getLogger(__name__)
@@ -58,6 +61,44 @@ _WEBRTC_STAYS_ON_THE_PROXY = (
 #: strips its unsafe fallback deliberately because that renderer string is an
 #: automation signal in its own right.
 _DOCKER_WEBGL = ("--enable-webgl", "--ignore-gpu-blocklist")
+
+
+#: Resource types aborted before the browser fetches them. All three are bytes
+#: a human looks at and no extractor reads: this server takes ``innerText`` and
+#: anchor hrefs, so an avatar, a webfont or an autoplaying video changes nothing
+#: it returns, while together they are most of the ~100 subrequests a single
+#: LinkedIn page fires. That volume is what earns the HTTP 429.
+#:
+#: ``stylesheet`` is deliberately absent. Layout decides what ``innerText``
+#: reports and what a visibility check answers, so blocking CSS would change the
+#: text itself, which is the one thing this may not do.
+BLOCKED_RESOURCE_TYPES = frozenset({"image", "font", "media"})
+
+
+async def block_heavy_subresources(context: "BrowserContext") -> None:
+    """Abort every image, font and media request made by *context*.
+
+    Everything else is continued untouched. Nothing here rewrites a request:
+    a header or a user agent invented in a route handler would be the same
+    self-contradiction the identity rules refuse, and dropping a request is
+    not a claim the browser makes about itself.
+    """
+
+    async def abort_the_heavy_ones(route: "Route") -> None:
+        # Both calls raise once the page or context behind the request is
+        # gone, which is routine here: contexts close on rotation, on bridge
+        # reopen and at shutdown, and requests in flight at that moment land
+        # in this handler afterwards. An exception escaping a route handler
+        # leaves the request unfulfilled, so the navigation that made it hangs
+        # to its own timeout and reports nothing about why. Suppressed rather
+        # than logged: at that point the context is going away regardless.
+        with contextlib.suppress(Exception):
+            if route.request.resource_type in BLOCKED_RESOURCE_TYPES:
+                await route.abort()
+            else:
+                await route.continue_()
+
+    await context.route("**/*", abort_the_heavy_ones)
 
 
 def build_launch_options(
@@ -120,6 +161,13 @@ def build_launch_options(
 
     if args:
         launch_options["args"] = args
+
+    # Not a Patchright option. ``BrowserManager`` takes it as a named argument,
+    # so it is pulled back out before the rest of this dict reaches the launch.
+    # It rides along here because both launch paths already forward this dict
+    # whole, which is the one way a setting cannot apply to scraping but not to
+    # the login that mints the session.
+    launch_options["block_subresources"] = browser.block_subresources
 
     return launch_options, viewport
 

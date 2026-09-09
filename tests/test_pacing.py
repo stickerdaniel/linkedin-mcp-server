@@ -9,6 +9,7 @@ import pytest
 
 from linkedin_mcp_server.pacing import (
     ACCOUNT_BUDGET_JOB,
+    DEFAULT_TOOL_CALL_GAP,
     MAX_BUNCH_PAUSE,
     MIN_BUNCH_PAUSE,
     WINDOW_SECONDS,
@@ -16,9 +17,11 @@ from linkedin_mcp_server.pacing import (
     JobStore,
     Ledger,
     Schedule,
+    TOOL_CALL_GAP_JITTER,
     jittered_cap,
     load_account_budget,
     next_bunch_delay,
+    tool_call_gap,
     warmup_cap,
 )
 
@@ -306,3 +309,30 @@ class TestJobStore:
         store = JobStore(tmp_path / "jobs")
         store.save(Job(name="j", started_on=date(2026, 8, 5)))
         assert list((tmp_path / "jobs").glob("*.tmp")) == []
+
+
+class TestToolCallGap:
+    """The gap the middleware leaves between two MCP tool calls."""
+
+    def test_default_gap_is_the_documented_seconds_plus_or_minus_the_jitter(self):
+        gaps = {tool_call_gap() for _ in range(200)}
+
+        low = DEFAULT_TOOL_CALL_GAP * (1 - TOOL_CALL_GAP_JITTER)
+        high = DEFAULT_TOOL_CALL_GAP * (1 + TOOL_CALL_GAP_JITTER)
+        assert all(low <= gap <= high for gap in gaps)
+        # Jittered, not a constant: a fixed period is the pattern being avoided.
+        assert len(gaps) > 1
+
+    def test_a_configured_gap_is_honoured(self):
+        gaps = [tool_call_gap("60") for _ in range(50)]
+
+        assert all(48.0 <= gap <= 72.0 for gap in gaps)
+
+    def test_zero_is_the_way_to_turn_the_spacing_off(self):
+        assert tool_call_gap("0") == 0.0
+
+    @pytest.mark.parametrize("raw", ["", "  ", None, "soon", "-5"])
+    def test_anything_unusable_falls_back_to_the_default(self, raw):
+        # A typo must not be a second way of disabling the pacing, which is why
+        # only an explicit 0 does that.
+        assert tool_call_gap(raw) > 0

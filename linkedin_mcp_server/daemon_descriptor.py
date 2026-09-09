@@ -156,6 +156,11 @@ SHARED_CONFIG_FIELDS = (
     "auto_import_from_browser",
     "eager_full_chromium",
     "browser_idle_timeout_seconds",
+    # Registered as a route on the context at launch, so a client cannot turn
+    # it off in a browser the owner already opened with it on: asking for the
+    # images and getting a page without them would read as LinkedIn changing
+    # its markup, not as a setting that did not apply.
+    "block_subresources",
 )
 
 

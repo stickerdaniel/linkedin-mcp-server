@@ -6,6 +6,8 @@ import asyncio
 import contextlib
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import json
 import logging
 import re
@@ -29,6 +31,7 @@ from linkedin_mcp_server.core import (
 from linkedin_mcp_server.core.exceptions import (
     AuthenticationError,
     LinkedInScraperException,
+    RateLimitError,
 )
 from linkedin_mcp_server.debug_trace import record_page_trace
 from linkedin_mcp_server.debug_utils import stabilize_navigation
@@ -65,6 +68,7 @@ from linkedin_mcp_server.core.humanize import (
     human_pause,
     human_type,
     humanize_after_nav,
+    jitter,
 )
 
 if TYPE_CHECKING:
@@ -77,8 +81,65 @@ WaitUntil = Literal["commit", "domcontentloaded", "load", "networkidle"]
 # Pacing between page navigations
 _NAV_DELAY = 2.0
 
-# Backoff before retrying a temporarily blocked page
+# Backoff before retrying a temporarily blocked page. Each retry within one
+# scrape waits twice as long as the one before it, jittered.
 _RATE_LIMIT_RETRY_DELAY = 5.0
+
+# How many soft rate-limit retries one extractor may spend in total. The
+# extractor lives for exactly one tool call, so this is the whole scrape's
+# budget rather than each section's. It used to be one retry *per section*,
+# which meant an eight-section scrape that had started to be throttled sent
+# eight extra navigations -- doubling its request volume at the moment
+# LinkedIn was asking for less. Two keeps the original benefit for a genuine
+# one-off blip while capping the amplification at a constant.
+_RATE_LIMIT_RETRY_BUDGET = 2
+
+# A hard 429 never reaches `detect_rate_limit`, which reads a page that
+# loaded. Measured live: LinkedIn answers a throttled navigation with a 429
+# that Chromium refuses to commit, so `page.goto` raises
+# `net::ERR_HTTP_RESPONSE_CODE_FAILURE` and the tab shows Chromium's own
+# "This page isn't working / HTTP ERROR 429" interstitial instead of a
+# document. The net error token is the classifier because it is a Chromium
+# constant; the interstitial's prose is browser chrome and is translated, so
+# matching it would break the locale-independence rule.
+#
+# The token alone is NOT a 429. Chromium raises it for any response code the
+# navigation stack refuses, 404 and 403 and 5xx included, so treating it as a
+# rate limit on its own told a user who mistyped a username to wait five
+# minutes and skipped the not-found branch in `error_handler` entirely. It is
+# therefore only half the signal: the status has to be corroborated off the
+# interstitial before this is called a rate limit, and an uncorroborated
+# refusal is re-raised as the navigation error it already was.
+_HTTP_STATUS_NAV_FAILURE = "ERR_HTTP_RESPONSE_CODE_FAILURE"
+
+# The status on Chromium's own error page, as digits. The words around it are
+# translated; the number is not, which is the whole reason to match on it
+# rather than on "too many requests". Bounded by a word boundary so a 429 in a
+# URL or a timestamp elsewhere on the page cannot stand in for the status.
+_HTTP_STATUS_ON_INTERSTITIAL = re.compile(r"\b429\b")
+
+# The other shape of the same thing, and the reason `page.goto`'s return value
+# is no longer discarded: a 429 that Chromium *does* commit comes back as an
+# ordinary response. Measured against a local server answering 429, with and
+# without a body, under both `wait_until="domcontentloaded"` and `"commit"`:
+# `goto` returns rather than raising, `status` is 429 and `Retry-After`
+# survives on `headers`. No `wait_until` change is needed to see it.
+_HTTP_TOO_MANY_REQUESTS = 429
+
+# Pause before a hard rate limit is reported, doubling per hit within one
+# scrape and jittered like every other deliberate pause here. Bounded well
+# under the tool timeout on purpose: this cannot wait out a real limit, it
+# only stops the next tool call from leaving for it immediately. How long to
+# actually wait is carried to the client on `RateLimitError.suggested_wait_time`.
+_RATE_LIMIT_BACKOFF_DELAY = 5.0
+_RATE_LIMIT_BACKOFF_MAX = 30.0
+# Enough doublings to reach the cap from the base delay, and no more.
+_RATE_LIMIT_BACKOFF_MAX_DOUBLINGS = 8
+
+# The longest `Retry-After` worth repeating to a client. LinkedIn asking for a
+# day off is a real answer, but relaying it unchanged makes the tool look hung;
+# the cap keeps the report actionable and the server still refuses to scrape.
+_RETRY_AFTER_CEILING = 3600
 
 # Returned as section text when a page comes back with its content gone and
 # only LinkedIn's own navigation and footer left.
@@ -97,6 +158,37 @@ _RATE_LIMIT_RETRY_DELAY = 5.0
 # deliberately — body text would be a per-locale guess, and this project's
 # rule is that classification never depends on text values.
 _RATE_LIMITED_MSG = "[Rate limited] LinkedIn blocked this section. Try again later or request fewer sections."
+
+
+def _retry_after_seconds(value: str | None) -> int | None:
+    """`Retry-After` in whole seconds, or None when absent or unreadable.
+
+    RFC 6585 allows either a delay in seconds or an HTTP-date, and both are
+    accepted here. None is returned rather than a guess: nothing downstream may
+    invent a wait LinkedIn did not ask for.
+
+    The result is clamped to `_RETRY_AFTER_CEILING`. A header is a request, not
+    an instruction, and an hour-long one relayed verbatim reads to the client
+    as the server having hung. The clamp is on the number reported, never on
+    anything slept on -- nothing here sleeps for `Retry-After`.
+
+    `isascii()` guards the `isdigit()`: superscripts and other Unicode digits
+    answer True to `isdigit()` and then raise inside `int()`, which on this
+    path would replace a rate-limit report with an unrelated traceback.
+    """
+    if not value:
+        return None
+    value = value.strip()
+    if value.isascii() and value.isdigit():
+        return min(_RETRY_AFTER_CEILING, int(value))
+    try:
+        when = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    seconds = int((when - datetime.now(timezone.utc)).total_seconds())
+    return min(_RETRY_AFTER_CEILING, max(0, seconds))
 
 
 def _reconcile_search_references(
@@ -1049,6 +1141,12 @@ class LinkedInExtractor:
         # What the sidebar scroll spent on the page being read, so that a
         # multi-page search charges its scroll budget for scrolling alone.
         self._scroll_seconds = 0.0
+        # Rate-limit accounting for this scrape. One extractor is built per
+        # tool call, so both counters span the whole scrape and every section
+        # in it, which is the point: a per-section budget is what let a
+        # throttled scrape double its own request volume.
+        self._soft_retries_used = 0
+        self._rate_limit_hits = 0
 
     @staticmethod
     def _normalize_body_marker(value: Any) -> str:
@@ -1140,6 +1238,83 @@ class LinkedInExtractor:
             body_marker,
         )
 
+    async def _claim_soft_retry(self, url: str) -> bool:
+        """Take one retry from this scrape's soft rate-limit budget.
+
+        Returns whether the caller may re-navigate. The budget is the
+        extractor's, not the section's, so a scrape already being throttled
+        stops asking instead of sending one extra navigation per remaining
+        section. Each retry waits twice as long as the one before it.
+        """
+        if self._soft_retries_used >= _RATE_LIMIT_RETRY_BUDGET:
+            logger.warning(
+                "Soft rate-limit retry budget (%d) spent, not re-fetching %s",
+                _RATE_LIMIT_RETRY_BUDGET,
+                url,
+            )
+            return False
+
+        delay = jitter(_RATE_LIMIT_RETRY_DELAY * 2**self._soft_retries_used)
+        self._soft_retries_used += 1
+        logger.info("Retrying %s after %.1fs backoff", url, delay)
+        await asyncio.sleep(delay)
+        return True
+
+    async def _refusal_was_a_rate_limit(self) -> bool:
+        """Read the status off the error page Chromium left in the tab.
+
+        Only called after a navigation raised, where there is no response
+        object to ask. The interstitial carries the numeric status, so this
+        distinguishes the 429 the backoff exists for from the 404 a mistyped
+        username produces -- both of which arrive as the same net error token.
+
+        Fails closed: a body that cannot be read is not evidence of a rate
+        limit, and the caller re-raises the navigation error instead.
+        """
+        try:
+            body = await self._page.evaluate("() => document.body?.innerText || ''")
+        except Exception:
+            return False
+        return bool(_HTTP_STATUS_ON_INTERSTITIAL.search(str(body)))
+
+    async def _rate_limit_error(
+        self, url: str, *, retry_after: int | None
+    ) -> RateLimitError:
+        """Pause, then build the error for a navigation LinkedIn refused.
+
+        The pause is the only backoff available here: retrying the navigation
+        would be one more request into a live limit, so the wait happens before
+        the failure is handed back and the client's next call inherits it.
+        """
+        # Clamped after the jitter, not before: jittering the cap first meant
+        # `_RATE_LIMIT_BACKOFF_MAX` of 30 could still sleep ~45s at the +50%
+        # end, so the constant did not name the maximum it claimed to. The
+        # exponent is capped too -- it is bounded in practice because every
+        # hit sleeps, but nothing in the type says so.
+        delay = min(
+            _RATE_LIMIT_BACKOFF_MAX,
+            jitter(
+                _RATE_LIMIT_BACKOFF_DELAY
+                * 2 ** min(self._rate_limit_hits, _RATE_LIMIT_BACKOFF_MAX_DOUBLINGS)
+            ),
+        )
+        self._rate_limit_hits += 1
+        logger.warning(
+            "LinkedIn rate-limited %s (retry-after: %s); backing off %.1fs",
+            url,
+            retry_after if retry_after is not None else "not sent",
+            delay,
+        )
+        await asyncio.sleep(delay)
+
+        message = f"LinkedIn refused {url} with HTTP 429 (too many requests)."
+        if retry_after is None:
+            return RateLimitError(f"{message} Wait before scraping again.")
+        return RateLimitError(
+            f"{message} It asked to be left alone for {retry_after}s.",
+            suggested_wait_time=retry_after,
+        )
+
     async def _raise_if_auth_barrier(
         self,
         url: str,
@@ -1170,6 +1345,7 @@ class LinkedInExtractor:
         """Navigate to a LinkedIn page and fail fast on auth barriers."""
         hops: list[str] = []
         listener_registered = False
+        response: Any = None
 
         def record_navigation(frame: Any) -> None:
             if frame != self._page.main_frame:
@@ -1194,7 +1370,9 @@ class LinkedInExtractor:
                 extra={"target_url": url, "wait_until": wait_until},
             )
             try:
-                await self._page.goto(url, wait_until=wait_until, timeout=30000)
+                response = await self._page.goto(
+                    url, wait_until=wait_until, timeout=30000
+                )
                 await stabilize_navigation(f"goto {url}", logger)
                 # A little cursor entropy after each load: a frozen mouse across
                 # navigations is a cheap bot tell. Best-effort, never fatal.
@@ -1210,6 +1388,18 @@ class LinkedInExtractor:
                 # password in trace.jsonl. Converting here also keeps a proxy
                 # outage from being reported as a LinkedIn navigation problem.
                 raise_if_proxy_error(exc)
+                if (
+                    _HTTP_STATUS_NAV_FAILURE in str(exc)
+                    and await self._refusal_was_a_rate_limit()
+                ):
+                    # No response object exists on this path, so no
+                    # `Retry-After` can be read and none is invented.
+                    # `from None` for the same reason the generic re-raise
+                    # below copies the exception rather than passing it on:
+                    # the driver's own text is not carried into anything
+                    # that logs it.
+                    error = await self._rate_limit_error(url, retry_after=None)
+                    raise error from None
                 if allow_remember_me and await resolve_remember_me_prompt(self._page):
                     await stabilize_navigation(
                         f"remember-me resolution for {url}", logger
@@ -1264,6 +1454,16 @@ class LinkedInExtractor:
                 # that. Only the message is rewritten; the type is preserved so
                 # callers that branch on it are unaffected.
                 raise redacted_copy(exc) from None
+
+            # Outside the block above on purpose: raising in there would be
+            # caught by its own handler and re-raised as a navigation failure.
+            if response is not None and response.status == _HTTP_TOO_MANY_REQUESTS:
+                raise await self._rate_limit_error(
+                    url,
+                    retry_after=_retry_after_seconds(
+                        response.headers.get("retry-after")
+                    ),
+                )
 
             barrier = await detect_auth_barrier_quick(self._page)
             if not barrier:
@@ -1759,9 +1959,9 @@ class LinkedInExtractor:
     ) -> ExtractedSection:
         """Navigate to a URL, scroll to load lazy content, and extract innerText.
 
-        Retries once after a backoff when the page returns only LinkedIn chrome
+        Retries after a backoff when the page returns only LinkedIn chrome
         (sidebar/footer noise with no actual content), which indicates a soft
-        rate limit.
+        rate limit, for as long as the scrape-wide retry budget allows.
 
         Raises LinkedInScraperException subclasses (rate limit, auth, etc.).
         Returns _RATE_LIMITED_MSG sentinel when soft-rate-limited after retry.
@@ -1772,9 +1972,8 @@ class LinkedInExtractor:
             if result.text != _RATE_LIMITED_MSG:
                 return result
 
-            # Retry once after backoff
-            logger.info("Retrying %s after %.0fs backoff", url, _RATE_LIMIT_RETRY_DELAY)
-            await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
+            if not await self._claim_soft_retry(url):
+                return result
             return await self._extract_page_once(url, section_name, max_scrolls)
 
         except LinkedInScraperException:
@@ -1967,20 +2166,17 @@ class LinkedInExtractor:
         LinkedIn renders contact info as a native <dialog> element.
         Falls back to `<main>` if no dialog is found.
 
-        Retries once after a backoff when the overlay returns only LinkedIn
-        chrome (noise), mirroring `extract_page` behavior.
+        Retries after a backoff when the overlay returns only LinkedIn
+        chrome (noise), mirroring `extract_page` behavior — the retry budget
+        is shared with it, because the requests land on the same limit.
         """
         try:
             result = await self._extract_overlay_once(url, section_name)
             if result.text != _RATE_LIMITED_MSG:
                 return result
 
-            logger.info(
-                "Retrying overlay %s after %.0fs backoff",
-                url,
-                _RATE_LIMIT_RETRY_DELAY,
-            )
-            await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
+            if not await self._claim_soft_retry(url):
+                return result
             return await self._extract_overlay_once(url, section_name)
 
         except LinkedInScraperException:
@@ -3533,7 +3729,7 @@ class LinkedInExtractor:
     ) -> ExtractedSection:
         """Extract innerText from a job search page with soft rate-limit retry.
 
-        Mirrors the noise-only detection and single-retry behavior of
+        Mirrors the noise-only detection and budgeted-retry behavior of
         ``extract_page`` / ``_extract_page_once`` so that callers get a
         ``_RATE_LIMITED_MSG`` sentinel instead of silent empty results.
         """
@@ -3544,12 +3740,8 @@ class LinkedInExtractor:
             if result.text != _RATE_LIMITED_MSG:
                 return result
 
-            logger.info(
-                "Retrying search page %s after %.0fs backoff",
-                url,
-                _RATE_LIMIT_RETRY_DELAY,
-            )
-            await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
+            if not await self._claim_soft_retry(url):
+                return result
             result = await self._extract_search_page_once(
                 url, section_name, scroll_deadline / 2
             )

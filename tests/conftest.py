@@ -176,6 +176,24 @@ def isolate_profile_dir(ignore_the_developers_environment, tmp_path, monkeypatch
     return fake_profile
 
 
+@pytest.fixture(autouse=True)
+def isolate_the_account_ledger(tmp_path, monkeypatch):
+    """Keep the shared action budget out of the developer's real home.
+
+    Every tool call the middleware runs records one action against
+    ``~/.linkedin-mcp/jobs``, so without this a test run spends the daily
+    budget of whoever ran it and the next real job finds it half gone.
+    """
+    from linkedin_mcp_server import sequential_tool_middleware
+    from linkedin_mcp_server.pacing import JobStore
+
+    monkeypatch.setattr(
+        sequential_tool_middleware,
+        "JobStore",
+        lambda *args, **kwargs: JobStore(tmp_path / "jobs"),
+    )
+
+
 @pytest.fixture
 def profile_dir(isolate_profile_dir):
     """Create a non-empty profile directory."""
