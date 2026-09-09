@@ -39,6 +39,9 @@ from .support.policy_trace import (
 ROOT = Path(__file__).parents[2]
 TRACE_ROOT = ROOT / "tests" / "fixtures" / "scraping-policy" / "v1"
 PRODUCTION_BASELINE = "70e50ada68b9389f8d315df6ab1e56c08f6c985b"
+BASELINE_PROVENANCE_SHA256 = (
+    "a446e0152c4b6430c83f56b8f663baa9824c48803879baa822c840f5771e67e8"
+)
 _TOOL_SCHEMAS: dict[str, dict[str, Any]] | None = None
 
 _COMMON_ALLOWED = {
@@ -950,7 +953,7 @@ def _baseline_file(path: str) -> bytes:
     ).stdout
 
 
-def _baseline_provenance_trace() -> dict[str, Any]:
+def _generated_baseline_provenance_trace() -> dict[str, Any]:
     extractor_source = _baseline_file(
         "linkedin_mcp_server/scraping/extractor.py"
     ).decode("utf-8")
@@ -1017,6 +1020,45 @@ def _baseline_provenance_trace() -> dict[str, Any]:
         "events": [],
         "result": result,
     }
+
+
+def _baseline_object_exists() -> bool:
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(ROOT),
+            "cat-file",
+            "-e",
+            f"{PRODUCTION_BASELINE}^{{commit}}",
+        ],
+        check=False,
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
+def _verify_baseline_provenance_bytes(raw: bytes) -> None:
+    actual = sha256(raw).hexdigest()
+    if actual != BASELINE_PROVENANCE_SHA256:
+        raise AssertionError(
+            "canonical baseline provenance hash mismatch: "
+            f"expected {BASELINE_PROVENANCE_SHA256}, got {actual}"
+        )
+
+
+def _baseline_provenance_trace() -> dict[str, Any]:
+    if _baseline_object_exists():
+        trace = _generated_baseline_provenance_trace()
+        _verify_baseline_provenance_bytes(canonical_json(trace).encode("utf-8"))
+        return trace
+
+    raw = (TRACE_ROOT / "baseline-provenance.json").read_bytes()
+    _verify_baseline_provenance_bytes(raw)
+    value = json.loads(raw)
+    if not isinstance(value, dict):
+        raise AssertionError("canonical baseline provenance must be a JSON object")
+    return value
 
 
 async def _facade_contract_trace() -> dict[str, Any]:

@@ -16,6 +16,7 @@ from .support.policy_trace import (
     ScriptedPage,
     ScriptedResponse,
     TraceRecorder,
+    semantic_program_id,
 )
 
 
@@ -29,6 +30,21 @@ def test_recorder_and_page_fail_fast_on_undeclared_operations():
         page.locator("main")
     with pytest.raises(AssertionError, match="unrecognized evaluate program"):
         asyncio.run(page.evaluate("() => window.unknownPolicySurface"))
+
+
+@pytest.mark.parametrize(
+    "program",
+    [
+        "() => { const state = {}; state.editor.focus(); }",
+        "() => document.querySelector('main a[href*=\"/messaging/compose/\"]')",
+        "selector => document.querySelectorAll(selector)",
+        "arg => arg.previous + 1",
+        "expected => { const needle = normalize(expected); return needle; }",
+    ],
+)
+def test_retired_messaging_programs_are_rejected(program):
+    with pytest.raises(AssertionError, match="unrecognized evaluate program"):
+        semantic_program_id(program)
 
 
 def test_page_rejects_unused_required_script_outcomes():

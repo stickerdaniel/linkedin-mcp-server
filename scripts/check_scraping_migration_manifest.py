@@ -35,6 +35,8 @@ PERMANENT_ALIASES = {
 
 _PRIVATE_OWNERS: dict[str, tuple[str, int]] = {
     "_message_action_result": ("contracts.message_action_result", 1),
+    "_build_job_search_url": ("search_urls.build_job_search_url", 2),
+    "_build_content_search_url": ("search_urls.build_content_search_url", 2),
     "_navigate_to_page": ("navigation.PageNavigator", 3),
     "_raise_if_auth_barrier": ("navigation.PageNavigator", 3),
     "_log_navigation_failure": ("navigation.PageNavigator", 3),
@@ -67,6 +69,10 @@ _PRIVATE_OWNERS: dict[str, tuple[str, int]] = {
     "_extract_conversation_thread_refs": ("conversations.ConversationReader", 11),
     "_resolve_conversation_thread_urls": ("conversations.ConversationReader", 11),
     "_open_conversation_by_username": ("conversations.ConversationReader", 11),
+    "_strip_select_conversation_prefix": (
+        "conversations.strip_select_conversation_prefix",
+        11,
+    ),
     "_read_profile_display_name": ("profile_page.ProfilePageReader", 6),
     "_read_profile_message_target": ("message_sender.MessageSender", 12),
     "_resolve_message_compose_href": ("message_sender.MessageSender", 12),
@@ -142,6 +148,11 @@ _IMPORT_OWNERS = {
         "message_sender.ProfileMessageTargetResolution",
         12,
     ),
+}
+
+_INSTANCE_ATTRIBUTE_OWNERS = {
+    "_page": ("facade.LinkedInExtractor._page", 14),
+    "_scroll_seconds": ("session.ScrapingSession._scroll_seconds", 3),
 }
 
 _MODULE_ATTRIBUTE_OWNERS = {
@@ -349,6 +360,12 @@ class UnresolvedSeamError(ValueError):
     """A seam could not be assigned to a verified migration owner."""
 
 
+def _is_extractor_module_import(node: ast.ImportFrom) -> bool:
+    return node.module == EXTRACTOR_MODULE or (
+        node.level == 1 and node.module == "extractor"
+    )
+
+
 def _annotation_name(annotation: ast.expr | None) -> str | None:
     if isinstance(annotation, ast.Name):
         return annotation.id
@@ -404,7 +421,10 @@ def _class_aliases(tree: ast.AST) -> set[str]:
     for node in ast.walk(tree):
         if not isinstance(node, ast.ImportFrom):
             continue
-        if node.module not in {EXTRACTOR_MODULE, "linkedin_mcp_server.scraping"}:
+        if not (
+            _is_extractor_module_import(node)
+            or node.module == "linkedin_mcp_server.scraping"
+        ):
             continue
         for alias in node.names:
             if alias.name == "LinkedInExtractor":
@@ -652,7 +672,7 @@ class Scanner(ast.NodeVisitor):
             )
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> Any:
-        if node.module == EXTRACTOR_MODULE:
+        if _is_extractor_module_import(node):
             for alias in node.names:
                 if alias.name in PERMANENT_ALIASES:
                     self._add(
@@ -679,6 +699,13 @@ class Scanner(ast.NodeVisitor):
                         "owner-local scraping modules",
                         14,
                     )
+                elif alias.name == "LinkedInExtractor":
+                    self._add(
+                        "direct_import",
+                        node,
+                        alias.name,
+                        *_IMPORT_OWNERS[alias.name],
+                    )
         self.generic_visit(node)
 
     def _suppress_module_attributes(self, target: ast.expr) -> None:
@@ -691,13 +718,32 @@ class Scanner(ast.NodeVisitor):
                 self.suppressed_module_attributes.add(id(item))
 
     def visit_Attribute(self, node: ast.Attribute) -> Any:
-        if (
-            id(node) not in self.suppressed_module_attributes
-            and isinstance(node.value, ast.Name)
-            and node.value.id in self.module_names
+        if id(node) not in self.suppressed_module_attributes and isinstance(
+            node.value, ast.Name
         ):
-            self._direct_module_attribute(node, node.attr)
+            if node.value.id in self.module_names:
+                self._direct_module_attribute(node, node.attr)
+            elif node.value.id in self.class_names or (
+                self.instance_bindings and node.value.id in self.instance_bindings[-1]
+            ):
+                self._direct_facade_attribute(node, node.attr)
         self.generic_visit(node)
+
+    def _direct_facade_attribute(self, node: ast.Attribute, name: str) -> None:
+        if not name.startswith("_"):
+            return
+        owner_stage = (
+            _PRIVATE_OWNERS.get(name)
+            or _WORKFLOW_OWNERS.get(name)
+            or _INSTANCE_ATTRIBUTE_OWNERS.get(name)
+        )
+        if owner_stage is not None:
+            self._add("private_facade_access", node, name, *owner_stage)
+            return
+        if name in self.facade_privates:
+            self._error(node, name, "private facade access has no migration owner")
+            return
+        self._error(node, name, "unknown private facade access")
 
     def _direct_module_attribute(self, node: ast.Attribute, name: str) -> None:
         if name in _IMPORTED_MODULE_NAMES:
@@ -802,9 +848,10 @@ class Scanner(ast.NodeVisitor):
             return
         name = attribute.value
         bindings = self.instance_bindings[-1] if self.instance_bindings else set()
-        if isinstance(target, ast.Name) and target.id in bindings:
+        is_facade_class = isinstance(target, ast.Name) and target.id in self.class_names
+        if isinstance(target, ast.Name) and (target.id in bindings or is_facade_class):
             if name in self.facade_privates:
-                owner_stage = _PRIVATE_OWNERS.get(name)
+                owner_stage = _PRIVATE_OWNERS.get(name) or _WORKFLOW_OWNERS.get(name)
                 if owner_stage is None:
                     self._error(
                         node, name, "private facade patch has no migration owner"
@@ -814,6 +861,22 @@ class Scanner(ast.NodeVisitor):
                 return
             if name not in self.facade_publics:
                 self._error(node, name, "unknown public facade patch")
+                return
+            if is_facade_class:
+                owner_stage = _WORKFLOW_OWNERS.get(name)
+                if owner_stage is None:
+                    self._error(
+                        node, name, "public facade patch has no migration owner"
+                    )
+                    return
+                owner, stage = owner_stage
+                self._add(
+                    "public_patch_object",
+                    node,
+                    name,
+                    f"{owner} dependency",
+                    stage,
+                )
                 return
             callers = self._callers(name)
             if not callers:

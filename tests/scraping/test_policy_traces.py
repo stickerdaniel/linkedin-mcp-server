@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import importlib.util
 import json
 import logging
 import subprocess
@@ -34,6 +35,12 @@ from .support.policy_trace import FakeClock, ScriptedPage, TraceRecorder
 
 ROOT = Path(__file__).resolve().parents[2]
 CHECKER = ROOT / "scripts" / "check_scraping_policy_traces.py"
+_CHECKER_SPEC = importlib.util.spec_from_file_location(
+    "check_scraping_policy_traces", CHECKER
+)
+assert _CHECKER_SPEC is not None and _CHECKER_SPEC.loader is not None
+_CHECKER_MODULE = importlib.util.module_from_spec(_CHECKER_SPEC)
+_CHECKER_SPEC.loader.exec_module(_CHECKER_MODULE)
 
 
 def _operation_positions(trace: dict[str, Any]) -> dict[str, list[int]]:
@@ -152,6 +159,32 @@ async def test_baseline_provenance_is_generated_from_the_final_production_parent
         ),
         "mutable_instance_attributes": ["_page", "_scroll_seconds"],
     }
+
+
+def test_check_mode_uses_guarded_provenance_when_baseline_object_missing(monkeypatch):
+    def reject_baseline_read(_path: str) -> bytes:
+        raise AssertionError("missing baseline must not inspect relocated production")
+
+    scenario_globals = _CHECKER_MODULE.build_policy_traces.__globals__
+    monkeypatch.setitem(scenario_globals, "_baseline_object_exists", lambda: False)
+    monkeypatch.setitem(scenario_globals, "_baseline_file", reject_baseline_read)
+    monkeypatch.setattr(sys, "argv", [str(CHECKER), "--check"])
+
+    assert _CHECKER_MODULE.main() == 0
+
+
+def test_missing_baseline_rejects_tampered_canonical_provenance(monkeypatch, tmp_path):
+    trace_root = tmp_path / "v1"
+    trace_root.mkdir()
+    raw = (TRACE_ROOT / "baseline-provenance.json").read_bytes()
+    tampered = raw.replace(b'"python_version": "3.13"', b'"python_version": "3.12"')
+    assert tampered != raw
+    (trace_root / "baseline-provenance.json").write_bytes(tampered)
+    monkeypatch.setattr(policy_scenarios, "_baseline_object_exists", lambda: False)
+    monkeypatch.setattr(policy_scenarios, "TRACE_ROOT", trace_root)
+
+    with pytest.raises(AssertionError, match="baseline provenance hash mismatch"):
+        policy_scenarios._baseline_provenance_trace()
 
 
 async def test_trace_set_exercises_every_tool_facing_facade_method():

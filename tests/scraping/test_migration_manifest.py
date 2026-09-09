@@ -57,6 +57,7 @@ def test_manifest_matches_every_current_extractor_seam():
         "public_patch_object",
         "imported_module_patch",
         "module_attribute",
+        "private_facade_access",
     } <= {seam["kind"] for seam in current["seams"]}
     assert all(seam["canonical_owner"] for seam in current["seams"])
     assert not {
@@ -79,6 +80,9 @@ def test_manifest_covers_production_callers_not_only_tests():
     }
 
     assert production == {
+        "linkedin_mcp_server/dependencies.py",
+        "linkedin_mcp_server/scraping/__init__.py",
+        "linkedin_mcp_server/scraping/extractor.py",
         "linkedin_mcp_server/tools/company.py",
         "linkedin_mcp_server/tools/feed.py",
         "linkedin_mcp_server/tools/messaging.py",
@@ -95,6 +99,8 @@ def test_manifest_covers_production_callers_not_only_tests():
         "FilterValidationError",
         "SEND_INTERRUPTED_WARNING",
         "refuse_an_invalid_message",
+        "LinkedInExtractor",
+        "_message_action_result",
     }
 
 
@@ -118,13 +124,24 @@ def test_final_messaging_seams_have_only_the_approved_stage_owners():
         seam
         for seam in current
         if seam["path"] in message_paths
-        and seam["target"] not in {"LinkedInExtractor", "_navigate_to_page"}
+        and seam["target"]
+        not in {"LinkedInExtractor", "_navigate_to_page", "_extract_profile_urn"}
     ]
     assert {seam["path"] for seam in dom_seams} == message_paths
     assert all(seam["migration_stage"] == 12 for seam in dom_seams)
     assert all(
         seam["canonical_owner"].startswith("message_sender.") for seam in dom_seams
     )
+    profile_urn_reads = [
+        seam
+        for seam in current
+        if seam["path"] == "tests/test_send_message_confirmation_dom.py"
+        and seam["target"] == "_extract_profile_urn"
+    ]
+    assert {
+        (seam["kind"], seam["canonical_owner"], seam["migration_stage"])
+        for seam in profile_urn_reads
+    } == {("private_facade_access", "profile_page.ProfilePageReader", 6)}
 
     private_targets = {
         seam["target"]
@@ -349,6 +366,59 @@ def _scan_synthetic(source: str, *, path: Path | None = None) -> list[migration.
         ),
         frozenset({"_navigate_to_page"}),
     )
+
+
+def test_relative_import_and_private_facade_accesses_are_inventoried():
+    seams = _scan_synthetic(
+        """
+from .extractor import LinkedInExtractor as Facade
+
+async def scenario(page, replacement):
+    extractor = Facade(page)
+    build_url = Facade._build_job_search_url
+    await extractor._goto_with_auth_checks("https://example.test")
+    extractor._read_message_composer_state = replacement
+"""
+    )
+
+    direct = [seam for seam in seams if seam.kind == "direct_import"]
+    assert [(seam.target, seam.migration_stage) for seam in direct] == [
+        ("LinkedInExtractor", 14)
+    ]
+    accesses = [seam for seam in seams if seam.kind == "private_facade_access"]
+    assert {
+        (seam.target, seam.canonical_owner, seam.migration_stage) for seam in accesses
+    } == {
+        ("_build_job_search_url", "search_urls.build_job_search_url", 2),
+        ("_goto_with_auth_checks", "navigation.PageNavigator", 3),
+        (
+            "_read_message_composer_state",
+            "message_sender.MessageSender",
+            12,
+        ),
+    }
+
+
+@pytest.mark.parametrize(
+    "access",
+    [
+        "missing = Facade._unknown_helper",
+        "extractor._unknown_helper = replacement",
+    ],
+)
+def test_unknown_private_facade_accesses_fail_closed(access):
+    source = f"""
+from .extractor import LinkedInExtractor as Facade
+
+async def scenario(page, replacement):
+    extractor = Facade(page)
+    {access}
+"""
+
+    with pytest.raises(
+        migration.UnresolvedSeamError, match="unknown private facade access"
+    ):
+        _scan_synthetic(source)
 
 
 def test_caller_resolution_ignores_test_class_names():
