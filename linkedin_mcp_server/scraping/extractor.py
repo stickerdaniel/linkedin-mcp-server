@@ -559,14 +559,18 @@ _MESSAGE_COMPOSER_INSPECT_JS = r"""
         ).filter(visible);
         if (editors.length !== 1) return {status: 'ambiguous_editor'};
         const editor = editors[0];
-        const localScopes = [];
-        let ancestor = editor.parentElement;
-        while (ancestor) {
-            if (ancestor.matches('form, dialog, [role="dialog"]')) {
-                localScopes.push(ancestor);
+        const semanticAncestors = element => {
+            const scopes = [];
+            let ancestor = element.parentElement;
+            while (ancestor) {
+                if (ancestor.matches('form, dialog, [role="dialog"]')) {
+                    scopes.push(ancestor);
+                }
+                ancestor = ancestor.parentElement;
             }
-            ancestor = ancestor.parentElement;
-        }
+            return scopes;
+        };
+        const localScopes = semanticAncestors(editor);
         if (localScopes.length === 0) return {status: 'missing_owner'};
 
         const owner = localScopes.find(scope =>
@@ -576,15 +580,18 @@ _MESSAGE_COMPOSER_INSPECT_JS = r"""
             element !== editor &&
             !editor.contains(element) &&
             !element.closest('[data-view-name="message-list-item"]');
-        const paths = Array.from(owner.querySelectorAll('a[href*="/in/"]'))
+        const identityElements = selector => Array.from(new Set(
+            localScopes.flatMap(scope => [
+                ...(scope.matches(selector) ? [scope] : []),
+                ...scope.querySelectorAll(selector),
+            ])
+        ));
+        const paths = identityElements('a[href*="/in/"]')
             .filter(element => visible(element) && outsideDraftAndHistory(element))
             .map(anchor => profilePath(anchor.getAttribute('href') || anchor.href || ''));
-        const urns = [
-            ...(owner.matches('[data-profile-urn], [data-recipient-urn]')
-                ? [owner]
-                : []),
-            ...owner.querySelectorAll('[data-profile-urn], [data-recipient-urn]'),
-        ].filter(
+        const urns = identityElements(
+            '[data-profile-urn], [data-recipient-urn]'
+        ).filter(
             element => visible(element) && outsideDraftAndHistory(element)
         ).flatMap(element =>
             ['data-profile-urn', 'data-recipient-urn']
@@ -612,6 +619,7 @@ _MESSAGE_COMPOSER_INSPECT_JS = r"""
         return {
             status: 'valid',
             editor,
+            ancestorChain: localScopes,
             localScope,
             owner,
             buttons,
@@ -641,6 +649,7 @@ _MESSAGE_COMPOSER_OWNER_JS = (
         if (
             !button.isConnected ||
             !state.localScope.contains(button) ||
+            (button.form !== null && !state.ancestorChain.includes(button.form)) ||
             button.disabled ||
             (button.getAttribute('aria-disabled') || '').toLowerCase() === 'true'
         ) {
@@ -648,6 +657,7 @@ _MESSAGE_COMPOSER_OWNER_JS = (
         }
         state.owner.__linkedinMcpComposer = {
             editor: state.editor,
+            ancestorChain: state.ancestorChain,
             button,
             localScope: state.localScope,
             profilePath: target.profilePath,
@@ -669,6 +679,10 @@ _MESSAGE_CONFIRMATION_PREPARE_JS = (
             !pinned ||
             composer.owner !== arg.owner ||
             composer.editor !== pinned.editor ||
+            composer.ancestorChain.length !== pinned.ancestorChain.length ||
+            composer.ancestorChain.some(
+                (scope, index) => scope !== pinned.ancestorChain[index]
+            ) ||
             composer.localScope !== pinned.localScope ||
             composer.buttons.length !== 1 ||
             composer.buttons[0] !== pinned.button ||
@@ -694,9 +708,7 @@ _MESSAGE_CONFIRMATION_PREPARE_JS = (
             owner: arg.owner,
             editor: pinned.editor,
             expected: arg.expected,
-            baseline: new Set(
-                arg.owner.querySelectorAll('[data-view-name="message-list-item"]')
-            ),
+            baseline: new Set(),
             candidates: new Map(),
             invalid: false,
         };
@@ -801,6 +813,9 @@ _MESSAGE_CONFIRMATION_PREPARE_JS = (
             }
             refresh();
         });
+        state.baseline = new Set(
+            document.querySelectorAll('[data-view-name="message-list-item"]')
+        );
         state.observer.observe(state.owner, {
             attributes: true,
             attributeFilter: ['data-event-urn'],
@@ -996,6 +1011,45 @@ _MESSAGE_COMPOSER_PINNED_JS = r"""
             return false;
         }
     };
+    const semanticAncestors = element => {
+        const scopes = [];
+        let ancestor = element?.parentElement;
+        while (ancestor) {
+            if (ancestor.matches('form, dialog, [role="dialog"]')) {
+                scopes.push(ancestor);
+            }
+            ancestor = ancestor.parentElement;
+        }
+        return scopes;
+    };
+    const identitiesMatch = (scopes, editor, target) => {
+        const outsideDraftAndHistory = element =>
+            element !== editor &&
+            !editor.contains(element) &&
+            !element.closest('[data-view-name="message-list-item"]');
+        const identityElements = selector => Array.from(new Set(
+            scopes.flatMap(scope => [
+                ...(scope.matches(selector) ? [scope] : []),
+                ...scope.querySelectorAll(selector),
+            ])
+        ));
+        const paths = identityElements('a[href*="/in/"]')
+            .filter(element => visible(element) && outsideDraftAndHistory(element))
+            .map(anchor => profilePath(anchor.getAttribute('href') || anchor.href || ''));
+        const urns = identityElements(
+            '[data-profile-urn], [data-recipient-urn]'
+        ).filter(
+            element => visible(element) && outsideDraftAndHistory(element)
+        ).flatMap(element =>
+            ['data-profile-urn', 'data-recipient-urn']
+                .filter(name => element.hasAttribute(name))
+                .map(name => normalizeUrn(element.getAttribute(name)))
+        );
+        return !(
+            paths.some(path => path !== target.profilePath) ||
+            urns.some(urn => urn !== target.profileUrn)
+        );
+    };
     const validatePinned = target => {
         const pinned = owner?.__linkedinMcpComposer;
         if (
@@ -1006,43 +1060,26 @@ _MESSAGE_COMPOSER_PINNED_JS = r"""
         ) {
             return null;
         }
-        const {editor, button, localScope} = pinned;
+        const {editor, ancestorChain, button, localScope} = pinned;
+        const currentChain = semanticAncestors(editor);
         if (
             !owner.isConnected ||
             !editor?.isConnected ||
             !button?.isConnected ||
             !localScope?.isConnected ||
+            !Array.isArray(ancestorChain) ||
+            currentChain.length !== ancestorChain.length ||
+            currentChain.some((scope, index) => scope !== ancestorChain[index]) ||
+            !currentChain.includes(owner) ||
+            !currentChain.includes(localScope) ||
             !owner.contains(editor) ||
             !owner.contains(localScope) ||
             !localScope.contains(button) ||
+            (button.form !== null && !currentChain.includes(button.form)) ||
             !visible(editor) ||
             !visible(button) ||
-            !editor.matches('[role="textbox"][contenteditable="true"]')
-        ) {
-            return null;
-        }
-        const outsideDraftAndHistory = element =>
-            element !== editor &&
-            !editor.contains(element) &&
-            !element.closest('[data-view-name="message-list-item"]');
-        const paths = Array.from(owner.querySelectorAll('a[href*="/in/"]'))
-            .filter(element => visible(element) && outsideDraftAndHistory(element))
-            .map(anchor => profilePath(anchor.getAttribute('href') || anchor.href || ''));
-        const urns = [
-            ...(owner.matches('[data-profile-urn], [data-recipient-urn]')
-                ? [owner]
-                : []),
-            ...owner.querySelectorAll('[data-profile-urn], [data-recipient-urn]'),
-        ].filter(
-            element => visible(element) && outsideDraftAndHistory(element)
-        ).flatMap(element =>
-            ['data-profile-urn', 'data-recipient-urn']
-                .filter(name => element.hasAttribute(name))
-                .map(name => normalizeUrn(element.getAttribute(name)))
-        );
-        if (
-            paths.some(path => path !== target.profilePath) ||
-            urns.some(urn => urn !== target.profileUrn)
+            !editor.matches('[role="textbox"][contenteditable="true"]') ||
+            !identitiesMatch(currentChain, editor, target)
         ) {
             return null;
         }

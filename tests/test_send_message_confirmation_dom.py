@@ -98,6 +98,18 @@ REPARENTED_BASELINE_SEND_JS = """
   });
 """
 
+GLOBAL_BASELINE_REPARENT_SEND_JS = """
+  document.getElementById('send').addEventListener('click', event => {
+    event.preventDefault();
+    document.body.dataset.clicked = 'true';
+    const composer = document.getElementById('composer');
+    const entry = document.querySelector('#outside [data-view-name="message-list-item"]');
+    document.getElementById('thread').appendChild(entry);
+    entry.setAttribute('data-event-urn', 'server-reparented-id');
+    composer.textContent = '';
+  });
+"""
+
 REPLACED_NODE_SEND_JS = """
   document.getElementById('send').addEventListener('click', event => {
     event.preventDefault();
@@ -614,6 +626,34 @@ class TestSendConfirmationDom:
         assert await dom_page.locator("#thread .msg").count() == 1
         assert (
             await dom_page.locator("#thread .msg").get_attribute("data-event-urn")
+            == "server-reparented-id"
+        )
+
+    async def test_global_baseline_node_reparented_into_owner_is_never_confirmed(
+        self, dom_page
+    ):
+        outside = f"""
+          <aside id="outside">
+            <div class="msg" data-view-name="message-list-item"
+                 data-event-urn="outside-history-id">
+              <span class="message-unit">{MESSAGE}</span>
+            </div>
+          </aside>
+        """
+        html = compose_page(GLOBAL_BASELINE_REPARENT_SEND_JS).replace(
+            "</section>", f"</section>{outside}"
+        )
+
+        result = await send(dom_page, html)
+
+        assert result["status"] == "send_unconfirmed"
+        assert result["sent"] is False
+        assert result["retry_safe"] is False
+        assert await dom_page.evaluate("document.body.dataset.clicked") == "true"
+        assert await dom_page.locator("#outside .msg").count() == 0
+        assert await dom_page.locator("#thread .msg").count() == 2
+        assert (
+            await dom_page.locator("#thread .msg").last.get_attribute("data-event-urn")
             == "server-reparented-id"
         )
 

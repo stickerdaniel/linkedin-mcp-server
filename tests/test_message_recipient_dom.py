@@ -430,6 +430,59 @@ class TestMessageComposerDom:
             await dom_page.locator("[data-outer]").get_attribute("data-clicked") is None
         )
 
+    @pytest.mark.parametrize(
+        ("recipient_urn", "button_form", "expected"),
+        [
+            ("OTHER", None, None),
+            ("ACoAAB", "foreign", None),
+            ("ACoAAB", None, ("written", "clicked", "ancestor")),
+        ],
+        ids=["foreign-ancestor", "foreign-form-owner", "matching-ancestor"],
+    )
+    async def test_entire_semantic_ancestor_chain_controls_submit(
+        self, dom_page, recipient_urn, button_form, expected
+    ):
+        form_attribute = f' form="{button_form}"' if button_form else ""
+        await _set_composer_content(
+            dom_page,
+            f"""<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>
+              <form id="ancestor" data-recipient-urn="{recipient_urn}"
+                    onsubmit="event.preventDefault();
+                      document.body.dataset.submitted=this.id">
+                <section role="dialog">
+                  <div role="textbox" contenteditable="true"
+                       style="display:block;width:200px;height:30px"></div>
+                  <button type="submit"{form_attribute}>Send</button>
+                </section>
+              </form>
+              <form id="foreign" onsubmit="event.preventDefault();
+                document.body.dataset.submitted=this.id"></form>
+            </body></html>""",
+        )
+        extractor = LinkedInExtractor(dom_page)
+        owner = await extractor._resolve_message_owner(_message_target())
+        written = submitted = None
+        if owner is not None:
+            written = await extractor._write_verified_message(
+                "Hello!", target=_message_target(), owner=owner
+            )
+            submitted = await extractor._submit_verified_message(
+                "Hello!", target=_message_target(), owner=owner
+            )
+            await extractor._dispose_message_owner(owner)
+
+        if expected is None:
+            assert owner is None
+            assert written is None
+            assert submitted is None
+            assert await dom_page.evaluate("document.body.dataset.submitted") is None
+        else:
+            assert (written, submitted) == expected[:2]
+            assert (
+                await dom_page.evaluate("document.body.dataset.submitted")
+                == expected[2]
+            )
+
     async def test_profile_link_inside_editor_never_authorizes(self, dom_page):
         """Draft content is not a recipient, however well-formed it looks."""
         state = await _state(
