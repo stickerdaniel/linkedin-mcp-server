@@ -499,6 +499,175 @@ def test_unknown_relative_module_alias_access_fails_closed():
         )
 
 
+def test_function_definition_expressions_use_the_enclosing_scope():
+    seams = _scan_synthetic(
+        """
+from linkedin_mcp_server.scraping import extractor as legacy
+
+def marker(value):
+    return value
+
+@marker(legacy._drain_listener_tasks)
+def parameter_shadow(
+    legacy: legacy._ProfileMessageTarget = legacy._PROFILE_MESSAGE_TARGET_JS,
+    callback=(lambda legacy=legacy._message_page_url_is_safe: legacy._unknown),
+) -> legacy._ProfileMessageTargetResolution:
+    legacy._unknown()
+
+def local_shadow(
+    value: legacy._ProfileMessageTarget = legacy._PROFILE_MESSAGE_TARGET_JS,
+):
+    legacy = object()
+    legacy._unknown()
+"""
+    )
+
+    attributes = [seam.target for seam in seams if seam.kind == "module_attribute"]
+    assert attributes == [
+        "_drain_listener_tasks",
+        "_ProfileMessageTarget",
+        "_PROFILE_MESSAGE_TARGET_JS",
+        "_message_page_url_is_safe",
+        "_ProfileMessageTargetResolution",
+        "_ProfileMessageTarget",
+        "_PROFILE_MESSAGE_TARGET_JS",
+    ]
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "[legacy._unknown for first in legacy._drain_listener_tasks "
+        "for legacy in legacy._drain_listener_tasks]",
+        "{legacy._unknown for first in legacy._drain_listener_tasks "
+        "for legacy in legacy._drain_listener_tasks}",
+        "{legacy._unknown: legacy._also_unknown "
+        "for first in legacy._drain_listener_tasks "
+        "for legacy in legacy._drain_listener_tasks}",
+        "(legacy._unknown for first in legacy._drain_listener_tasks "
+        "for legacy in legacy._drain_listener_tasks)",
+    ],
+)
+def test_comprehension_targets_shadow_only_after_their_iterators(expression):
+    seams = _scan_synthetic(
+        "from linkedin_mcp_server.scraping import extractor as legacy\n"
+        f"result = {expression}\n"
+    )
+
+    assert [seam.target for seam in seams if seam.kind == "module_attribute"] == [
+        "_drain_listener_tasks",
+        "_drain_listener_tasks",
+    ]
+
+
+def test_nested_comprehensions_keep_their_implicit_scopes_separate():
+    seams = _scan_synthetic(
+        """
+from linkedin_mcp_server.scraping import extractor as legacy
+result = [
+    legacy._unknown
+    for legacy in [item for item in legacy._drain_listener_tasks]
+]
+"""
+    )
+
+    assert [seam.target for seam in seams if seam.kind == "module_attribute"] == [
+        "_drain_listener_tasks"
+    ]
+
+
+def test_module_aliases_follow_nested_global_and_nonlocal_bindings():
+    seams = _scan_synthetic(
+        """
+from linkedin_mcp_server.scraping import extractor as legacy
+
+def shadows():
+    def by_parameter(legacy):
+        legacy._unknown
+
+    def by_assignment():
+        legacy = object()
+        legacy._unknown
+
+    def by_import():
+        import types as legacy
+        legacy._unknown
+
+    def by_function():
+        def legacy():
+            pass
+        legacy._unknown
+
+    def by_class():
+        class legacy:
+            pass
+        legacy._unknown
+
+    def module_binding():
+        global legacy
+        return legacy._drain_listener_tasks
+
+def alias_owner():
+    from linkedin_mcp_server.scraping import extractor as nested_alias
+
+    def inherited():
+        return nested_alias._drain_listener_tasks
+
+    def enclosing_binding():
+        nonlocal nested_alias
+        return nested_alias._drain_listener_tasks
+
+nested_alias = object()
+nested_alias._unknown
+"""
+    )
+
+    assert [seam.target for seam in seams if seam.kind == "module_attribute"] == [
+        "_drain_listener_tasks",
+        "_drain_listener_tasks",
+        "_drain_listener_tasks",
+    ]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        """
+from linkedin_mcp_server.scraping import extractor as legacy
+
+def marker(value):
+    return value
+
+@marker(legacy._unknown)
+def scenario():
+    pass
+""",
+        """
+from linkedin_mcp_server.scraping import extractor as legacy
+
+def scenario(value=legacy._unknown):
+    pass
+""",
+        """
+from linkedin_mcp_server.scraping import extractor as legacy
+
+def scenario(value: legacy._unknown):
+    pass
+""",
+        """
+from linkedin_mcp_server.scraping import extractor as legacy
+result = [item for item in legacy._unknown]
+""",
+    ],
+)
+def test_unknown_module_accesses_in_enclosing_evaluation_fail_closed(source):
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match="unknown direct extractor module attribute",
+    ):
+        _scan_synthetic(source)
+
+
 def test_manifest_includes_extractor_access_from_nested_closure():
     accesses = [
         seam

@@ -398,10 +398,13 @@ def _walk_scope(node: ast.AST):
 
 
 class _LocalBindingCollector(ast.NodeVisitor):
-    def __init__(self) -> None:
+    def __init__(self, path: Path | None = None) -> None:
+        self.path = path
         self.bindings: set[str] = set()
         self.globals: set[str] = set()
         self.nonlocals: set[str] = set()
+        self.module_aliases: set[str] = set()
+        self.class_aliases: set[str] = set()
 
     def visit_Name(self, node: ast.Name) -> Any:
         if isinstance(node.ctx, (ast.Store, ast.Del)):
@@ -411,15 +414,55 @@ class _LocalBindingCollector(ast.NodeVisitor):
         self.bindings.update(
             alias.asname or alias.name.split(".", 1)[0] for alias in node.names
         )
+        self.module_aliases.update(
+            alias.asname
+            for alias in node.names
+            if alias.name == EXTRACTOR_MODULE and alias.asname
+        )
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> Any:
         self.bindings.update(alias.asname or alias.name for alias in node.names)
+        if self.path is None:
+            return
+        if _is_scraping_package_import(self.path, node):
+            self.module_aliases.update(
+                alias.asname or alias.name
+                for alias in node.names
+                if alias.name == "extractor"
+            )
+        if _is_extractor_module_import(self.path, node) or _is_scraping_package_import(
+            self.path, node
+        ):
+            self.class_aliases.update(
+                alias.asname or alias.name
+                for alias in node.names
+                if alias.name == "LinkedInExtractor"
+            )
 
     def visit_Global(self, node: ast.Global) -> Any:
         self.globals.update(node.names)
 
     def visit_Nonlocal(self, node: ast.Nonlocal) -> Any:
         self.nonlocals.update(node.names)
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> Any:
+        if node.name:
+            self.bindings.add(node.name)
+        self.generic_visit(node)
+
+    def visit_MatchAs(self, node: ast.MatchAs) -> Any:
+        if node.name:
+            self.bindings.add(node.name)
+        self.generic_visit(node)
+
+    def visit_MatchStar(self, node: ast.MatchStar) -> Any:
+        if node.name:
+            self.bindings.add(node.name)
+
+    def visit_MatchMapping(self, node: ast.MatchMapping) -> Any:
+        if node.rest:
+            self.bindings.add(node.rest)
+        self.generic_visit(node)
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> Any:
         self.bindings.add(node.name)
@@ -456,74 +499,84 @@ class _LocalBindingCollector(ast.NodeVisitor):
         self._visit_comprehension(node.generators, [node.key, node.value])
 
 
-def _function_shadowed_names(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
-    arguments = {
+def _argument_names(arguments: ast.arguments) -> set[str]:
+    names = {
         argument.arg
         for argument in [
-            *node.args.posonlyargs,
-            *node.args.args,
-            *node.args.kwonlyargs,
+            *arguments.posonlyargs,
+            *arguments.args,
+            *arguments.kwonlyargs,
         ]
     }
-    if node.args.vararg:
-        arguments.add(node.args.vararg.arg)
-    if node.args.kwarg:
-        arguments.add(node.args.kwarg.arg)
+    if arguments.vararg:
+        names.add(arguments.vararg.arg)
+    if arguments.kwarg:
+        names.add(arguments.kwarg.arg)
+    return names
 
-    collector = _LocalBindingCollector()
-    for statement in node.body:
+
+def _scope_collector(path: Path, statements: list[ast.stmt]) -> _LocalBindingCollector:
+    collector = _LocalBindingCollector(path)
+    for statement in statements:
         collector.visit(statement)
-    return (arguments | collector.bindings | collector.globals) - collector.nonlocals
+    return collector
+
+
+def _function_shadowed_names(
+    path: Path, node: ast.FunctionDef | ast.AsyncFunctionDef
+) -> set[str]:
+    collector = _scope_collector(path, node.body)
+    local_bindings = collector.bindings - collector.globals - collector.nonlocals
+    return _argument_names(node.args) | local_bindings
+
+
+@dataclass(slots=True)
+class _ScopeFrame:
+    module_names: set[str]
+    class_names: set[str]
+    instance_names: set[str]
+    closure_module_names: set[str]
+    closure_class_names: set[str]
+    closure_instance_names: set[str]
 
 
 def _extractor_bindings(
-    node: ast.FunctionDef | ast.AsyncFunctionDef, class_aliases: set[str]
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    annotation_aliases: set[str],
+    body_aliases: set[str],
 ) -> set[str]:
     bindings = {
         argument.arg
         for argument in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]
-        if _annotation_name(argument.annotation) in class_aliases
+        if _annotation_name(argument.annotation) in annotation_aliases
     }
     if (
         node.args.vararg
-        and _annotation_name(node.args.vararg.annotation) in class_aliases
+        and _annotation_name(node.args.vararg.annotation) in annotation_aliases
     ):
         bindings.add(node.args.vararg.arg)
     if (
         node.args.kwarg
-        and _annotation_name(node.args.kwarg.annotation) in class_aliases
+        and _annotation_name(node.args.kwarg.annotation) in annotation_aliases
     ):
         bindings.add(node.args.kwarg.arg)
 
-    for item in _walk_scope(node):
-        if not isinstance(item, (ast.Assign, ast.AnnAssign)):
-            continue
-        value = item.value
-        if not (
-            isinstance(value, ast.Call)
-            and isinstance(value.func, ast.Name)
-            and value.func.id in class_aliases
-        ):
-            continue
-        targets = item.targets if isinstance(item, ast.Assign) else [item.target]
-        bindings.update(target.id for target in targets if isinstance(target, ast.Name))
+    for statement in node.body:
+        for item in (statement, *_walk_scope(statement)):
+            if not isinstance(item, (ast.Assign, ast.AnnAssign)):
+                continue
+            value = item.value
+            if not (
+                isinstance(value, ast.Call)
+                and isinstance(value.func, ast.Name)
+                and value.func.id in body_aliases
+            ):
+                continue
+            targets = item.targets if isinstance(item, ast.Assign) else [item.target]
+            bindings.update(
+                target.id for target in targets if isinstance(target, ast.Name)
+            )
     return bindings
-
-
-def _class_aliases(path: Path, tree: ast.AST) -> set[str]:
-    aliases = {"LinkedInExtractor"}
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.ImportFrom):
-            continue
-        if not (
-            _is_extractor_module_import(path, node)
-            or _is_scraping_package_import(path, node)
-        ):
-            continue
-        for alias in node.names:
-            if alias.name == "LinkedInExtractor":
-                aliases.add(alias.asname or alias.name)
-    return aliases
 
 
 def module_aliases(path: Path, tree: ast.AST) -> set[str]:
@@ -577,16 +630,33 @@ class Scanner(ast.NodeVisitor):
         facade_privates: frozenset[str],
     ):
         self.path = path
-        self.module_names = module_names
-        self.class_names = class_names
+        self.root_module_names = module_names
+        self.root_class_names = class_names
         self.facade_publics = facade_publics
         self.facade_privates = facade_privates
         self.functions: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
-        self.instance_bindings: list[set[str]] = []
+        self.frames = [
+            _ScopeFrame(
+                module_names=set(module_names),
+                class_names=set(class_names),
+                instance_names=set(),
+                closure_module_names=set(module_names),
+                closure_class_names=set(class_names),
+                closure_instance_names=set(),
+            )
+        ]
         self.caller_contexts: list[set[str]] = []
         self.suppressed_module_attributes: set[int] = set()
         self.seams: list[Seam] = []
         self.errors: list[str] = []
+
+    @property
+    def module_names(self) -> set[str]:
+        return self.frames[-1].module_names
+
+    @property
+    def class_names(self) -> set[str]:
+        return self.frames[-1].class_names
 
     @property
     def relative_path(self) -> str:
@@ -615,17 +685,95 @@ class Scanner(ast.NodeVisitor):
         line = getattr(node, "lineno", 0)
         self.errors.append(f"{self.relative_path}:{line} {target}: {reason}")
 
+    @staticmethod
+    def _adjust_aliases(
+        inherited: set[str],
+        root: set[str],
+        collector: _LocalBindingCollector,
+        local_aliases: set[str],
+        parameters: set[str] | None = None,
+    ) -> set[str]:
+        local_bindings = collector.bindings - collector.globals - collector.nonlocals
+        names = inherited - local_bindings - (parameters or set())
+        for name in collector.globals:
+            if name in root:
+                names.add(name)
+            else:
+                names.discard(name)
+        names.update(local_aliases)
+        return names
+
+    def _visit_arguments(self, arguments: ast.arguments) -> None:
+        for argument in [
+            *arguments.posonlyargs,
+            *arguments.args,
+            *arguments.kwonlyargs,
+        ]:
+            if argument.annotation is not None:
+                self.visit(argument.annotation)
+        if arguments.vararg and arguments.vararg.annotation is not None:
+            self.visit(arguments.vararg.annotation)
+        if arguments.kwarg and arguments.kwarg.annotation is not None:
+            self.visit(arguments.kwarg.annotation)
+        for default in arguments.defaults:
+            self.visit(default)
+        for default in arguments.kw_defaults:
+            if default is not None:
+                self.visit(default)
+
     def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
-        self.functions.append(node)
-        inherited = self.instance_bindings[-1] if self.instance_bindings else set()
-        bindings = inherited - _function_shadowed_names(node)
-        bindings.update(_extractor_bindings(node, self.class_names))
-        bindings.update(
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        self._visit_arguments(node.args)
+        if node.returns is not None:
+            self.visit(node.returns)
+        for type_parameter in getattr(node, "type_params", ()):
+            self.visit(type_parameter)
+
+        parent = self.frames[-1]
+        collector = _scope_collector(self.path, node.body)
+        parameters = _argument_names(node.args)
+        module_names = self._adjust_aliases(
+            parent.closure_module_names,
+            self.root_module_names,
+            collector,
+            collector.module_aliases,
+            parameters,
+        )
+        class_names = self._adjust_aliases(
+            parent.closure_class_names,
+            self.root_class_names,
+            collector,
+            collector.class_aliases,
+            parameters,
+        )
+        instance_names = parent.closure_instance_names - _function_shadowed_names(
+            self.path, node
+        )
+        instance_names.update(
+            _extractor_bindings(
+                node,
+                parent.class_names,
+                class_names,
+            )
+        )
+        instance_names.update(
             _EXPLICIT_INSTANCE_BINDINGS.get((self.relative_path, node.name), ())
         )
-        self.instance_bindings.append(bindings)
-        self.generic_visit(node)
-        self.instance_bindings.pop()
+        self.functions.append(node)
+        self.frames.append(
+            _ScopeFrame(
+                module_names=module_names,
+                class_names=class_names,
+                instance_names=instance_names,
+                closure_module_names=set(module_names),
+                closure_class_names=set(class_names),
+                closure_instance_names=set(instance_names),
+            )
+        )
+        for statement in node.body:
+            self.visit(statement)
+        self.frames.pop()
         self.functions.pop()
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> Any:
@@ -633,6 +781,135 @@ class Scanner(ast.NodeVisitor):
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> Any:
         self._visit_function(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> Any:
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for base in node.bases:
+            self.visit(base)
+        for keyword in node.keywords:
+            self.visit(keyword.value)
+        for type_parameter in getattr(node, "type_params", ()):
+            self.visit(type_parameter)
+
+        parent = self.frames[-1]
+        collector = _scope_collector(self.path, node.body)
+        module_names = self._adjust_aliases(
+            parent.closure_module_names,
+            self.root_module_names,
+            collector,
+            collector.module_aliases,
+        )
+        class_names = self._adjust_aliases(
+            parent.closure_class_names,
+            self.root_class_names,
+            collector,
+            collector.class_aliases,
+        )
+        local_bindings = collector.bindings - collector.globals - collector.nonlocals
+        instance_names = parent.closure_instance_names - local_bindings
+        self.frames.append(
+            _ScopeFrame(
+                module_names=module_names,
+                class_names=class_names,
+                instance_names=instance_names,
+                closure_module_names=set(parent.closure_module_names),
+                closure_class_names=set(parent.closure_class_names),
+                closure_instance_names=set(parent.closure_instance_names),
+            )
+        )
+        for statement in node.body:
+            self.visit(statement)
+        self.frames.pop()
+
+    def visit_Lambda(self, node: ast.Lambda) -> Any:
+        self._visit_arguments(node.args)
+        parent = self.frames[-1]
+        collector = _LocalBindingCollector(self.path)
+        collector.visit(node.body)
+        parameters = _argument_names(node.args)
+        module_names = self._adjust_aliases(
+            parent.closure_module_names,
+            self.root_module_names,
+            collector,
+            set(),
+            parameters,
+        )
+        class_names = self._adjust_aliases(
+            parent.closure_class_names,
+            self.root_class_names,
+            collector,
+            set(),
+            parameters,
+        )
+        local_bindings = collector.bindings - collector.globals - collector.nonlocals
+        instance_names = parent.closure_instance_names - local_bindings - parameters
+        self.frames.append(
+            _ScopeFrame(
+                module_names=module_names,
+                class_names=class_names,
+                instance_names=instance_names,
+                closure_module_names=set(module_names),
+                closure_class_names=set(class_names),
+                closure_instance_names=set(instance_names),
+            )
+        )
+        self.visit(node.body)
+        self.frames.pop()
+
+    @staticmethod
+    def _target_names(target: ast.expr) -> set[str]:
+        return {
+            item.id
+            for item in ast.walk(target)
+            if isinstance(item, ast.Name) and isinstance(item.ctx, ast.Store)
+        }
+
+    def _visit_comprehension(
+        self,
+        generators: list[ast.comprehension],
+        values: list[ast.expr],
+    ) -> None:
+        first, *remaining = generators
+        self.visit(first.iter)
+        parent = self.frames[-1]
+        module_names = set(parent.closure_module_names)
+        class_names = set(parent.closure_class_names)
+        instance_names = set(parent.closure_instance_names)
+        frame = _ScopeFrame(
+            module_names=module_names,
+            class_names=class_names,
+            instance_names=instance_names,
+            closure_module_names=module_names,
+            closure_class_names=class_names,
+            closure_instance_names=instance_names,
+        )
+        self.frames.append(frame)
+        for generator in (first, *remaining):
+            if generator is not first:
+                self.visit(generator.iter)
+            self.visit(generator.target)
+            targets = self._target_names(generator.target)
+            frame.module_names.difference_update(targets)
+            frame.class_names.difference_update(targets)
+            frame.instance_names.difference_update(targets)
+            for condition in generator.ifs:
+                self.visit(condition)
+        for value in values:
+            self.visit(value)
+        self.frames.pop()
+
+    def visit_ListComp(self, node: ast.ListComp) -> Any:
+        self._visit_comprehension(node.generators, [node.elt])
+
+    def visit_SetComp(self, node: ast.SetComp) -> Any:
+        self._visit_comprehension(node.generators, [node.elt])
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> Any:
+        self._visit_comprehension(node.generators, [node.elt])
+
+    def visit_DictComp(self, node: ast.DictComp) -> Any:
+        self._visit_comprehension(node.generators, [node.key, node.value])
 
     @staticmethod
     def _called_methods(nodes: list[ast.stmt], bindings: set[str]) -> set[str]:
@@ -664,7 +941,7 @@ class Scanner(ast.NodeVisitor):
         return methods
 
     def _visit_with(self, node: ast.With | ast.AsyncWith) -> None:
-        bindings = self.instance_bindings[-1] if self.instance_bindings else set()
+        bindings = self.frames[-1].instance_names
         self.caller_contexts.append(self._called_methods(node.body, bindings))
         for item in node.items:
             self.visit(item.context_expr)
@@ -684,7 +961,7 @@ class Scanner(ast.NodeVisitor):
         if not self.functions:
             return []
         function = self.functions[-1]
-        bindings = self.instance_bindings[-1]
+        bindings = self.frames[-1].instance_names
         methods = (
             set(self.caller_contexts[-1])
             if self.caller_contexts
@@ -819,8 +1096,9 @@ class Scanner(ast.NodeVisitor):
         ):
             if node.value.id in self.module_names:
                 self._direct_module_attribute(node, node.attr)
-            elif node.value.id in self.class_names or (
-                self.instance_bindings and node.value.id in self.instance_bindings[-1]
+            elif (
+                node.value.id in self.class_names
+                or node.value.id in self.frames[-1].instance_names
             ):
                 self._direct_facade_attribute(node, node.attr)
         self.generic_visit(node)
@@ -943,7 +1221,7 @@ class Scanner(ast.NodeVisitor):
             self._error(node, ast.unparse(target), "dynamic patch.object attribute")
             return
         name = attribute.value
-        bindings = self.instance_bindings[-1] if self.instance_bindings else set()
+        bindings = self.frames[-1].instance_names
         is_facade_class = isinstance(target, ast.Name) and target.id in self.class_names
         if isinstance(target, ast.Name) and (target.id in bindings or is_facade_class):
             if name in self.facade_privates:
@@ -1053,10 +1331,15 @@ def scan_source(
     """Scan one source string and fail on every unresolved extractor seam."""
 
     tree = ast.parse(source, filename=str(path))
+    module_aliases(path, tree)
+    root = _scope_collector(path, tree.body)
+    class_names = set(root.class_aliases)
+    if path == PACKAGE / "scraping" / "extractor.py":
+        class_names.add("LinkedInExtractor")
     scanner = Scanner(
         path,
-        module_aliases(path, tree),
-        _class_aliases(path, tree),
+        root.module_aliases,
+        class_names,
         facade_publics,
         facade_privates,
     )
