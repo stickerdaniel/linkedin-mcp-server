@@ -55,6 +55,21 @@ class SequentialToolExecutionMiddleware(Middleware):
         }
     )
 
+    # Tools that count their own LinkedIn activity against the same ledger,
+    # once per profile or company rather than once per call. They are paced
+    # like anything else -- they do reach LinkedIn -- but recording here as
+    # well would add one unit per call on top of the ones they already wrote,
+    # and the ledger drives a daily cap, so an overstated count stops the next
+    # bunch early. Skipping the record is not the same as skipping the gap,
+    # which is why this is a separate set rather than another entry above.
+    _SELF_RECORDING_TOOLS = frozenset(
+        {
+            "run_enrichment_bunch",
+            "enrich_companies",
+            "enrich_company_deep",
+        }
+    )
+
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self._store = JobStore()
@@ -208,7 +223,8 @@ class SequentialToolExecutionMiddleware(Middleware):
             # a gap. Still inside the asyncio lock, so the next call in this
             # process sees the deadline before it tests it.
             if tool_name not in self._LOCAL_ONLY_TOOLS:
-                self._record_one_account_action()
+                if tool_name not in self._SELF_RECORDING_TOOLS:
+                    self._record_one_account_action()
                 self._next_call_at = time.monotonic() + tool_call_gap(
                     os.environ.get(EnvironmentKeys.TOOL_CALL_GAP_SECONDS)
                 )

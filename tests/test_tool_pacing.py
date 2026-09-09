@@ -132,3 +132,31 @@ class TestLocalOnlyToolsAreNotPaced:
 
         await _timed_call(paced)
         assert load_account_budget(store, now).ledger.spent(now) == 1
+
+
+class TestSelfRecordingToolsAreNotCountedTwice:
+    """An enrichment tool writes its own units, one per profile it scrapes.
+
+    Recording here as well added one more per call. The ledger drives a
+    rolling daily cap, so an overstated count makes the next bunch stop before
+    the budget it was actually given. The gap still applies: these tools do
+    reach LinkedIn, and skipping the record is not the same as skipping the
+    pacing.
+    """
+
+    async def test_a_self_recording_tool_spends_no_extra_unit(self, paced, tmp_path):
+        store = JobStore(tmp_path / "jobs")
+        now = datetime.now()
+
+        await _timed_call(paced, "run_enrichment_bunch")
+        await _timed_call(paced, "enrich_companies")
+        await _timed_call(paced, "enrich_company_deep")
+
+        assert load_account_budget(store, now).ledger.spent(now) == 0
+
+    async def test_a_self_recording_tool_is_still_paced(self, paced):
+        await _timed_call(paced, "run_enrichment_bunch")
+        second = await _timed_call(paced, "run_enrichment_bunch")
+
+        # Unlike a local-only tool, this one waits: it did reach LinkedIn.
+        assert second >= GAP * 0.8
