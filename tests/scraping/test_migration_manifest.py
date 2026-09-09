@@ -1212,6 +1212,54 @@ async def scenario(page):
         )
 
 
+def test_boundary_callers_track_class_extractor_assignments():
+    seams = _scan_synthetic(
+        """
+from unittest.mock import patch
+from linkedin_mcp_server.scraping import extractor as legacy_surface
+from linkedin_mcp_server.scraping.extractor import LinkedInExtractor
+
+async def scenario(page):
+    with patch.object(legacy_surface, "detect_rate_limit"):
+        class ReconciledFinally:
+            try:
+                might_fail()
+            except RuntimeError as worker:
+                pass
+            finally:
+                worker = LinkedInExtractor(page)
+            after = worker.extract_feed()
+
+        class AnnotatedInstance:
+            worker: LinkedInExtractor = LinkedInExtractor(page)
+            after = worker.search_posts("query")
+
+        class LocalAlias:
+            from linkedin_mcp_server.scraping.extractor import (
+                LinkedInExtractor as LocalExtractor,
+            )
+            worker = LocalExtractor(page)
+            after = worker.scrape_company("company")
+
+        class ShadowedAlias:
+            LinkedInExtractor = object()
+            worker = LinkedInExtractor(page)
+            after = worker.scrape_person("person")
+
+        class AnnotationOnly:
+            worker: LinkedInExtractor
+            after = worker.scrape_person("person")
+"""
+    )
+
+    boundary = [
+        seam
+        for seam in seams
+        if seam.kind == "boundary_patch_object" and seam.target == "detect_rate_limit"
+    ]
+    assert {seam.migration_stage for seam in boundary} == {5, 8, 10}
+
+
 def test_only_shadowed_boundary_callers_fail_closed():
     with pytest.raises(
         migration.UnresolvedSeamError,

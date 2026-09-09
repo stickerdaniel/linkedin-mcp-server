@@ -654,9 +654,12 @@ def _extractor_bindings(
 
 
 class _CalledMethodCollector(ast.NodeVisitor):
-    def __init__(self, bindings: set[str]) -> None:
+    def __init__(self, path: Path, bindings: set[str], class_names: set[str]) -> None:
+        self.path = path
         self.bindings = [set(bindings)]
         self.closure_bindings = [set(bindings)]
+        self.class_names = [set(class_names)]
+        self.closure_class_names = [set(class_names)]
         self.ambiguous_names = [set[str]()]
         self.closure_ambiguous_names = [set[str]()]
         self.methods: set[str] = set()
@@ -718,7 +721,7 @@ class _CalledMethodCollector(ast.NodeVisitor):
             self.visit(node.returns)
         for type_parameter in getattr(node, "type_params", ()):
             self.visit(type_parameter)
-        collector = _LocalBindingCollector()
+        collector = _LocalBindingCollector(self.path)
         for statement in node.body:
             collector.visit(statement)
         local_bindings = (
@@ -726,14 +729,20 @@ class _CalledMethodCollector(ast.NodeVisitor):
         ) | _argument_names(node.args)
         bindings = self.closure_bindings[-1] - local_bindings - collector.globals
         ambiguous = self.closure_ambiguous_names[-1] - local_bindings
+        class_names = self.closure_class_names[-1] - local_bindings
+        class_names.update(collector.class_aliases)
         self.bindings.append(bindings)
         self.closure_bindings.append(set(bindings))
+        self.class_names.append(class_names)
+        self.closure_class_names.append(set(class_names))
         self.ambiguous_names.append(ambiguous)
         self.closure_ambiguous_names.append(set(ambiguous))
         for statement in node.body:
             self.visit(statement)
         self.closure_ambiguous_names.pop()
         self.ambiguous_names.pop()
+        self.closure_class_names.pop()
+        self.class_names.pop()
         self.closure_bindings.pop()
         self.bindings.pop()
 
@@ -746,12 +755,13 @@ class _CalledMethodCollector(ast.NodeVisitor):
     def _apply_class_binding(self, statement: ast.stmt) -> None:
         if isinstance(statement, ast.AnnAssign) and statement.value is None:
             return
-        collector = _LocalBindingCollector()
+        collector = _LocalBindingCollector(self.path)
         if isinstance(statement, ast.Match):
             targets = set().union(
                 *(_pattern_names(case.pattern) for case in statement.cases)
             )
             self.bindings[-1].difference_update(targets)
+            self.class_names[-1].difference_update(targets)
             self.ambiguous_names[-1].difference_update(targets)
             return
         if isinstance(
@@ -767,32 +777,47 @@ class _CalledMethodCollector(ast.NodeVisitor):
                 ast.ClassDef,
             ),
         ):
+            extractor_instances = _extractor_assignment_names(
+                statement, self.class_names[-1]
+            )
             collector.visit(statement)
             self.bindings[-1].difference_update(collector.bindings)
+            self.class_names[-1].difference_update(collector.bindings)
             self.ambiguous_names[-1].difference_update(collector.bindings)
+            self.bindings[-1].update(extractor_instances)
+            self.class_names[-1].update(collector.class_aliases)
 
     def _visit_class_suite(self, statements: list[ast.stmt]) -> None:
         for statement in statements:
             self.visit(statement)
             self._apply_class_binding(statement)
 
-    def _called_state(self) -> tuple[set[str], set[str]]:
-        return (set(self.bindings[-1]), set(self.ambiguous_names[-1]))
+    def _called_state(self) -> tuple[set[str], set[str], set[str]]:
+        return (
+            set(self.bindings[-1]),
+            set(self.class_names[-1]),
+            set(self.ambiguous_names[-1]),
+        )
 
-    def _restore_called_state(self, state: tuple[set[str], set[str]]) -> None:
+    def _restore_called_state(self, state: tuple[set[str], set[str], set[str]]) -> None:
         self.bindings[-1] = set(state[0])
-        self.ambiguous_names[-1] = set(state[1])
+        self.class_names[-1] = set(state[1])
+        self.ambiguous_names[-1] = set(state[2])
 
-    def _merge_called_states(self, states: list[tuple[set[str], set[str]]]) -> None:
+    def _merge_called_states(
+        self, states: list[tuple[set[str], set[str], set[str]]]
+    ) -> None:
         bindings = set.intersection(*(state[0] for state in states))
-        ambiguous = set().union(*(state[1] for state in states))
-        candidates = set().union(*(state[0] for state in states))
+        class_names = set.intersection(*(state[1] for state in states))
+        ambiguous = set().union(*(state[2] for state in states))
+        candidates = set().union(*(state[0] | state[1] for state in states))
         ambiguous.update(
             name
             for name in candidates
-            if len({name in state[0] for state in states}) > 1
+            if len({(name in state[0], name in state[1]) for state in states}) > 1
         )
         self.bindings[-1] = bindings
+        self.class_names[-1] = class_names
         self.ambiguous_names[-1] = ambiguous
 
     def visit_If(self, node: ast.If) -> Any:
@@ -804,7 +829,7 @@ class _CalledMethodCollector(ast.NodeVisitor):
             self._visit_class_suite(node.body if node.test.value else node.orelse)
             return
         before = self._called_state()
-        states: list[tuple[set[str], set[str]]] = []
+        states: list[tuple[set[str], set[str], set[str]]] = []
         for statements in (node.body, node.orelse):
             self._restore_called_state(before)
             self._visit_class_suite(statements)
@@ -824,7 +849,7 @@ class _CalledMethodCollector(ast.NodeVisitor):
             self._visit_class_suite(node.body)
             self.visit(node.handlers[handler_index])
         else:
-            states: list[tuple[set[str], set[str]]] = []
+            states: list[tuple[set[str], set[str], set[str]]] = []
             self._restore_called_state(before)
             self._visit_class_suite(node.body)
             self._visit_class_suite(node.orelse)
@@ -849,12 +874,16 @@ class _CalledMethodCollector(ast.NodeVisitor):
         if node.type is not None:
             self.visit(node.type)
         self.bindings[-1].discard(node.name)
+        self.class_names[-1].discard(node.name)
         self.ambiguous_names[-1].discard(node.name)
         self._visit_class_suite(node.body)
         self.bindings[-1].discard(node.name)
+        self.class_names[-1].discard(node.name)
         self.ambiguous_names[-1].discard(node.name)
         if node.name in self.closure_bindings[-1]:
             self.bindings[-1].add(node.name)
+        if node.name in self.closure_class_names[-1]:
+            self.class_names[-1].add(node.name)
         if node.name in self.closure_ambiguous_names[-1]:
             self.ambiguous_names[-1].add(node.name)
 
@@ -868,13 +897,16 @@ class _CalledMethodCollector(ast.NodeVisitor):
             return
         targets = _pattern_names(node.pattern)
         previous_bindings = set(self.bindings[-1])
+        previous_class_names = set(self.class_names[-1])
         previous_ambiguous = set(self.ambiguous_names[-1])
         self.bindings[-1].difference_update(targets)
+        self.class_names[-1].difference_update(targets)
         self.ambiguous_names[-1].difference_update(targets)
         if node.guard is not None:
             self.visit(node.guard)
         self._visit_class_suite(node.body)
         self.bindings[-1] = previous_bindings
+        self.class_names[-1] = previous_class_names
         self.ambiguous_names[-1] = previous_ambiguous
 
     def visit_ClassDef(self, node: ast.ClassDef) -> Any:
@@ -887,9 +919,12 @@ class _CalledMethodCollector(ast.NodeVisitor):
         for type_parameter in getattr(node, "type_params", ()):
             self.visit(type_parameter)
         closure = set(self.closure_bindings[-1])
+        closure_class_names = set(self.closure_class_names[-1])
         closure_ambiguous = set(self.closure_ambiguous_names[-1])
         self.bindings.append(set(closure))
         self.closure_bindings.append(closure)
+        self.class_names.append(set(closure_class_names))
+        self.closure_class_names.append(closure_class_names)
         self.ambiguous_names.append(set(closure_ambiguous))
         self.closure_ambiguous_names.append(closure_ambiguous)
         self.class_scope_depths.add(len(self.bindings))
@@ -897,6 +932,8 @@ class _CalledMethodCollector(ast.NodeVisitor):
         self.class_scope_depths.remove(len(self.bindings))
         self.closure_ambiguous_names.pop()
         self.ambiguous_names.pop()
+        self.closure_class_names.pop()
+        self.class_names.pop()
         self.closure_bindings.pop()
         self.bindings.pop()
 
@@ -909,13 +946,18 @@ class _CalledMethodCollector(ast.NodeVisitor):
         )
         local_bindings = collector.bindings | _argument_names(node.args)
         ambiguous = self.closure_ambiguous_names[-1] - local_bindings
+        class_names = self.closure_class_names[-1] - local_bindings
         self.bindings.append(bindings)
         self.closure_bindings.append(set(bindings))
+        self.class_names.append(class_names)
+        self.closure_class_names.append(set(class_names))
         self.ambiguous_names.append(ambiguous)
         self.closure_ambiguous_names.append(set(ambiguous))
         self.visit(node.body)
         self.closure_ambiguous_names.pop()
         self.ambiguous_names.pop()
+        self.closure_class_names.pop()
+        self.class_names.pop()
         self.closure_bindings.pop()
         self.bindings.pop()
 
@@ -933,9 +975,12 @@ class _CalledMethodCollector(ast.NodeVisitor):
         first, *remaining = generators
         self.visit(first.iter)
         bindings = set(self.closure_bindings[-1])
+        class_names = set(self.closure_class_names[-1])
         ambiguous = set(self.closure_ambiguous_names[-1])
         self.bindings.append(bindings)
         self.closure_bindings.append(bindings)
+        self.class_names.append(class_names)
+        self.closure_class_names.append(class_names)
         self.ambiguous_names.append(ambiguous)
         self.closure_ambiguous_names.append(ambiguous)
         for generator in (first, *remaining):
@@ -944,6 +989,7 @@ class _CalledMethodCollector(ast.NodeVisitor):
             self.visit(generator.target)
             targets = self._target_names(generator.target)
             self.bindings[-1].difference_update(targets)
+            self.class_names[-1].difference_update(targets)
             self.ambiguous_names[-1].difference_update(targets)
             for condition in generator.ifs:
                 self.visit(condition)
@@ -951,6 +997,8 @@ class _CalledMethodCollector(ast.NodeVisitor):
             self.visit(value)
         self.closure_ambiguous_names.pop()
         self.ambiguous_names.pop()
+        self.closure_class_names.pop()
+        self.class_names.pop()
         self.closure_bindings.pop()
         self.bindings.pop()
 
@@ -1526,7 +1574,7 @@ class Scanner(ast.NodeVisitor):
         self._visit_comprehension(node.generators, [node.key, node.value])
 
     def _called_methods(self, nodes: list[ast.stmt], bindings: set[str]) -> set[str]:
-        collector = _CalledMethodCollector(bindings)
+        collector = _CalledMethodCollector(self.path, bindings, self.class_names)
         for node in nodes:
             collector.visit(node)
         for node, name in collector.errors:
