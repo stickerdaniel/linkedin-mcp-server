@@ -7759,6 +7759,7 @@ class TestExtractProfileUrn:
     async def test_returns_urn_from_atomic_top_card_snapshot(self, mock_page):
         mock_page.evaluate = AsyncMock(
             return_value={
+                "status": "resolved",
                 "pageUrl": "https://www.linkedin.com/in/testuser/",
                 "displayName": "Test User",
                 "composeHrefs": [
@@ -7778,6 +7779,7 @@ class TestExtractProfileUrn:
     async def test_accepts_safe_final_vanity_redirect(self, mock_page):
         mock_page.evaluate = AsyncMock(
             return_value={
+                "status": "resolved",
                 "pageUrl": "https://www.linkedin.com/in/canonical-user/",
                 "displayName": "Test User",
                 "composeHrefs": [
@@ -7787,15 +7789,17 @@ class TestExtractProfileUrn:
             }
         )
 
-        target = await LinkedInExtractor(mock_page)._read_profile_message_target()
+        resolution = await LinkedInExtractor(mock_page)._read_profile_message_target()
 
-        assert target is not None
-        assert target.profile_path == "/in/canonical-user/"
-        assert target.profile_urn == "ACoAAB"
+        assert resolution.status == "resolved"
+        assert resolution.target is not None
+        assert resolution.target.profile_path == "/in/canonical-user/"
+        assert resolution.target.profile_urn == "ACoAAB"
 
     async def test_returns_none_for_ambiguous_top_card_links(self, mock_page):
         mock_page.evaluate = AsyncMock(
             return_value={
+                "status": "resolved",
                 "pageUrl": "https://www.linkedin.com/in/testuser/",
                 "displayName": "Test User",
                 "composeHrefs": [
@@ -8667,7 +8671,9 @@ class TestSendMessage:
                 extractor,
                 "_read_profile_message_target",
                 new_callable=AsyncMock,
-                return_value=None,
+                return_value=extractor_module._ProfileMessageTargetResolution(
+                    "unavailable"
+                ),
             ),
             patch.object(
                 extractor, "_wait_for_message_surface", new_callable=AsyncMock
@@ -8708,6 +8714,29 @@ class TestSendMessage:
         mock_page.keyboard.type.assert_not_awaited()
         mock_page.keyboard.press.assert_not_awaited()
 
+    async def test_unresolved_profile_target_is_not_connection_handoff(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                extractor,
+                "_read_profile_message_target",
+                new_callable=AsyncMock,
+                return_value=extractor_module._ProfileMessageTargetResolution("failed"),
+            ),
+        ):
+            result = await extractor.send_message(
+                "testuser", "Hello!", confirm_send=True
+            )
+
+        assert result["status"] == "recipient_resolution_failed"
+        assert "connect_with_person" not in result["message"]
+        assert result["retry_safe"] is True
+
     @staticmethod
     def _target():
         return extractor_module._ProfileMessageTarget(
@@ -8734,7 +8763,7 @@ class TestSendMessage:
         mock_page.keyboard = MagicMock(type=AsyncMock(), press=AsyncMock())
         owner = MagicMock()
         owner.as_element.return_value = owner
-        owner.evaluate = AsyncMock()
+        owner.evaluate = AsyncMock(return_value="ready")
         owner.dispose = AsyncMock()
         mock_page.evaluate_handle = AsyncMock(return_value=owner)
 
@@ -8769,7 +8798,9 @@ class TestSendMessage:
                 extractor,
                 "_read_profile_message_target",
                 new_callable=AsyncMock,
-                return_value=target,
+                return_value=extractor_module._ProfileMessageTargetResolution(
+                    "resolved", target
+                ),
             ),
             patch.object(
                 extractor,
@@ -8858,7 +8889,9 @@ class TestSendMessage:
                 extractor,
                 "_read_profile_message_target",
                 new_callable=AsyncMock,
-                return_value=target,
+                return_value=extractor_module._ProfileMessageTargetResolution(
+                    "resolved", target
+                ),
             ),
         ):
             result = await extractor.send_message(
@@ -9161,10 +9194,48 @@ class TestSendMessage:
         mock_page.keyboard.type.assert_not_awaited()
         mock_page.keyboard.press.assert_not_awaited()
 
+    async def test_disabled_pinned_submit_cleans_before_retryable_failure(
+        self, mock_page
+    ):
+        extractor = LinkedInExtractor(mock_page)
+        patches = self._patch_to_composer(extractor, mock_page)
+        owner = mock_page.evaluate_handle.return_value
+        with (
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6] as write,
+            patches[7] as submit,
+            patches[8],
+            patches[9] as prepare,
+            patches[10],
+            patch.object(
+                extractor,
+                "_wait_for_verified_submit",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch.object(
+                extractor, "_cleanup_owned_message", new_callable=AsyncMock
+            ) as cleanup,
+        ):
+            result = await extractor.send_message(
+                "testuser", "Hello!", confirm_send=True
+            )
+
+        assert result["status"] == "send_unavailable"
+        assert result["retry_safe"] is True
+        write.assert_awaited_once()
+        prepare.assert_not_awaited()
+        submit.assert_not_awaited()
+        cleanup.assert_awaited_once_with("Hello!", owner)
+
     @pytest.mark.parametrize(
         ("submit_count", "submit_usable"),
-        [(0, False), (2, False), (1, False)],
-        ids=["missing", "ambiguous", "disabled"],
+        [(0, False), (2, False)],
+        ids=["missing", "ambiguous"],
     )
     async def test_only_one_active_submit_path_can_send(
         self, mock_page, submit_count, submit_usable
@@ -9408,6 +9479,40 @@ class TestSendMessage:
         assert result["status"] == "send_unconfirmed"
         assert result["sent"] is False
         assert result["retry_safe"] is False
+
+    async def test_owner_cleanup_runs_when_confirmation_cleanup_fails(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        patches = self._patch_to_composer(extractor, mock_page)
+        owner = mock_page.evaluate_handle.return_value
+
+        with (
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patches[7],
+            patches[8],
+            patches[9],
+            patches[10],
+            patch.object(
+                extractor,
+                "_dispose_message_confirmation",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("cleanup failed"),
+            ),
+            patch.object(
+                extractor, "_dispose_message_owner", new_callable=AsyncMock
+            ) as dispose_owner,
+        ):
+            result = await extractor.send_message(
+                "testuser", "Hello!", confirm_send=True
+            )
+
+        assert result["status"] == "send_unconfirmed"
+        assert result["retry_safe"] is False
+        dispose_owner.assert_awaited_once_with(owner)
 
     async def test_an_error_before_anything_can_submit_is_raised(self, mock_page):
         """Without a newline nothing has submitted yet, so the error is the answer.

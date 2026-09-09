@@ -650,23 +650,14 @@ class TestMessageComposerDom:
             is None
         )
 
-    @pytest.mark.parametrize(
-        "buttons",
-        [
-            '<button type="submit">A</button><button type="submit">B</button>',
-            '<button type="submit" disabled>A</button>',
-            '<button type="submit" aria-disabled="true">A</button>',
-        ],
-        ids=["ambiguous", "disabled", "aria-disabled"],
-    )
-    async def test_ambiguous_or_disabled_submit_is_never_pinned(
-        self, dom_page, buttons
-    ):
+    async def test_ambiguous_submit_is_never_pinned(self, dom_page):
         await _set_composer_content(
             dom_page,
             _composer(
                 identity='<a href="https://www.linkedin.com/in/testuser/">Test</a>',
-                buttons=buttons,
+                buttons=(
+                    '<button type="submit">A</button><button type="submit">B</button>'
+                ),
             ),
         )
 
@@ -674,6 +665,38 @@ class TestMessageComposerDom:
             await LinkedInExtractor(dom_page)._resolve_message_owner(_message_target())
             is None
         )
+
+    @pytest.mark.parametrize("disabled_attribute", ["disabled", 'aria-disabled="true"'])
+    async def test_unique_disabled_submit_is_pinned_for_local_write(
+        self, dom_page, disabled_attribute
+    ):
+        await _set_composer_content(
+            dom_page,
+            _composer(
+                identity='<a href="https://www.linkedin.com/in/testuser/">Test</a>',
+                buttons=f'<button type="submit" {disabled_attribute}>A</button>',
+            ),
+        )
+        extractor = LinkedInExtractor(dom_page)
+
+        owner = await extractor._resolve_message_owner(_message_target())
+
+        assert owner is not None
+        assert (
+            await extractor._write_verified_message(
+                "Hello!", target=_message_target(), owner=owner
+            )
+            == "written"
+        )
+        assert (
+            await extractor._submit_verified_message(
+                "Hello!", target=_message_target(), owner=owner
+            )
+            == "invalid"
+        )
+        await extractor._cleanup_owned_message("Hello!", owner)
+        await extractor._dispose_message_owner(owner)
+        assert await dom_page.locator('[role="textbox"]').inner_text() == ""
 
     async def test_removed_submit_or_changed_recipient_invalidates_pins(self, dom_page):
         identity = '<a href="https://www.linkedin.com/in/testuser/">Test</a>'
@@ -721,6 +744,34 @@ class TestMessageComposerDom:
             == "invalid"
         )
         await extractor._dispose_message_owner(owner)
+
+    async def test_queryless_thread_route_is_pinned_exactly(self, dom_page):
+        await dom_page.goto("https://www.linkedin.com/messaging/thread/INITIAL/")
+        await dom_page.set_content(
+            _composer(identity="", buttons='<button type="submit">Send</button>')
+        )
+        extractor = LinkedInExtractor(dom_page)
+        owner = await extractor._resolve_message_owner(_message_target())
+
+        assert owner is not None
+        assert (
+            await extractor._write_verified_message(
+                "Hello!", target=_message_target(), owner=owner
+            )
+            == "written"
+        )
+        await dom_page.evaluate(
+            "history.replaceState({}, '', '/messaging/thread/OTHER/')"
+        )
+        assert (
+            await extractor._submit_verified_message(
+                "Hello!", target=_message_target(), owner=owner
+            )
+            == "invalid"
+        )
+        await extractor._cleanup_owned_message("Hello!", owner)
+        await extractor._dispose_message_owner(owner)
+        assert await dom_page.locator('[role="textbox"]').inner_text() == ""
 
     async def test_missing_submit_never_falls_back_to_enter(self, dom_page):
         await _set_composer_content(

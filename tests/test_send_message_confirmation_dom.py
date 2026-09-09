@@ -9,14 +9,17 @@ JavaScript in headless Chromium without making a LinkedIn request or write.
 from __future__ import annotations
 
 import os
+import time
 from unittest.mock import AsyncMock, patch
 
+import anyio
 import pytest
 from patchright.async_api import async_playwright
 
 from linkedin_mcp_server.scraping.extractor import (
     LinkedInExtractor,
     _ProfileMessageTarget,
+    _ProfileMessageTargetResolution,
 )
 
 pytestmark = [
@@ -303,7 +306,7 @@ async def send(
             extractor,
             "_read_profile_message_target",
             new_callable=AsyncMock,
-            return_value=TARGET,
+            return_value=_ProfileMessageTargetResolution("resolved", TARGET),
         ),
         patch(
             "linkedin_mcp_server.scraping.extractor._message_page_url_is_safe",
@@ -315,7 +318,7 @@ async def send(
         )
 
 
-async def read_profile_target(page, html: str) -> _ProfileMessageTarget | None:
+async def read_profile_target(page, html: str) -> _ProfileMessageTargetResolution:
     async def fulfill(route):
         await route.fulfill(status=200, content_type="text/html", body=html)
 
@@ -325,7 +328,7 @@ async def read_profile_target(page, html: str) -> _ProfileMessageTarget | None:
 
 
 class TestProfileMessageTargetDom:
-    async def test_history_only_compose_link_does_not_authorize_profile(self, dom_page):
+    async def test_history_only_compose_link_proves_action_absence(self, dom_page):
         html = profile_page(
             f"<section><h1>{DISPLAY_NAME}</h1></section>",
             other=(
@@ -334,7 +337,10 @@ class TestProfileMessageTargetDom:
             ),
         )
 
-        assert await read_profile_target(dom_page, html) is None
+        resolution = await read_profile_target(dom_page, html)
+
+        assert resolution.status == "unavailable"
+        assert resolution.target is None
 
     async def test_foreign_history_link_does_not_reject_top_card_target(self, dom_page):
         html = profile_page(
@@ -347,8 +353,10 @@ class TestProfileMessageTargetDom:
             ),
         )
 
-        target = await read_profile_target(dom_page, html)
+        resolution = await read_profile_target(dom_page, html)
+        target = resolution.target
 
+        assert resolution.status == "resolved"
         assert target is not None
         assert target.profile_path == PROFILE_PATH
         assert target.profile_urn == "ACoAAB"
@@ -364,10 +372,12 @@ class TestProfileMessageTargetDom:
         )
         extractor = LinkedInExtractor(dom_page)
 
-        assert await read_profile_target(dom_page, html) is None
+        resolution = await read_profile_target(dom_page, html)
+
+        assert resolution.status == "unavailable"
         assert await extractor._extract_profile_urn() is None
 
-    async def test_hidden_top_card_identity_does_not_authorize_profile(self, dom_page):
+    async def test_hidden_top_card_action_proves_action_absence(self, dom_page):
         html = profile_page(
             "<section>"
             f"<h1>{DISPLAY_NAME}</h1>"
@@ -375,7 +385,9 @@ class TestProfileMessageTargetDom:
             "</section>"
         )
 
-        assert await read_profile_target(dom_page, html) is None
+        resolution = await read_profile_target(dom_page, html)
+
+        assert resolution.status == "unavailable"
 
     async def test_visibility_hidden_card_does_not_precede_visible_card(self, dom_page):
         html = profile_page(
@@ -386,8 +398,10 @@ class TestProfileMessageTargetDom:
             ),
         )
 
-        target = await read_profile_target(dom_page, html)
+        resolution = await read_profile_target(dom_page, html)
+        target = resolution.target
 
+        assert resolution.status == "resolved"
         assert target is not None
         assert target.display_name == "Alice"
         assert target.profile_urn == "ACoAAB"
@@ -400,10 +414,76 @@ class TestProfileMessageTargetDom:
             "</section>"
         )
 
-        target = await read_profile_target(dom_page, profile_page(card, other=card))
+        resolution = await read_profile_target(dom_page, profile_page(card, other=card))
 
-        assert target is not None
-        assert target.profile_urn == "ACoAAB"
+        assert resolution.status == "resolved"
+        assert resolution.target is not None
+        assert resolution.target.profile_urn == "ACoAAB"
+
+    async def test_waits_for_delayed_profile_message_action(self, dom_page):
+        html = profile_page(f'<section id="top"><h1>{DISPLAY_NAME}</h1></section>')
+
+        async def fulfill(route):
+            await route.fulfill(status=200, content_type="text/html", body=html)
+
+        await dom_page.route("https://www.linkedin.com/**", fulfill)
+        await dom_page.goto(f"https://www.linkedin.com{PROFILE_PATH}")
+        await dom_page.evaluate(
+            f"""() => setTimeout(() => {{
+                document.getElementById('top').insertAdjacentHTML(
+                    'beforeend', '<a href="{COMPOSE_URL}">message</a>'
+                );
+            }}, 200)"""
+        )
+        started = time.monotonic()
+
+        resolution = await LinkedInExtractor(dom_page)._read_profile_message_target()
+
+        assert resolution.status == "resolved"
+        assert resolution.target is not None
+        assert resolution.target.profile_urn == "ACoAAB"
+        assert time.monotonic() - started >= 0.15
+
+    @pytest.mark.parametrize(
+        "top_card",
+        [
+            "<div>still loading</div>",
+            f"<section><h1>{DISPLAY_NAME}</h1><h1>Other</h1></section>",
+            (
+                f"<section><h1>{DISPLAY_NAME}</h1>"
+                f'<a href="{COMPOSE_URL}">one</a>'
+                '<a href="/messaging/compose/?recipient=OTHER">two</a></section>'
+            ),
+            (
+                f"<section><h1>{DISPLAY_NAME}</h1>"
+                f'<a aria-disabled="true" href="{COMPOSE_URL}">message</a></section>'
+            ),
+            (
+                f"<section><h1>{DISPLAY_NAME}</h1>"
+                '<a href="/messaging/compose/?recipient=">message</a></section>'
+            ),
+            (
+                f"<section><h1>{DISPLAY_NAME}</h1>"
+                '<a href="https://evil.example/messaging/compose/?recipient=ACoAAB">'
+                "message</a></section>"
+            ),
+        ],
+        ids=[
+            "missing-section",
+            "ambiguous-headings",
+            "ambiguous-actions",
+            "disabled-action",
+            "malformed-recipient",
+            "unsafe-url",
+        ],
+    )
+    async def test_ambiguous_or_invalid_target_is_not_action_absence(
+        self, dom_page, top_card
+    ):
+        resolution = await read_profile_target(dom_page, profile_page(top_card))
+
+        assert resolution.status == "failed"
+        assert resolution.target is None
 
 
 class TestComposerRecipientDom:
@@ -531,7 +611,7 @@ class TestComposerRecipientDom:
         assert await dom_page.locator("#foreign").input_value() == ""
         assert await dom_page.evaluate("document.body.dataset.clicked") is None
 
-    async def test_input_focus_switch_keeps_full_text_in_pinned_editor(self, dom_page):
+    async def test_input_focus_switch_cleans_exact_owned_text(self, dom_page):
         html = compose_page(
             """
               document.body.insertAdjacentHTML('beforeend', '<input id="foreign">');
@@ -544,26 +624,41 @@ class TestComposerRecipientDom:
         result = await send(dom_page, html)
 
         assert result["status"] == "compose_interact_failed"
-        assert await dom_page.locator("#composer").inner_text() == MESSAGE
+        assert await dom_page.locator("#composer").inner_text() == ""
         assert await dom_page.locator("#foreign").input_value() == ""
         assert await dom_page.evaluate("document.body.dataset.clicked") is None
 
-    @pytest.mark.parametrize(
-        "button_html",
-        [
+    async def test_disabled_submit_enables_after_local_input_and_sends(self, dom_page):
+        html = compose_page(
+            ID_TRANSITION_SEND_JS
+            + """
+              document.getElementById('composer').addEventListener('input', () => {
+                document.getElementById('send').disabled = false;
+              });
+            """
+        ).replace(
+            '<button id="send" type="submit">Send</button>',
             '<button id="send" type="submit" disabled>Send</button>',
-            (
-                '<button id="send" type="submit">Send</button>'
-                '<button type="submit">Other</button>'
-            ),
-        ],
-        ids=["disabled", "ambiguous"],
-    )
-    async def test_disabled_or_ambiguous_submit_never_dispatches(
-        self, dom_page, button_html
-    ):
-        html = compose_page(NOOP_SEND_JS).replace(
-            '<button id="send" type="submit">Send</button>', button_html
+        )
+
+        result = await send(dom_page, html)
+
+        assert result["status"] == "sent"
+        assert result["sent"] is True
+        assert await dom_page.evaluate("document.body.dataset.clicked") == "1"
+
+    async def test_permanently_disabled_submit_cleans_exact_owned_text(self, dom_page):
+        html = compose_page(
+            NOOP_SEND_JS
+            + """
+              document.getElementById('composer').addEventListener('input', () => {
+                document.body.dataset.inputCount = String(
+                  Number(document.body.dataset.inputCount || 0) + 1);
+              });
+            """
+        ).replace(
+            '<button id="send" type="submit">Send</button>',
+            '<button id="send" type="submit" disabled>Send</button>',
         )
 
         result = await send(dom_page, html)
@@ -572,6 +667,110 @@ class TestComposerRecipientDom:
         assert result["sent"] is False
         assert result["retry_safe"] is True
         assert await dom_page.evaluate("document.body.dataset.clicked") is None
+        assert await dom_page.evaluate("document.body.dataset.inputCount") == "2"
+        assert (await dom_page.locator("#composer").inner_text()).strip() == ""
+
+    @pytest.mark.parametrize(
+        "button_change",
+        [
+            "send.replaceWith(send.cloneNode(true));",
+            "send.insertAdjacentHTML('afterend', '<button type=submit>Other</button>');",
+        ],
+        ids=["replaced", "ambiguous"],
+    )
+    async def test_submit_change_after_insertion_cleans_without_click(
+        self, dom_page, button_change
+    ):
+        html = compose_page(
+            NOOP_SEND_JS
+            + f"""
+              document.getElementById('composer').addEventListener('input', () => {{
+                const send = document.getElementById('send');
+                if (document.getElementById('composer').innerText) {{
+                  {button_change}
+                }}
+              }});
+            """
+        )
+
+        result = await send(dom_page, html)
+
+        assert result["status"] == "compose_interact_failed"
+        assert result["retry_safe"] is True
+        assert await dom_page.evaluate("document.body.dataset.clicked") is None
+        assert (await dom_page.locator("#composer").inner_text()).strip() == ""
+
+    async def test_ambiguous_submit_never_dispatches(self, dom_page):
+        html = compose_page(NOOP_SEND_JS).replace(
+            '<button id="send" type="submit">Send</button>',
+            (
+                '<button id="send" type="submit">Send</button>'
+                '<button type="submit">Other</button>'
+            ),
+        )
+
+        result = await send(dom_page, html)
+
+        assert result["status"] == "send_unavailable"
+        assert result["sent"] is False
+        assert result["retry_safe"] is True
+        assert await dom_page.evaluate("document.body.dataset.clicked") is None
+        assert (await dom_page.locator("#composer").inner_text()).strip() == ""
+
+    async def test_route_change_on_focus_invalidates_pinned_owner(self, dom_page):
+        html = compose_page(
+            """
+              document.getElementById('composer').addEventListener('focus', () => {
+                history.replaceState({}, '', '/messaging/thread/OTHER/');
+              });
+            """
+        )
+
+        result = await send(dom_page, html)
+
+        assert result["status"] == "compose_interact_failed"
+        assert await dom_page.evaluate("document.body.dataset.clicked") is None
+        assert (await dom_page.locator("#composer").inner_text()).strip() == ""
+
+    async def test_route_change_after_insertion_cleans_owned_text(self, dom_page):
+        html = compose_page(
+            """
+              document.getElementById('composer').addEventListener('input', () => {
+                if (document.getElementById('composer').innerText) {
+                  history.replaceState({}, '', '/messaging/thread/OTHER/');
+                }
+              });
+            """
+        )
+
+        result = await send(dom_page, html)
+
+        assert result["status"] == "compose_interact_failed"
+        assert result["retry_safe"] is True
+        assert await dom_page.evaluate("document.body.dataset.clicked") is None
+        assert (await dom_page.locator("#composer").inner_text()).strip() == ""
+
+    async def test_modified_inserted_text_is_preserved_on_route_failure(self, dom_page):
+        html = compose_page(
+            """
+              document.getElementById('composer').addEventListener('input', () => {
+                const editor = document.getElementById('composer');
+                if (editor.innerText === 'UNDELIVERED SENTINEL') {
+                  editor.textContent += ' user edit';
+                  history.replaceState({}, '', '/messaging/thread/OTHER/');
+                }
+              });
+            """
+        )
+
+        result = await send(dom_page, html)
+
+        assert result["status"] == "compose_interact_failed"
+        assert result["retry_safe"] is True
+        assert await dom_page.evaluate("document.body.dataset.clicked") is None
+        assert await dom_page.locator("#composer").inner_text() == (
+            MESSAGE + " user edit"
+        )
 
 
 class TestSendConfirmationDom:
@@ -728,3 +927,71 @@ class TestSendConfirmationDom:
         assert result["status"] == "send_unconfirmed"
         assert result["sent"] is False
         assert result["retry_safe"] is False
+
+    async def test_cancelled_confirmation_cleans_observer_pins_and_handle(
+        self, dom_page
+    ):
+        await dom_page.goto(COMPOSE_URL)
+        await dom_page.set_content(compose_page(NOOP_SEND_JS))
+        extractor = LinkedInExtractor(dom_page)
+        resolve_owner = extractor._resolve_message_owner
+        captured = {}
+
+        async def capture_owner(target):
+            owner = await resolve_owner(target)
+            captured["owner"] = owner
+            return owner
+
+        async def wait_for_confirmation(*_args, **_kwargs):
+            await anyio.sleep_forever()
+
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor,
+                "_read_profile_message_target",
+                new_callable=AsyncMock,
+                return_value=_ProfileMessageTargetResolution("resolved", TARGET),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor._message_page_url_is_safe",
+                return_value=True,
+            ),
+            patch.object(
+                extractor, "_resolve_message_owner", side_effect=capture_owner
+            ),
+            patch.object(
+                extractor,
+                "_message_send_confirmed",
+                side_effect=wait_for_confirmation,
+            ),
+            pytest.raises(TimeoutError),
+        ):
+            with anyio.fail_after(0.5):
+                await extractor.send_message("fadi-eliwi", MESSAGE, confirm_send=True)
+
+        cleanup_state = await dom_page.evaluate(
+            """() => {
+                const owner = document.getElementById('conversation');
+                return {
+                    hasComposer: Object.hasOwn(owner, '__linkedinMcpComposer'),
+                    hasConfirmations: Object.hasOwn(
+                        owner, '__linkedinMcpConfirmations'
+                    ),
+                    markers: owner.querySelectorAll(
+                        '[data-linkedin-mcp-candidate], '
+                        + '[data-linkedin-mcp-editor], '
+                        + '[data-linkedin-mcp-confirmation]'
+                    ).length,
+                };
+            }"""
+        )
+        assert cleanup_state == {
+            "hasComposer": False,
+            "hasConfirmations": False,
+            "markers": 0,
+        }
+        assert await dom_page.evaluate("document.body.dataset.clicked") == "true"
+        assert (await dom_page.locator("#composer").inner_text()).strip() == MESSAGE
+        with pytest.raises(Exception, match="closed"):
+            await captured["owner"].evaluate("owner => owner.isConnected")

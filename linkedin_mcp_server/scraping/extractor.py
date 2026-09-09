@@ -462,30 +462,88 @@ _PROFILE_MESSAGE_TARGET_JS = r"""() => {
         !anchor.hasAttribute('disabled') &&
         (anchor.getAttribute('aria-disabled') || '').toLowerCase() !== 'true';
     const normalize = value => (value || '').replace(/\s+/g, ' ').trim();
+    const validComposeHref = value => {
+        if (typeof value !== 'string' || /[\\\x00-\x1f\x7f]/.test(value)) {
+            return false;
+        }
+        try {
+            const url = new URL(value, window.location.href);
+            const hostname = url.hostname.toLowerCase().replace(/\.$/, '');
+            if (
+                url.protocol !== 'https:' ||
+                !/(^|\.)linkedin\.com$/.test(hostname) ||
+                url.username ||
+                url.password ||
+                (url.port && url.port !== '443') ||
+                url.hash ||
+                url.pathname !== '/messaging/compose/'
+            ) {
+                return false;
+            }
+            const values = [
+                ...url.searchParams.getAll('recipient'),
+                ...url.searchParams.getAll('profileUrn'),
+            ];
+            const normalized = values.map(item => {
+                const text = item.trim();
+                const prefix = 'urn:li:fsd_profile:';
+                const identifier = text.startsWith(prefix)
+                    ? text.slice(prefix.length)
+                    : text;
+                return /^[A-Za-z0-9_-]+$/.test(identifier) ? identifier : null;
+            });
+            return normalized.length > 0 &&
+                normalized.every(item => item !== null && item === normalized[0]);
+        } catch {
+            return false;
+        }
+    };
     const main = document.querySelector('main');
-    if (!main) return null;
+    if (!main) return {status: 'unresolved'};
 
     const section = Array.from(main.children).find(
         element => element.matches('section') && visible(element)
     );
-    if (!section) return null;
+    if (!section) return {status: 'unresolved'};
     const headings = Array.from(section.querySelectorAll('h1')).filter(
         heading => visible(heading) && heading.closest('section') === section
     );
-    const composeAnchors = Array.from(
+    const visibleComposeAnchors = Array.from(
         section.querySelectorAll('a[href*="/messaging/compose/"]')
-    ).filter(anchor => active(anchor) && anchor.closest('section') === section);
-    if (headings.length !== 1 || composeAnchors.length !== 1) return null;
+    ).filter(anchor => visible(anchor) && anchor.closest('section') === section);
+    const composeAnchors = visibleComposeAnchors.filter(active);
+    if (
+        headings.length !== 1 ||
+        composeAnchors.length > 1 ||
+        (composeAnchors.length === 1 && visibleComposeAnchors.length !== 1)
+    ) {
+        return {status: 'unresolved'};
+    }
+    if (composeAnchors.length === 0) {
+        return visibleComposeAnchors.length === 0
+            ? {status: 'unavailable', pageUrl: window.location.href}
+            : {status: 'unresolved'};
+    }
 
     const anchor = composeAnchors[0];
+    const composeHref = anchor.getAttribute('href') || anchor.href || '';
+    if (!validComposeHref(composeHref)) return {status: 'unresolved'};
     return {
+        status: 'resolved',
         pageUrl: window.location.href,
         displayName: normalize(
             headings[0].innerText || headings[0].textContent || ''
         ),
-        composeHrefs: [anchor.getAttribute('href') || anchor.href || ''],
+        composeHrefs: [composeHref],
     };
 }"""
+
+_PROFILE_MESSAGE_TARGET_READY_JS = (
+    f"() => ({_PROFILE_MESSAGE_TARGET_JS})().status === 'resolved'"
+)
+_PROFILE_MESSAGE_TARGET_TIMEOUT_MS = 1_000
+_MESSAGE_SUBMIT_READY_TIMEOUT_MS = 1_000
+_MESSAGE_CLEANUP_TIMEOUT_SECONDS = 1.0
 
 _MESSAGE_COMPOSER_INSPECT_JS = r"""
     const visible = element => {
@@ -526,7 +584,7 @@ _MESSAGE_COMPOSER_INSPECT_JS = r"""
             return null;
         }
     };
-    const messageUrlSafe = target => {
+    const messageRoute = target => {
         try {
             const url = new URL(window.location.href);
             const hostname = url.hostname.toLowerCase().replace(/\.$/, '');
@@ -542,15 +600,17 @@ _MESSAGE_COMPOSER_INSPECT_JS = r"""
                     /^\/messaging\/thread\/[A-Za-z0-9_=-]+\/$/.test(url.pathname)
                 )
             ) {
-                return false;
+                return null;
             }
             const values = [
                 ...url.searchParams.getAll('recipient'),
                 ...url.searchParams.getAll('profileUrn'),
             ];
-            return values.every(value => normalizeUrn(value) === target.profileUrn);
+            return values.every(value => normalizeUrn(value) === target.profileUrn)
+                ? url.href
+                : null;
         } catch {
-            return false;
+            return null;
         }
     };
     const inspect = target => {
@@ -625,7 +685,7 @@ _MESSAGE_COMPOSER_INSPECT_JS = r"""
             buttons,
             active: document.activeElement === editor,
             empty: !(editor.innerText || '').replace(/\s+/g, ' ').trim(),
-            messageUrlSafe: messageUrlSafe(target),
+            messageRoute: messageRoute(target),
         };
     };
 """
@@ -637,7 +697,7 @@ _MESSAGE_COMPOSER_OWNER_JS = (
         const state = inspect(target);
         if (
             state.status !== 'valid' ||
-            state.messageUrlSafe !== true ||
+            state.messageRoute === null ||
             !state.owner.isConnected ||
             !state.editor.isConnected ||
             !state.owner.contains(state.editor) ||
@@ -649,9 +709,7 @@ _MESSAGE_COMPOSER_OWNER_JS = (
         if (
             !button.isConnected ||
             !state.localScope.contains(button) ||
-            (button.form !== null && !state.ancestorChain.includes(button.form)) ||
-            button.disabled ||
-            (button.getAttribute('aria-disabled') || '').toLowerCase() === 'true'
+            (button.form !== null && !state.ancestorChain.includes(button.form))
         ) {
             return null;
         }
@@ -662,6 +720,8 @@ _MESSAGE_COMPOSER_OWNER_JS = (
             localScope: state.localScope,
             profilePath: target.profilePath,
             profileUrn: target.profileUrn,
+            route: state.messageRoute,
+            ownedMessage: null,
         };
         return state.owner;
     }"""
@@ -675,7 +735,7 @@ _MESSAGE_CONFIRMATION_PREPARE_JS = (
         const pinned = arg.owner?.__linkedinMcpComposer;
         if (
             composer.status !== 'valid' ||
-            composer.messageUrlSafe !== true ||
+            composer.messageRoute !== pinned?.route ||
             !pinned ||
             composer.owner !== arg.owner ||
             composer.editor !== pinned.editor ||
@@ -686,10 +746,14 @@ _MESSAGE_CONFIRMATION_PREPARE_JS = (
             composer.localScope !== pinned.localScope ||
             composer.buttons.length !== 1 ||
             composer.buttons[0] !== pinned.button ||
+            pinned.button.disabled ||
+            (pinned.button.getAttribute('aria-disabled') || '').toLowerCase()
+                === 'true' ||
             !arg.owner.isConnected ||
             !pinned.editor.isConnected ||
             !arg.owner.contains(pinned.editor) ||
             document.activeElement !== pinned.editor ||
+            pinned.ownedMessage !== arg.expected ||
             (pinned.editor.innerText || pinned.editor.textContent || '') !== arg.expected
         ) {
             return null;
@@ -850,7 +914,7 @@ _MESSAGE_CONFIRMATION_READY_JS = (
         const composer = inspect(arg);
         if (
             composer.status !== 'valid' ||
-            composer.messageUrlSafe !== true ||
+            composer.messageRoute === null ||
             composer.owner !== arg.owner ||
             composer.buttons.length !== 1 ||
             composer.editor.getAttribute('data-linkedin-mcp-editor') !== arg.token
@@ -887,7 +951,6 @@ _MESSAGE_CONFIRMATION_DISPOSE_JS = r"""arg => {
     const state = confirmations?.get(arg.token);
     if (state?.observer) state.observer.disconnect();
     confirmations?.delete(arg.token);
-    if (arg.owner) delete arg.owner.__linkedinMcpComposer;
     for (const element of arg.owner?.querySelectorAll(
         '[data-linkedin-mcp-candidate], [data-linkedin-mcp-editor], '
         + '[data-linkedin-mcp-confirmation]'
@@ -905,6 +968,28 @@ _MESSAGE_CONFIRMATION_DISPOSE_JS = r"""arg => {
         if (element.getAttribute('data-linkedin-mcp-confirmation') === arg.token) {
             element.remove();
         }
+    }
+}"""
+
+_MESSAGE_COMPOSER_DISPOSE_JS = r"""owner => {
+    const confirmations = owner?.__linkedinMcpConfirmations;
+    for (const state of confirmations?.values() || []) {
+        if (state?.observer) state.observer.disconnect();
+    }
+    confirmations?.clear();
+    if (owner) {
+        delete owner.__linkedinMcpConfirmations;
+        delete owner.__linkedinMcpComposer;
+    }
+    for (const element of owner?.querySelectorAll(
+        '[data-linkedin-mcp-candidate], [data-linkedin-mcp-editor], '
+        + '[data-linkedin-mcp-confirmation]'
+    ) || []) {
+        element.removeAttribute('data-linkedin-mcp-candidate');
+        element.removeAttribute('data-linkedin-mcp-matched');
+        element.removeAttribute('data-linkedin-mcp-transitioned');
+        element.removeAttribute('data-linkedin-mcp-editor');
+        if (element.hasAttribute('data-linkedin-mcp-confirmation')) element.remove();
     }
 }"""
 
@@ -984,7 +1069,7 @@ _MESSAGE_COMPOSER_PINNED_JS = r"""
             return null;
         }
     };
-    const messageUrlSafe = target => {
+    const messageRoute = target => {
         try {
             const url = new URL(window.location.href);
             const hostname = url.hostname.toLowerCase().replace(/\.$/, '');
@@ -1000,15 +1085,17 @@ _MESSAGE_COMPOSER_PINNED_JS = r"""
                     /^\/messaging\/thread\/[A-Za-z0-9_=-]+\/$/.test(url.pathname)
                 )
             ) {
-                return false;
+                return null;
             }
             const values = [
                 ...url.searchParams.getAll('recipient'),
                 ...url.searchParams.getAll('profileUrn'),
             ];
-            return values.every(value => normalizeUrn(value) === target.profileUrn);
+            return values.every(value => normalizeUrn(value) === target.profileUrn)
+                ? url.href
+                : null;
         } catch {
-            return false;
+            return null;
         }
     };
     const semanticAncestors = element => {
@@ -1050,13 +1137,13 @@ _MESSAGE_COMPOSER_PINNED_JS = r"""
             urns.some(urn => urn !== target.profileUrn)
         );
     };
-    const validatePinned = target => {
+    const validatePinned = (target, requireEnabled = true) => {
         const pinned = owner?.__linkedinMcpComposer;
         if (
             !pinned ||
             pinned.profilePath !== target.profilePath ||
             pinned.profileUrn !== target.profileUrn ||
-            !messageUrlSafe(target)
+            messageRoute(target) !== pinned.route
         ) {
             return null;
         }
@@ -1092,8 +1179,10 @@ _MESSAGE_COMPOSER_PINNED_JS = r"""
         if (
             buttons.length !== 1 ||
             buttons[0] !== button ||
-            button.disabled ||
-            (button.getAttribute('aria-disabled') || '').toLowerCase() === 'true'
+            (requireEnabled && (
+                button.disabled ||
+                (button.getAttribute('aria-disabled') || '').toLowerCase() === 'true'
+            ))
         ) {
             return null;
         }
@@ -1105,14 +1194,14 @@ _MESSAGE_COMPOSER_WRITE_JS = (
     "(owner, arg) => {"
     + _MESSAGE_COMPOSER_PINNED_JS
     + r"""
-        let pinned = validatePinned(arg);
+        let pinned = validatePinned(arg, false);
         if (!pinned) return 'invalid';
         const {editor} = pinned;
         if ((editor.innerText || '').replace(/\s+/g, ' ').trim()) {
             return 'occupied';
         }
         editor.focus();
-        pinned = validatePinned(arg);
+        pinned = validatePinned(arg, false);
         if (!pinned || document.activeElement !== editor) return 'invalid';
         if ((editor.innerText || '').replace(/\s+/g, ' ').trim()) {
             return 'occupied';
@@ -1120,15 +1209,20 @@ _MESSAGE_COMPOSER_WRITE_JS = (
         if (
             typeof document.queryCommandSupported !== 'function' ||
             !document.queryCommandSupported('insertText') ||
-            typeof document.execCommand !== 'function' ||
-            document.execCommand('insertText', false, arg.message) !== true
+            typeof document.execCommand !== 'function'
         ) {
             return 'unsupported';
         }
-        pinned = validatePinned(arg);
+        const inserted = document.execCommand('insertText', false, arg.message);
+        if ((editor.innerText || editor.textContent || '') === arg.message) {
+            pinned.ownedMessage = arg.message;
+        }
+        if (inserted !== true) return 'unsupported';
+        pinned = validatePinned(arg, false);
         if (
             !pinned ||
             document.activeElement !== editor ||
+            pinned.ownedMessage !== arg.message ||
             (editor.innerText || editor.textContent || '') !== arg.message
         ) {
             return 'invalid';
@@ -1136,6 +1230,61 @@ _MESSAGE_COMPOSER_WRITE_JS = (
         return 'written';
     }"""
 )
+
+_MESSAGE_COMPOSER_SUBMIT_READY_JS = (
+    "(owner, arg) => {"
+    + _MESSAGE_COMPOSER_PINNED_JS
+    + r"""
+        const pinned = validatePinned(arg, false);
+        if (
+            !pinned ||
+            document.activeElement !== pinned.editor ||
+            pinned.ownedMessage !== arg.message ||
+            (pinned.editor.innerText || pinned.editor.textContent || '') !== arg.message
+        ) {
+            return 'invalid';
+        }
+        return pinned.button.disabled ||
+            (pinned.button.getAttribute('aria-disabled') || '').toLowerCase() === 'true'
+            ? 'disabled'
+            : 'ready';
+    }"""
+)
+
+_MESSAGE_COMPOSER_CLEANUP_JS = r"""(owner, arg) => {
+    const pinned = owner?.__linkedinMcpComposer;
+    if (!pinned || pinned.ownedMessage !== arg.message) return false;
+    const {editor, ancestorChain} = pinned;
+    const currentChain = [];
+    let ancestor = editor?.parentElement;
+    while (ancestor) {
+        if (ancestor.matches('form, dialog, [role="dialog"]')) {
+            currentChain.push(ancestor);
+        }
+        ancestor = ancestor.parentElement;
+    }
+    if (
+        !owner.isConnected ||
+        !editor?.isConnected ||
+        !Array.isArray(ancestorChain) ||
+        currentChain.length !== ancestorChain.length ||
+        currentChain.some((scope, index) => scope !== ancestorChain[index]) ||
+        !currentChain.includes(owner) ||
+        !owner.contains(editor) ||
+        (editor.innerText || editor.textContent || '') !== arg.message
+    ) {
+        return false;
+    }
+    pinned.ownedMessage = null;
+    editor.replaceChildren();
+    editor.dispatchEvent(new InputEvent('input', {
+        bubbles: true,
+        composed: true,
+        data: null,
+        inputType: 'deleteContentBackward',
+    }));
+    return true;
+}"""
 
 _MESSAGE_COMPOSER_SUBMIT_JS = (
     "(owner, arg) => {"
@@ -1145,6 +1294,7 @@ _MESSAGE_COMPOSER_SUBMIT_JS = (
         if (
             !pinned ||
             document.activeElement !== pinned.editor ||
+            pinned.ownedMessage !== arg.message ||
             (pinned.editor.innerText || pinned.editor.textContent || '') !== arg.message
         ) {
             return 'invalid';
@@ -1173,6 +1323,12 @@ class _ProfileMessageTarget:
     profile_urn: str
     compose_url: str
     display_name: str | None
+
+
+@dataclass(frozen=True)
+class _ProfileMessageTargetResolution:
+    status: Literal["resolved", "unavailable", "failed"]
+    target: _ProfileMessageTarget | None = None
 
 
 def _safe_linkedin_url(value: str, *, base: str | None = None) -> ParseResult | None:
@@ -3433,8 +3589,8 @@ class LinkedInExtractor:
 
     async def _extract_profile_urn(self) -> str | None:
         """Extract a profile URN only from one unambiguous top-card snapshot."""
-        target = await self._read_profile_message_target()
-        return target.profile_urn if target else None
+        resolution = await self._read_profile_message_target()
+        return resolution.target.profile_urn if resolution.target else None
 
     async def get_sidebar_profiles(self, username: str) -> dict[str, Any]:
         """Extract profile links from sidebar sections on a LinkedIn profile page.
@@ -3613,46 +3769,73 @@ class LinkedInExtractor:
             "sidebar_profiles": sidebar_profiles,
         }
 
-    async def _read_profile_message_target(self) -> _ProfileMessageTarget | None:
-        """Read profile identity, name, compose URL and URN in one DOM snapshot."""
-        data = await self._page.evaluate(_PROFILE_MESSAGE_TARGET_JS)
+    async def _read_profile_message_target(self) -> _ProfileMessageTargetResolution:
+        """Resolve one recipient-specific top-card compose action after settling."""
+        try:
+            await self._page.wait_for_function(
+                _PROFILE_MESSAGE_TARGET_READY_JS,
+                timeout=_PROFILE_MESSAGE_TARGET_TIMEOUT_MS,
+            )
+        except PlaywrightTimeoutError:
+            pass
+        except Exception:
+            logger.debug("Could not wait for the profile Message action", exc_info=True)
+
+        try:
+            data = await self._page.evaluate(_PROFILE_MESSAGE_TARGET_JS)
+        except Exception:
+            logger.debug("Could not inspect the profile Message action", exc_info=True)
+            return _ProfileMessageTargetResolution("failed")
         if not isinstance(data, dict):
-            return None
+            return _ProfileMessageTargetResolution("failed")
+        if data.get("status") == "unavailable":
+            page_url = data.get("pageUrl")
+            if (
+                not isinstance(page_url, str)
+                or _profile_path_from_url(page_url) is None
+            ):
+                return _ProfileMessageTargetResolution("failed")
+            return _ProfileMessageTargetResolution("unavailable")
+        if data.get("status") != "resolved":
+            return _ProfileMessageTargetResolution("failed")
 
         page_url = data.get("pageUrl")
         compose_hrefs = data.get("composeHrefs")
         if not isinstance(page_url, str) or not isinstance(compose_hrefs, list):
-            return None
+            return _ProfileMessageTargetResolution("failed")
         profile_path = _profile_path_from_url(page_url)
         if profile_path is None:
-            return None
+            return _ProfileMessageTargetResolution("failed")
         if len(compose_hrefs) != 1 or not isinstance(compose_hrefs[0], str):
-            return None
+            return _ProfileMessageTargetResolution("failed")
 
         parsed_compose = _safe_linkedin_url(compose_hrefs[0], base=page_url)
         if parsed_compose is None:
-            return None
+            return _ProfileMessageTargetResolution("failed")
         compose_url = parsed_compose.geturl()
         profile_urn = _profile_urn_from_compose_url(compose_url)
         if profile_urn is None:
-            return None
+            return _ProfileMessageTargetResolution("failed")
 
         display_name = data.get("displayName")
         if not isinstance(display_name, str) or not display_name.strip():
             display_name = None
         else:
             display_name = display_name.strip()
-        return _ProfileMessageTarget(
-            profile_path=profile_path,
-            profile_urn=profile_urn,
-            compose_url=compose_url,
-            display_name=display_name,
+        return _ProfileMessageTargetResolution(
+            "resolved",
+            _ProfileMessageTarget(
+                profile_path=profile_path,
+                profile_urn=profile_urn,
+                compose_url=compose_url,
+                display_name=display_name,
+            ),
         )
 
     async def _resolve_message_compose_href(self) -> str | None:
         """Return an unambiguous recipient-specific top-card compose URL."""
-        target = await self._read_profile_message_target()
-        return target.compose_url if target else None
+        resolution = await self._read_profile_message_target()
+        return resolution.target.compose_url if resolution.target else None
 
     async def _read_profile_display_name(self) -> str | None:
         """Read the visible profile name from the current person page."""
@@ -3757,6 +3940,35 @@ class LinkedInExtractor:
         )
         return result if result in {"written", "occupied", "unsupported"} else "invalid"
 
+    async def _wait_for_verified_submit(
+        self,
+        message: str,
+        *,
+        target: _ProfileMessageTarget,
+        owner: Any,
+    ) -> bool:
+        """Wait briefly for the exact pinned submit button to become active."""
+        deadline = time.monotonic() + _MESSAGE_SUBMIT_READY_TIMEOUT_MS / 1_000
+        argument = {**self._message_target_argument(target), "message": message}
+        while True:
+            try:
+                state = await owner.evaluate(
+                    _MESSAGE_COMPOSER_SUBMIT_READY_JS, argument
+                )
+                if state == "ready":
+                    return True
+                if state != "disabled":
+                    return False
+            except Exception:
+                logger.debug(
+                    "Could not wait for the pinned submit button", exc_info=True
+                )
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            await asyncio.sleep(min(0.05, remaining))
+
     async def _submit_verified_message(
         self,
         message: str,
@@ -3771,6 +3983,20 @@ class LinkedInExtractor:
         )
         return "clicked" if result == "clicked" else "invalid"
 
+    @staticmethod
+    async def _cleanup_owned_message(message: str, owner: Any) -> None:
+        """Best-effort removal of text proven to belong to this tool call."""
+        with anyio.move_on_after(
+            _MESSAGE_CLEANUP_TIMEOUT_SECONDS, shield=True
+        ) as scope:
+            try:
+                await owner.evaluate(_MESSAGE_COMPOSER_CLEANUP_JS, {"message": message})
+            except Exception:
+                logger.debug("Could not clear tool-owned message text", exc_info=True)
+        if scope.cancel_called:
+            logger.warning("Timed out clearing tool-owned message text")
+        await anyio.lowlevel.checkpoint()
+
     async def _resolve_message_owner(self, target: _ProfileMessageTarget) -> Any | None:
         """Hold the verified owner node across submission and confirmation."""
         owner = await self._page.evaluate_handle(
@@ -3784,15 +4010,30 @@ class LinkedInExtractor:
 
     @staticmethod
     async def _dispose_message_owner(owner: Any) -> None:
-        """Release the pinned composer nodes without replacing their result."""
+        """Release all owner-scoped observers, pins, markers and handles."""
         try:
-            await owner.evaluate("owner => { delete owner.__linkedinMcpComposer; }")
-        except Exception:
-            logger.debug("Could not clear pinned message nodes", exc_info=True)
-        try:
-            await owner.dispose()
-        except Exception:
-            logger.debug("Could not release message owner handle", exc_info=True)
+            with anyio.move_on_after(
+                _MESSAGE_CLEANUP_TIMEOUT_SECONDS, shield=True
+            ) as dom_scope:
+                try:
+                    await owner.evaluate(_MESSAGE_COMPOSER_DISPOSE_JS)
+                except Exception:
+                    logger.debug("Could not clear pinned message nodes", exc_info=True)
+            if dom_scope.cancel_called:
+                logger.warning("Timed out clearing pinned message nodes")
+        finally:
+            with anyio.move_on_after(
+                _MESSAGE_CLEANUP_TIMEOUT_SECONDS, shield=True
+            ) as handle_scope:
+                try:
+                    await owner.dispose()
+                except Exception:
+                    logger.debug(
+                        "Could not release message owner handle", exc_info=True
+                    )
+            if handle_scope.cancel_called:
+                logger.warning("Timed out releasing message owner handle")
+        await anyio.lowlevel.checkpoint()
 
     def _message_confirmation_argument(
         self,
@@ -3855,13 +4096,19 @@ class LinkedInExtractor:
         self, owner: Any, confirmation: str
     ) -> None:
         """Disconnect a request-local confirmation observer."""
-        try:
-            await self._page.evaluate(
-                _MESSAGE_CONFIRMATION_DISPOSE_JS,
-                {"owner": owner, "token": confirmation},
-            )
-        except Exception:
-            logger.debug("Could not disconnect message observer", exc_info=True)
+        with anyio.move_on_after(
+            _MESSAGE_CLEANUP_TIMEOUT_SECONDS, shield=True
+        ) as scope:
+            try:
+                await self._page.evaluate(
+                    _MESSAGE_CONFIRMATION_DISPOSE_JS,
+                    {"owner": owner, "token": confirmation},
+                )
+            except Exception:
+                logger.debug("Could not disconnect message observer", exc_info=True)
+        if scope.cancel_called:
+            logger.warning("Timed out disconnecting message observer")
+        await anyio.lowlevel.checkpoint()
 
     @staticmethod
     def _extract_thread_id(url: str) -> str | None:
@@ -5738,14 +5985,22 @@ class LinkedInExtractor:
         except PlaywrightTimeoutError:
             logger.debug("Profile page did not load for %s", linkedin_username)
 
-        target = await self._read_profile_message_target()
-        if target is None:
+        resolution = await self._read_profile_message_target()
+        if resolution.status == "unavailable":
             return self._message_action_result(
                 profile_url,
                 "message_unavailable",
                 "LinkedIn did not expose a normal Message action for this profile. "
                 "Use connect_with_person first, then retry only after the connection "
                 "request is accepted.",
+            )
+        target = resolution.target
+        if target is None:
+            return self._message_action_result(
+                profile_url,
+                "recipient_resolution_failed",
+                "LinkedIn did not expose one unambiguous recipient-specific Message "
+                "action.",
             )
 
         supplied_urn = _normalize_profile_urn(profile_urn) if profile_urn else None
@@ -5836,11 +6091,11 @@ class LinkedInExtractor:
                 "The messaging URL changed before the composer could be pinned.",
                 recipient_selected=recipient_selected,
             )
-        if state.get("submitCount") != 1 or state.get("submitUsable") is not True:
+        if state.get("submitCount") != 1:
             return self._message_action_result(
                 self._page.url,
                 "send_unavailable",
-                "The local submit path was missing, disabled, or ambiguous.",
+                "The local submit path was missing or ambiguous.",
                 recipient_selected=recipient_selected,
             )
 
@@ -5881,6 +6136,19 @@ class LinkedInExtractor:
                         self._page.url,
                         "compose_interact_failed",
                         "The verified message editor could not accept the message.",
+                        recipient_selected=recipient_selected,
+                    )
+
+                if not await self._wait_for_verified_submit(
+                    message,
+                    target=target,
+                    owner=owner,
+                ):
+                    return self._message_action_result(
+                        self._page.url,
+                        "send_unavailable",
+                        "The pinned submit button did not become available without "
+                        "changing the verified composer.",
                         recipient_selected=recipient_selected,
                     )
 
@@ -5959,7 +6227,11 @@ class LinkedInExtractor:
                 finally:
                     await self._dispose_message_confirmation(owner, confirmation)
             finally:
-                await self._dispose_message_owner(owner)
+                try:
+                    if not may_have_submitted:
+                        await self._cleanup_owned_message(message, owner)
+                finally:
+                    await self._dispose_message_owner(owner)
         except Exception:
             if not may_have_submitted:
                 # Nothing can have been submitted yet, so the error itself is
