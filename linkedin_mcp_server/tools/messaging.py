@@ -17,7 +17,7 @@ from linkedin_mcp_server.core.exceptions import (
 )
 from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
 from linkedin_mcp_server.error_handler import raise_tool_error
-from linkedin_mcp_server.scraping.extractor import (
+from linkedin_mcp_server.scraping.contracts import (
     SEND_INTERRUPTED_WARNING,
     refuse_an_invalid_message,
 )
