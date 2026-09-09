@@ -243,14 +243,17 @@ def register_messaging_tools(
         The recipient must be directly messageable from the profile page. If
         LinkedIn does not expose a normal Message action, use connect_with_person
         first, then retry send_message only after the connection request is
-        accepted. Nothing is typed or submitted until the loaded profile and the
-        open composer identify the same person; on any disagreement the tool
-        returns without touching the editor. This is a write operation when
-        confirm_send is True.
+        accepted. Recipient authorization comes from validating one
+        recipient-specific Message action carrying the target URN, then following
+        its browser navigation and pinning the exact final route. Visible profile
+        links or recipient URNs in the composer are optional corroboration; any
+        contradiction fails closed. No Voyager or other private API is used. This
+        is a write operation when confirm_send is True.
 
         Args:
             linkedin_username: LinkedIn username of the recipient; a full profile URL is accepted too
-            message: The message text to send
+            message: Single-line message text to send. C0 control characters and
+                DEL are rejected, including CR, LF, and tab.
             confirm_send: Must be True to send the message
             ctx: FastMCP context for progress reporting
             profile_urn: Optional profile URN (e.g. ACoAAB...) to verify against

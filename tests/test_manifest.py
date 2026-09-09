@@ -166,6 +166,14 @@ def test_every_declared_key_is_referenced(manifest: dict[str, Any]) -> None:
     )
 
 
+def test_send_message_documents_single_line_controls(manifest: dict[str, Any]) -> None:
+    tools = {tool["name"]: tool["description"] for tool in manifest["tools"]}
+    assert (
+        "single-line message without C0 or DEL control characters "
+        "(including CR, LF, and tab)"
+    ) in tools["send_message"]
+
+
 def test_no_default_is_itself_a_placeholder(manifest: dict[str, Any]) -> None:
     """A default that names another field only moves the problem.
 

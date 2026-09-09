@@ -1004,6 +1004,20 @@ class TestMessagingTools:
             "connection request is accepted."
         ) in description
 
+    async def test_send_message_schema_explains_single_line_controls(self):
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool = await mcp.get_tool("send_message")
+        assert tool is not None
+        message_schema = tool.parameters["properties"]["message"]
+        assert " ".join(message_schema["description"].split()) == (
+            "Single-line message text to send. C0 control characters and DEL are "
+            "rejected, including CR, LF, and tab."
+        )
+
     @pytest.mark.parametrize("message", ["", "   \t\n"], ids=["empty", "whitespace"])
     async def test_send_message_refuses_blank_before_a_session(
         self, mock_context, message
@@ -1036,8 +1050,8 @@ class TestMessagingTools:
 
     @pytest.mark.parametrize(
         "message",
-        ["First\nSecond", "First\rSecond", "First\tSecond", "First\x7fSecond"],
-        ids=["newline", "carriage-return", "tab", "del"],
+        [f"First{chr(codepoint)}Second" for codepoint in (*range(32), 127)],
+        ids=[f"U+{codepoint:04X}" for codepoint in (*range(32), 127)],
     )
     async def test_send_message_refuses_controls_before_a_session(
         self, mock_context, message

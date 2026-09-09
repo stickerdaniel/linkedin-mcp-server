@@ -3868,7 +3868,7 @@ class LinkedInExtractor:
     async def _wait_for_message_surface(
         self, target: _ProfileMessageTarget
     ) -> Literal["composer"] | None:
-        """Wait for one editor with a matching local recipient identity."""
+        """Wait for one editor with no contradictory local recipient identity."""
         if await self._wait_for_message_composer(target):
             return "composer"
         return None
@@ -3910,7 +3910,7 @@ class LinkedInExtractor:
     async def _read_message_composer_state(
         self, target: _ProfileMessageTarget
     ) -> dict[str, Any]:
-        """Inspect the unique editor and recipient inside its semantic owner."""
+        """Inspect the unique editor and reject contradictory local identity."""
         state = await self._page.evaluate(
             _MESSAGE_COMPOSER_STATE_JS,
             self._message_target_argument(target),
@@ -3920,7 +3920,7 @@ class LinkedInExtractor:
     async def _focus_verified_message_editor(
         self, target: _ProfileMessageTarget
     ) -> bool:
-        """Focus the same local editor whose recipient identity was verified."""
+        """Focus the same editor after local contradiction checks."""
         focused = await self._page.evaluate(
             _MESSAGE_COMPOSER_FOCUS_JS,
             self._message_target_argument(target),
@@ -5971,7 +5971,10 @@ class LinkedInExtractor:
 
         Opens LinkedIn's profile-based compose flow. That may create a separate
         DM instead of replying in an existing recruiter/InMail or messaging
-        thread.
+        thread. Recipient authorization comes from the validated top-card action
+        carrying the target URN and the browser navigation it initiates. The exact
+        resulting route is pinned through every later operation; visible local
+        identities are optional corroboration, but any contradiction fails closed.
 
         Args:
             linkedin_username: LinkedIn username of the recipient.
@@ -6020,6 +6023,10 @@ class LinkedInExtractor:
                 "The supplied profile URN did not match the loaded profile.",
             )
 
+        # The validated top-card action and its browser navigation are the
+        # recipient boundary. LinkedIn may strip the query and expose no local
+        # identity, so capture the final route now and fail on any later change or
+        # visible contradiction. Do not replace this with a Voyager/private API.
         await self._navigate_to_page(target.compose_url)
         expected_route = self._page.url
         if not _message_page_url_is_safe(expected_route, target.profile_urn):
