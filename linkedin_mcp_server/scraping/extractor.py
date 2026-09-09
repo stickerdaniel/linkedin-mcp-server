@@ -448,10 +448,15 @@ SEND_INTERRUPTED_WARNING = (
 )
 
 _PROFILE_MESSAGE_TARGET_JS = r"""() => {
-    const visible = element => !!(
-        element &&
-        (element.offsetWidth || element.offsetHeight || element.getClientRects().length)
-    );
+    const visible = element => {
+        const visibility = element && getComputedStyle(element).visibility;
+        return !!(
+            element &&
+            visibility !== 'hidden' &&
+            visibility !== 'collapse' &&
+            (element.offsetWidth || element.offsetHeight || element.getClientRects().length)
+        );
+    };
     const active = anchor =>
         visible(anchor) &&
         !anchor.hasAttribute('disabled') &&
@@ -483,10 +488,15 @@ _PROFILE_MESSAGE_TARGET_JS = r"""() => {
 }"""
 
 _MESSAGE_COMPOSER_INSPECT_JS = r"""
-    const visible = element => !!(
-        element &&
-        (element.offsetWidth || element.offsetHeight || element.getClientRects().length)
-    );
+    const visible = element => {
+        const visibility = element && getComputedStyle(element).visibility;
+        return !!(
+            element &&
+            visibility !== 'hidden' &&
+            visibility !== 'collapse' &&
+            (element.offsetWidth || element.offsetHeight || element.getClientRects().length)
+        );
+    };
     const normalizeUrn = value => {
         const text = (value || '').trim();
         const prefix = 'urn:li:fsd_profile:';
@@ -921,10 +931,15 @@ _MESSAGE_COMPOSER_FOCUS_JS = (
 )
 
 _MESSAGE_COMPOSER_PINNED_JS = r"""
-    const visible = element => !!(
-        element &&
-        (element.offsetWidth || element.offsetHeight || element.getClientRects().length)
-    );
+    const visible = element => {
+        const visibility = element && getComputedStyle(element).visibility;
+        return !!(
+            element &&
+            visibility !== 'hidden' &&
+            visibility !== 'collapse' &&
+            (element.offsetWidth || element.offsetHeight || element.getClientRects().length)
+        );
+    };
     const normalizeUrn = value => {
         const text = (value || '').trim();
         const prefix = 'urn:li:fsd_profile:';

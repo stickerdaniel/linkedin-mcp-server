@@ -365,6 +365,22 @@ class TestProfileMessageTargetDom:
 
         assert await read_profile_target(dom_page, html) is None
 
+    async def test_visibility_hidden_card_does_not_precede_visible_card(self, dom_page):
+        html = profile_page(
+            '<section style="visibility:hidden"><h1>Bob</h1>'
+            '<a href="/messaging/compose/?recipient=BOB">message</a></section>',
+            other=(
+                f'<section><h1>Alice</h1><a href="{COMPOSE_URL}">message</a></section>'
+            ),
+        )
+
+        target = await read_profile_target(dom_page, html)
+
+        assert target is not None
+        assert target.display_name == "Alice"
+        assert target.profile_urn == "ACoAAB"
+        assert target.compose_url == COMPOSE_URL
+
     async def test_later_sections_never_compete_with_first_top_card(self, dom_page):
         card = (
             "<section>"

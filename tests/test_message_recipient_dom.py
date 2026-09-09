@@ -291,6 +291,57 @@ class TestMessageComposerDom:
 
         assert state["status"] == "valid"
 
+    @pytest.mark.parametrize("visibility", ["hidden", "collapse"])
+    async def test_invisible_conflicts_do_not_block_url_pinned_composer(
+        self, dom_page, visibility
+    ):
+        await _set_composer_content(
+            dom_page,
+            _composer(
+                identity=(
+                    f'<div style="visibility:{visibility}" data-recipient-urn="OTHER">'
+                    '<a href="https://www.linkedin.com/in/bob/">Bob</a></div>'
+                ),
+                buttons='<button type="submit">Send</button>',
+            ),
+        )
+        extractor = LinkedInExtractor(dom_page)
+
+        owner = await extractor._resolve_message_owner(_message_target())
+        assert owner is not None
+        assert (
+            await extractor._write_verified_message(
+                "Hello!", target=_message_target(), owner=owner
+            )
+            == "written"
+        )
+        await extractor._dispose_message_owner(owner)
+
+    async def test_hidden_conflicts_do_not_override_visible_identity(self, dom_page):
+        await _set_composer_content(
+            dom_page,
+            _composer(
+                identity=(
+                    '<div style="visibility:hidden" data-recipient-urn="OTHER">'
+                    '<a href="https://www.linkedin.com/in/bob/">Bob</a></div>'
+                    '<div data-recipient-urn="ACoAAB">'
+                    '<a href="https://www.linkedin.com/in/testuser/">Test</a></div>'
+                ),
+                buttons='<button type="submit">Send</button>',
+            ),
+        )
+        extractor = LinkedInExtractor(dom_page)
+
+        owner = await extractor._resolve_message_owner(_message_target())
+        assert owner is not None
+        assert (
+            await extractor._write_verified_message(
+                "Hello!", target=_message_target(), owner=owner
+            )
+            == "written"
+        )
+        await extractor._dispose_message_owner(owner)
+
     async def test_second_urn_attribute_on_one_element_is_never_skipped(self, dom_page):
         conflicting = await _state(
             dom_page,
