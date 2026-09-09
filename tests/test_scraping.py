@@ -1,5 +1,6 @@
 """Tests for the LinkedInExtractor scraping engine."""
 
+from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 from urllib.parse import parse_qs, urlparse
@@ -30,6 +31,10 @@ from linkedin_mcp_server.scraping.extractor import (
     ExtractedSection,
     LinkedInExtractor,
     _CONTENT_DATE_POSTED_MAP,
+    _MESSAGE_COMPOSER_OWNER_JS,
+    _MESSAGE_CONFIRMATION_DISPOSE_JS,
+    _MESSAGE_CONFIRMATION_PREPARE_JS,
+    _MESSAGE_CONFIRMATION_READY_JS,
     _RATE_LIMITED_MSG,
     _build_feed_references,
     _truncate_linkedin_noise,
@@ -7621,35 +7626,190 @@ class TestGetSidebarProfiles:
         }
 
 
+class TestMessageTargetUrls:
+    @pytest.mark.parametrize(
+        ("url", "expected"),
+        [
+            (
+                "https://www.linkedin.com/messaging/compose/?recipient=ACoAAB",
+                "ACoAAB",
+            ),
+            (
+                "https://de.linkedin.com/messaging/compose/"
+                "?recipient=ACoAAB&profileUrn=urn%3Ali%3Afsd_profile%3AACoAAB",
+                "ACoAAB",
+            ),
+            (
+                "https://www.linkedin.com/messaging/compose/"
+                "?recipient=ACoAAB&recipient=ACoAAB",
+                "ACoAAB",
+            ),
+            ("http://www.linkedin.com/messaging/compose/?recipient=ACoAAB", None),
+            ("https://evil.example/messaging/compose/?recipient=ACoAAB", None),
+            ("//evil.example/messaging/compose/?recipient=ACoAAB", None),
+            ("https://user@www.linkedin.com/messaging/compose/?recipient=ACoAAB", None),
+            ("https://www.linkedin.com:444/messaging/compose/?recipient=ACoAAB", None),
+            ("https://www.linkedin.com/jobs/?recipient=ACoAAB", None),
+            (
+                "https://www.linkedin.com/messaging/compose/?recipient=ACoAAB#draft",
+                None,
+            ),
+            ("https://www.linkedin.com/messaging/compose/?recipient=ACoAAB\n", None),
+            ("https://www.linkedin.com/messaging/compose/?recipient=", None),
+            (
+                "https://www.linkedin.com/messaging/compose/"
+                "?recipient=ACoAAB&recipient=OTHER",
+                None,
+            ),
+            (
+                "https://www.linkedin.com/messaging/compose/"
+                "?recipient=ACoAAB&profileUrn=urn%3Ali%3Afsd_profile%3AOTHER",
+                None,
+            ),
+            (
+                "https://www.linkedin.com/messaging/compose/?profileUrn=malformed%3Aurn",
+                None,
+            ),
+        ],
+    )
+    def test_compose_url_requires_one_linkedin_recipient(self, url, expected):
+        assert extractor_module._profile_urn_from_compose_url(url) == expected
+
+    @pytest.mark.parametrize(
+        ("url", "expected"),
+        [
+            ("https://www.linkedin.com/in/testuser/", "/in/testuser/"),
+            ("https://de.linkedin.com/in/testuser/", "/in/testuser/"),
+            ("http://www.linkedin.com/in/testuser/", None),
+            ("https://evil.example/in/testuser/", None),
+            ("https://user@www.linkedin.com/in/testuser/", None),
+            ("https://www.linkedin.com:444/in/testuser/", None),
+            ("https://www.linkedin.com/in/testuser/edit/intro/", None),
+            ("https://www.linkedin.com/in/testuser%2Fedit/", None),
+            ("https://www.linkedin.com/in/testuser/?trk=profile", None),
+            ("https://www.linkedin.com/in/testuser/#details", None),
+        ],
+    )
+    def test_profile_url_requires_exact_linkedin_profile(self, url, expected):
+        assert extractor_module._profile_path_from_url(url) == expected
+
+    @pytest.mark.parametrize(
+        ("url", "expected"),
+        [
+            ("https://www.linkedin.com/messaging/compose/", True),
+            (
+                "https://www.linkedin.com/messaging/compose/?recipient=ACoAAB",
+                True,
+            ),
+            (
+                "https://www.linkedin.com/messaging/compose/"
+                "?recipient=ACoAAB&recipient=ACoAAB&"
+                "profileUrn=urn%3Ali%3Afsd_profile%3AACoAAB",
+                True,
+            ),
+            ("https://de.linkedin.com/messaging/thread/2-abc/", True),
+            (
+                "https://www.linkedin.com/messaging/thread/2-abc/"
+                "?recipient=ACoAAB&profileUrn=urn%3Ali%3Afsd_profile%3AACoAAB",
+                True,
+            ),
+            (
+                "https://www.linkedin.com/messaging/compose/?recipient=OTHER",
+                False,
+            ),
+            (
+                "https://www.linkedin.com/messaging/compose/"
+                "?recipient=ACoAAB&recipient=OTHER",
+                False,
+            ),
+            (
+                "https://www.linkedin.com/messaging/compose/?profileUrn=",
+                False,
+            ),
+            (
+                "https://www.linkedin.com/messaging/thread/2-abc/"
+                "?recipient=ACoAAB&recipient=OTHER",
+                False,
+            ),
+            (
+                "https://www.linkedin.com/messaging/thread/2-abc/?profileUrn=",
+                False,
+            ),
+            ("http://www.linkedin.com/messaging/compose/", False),
+            ("https://evil.example/messaging/compose/", False),
+            ("https://user@www.linkedin.com/messaging/thread/2-abc/", False),
+            ("https://www.linkedin.com:444/messaging/compose/", False),
+            ("https://www.linkedin.com/messaging/compose/#draft", False),
+            ("https://www.linkedin.com/messaging/thread/2-abc%2Fother/", False),
+            # Measured live: LinkedIn redirects an existing conversation to a
+            # padded base64url id, and the padding reaches the path unescaped.
+            (
+                "https://www.linkedin.com/messaging/thread/"
+                "2-ZDBkMjZiY2UtNjQwYi00NzczLWIxYWYtNTczZTZhZDkzMzQ4XzEwMA==/",
+                True,
+            ),
+            ("https://www.linkedin.com/feed/", False),
+        ],
+    )
+    def test_final_url_requires_safe_messaging_path(self, url, expected):
+        assert extractor_module._message_page_url_is_safe(url, "ACoAAB") is expected
+
+
 class TestExtractProfileUrn:
-    async def test_returns_urn_from_compose_href(self, mock_page):
-        """Extracts the recipient URN from the messaging compose link."""
+    async def test_returns_urn_from_atomic_top_card_snapshot(self, mock_page):
         mock_page.evaluate = AsyncMock(
-            return_value="/messaging/compose/?recipient=ACoAAB1IelEBLEkqTkNbZ-a1D8mq5R-6C1ihSEk&lipi=urn..."
+            return_value={
+                "status": "resolved",
+                "pageUrl": "https://www.linkedin.com/in/testuser/",
+                "displayName": "Test User",
+                "composeHrefs": [
+                    "/messaging/compose/?recipient=ACoAAB&"
+                    "profileUrn=urn%3Ali%3Afsd_profile%3AACoAAB"
+                ],
+            }
         )
 
-        extractor = LinkedInExtractor(mock_page)
-        result = await extractor._extract_profile_urn()
+        result = await LinkedInExtractor(mock_page)._extract_profile_urn()
 
-        assert result == "ACoAAB1IelEBLEkqTkNbZ-a1D8mq5R-6C1ihSEk"
-
-    async def test_returns_none_when_no_compose_button(self, mock_page):
-        """Returns None when no messaging compose link is found."""
-        mock_page.evaluate = AsyncMock(return_value=None)
-
-        extractor = LinkedInExtractor(mock_page)
-        result = await extractor._extract_profile_urn()
-
-        assert result is None
-
-    async def test_returns_none_when_no_recipient_param(self, mock_page):
-        """Returns None when the compose href has no recipient query param."""
-        mock_page.evaluate = AsyncMock(
-            return_value="/messaging/compose/?someOtherParam=value"
+        assert result == "ACoAAB"
+        mock_page.evaluate.assert_awaited_once_with(
+            extractor_module._PROFILE_MESSAGE_TARGET_JS
         )
 
-        extractor = LinkedInExtractor(mock_page)
-        result = await extractor._extract_profile_urn()
+    async def test_accepts_safe_final_vanity_redirect(self, mock_page):
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "status": "resolved",
+                "pageUrl": "https://www.linkedin.com/in/canonical-user/",
+                "displayName": "Test User",
+                "composeHrefs": [
+                    "/messaging/compose/?recipient=ACoAAB&"
+                    "profileUrn=urn%3Ali%3Afsd_profile%3AACoAAB"
+                ],
+            }
+        )
+
+        resolution = await LinkedInExtractor(mock_page)._read_profile_message_target()
+
+        assert resolution.status == "resolved"
+        assert resolution.target is not None
+        assert resolution.target.profile_path == "/in/canonical-user/"
+        assert resolution.target.profile_urn == "ACoAAB"
+
+    async def test_returns_none_for_ambiguous_top_card_links(self, mock_page):
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "status": "resolved",
+                "pageUrl": "https://www.linkedin.com/in/testuser/",
+                "displayName": "Test User",
+                "composeHrefs": [
+                    "/messaging/compose/?recipient=ACoAAB",
+                    "/messaging/compose/?recipient=OTHER",
+                ],
+            }
+        )
+
+        result = await LinkedInExtractor(mock_page)._extract_profile_urn()
 
         assert result is None
 
@@ -8435,8 +8595,126 @@ class TestSearchConversations:
 
 
 class TestSendMessage:
-    async def test_dry_run_returns_confirmation_required(self, mock_page):
-        """send_message with confirm_send=False returns confirmation_required status."""
+    @pytest.mark.parametrize("message", ["", " \t\n"], ids=["empty", "whitespace"])
+    async def test_blank_message_is_rejected_before_browser_interaction(
+        self, mock_page, message
+    ):
+        extractor = LinkedInExtractor(mock_page)
+        keyboard = MagicMock()
+        mock_page.keyboard = keyboard
+
+        with patch.object(
+            extractor, "_navigate_to_page", new_callable=AsyncMock
+        ) as navigate:
+            result = await extractor.send_message(
+                "testuser", message, confirm_send=True
+            )
+
+        # Not `message_unavailable`: that status is about the recipient and
+        # tells a caller to move on, while this one is about their own input.
+        assert result == {
+            "url": "https://www.linkedin.com/in/testuser/",
+            "status": "invalid_message",
+            "message": "Message must contain non-whitespace characters.",
+            "recipient_selected": False,
+            "sent": False,
+            "retry_safe": True,
+        }
+        navigate.assert_not_awaited()
+        mock_page.evaluate.assert_not_awaited()
+        keyboard.type.assert_not_called()
+        keyboard.press.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "message",
+        ["First\nSecond", "First\rSecond", "First\tSecond", "First\x7fSecond"],
+        ids=["newline", "carriage-return", "tab", "del"],
+    )
+    async def test_control_message_is_rejected_before_browser_interaction(
+        self, mock_page, message
+    ):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.keyboard = MagicMock(type=AsyncMock(), press=AsyncMock())
+
+        with patch.object(
+            extractor, "_navigate_to_page", new_callable=AsyncMock
+        ) as navigate:
+            result = await extractor.send_message(
+                "testuser", message, confirm_send=True
+            )
+
+        assert result["status"] == "invalid_message"
+        assert result["message"] == (
+            "Message must not contain control characters or line breaks."
+        )
+        assert result["retry_safe"] is True
+        navigate.assert_not_awaited()
+        mock_page.evaluate.assert_not_awaited()
+        mock_page.keyboard.type.assert_not_awaited()
+        mock_page.keyboard.press.assert_not_awaited()
+
+    async def test_unavailable_message_action_returns_connection_handoff(
+        self, mock_page
+    ):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.keyboard = MagicMock(type=AsyncMock(), press=AsyncMock())
+
+        with (
+            patch.object(
+                extractor, "_navigate_to_page", new_callable=AsyncMock
+            ) as navigate,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                extractor,
+                "_read_profile_message_target",
+                new_callable=AsyncMock,
+                return_value=extractor_module._ProfileMessageTargetResolution(
+                    "unavailable"
+                ),
+            ),
+            patch.object(
+                extractor, "_wait_for_message_surface", new_callable=AsyncMock
+            ) as surface,
+            patch.object(
+                extractor, "_read_message_composer_state", new_callable=AsyncMock
+            ) as state,
+            patch.object(
+                extractor,
+                "_focus_verified_message_editor",
+                new_callable=AsyncMock,
+            ) as focus,
+            patch.object(
+                extractor, "_submit_verified_message", new_callable=AsyncMock
+            ) as submit,
+        ):
+            result = await extractor.send_message(
+                "testuser", "Hello!", confirm_send=True
+            )
+
+        assert result == {
+            "url": "https://www.linkedin.com/in/testuser/",
+            "status": "message_unavailable",
+            "message": (
+                "LinkedIn did not expose a normal Message action for this profile. "
+                "Use connect_with_person first, then retry only after the connection "
+                "request is accepted."
+            ),
+            "recipient_selected": False,
+            "sent": False,
+            "retry_safe": True,
+        }
+        navigate.assert_awaited_once_with("https://www.linkedin.com/in/testuser/")
+        surface.assert_not_awaited()
+        state.assert_not_awaited()
+        focus.assert_not_awaited()
+        submit.assert_not_awaited()
+        mock_page.keyboard.type.assert_not_awaited()
+        mock_page.keyboard.press.assert_not_awaited()
+
+    async def test_unresolved_profile_target_is_not_connection_handoff(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         with (
             patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
@@ -8444,21 +8722,85 @@ class TestSendMessage:
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
             ),
+            patch.object(
+                extractor,
+                "_read_profile_message_target",
+                new_callable=AsyncMock,
+                return_value=extractor_module._ProfileMessageTargetResolution("failed"),
+            ),
+        ):
+            result = await extractor.send_message(
+                "testuser", "Hello!", confirm_send=True
+            )
+
+        assert result["status"] == "recipient_resolution_failed"
+        assert "connect_with_person" not in result["message"]
+        assert result["retry_safe"] is True
+
+    @staticmethod
+    def _target():
+        return extractor_module._ProfileMessageTarget(
+            profile_path="/in/testuser/",
+            profile_urn="ACoAAB",
+            compose_url=(
+                "https://www.linkedin.com/messaging/compose/"
+                "?recipient=ACoAAB&profileUrn=urn%3Ali%3Afsd_profile%3AACoAAB"
+            ),
+            display_name="Test User",
+        )
+
+    @staticmethod
+    def _patch_to_composer(
+        extractor,
+        mock_page,
+        *,
+        states=None,
+        submission="clicked",
+        write_result="written",
+    ):
+        target = TestSendMessage._target()
+        mock_page.url = "https://www.linkedin.com/messaging/compose/?recipient=ACoAAB"
+        mock_page.keyboard = MagicMock(type=AsyncMock(), press=AsyncMock())
+        owner = MagicMock()
+        owner.as_element.return_value = owner
+        owner.evaluate = AsyncMock(return_value="ready")
+        owner.dispose = AsyncMock()
+        mock_page.evaluate_handle = AsyncMock(return_value=owner)
+
+        # An empty composer is the ordinary precondition for sending, so a
+        # state that says nothing about it means empty. A case about a draft
+        # still standing in the editor says `"empty": False` and gets it.
+        def with_empty(state):
+            if not isinstance(state, dict):
+                return state
+            return {
+                "empty": True,
+                "submitCount": 1,
+                "submitUsable": True,
+                **state,
+            }
+
+        if callable(states):
+            inner = states
+
+            async def states(*args, **kwargs):
+                return with_empty(await inner(*args, **kwargs))
+        elif states is not None:
+            states = [with_empty(state) for state in states]
+        return (
+            target,
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
             patch(
-                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
             ),
             patch.object(
                 extractor,
-                "_read_profile_display_name",
+                "_read_profile_message_target",
                 new_callable=AsyncMock,
-                return_value="Test User",
-            ),
-            patch.object(
-                extractor,
-                "_resolve_message_compose_href",
-                new_callable=AsyncMock,
-                return_value="https://www.linkedin.com/messaging/compose/?recipient=ACoAAB",
+                return_value=extractor_module._ProfileMessageTargetResolution(
+                    "resolved", target
+                ),
             ),
             patch.object(
                 extractor,
@@ -8468,381 +8810,740 @@ class TestSendMessage:
             ),
             patch.object(
                 extractor,
-                "_resolve_message_compose_box",
+                "_read_message_composer_state",
                 new_callable=AsyncMock,
-                return_value=MagicMock(),
+                side_effect=states or None,
+                return_value={
+                    "status": "valid",
+                    "active": False,
+                    "empty": True,
+                    "submitCount": 1,
+                    "submitUsable": True,
+                },
             ),
             patch.object(
                 extractor,
-                "_compose_page_matches_recipient",
+                "_write_verified_message",
+                new_callable=AsyncMock,
+                return_value=write_result,
+            ),
+            patch.object(
+                extractor,
+                "_submit_verified_message",
+                new_callable=AsyncMock,
+                return_value=submission,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                extractor,
+                "_prepare_message_confirmation",
+                new_callable=AsyncMock,
+                return_value="confirmation-token",
+            ),
+            patch.object(
+                extractor,
+                "_message_send_confirmed",
                 new_callable=AsyncMock,
                 return_value=True,
             ),
-            patch.object(
-                extractor,
-                "_dismiss_message_ui",
-                new_callable=AsyncMock,
-            ),
+        )
+
+    async def test_dry_run_returns_before_focus_or_text_entry(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        patches = self._patch_to_composer(extractor, mock_page)
+        with (
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6] as focus,
+            patches[7] as submit,
+            patches[8],
         ):
             result = await extractor.send_message(
                 "testuser", "Hello!", confirm_send=False
             )
 
         assert result["status"] == "confirmation_required"
-        assert result["sent"] is False
+        assert result["recipient_selected"] is True
+        focus.assert_not_awaited()
+        submit.assert_not_awaited()
+        mock_page.keyboard.type.assert_not_awaited()
 
-    async def test_message_unavailable_when_no_compose_href(self, mock_page):
-        """send_message returns message_unavailable when no compose URL found."""
+    async def test_rejects_supplied_urn_before_compose_navigation(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
+        target = self._target()
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor, "_navigate_to_page", new_callable=AsyncMock
+            ) as navigate,
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
             ),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
-                new_callable=AsyncMock,
-            ),
             patch.object(
                 extractor,
-                "_read_profile_display_name",
+                "_read_profile_message_target",
                 new_callable=AsyncMock,
-                return_value="Test User",
-            ),
-            patch.object(
-                extractor,
-                "_resolve_message_compose_href",
-                new_callable=AsyncMock,
-                return_value=None,
-            ),
-        ):
-            result = await extractor.send_message(
-                "testuser", "Hello!", confirm_send=True
-            )
-
-        assert result["status"] == "message_unavailable"
-        assert result["sent"] is False
-
-    async def test_uses_profile_urn_when_provided(self, mock_page):
-        """send_message builds compose URL from profile_urn without Message-button lookup."""
-        extractor = LinkedInExtractor(mock_page)
-        with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
-                new_callable=AsyncMock,
-            ),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
-                new_callable=AsyncMock,
-            ),
-            patch.object(
-                extractor,
-                "_read_profile_display_name",
-                new_callable=AsyncMock,
-                return_value="Test User",
-            ),
-            patch.object(
-                extractor,
-                "_resolve_message_compose_href",
-                new_callable=AsyncMock,
-                return_value=None,
-            ) as mock_resolve_href,
-            patch.object(
-                extractor,
-                "_wait_for_message_surface",
-                new_callable=AsyncMock,
-                return_value="composer",
-            ),
-            patch.object(
-                extractor,
-                "_resolve_message_compose_box",
-                new_callable=AsyncMock,
-                return_value=MagicMock(),
-            ),
-            patch.object(
-                extractor,
-                "_compose_page_matches_recipient",
-                new_callable=AsyncMock,
-                return_value=True,
-            ),
-            patch.object(
-                extractor,
-                "_dismiss_message_ui",
-                new_callable=AsyncMock,
+                return_value=extractor_module._ProfileMessageTargetResolution(
+                    "resolved", target
+                ),
             ),
         ):
             result = await extractor.send_message(
                 "testuser",
                 "Hello!",
-                confirm_send=False,
-                profile_urn="ACoAAB1IelEB",
+                confirm_send=True,
+                profile_urn="OTHER",
             )
 
-        # _resolve_message_compose_href should NOT be called when profile_urn given
-        mock_resolve_href.assert_not_awaited()
-        assert result["status"] == "confirmation_required"
+        assert result["status"] == "recipient_resolution_failed"
+        navigate.assert_awaited_once_with("https://www.linkedin.com/in/testuser/")
 
-    async def test_profile_urn_compose_url_includes_full_params(self, mock_page):
-        """send_message with profile_urn builds URL with profileUrn, screenContext, interop."""
+    async def test_rejects_foreign_url_recipient_after_navigation(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
-        navigate_calls = []
-
-        async def capture_navigate(url):
-            navigate_calls.append(url)
-
+        patches = self._patch_to_composer(extractor, mock_page)
+        mock_page.url = "https://www.linkedin.com/messaging/compose/?recipient=OTHER"
         with (
-            patch.object(
-                extractor,
-                "_navigate_to_page",
-                new_callable=AsyncMock,
-                side_effect=capture_navigate,
-            ),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
-                new_callable=AsyncMock,
-            ),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
-                new_callable=AsyncMock,
-            ),
-            patch.object(
-                extractor,
-                "_read_profile_display_name",
-                new_callable=AsyncMock,
-                return_value="Test User",
-            ),
-            patch.object(
-                extractor,
-                "_wait_for_message_surface",
-                new_callable=AsyncMock,
-                return_value="composer",
-            ),
-            patch.object(
-                extractor,
-                "_resolve_message_compose_box",
-                new_callable=AsyncMock,
-                return_value=MagicMock(),
-            ),
-            patch.object(
-                extractor,
-                "_compose_page_matches_recipient",
-                new_callable=AsyncMock,
-                return_value=True,
-            ),
-            patch.object(
-                extractor,
-                "_dismiss_message_ui",
-                new_callable=AsyncMock,
-            ),
-        ):
-            await extractor.send_message(
-                "testuser",
-                "Hello!",
-                confirm_send=False,
-                profile_urn="ACoAAB1IelEB",
-            )
-
-        # Second navigate call is the compose URL (first is the profile page)
-        compose_url = navigate_calls[1]
-        assert "profileUrn=" in compose_url
-        assert "urn%3Ali%3Afsd_profile%3AACoAAB1IelEB" in compose_url
-        assert "recipient=ACoAAB1IelEB" in compose_url
-        assert "screenContext=NON_SELF_PROFILE_VIEW" in compose_url
-        assert "interop=msgOverlay" in compose_url
-
-
-class TestResolveMessageComposeBox:
-    async def test_returns_locator_when_count_positive(self, mock_page):
-        """_resolve_message_compose_box returns locator.last when count() > 0."""
-        extractor = LinkedInExtractor(mock_page)
-        mock_locator = MagicMock()
-        mock_locator.count = AsyncMock(return_value=1)
-        sentinel = MagicMock(name="last_locator")
-        sentinel.wait_for = AsyncMock()
-        mock_locator.last = sentinel
-        mock_locator.wait_for = AsyncMock()
-        mock_page.locator = MagicMock(return_value=mock_locator)
-
-        result = await extractor._resolve_message_compose_box()
-
-        assert result is sentinel
-        # wait_for should NOT be called on the early-return path
-        sentinel.wait_for.assert_not_called()
-        mock_locator.wait_for.assert_not_called()
-
-    async def test_returns_none_when_all_selectors_miss(self, mock_page):
-        """_resolve_message_compose_box returns None when no selector matches."""
-        from patchright.async_api import TimeoutError as PlaywrightTimeoutError
-
-        extractor = LinkedInExtractor(mock_page)
-        mock_locator = MagicMock()
-        mock_locator.count = AsyncMock(return_value=0)
-        mock_locator.last = MagicMock()
-        mock_locator.last.wait_for = AsyncMock(
-            side_effect=PlaywrightTimeoutError("timeout")
-        )
-        mock_page.locator = MagicMock(return_value=mock_locator)
-
-        result = await extractor._resolve_message_compose_box()
-
-        assert result is None
-
-    async def test_falls_through_when_count_raises(self, mock_page):
-        """_resolve_message_compose_box handles count() exceptions gracefully."""
-        from patchright.async_api import TimeoutError as PlaywrightTimeoutError
-
-        extractor = LinkedInExtractor(mock_page)
-        mock_locator = MagicMock()
-        mock_locator.count = AsyncMock(side_effect=Exception("detached"))
-        mock_locator.last = MagicMock()
-        mock_locator.last.wait_for = AsyncMock(
-            side_effect=PlaywrightTimeoutError("timeout")
-        )
-        mock_page.locator = MagicMock(return_value=mock_locator)
-
-        result = await extractor._resolve_message_compose_box()
-
-        assert result is None
-
-
-class TestSendMessageComposerInteraction:
-    """Tests for the page.evaluate + keyboard.type send path (patchright workaround)."""
-
-    def _patch_send_message_to_compose(self, extractor, mock_page):
-        """Return a context manager that patches send_message up to the compose step."""
-        return (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
-                new_callable=AsyncMock,
-            ),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
-                new_callable=AsyncMock,
-            ),
-            patch.object(
-                extractor,
-                "_read_profile_display_name",
-                new_callable=AsyncMock,
-                return_value="Test User",
-            ),
-            patch.object(
-                extractor,
-                "_resolve_message_compose_href",
-                new_callable=AsyncMock,
-                return_value="https://www.linkedin.com/messaging/compose/?recipient=ACoAAB",
-            ),
-            patch.object(
-                extractor,
-                "_wait_for_message_surface",
-                new_callable=AsyncMock,
-                return_value="composer",
-            ),
-            patch.object(
-                extractor,
-                "_resolve_message_compose_box",
-                new_callable=AsyncMock,
-                return_value=MagicMock(),
-            ),
-            patch.object(
-                extractor,
-                "_compose_page_matches_recipient",
-                new_callable=AsyncMock,
-                return_value=True,
-            ),
-            patch.object(
-                extractor,
-                "_dismiss_message_ui",
-                new_callable=AsyncMock,
-            ),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
-                new_callable=AsyncMock,
-            ),
-        )
-
-    async def test_focus_and_type_via_evaluate_and_keyboard(self, mock_page):
-        """send_message uses page.evaluate to focus and page.keyboard.type to type."""
-        extractor = LinkedInExtractor(mock_page)
-        mock_keyboard = MagicMock()
-        mock_keyboard.type = AsyncMock()
-        mock_keyboard.press = AsyncMock()
-        mock_page.keyboard = mock_keyboard
-        # evaluate returns: True (focus), True (send button click)
-        mock_page.evaluate = AsyncMock(side_effect=[True, True])
-        patches = self._patch_send_message_to_compose(extractor, mock_page)
-
-        with (
-            patches[0],
             patches[1],
             patches[2],
             patches[3],
-            patches[4],
-            patches[5],
-            patches[6],
-            patches[7],
+            patches[4] as surface,
+            patches[5] as state,
+            patches[6] as focus,
+            patches[7] as submit,
             patches[8],
             patches[9],
-            patch.object(
-                extractor,
-                "_message_text_visible",
-                new_callable=AsyncMock,
-                return_value=True,
-            ),
+            patches[10],
         ):
             result = await extractor.send_message(
                 "testuser", "Hello!", confirm_send=True
             )
 
-        assert result["status"] == "sent"
-        assert result["sent"] is True
-        # Verify keyboard.type was used (not press_sequentially)
-        mock_keyboard.type.assert_awaited_once_with("Hello!", delay=15)
+        assert result["status"] == "recipient_resolution_failed"
+        surface.assert_not_awaited()
+        state.assert_not_awaited()
+        focus.assert_not_awaited()
+        submit.assert_not_awaited()
+        mock_page.keyboard.type.assert_not_awaited()
 
-    async def test_compose_interact_failed_when_focus_fails(self, mock_page):
-        """send_message returns compose_interact_failed when JS focus fails."""
+    async def test_rejects_contradictory_url_before_focus(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
-        mock_keyboard = MagicMock()
-        mock_keyboard.type = AsyncMock()
-        mock_page.keyboard = mock_keyboard
-        # evaluate returns False (focus failed)
-        mock_page.evaluate = AsyncMock(return_value=False)
-        patches = self._patch_send_message_to_compose(extractor, mock_page)
 
+        async def change_url_after_initial_state(_target):
+            mock_page.url = (
+                "https://www.linkedin.com/messaging/compose/"
+                "?recipient=ACoAAB&recipient=OTHER"
+            )
+            return {"status": "valid", "active": False}
+
+        patches = self._patch_to_composer(
+            extractor,
+            mock_page,
+            states=change_url_after_initial_state,
+        )
         with (
-            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5] as state,
+            patches[6] as focus,
+            patches[7] as submit,
+            patches[8],
+            patches[9],
+            patches[10],
+        ):
+            result = await extractor.send_message(
+                "testuser", "Hello!", confirm_send=True
+            )
+
+        assert result["status"] == "recipient_resolution_failed"
+        state.assert_awaited_once()
+        focus.assert_not_awaited()
+        submit.assert_not_awaited()
+        mock_page.keyboard.type.assert_not_awaited()
+
+    async def test_rejects_foreign_url_recipient_before_text_entry(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        state_calls = 0
+
+        async def change_url_during_prefocus_state(_target):
+            nonlocal state_calls
+            state_calls += 1
+            if state_calls == 2:
+                mock_page.url = (
+                    "https://www.linkedin.com/messaging/compose/?recipient=OTHER"
+                )
+            return {"status": "valid", "active": state_calls > 1}
+
+        patches = self._patch_to_composer(
+            extractor,
+            mock_page,
+            states=change_url_during_prefocus_state,
+        )
+        with (
             patches[1],
             patches[2],
             patches[3],
             patches[4],
             patches[5],
-            patches[6],
+            patches[6] as focus,
+            patches[7] as submit,
+            patches[8],
+            patches[9],
+            patches[10],
+        ):
+            result = await extractor.send_message(
+                "testuser", "Hello!", confirm_send=True
+            )
+
+        assert result["status"] == "recipient_resolution_failed"
+        focus.assert_not_awaited()
+        submit.assert_not_awaited()
+        mock_page.keyboard.type.assert_not_awaited()
+
+    async def test_queryless_route_switch_during_surface_wait_fails_closed(
+        self, mock_page
+    ):
+        extractor = LinkedInExtractor(mock_page)
+        patches = self._patch_to_composer(extractor, mock_page)
+        alice_route = "https://www.linkedin.com/messaging/thread/ALICE/"
+        bob_route = "https://www.linkedin.com/messaging/thread/BOB/"
+        mock_page.url = alice_route
+
+        async def switch_route(_target):
+            mock_page.url = bob_route
+            return "composer"
+
+        with (
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4] as surface,
+            patches[5] as state,
+            patches[6] as write,
+            patches[7] as submit,
+            patches[8],
+            patches[9],
+            patches[10],
+        ):
+            surface.side_effect = switch_route
+            result = await extractor.send_message(
+                "testuser", "Hello!", confirm_send=True
+            )
+
+        assert result["status"] == "recipient_resolution_failed"
+        assert result["retry_safe"] is True
+        assert result["url"] == bob_route
+        state.assert_not_awaited()
+        write.assert_not_awaited()
+        submit.assert_not_awaited()
+        mock_page.keyboard.type.assert_not_awaited()
+        mock_page.keyboard.press.assert_not_awaited()
+
+    async def test_queryless_route_is_captured_before_owner_resolution(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        patches = self._patch_to_composer(extractor, mock_page)
+        alice_route = "https://www.linkedin.com/messaging/thread/ALICE/"
+        bob_route = "https://www.linkedin.com/messaging/thread/BOB/"
+        mock_page.url = alice_route
+
+        async def switch_route(target, *, expected_route):
+            assert target == self._target()
+            assert expected_route == alice_route
+            mock_page.url = bob_route
+            return None
+
+        with (
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6] as write,
+            patches[7] as submit,
+            patches[8],
+            patches[9],
+            patches[10],
+            patch.object(
+                extractor,
+                "_resolve_message_owner",
+                new_callable=AsyncMock,
+                side_effect=switch_route,
+            ) as resolve_owner,
+        ):
+            result = await extractor.send_message(
+                "testuser", "Hello!", confirm_send=True
+            )
+
+        assert result["status"] == "recipient_resolution_failed"
+        assert result["retry_safe"] is True
+        resolve_owner.assert_awaited_once_with(
+            self._target(), expected_route=alice_route
+        )
+        write.assert_not_awaited()
+        submit.assert_not_awaited()
+        mock_page.keyboard.type.assert_not_awaited()
+        mock_page.keyboard.press.assert_not_awaited()
+
+    async def test_rejects_contradictory_url_before_submission(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        patches = self._patch_to_composer(extractor, mock_page)
+
+        async def change_url_during_write(message, *, target, owner):
+            assert message == "Hello!"
+            assert target == self._target()
+            assert owner is mock_page.evaluate_handle.return_value
+            mock_page.url = (
+                "https://www.linkedin.com/messaging/compose/"
+                "?recipient=ACoAAB&profileUrn=urn%3Ali%3Afsd_profile%3AOTHER"
+            )
+            return "invalid"
+
+        with (
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6] as write,
+            patches[7] as submit,
+            patches[8],
+            patches[9],
+            patches[10],
+        ):
+            write.side_effect = change_url_during_write
+            result = await extractor.send_message(
+                "testuser", "Hello!", confirm_send=True
+            )
+
+        assert result["status"] == "recipient_resolution_failed"
+        write.assert_awaited_once()
+        mock_page.keyboard.type.assert_not_awaited()
+        submit.assert_not_awaited()
+        mock_page.keyboard.press.assert_not_awaited()
+
+    async def test_refuses_a_composer_that_already_holds_a_draft(self, mock_page):
+        """A draft in the editor is not ours to send, and not ours to clear."""
+        extractor = LinkedInExtractor(mock_page)
+        patches = self._patch_to_composer(
+            extractor,
+            mock_page,
+            # The recipient check first, then the read taken immediately
+            # before focus: that one still finds the author's draft.
+            states=[
+                {"status": "valid", "active": False},
+                {"status": "valid", "active": False, "empty": False},
+            ],
+        )
+        with (
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6] as focus,
+            patches[7] as submit,
+            patches[8],
+            patches[9],
+            patches[10],
+        ):
+            result = await extractor.send_message(
+                "testuser", "Hello!", confirm_send=True
+            )
+
+        assert result["status"] == "composer_occupied"
+        assert result["sent"] is False
+        # Nothing is typed, nothing is submitted, and the draft is left where
+        # its author put it.
+        focus.assert_not_awaited()
+        submit.assert_not_awaited()
+        mock_page.keyboard.type.assert_not_awaited()
+        mock_page.keyboard.press.assert_not_awaited()
+
+    async def test_rejects_recipient_change_before_focus(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        patches = self._patch_to_composer(
+            extractor,
+            mock_page,
+            states=[
+                {"status": "valid", "active": False},
+                {"status": "recipient_mismatch", "active": False},
+            ],
+        )
+        with (
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6] as focus,
             patches[7],
             patches[8],
             patches[9],
+            patches[10],
         ):
             result = await extractor.send_message(
                 "testuser", "Hello!", confirm_send=True
             )
 
         assert result["status"] == "compose_interact_failed"
-        assert result["sent"] is False
+        focus.assert_not_awaited()
+        mock_page.keyboard.type.assert_not_awaited()
 
-    async def test_enter_fallback_when_send_button_not_found(self, mock_page):
-        """send_message falls back to Enter key when JS cannot find send button."""
+    async def test_rejects_editor_change_before_text_entry(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
-        mock_keyboard = MagicMock()
-        mock_keyboard.type = AsyncMock()
-        mock_keyboard.press = AsyncMock()
-        mock_page.keyboard = mock_keyboard
-        # evaluate returns: True (focus), False (no send button found)
-        mock_page.evaluate = AsyncMock(side_effect=[True, False])
-        patches = self._patch_send_message_to_compose(extractor, mock_page)
+        patches = self._patch_to_composer(
+            extractor,
+            mock_page,
+            states=[
+                {"status": "valid", "active": False},
+                {"status": "valid", "active": False},
+            ],
+            write_result="invalid",
+        )
+        with (
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patches[7],
+            patches[8],
+            patch.object(
+                extractor,
+                "_prepare_message_confirmation",
+                new_callable=AsyncMock,
+                return_value=0,
+            ),
+            patch.object(
+                extractor,
+                "_message_send_confirmed",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+        ):
+            result = await extractor.send_message(
+                "testuser", "Hello!", confirm_send=True
+            )
+
+        assert result["status"] == "compose_interact_failed"
+        mock_page.keyboard.type.assert_not_awaited()
+
+    async def test_missing_owner_is_retryable_before_dispatch(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        patches = self._patch_to_composer(extractor, mock_page)
+        owner = mock_page.evaluate_handle.return_value
+        owner.as_element.return_value = None
+        with ExitStack() as stack:
+            entered = [stack.enter_context(item) for item in patches[1:]]
+            result = await extractor.send_message(
+                "testuser", "Hello!", confirm_send=True
+            )
+
+        assert result["status"] == "recipient_resolution_failed"
+        assert result["sent"] is False
+        assert result["retry_safe"] is True
+        entered[6].assert_not_awaited()
+        owner.dispose.assert_awaited_once_with()
+
+    async def test_rejects_ambiguous_submit_after_text_entry(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        patches = self._patch_to_composer(extractor, mock_page, submission="invalid")
+        with (
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6] as write,
+            patches[7],
+            patches[8],
+            patches[9],
+            patches[10],
+        ):
+            result = await extractor.send_message(
+                "testuser", "Hello!", confirm_send=True
+            )
+
+        assert result["status"] == "send_unavailable"
+        assert result["retry_safe"] is True
+        write.assert_awaited_once()
+        mock_page.keyboard.type.assert_not_awaited()
+        mock_page.keyboard.press.assert_not_awaited()
+
+    async def test_disabled_pinned_submit_cleans_before_retryable_failure(
+        self, mock_page
+    ):
+        extractor = LinkedInExtractor(mock_page)
+        patches = self._patch_to_composer(extractor, mock_page)
+        owner = mock_page.evaluate_handle.return_value
+        with (
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6] as write,
+            patches[7] as submit,
+            patches[8],
+            patches[9] as prepare,
+            patches[10],
+            patch.object(
+                extractor,
+                "_wait_for_verified_submit",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch.object(
+                extractor, "_cleanup_owned_message", new_callable=AsyncMock
+            ) as cleanup,
+        ):
+            result = await extractor.send_message(
+                "testuser", "Hello!", confirm_send=True
+            )
+
+        assert result["status"] == "send_unavailable"
+        assert result["retry_safe"] is True
+        write.assert_awaited_once()
+        prepare.assert_not_awaited()
+        submit.assert_not_awaited()
+        cleanup.assert_awaited_once_with("Hello!", owner)
+
+    @pytest.mark.parametrize(
+        ("submit_count", "submit_usable"),
+        [(0, False), (2, False)],
+        ids=["missing", "ambiguous"],
+    )
+    async def test_only_one_active_submit_path_can_send(
+        self, mock_page, submit_count, submit_usable
+    ):
+        extractor = LinkedInExtractor(mock_page)
+        patches = self._patch_to_composer(
+            extractor,
+            mock_page,
+            states=[
+                {"status": "valid"},
+                {
+                    "status": "valid",
+                    "submitCount": submit_count,
+                    "submitUsable": submit_usable,
+                },
+            ],
+        )
+        with (
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6] as write,
+            patches[7] as submit,
+            patches[8],
+            patches[9],
+            patches[10],
+        ):
+            result = await extractor.send_message(
+                "testuser", "Hello!", confirm_send=True
+            )
+
+        assert result["status"] == "send_unavailable"
+        assert result["retry_safe"] is True
+        write.assert_not_awaited()
+        submit.assert_not_awaited()
+        mock_page.keyboard.press.assert_not_awaited()
+
+    async def test_observer_is_prepared_after_typing_and_before_submission(
+        self, mock_page
+    ):
+        """The mutation observer starts immediately before the only submit."""
+        extractor = LinkedInExtractor(mock_page)
+        steps: list[str] = []
+        patches = self._patch_to_composer(extractor, mock_page)
+
+        async def write(message, *, target, owner):
+            assert message == "Hello!"
+            assert target == self._target()
+            assert owner is mock_page.evaluate_handle.return_value
+            steps.append("write")
+            return "written"
+
+        async def prepare(message, *, target, owner):
+            assert message == "Hello!"
+            assert target == self._target()
+            assert owner is mock_page.evaluate_handle.return_value
+            steps.append("prepare")
+            return "confirmation-token"
+
+        async def submit(message, *, target, owner):
+            assert message == "Hello!"
+            assert target == self._target()
+            assert owner is mock_page.evaluate_handle.return_value
+            steps.append("submit")
+            return "clicked"
+
+        async def confirmed(message, *, target, owner, confirmation):
+            assert message == "Hello!"
+            assert target == self._target()
+            assert owner is mock_page.evaluate_handle.return_value
+            steps.append(f"confirm:{confirmation}")
+            return True
 
         with (
-            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patch.object(
+                extractor,
+                "_write_verified_message",
+                new_callable=AsyncMock,
+                side_effect=write,
+            ),
+            patch.object(
+                extractor,
+                "_submit_verified_message",
+                new_callable=AsyncMock,
+                side_effect=submit,
+            ),
+            patches[8],
+            patch.object(
+                extractor,
+                "_prepare_message_confirmation",
+                new_callable=AsyncMock,
+                side_effect=prepare,
+            ),
+            patch.object(
+                extractor,
+                "_message_send_confirmed",
+                new_callable=AsyncMock,
+                side_effect=confirmed,
+            ),
+        ):
+            result = await extractor.send_message(
+                "testuser", "Hello!", confirm_send=True
+            )
+
+        assert result["status"] == "sent"
+        assert steps == [
+            "write",
+            "prepare",
+            "submit",
+            "confirm:confirmation-token",
+        ]
+
+    async def test_interrupted_submission_is_not_a_failure(self, mock_page):
+        """A click round trip can fail after dispatching the local event."""
+        extractor = LinkedInExtractor(mock_page)
+        patches = self._patch_to_composer(extractor, mock_page)
+        visible = AsyncMock()
+
+        with (
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patches[7] as submit,
+            patches[8],
+            patches[9],
+            patch.object(extractor, "_message_send_confirmed", visible),
+        ):
+            submit.side_effect = PatchrightError("execution context was destroyed")
+            result = await extractor.send_message(
+                "testuser", "Hello!", confirm_send=True
+            )
+
+        assert result["status"] == "send_unconfirmed"
+        assert result["sent"] is False
+        assert result["retry_safe"] is False
+        visible.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "stage",
+        ["dispatch", "confirmation", "owner-cleanup"],
+    )
+    async def test_cancellation_after_dispatch_is_logged(
+        self, mock_page, caplog, stage
+    ):
+        """Cancellation in the destructive window leaves a warning behind."""
+        extractor = LinkedInExtractor(mock_page)
+        patches = self._patch_to_composer(extractor, mock_page)
+        if stage == "owner-cleanup":
+            mock_page.evaluate_handle.return_value.dispose = AsyncMock(
+                side_effect=asyncio.CancelledError()
+            )
+
+        with (
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patches[7] as submit,
+            patches[8],
+            patches[9],
+            patches[10] as confirmed,
+            caplog.at_level(
+                logging.WARNING, logger="linkedin_mcp_server.scraping.extractor"
+            ),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            if stage == "dispatch":
+                submit.side_effect = asyncio.CancelledError()
+            elif stage == "confirmation":
+                confirmed.side_effect = asyncio.CancelledError()
+            await extractor.send_message("testuser", "Hello!", confirm_send=True)
+
+        # Cancellation has to keep propagating, or the surrounding scope
+        # never unwinds. The warning names the duplicate-delivery risk that
+        # the discarded result can no longer report.
+        warnings = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("retry may deliver the message twice" in w for w in warnings), (
+            warnings
+        )
+
+    async def test_cancellation_while_writing_does_not_warn(self, mock_page, caplog):
+        """Validated text cannot submit before the explicit submit path."""
+        extractor = LinkedInExtractor(mock_page)
+        patches = self._patch_to_composer(extractor, mock_page)
+
+        with (
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6] as write,
+            patches[7],
+            patches[8],
+            patches[9],
+            patches[10],
+            caplog.at_level(
+                logging.WARNING, logger="linkedin_mcp_server.scraping.extractor"
+            ),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            write.side_effect = asyncio.CancelledError()
+            await extractor.send_message("testuser", "Hello there!", confirm_send=True)
+
+        warnings = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+        assert not any("retry may deliver the message twice" in w for w in warnings)
+
+    async def test_ordinary_error_after_dispatch_still_answers(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        patches = self._patch_to_composer(extractor, mock_page)
+
+        with (
             patches[1],
             patches[2],
             patches[3],
@@ -8852,20 +9553,287 @@ class TestSendMessageComposerInteraction:
             patches[7],
             patches[8],
             patches[9],
+            patches[10] as confirmed,
+        ):
+            confirmed.side_effect = RuntimeError("context destroyed")
+            result = await extractor.send_message(
+                "testuser", "Hello!", confirm_send=True
+            )
+
+        assert result["status"] == "send_unconfirmed"
+        assert result["sent"] is False
+        assert result["retry_safe"] is False
+
+    async def test_owner_cleanup_runs_when_confirmation_cleanup_fails(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        patches = self._patch_to_composer(extractor, mock_page)
+        owner = mock_page.evaluate_handle.return_value
+
+        with (
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patches[7],
+            patches[8],
+            patches[9],
+            patches[10],
             patch.object(
                 extractor,
-                "_message_text_visible",
+                "_dispose_message_confirmation",
                 new_callable=AsyncMock,
-                return_value=True,
+                side_effect=RuntimeError("cleanup failed"),
             ),
+            patch.object(
+                extractor, "_dispose_message_owner", new_callable=AsyncMock
+            ) as dispose_owner,
         ):
             result = await extractor.send_message(
                 "testuser", "Hello!", confirm_send=True
             )
 
-        assert result["status"] == "sent"
-        # Enter was pressed as fallback
-        mock_keyboard.press.assert_awaited_once_with("Enter")
+        assert result["status"] == "send_unconfirmed"
+        assert result["retry_safe"] is False
+        dispose_owner.assert_awaited_once_with(owner)
+
+    async def test_an_error_before_anything_can_submit_is_raised(self, mock_page):
+        """Without a newline nothing has submitted yet, so the error is the answer.
+
+        The pair to the case above. Reporting `send_unconfirmed` here would
+        claim a duplicate-delivery risk that cannot exist and take the real
+        error away from a caller who can simply retry.
+        """
+        extractor = LinkedInExtractor(mock_page)
+        patches = self._patch_to_composer(extractor, mock_page)
+
+        with (
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6] as write,
+            patches[7],
+            patches[8],
+            patches[9],
+            patches[10],
+            pytest.raises(RuntimeError, match="page closed"),
+        ):
+            write.side_effect = RuntimeError("page closed")
+            await extractor.send_message("testuser", "Single line", confirm_send=True)
+
+    async def test_send_unconfirmed_when_click_adds_nothing(self, mock_page):
+        """A clicked Send button that changes nothing is not a sent message."""
+        extractor = LinkedInExtractor(mock_page)
+        patches = self._patch_to_composer(extractor, mock_page)
+        with (
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patches[7],
+            patches[8],
+            patch.object(
+                extractor,
+                "_prepare_message_confirmation",
+                new_callable=AsyncMock,
+                return_value=1,
+            ),
+            patch.object(
+                extractor,
+                "_message_send_confirmed",
+                new_callable=AsyncMock,
+                return_value=False,
+            ) as visible,
+        ):
+            result = await extractor.send_message(
+                "testuser", "Hello!", confirm_send=True
+            )
+
+        # The click happened, so nothing here proves the message did not go
+        # out. Answering "not sent" would invite a retry that delivers twice,
+        # which is what `retry_safe` says and `sent` cannot.
+        assert result["status"] == "send_unconfirmed"
+        assert result["sent"] is False
+        assert result["retry_safe"] is False
+        visible.assert_awaited_once_with(
+            "Hello!",
+            target=self._target(),
+            owner=mock_page.evaluate_handle.return_value,
+            confirmation=1,
+        )
+
+
+class TestResolveMessageComposeBox:
+    async def test_requires_exactly_one_visible_editor(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        locator = MagicMock(count=AsyncMock(return_value=2))
+        locator.first = MagicMock()
+        mock_page.locator.return_value = locator
+
+        assert await extractor._resolve_message_compose_box() is None
+
+        mock_page.locator.assert_called_once_with(
+            f"{extractor_module._MESSAGING_COMPOSE_SELECTOR}:visible"
+        )
+
+
+class TestMessageConfirmation:
+    """Tests for the owner-pinned message-list mutation contract."""
+
+    @staticmethod
+    def _arguments():
+        target = TestSendMessage._target()
+        owner = MagicMock()
+        return target, owner
+
+    async def test_owner_handle_uses_the_shared_recipient_inspection(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        target, owner = self._arguments()
+        owner.as_element.return_value = owner
+        mock_page.evaluate_handle = AsyncMock(return_value=owner)
+
+        expected_route = "https://www.linkedin.com/messaging/thread/ALICE/"
+
+        assert (
+            await extractor._resolve_message_owner(
+                target, expected_route=expected_route
+            )
+            is owner
+        )
+
+        mock_page.evaluate_handle.assert_awaited_once_with(
+            _MESSAGE_COMPOSER_OWNER_JS,
+            arg={
+                "target": {
+                    "profilePath": target.profile_path,
+                    "profileUrn": target.profile_urn,
+                },
+                "expectedRoute": expected_route,
+            },
+        )
+
+    async def test_invalid_owner_handle_is_released(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        target, owner = self._arguments()
+        owner.as_element.return_value = None
+        owner.dispose = AsyncMock()
+        mock_page.evaluate_handle = AsyncMock(return_value=owner)
+
+        assert (
+            await extractor._resolve_message_owner(
+                target,
+                expected_route="https://www.linkedin.com/messaging/thread/ALICE/",
+            )
+            is None
+        )
+        owner.dispose.assert_awaited_once_with()
+
+    async def test_owner_disposal_error_is_suppressed(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        owner = MagicMock(dispose=AsyncMock(side_effect=RuntimeError("closed")))
+
+        await extractor._dispose_message_owner(owner)
+
+        owner.dispose.assert_awaited_once_with()
+
+    async def test_prepare_installs_observer_in_the_target_owner(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        target, owner = self._arguments()
+        mock_page.evaluate = AsyncMock(return_value="confirmation-token")
+
+        assert (
+            await extractor._prepare_message_confirmation(
+                "Hello!", target=target, owner=owner
+            )
+            == "confirmation-token"
+        )
+        mock_page.evaluate.assert_awaited_once_with(
+            _MESSAGE_CONFIRMATION_PREPARE_JS,
+            {
+                "profilePath": target.profile_path,
+                "profileUrn": target.profile_urn,
+                "expected": "Hello!",
+                "owner": owner,
+            },
+        )
+
+    @pytest.mark.parametrize("result", [None, "", 0, {"token": "wrong"}])
+    async def test_invalid_prepare_result_fails_closed(self, mock_page, result):
+        extractor = LinkedInExtractor(mock_page)
+        target, owner = self._arguments()
+        mock_page.evaluate = AsyncMock(return_value=result)
+
+        assert (
+            await extractor._prepare_message_confirmation(
+                "Hello!", target=target, owner=owner
+            )
+            is None
+        )
+
+    async def test_confirmation_waits_for_the_exact_token(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        target, owner = self._arguments()
+        mock_page.wait_for_function = AsyncMock(return_value=None)
+
+        assert (
+            await extractor._message_send_confirmed(
+                "Hello!",
+                target=target,
+                owner=owner,
+                confirmation="confirmation-token",
+            )
+            is True
+        )
+        mock_page.wait_for_function.assert_awaited_once_with(
+            _MESSAGE_CONFIRMATION_READY_JS,
+            arg={
+                "profilePath": target.profile_path,
+                "profileUrn": target.profile_urn,
+                "expected": "Hello!",
+                "owner": owner,
+                "token": "confirmation-token",
+            },
+        )
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            PlaywrightTimeoutError("timeout"),
+            PatchrightError("execution context destroyed"),
+        ],
+        ids=["timeout", "context-destroyed"],
+    )
+    async def test_confirmation_errors_do_not_confirm(self, mock_page, error):
+        extractor = LinkedInExtractor(mock_page)
+        target, owner = self._arguments()
+        mock_page.wait_for_function = AsyncMock(side_effect=error)
+
+        assert (
+            await extractor._message_send_confirmed(
+                "Hello!",
+                target=target,
+                owner=owner,
+                confirmation="confirmation-token",
+            )
+            is False
+        )
+
+    async def test_dispose_disconnects_the_owner_token(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        _target, owner = self._arguments()
+        mock_page.evaluate = AsyncMock()
+
+        await extractor._dispose_message_confirmation(owner, "confirmation-token")
+
+        mock_page.evaluate.assert_awaited_once_with(
+            _MESSAGE_CONFIRMATION_DISPOSE_JS,
+            {"owner": owner, "token": "confirmation-token"},
+        )
 
 
 class TestBuildFeedReferences:
