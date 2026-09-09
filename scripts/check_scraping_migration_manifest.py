@@ -545,6 +545,47 @@ def _pattern_names(pattern: ast.pattern) -> set[str]:
     }
 
 
+def _raised_exception_name(statement: ast.stmt) -> str | None:
+    if not isinstance(statement, ast.Raise) or statement.exc is None:
+        return None
+    if isinstance(statement.exc, ast.Name):
+        return statement.exc.id
+    if isinstance(statement.exc, ast.Call) and isinstance(statement.exc.func, ast.Name):
+        return statement.exc.func.id
+    return None
+
+
+def _matching_handler_index(
+    handlers: list[ast.ExceptHandler], exception_name: str
+) -> int | None:
+    for index, handler in enumerate(handlers):
+        if handler.type is None:
+            return index
+        candidates = (
+            handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
+        )
+        if any(
+            isinstance(candidate, ast.Name) and candidate.id == exception_name
+            for candidate in candidates
+        ):
+            return index
+    return None
+
+
+def _static_try_outcome(
+    node: ast.Try | ast.TryStar,
+) -> tuple[str, int | None]:
+    if all(isinstance(statement, ast.Pass) for statement in node.body):
+        return ("normal", None)
+    if len(node.body) == 1:
+        exception_name = _raised_exception_name(node.body[0])
+        if exception_name is not None:
+            handler = _matching_handler_index(node.handlers, exception_name)
+            if handler is not None:
+                return ("handler", handler)
+    return ("unknown", None)
+
+
 def _extractor_assignment_names(statement: ast.stmt, class_names: set[str]) -> set[str]:
     if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
         return set()
@@ -735,6 +776,25 @@ class _CalledMethodCollector(ast.NodeVisitor):
             self.visit(statement)
             self._apply_class_binding(statement)
 
+    def _called_state(self) -> tuple[set[str], set[str]]:
+        return (set(self.bindings[-1]), set(self.ambiguous_names[-1]))
+
+    def _restore_called_state(self, state: tuple[set[str], set[str]]) -> None:
+        self.bindings[-1] = set(state[0])
+        self.ambiguous_names[-1] = set(state[1])
+
+    def _merge_called_states(self, states: list[tuple[set[str], set[str]]]) -> None:
+        bindings = set.intersection(*(state[0] for state in states))
+        ambiguous = set().union(*(state[1] for state in states))
+        candidates = set().union(*(state[0] for state in states))
+        ambiguous.update(
+            name
+            for name in candidates
+            if len({name in state[0] for state in states}) > 1
+        )
+        self.bindings[-1] = bindings
+        self.ambiguous_names[-1] = ambiguous
+
     def visit_If(self, node: ast.If) -> Any:
         if len(self.bindings) not in self.class_scope_depths:
             self.generic_visit(node)
@@ -743,17 +803,44 @@ class _CalledMethodCollector(ast.NodeVisitor):
         if isinstance(node.test, ast.Constant) and isinstance(node.test.value, bool):
             self._visit_class_suite(node.body if node.test.value else node.orelse)
             return
-        before = set(self.bindings[-1])
-        before_ambiguous = set(self.ambiguous_names[-1])
+        before = self._called_state()
         states: list[tuple[set[str], set[str]]] = []
         for statements in (node.body, node.orelse):
-            self.bindings[-1] = set(before)
-            self.ambiguous_names[-1] = set(before_ambiguous)
+            self._restore_called_state(before)
             self._visit_class_suite(statements)
-            states.append((self.bindings[-1], self.ambiguous_names[-1]))
-        self.bindings[-1] = states[0][0] & states[1][0]
-        self.ambiguous_names[-1] = states[0][1] | states[1][1]
-        self.ambiguous_names[-1].update(states[0][0] ^ states[1][0])
+            states.append(self._called_state())
+        self._merge_called_states(states)
+
+    def _visit_try(self, node: ast.Try | ast.TryStar) -> None:
+        if len(self.bindings) not in self.class_scope_depths:
+            self.generic_visit(node)
+            return
+        outcome, handler_index = _static_try_outcome(node)
+        before = self._called_state()
+        if outcome == "normal":
+            self._visit_class_suite(node.body)
+            self._visit_class_suite(node.orelse)
+        elif outcome == "handler" and handler_index is not None:
+            self._visit_class_suite(node.body)
+            self.visit(node.handlers[handler_index])
+        else:
+            states: list[tuple[set[str], set[str]]] = []
+            self._restore_called_state(before)
+            self._visit_class_suite(node.body)
+            self._visit_class_suite(node.orelse)
+            states.append(self._called_state())
+            for handler in node.handlers:
+                self._restore_called_state(before)
+                self.visit(handler)
+                states.append(self._called_state())
+            self._merge_called_states(states)
+        self._visit_class_suite(node.finalbody)
+
+    def visit_Try(self, node: ast.Try) -> Any:
+        self._visit_try(node)
+
+    def visit_TryStar(self, node: ast.TryStar) -> Any:
+        self._visit_try(node)
 
     def visit_ExceptHandler(self, node: ast.ExceptHandler) -> Any:
         if len(self.bindings) not in self.class_scope_depths or not node.name:
@@ -1235,6 +1322,41 @@ class Scanner(ast.NodeVisitor):
             self.visit(statement)
             self._apply_class_bindings(statement, frame)
 
+    def _merge_class_states(
+        self, current: _ScopeFrame, states: list[_ScopeFrame]
+    ) -> None:
+        candidates = set().union(
+            *(
+                state.module_names | state.class_names | state.instance_names
+                for state in states
+            )
+        )
+        current.ambiguous_names = set().union(
+            *(state.ambiguous_names for state in states)
+        )
+        current.ambiguous_names.update(
+            name
+            for name in candidates
+            if len(
+                {
+                    (
+                        name in state.module_names,
+                        name in state.class_names,
+                        name in state.instance_names,
+                    )
+                    for state in states
+                }
+            )
+            > 1
+        )
+        current.module_names = set.intersection(
+            *(state.module_names for state in states)
+        )
+        current.class_names = set.intersection(*(state.class_names for state in states))
+        current.instance_names = set.intersection(
+            *(state.instance_names for state in states)
+        )
+
     def visit_If(self, node: ast.If) -> Any:
         if self.frames[-1].kind != "class":
             self.generic_visit(node)
@@ -1252,37 +1374,41 @@ class Scanner(ast.NodeVisitor):
             self._visit_class_suite(statements)
             states.append(branch)
         self.frames[-1] = current
-        candidates = set().union(
-            *(
-                state.module_names | state.class_names | state.instance_names
-                for state in states
-            )
-        )
-        candidates.update(
-            current.module_names | current.class_names | current.instance_names
-        )
-        current.ambiguous_names = states[0].ambiguous_names | states[1].ambiguous_names
-        current.ambiguous_names.update(
-            name
-            for name in candidates
-            if len(
-                {
-                    (
-                        name in state.module_names,
-                        name in state.class_names,
-                        name in state.instance_names,
-                    )
-                    for state in states
-                }
-            )
-            > 1
-        )
-        current.module_names.intersection_update(states[0].module_names)
-        current.module_names.intersection_update(states[1].module_names)
-        current.class_names.intersection_update(states[0].class_names)
-        current.class_names.intersection_update(states[1].class_names)
-        current.instance_names.intersection_update(states[0].instance_names)
-        current.instance_names.intersection_update(states[1].instance_names)
+        self._merge_class_states(current, states)
+
+    def _visit_try(self, node: ast.Try | ast.TryStar) -> None:
+        if self.frames[-1].kind != "class":
+            self.generic_visit(node)
+            return
+        outcome, handler_index = _static_try_outcome(node)
+        current = self.frames[-1]
+        if outcome == "normal":
+            self._visit_class_suite(node.body)
+            self._visit_class_suite(node.orelse)
+        elif outcome == "handler" and handler_index is not None:
+            self._visit_class_suite(node.body)
+            self.visit(node.handlers[handler_index])
+        else:
+            states: list[_ScopeFrame] = []
+            normal = self._copy_frame(current)
+            self.frames[-1] = normal
+            self._visit_class_suite(node.body)
+            self._visit_class_suite(node.orelse)
+            states.append(normal)
+            for handler in node.handlers:
+                branch = self._copy_frame(current)
+                self.frames[-1] = branch
+                self.visit(handler)
+                states.append(branch)
+            self.frames[-1] = current
+            self._merge_class_states(current, states)
+        self._visit_class_suite(node.finalbody)
+
+    def visit_Try(self, node: ast.Try) -> Any:
+        self._visit_try(node)
+
+    def visit_TryStar(self, node: ast.TryStar) -> Any:
+        self._visit_try(node)
 
     def visit_ClassDef(self, node: ast.ClassDef) -> Any:
         for decorator in node.decorator_list:
