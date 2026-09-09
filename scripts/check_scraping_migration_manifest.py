@@ -37,9 +37,14 @@ _PRIVATE_OWNERS: dict[str, tuple[str, int]] = {
     "_message_action_result": ("contracts.message_action_result", 1),
     "_build_job_search_url": ("search_urls.build_job_search_url", 2),
     "_build_content_search_url": ("search_urls.build_content_search_url", 2),
-    "_navigate_to_page": ("navigation.PageNavigator", 3),
-    "_raise_if_auth_barrier": ("navigation.PageNavigator", 3),
+    "_normalize_body_marker": ("navigation.PageNavigator", 3),
     "_log_navigation_failure": ("navigation.PageNavigator", 3),
+    "_raise_if_auth_barrier": ("navigation.PageNavigator", 3),
+    "_goto_with_auth_checks": ("navigation.PageNavigator", 3),
+    "_navigate_to_page": ("navigation.PageNavigator", 3),
+    "_watching_navigations": ("navigation.PageNavigator", 3),
+    "_document_origin": ("navigation.PageNavigator", 3),
+    "_settle_navigation": ("navigation.PageNavigator", 3),
     "_extract_loaded_section": ("capture.SectionCapture", 4),
     "_extract_overlay": ("capture.SectionCapture", 4),
     "_extract_overlay_once": ("capture.SectionCapture", 4),
@@ -146,7 +151,9 @@ _IMPORT_OWNERS = {
 
 _INSTANCE_ATTRIBUTE_OWNERS = {
     "_page": ("facade.LinkedInExtractor._page", 14),
-    "_scroll_seconds": ("session.ScrapingSession._scroll_seconds", 3),
+    "_session": ("session.ScrapingSession", 3),
+    "_navigator": ("navigation.PageNavigator", 3),
+    "_scroll_seconds": ("facade.LinkedInExtractor._scroll_seconds", 14),
 }
 
 _MODULE_ATTRIBUTE_OWNERS = {
@@ -191,9 +198,9 @@ _WORKFLOW_OWNERS: dict[str, tuple[str, int]] = {
     "_goto_with_auth_checks": ("navigation.PageNavigator", 3),
     "_extract_page_once": ("capture.SectionCapture", 4),
     "_extract_feed_once": ("feed.FeedScraper", 5),
-    "_watching_navigations": ("job_pages.JobPageReader", 9),
-    "_document_origin": ("job_pages.JobPageReader", 9),
-    "_settle_navigation": ("job_pages.JobPageReader", 9),
+    "_watching_navigations": ("navigation.PageNavigator", 3),
+    "_document_origin": ("navigation.PageNavigator", 3),
+    "_settle_navigation": ("navigation.PageNavigator", 3),
     "_extract_search_page": ("job_pages.JobPageReader", 9),
     "_extract_saved_jobs_page": ("job_pages.JobPageReader", 9),
     "_open_conversation_by_username": ("conversations.ConversationReader", 11),

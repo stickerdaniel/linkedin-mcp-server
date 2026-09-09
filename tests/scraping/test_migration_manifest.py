@@ -329,7 +329,7 @@ def test_checker_rejects_obsolete_seams_at_their_migration_stage():
     # completed stage are closed by definition, so an override there proves
     # nothing; raise this number as each stage lands.
     result = subprocess.run(
-        [sys.executable, str(CHECKER), "--check", "--stage", "3"],
+        [sys.executable, str(CHECKER), "--check", "--stage", "4"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -337,7 +337,7 @@ def test_checker_rejects_obsolete_seams_at_their_migration_stage():
     )
 
     assert result.returncode == 1
-    assert "obsolete at stage 3:" in result.stderr
+    assert "obsolete at stage 4:" in result.stderr
     assert "string_patch" in result.stderr
 
 
@@ -448,7 +448,7 @@ async def outer(page):
     accesses = [seam for seam in seams if seam.kind == "private_facade_access"]
     assert [
         (seam.target, seam.canonical_owner, seam.migration_stage) for seam in accesses
-    ] == [("_scroll_seconds", "session.ScrapingSession._scroll_seconds", 3)]
+    ] == [("_scroll_seconds", "facade.LinkedInExtractor._scroll_seconds", 14)]
 
 
 def test_unknown_private_closure_access_fails_closed():
@@ -963,8 +963,8 @@ def test_manifest_includes_extractor_access_from_nested_closure():
         (seam["line"], seam["canonical_owner"], seam["migration_stage"])
         for seam in accesses
     } == {
-        (917, "session.ScrapingSession._scroll_seconds", 3),
-        (4215, "session.ScrapingSession._scroll_seconds", 3),
+        (820, "facade.LinkedInExtractor._scroll_seconds", 14),
+        (3930, "facade.LinkedInExtractor._scroll_seconds", 14),
     }
 
 
