@@ -149,10 +149,17 @@ _IMPORT_OWNERS = {
     ),
 }
 
+# `_content` and `_capture` are the facade's own wiring rather than a
+# collaborator a test could build for itself: reaching them is how a workflow
+# still living on the facade gets its capture stubbed, so the seam closes with
+# the facade and not with the module that owns the class. `_session` and
+# `_navigator` carry no such consumer and stay pinned to their own stage.
 _INSTANCE_ATTRIBUTE_OWNERS = {
     "_page": ("facade.LinkedInExtractor._page", 14),
     "_session": ("session.ScrapingSession", 3),
     "_navigator": ("navigation.PageNavigator", 3),
+    "_content": ("facade.LinkedInExtractor._content", 14),
+    "_capture": ("facade.LinkedInExtractor._capture", 14),
     "_scroll_seconds": ("facade.LinkedInExtractor._scroll_seconds", 14),
 }
 
@@ -260,8 +267,6 @@ _EXPLICIT_CALLER_CONTEXTS: dict[tuple[str, str, str], tuple[str, ...]] = {
         "boundaries",
         "detect_rate_limit",
     ): (
-        "_extract_loaded_section",
-        "_extract_overlay_once",
         "_extract_feed_body",
         "get_sidebar_profiles",
         "_extract_search_page_once",
@@ -278,7 +283,6 @@ _EXPLICIT_CALLER_CONTEXTS: dict[tuple[str, str, str], tuple[str, ...]] = {
         "boundaries",
         "handle_modal_close",
     ): (
-        "_extract_loaded_section",
         "_extract_feed_body",
         "get_sidebar_profiles",
         "_extract_search_page_once",
@@ -294,7 +298,7 @@ _EXPLICIT_CALLER_CONTEXTS: dict[tuple[str, str, str], tuple[str, ...]] = {
         "tests/scraping/policy_scenarios.py",
         "boundaries",
         "scroll_to_bottom",
-    ): ("_extract_loaded_section", "_extract_saved_jobs_page_once"),
+    ): ("_extract_saved_jobs_page_once",),
     (
         "tests/scraping/policy_scenarios.py",
         "boundaries",
@@ -306,8 +310,6 @@ _EXPLICIT_CALLER_CONTEXTS: dict[tuple[str, str, str], tuple[str, ...]] = {
         "build_issue_diagnostics",
     ): (
         "extract_feed",
-        "extract_page",
-        "_extract_overlay",
         "scrape_person",
         "scrape_company",
         "_extract_search_page",
