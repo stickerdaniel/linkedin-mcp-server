@@ -817,20 +817,29 @@ uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --por
 
 <a id="using-a-proxy"></a>
 
-## 🌐 Using a proxy
+## 🛡️ Using a proxy
 
-LinkedIn scores the address a session signs in from, and the safest one is the address the account already uses. A proxy is the right tool when the server cannot sit on that address: it runs on a cloud host or in a different country from the account's history, or it serves a second LinkedIn account that should not share the first one's address. In that case take a dedicated static ISP address and keep it. If your provider only sells a residential pool, use a sticky session that holds one address, never per-request rotation. A WireGuard or Tailscale exit node on your own home network does the same job when you have one.
+LinkedIn scores the address a session signs in from. The account's usual address is the safe one, and you need a proxy only when the server cannot use it: a cloud host, another country, or a second account that must not share the first one's address. A container on your own machine leaves through your address and needs none.
 
-The same flags and variables work for every install method: `--proxy-server`, `PROXY_SERVER`, `PROXY_USERNAME`, `PROXY_PASSWORD` and `PROXY_BYPASS`. The MCP Bundle exposes them in its Claude Desktop settings.
+Take a dedicated static ISP address and keep it. From a residential pool, use a sticky session that holds one address, never per-request rotation. A WireGuard or Tailscale exit node on your home network works too.
 
-- Route the browser through a proxy with `--proxy-server http://host:port` (`http`, `https`, `socks4` and `socks5` are accepted). Only browser traffic is routed, not the MCP transport.
-- Credentials go in `PROXY_USERNAME` and `PROXY_PASSWORD`. There is no `--proxy-password` flag on purpose: command-line arguments are readable by every other user on the machine. `PROXY_SERVER` also accepts the combined `http://user:pass@host:port` form most providers hand out.
+**Setup:**
+
+- Set the proxy up **before** `--login`. Moving an existing session to a new address triggers a LinkedIn checkpoint. That includes a session from `--import-from-browser`, which was created on your real address.
+- `--proxy-server scheme://host:port` or `PROXY_SERVER`, with `http`, `https`, `socks4` or `socks5`. Only browser traffic is routed, not the MCP transport.
+- Credentials go in `PROXY_USERNAME` and `PROXY_PASSWORD`, or in the combined `http://user:pass@host:port` form. There is no `--proxy-password` flag: command-line arguments are readable by every other user on the machine.
+- `PROXY_BYPASS=localhost,127.0.0.1,::1` reaches local targets directly. With a proxy set, Chromium routes `localhost` through it too.
+- These flags and variables work with every install method. The MCP Bundle exposes the same four settings in Claude Desktop.
+
+<details>
+<summary>Pitfalls</summary>
+
 - Chromium cannot authenticate to a SOCKS proxy, so credentials require an `http(s)` endpoint. If your provider only offers authenticated SOCKS5, run a local relay that holds the credentials and point the server at that.
-- Local addresses go through the proxy too. Chromium's usual direct route for `localhost` is removed when a proxy is set, so add `PROXY_BYPASS=localhost,127.0.0.1,::1` if you need local targets reached directly.
-- A container on your own machine leaves through your address and needs no proxy. Inside a container `127.0.0.1` is the container itself, so a relay on the host is `host.docker.internal` (native Linux Docker also needs `--add-host=host.docker.internal:host-gateway`).
-- Auto-import is skipped while a proxy is configured: a session taken from a local browser was created on your real address, and moving it to the proxy is the very change that triggers a checkpoint. Use `--login`.
-- A wrong proxy password does not report itself: Chromium retries the authentication challenge until the page times out, so it surfaces as a timeout or a failed sign-in. If sessions stop working right after you add a proxy, check the credentials before assuming the session expired.
-- **Set the proxy up before creating the session.** Run `--login` with the proxy already configured. Turning a proxy on for an existing profile moves a logged-in session to a new IP, which is what triggers a LinkedIn checkpoint. The same applies to `--import-from-browser`, which imports a session created on your real IP.
+- A wrong proxy password shows up as a timeout or a failed sign-in, because Chromium retries the authentication challenge until the page times out. If sessions stop working right after you add a proxy, check the credentials first.
+- Auto-import is skipped while a proxy is configured: the imported session would move from your real address to the proxy. Use `--login`.
+- Inside a container `127.0.0.1` is the container itself, so a relay on the host is `host.docker.internal`; native Linux Docker also needs `--add-host=host.docker.internal:host-gateway`.
+
+</details>
 
 <br/>
 <br/>
