@@ -1471,6 +1471,76 @@ async def test_unknown(page):
         _scan_synthetic(source)
 
 
+def test_collaborator_patches_resolve_through_the_facade_attribute():
+    seams = _scan_synthetic(
+        """
+from unittest.mock import patch
+from linkedin_mcp_server.scraping.extractor import LinkedInExtractor
+
+async def test_reach_through(page, replacement):
+    extractor = LinkedInExtractor(page)
+    with (
+        patch.object(extractor._capture, "_extract_overlay", replacement),
+        patch.object(extractor._capture, "extract_page", replacement),
+        patch.object(extractor._content, "_extract_root_content", replacement),
+    ):
+        await extractor.scrape_person("ada")
+"""
+    )
+
+    assert [
+        (seam.kind, seam.target, seam.canonical_owner, seam.migration_stage)
+        for seam in seams
+        if seam.kind.endswith("_patch_object")
+    ] == [
+        ("private_patch_object", "_extract_overlay", "capture.SectionCapture", 6),
+        ("public_patch_object", "extract_page", "capture.SectionCapture dependency", 6),
+        (
+            "private_patch_object",
+            "_extract_root_content",
+            "content.PageContentReader",
+            11,
+        ),
+    ]
+    # The reach-through itself stays on the record next to the patch it
+    # carries, and both expire with the last workflow that still asks the
+    # facade for the collaborator.
+    assert {
+        (seam.target, seam.migration_stage)
+        for seam in seams
+        if seam.kind == "private_facade_access"
+    } == {("_capture", 6), ("_content", 11)}
+
+
+@pytest.mark.parametrize(
+    ("target", "message"),
+    [
+        ("extractor._capture, '_extract_overlayy'", "unknown capture.SectionCapture"),
+        ("extractor._content, '_extract_root'", "unknown content.PageContentReader"),
+        ("extractor._session, 'check_rate_limit'", "unknown facade collaborator"),
+    ],
+)
+def test_unknown_collaborator_patches_fail_closed(target, message):
+    # A misspelled member, or an attribute carrying no collaborator at all,
+    # intercepts nothing and reads as a passing test. Falling through without a
+    # seam is what let the whole shape go unrecorded, so it has to name its
+    # call site instead.
+    source = f"""
+from unittest.mock import patch
+from linkedin_mcp_server.scraping.extractor import LinkedInExtractor
+
+async def test_typo(page):
+    extractor = LinkedInExtractor(page)
+    with patch.object({target}):
+        pass
+"""
+
+    with pytest.raises(
+        migration.UnresolvedSeamError, match=rf"synthetic_inventory\.py:7 .*{message}"
+    ):
+        _scan_synthetic(source)
+
+
 @pytest.mark.parametrize(
     "suffix",
     ["", "\nreader = linkedin_mcp_server.scraping.extractor._drain_listener_tasks"],

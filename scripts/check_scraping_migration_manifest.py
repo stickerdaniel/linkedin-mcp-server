@@ -152,15 +152,31 @@ _IMPORT_OWNERS = {
 # `_content` and `_capture` are the facade's own wiring rather than a
 # collaborator a test could build for itself: reaching them is how a workflow
 # still living on the facade gets its capture stubbed, so the seam closes with
-# the facade and not with the module that owns the class. `_session` and
-# `_navigator` carry no such consumer and stay pinned to their own stage.
+# the last workflow that still asks the facade for it, not with the module that
+# owns the class and not with the facade. Measured over every reach-through in
+# the tree: all 19 `_capture` sites sit in `scrape_person` tests, which move at
+# stage 6, and the 14 `_content` sites spread over `scrape_company` (8),
+# `_extract_search_page`, `search_jobs`, `_extract_saved_jobs_page` (9) and
+# `get_inbox`, `get_conversation`, `search_conversations` (11). Pinning either
+# at the facade's own stage 14 would leave a stale reach-through unflagged for
+# the rest of the migration. `_session` and `_navigator` carry no such consumer
+# and stay pinned to their own stage.
 _INSTANCE_ATTRIBUTE_OWNERS = {
     "_page": ("facade.LinkedInExtractor._page", 14),
     "_session": ("session.ScrapingSession", 3),
     "_navigator": ("navigation.PageNavigator", 3),
-    "_content": ("facade.LinkedInExtractor._content", 14),
-    "_capture": ("facade.LinkedInExtractor._capture", 14),
+    "_content": ("facade.LinkedInExtractor._content", 11),
+    "_capture": ("facade.LinkedInExtractor._capture", 6),
     "_scroll_seconds": ("facade.LinkedInExtractor._scroll_seconds", 14),
+}
+
+# The collaborator behind each of those two attributes. A patch routed through
+# the attribute lands on the collaborator's own method, so the seam records the
+# collaborator as its owner while the stage stays the attribute's: what expires
+# is the reach-through, not the method.
+_FACADE_COLLABORATORS = {
+    "_content": "content.PageContentReader",
+    "_capture": "capture.SectionCapture",
 }
 
 _MODULE_ATTRIBUTE_OWNERS = {
@@ -1057,6 +1073,34 @@ def extractor_methods(package: Path = PACKAGE) -> tuple[frozenset[str], frozense
                 frozenset(name for name in methods if name.startswith("_")),
             )
     raise AssertionError("LinkedInExtractor not found in scraping/extractor.py")
+
+
+# One patched attribute per site re-reads the owning module, so the answer is
+# kept. Keyed by package too, because a caller may point the reader at a tree
+# other than this one.
+_COLLABORATOR_METHODS: dict[tuple[Path, str], frozenset[str]] = {}
+
+
+def collaborator_methods(owner: str, package: Path = PACKAGE) -> frozenset[str]:
+    """Read the method names of a facade collaborator named ``module.Class``."""
+
+    cached = _COLLABORATOR_METHODS.get((package, owner))
+    if cached is not None:
+        return cached
+    module, class_name = owner.split(".", 1)
+    tree = ast.parse(
+        (package / "scraping" / f"{module}.py").read_text(encoding="utf-8")
+    )
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            methods = frozenset(
+                item.name
+                for item in node.body
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+            )
+            _COLLABORATOR_METHODS[package, owner] = methods
+            return methods
+    raise AssertionError(f"{class_name} not found in scraping/{module}.py")
 
 
 class Scanner(ast.NodeVisitor):
@@ -1984,6 +2028,30 @@ class Scanner(ast.NodeVisitor):
                 "unknown extractor module object patch",
             )
             return
+
+        if (
+            isinstance(target, ast.Attribute)
+            and isinstance(target.value, ast.Name)
+            and (target.value.id in bindings or target.value.id in self.class_names)
+        ):
+            self._collaborator_patch(node, target.attr, name)
+            return
+
+    def _collaborator_patch(self, node: ast.Call, attribute: str, name: str) -> None:
+        owner = _FACADE_COLLABORATORS.get(attribute)
+        owner_stage = _INSTANCE_ATTRIBUTE_OWNERS.get(attribute)
+        patch_target = f"{attribute}.{name}"
+        if owner is None or owner_stage is None:
+            self._error(node, patch_target, "unknown facade collaborator patch")
+            return
+        if name not in collaborator_methods(owner):
+            self._error(node, patch_target, f"unknown {owner} patch")
+            return
+        _, stage = owner_stage
+        if name.startswith("_"):
+            self._add("private_patch_object", node, name, owner, stage)
+            return
+        self._add("public_patch_object", node, name, f"{owner} dependency", stage)
 
 
 def scan_source(

@@ -181,7 +181,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader -> session.ScrapingSession.scroll_job_sidebar",
       "kind": "boundary_patch_object",
-      "line": 192,
+      "line": 193,
       "migration_stage": 9,
       "path": "tests/scraping/policy_scenarios.py",
       "target": "scroll_job_sidebar"
@@ -189,7 +189,7 @@
     {
       "canonical_owner": "feed.FeedScraper -> error_diagnostics.build_issue_diagnostics",
       "kind": "boundary_patch_object",
-      "line": 194,
+      "line": 195,
       "migration_stage": 5,
       "path": "tests/scraping/policy_scenarios.py",
       "target": "build_issue_diagnostics"
@@ -197,7 +197,7 @@
     {
       "canonical_owner": "person.PersonScraper -> error_diagnostics.build_issue_diagnostics",
       "kind": "boundary_patch_object",
-      "line": 194,
+      "line": 195,
       "migration_stage": 6,
       "path": "tests/scraping/policy_scenarios.py",
       "target": "build_issue_diagnostics"
@@ -205,7 +205,7 @@
     {
       "canonical_owner": "company.CompanyScraper -> error_diagnostics.build_issue_diagnostics",
       "kind": "boundary_patch_object",
-      "line": 194,
+      "line": 195,
       "migration_stage": 8,
       "path": "tests/scraping/policy_scenarios.py",
       "target": "build_issue_diagnostics"
@@ -213,7 +213,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader -> error_diagnostics.build_issue_diagnostics",
       "kind": "boundary_patch_object",
-      "line": 194,
+      "line": 195,
       "migration_stage": 9,
       "path": "tests/scraping/policy_scenarios.py",
       "target": "build_issue_diagnostics"
@@ -221,7 +221,7 @@
     {
       "canonical_owner": "jobs.JobScraper -> error_diagnostics.build_issue_diagnostics",
       "kind": "boundary_patch_object",
-      "line": 194,
+      "line": 195,
       "migration_stage": 9,
       "path": "tests/scraping/policy_scenarios.py",
       "target": "build_issue_diagnostics"
@@ -229,7 +229,7 @@
     {
       "canonical_owner": "feed.FeedScraper",
       "kind": "private_patch_object",
-      "line": 195,
+      "line": 196,
       "migration_stage": 5,
       "path": "tests/scraping/policy_scenarios.py",
       "target": "_drain_listener_tasks"
@@ -1187,10 +1187,18 @@
       "target": "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar"
     },
     {
+      "canonical_owner": "content.PageContentReader",
+      "kind": "private_patch_object",
+      "line": 631,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_root_content"
+    },
+    {
       "canonical_owner": "facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
       "line": 632,
-      "migration_stage": 14,
+      "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_content"
     },
@@ -1395,10 +1403,18 @@
       "target": "extract_page"
     },
     {
+      "canonical_owner": "capture.SectionCapture",
+      "kind": "private_patch_object",
+      "line": 922,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_overlay"
+    },
+    {
       "canonical_owner": "facade.LinkedInExtractor._capture",
       "kind": "private_facade_access",
       "line": 923,
-      "migration_stage": 14,
+      "migration_stage": 6,
       "path": "tests/test_scraping.py",
       "target": "_capture"
     },
@@ -1419,10 +1435,18 @@
       "target": "extract_page"
     },
     {
+      "canonical_owner": "capture.SectionCapture",
+      "kind": "private_patch_object",
+      "line": 949,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_overlay"
+    },
+    {
       "canonical_owner": "facade.LinkedInExtractor._capture",
       "kind": "private_facade_access",
       "line": 950,
-      "migration_stage": 14,
+      "migration_stage": 6,
       "path": "tests/test_scraping.py",
       "target": "_capture"
     },
@@ -1443,10 +1467,18 @@
       "target": "extract_page"
     },
     {
+      "canonical_owner": "capture.SectionCapture",
+      "kind": "private_patch_object",
+      "line": 984,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_overlay"
+    },
+    {
       "canonical_owner": "facade.LinkedInExtractor._capture",
       "kind": "private_facade_access",
       "line": 985,
-      "migration_stage": 14,
+      "migration_stage": 6,
       "path": "tests/test_scraping.py",
       "target": "_capture"
     },
@@ -1475,10 +1507,18 @@
       "target": "extract_page"
     },
     {
+      "canonical_owner": "capture.SectionCapture",
+      "kind": "private_patch_object",
+      "line": 1030,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_overlay"
+    },
+    {
       "canonical_owner": "facade.LinkedInExtractor._capture",
       "kind": "private_facade_access",
       "line": 1031,
-      "migration_stage": 14,
+      "migration_stage": 6,
       "path": "tests/test_scraping.py",
       "target": "_capture"
     },
@@ -1531,10 +1571,18 @@
       "target": "extract_page"
     },
     {
+      "canonical_owner": "capture.SectionCapture",
+      "kind": "private_patch_object",
+      "line": 1110,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_overlay"
+    },
+    {
       "canonical_owner": "facade.LinkedInExtractor._capture",
       "kind": "private_facade_access",
       "line": 1111,
-      "migration_stage": 14,
+      "migration_stage": 6,
       "path": "tests/test_scraping.py",
       "target": "_capture"
     },
@@ -1555,10 +1603,18 @@
       "target": "extract_page"
     },
     {
+      "canonical_owner": "capture.SectionCapture",
+      "kind": "private_patch_object",
+      "line": 1154,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_overlay"
+    },
+    {
       "canonical_owner": "facade.LinkedInExtractor._capture",
       "kind": "private_facade_access",
       "line": 1155,
-      "migration_stage": 14,
+      "migration_stage": 6,
       "path": "tests/test_scraping.py",
       "target": "_capture"
     },
@@ -1579,10 +1635,18 @@
       "target": "extract_page"
     },
     {
+      "canonical_owner": "capture.SectionCapture",
+      "kind": "private_patch_object",
+      "line": 1196,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_overlay"
+    },
+    {
       "canonical_owner": "facade.LinkedInExtractor._capture",
       "kind": "private_facade_access",
       "line": 1197,
-      "migration_stage": 14,
+      "migration_stage": 6,
       "path": "tests/test_scraping.py",
       "target": "_capture"
     },
@@ -1603,10 +1667,18 @@
       "target": "extract_page"
     },
     {
+      "canonical_owner": "capture.SectionCapture",
+      "kind": "private_patch_object",
+      "line": 1222,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_overlay"
+    },
+    {
       "canonical_owner": "facade.LinkedInExtractor._capture",
       "kind": "private_facade_access",
       "line": 1223,
-      "migration_stage": 14,
+      "migration_stage": 6,
       "path": "tests/test_scraping.py",
       "target": "_capture"
     },
@@ -1627,10 +1699,18 @@
       "target": "extract_page"
     },
     {
+      "canonical_owner": "capture.SectionCapture",
+      "kind": "private_patch_object",
+      "line": 1248,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_overlay"
+    },
+    {
       "canonical_owner": "facade.LinkedInExtractor._capture",
       "kind": "private_facade_access",
       "line": 1249,
-      "migration_stage": 14,
+      "migration_stage": 6,
       "path": "tests/test_scraping.py",
       "target": "_capture"
     },
@@ -1651,10 +1731,18 @@
       "target": "extract_page"
     },
     {
+      "canonical_owner": "capture.SectionCapture",
+      "kind": "private_patch_object",
+      "line": 1274,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_overlay"
+    },
+    {
       "canonical_owner": "facade.LinkedInExtractor._capture",
       "kind": "private_facade_access",
       "line": 1275,
-      "migration_stage": 14,
+      "migration_stage": 6,
       "path": "tests/test_scraping.py",
       "target": "_capture"
     },
@@ -1675,10 +1763,18 @@
       "target": "extract_page"
     },
     {
+      "canonical_owner": "capture.SectionCapture",
+      "kind": "private_patch_object",
+      "line": 1300,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_overlay"
+    },
+    {
       "canonical_owner": "facade.LinkedInExtractor._capture",
       "kind": "private_facade_access",
       "line": 1301,
-      "migration_stage": 14,
+      "migration_stage": 6,
       "path": "tests/test_scraping.py",
       "target": "_capture"
     },
@@ -2275,10 +2371,18 @@
       "target": "extract_page"
     },
     {
+      "canonical_owner": "capture.SectionCapture",
+      "kind": "private_patch_object",
+      "line": 2293,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_overlay"
+    },
+    {
       "canonical_owner": "facade.LinkedInExtractor._capture",
       "kind": "private_facade_access",
       "line": 2294,
-      "migration_stage": 14,
+      "migration_stage": 6,
       "path": "tests/test_scraping.py",
       "target": "_capture"
     },
@@ -2307,10 +2411,18 @@
       "target": "linkedin_mcp_server.scraping.extractor.build_issue_diagnostics"
     },
     {
+      "canonical_owner": "capture.SectionCapture",
+      "kind": "private_patch_object",
+      "line": 2334,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_overlay"
+    },
+    {
       "canonical_owner": "facade.LinkedInExtractor._capture",
       "kind": "private_facade_access",
       "line": 2335,
-      "migration_stage": 14,
+      "migration_stage": 6,
       "path": "tests/test_scraping.py",
       "target": "_capture"
     },
@@ -2331,10 +2443,18 @@
       "target": "extract_page"
     },
     {
+      "canonical_owner": "capture.SectionCapture",
+      "kind": "private_patch_object",
+      "line": 2379,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_overlay"
+    },
+    {
       "canonical_owner": "facade.LinkedInExtractor._capture",
       "kind": "private_facade_access",
       "line": 2380,
-      "migration_stage": 14,
+      "migration_stage": 6,
       "path": "tests/test_scraping.py",
       "target": "_capture"
     },
@@ -2379,10 +2499,18 @@
       "target": "extract_page"
     },
     {
+      "canonical_owner": "capture.SectionCapture",
+      "kind": "private_patch_object",
+      "line": 2443,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_overlay"
+    },
+    {
       "canonical_owner": "facade.LinkedInExtractor._capture",
       "kind": "private_facade_access",
       "line": 2444,
-      "migration_stage": 14,
+      "migration_stage": 6,
       "path": "tests/test_scraping.py",
       "target": "_capture"
     },
@@ -2459,10 +2587,18 @@
       "target": "asyncio.sleep"
     },
     {
+      "canonical_owner": "content.PageContentReader",
+      "kind": "private_patch_object",
+      "line": 2584,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_root_content"
+    },
+    {
       "canonical_owner": "facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
       "line": 2585,
-      "migration_stage": 14,
+      "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_content"
     },
@@ -2619,10 +2755,18 @@
       "target": "asyncio.sleep"
     },
     {
+      "canonical_owner": "content.PageContentReader",
+      "kind": "private_patch_object",
+      "line": 2862,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_root_content"
+    },
+    {
       "canonical_owner": "facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
       "line": 2863,
-      "migration_stage": 14,
+      "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_content"
     },
@@ -2763,10 +2907,18 @@
       "target": "asyncio.sleep"
     },
     {
+      "canonical_owner": "content.PageContentReader",
+      "kind": "private_patch_object",
+      "line": 3115,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_root_content"
+    },
+    {
       "canonical_owner": "facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
       "line": 3116,
-      "migration_stage": 14,
+      "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_content"
     },
@@ -3803,10 +3955,18 @@
       "target": "linkedin_mcp_server.scraping.extractor.scroll_to_bottom"
     },
     {
+      "canonical_owner": "content.PageContentReader",
+      "kind": "private_patch_object",
+      "line": 4549,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_root_content"
+    },
+    {
       "canonical_owner": "facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
       "line": 4550,
-      "migration_stage": 14,
+      "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_content"
     },
@@ -4443,10 +4603,18 @@
       "target": "extract_page"
     },
     {
+      "canonical_owner": "capture.SectionCapture",
+      "kind": "private_patch_object",
+      "line": 5507,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_overlay"
+    },
+    {
       "canonical_owner": "facade.LinkedInExtractor._capture",
       "kind": "private_facade_access",
       "line": 5508,
-      "migration_stage": 14,
+      "migration_stage": 6,
       "path": "tests/test_scraping.py",
       "target": "_capture"
     },
@@ -4499,10 +4667,18 @@
       "target": "scrape_person"
     },
     {
+      "canonical_owner": "capture.SectionCapture",
+      "kind": "private_patch_object",
+      "line": 5619,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_loaded_section"
+    },
+    {
       "canonical_owner": "facade.LinkedInExtractor._capture",
       "kind": "private_facade_access",
       "line": 5620,
-      "migration_stage": 14,
+      "migration_stage": 6,
       "path": "tests/test_scraping.py",
       "target": "_capture"
     },
@@ -4531,10 +4707,18 @@
       "target": "extract_page"
     },
     {
+      "canonical_owner": "capture.SectionCapture",
+      "kind": "private_patch_object",
+      "line": 5656,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_loaded_section"
+    },
+    {
       "canonical_owner": "facade.LinkedInExtractor._capture",
       "kind": "private_facade_access",
       "line": 5657,
-      "migration_stage": 14,
+      "migration_stage": 6,
       "path": "tests/test_scraping.py",
       "target": "_capture"
     },
@@ -4547,10 +4731,18 @@
       "target": "asyncio.sleep"
     },
     {
+      "canonical_owner": "capture.SectionCapture",
+      "kind": "private_patch_object",
+      "line": 5678,
+      "migration_stage": 6,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_loaded_section"
+    },
+    {
       "canonical_owner": "facade.LinkedInExtractor._capture",
       "kind": "private_facade_access",
       "line": 5679,
-      "migration_stage": 14,
+      "migration_stage": 6,
       "path": "tests/test_scraping.py",
       "target": "_capture"
     },
@@ -4819,10 +5011,18 @@
       "target": "_scroll_main_scrollable_region"
     },
     {
+      "canonical_owner": "content.PageContentReader",
+      "kind": "private_patch_object",
+      "line": 6255,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_root_content"
+    },
+    {
       "canonical_owner": "facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
       "line": 6256,
-      "migration_stage": 14,
+      "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_content"
     },
@@ -4883,10 +5083,18 @@
       "target": "_scroll_main_scrollable_region"
     },
     {
+      "canonical_owner": "content.PageContentReader",
+      "kind": "private_patch_object",
+      "line": 6302,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_root_content"
+    },
+    {
       "canonical_owner": "facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
       "line": 6303,
-      "migration_stage": 14,
+      "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_content"
     },
@@ -4939,10 +5147,18 @@
       "target": "_scroll_main_scrollable_region"
     },
     {
+      "canonical_owner": "content.PageContentReader",
+      "kind": "private_patch_object",
+      "line": 6354,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_root_content"
+    },
+    {
       "canonical_owner": "facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
       "line": 6355,
-      "migration_stage": 14,
+      "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_content"
     },
@@ -5003,10 +5219,18 @@
       "target": "_scroll_main_scrollable_region"
     },
     {
+      "canonical_owner": "content.PageContentReader",
+      "kind": "private_patch_object",
+      "line": 6407,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_root_content"
+    },
+    {
       "canonical_owner": "facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
       "line": 6408,
-      "migration_stage": 14,
+      "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_content"
     },
@@ -5059,10 +5283,18 @@
       "target": "_scroll_main_scrollable_region"
     },
     {
+      "canonical_owner": "content.PageContentReader",
+      "kind": "private_patch_object",
+      "line": 6453,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_root_content"
+    },
+    {
       "canonical_owner": "facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
       "line": 6454,
-      "migration_stage": 14,
+      "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_content"
     },
@@ -5123,10 +5355,18 @@
       "target": "_resolve_conversation_thread_urls"
     },
     {
+      "canonical_owner": "content.PageContentReader",
+      "kind": "private_patch_object",
+      "line": 6508,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_root_content"
+    },
+    {
       "canonical_owner": "facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
       "line": 6509,
-      "migration_stage": 14,
+      "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_content"
     },
@@ -5195,10 +5435,18 @@
       "target": "_resolve_conversation_thread_urls"
     },
     {
+      "canonical_owner": "content.PageContentReader",
+      "kind": "private_patch_object",
+      "line": 6566,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_root_content"
+    },
+    {
       "canonical_owner": "facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
       "line": 6567,
-      "migration_stage": 14,
+      "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_content"
     },
@@ -5491,10 +5739,18 @@
       "target": "_wait_for_main_text"
     },
     {
+      "canonical_owner": "content.PageContentReader",
+      "kind": "private_patch_object",
+      "line": 6862,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_root_content"
+    },
+    {
       "canonical_owner": "facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
       "line": 6863,
-      "migration_stage": 14,
+      "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_content"
     },
@@ -5547,10 +5803,18 @@
       "target": "_wait_for_main_text"
     },
     {
+      "canonical_owner": "content.PageContentReader",
+      "kind": "private_patch_object",
+      "line": 6922,
+      "migration_stage": 11,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_root_content"
+    },
+    {
       "canonical_owner": "facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
       "line": 6923,
-      "migration_stage": 14,
+      "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_content"
     },

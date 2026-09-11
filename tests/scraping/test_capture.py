@@ -592,6 +592,62 @@ class TestActivityFeedExtraction:
 
         assert show_more.click.await_count == 3
 
+    async def test_details_page_show_more_default_ceiling_is_five_clicks(
+        self, mock_page
+    ):
+        """Without a budget the loop stops at the default ceiling, not later.
+
+        The two neighbouring tests both leave the default unmeasured: one
+        scripts the button away after two clicks, the other passes its own
+        budget. Lowering the literal has to fail somewhere.
+        """
+        mock_page.evaluate = AsyncMock(
+            return_value={"source": "root", "text": "text", "references": []}
+        )
+        mock_page.wait_for_function = AsyncMock()
+
+        show_more = MagicMock()
+        show_more.count = AsyncMock(return_value=1)  # always present
+        show_more.is_visible = AsyncMock(return_value=True)
+        show_more.scroll_into_view_if_needed = AsyncMock()
+        show_more.click = AsyncMock()
+        show_more.first = show_more
+        show_more.filter = MagicMock(return_value=show_more)
+
+        def locator_side_effect(selector):
+            if selector == "main button":
+                return show_more
+            return MagicMock(count=AsyncMock(return_value=0))
+
+        mock_page.locator = MagicMock(side_effect=locator_side_effect)
+        capture = _capture(mock_page)
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.session.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            await capture._extract_page_once(
+                "https://www.linkedin.com/in/billgates/details/experience/",
+                section_name="experience",
+            )
+
+        assert show_more.click.await_count == 5
+
     async def test_non_details_page_does_not_click_show_more(self, mock_page):
         """Non-details URLs (main profile, activity) skip the Show more loop."""
         mock_page.evaluate = AsyncMock(

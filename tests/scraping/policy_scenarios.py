@@ -189,6 +189,7 @@ async def boundaries(
         patch.object(extractor_module, "handle_modal_close", modal),
         patch.object(session_module, "scroll_to_bottom", scroll_body),
         patch.object(extractor_module, "scroll_to_bottom", scroll_body),
+        patch.object(session_module, "scroll_job_sidebar", scroll_sidebar),
         patch.object(extractor_module, "scroll_job_sidebar", scroll_sidebar),
         patch.object(capture_module, "build_issue_diagnostics", diagnostics),
         patch.object(extractor_module, "build_issue_diagnostics", diagnostics),
