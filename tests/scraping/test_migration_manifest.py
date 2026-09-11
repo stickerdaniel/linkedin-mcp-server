@@ -6,6 +6,7 @@ from pathlib import Path
 
 import json
 import logging
+import re
 import subprocess
 import sys
 
@@ -1645,6 +1646,14 @@ async def test_shape(page, replacement, monkeypatch, arguments, pair, thing, fla
             r"monkeypatch\.setattr\(\*\*arguments\): unresolved setattr arguments",
         ),
         (
+            "setattr(*arguments)",
+            r"setattr\(\*arguments\): unresolved setattr arguments",
+        ),
+        (
+            "setattr(**arguments)",
+            r"setattr\(\*\*arguments\): unresolved setattr arguments",
+        ),
+        (
             "monkeypatch.setattr(extractor._capture)",
             r"extractor\._capture: unresolved setattr target",
         ),
@@ -1667,6 +1676,84 @@ def test_unresolvable_replacement_targets_name_their_call_site(statement, messag
         migration.UnresolvedSeamError, match=rf"synthetic_inventory\.py:7 .*{message}"
     ):
         _scan_synthetic(_reach_through(statement))
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "helper.setattr(*arguments)",
+        "helper.setattr(**arguments)",
+        "helper.setattr()",
+        "self.helper.setattr(*arguments)",
+        "helpers[0].setattr(*arguments)",
+    ],
+)
+def test_a_foreign_setattr_receiver_keeps_its_dynamic_shape(statement):
+    # `setattr` is an ordinary method name and the tree holds about 1873 calls
+    # to one. Refusing every dynamic shape ahead of any scoping fails the
+    # checker on a receiver that cannot reach the extractor at all, and this
+    # guard gates every remaining stage of the decomposition. Nothing is
+    # recorded either, because nothing was resolved.
+    seams = _scan_synthetic(_reach_through(statement))
+
+    assert not [seam for seam in seams if seam.kind.endswith("_patch_object")]
+
+
+def _fixture_alias(binding: str, call: str) -> str:
+    """A workflow test that patches through a fixture under another name."""
+
+    return f"""
+import pytest
+from linkedin_mcp_server.scraping.extractor import LinkedInExtractor
+
+async def test_shape(page, arguments{binding}):
+    extractor = LinkedInExtractor(page)
+    {call}
+    await extractor.scrape_person("ada")
+"""
+
+
+@pytest.mark.parametrize(
+    ("binding", "call", "line", "receiver"),
+    [
+        ("", "monkeypatch.setattr(*arguments)", 7, "monkeypatch"),
+        (
+            "",
+            "with pytest.MonkeyPatch.context() as patching:\n"
+            "        patching.setattr(*arguments)",
+            8,
+            "patching",
+        ),
+        (
+            ", patcher: pytest.MonkeyPatch",
+            "patcher.setattr(*arguments)",
+            7,
+            "patcher",
+        ),
+        ("", "mp = monkeypatch\n    mp.setattr(*arguments)", 8, "mp"),
+        (
+            "",
+            "self.patcher = pytest.MonkeyPatch()\n    self.patcher.setattr(*arguments)",
+            8,
+            "self.patcher",
+        ),
+    ],
+)
+def test_an_unreadable_setattr_through_the_fixture_names_its_call_site(
+    binding, call, line, receiver
+):
+    # The fixture is the one receiver whose `setattr` routinely lands on the
+    # extractor, and it is routinely bound to another name: a private context
+    # manager, an annotated parameter, a plain alias. Testing the receiver
+    # against the literal `monkeypatch` would skip exactly those, so the names
+    # the fixture is bound to in the file are collected first.
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=rf"synthetic_inventory\.py:{line} "
+        rf"{re.escape(receiver)}\.setattr\(\*arguments\): "
+        r"unresolved setattr arguments",
+    ):
+        _scan_synthetic(_fixture_alias(binding, call))
 
 
 @pytest.mark.parametrize(

@@ -738,6 +738,68 @@ def _setattr_arguments(node: ast.Call) -> tuple[ast.expr | None, ast.expr | None
     return (target, name)
 
 
+# The fixture's own name, and the class a private context is opened from. A
+# binding reading from either holds the same object, which is the whole signal
+# `_monkeypatch_names` follows.
+_MONKEYPATCH_NAMES = frozenset({"monkeypatch", "MonkeyPatch"})
+
+
+def _mentions_monkeypatch(expression: ast.expr) -> bool:
+    return any(
+        (isinstance(item, ast.Name) and item.id in _MONKEYPATCH_NAMES)
+        or (isinstance(item, ast.Attribute) and item.attr in _MONKEYPATCH_NAMES)
+        for item in ast.walk(expression)
+    )
+
+
+def _monkeypatch_names(tree: ast.Module) -> set[str]:
+    """Name every local in one file that plausibly holds a pytest fixture.
+
+    ``with pytest.MonkeyPatch.context() as patching`` and a parameter annotated
+    ``pytest.MonkeyPatch`` are the fixture under another name, which is why a
+    receiver test spelled ``monkeypatch`` alone would not find them. Read over
+    the whole module rather than per scope, and kept for a name a later
+    statement reuses for something else: this set only ever decides whether an
+    unreadable ``setattr`` is loud, so a name too many costs a refusal that
+    names its site and a name too few costs a silent skip. The bare end of an
+    attribute target joins it for the same reason, because ``self.patcher``
+    reads back through ``patcher``.
+    """
+
+    names = {"monkeypatch"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.withitem):
+            if isinstance(node.optional_vars, ast.Name) and _mentions_monkeypatch(
+                node.context_expr
+            ):
+                names.add(node.optional_vars.id)
+        elif isinstance(node, ast.Assign) and _mentions_monkeypatch(node.value):
+            names.update(_bound_name(target) for target in node.targets)
+        elif isinstance(node, ast.AnnAssign):
+            if _mentions_monkeypatch(node.annotation) or (
+                node.value is not None and _mentions_monkeypatch(node.value)
+            ):
+                names.add(_bound_name(node.target))
+        elif (
+            isinstance(node, ast.arg)
+            and node.annotation is not None
+            and _mentions_monkeypatch(node.annotation)
+        ):
+            names.add(node.arg)
+    names.discard("")
+    return names
+
+
+def _bound_name(target: ast.expr) -> str:
+    """Name what one assignment target binds, or nothing for a shape without one."""
+
+    if isinstance(target, ast.Name):
+        return target.id
+    if isinstance(target, ast.Attribute):
+        return target.attr
+    return ""
+
+
 class _CollaboratorAliasCollector:
     """Answer each use of a local name bound to a facade collaborator.
 
@@ -1483,12 +1545,14 @@ class Scanner(ast.NodeVisitor):
         class_names: set[str],
         facade_publics: frozenset[str],
         facade_privates: frozenset[str],
+        monkeypatch_names: set[str],
     ):
         self.path = path
         self.root_module_names = module_names
         self.root_class_names = class_names
         self.facade_publics = facade_publics
         self.facade_privates = facade_privates
+        self.monkeypatch_names = monkeypatch_names
         self.functions: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
         self.frames = [
             _ScopeFrame(
@@ -2282,17 +2346,14 @@ class Scanner(ast.NodeVisitor):
         named ``monkeypatch``, because the fixture is routinely bound to
         another name and a receiver test would skip exactly the sites this
         exists to see. Everything it resolves to is a foreign object unless the
-        target reaches the extractor, so the breadth costs nothing.
+        target reaches the extractor, so the breadth costs nothing. It costs
+        something only where there is no target left to scope, which is what
+        ``_refuse_unreadable_setattr`` answers for.
         """
 
         target, name = _setattr_arguments(node)
         if target is None:
-            # Neither end of the replacement is readable, so there is nothing
-            # to scope against the extractor and a skip would be
-            # indistinguishable from a patch that intercepts nothing. Measured
-            # over every `setattr` site in the tree: none reaches this, the
-            # same answer the `patch.object` refusal got.
-            self._error(node, ast.unparse(node), "unresolved setattr arguments")
+            self._refuse_unreadable_setattr(node)
             return
         if (
             isinstance(target, ast.Constant)
@@ -2308,6 +2369,49 @@ class Scanner(ast.NodeVisitor):
             return
         self._suppress_module_attributes(target)
         self._replacement(node, target, name.value, "setattr")
+
+    def _refuse_unreadable_setattr(self, node: ast.Call) -> None:
+        """Refuse a ``setattr`` whose call shape hides both of its ends.
+
+        There is no target to scope against the extractor, and a skip reads the
+        same as a patch that intercepts nothing, so the refusal has to be loud
+        where the call could plausibly land on the extractor. Every other
+        refusal here is narrowed by ``_reaches_the_extractor``; a blanket one
+        answers the same way for a foreign ``helper.setattr(*arguments)``
+        anywhere in the tree, and one false failure blocks every later stage.
+
+        The receiver is the only signal the shape leaves. A bare name is the
+        builtin, which takes any object including the extractor, so it stays
+        loud. A method belongs to whatever the receiver holds, and only a
+        pytest fixture patches the extractor through one. That is the trade-off
+        against the docstring above: matching the method name alone is what
+        keeps an aliased fixture inventoried, and it is free only while a
+        readable target does the scoping. With the target gone the receiver has
+        to answer instead, so ``_monkeypatch_names`` stands in for it, widened
+        past the fixture's own name for exactly the aliases that docstring
+        warns about.
+        """
+
+        function = node.func
+        if isinstance(function, ast.Attribute) and not self._monkeypatch_receiver(
+            function.value
+        ):
+            return
+        self._error(node, ast.unparse(node), "unresolved setattr arguments")
+
+    def _monkeypatch_receiver(self, receiver: ast.expr) -> bool:
+        """Answer whether a ``.setattr`` receiver plausibly holds the fixture.
+
+        A mention anywhere in the receiver is enough: ``self.patcher`` reaches
+        the same object as the bare local, and the attribute name is all of it
+        there is to recognise.
+        """
+
+        return any(
+            (isinstance(item, ast.Name) and item.id in self.monkeypatch_names)
+            or (isinstance(item, ast.Attribute) and item.attr in self.monkeypatch_names)
+            for item in ast.walk(receiver)
+        )
 
     def visit_Assign(self, node: ast.Assign) -> Any:
         for target in node.targets:
@@ -2651,6 +2755,7 @@ def scan_source(
         class_names,
         facade_publics,
         facade_privates,
+        _monkeypatch_names(tree),
     )
     scanner.visit(tree)
     if scanner.errors:
