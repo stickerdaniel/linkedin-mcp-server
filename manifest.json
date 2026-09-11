@@ -92,6 +92,10 @@
       "description": "List job postings saved by the authenticated LinkedIn user"
     },
     {
+      "name": "save_job",
+      "description": "Save a LinkedIn job posting to the authenticated user's saved jobs list"
+    },
+    {
       "name": "search_people",
       "description": "Search for people on LinkedIn by keywords, location, connection degree (1st/2nd/3rd), and current company"
     },
