@@ -14,11 +14,20 @@ import anyio
 import pytest
 from fastmcp import FastMCP
 
+from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.scraping.content import PageContentReader
 from linkedin_mcp_server.scraping.contracts import ExtractedSection
 from linkedin_mcp_server.scraping.feed import FeedScraper
 from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.session import ScrapingSession
+
+from .policy_scenarios import _COMMON_ALLOWED, _page, _root, boundaries
+from .support.policy_trace import (
+    FakeClock,
+    ScriptedPage,
+    ScriptedResponse,
+    TraceRecorder,
+)
 
 
 def _scraper(page) -> FeedScraper:
@@ -116,6 +125,117 @@ class TestFeedListenerLifecycle:
         # And the drain still ran: the read's failure is consumed here instead
         # of resurfacing from the loop long after the feed call returned.
         assert reads[0]._log_traceback is False
+
+
+class TestExtractFeedFailures:
+    """The envelope ``extract_feed`` wraps around one attempt.
+
+    Two lines decide which of ``get_feed``'s two paths a failure takes. A
+    ``LinkedInScraperException`` is re-raised so the tool can hand it to
+    ``handle_auth_error`` and ask the caller to close the stale browser and
+    sign in again; anything else becomes a section error on a call that
+    otherwise reports success. Swallowing the first turns a challenged
+    session into a success payload carrying an empty feed, which is the
+    one shape the recovery path exists to prevent.
+
+    Patched on the instance: what is under test is the frame, and the
+    attempt it wraps needs a full browser to reach at all.
+    """
+
+    @staticmethod
+    def _once_raising(error: Exception):
+        async def _extract_feed_once(num_posts: int) -> ExtractedSection:
+            raise error
+
+        return _extract_feed_once
+
+    async def test_a_scraper_exception_reaches_the_tool_unwrapped(self):
+        scraper = _scraper(_ListenerPage())
+        challenged = AuthenticationError("LinkedIn challenged this session")
+
+        with patch.object(
+            scraper, "_extract_feed_once", self._once_raising(challenged)
+        ):
+            with pytest.raises(AuthenticationError) as raised:
+                await scraper.extract_feed(num_posts=10)
+
+        assert raised.value is challenged
+
+    async def test_any_other_failure_becomes_a_section_error(self, caplog):
+        scraper = _scraper(_ListenerPage())
+        broken = RuntimeError("feed payload parser failed")
+
+        with patch.object(scraper, "_extract_feed_once", self._once_raising(broken)):
+            with caplog.at_level(logging.WARNING):
+                result = await scraper.extract_feed(num_posts=10)
+
+        assert result.text == ""
+        assert result.references == []
+        assert result.error is not None
+        # The context names this workflow, so the issue report the diagnostics
+        # write is filed against the feed rather than against the tool above it.
+        assert result.error["context"] == "extract_feed"
+        assert result.error["error_type"] == "RuntimeError"
+        assert result.error["error_message"] == "feed payload parser failed"
+        assert "Failed to extract feed: feed payload parser failed" in caplog.text
+
+
+class TestFeedScrollCeiling:
+    """``_MAX_SCROLLS``, on a feed that never stops producing.
+
+    ``stale_count`` resets on every round that yields a permalink, so a
+    feed that keeps loading never stale-stops and the ceiling is the only
+    thing left to end the loop. Neither canonical fixture reaches it: one
+    stale-stops after three wheels, the other satisfies ``num_posts=1`` on
+    the first. The pacing is what differs here: exactly one batch lands per
+    wheel, which keeps every round productive without ever reaching
+    ``num_posts``, so the count the loop returns is the ceiling itself.
+    """
+
+    _CEILING = 12
+    # The tool's own upper bound. Anything the loop could reach in twelve
+    # rounds at one post per scroll stays far below it, which is the point:
+    # the ceiling truncates the result the caller asked for.
+    _NUM_POSTS = 50
+
+    @staticmethod
+    def _one_batch_per_wheel(page: ScriptedPage, index: int):
+        """One SDUI payload, delivered only when the wheel fires."""
+        slug = f"ceiling-ugcPost-{index}-example"
+        response = ScriptedResponse(
+            page.recorder,
+            "https://www.linkedin.com/feed/",
+            f'{{"postSlugUrl":"https://www.linkedin.com/posts/{slug}"}}'.encode(),
+        )
+        return lambda: page.emit("response", response)
+
+    async def test_a_producing_feed_is_truncated_at_the_twelfth_scroll(self):
+        recorder = TraceRecorder(
+            "feed-scroll-ceiling",
+            _COMMON_ALLOWED | {"response.body.start", "response.body.finish"},
+        )
+        clock = FakeClock(recorder)
+        page = _page(recorder).script("evaluate:root_content", _root("Feed content"))
+        page.script(
+            "mouse.wheel",
+            *[self._one_batch_per_wheel(page, index) for index in range(self._CEILING)],
+        )
+        scraper = _scraper(page)
+
+        async with boundaries(recorder, clock):
+            with recorder.context("extract_feed", "feed"):
+                result = await scraper.extract_feed(num_posts=self._NUM_POSTS)
+
+        wheels = [event for event in recorder.events if event["kind"] == "mouse.wheel"]
+        # Exactly the literal, in both directions: a thirteenth wheel finds no
+        # scripted batch behind it, and an eleventh leaves one unspent, which
+        # ``assert_clean`` below reports as well.
+        assert len(wheels) == self._CEILING
+        # Every round produced, so nothing stopped for staleness here, and the
+        # requested count is still nowhere near when the loop gives up.
+        assert len(result.references) == self._CEILING
+        assert len(result.references) < self._NUM_POSTS
+        page.assert_clean()
 
 
 class TestDrainListenerTasks:
