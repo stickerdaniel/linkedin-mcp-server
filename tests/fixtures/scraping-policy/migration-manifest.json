@@ -299,22 +299,6 @@
       "target": "_PROFILE_MESSAGE_TARGET_JS"
     },
     {
-      "canonical_owner": "connection_actions.ACTION_SIGNALS_JS",
-      "kind": "direct_import",
-      "line": 25,
-      "migration_stage": 7,
-      "path": "tests/test_action_signals_dom.py",
-      "target": "_ACTION_SIGNALS_JS"
-    },
-    {
-      "canonical_owner": "connection_actions.CLICK_INCOMING_ACCEPT_JS",
-      "kind": "direct_import",
-      "line": 25,
-      "migration_stage": 7,
-      "path": "tests/test_action_signals_dom.py",
-      "target": "_CLICK_INCOMING_ACCEPT_JS"
-    },
-    {
       "canonical_owner": "facade.LinkedInExtractor",
       "kind": "direct_import",
       "line": 96,
@@ -1323,585 +1307,73 @@
       "target": "_extract_search_page"
     },
     {
-      "canonical_owner": "connection_actions.ConnectionActions dependency",
+      "canonical_owner": "company.CompanyScraper dependency",
       "kind": "public_patch_object",
-      "line": 1073,
-      "migration_stage": 7,
+      "line": 1033,
+      "migration_stage": 8,
       "path": "tests/test_scraping.py",
-      "target": "scrape_person"
+      "target": "extract_page"
     },
     {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1078,
-      "migration_stage": 7,
+      "canonical_owner": "global imported object, unaffected by relocation",
+      "kind": "imported_module_patch",
+      "line": 1039,
+      "migration_stage": null,
       "path": "tests/test_scraping.py",
-      "target": "_read_action_signals"
+      "target": "asyncio.sleep"
     },
     {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1089,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_dialog_is_open"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1095,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_click_dialog_primary_button"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions dependency",
+      "canonical_owner": "company.CompanyScraper dependency",
       "kind": "public_patch_object",
-      "line": 1116,
-      "migration_stage": 7,
+      "line": 1059,
+      "migration_stage": 8,
       "path": "tests/test_scraping.py",
-      "target": "scrape_person"
+      "target": "extract_page"
     },
     {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1119,
-      "migration_stage": 7,
+      "canonical_owner": "global imported object, unaffected by relocation",
+      "kind": "imported_module_patch",
+      "line": 1065,
+      "migration_stage": null,
       "path": "tests/test_scraping.py",
-      "target": "_read_action_signals"
+      "target": "asyncio.sleep"
     },
     {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1126,
-      "migration_stage": 7,
+      "canonical_owner": "company.CompanyScraper dependency",
+      "kind": "public_patch_object",
+      "line": 1081,
+      "migration_stage": 8,
       "path": "tests/test_scraping.py",
-      "target": "_dialog_is_open"
+      "target": "extract_page"
     },
     {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
+      "canonical_owner": "global imported object, unaffected by relocation",
+      "kind": "imported_module_patch",
+      "line": 1087,
+      "migration_stage": null,
+      "path": "tests/test_scraping.py",
+      "target": "asyncio.sleep"
+    },
+    {
+      "canonical_owner": "company.CompanyScraper dependency",
+      "kind": "public_patch_object",
+      "line": 1102,
+      "migration_stage": 8,
+      "path": "tests/test_scraping.py",
+      "target": "extract_page"
+    },
+    {
+      "canonical_owner": "global imported object, unaffected by relocation",
+      "kind": "imported_module_patch",
+      "line": 1108,
+      "migration_stage": null,
+      "path": "tests/test_scraping.py",
+      "target": "asyncio.sleep"
+    },
+    {
+      "canonical_owner": "company.CompanyScraper dependency",
+      "kind": "public_patch_object",
       "line": 1129,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_click_dialog_primary_button"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_facade_access",
-      "line": 1153,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_get_premium_upsell_message"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1186,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_dialog_is_open"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1189,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_get_premium_upsell_message"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1195,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_dismiss_dialog"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_facade_access",
-      "line": 1199,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_submit_invite_dialog"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1247,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_dialog_is_open"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1255,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_fill_dialog_textarea"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1261,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_click_dialog_primary_button"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1267,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_get_premium_upsell_message"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1273,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_dismiss_dialog"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_facade_access",
-      "line": 1277,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_submit_invite_dialog"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions dependency",
-      "kind": "public_patch_object",
-      "line": 1289,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "scrape_person"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1290,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_read_action_signals"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1297,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_dialog_is_open"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1300,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_dismiss_dialog"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions dependency",
-      "kind": "public_patch_object",
-      "line": 1312,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "scrape_person"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1313,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_read_action_signals"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions dependency",
-      "kind": "public_patch_object",
-      "line": 1330,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "scrape_person"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1331,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_read_action_signals"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions dependency",
-      "kind": "public_patch_object",
-      "line": 1353,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "scrape_person"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1358,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_read_action_signals"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1371,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_open_more_menu"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1380,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_dialog_is_open"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1386,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_click_dialog_primary_button"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions dependency",
-      "kind": "public_patch_object",
-      "line": 1411,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "scrape_person"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1412,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_read_action_signals"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1422,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_open_more_menu"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1431,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_submit_invite_dialog"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions dependency",
-      "kind": "public_patch_object",
-      "line": 1452,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "scrape_person"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1453,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_read_action_signals"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1462,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_open_more_menu"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1471,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_probe_invite_note_limit"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1477,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_submit_invite_dialog"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions dependency",
-      "kind": "public_patch_object",
-      "line": 1500,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "scrape_person"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1501,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_read_action_signals"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1507,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_open_more_menu"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1516,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_submit_invite_dialog"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions dependency",
-      "kind": "public_patch_object",
-      "line": 1534,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "scrape_person"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1535,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_read_action_signals"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1544,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_submit_invite_dialog"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions dependency",
-      "kind": "public_patch_object",
-      "line": 1562,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "scrape_person"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1567,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_read_action_signals"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1576,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_click_incoming_accept"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1587,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_submit_invite_dialog"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions dependency",
-      "kind": "public_patch_object",
-      "line": 1607,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "scrape_person"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1612,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_read_action_signals"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1618,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_click_incoming_accept"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions dependency",
-      "kind": "public_patch_object",
-      "line": 1624,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "click_button_by_text"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions dependency",
-      "kind": "public_patch_object",
-      "line": 1649,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "scrape_person"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1659,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_read_action_signals"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1665,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_click_incoming_accept"
-    },
-    {
-      "canonical_owner": "global imported object, unaffected by relocation",
-      "kind": "imported_module_patch",
-      "line": 1671,
-      "migration_stage": null,
-      "path": "tests/test_scraping.py",
-      "target": "asyncio.sleep"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions dependency",
-      "kind": "public_patch_object",
-      "line": 1696,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "scrape_person"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1701,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_read_action_signals"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1711,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_click_incoming_accept"
-    },
-    {
-      "canonical_owner": "global imported object, unaffected by relocation",
-      "kind": "imported_module_patch",
-      "line": 1717,
-      "migration_stage": null,
-      "path": "tests/test_scraping.py",
-      "target": "asyncio.sleep"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions dependency",
-      "kind": "public_patch_object",
-      "line": 1733,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "scrape_person"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1734,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_read_action_signals"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1741,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_dialog_is_open"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1744,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_dismiss_dialog"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions dependency",
-      "kind": "public_patch_object",
-      "line": 1754,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "scrape_person"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1827,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_dialog_is_open"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 1830,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_get_premium_upsell_message"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_facade_access",
-      "line": 1841,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_submit_invite_dialog"
-    },
-    {
-      "canonical_owner": "company.CompanyScraper dependency",
-      "kind": "public_patch_object",
-      "line": 1858,
       "migration_stage": 8,
       "path": "tests/test_scraping.py",
       "target": "extract_page"
@@ -1909,71 +1381,7 @@
     {
       "canonical_owner": "global imported object, unaffected by relocation",
       "kind": "imported_module_patch",
-      "line": 1864,
-      "migration_stage": null,
-      "path": "tests/test_scraping.py",
-      "target": "asyncio.sleep"
-    },
-    {
-      "canonical_owner": "company.CompanyScraper dependency",
-      "kind": "public_patch_object",
-      "line": 1884,
-      "migration_stage": 8,
-      "path": "tests/test_scraping.py",
-      "target": "extract_page"
-    },
-    {
-      "canonical_owner": "global imported object, unaffected by relocation",
-      "kind": "imported_module_patch",
-      "line": 1890,
-      "migration_stage": null,
-      "path": "tests/test_scraping.py",
-      "target": "asyncio.sleep"
-    },
-    {
-      "canonical_owner": "company.CompanyScraper dependency",
-      "kind": "public_patch_object",
-      "line": 1906,
-      "migration_stage": 8,
-      "path": "tests/test_scraping.py",
-      "target": "extract_page"
-    },
-    {
-      "canonical_owner": "global imported object, unaffected by relocation",
-      "kind": "imported_module_patch",
-      "line": 1912,
-      "migration_stage": null,
-      "path": "tests/test_scraping.py",
-      "target": "asyncio.sleep"
-    },
-    {
-      "canonical_owner": "company.CompanyScraper dependency",
-      "kind": "public_patch_object",
-      "line": 1927,
-      "migration_stage": 8,
-      "path": "tests/test_scraping.py",
-      "target": "extract_page"
-    },
-    {
-      "canonical_owner": "global imported object, unaffected by relocation",
-      "kind": "imported_module_patch",
-      "line": 1933,
-      "migration_stage": null,
-      "path": "tests/test_scraping.py",
-      "target": "asyncio.sleep"
-    },
-    {
-      "canonical_owner": "company.CompanyScraper dependency",
-      "kind": "public_patch_object",
-      "line": 1954,
-      "migration_stage": 8,
-      "path": "tests/test_scraping.py",
-      "target": "extract_page"
-    },
-    {
-      "canonical_owner": "global imported object, unaffected by relocation",
-      "kind": "imported_module_patch",
-      "line": 1963,
+      "line": 1138,
       "migration_stage": null,
       "path": "tests/test_scraping.py",
       "target": "asyncio.sleep"
@@ -1981,7 +1389,7 @@
     {
       "canonical_owner": "content.PageContentReader",
       "kind": "private_patch_object",
-      "line": 2003,
+      "line": 1178,
       "migration_stage": 8,
       "path": "tests/test_scraping.py",
       "target": "_extract_root_content"
@@ -1989,7 +1397,7 @@
     {
       "canonical_owner": "company.CompanyScraper -> facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
-      "line": 2004,
+      "line": 1179,
       "migration_stage": 8,
       "path": "tests/test_scraping.py",
       "target": "_content"
@@ -1997,7 +1405,7 @@
     {
       "canonical_owner": "company.CompanyScraper -> session.ScrapingSession.scroll_body",
       "kind": "string_patch",
-      "line": 2009,
+      "line": 1184,
       "migration_stage": 8,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.scroll_to_bottom"
@@ -2005,7 +1413,7 @@
     {
       "canonical_owner": "company.CompanyScraper -> session.ScrapingSession.check_rate_limit",
       "kind": "string_patch",
-      "line": 2013,
+      "line": 1188,
       "migration_stage": 8,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
@@ -2013,7 +1421,7 @@
     {
       "canonical_owner": "company.CompanyScraper -> session.ScrapingSession.dismiss_modal",
       "kind": "string_patch",
-      "line": 2017,
+      "line": 1192,
       "migration_stage": 8,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
@@ -2021,7 +1429,7 @@
     {
       "canonical_owner": "global imported object, unaffected by relocation",
       "kind": "imported_module_patch",
-      "line": 2022,
+      "line": 1197,
       "migration_stage": null,
       "path": "tests/test_scraping.py",
       "target": "asyncio.sleep"
@@ -2029,7 +1437,7 @@
     {
       "canonical_owner": "jobs.JobScraper dependency",
       "kind": "public_patch_object",
-      "line": 2043,
+      "line": 1218,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "extract_page"
@@ -2037,7 +1445,7 @@
     {
       "canonical_owner": "jobs.JobScraper dependency",
       "kind": "public_patch_object",
-      "line": 2058,
+      "line": 1233,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "extract_page"
@@ -2045,23 +1453,535 @@
     {
       "canonical_owner": "jobs.JobScraper dependency",
       "kind": "public_patch_object",
+      "line": 1248,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "extract_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 1294,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 1300,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 1306,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "global imported object, unaffected by relocation",
+      "kind": "imported_module_patch",
+      "line": 1312,
+      "migration_stage": null,
+      "path": "tests/test_scraping.py",
+      "target": "asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 1325,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 1334,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 1340,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "global imported object, unaffected by relocation",
+      "kind": "imported_module_patch",
+      "line": 1346,
+      "migration_stage": null,
+      "path": "tests/test_scraping.py",
+      "target": "asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 1376,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 1381,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 1387,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "global imported object, unaffected by relocation",
+      "kind": "imported_module_patch",
+      "line": 1393,
+      "migration_stage": null,
+      "path": "tests/test_scraping.py",
+      "target": "asyncio.sleep"
+    },
+    {
+      "canonical_owner": "content.PageContentReader",
+      "kind": "private_patch_object",
+      "line": 1456,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_root_content"
+    },
+    {
+      "canonical_owner": "jobs.JobScraper -> facade.LinkedInExtractor._content",
+      "kind": "private_facade_access",
+      "line": 1457,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_content"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 1462,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 1468,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "jobs.JobScraper -> session.ScrapingSession.scroll_job_sidebar",
+      "kind": "string_patch",
+      "line": 1474,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar"
+    },
+    {
+      "canonical_owner": "jobs.JobScraper -> session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 1479,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "jobs.JobScraper -> session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 1483,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 1553,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 1559,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 1565,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "global imported object, unaffected by relocation",
+      "kind": "imported_module_patch",
+      "line": 1571,
+      "migration_stage": null,
+      "path": "tests/test_scraping.py",
+      "target": "asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 1590,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 1596,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 1602,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "global imported object, unaffected by relocation",
+      "kind": "imported_module_patch",
+      "line": 1608,
+      "migration_stage": null,
+      "path": "tests/test_scraping.py",
+      "target": "asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 1640,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 1641,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 1647,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "global imported object, unaffected by relocation",
+      "kind": "imported_module_patch",
+      "line": 1653,
+      "migration_stage": null,
+      "path": "tests/test_scraping.py",
+      "target": "asyncio.sleep"
+    },
+    {
+      "canonical_owner": "content.PageContentReader",
+      "kind": "private_patch_object",
+      "line": 1709,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_root_content"
+    },
+    {
+      "canonical_owner": "jobs.JobScraper -> facade.LinkedInExtractor._content",
+      "kind": "private_facade_access",
+      "line": 1710,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_content"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 1715,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 1721,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "jobs.JobScraper -> session.ScrapingSession.scroll_job_sidebar",
+      "kind": "string_patch",
+      "line": 1727,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar"
+    },
+    {
+      "canonical_owner": "jobs.JobScraper -> session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 1732,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "jobs.JobScraper -> session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 1736,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "global imported object, unaffected by relocation",
+      "kind": "imported_module_patch",
+      "line": 1741,
+      "migration_stage": null,
+      "path": "tests/test_scraping.py",
+      "target": "asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 1766,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 1771,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 1777,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "global imported object, unaffected by relocation",
+      "kind": "imported_module_patch",
+      "line": 1783,
+      "migration_stage": null,
+      "path": "tests/test_scraping.py",
+      "target": "asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_facade_access",
+      "line": 1807,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 1823,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 1832,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 1838,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "global imported object, unaffected by relocation",
+      "kind": "imported_module_patch",
+      "line": 1844,
+      "migration_stage": null,
+      "path": "tests/test_scraping.py",
+      "target": "asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 1885,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 1886,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 1892,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "global imported object, unaffected by relocation",
+      "kind": "imported_module_patch",
+      "line": 1898,
+      "migration_stage": null,
+      "path": "tests/test_scraping.py",
+      "target": "asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 1924,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 1933,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 1939,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "global imported object, unaffected by relocation",
+      "kind": "imported_module_patch",
+      "line": 1945,
+      "migration_stage": null,
+      "path": "tests/test_scraping.py",
+      "target": "asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 1972,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 1983,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 1989,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "global imported object, unaffected by relocation",
+      "kind": "imported_module_patch",
+      "line": 1995,
+      "migration_stage": null,
+      "path": "tests/test_scraping.py",
+      "target": "asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2018,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2029,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2035,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "global imported object, unaffected by relocation",
+      "kind": "imported_module_patch",
+      "line": 2041,
+      "migration_stage": null,
+      "path": "tests/test_scraping.py",
+      "target": "asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
       "line": 2073,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
-      "target": "extract_page"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 2119,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
       "target": "_extract_search_page"
     },
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 2125,
+      "line": 2078,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_job_ids"
@@ -2069,7 +1989,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 2131,
+      "line": 2084,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_get_total_search_pages"
@@ -2077,7 +1997,7 @@
     {
       "canonical_owner": "global imported object, unaffected by relocation",
       "kind": "imported_module_patch",
-      "line": 2137,
+      "line": 2090,
       "migration_stage": null,
       "path": "tests/test_scraping.py",
       "target": "asyncio.sleep"
@@ -2085,7 +2005,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 2150,
+      "line": 2114,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_search_page"
@@ -2093,7 +2013,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 2159,
+      "line": 2123,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_job_ids"
@@ -2101,7 +2021,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 2165,
+      "line": 2129,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_get_total_search_pages"
@@ -2109,7 +2029,7 @@
     {
       "canonical_owner": "global imported object, unaffected by relocation",
       "kind": "imported_module_patch",
-      "line": 2171,
+      "line": 2135,
       "migration_stage": null,
       "path": "tests/test_scraping.py",
       "target": "asyncio.sleep"
@@ -2117,7 +2037,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 2201,
+      "line": 2193,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_search_page"
@@ -2125,87 +2045,31 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
+      "line": 2194,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2200,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "global imported object, unaffected by relocation",
+      "kind": "imported_module_patch",
       "line": 2206,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_job_ids"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 2212,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_get_total_search_pages"
-    },
-    {
-      "canonical_owner": "global imported object, unaffected by relocation",
-      "kind": "imported_module_patch",
-      "line": 2218,
       "migration_stage": null,
       "path": "tests/test_scraping.py",
       "target": "asyncio.sleep"
     },
     {
-      "canonical_owner": "content.PageContentReader",
-      "kind": "private_patch_object",
-      "line": 2281,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_root_content"
-    },
-    {
-      "canonical_owner": "jobs.JobScraper -> facade.LinkedInExtractor._content",
-      "kind": "private_facade_access",
-      "line": 2282,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_content"
-    },
-    {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 2287,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_job_ids"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 2293,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_get_total_search_pages"
-    },
-    {
-      "canonical_owner": "jobs.JobScraper -> session.ScrapingSession.scroll_job_sidebar",
-      "kind": "string_patch",
-      "line": 2299,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar"
-    },
-    {
-      "canonical_owner": "jobs.JobScraper -> session.ScrapingSession.check_rate_limit",
-      "kind": "string_patch",
-      "line": 2304,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
-    },
-    {
-      "canonical_owner": "jobs.JobScraper -> session.ScrapingSession.dismiss_modal",
-      "kind": "string_patch",
-      "line": 2308,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 2378,
+      "line": 2240,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_search_page"
@@ -2213,7 +2077,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 2384,
+      "line": 2246,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_job_ids"
@@ -2221,7 +2085,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 2390,
+      "line": 2252,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_get_total_search_pages"
@@ -2229,463 +2093,7 @@
     {
       "canonical_owner": "global imported object, unaffected by relocation",
       "kind": "imported_module_patch",
-      "line": 2396,
-      "migration_stage": null,
-      "path": "tests/test_scraping.py",
-      "target": "asyncio.sleep"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 2415,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_search_page"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 2421,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_job_ids"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 2427,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_get_total_search_pages"
-    },
-    {
-      "canonical_owner": "global imported object, unaffected by relocation",
-      "kind": "imported_module_patch",
-      "line": 2433,
-      "migration_stage": null,
-      "path": "tests/test_scraping.py",
-      "target": "asyncio.sleep"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 2465,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_search_page"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 2466,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_job_ids"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 2472,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_get_total_search_pages"
-    },
-    {
-      "canonical_owner": "global imported object, unaffected by relocation",
-      "kind": "imported_module_patch",
-      "line": 2478,
-      "migration_stage": null,
-      "path": "tests/test_scraping.py",
-      "target": "asyncio.sleep"
-    },
-    {
-      "canonical_owner": "content.PageContentReader",
-      "kind": "private_patch_object",
-      "line": 2534,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_root_content"
-    },
-    {
-      "canonical_owner": "jobs.JobScraper -> facade.LinkedInExtractor._content",
-      "kind": "private_facade_access",
-      "line": 2535,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_content"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 2540,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_job_ids"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 2546,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_get_total_search_pages"
-    },
-    {
-      "canonical_owner": "jobs.JobScraper -> session.ScrapingSession.scroll_job_sidebar",
-      "kind": "string_patch",
-      "line": 2552,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar"
-    },
-    {
-      "canonical_owner": "jobs.JobScraper -> session.ScrapingSession.check_rate_limit",
-      "kind": "string_patch",
-      "line": 2557,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
-    },
-    {
-      "canonical_owner": "jobs.JobScraper -> session.ScrapingSession.dismiss_modal",
-      "kind": "string_patch",
-      "line": 2561,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
-    },
-    {
-      "canonical_owner": "global imported object, unaffected by relocation",
-      "kind": "imported_module_patch",
-      "line": 2566,
-      "migration_stage": null,
-      "path": "tests/test_scraping.py",
-      "target": "asyncio.sleep"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 2591,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_search_page"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 2596,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_job_ids"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 2602,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_get_total_search_pages"
-    },
-    {
-      "canonical_owner": "global imported object, unaffected by relocation",
-      "kind": "imported_module_patch",
-      "line": 2608,
-      "migration_stage": null,
-      "path": "tests/test_scraping.py",
-      "target": "asyncio.sleep"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_facade_access",
-      "line": 2632,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_job_ids"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 2648,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_search_page"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 2657,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_job_ids"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 2663,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_get_total_search_pages"
-    },
-    {
-      "canonical_owner": "global imported object, unaffected by relocation",
-      "kind": "imported_module_patch",
-      "line": 2669,
-      "migration_stage": null,
-      "path": "tests/test_scraping.py",
-      "target": "asyncio.sleep"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 2710,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_search_page"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 2711,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_job_ids"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 2717,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_get_total_search_pages"
-    },
-    {
-      "canonical_owner": "global imported object, unaffected by relocation",
-      "kind": "imported_module_patch",
-      "line": 2723,
-      "migration_stage": null,
-      "path": "tests/test_scraping.py",
-      "target": "asyncio.sleep"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 2749,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_search_page"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 2758,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_job_ids"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 2764,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_get_total_search_pages"
-    },
-    {
-      "canonical_owner": "global imported object, unaffected by relocation",
-      "kind": "imported_module_patch",
-      "line": 2770,
-      "migration_stage": null,
-      "path": "tests/test_scraping.py",
-      "target": "asyncio.sleep"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 2797,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_search_page"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 2808,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_job_ids"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 2814,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_get_total_search_pages"
-    },
-    {
-      "canonical_owner": "global imported object, unaffected by relocation",
-      "kind": "imported_module_patch",
-      "line": 2820,
-      "migration_stage": null,
-      "path": "tests/test_scraping.py",
-      "target": "asyncio.sleep"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 2843,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_search_page"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 2854,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_job_ids"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 2860,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_get_total_search_pages"
-    },
-    {
-      "canonical_owner": "global imported object, unaffected by relocation",
-      "kind": "imported_module_patch",
-      "line": 2866,
-      "migration_stage": null,
-      "path": "tests/test_scraping.py",
-      "target": "asyncio.sleep"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 2898,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_search_page"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 2903,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_job_ids"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 2909,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_get_total_search_pages"
-    },
-    {
-      "canonical_owner": "global imported object, unaffected by relocation",
-      "kind": "imported_module_patch",
-      "line": 2915,
-      "migration_stage": null,
-      "path": "tests/test_scraping.py",
-      "target": "asyncio.sleep"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 2939,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_search_page"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 2948,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_job_ids"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 2954,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_get_total_search_pages"
-    },
-    {
-      "canonical_owner": "global imported object, unaffected by relocation",
-      "kind": "imported_module_patch",
-      "line": 2960,
-      "migration_stage": null,
-      "path": "tests/test_scraping.py",
-      "target": "asyncio.sleep"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3018,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_search_page"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3019,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_job_ids"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3025,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_get_total_search_pages"
-    },
-    {
-      "canonical_owner": "global imported object, unaffected by relocation",
-      "kind": "imported_module_patch",
-      "line": 3031,
-      "migration_stage": null,
-      "path": "tests/test_scraping.py",
-      "target": "asyncio.sleep"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3065,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_search_page"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3071,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_job_ids"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3077,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_get_total_search_pages"
-    },
-    {
-      "canonical_owner": "global imported object, unaffected by relocation",
-      "kind": "imported_module_patch",
-      "line": 3083,
+      "line": 2258,
       "migration_stage": null,
       "path": "tests/test_scraping.py",
       "target": "asyncio.sleep"
@@ -2693,7 +2101,7 @@
     {
       "canonical_owner": "facade.LinkedInExtractor._scroll_seconds",
       "kind": "private_facade_access",
-      "line": 3123,
+      "line": 2298,
       "migration_stage": 14,
       "path": "tests/test_scraping.py",
       "target": "_scroll_seconds"
@@ -2701,639 +2109,639 @@
     {
       "canonical_owner": "jobs.JobScraper -> owner-local time module binding",
       "kind": "module_rebind_patch",
+      "line": 2309,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "time"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2310,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2311,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2317,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "global imported object, unaffected by relocation",
+      "kind": "imported_module_patch",
+      "line": 2323,
+      "migration_stage": null,
+      "path": "tests/test_scraping.py",
+      "target": "asyncio.sleep"
+    },
+    {
+      "canonical_owner": "jobs.JobScraper -> owner-local time module binding",
+      "kind": "module_rebind_patch",
+      "line": 2367,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "time"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2368,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2369,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2375,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "global imported object, unaffected by relocation",
+      "kind": "imported_module_patch",
+      "line": 2381,
+      "migration_stage": null,
+      "path": "tests/test_scraping.py",
+      "target": "asyncio.sleep"
+    },
+    {
+      "canonical_owner": "jobs.JobScraper -> owner-local time module binding",
+      "kind": "module_rebind_patch",
+      "line": 2431,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "time"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2432,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2433,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2439,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "global imported object, unaffected by relocation",
+      "kind": "imported_module_patch",
+      "line": 2445,
+      "migration_stage": null,
+      "path": "tests/test_scraping.py",
+      "target": "asyncio.sleep"
+    },
+    {
+      "canonical_owner": "jobs.JobScraper -> owner-local time module binding",
+      "kind": "module_rebind_patch",
+      "line": 2491,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "time"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2492,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2493,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2499,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "global imported object, unaffected by relocation",
+      "kind": "imported_module_patch",
+      "line": 2505,
+      "migration_stage": null,
+      "path": "tests/test_scraping.py",
+      "target": "asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2522,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2528,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2534,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "global imported object, unaffected by relocation",
+      "kind": "imported_module_patch",
+      "line": 2540,
+      "migration_stage": null,
+      "path": "tests/test_scraping.py",
+      "target": "asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2554,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2560,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2566,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "global imported object, unaffected by relocation",
+      "kind": "imported_module_patch",
+      "line": 2572,
+      "migration_stage": null,
+      "path": "tests/test_scraping.py",
+      "target": "asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2600,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2608,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2614,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "global imported object, unaffected by relocation",
+      "kind": "imported_module_patch",
+      "line": 2620,
+      "migration_stage": null,
+      "path": "tests/test_scraping.py",
+      "target": "asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2636,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2641,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2647,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "global imported object, unaffected by relocation",
+      "kind": "imported_module_patch",
+      "line": 2653,
+      "migration_stage": null,
+      "path": "tests/test_scraping.py",
+      "target": "asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2675,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2684,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2690,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "global imported object, unaffected by relocation",
+      "kind": "imported_module_patch",
+      "line": 2696,
+      "migration_stage": null,
+      "path": "tests/test_scraping.py",
+      "target": "asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2714,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2725,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2731,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "global imported object, unaffected by relocation",
+      "kind": "imported_module_patch",
+      "line": 2737,
+      "migration_stage": null,
+      "path": "tests/test_scraping.py",
+      "target": "asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2776,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2781,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2787,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "global imported object, unaffected by relocation",
+      "kind": "imported_module_patch",
+      "line": 2793,
+      "migration_stage": null,
+      "path": "tests/test_scraping.py",
+      "target": "asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2810,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2820,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2826,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "global imported object, unaffected by relocation",
+      "kind": "imported_module_patch",
+      "line": 2832,
+      "migration_stage": null,
+      "path": "tests/test_scraping.py",
+      "target": "asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader -> session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 2853,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader -> session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 2857,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader -> session.ScrapingSession.scroll_job_sidebar",
+      "kind": "string_patch",
+      "line": 2862,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_facade_access",
+      "line": 2868,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader -> session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 2899,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader -> session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
+      "line": 2903,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader -> session.ScrapingSession.scroll_job_sidebar",
+      "kind": "string_patch",
+      "line": 2908,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_facade_access",
+      "line": 2914,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2930,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2939,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2945,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "global imported object, unaffected by relocation",
+      "kind": "imported_module_patch",
+      "line": 2951,
+      "migration_stage": null,
+      "path": "tests/test_scraping.py",
+      "target": "asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2972,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2981,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 2987,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "global imported object, unaffected by relocation",
+      "kind": "imported_module_patch",
+      "line": 2993,
+      "migration_stage": null,
+      "path": "tests/test_scraping.py",
+      "target": "asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3010,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3016,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3022,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_get_total_search_pages"
+    },
+    {
+      "canonical_owner": "global imported object, unaffected by relocation",
+      "kind": "imported_module_patch",
+      "line": 3028,
+      "migration_stage": null,
+      "path": "tests/test_scraping.py",
+      "target": "asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3044,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3053,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "global imported object, unaffected by relocation",
+      "kind": "imported_module_patch",
+      "line": 3059,
+      "migration_stage": null,
+      "path": "tests/test_scraping.py",
+      "target": "asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3079,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_search_page"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader",
+      "kind": "private_patch_object",
+      "line": 3088,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "_extract_job_ids"
+    },
+    {
+      "canonical_owner": "global imported object, unaffected by relocation",
+      "kind": "imported_module_patch",
+      "line": 3094,
+      "migration_stage": null,
+      "path": "tests/test_scraping.py",
+      "target": "asyncio.sleep"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader -> session.ScrapingSession.check_rate_limit",
+      "kind": "string_patch",
+      "line": 3130,
+      "migration_stage": 9,
+      "path": "tests/test_scraping.py",
+      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
+    },
+    {
+      "canonical_owner": "job_pages.JobPageReader -> session.ScrapingSession.dismiss_modal",
+      "kind": "string_patch",
       "line": 3134,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "time"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3135,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_search_page"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3136,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_job_ids"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3142,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_get_total_search_pages"
-    },
-    {
-      "canonical_owner": "global imported object, unaffected by relocation",
-      "kind": "imported_module_patch",
-      "line": 3148,
-      "migration_stage": null,
-      "path": "tests/test_scraping.py",
-      "target": "asyncio.sleep"
-    },
-    {
-      "canonical_owner": "jobs.JobScraper -> owner-local time module binding",
-      "kind": "module_rebind_patch",
-      "line": 3192,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "time"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3193,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_search_page"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3194,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_job_ids"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3200,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_get_total_search_pages"
-    },
-    {
-      "canonical_owner": "global imported object, unaffected by relocation",
-      "kind": "imported_module_patch",
-      "line": 3206,
-      "migration_stage": null,
-      "path": "tests/test_scraping.py",
-      "target": "asyncio.sleep"
-    },
-    {
-      "canonical_owner": "jobs.JobScraper -> owner-local time module binding",
-      "kind": "module_rebind_patch",
-      "line": 3256,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "time"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3257,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_search_page"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3258,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_job_ids"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3264,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_get_total_search_pages"
-    },
-    {
-      "canonical_owner": "global imported object, unaffected by relocation",
-      "kind": "imported_module_patch",
-      "line": 3270,
-      "migration_stage": null,
-      "path": "tests/test_scraping.py",
-      "target": "asyncio.sleep"
-    },
-    {
-      "canonical_owner": "jobs.JobScraper -> owner-local time module binding",
-      "kind": "module_rebind_patch",
-      "line": 3316,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "time"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3317,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_search_page"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3318,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_job_ids"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3324,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_get_total_search_pages"
-    },
-    {
-      "canonical_owner": "global imported object, unaffected by relocation",
-      "kind": "imported_module_patch",
-      "line": 3330,
-      "migration_stage": null,
-      "path": "tests/test_scraping.py",
-      "target": "asyncio.sleep"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3347,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_search_page"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3353,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_job_ids"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3359,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_get_total_search_pages"
-    },
-    {
-      "canonical_owner": "global imported object, unaffected by relocation",
-      "kind": "imported_module_patch",
-      "line": 3365,
-      "migration_stage": null,
-      "path": "tests/test_scraping.py",
-      "target": "asyncio.sleep"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3379,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_search_page"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3385,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_job_ids"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3391,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_get_total_search_pages"
-    },
-    {
-      "canonical_owner": "global imported object, unaffected by relocation",
-      "kind": "imported_module_patch",
-      "line": 3397,
-      "migration_stage": null,
-      "path": "tests/test_scraping.py",
-      "target": "asyncio.sleep"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3425,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_search_page"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3433,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_job_ids"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3439,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_get_total_search_pages"
-    },
-    {
-      "canonical_owner": "global imported object, unaffected by relocation",
-      "kind": "imported_module_patch",
-      "line": 3445,
-      "migration_stage": null,
-      "path": "tests/test_scraping.py",
-      "target": "asyncio.sleep"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3461,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_search_page"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3466,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_job_ids"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3472,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_get_total_search_pages"
-    },
-    {
-      "canonical_owner": "global imported object, unaffected by relocation",
-      "kind": "imported_module_patch",
-      "line": 3478,
-      "migration_stage": null,
-      "path": "tests/test_scraping.py",
-      "target": "asyncio.sleep"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3500,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_search_page"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3509,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_job_ids"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3515,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_get_total_search_pages"
-    },
-    {
-      "canonical_owner": "global imported object, unaffected by relocation",
-      "kind": "imported_module_patch",
-      "line": 3521,
-      "migration_stage": null,
-      "path": "tests/test_scraping.py",
-      "target": "asyncio.sleep"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3539,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_search_page"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3550,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_job_ids"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3556,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_get_total_search_pages"
-    },
-    {
-      "canonical_owner": "global imported object, unaffected by relocation",
-      "kind": "imported_module_patch",
-      "line": 3562,
-      "migration_stage": null,
-      "path": "tests/test_scraping.py",
-      "target": "asyncio.sleep"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3601,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_search_page"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3606,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_job_ids"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3612,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_get_total_search_pages"
-    },
-    {
-      "canonical_owner": "global imported object, unaffected by relocation",
-      "kind": "imported_module_patch",
-      "line": 3618,
-      "migration_stage": null,
-      "path": "tests/test_scraping.py",
-      "target": "asyncio.sleep"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3635,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_search_page"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3645,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_job_ids"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3651,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_get_total_search_pages"
-    },
-    {
-      "canonical_owner": "global imported object, unaffected by relocation",
-      "kind": "imported_module_patch",
-      "line": 3657,
-      "migration_stage": null,
-      "path": "tests/test_scraping.py",
-      "target": "asyncio.sleep"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader -> session.ScrapingSession.check_rate_limit",
-      "kind": "string_patch",
-      "line": 3678,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader -> session.ScrapingSession.dismiss_modal",
-      "kind": "string_patch",
-      "line": 3682,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader -> session.ScrapingSession.scroll_job_sidebar",
-      "kind": "string_patch",
-      "line": 3687,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_facade_access",
-      "line": 3693,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_search_page"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader -> session.ScrapingSession.check_rate_limit",
-      "kind": "string_patch",
-      "line": 3724,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader -> session.ScrapingSession.dismiss_modal",
-      "kind": "string_patch",
-      "line": 3728,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader -> session.ScrapingSession.scroll_job_sidebar",
-      "kind": "string_patch",
-      "line": 3733,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_facade_access",
-      "line": 3739,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_search_page"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3755,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_search_page"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3764,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_job_ids"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3770,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_get_total_search_pages"
-    },
-    {
-      "canonical_owner": "global imported object, unaffected by relocation",
-      "kind": "imported_module_patch",
-      "line": 3776,
-      "migration_stage": null,
-      "path": "tests/test_scraping.py",
-      "target": "asyncio.sleep"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3797,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_search_page"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3806,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_job_ids"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3812,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_get_total_search_pages"
-    },
-    {
-      "canonical_owner": "global imported object, unaffected by relocation",
-      "kind": "imported_module_patch",
-      "line": 3818,
-      "migration_stage": null,
-      "path": "tests/test_scraping.py",
-      "target": "asyncio.sleep"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3835,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_search_page"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3841,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_job_ids"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3847,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_get_total_search_pages"
-    },
-    {
-      "canonical_owner": "global imported object, unaffected by relocation",
-      "kind": "imported_module_patch",
-      "line": 3853,
-      "migration_stage": null,
-      "path": "tests/test_scraping.py",
-      "target": "asyncio.sleep"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3869,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_search_page"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3878,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_job_ids"
-    },
-    {
-      "canonical_owner": "global imported object, unaffected by relocation",
-      "kind": "imported_module_patch",
-      "line": 3884,
-      "migration_stage": null,
-      "path": "tests/test_scraping.py",
-      "target": "asyncio.sleep"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3904,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_search_page"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader",
-      "kind": "private_patch_object",
-      "line": 3913,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_job_ids"
-    },
-    {
-      "canonical_owner": "global imported object, unaffected by relocation",
-      "kind": "imported_module_patch",
-      "line": 3919,
-      "migration_stage": null,
-      "path": "tests/test_scraping.py",
-      "target": "asyncio.sleep"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader -> session.ScrapingSession.check_rate_limit",
-      "kind": "string_patch",
-      "line": 3955,
-      "migration_stage": 9,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
-    },
-    {
-      "canonical_owner": "job_pages.JobPageReader -> session.ScrapingSession.dismiss_modal",
-      "kind": "string_patch",
-      "line": 3959,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
@@ -3341,7 +2749,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader -> session.ScrapingSession.scroll_body",
       "kind": "string_patch",
-      "line": 3964,
+      "line": 3139,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.scroll_to_bottom"
@@ -3349,7 +2757,7 @@
     {
       "canonical_owner": "content.PageContentReader",
       "kind": "private_patch_object",
-      "line": 3968,
+      "line": 3143,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_root_content"
@@ -3357,7 +2765,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader -> facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
-      "line": 3969,
+      "line": 3144,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_content"
@@ -3365,7 +2773,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_facade_access",
-      "line": 3979,
+      "line": 3154,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_saved_jobs_page"
@@ -3373,7 +2781,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader -> session.ScrapingSession.check_rate_limit",
       "kind": "string_patch",
-      "line": 4014,
+      "line": 3189,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
@@ -3381,7 +2789,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader -> session.ScrapingSession.dismiss_modal",
       "kind": "string_patch",
-      "line": 4018,
+      "line": 3193,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
@@ -3389,7 +2797,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader -> session.ScrapingSession.scroll_body",
       "kind": "string_patch",
-      "line": 4023,
+      "line": 3198,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.scroll_to_bottom"
@@ -3397,7 +2805,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_facade_access",
-      "line": 4033,
+      "line": 3208,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_saved_jobs_page"
@@ -3405,7 +2813,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4061,
+      "line": 3236,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_saved_jobs_page"
@@ -3413,7 +2821,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4067,
+      "line": 3242,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_job_ids"
@@ -3421,7 +2829,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4073,
+      "line": 3248,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_get_total_list_pages"
@@ -3429,7 +2837,7 @@
     {
       "canonical_owner": "global imported object, unaffected by relocation",
       "kind": "imported_module_patch",
-      "line": 4079,
+      "line": 3254,
       "migration_stage": null,
       "path": "tests/test_scraping.py",
       "target": "asyncio.sleep"
@@ -3437,7 +2845,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4101,
+      "line": 3276,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_saved_jobs_page"
@@ -3445,7 +2853,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4107,
+      "line": 3282,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_job_ids"
@@ -3453,7 +2861,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4113,
+      "line": 3288,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_get_total_list_pages"
@@ -3461,7 +2869,7 @@
     {
       "canonical_owner": "global imported object, unaffected by relocation",
       "kind": "imported_module_patch",
-      "line": 4119,
+      "line": 3294,
       "migration_stage": null,
       "path": "tests/test_scraping.py",
       "target": "asyncio.sleep"
@@ -3469,7 +2877,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4136,
+      "line": 3311,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_saved_jobs_page"
@@ -3477,7 +2885,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4145,
+      "line": 3320,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_job_ids"
@@ -3485,7 +2893,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4151,
+      "line": 3326,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_get_total_list_pages"
@@ -3493,7 +2901,7 @@
     {
       "canonical_owner": "global imported object, unaffected by relocation",
       "kind": "imported_module_patch",
-      "line": 4157,
+      "line": 3332,
       "migration_stage": null,
       "path": "tests/test_scraping.py",
       "target": "asyncio.sleep"
@@ -3501,7 +2909,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4173,
+      "line": 3348,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_saved_jobs_page"
@@ -3509,7 +2917,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4180,
+      "line": 3355,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_job_ids"
@@ -3517,7 +2925,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4186,
+      "line": 3361,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_get_total_list_pages"
@@ -3525,7 +2933,7 @@
     {
       "canonical_owner": "global imported object, unaffected by relocation",
       "kind": "imported_module_patch",
-      "line": 4192,
+      "line": 3367,
       "migration_stage": null,
       "path": "tests/test_scraping.py",
       "target": "asyncio.sleep"
@@ -3533,7 +2941,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4214,
+      "line": 3389,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_saved_jobs_page"
@@ -3541,7 +2949,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4217,
+      "line": 3392,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_job_ids"
@@ -3549,7 +2957,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4223,
+      "line": 3398,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_get_total_list_pages"
@@ -3557,7 +2965,7 @@
     {
       "canonical_owner": "global imported object, unaffected by relocation",
       "kind": "imported_module_patch",
-      "line": 4229,
+      "line": 3404,
       "migration_stage": null,
       "path": "tests/test_scraping.py",
       "target": "asyncio.sleep"
@@ -3565,7 +2973,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4247,
+      "line": 3422,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_saved_jobs_page"
@@ -3573,7 +2981,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4252,
+      "line": 3427,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_job_ids"
@@ -3581,7 +2989,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4258,
+      "line": 3433,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_get_total_list_pages"
@@ -3589,7 +2997,7 @@
     {
       "canonical_owner": "global imported object, unaffected by relocation",
       "kind": "imported_module_patch",
-      "line": 4264,
+      "line": 3439,
       "migration_stage": null,
       "path": "tests/test_scraping.py",
       "target": "asyncio.sleep"
@@ -3597,7 +3005,7 @@
     {
       "canonical_owner": "jobs.JobScraper -> session.ScrapingSession.check_rate_limit",
       "kind": "string_patch",
-      "line": 4290,
+      "line": 3465,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
@@ -3605,7 +3013,7 @@
     {
       "canonical_owner": "jobs.JobScraper -> session.ScrapingSession.dismiss_modal",
       "kind": "string_patch",
-      "line": 4294,
+      "line": 3469,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
@@ -3613,7 +3021,7 @@
     {
       "canonical_owner": "jobs.JobScraper -> session.ScrapingSession.check_rate_limit",
       "kind": "string_patch",
-      "line": 4339,
+      "line": 3514,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
@@ -3621,7 +3029,7 @@
     {
       "canonical_owner": "jobs.JobScraper -> session.ScrapingSession.dismiss_modal",
       "kind": "string_patch",
-      "line": 4343,
+      "line": 3518,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
@@ -3629,7 +3037,7 @@
     {
       "canonical_owner": "jobs.JobScraper -> session.ScrapingSession.scroll_body",
       "kind": "string_patch",
-      "line": 4348,
+      "line": 3523,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.scroll_to_bottom"
@@ -3637,7 +3045,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4367,
+      "line": 3542,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_saved_jobs_page"
@@ -3645,7 +3053,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4373,
+      "line": 3548,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_get_total_list_pages"
@@ -3653,7 +3061,7 @@
     {
       "canonical_owner": "global imported object, unaffected by relocation",
       "kind": "imported_module_patch",
-      "line": 4379,
+      "line": 3554,
       "migration_stage": null,
       "path": "tests/test_scraping.py",
       "target": "asyncio.sleep"
@@ -3661,7 +3069,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4394,
+      "line": 3569,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_saved_jobs_page"
@@ -3669,7 +3077,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4400,
+      "line": 3575,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_get_total_list_pages"
@@ -3677,7 +3085,7 @@
     {
       "canonical_owner": "global imported object, unaffected by relocation",
       "kind": "imported_module_patch",
-      "line": 4406,
+      "line": 3581,
       "migration_stage": null,
       "path": "tests/test_scraping.py",
       "target": "asyncio.sleep"
@@ -3685,7 +3093,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4427,
+      "line": 3602,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_saved_jobs_page"
@@ -3693,7 +3101,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4436,
+      "line": 3611,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_job_ids"
@@ -3701,7 +3109,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4442,
+      "line": 3617,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_get_total_list_pages"
@@ -3709,7 +3117,7 @@
     {
       "canonical_owner": "global imported object, unaffected by relocation",
       "kind": "imported_module_patch",
-      "line": 4448,
+      "line": 3623,
       "migration_stage": null,
       "path": "tests/test_scraping.py",
       "target": "asyncio.sleep"
@@ -3717,7 +3125,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4469,
+      "line": 3644,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_saved_jobs_page"
@@ -3725,7 +3133,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4474,
+      "line": 3649,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_job_ids"
@@ -3733,7 +3141,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4480,
+      "line": 3655,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_get_total_list_pages"
@@ -3741,7 +3149,7 @@
     {
       "canonical_owner": "global imported object, unaffected by relocation",
       "kind": "imported_module_patch",
-      "line": 4486,
+      "line": 3661,
       "migration_stage": null,
       "path": "tests/test_scraping.py",
       "target": "asyncio.sleep"
@@ -3749,7 +3157,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4509,
+      "line": 3684,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_saved_jobs_page"
@@ -3757,7 +3165,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4515,
+      "line": 3690,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_job_ids"
@@ -3765,7 +3173,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4521,
+      "line": 3696,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_get_total_list_pages"
@@ -3773,7 +3181,7 @@
     {
       "canonical_owner": "global imported object, unaffected by relocation",
       "kind": "imported_module_patch",
-      "line": 4527,
+      "line": 3702,
       "migration_stage": null,
       "path": "tests/test_scraping.py",
       "target": "asyncio.sleep"
@@ -3781,7 +3189,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4551,
+      "line": 3726,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_saved_jobs_page"
@@ -3789,7 +3197,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4557,
+      "line": 3732,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_job_ids"
@@ -3797,7 +3205,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4563,
+      "line": 3738,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_get_total_list_pages"
@@ -3805,7 +3213,7 @@
     {
       "canonical_owner": "global imported object, unaffected by relocation",
       "kind": "imported_module_patch",
-      "line": 4569,
+      "line": 3744,
       "migration_stage": null,
       "path": "tests/test_scraping.py",
       "target": "asyncio.sleep"
@@ -3813,7 +3221,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4589,
+      "line": 3764,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_saved_jobs_page"
@@ -3821,7 +3229,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4595,
+      "line": 3770,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_job_ids"
@@ -3829,7 +3237,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4601,
+      "line": 3776,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_get_total_list_pages"
@@ -3837,7 +3245,7 @@
     {
       "canonical_owner": "global imported object, unaffected by relocation",
       "kind": "imported_module_patch",
-      "line": 4607,
+      "line": 3782,
       "migration_stage": null,
       "path": "tests/test_scraping.py",
       "target": "asyncio.sleep"
@@ -3845,7 +3253,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4630,
+      "line": 3805,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_saved_jobs_page"
@@ -3853,7 +3261,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4636,
+      "line": 3811,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_job_ids"
@@ -3861,7 +3269,7 @@
     {
       "canonical_owner": "job_pages.JobPageReader",
       "kind": "private_patch_object",
-      "line": 4642,
+      "line": 3817,
       "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_get_total_list_pages"
@@ -3869,7 +3277,7 @@
     {
       "canonical_owner": "global imported object, unaffected by relocation",
       "kind": "imported_module_patch",
-      "line": 4648,
+      "line": 3823,
       "migration_stage": null,
       "path": "tests/test_scraping.py",
       "target": "asyncio.sleep"
@@ -3877,7 +3285,7 @@
     {
       "canonical_owner": "posts.PostSearch dependency",
       "kind": "public_patch_object",
-      "line": 4699,
+      "line": 3874,
       "migration_stage": 10,
       "path": "tests/test_scraping.py",
       "target": "extract_page"
@@ -3885,7 +3293,7 @@
     {
       "canonical_owner": "posts.PostSearch dependency",
       "kind": "public_patch_object",
-      "line": 4717,
+      "line": 3892,
       "migration_stage": 10,
       "path": "tests/test_scraping.py",
       "target": "extract_page"
@@ -3893,7 +3301,7 @@
     {
       "canonical_owner": "posts.PostSearch dependency",
       "kind": "public_patch_object",
-      "line": 4731,
+      "line": 3906,
       "migration_stage": 10,
       "path": "tests/test_scraping.py",
       "target": "extract_page"
@@ -3901,7 +3309,7 @@
     {
       "canonical_owner": "posts.PostSearch dependency",
       "kind": "public_patch_object",
-      "line": 4752,
+      "line": 3927,
       "migration_stage": 10,
       "path": "tests/test_scraping.py",
       "target": "extract_page"
@@ -3909,7 +3317,7 @@
     {
       "canonical_owner": "posts.PostSearch dependency",
       "kind": "public_patch_object",
-      "line": 4766,
+      "line": 3941,
       "migration_stage": 10,
       "path": "tests/test_scraping.py",
       "target": "extract_page"
@@ -3917,7 +3325,7 @@
     {
       "canonical_owner": "posts.PostSearch dependency",
       "kind": "public_patch_object",
-      "line": 4779,
+      "line": 3954,
       "migration_stage": 10,
       "path": "tests/test_scraping.py",
       "target": "extract_page"
@@ -3925,7 +3333,7 @@
     {
       "canonical_owner": "company.CompanyScraper dependency",
       "kind": "public_patch_object",
-      "line": 4808,
+      "line": 3983,
       "migration_stage": 8,
       "path": "tests/test_scraping.py",
       "target": "extract_page"
@@ -3933,7 +3341,7 @@
     {
       "canonical_owner": "global imported object, unaffected by relocation",
       "kind": "imported_module_patch",
-      "line": 4814,
+      "line": 3989,
       "migration_stage": null,
       "path": "tests/test_scraping.py",
       "target": "asyncio.sleep"
@@ -3941,7 +3349,7 @@
     {
       "canonical_owner": "message_sender.profile_urn_from_compose_url",
       "kind": "module_attribute",
-      "line": 4888,
+      "line": 4063,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_profile_urn_from_compose_url"
@@ -3949,7 +3357,7 @@
     {
       "canonical_owner": "message_sender.profile_path_from_url",
       "kind": "module_attribute",
-      "line": 4906,
+      "line": 4081,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_profile_path_from_url"
@@ -3957,7 +3365,7 @@
     {
       "canonical_owner": "message_sender.message_page_url_is_safe",
       "kind": "module_attribute",
-      "line": 4967,
+      "line": 4142,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_message_page_url_is_safe"
@@ -3965,7 +3373,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.check_rate_limit",
       "kind": "string_patch",
-      "line": 5002,
+      "line": 4177,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
@@ -3973,7 +3381,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.dismiss_modal",
       "kind": "string_patch",
-      "line": 5006,
+      "line": 4181,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
@@ -3981,7 +3389,7 @@
     {
       "canonical_owner": "conversations.ConversationReader",
       "kind": "private_patch_object",
-      "line": 5010,
+      "line": 4185,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_wait_for_main_text"
@@ -3989,7 +3397,7 @@
     {
       "canonical_owner": "conversations.ConversationReader",
       "kind": "private_patch_object",
-      "line": 5015,
+      "line": 4190,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_scroll_main_scrollable_region"
@@ -3997,7 +3405,7 @@
     {
       "canonical_owner": "content.PageContentReader",
       "kind": "private_patch_object",
-      "line": 5020,
+      "line": 4195,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_extract_root_content"
@@ -4005,7 +3413,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
-      "line": 5021,
+      "line": 4196,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_content"
@@ -4013,7 +3421,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> text.strip_linkedin_noise",
       "kind": "string_patch",
-      "line": 5029,
+      "line": 4204,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise"
@@ -4021,7 +3429,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> link_metadata.build_references",
       "kind": "string_patch",
-      "line": 5033,
+      "line": 4208,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.build_references"
@@ -4029,7 +3437,7 @@
     {
       "canonical_owner": "conversations.ConversationReader",
       "kind": "private_patch_object",
-      "line": 5037,
+      "line": 4212,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_extract_conversation_thread_refs"
@@ -4037,7 +3445,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.check_rate_limit",
       "kind": "string_patch",
-      "line": 5055,
+      "line": 4230,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
@@ -4045,7 +3453,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.dismiss_modal",
       "kind": "string_patch",
-      "line": 5059,
+      "line": 4234,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
@@ -4053,7 +3461,7 @@
     {
       "canonical_owner": "conversations.ConversationReader",
       "kind": "private_patch_object",
-      "line": 5063,
+      "line": 4238,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_wait_for_main_text"
@@ -4061,7 +3469,7 @@
     {
       "canonical_owner": "conversations.ConversationReader",
       "kind": "private_patch_object",
-      "line": 5064,
+      "line": 4239,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_scroll_main_scrollable_region"
@@ -4069,7 +3477,7 @@
     {
       "canonical_owner": "content.PageContentReader",
       "kind": "private_patch_object",
-      "line": 5067,
+      "line": 4242,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_extract_root_content"
@@ -4077,7 +3485,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
-      "line": 5068,
+      "line": 4243,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_content"
@@ -4085,7 +3493,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> text.strip_linkedin_noise",
       "kind": "string_patch",
-      "line": 5073,
+      "line": 4248,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise"
@@ -4093,7 +3501,7 @@
     {
       "canonical_owner": "conversations.ConversationReader",
       "kind": "private_patch_object",
-      "line": 5077,
+      "line": 4252,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_extract_conversation_thread_refs"
@@ -4101,7 +3509,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.check_rate_limit",
       "kind": "string_patch",
-      "line": 5107,
+      "line": 4282,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
@@ -4109,7 +3517,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.dismiss_modal",
       "kind": "string_patch",
-      "line": 5111,
+      "line": 4286,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
@@ -4117,7 +3525,7 @@
     {
       "canonical_owner": "conversations.ConversationReader",
       "kind": "private_patch_object",
-      "line": 5115,
+      "line": 4290,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_wait_for_main_text"
@@ -4125,7 +3533,7 @@
     {
       "canonical_owner": "conversations.ConversationReader",
       "kind": "private_patch_object",
-      "line": 5116,
+      "line": 4291,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_scroll_main_scrollable_region"
@@ -4133,7 +3541,7 @@
     {
       "canonical_owner": "content.PageContentReader",
       "kind": "private_patch_object",
-      "line": 5119,
+      "line": 4294,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_extract_root_content"
@@ -4141,7 +3549,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
-      "line": 5120,
+      "line": 4295,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_content"
@@ -4149,7 +3557,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> text.strip_linkedin_noise",
       "kind": "string_patch",
-      "line": 5128,
+      "line": 4303,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise"
@@ -4157,7 +3565,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> link_metadata.build_references",
       "kind": "string_patch",
-      "line": 5132,
+      "line": 4307,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.build_references"
@@ -4165,7 +3573,7 @@
     {
       "canonical_owner": "conversations.ConversationReader",
       "kind": "private_patch_object",
-      "line": 5136,
+      "line": 4311,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_extract_conversation_thread_refs"
@@ -4173,7 +3581,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.check_rate_limit",
       "kind": "string_patch",
-      "line": 5160,
+      "line": 4335,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
@@ -4181,7 +3589,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.dismiss_modal",
       "kind": "string_patch",
-      "line": 5164,
+      "line": 4339,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
@@ -4189,7 +3597,7 @@
     {
       "canonical_owner": "conversations.ConversationReader",
       "kind": "private_patch_object",
-      "line": 5168,
+      "line": 4343,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_wait_for_main_text"
@@ -4197,7 +3605,7 @@
     {
       "canonical_owner": "conversations.ConversationReader",
       "kind": "private_patch_object",
-      "line": 5169,
+      "line": 4344,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_scroll_main_scrollable_region"
@@ -4205,7 +3613,7 @@
     {
       "canonical_owner": "content.PageContentReader",
       "kind": "private_patch_object",
-      "line": 5172,
+      "line": 4347,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_extract_root_content"
@@ -4213,7 +3621,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
-      "line": 5173,
+      "line": 4348,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_content"
@@ -4221,7 +3629,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> text.strip_linkedin_noise",
       "kind": "string_patch",
-      "line": 5178,
+      "line": 4353,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise"
@@ -4229,7 +3637,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> link_metadata.build_references",
       "kind": "string_patch",
-      "line": 5182,
+      "line": 4357,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.build_references"
@@ -4237,7 +3645,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.check_rate_limit",
       "kind": "string_patch",
-      "line": 5206,
+      "line": 4381,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
@@ -4245,7 +3653,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.dismiss_modal",
       "kind": "string_patch",
-      "line": 5210,
+      "line": 4385,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
@@ -4253,7 +3661,7 @@
     {
       "canonical_owner": "conversations.ConversationReader",
       "kind": "private_patch_object",
-      "line": 5214,
+      "line": 4389,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_wait_for_main_text"
@@ -4261,7 +3669,7 @@
     {
       "canonical_owner": "conversations.ConversationReader",
       "kind": "private_patch_object",
-      "line": 5215,
+      "line": 4390,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_scroll_main_scrollable_region"
@@ -4269,7 +3677,7 @@
     {
       "canonical_owner": "content.PageContentReader",
       "kind": "private_patch_object",
-      "line": 5218,
+      "line": 4393,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_extract_root_content"
@@ -4277,7 +3685,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
-      "line": 5219,
+      "line": 4394,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_content"
@@ -4285,7 +3693,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> link_metadata.build_references",
       "kind": "string_patch",
-      "line": 5224,
+      "line": 4399,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.build_references"
@@ -4293,7 +3701,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.check_rate_limit",
       "kind": "string_patch",
-      "line": 5246,
+      "line": 4421,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
@@ -4301,7 +3709,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.dismiss_modal",
       "kind": "string_patch",
-      "line": 5250,
+      "line": 4425,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
@@ -4309,7 +3717,7 @@
     {
       "canonical_owner": "conversations.ConversationReader",
       "kind": "private_patch_object",
-      "line": 5254,
+      "line": 4429,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_wait_for_main_text"
@@ -4317,7 +3725,7 @@
     {
       "canonical_owner": "conversations.ConversationReader",
       "kind": "private_patch_object",
-      "line": 5255,
+      "line": 4430,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_scroll_main_scrollable_region"
@@ -4325,7 +3733,7 @@
     {
       "canonical_owner": "profile_page.ProfilePageReader",
       "kind": "private_patch_object",
-      "line": 5258,
+      "line": 4433,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_read_profile_display_name"
@@ -4333,7 +3741,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> facade.LinkedInExtractor._profile_page",
       "kind": "private_facade_access",
-      "line": 5259,
+      "line": 4434,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_profile_page"
@@ -4341,7 +3749,7 @@
     {
       "canonical_owner": "conversations.ConversationReader",
       "kind": "private_patch_object",
-      "line": 5264,
+      "line": 4439,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_resolve_conversation_thread_urls"
@@ -4349,7 +3757,7 @@
     {
       "canonical_owner": "content.PageContentReader",
       "kind": "private_patch_object",
-      "line": 5273,
+      "line": 4448,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_extract_root_content"
@@ -4357,7 +3765,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
-      "line": 5274,
+      "line": 4449,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_content"
@@ -4365,7 +3773,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> text.strip_linkedin_noise",
       "kind": "string_patch",
-      "line": 5279,
+      "line": 4454,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise"
@@ -4373,7 +3781,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> link_metadata.build_references",
       "kind": "string_patch",
-      "line": 5283,
+      "line": 4458,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.build_references"
@@ -4381,7 +3789,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.check_rate_limit",
       "kind": "string_patch",
-      "line": 5304,
+      "line": 4479,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
@@ -4389,7 +3797,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.dismiss_modal",
       "kind": "string_patch",
-      "line": 5308,
+      "line": 4483,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
@@ -4397,7 +3805,7 @@
     {
       "canonical_owner": "conversations.ConversationReader",
       "kind": "private_patch_object",
-      "line": 5312,
+      "line": 4487,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_wait_for_main_text"
@@ -4405,7 +3813,7 @@
     {
       "canonical_owner": "conversations.ConversationReader",
       "kind": "private_patch_object",
-      "line": 5313,
+      "line": 4488,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_scroll_main_scrollable_region"
@@ -4413,7 +3821,7 @@
     {
       "canonical_owner": "profile_page.ProfilePageReader",
       "kind": "private_patch_object",
-      "line": 5316,
+      "line": 4491,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_read_profile_display_name"
@@ -4421,7 +3829,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> facade.LinkedInExtractor._profile_page",
       "kind": "private_facade_access",
-      "line": 5317,
+      "line": 4492,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_profile_page"
@@ -4429,7 +3837,7 @@
     {
       "canonical_owner": "conversations.ConversationReader",
       "kind": "private_patch_object",
-      "line": 5322,
+      "line": 4497,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_resolve_conversation_thread_urls"
@@ -4437,7 +3845,7 @@
     {
       "canonical_owner": "content.PageContentReader",
       "kind": "private_patch_object",
-      "line": 5331,
+      "line": 4506,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_extract_root_content"
@@ -4445,7 +3853,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
-      "line": 5332,
+      "line": 4507,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_content"
@@ -4453,7 +3861,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> text.strip_linkedin_noise",
       "kind": "string_patch",
-      "line": 5337,
+      "line": 4512,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise"
@@ -4461,7 +3869,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> link_metadata.build_references",
       "kind": "string_patch",
-      "line": 5341,
+      "line": 4516,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.build_references"
@@ -4469,7 +3877,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.check_rate_limit",
       "kind": "string_patch",
-      "line": 5361,
+      "line": 4536,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
@@ -4477,7 +3885,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.dismiss_modal",
       "kind": "string_patch",
-      "line": 5365,
+      "line": 4540,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
@@ -4485,7 +3893,7 @@
     {
       "canonical_owner": "profile_page.ProfilePageReader",
       "kind": "private_patch_object",
-      "line": 5369,
+      "line": 4544,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_read_profile_display_name"
@@ -4493,7 +3901,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> facade.LinkedInExtractor._profile_page",
       "kind": "private_facade_access",
-      "line": 5370,
+      "line": 4545,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_profile_page"
@@ -4501,7 +3909,7 @@
     {
       "canonical_owner": "conversations.ConversationReader",
       "kind": "private_patch_object",
-      "line": 5375,
+      "line": 4550,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_resolve_conversation_thread_urls"
@@ -4509,7 +3917,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.check_rate_limit",
       "kind": "string_patch",
-      "line": 5393,
+      "line": 4568,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
@@ -4517,7 +3925,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.dismiss_modal",
       "kind": "string_patch",
-      "line": 5397,
+      "line": 4572,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
@@ -4525,7 +3933,7 @@
     {
       "canonical_owner": "profile_page.ProfilePageReader",
       "kind": "private_patch_object",
-      "line": 5401,
+      "line": 4576,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_read_profile_display_name"
@@ -4533,7 +3941,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> facade.LinkedInExtractor._profile_page",
       "kind": "private_facade_access",
-      "line": 5402,
+      "line": 4577,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_profile_page"
@@ -4541,7 +3949,7 @@
     {
       "canonical_owner": "conversations.ConversationReader",
       "kind": "private_patch_object",
-      "line": 5407,
+      "line": 4582,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_resolve_conversation_thread_urls"
@@ -4549,7 +3957,7 @@
     {
       "canonical_owner": "conversations.strip_select_conversation_prefix",
       "kind": "private_facade_access",
-      "line": 5424,
+      "line": 4599,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_strip_select_conversation_prefix"
@@ -4557,7 +3965,7 @@
     {
       "canonical_owner": "conversations.strip_select_conversation_prefix",
       "kind": "private_facade_access",
-      "line": 5432,
+      "line": 4607,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_strip_select_conversation_prefix"
@@ -4565,7 +3973,7 @@
     {
       "canonical_owner": "conversations.strip_select_conversation_prefix",
       "kind": "private_facade_access",
-      "line": 5442,
+      "line": 4617,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_strip_select_conversation_prefix"
@@ -4573,7 +3981,7 @@
     {
       "canonical_owner": "conversations.strip_select_conversation_prefix",
       "kind": "private_facade_access",
-      "line": 5449,
+      "line": 4624,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_strip_select_conversation_prefix"
@@ -4581,7 +3989,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.check_rate_limit",
       "kind": "string_patch",
-      "line": 5480,
+      "line": 4655,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
@@ -4589,7 +3997,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.dismiss_modal",
       "kind": "string_patch",
-      "line": 5484,
+      "line": 4659,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
@@ -4597,7 +4005,7 @@
     {
       "canonical_owner": "conversations.ConversationReader",
       "kind": "private_patch_object",
-      "line": 5488,
+      "line": 4663,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_wait_for_main_text"
@@ -4605,7 +4013,7 @@
     {
       "canonical_owner": "conversations.ConversationReader",
       "kind": "private_patch_object",
-      "line": 5489,
+      "line": 4664,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_scroll_main_scrollable_region"
@@ -4613,7 +4021,7 @@
     {
       "canonical_owner": "conversations.ConversationReader",
       "kind": "private_patch_object",
-      "line": 5492,
+      "line": 4667,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_extract_conversation_thread_refs"
@@ -4621,7 +4029,7 @@
     {
       "canonical_owner": "conversations.ConversationReader",
       "kind": "private_facade_access",
-      "line": 5499,
+      "line": 4674,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_resolve_conversation_thread_urls"
@@ -4629,7 +4037,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.check_rate_limit",
       "kind": "string_patch",
-      "line": 5523,
+      "line": 4698,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
@@ -4637,7 +4045,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.dismiss_modal",
       "kind": "string_patch",
-      "line": 5527,
+      "line": 4702,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
@@ -4645,7 +4053,7 @@
     {
       "canonical_owner": "conversations.ConversationReader",
       "kind": "private_patch_object",
-      "line": 5531,
+      "line": 4706,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_wait_for_main_text"
@@ -4653,7 +4061,7 @@
     {
       "canonical_owner": "conversations.ConversationReader",
       "kind": "private_patch_object",
-      "line": 5532,
+      "line": 4707,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_scroll_main_scrollable_region"
@@ -4661,7 +4069,7 @@
     {
       "canonical_owner": "conversations.ConversationReader",
       "kind": "private_patch_object",
-      "line": 5535,
+      "line": 4710,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_extract_conversation_thread_refs"
@@ -4669,7 +4077,7 @@
     {
       "canonical_owner": "conversations.ConversationReader",
       "kind": "private_facade_access",
-      "line": 5537,
+      "line": 4712,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_resolve_conversation_thread_urls"
@@ -4677,7 +4085,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.check_rate_limit",
       "kind": "string_patch",
-      "line": 5565,
+      "line": 4740,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
@@ -4685,7 +4093,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.dismiss_modal",
       "kind": "string_patch",
-      "line": 5569,
+      "line": 4744,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
@@ -4693,7 +4101,7 @@
     {
       "canonical_owner": "conversations.ConversationReader",
       "kind": "private_patch_object",
-      "line": 5573,
+      "line": 4748,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_wait_for_main_text"
@@ -4701,7 +4109,7 @@
     {
       "canonical_owner": "conversations.ConversationReader",
       "kind": "private_patch_object",
-      "line": 5574,
+      "line": 4749,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_scroll_main_scrollable_region"
@@ -4709,7 +4117,7 @@
     {
       "canonical_owner": "conversations.ConversationReader",
       "kind": "private_patch_object",
-      "line": 5577,
+      "line": 4752,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_extract_conversation_thread_refs"
@@ -4717,7 +4125,7 @@
     {
       "canonical_owner": "conversations.ConversationReader",
       "kind": "private_facade_access",
-      "line": 5579,
+      "line": 4754,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_resolve_conversation_thread_urls"
@@ -4725,7 +4133,7 @@
     {
       "canonical_owner": "conversations.ConversationReader",
       "kind": "private_facade_access",
-      "line": 5603,
+      "line": 4778,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_extract_conversation_thread_refs"
@@ -4733,7 +4141,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.check_rate_limit",
       "kind": "string_patch",
-      "line": 5618,
+      "line": 4793,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
@@ -4741,7 +4149,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.dismiss_modal",
       "kind": "string_patch",
-      "line": 5622,
+      "line": 4797,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
@@ -4749,7 +4157,7 @@
     {
       "canonical_owner": "conversations.ConversationReader",
       "kind": "private_patch_object",
-      "line": 5626,
+      "line": 4801,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_wait_for_main_text"
@@ -4757,7 +4165,7 @@
     {
       "canonical_owner": "content.PageContentReader",
       "kind": "private_patch_object",
-      "line": 5627,
+      "line": 4802,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_extract_root_content"
@@ -4765,7 +4173,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
-      "line": 5628,
+      "line": 4803,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_content"
@@ -4773,7 +4181,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> text.strip_linkedin_noise",
       "kind": "string_patch",
-      "line": 5633,
+      "line": 4808,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise"
@@ -4781,7 +4189,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> link_metadata.build_references",
       "kind": "string_patch",
-      "line": 5637,
+      "line": 4812,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.build_references"
@@ -4789,7 +4197,7 @@
     {
       "canonical_owner": "conversations.ConversationReader",
       "kind": "private_patch_object",
-      "line": 5641,
+      "line": 4816,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_extract_conversation_thread_refs"
@@ -4797,7 +4205,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.check_rate_limit",
       "kind": "string_patch",
-      "line": 5678,
+      "line": 4853,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
@@ -4805,7 +4213,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.dismiss_modal",
       "kind": "string_patch",
-      "line": 5682,
+      "line": 4857,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
@@ -4813,7 +4221,7 @@
     {
       "canonical_owner": "conversations.ConversationReader",
       "kind": "private_patch_object",
-      "line": 5686,
+      "line": 4861,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_wait_for_main_text"
@@ -4821,7 +4229,7 @@
     {
       "canonical_owner": "content.PageContentReader",
       "kind": "private_patch_object",
-      "line": 5687,
+      "line": 4862,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_extract_root_content"
@@ -4829,7 +4237,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
-      "line": 5688,
+      "line": 4863,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_content"
@@ -4837,7 +4245,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> text.strip_linkedin_noise",
       "kind": "string_patch",
-      "line": 5693,
+      "line": 4868,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise"
@@ -4845,7 +4253,7 @@
     {
       "canonical_owner": "conversations.ConversationReader -> link_metadata.build_references",
       "kind": "string_patch",
-      "line": 5697,
+      "line": 4872,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.build_references"
@@ -4853,7 +4261,7 @@
     {
       "canonical_owner": "conversations.ConversationReader",
       "kind": "private_patch_object",
-      "line": 5701,
+      "line": 4876,
       "migration_stage": 11,
       "path": "tests/test_scraping.py",
       "target": "_extract_conversation_thread_refs"
@@ -4861,7 +4269,7 @@
     {
       "canonical_owner": "message_sender.MessageSender -> session.ScrapingSession.check_rate_limit",
       "kind": "string_patch",
-      "line": 5788,
+      "line": 4963,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
@@ -4869,7 +4277,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 5792,
+      "line": 4967,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_read_profile_message_target"
@@ -4877,7 +4285,7 @@
     {
       "canonical_owner": "message_sender.ProfileMessageTargetResolution",
       "kind": "module_attribute",
-      "line": 5796,
+      "line": 4971,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_ProfileMessageTargetResolution"
@@ -4885,7 +4293,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 5800,
+      "line": 4975,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_wait_for_message_surface"
@@ -4893,7 +4301,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 5803,
+      "line": 4978,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_read_message_composer_state"
@@ -4901,7 +4309,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 5806,
+      "line": 4981,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_focus_verified_message_editor"
@@ -4909,7 +4317,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 5811,
+      "line": 4986,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_submit_verified_message"
@@ -4917,7 +4325,7 @@
     {
       "canonical_owner": "message_sender.MessageSender -> session.ScrapingSession.check_rate_limit",
       "kind": "string_patch",
-      "line": 5843,
+      "line": 5018,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
@@ -4925,7 +4333,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 5847,
+      "line": 5022,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_read_profile_message_target"
@@ -4933,7 +4341,7 @@
     {
       "canonical_owner": "message_sender.ProfileMessageTargetResolution",
       "kind": "module_attribute",
-      "line": 5851,
+      "line": 5026,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_ProfileMessageTargetResolution"
@@ -4941,7 +4349,7 @@
     {
       "canonical_owner": "message_sender.ProfileMessageTarget",
       "kind": "module_attribute",
-      "line": 5864,
+      "line": 5039,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_ProfileMessageTarget"
@@ -4949,7 +4357,7 @@
     {
       "canonical_owner": "message_sender.MessageSender -> session.ScrapingSession.check_rate_limit",
       "kind": "string_patch",
-      "line": 5915,
+      "line": 5090,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
@@ -4957,7 +4365,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 5919,
+      "line": 5094,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_read_profile_message_target"
@@ -4965,7 +4373,7 @@
     {
       "canonical_owner": "message_sender.ProfileMessageTargetResolution",
       "kind": "module_attribute",
-      "line": 5923,
+      "line": 5098,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_ProfileMessageTargetResolution"
@@ -4973,7 +4381,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 5927,
+      "line": 5102,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_wait_for_message_surface"
@@ -4981,7 +4389,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 5933,
+      "line": 5108,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_read_message_composer_state"
@@ -4989,7 +4397,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 5946,
+      "line": 5121,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_write_verified_message"
@@ -4997,7 +4405,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 5952,
+      "line": 5127,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_submit_verified_message"
@@ -5005,7 +4413,7 @@
     {
       "canonical_owner": "global imported object, unaffected by relocation",
       "kind": "imported_module_patch",
-      "line": 5958,
+      "line": 5133,
       "migration_stage": null,
       "path": "tests/test_scraping.py",
       "target": "asyncio.sleep"
@@ -5013,7 +4421,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 5962,
+      "line": 5137,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_prepare_message_confirmation"
@@ -5021,7 +4429,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 5968,
+      "line": 5143,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_message_send_confirmed"
@@ -5029,7 +4437,7 @@
     {
       "canonical_owner": "message_sender.MessageSender -> session.ScrapingSession.check_rate_limit",
       "kind": "string_patch",
-      "line": 6006,
+      "line": 5181,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
@@ -5037,7 +4445,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 6010,
+      "line": 5185,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_read_profile_message_target"
@@ -5045,7 +4453,7 @@
     {
       "canonical_owner": "message_sender.ProfileMessageTargetResolution",
       "kind": "module_attribute",
-      "line": 6014,
+      "line": 5189,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_ProfileMessageTargetResolution"
@@ -5053,7 +4461,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 6195,
+      "line": 5370,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_resolve_message_owner"
@@ -5061,7 +4469,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 6341,
+      "line": 5516,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_prepare_message_confirmation"
@@ -5069,7 +4477,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 6347,
+      "line": 5522,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_message_send_confirmed"
@@ -5077,7 +4485,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 6420,
+      "line": 5595,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_wait_for_verified_submit"
@@ -5085,7 +4493,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 6426,
+      "line": 5601,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_cleanup_owned_message"
@@ -5093,7 +4501,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 6526,
+      "line": 5701,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_write_verified_message"
@@ -5101,7 +4509,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 6532,
+      "line": 5707,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_submit_verified_message"
@@ -5109,7 +4517,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 6539,
+      "line": 5714,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_prepare_message_confirmation"
@@ -5117,7 +4525,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 6545,
+      "line": 5720,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_message_send_confirmed"
@@ -5125,7 +4533,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 6580,
+      "line": 5755,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_message_send_confirmed"
@@ -5133,7 +4541,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 6705,
+      "line": 5880,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_dispose_message_confirmation"
@@ -5141,7 +4549,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 6711,
+      "line": 5886,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_dispose_message_owner"
@@ -5149,7 +4557,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 6762,
+      "line": 5937,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_prepare_message_confirmation"
@@ -5157,7 +4565,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 6768,
+      "line": 5943,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_message_send_confirmed"
@@ -5165,7 +4573,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_facade_access",
-      "line": 6800,
+      "line": 5975,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_resolve_message_compose_box"
@@ -5173,7 +4581,7 @@
     {
       "canonical_owner": "message_sender.MESSAGE_COMPOSE_SELECTOR",
       "kind": "module_attribute",
-      "line": 6803,
+      "line": 5978,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_MESSAGING_COMPOSE_SELECTOR"
@@ -5181,7 +4589,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_facade_access",
-      "line": 6825,
+      "line": 6000,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_resolve_message_owner"
@@ -5189,7 +4597,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_facade_access",
-      "line": 6850,
+      "line": 6025,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_resolve_message_owner"
@@ -5197,7 +4605,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_facade_access",
-      "line": 6862,
+      "line": 6037,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_dispose_message_owner"
@@ -5205,7 +4613,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_facade_access",
-      "line": 6872,
+      "line": 6047,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_prepare_message_confirmation"
@@ -5213,7 +4621,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_facade_access",
-      "line": 6894,
+      "line": 6069,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_prepare_message_confirmation"
@@ -5221,7 +4629,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_facade_access",
-      "line": 6906,
+      "line": 6081,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_message_send_confirmed"
@@ -5229,7 +4637,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_facade_access",
-      "line": 6939,
+      "line": 6114,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_message_send_confirmed"
@@ -5237,26 +4645,10 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_facade_access",
-      "line": 6953,
+      "line": 6128,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_dispose_message_confirmation"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions dependency",
-      "kind": "public_patch_object",
-      "line": 7007,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "scrape_person"
-    },
-    {
-      "canonical_owner": "connection_actions.ConnectionActions",
-      "kind": "private_patch_object",
-      "line": 7013,
-      "migration_stage": 7,
-      "path": "tests/test_scraping.py",
-      "target": "_read_action_signals"
     },
     {
       "canonical_owner": "facade.LinkedInExtractor",

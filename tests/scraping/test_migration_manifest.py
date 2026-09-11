@@ -288,14 +288,21 @@ def test_public_facade_patches_follow_each_calling_workflow():
     assert {
         seam["migration_stage"] for seam in public if seam["target"] == "extract_page"
     } == {8, 9, 10}
-    assert {
-        seam["migration_stage"] for seam in public if seam["target"] == "scrape_person"
-    } == {7}
-    assert {
-        seam["migration_stage"]
-        for seam in public
-        if seam["target"] == "click_button_by_text"
-    } == {7}
+    # Enumerated rather than checked one target at a time, so a public patch
+    # arriving for a workflow nobody expected fails here instead of passing
+    # unnoticed.
+    assert {seam["target"] for seam in public} == {"extract_page", "search_companies"}
+    # Both of the stage-7 targets were `connect_with_person` tests and closed
+    # by moving to the owner: it takes its one main-profile read as an injected
+    # callable, and it holds no click-by-text helper at all. The table keeps
+    # their entries so a patch that reappears is dated rather than unresolved.
+    assert not [seam for seam in public if seam["target"] == "scrape_person"]
+    assert not [seam for seam in public if seam["target"] == "click_button_by_text"]
+    assert migration._WORKFLOW_OWNERS["scrape_person"] == ("person.PersonScraper", 6)
+    assert migration._WORKFLOW_OWNERS["click_button_by_text"] == (
+        "facade.LinkedInExtractor compatibility method",
+        14,
+    )
 
 
 def test_permanent_aliases_never_go_obsolete():
@@ -339,7 +346,7 @@ def test_checker_rejects_obsolete_seams_at_their_migration_stage():
     # completed stage are closed by definition, so an override there proves
     # nothing; raise this number as each stage lands.
     result = subprocess.run(
-        [sys.executable, str(CHECKER), "--check", "--stage", "7"],
+        [sys.executable, str(CHECKER), "--check", "--stage", "8"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -347,16 +354,18 @@ def test_checker_rejects_obsolete_seams_at_their_migration_stage():
     )
 
     assert result.returncode == 1
-    assert "obsolete at stage 7:" in result.stderr
+    assert "obsolete at stage 8:" in result.stderr
     assert "public_patch_object" in result.stderr
     assert "private_patch_object" in result.stderr
     # Every direct read of an extractor module attribute aimed at the feed
     # drain moved with the test that held it, so no override below stage 9 can
     # surface one. A feed test still reaching back through the facade module
-    # would show up here. The same now holds for `string_patch`: the person
-    # workflow held the last one below stage 8.
+    # would show up here.
     assert "module_attribute" not in result.stderr
-    assert "string_patch" not in result.stderr
+    # `string_patch` runs the other way: the person workflow held the last one
+    # below stage 8, and the three the company workflow drives sit at exactly
+    # 8, so raising this override past the connection stage brought them back.
+    assert "string_patch" in result.stderr
 
 
 def test_checkers_offer_no_fixture_update_mode():
@@ -982,7 +991,7 @@ def test_manifest_includes_extractor_access_from_nested_closure():
         for seam in accesses
     } == {
         (590, "facade.LinkedInExtractor._scroll_seconds", 14),
-        (3123, "facade.LinkedInExtractor._scroll_seconds", 14),
+        (2298, "facade.LinkedInExtractor._scroll_seconds", 14),
     }
 
 
@@ -1414,10 +1423,21 @@ def test_direct_private_helper_calls_and_stage_gate_are_inventoried():
     ]
     assert {
         (seam["canonical_owner"], seam["migration_stage"]) for seam in direct_privates
-    } >= {
-        ("connection_actions.ACTION_SIGNALS_JS", 7),
-        ("job_pages.JOB_IDS_JS", 9),
-    }
+    } >= {("job_pages.JOB_IDS_JS", 9)}
+    # The two action-signal programs were the stage-7 half of that pair. They
+    # moved with their owner and the DOM test imports them from
+    # `connection_actions`, which is no seam at all. Closed by relocating the
+    # imports rather than by dropping the entries: an import back through the
+    # facade has to be dated, not fail closed as unknown.
+    assert not [
+        seam
+        for seam in current["seams"]
+        if seam["target"] in {"_ACTION_SIGNALS_JS", "_CLICK_INCOMING_ACCEPT_JS"}
+    ]
+    assert migration._IMPORT_OWNERS["_ACTION_SIGNALS_JS"] == (
+        "connection_actions.ACTION_SIGNALS_JS",
+        7,
+    )
 
     result = subprocess.run(
         [sys.executable, str(CHECKER), "--check", "--stage", "12"],
