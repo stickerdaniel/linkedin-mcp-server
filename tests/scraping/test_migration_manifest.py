@@ -1585,7 +1585,7 @@ def _reach_through(statement: str) -> str:
 from unittest.mock import patch
 from linkedin_mcp_server.scraping.extractor import LinkedInExtractor
 
-async def test_shape(page, replacement, monkeypatch, arguments, pair, thing):
+async def test_shape(page, replacement, monkeypatch, arguments, pair, thing, flag):
     extractor = LinkedInExtractor(page)
     {statement}
     await extractor.scrape_person("ada")
@@ -1628,13 +1628,41 @@ async def test_shape(page, replacement, monkeypatch, arguments, pair, thing):
             "extractor._capture._reader.made_up = replacement",
             r"extractor\._capture\._reader: unresolved attribute assignment target",
         ),
+        (
+            "extractor._capture._reader.made_up: object = replacement",
+            r"extractor\._capture\._reader: unresolved attribute assignment target",
+        ),
+        (
+            "monkeypatch.setattr()",
+            r"monkeypatch\.setattr\(\): unresolved setattr arguments",
+        ),
+        (
+            "monkeypatch.setattr(*arguments)",
+            r"monkeypatch\.setattr\(\*arguments\): unresolved setattr arguments",
+        ),
+        (
+            "monkeypatch.setattr(**arguments)",
+            r"monkeypatch\.setattr\(\*\*arguments\): unresolved setattr arguments",
+        ),
+        (
+            "monkeypatch.setattr(extractor._capture)",
+            r"extractor\._capture: unresolved setattr target",
+        ),
+        (
+            "monkeypatch.setattr(target=extractor._capture, value=replacement)",
+            r"extractor\._capture: unresolved setattr target",
+        ),
     ],
 )
 def test_unresolvable_replacement_targets_name_their_call_site(statement, message):
     # Each of these replaces a name on something the reader cannot reduce to a
-    # collaborator, so nothing proves the patch intercepts the implementation.
-    # A chain of `if ...: return` blocks that simply ends answers "not a seam"
-    # to exactly that, which is indistinguishable from a foreign object.
+    # collaborator, or hides both ends of the replacement behind a shape it
+    # cannot take apart, so nothing proves the patch intercepts the
+    # implementation. A chain of `if ...: return` blocks that simply ends
+    # answers "not a seam" to exactly that, which is indistinguishable from a
+    # foreign object. The `setattr` arity gates were the last two such chains:
+    # both the keyword form and a call short of its member name walked past
+    # them without a word.
     with pytest.raises(
         migration.UnresolvedSeamError, match=rf"synthetic_inventory\.py:7 .*{message}"
     ):
@@ -1647,20 +1675,31 @@ def test_unresolvable_replacement_targets_name_their_call_site(statement, messag
         ('cap = extractor._capture\n    patch.object(cap, "{name}", replacement)', 8),
         ('patch.object(cap := extractor._capture, "{name}", replacement)', 7),
         (
+            '(cap := extractor._capture)\n    patch.object(cap, "{name}", replacement)',
+            8,
+        ),
+        (
             "patch.object(target=extractor._capture, "
             'attribute="{name}", new=replacement)',
             7,
         ),
         ('monkeypatch.setattr(extractor._capture, "{name}", replacement)', 7),
+        (
+            "monkeypatch.setattr(target=extractor._capture, "
+            'name="{name}", value=replacement)',
+            7,
+        ),
         ('setattr(extractor._capture, "{name}", replacement)', 7),
         ("extractor._capture.{name} = replacement", 7),
+        ("extractor._capture.{name}: object = replacement", 7),
     ],
 )
 def test_every_reach_through_shape_lands_on_the_collaborator(statement, line):
-    # An alias, a walrus, the keyword form and all three `setattr` spellings
-    # reach the same collaborator as `patch.object(extractor._capture, ...)`.
-    # A shape that produced no seam also produced no error, so a name that has
-    # never existed on `SectionCapture` read as a passing test.
+    # An alias, a walrus, both keyword forms, all three `setattr` spellings and
+    # an assignment with or without an annotation reach the same collaborator
+    # as `patch.object(extractor._capture, ...)`. A shape that produced no seam
+    # also produced no error, so a name that has never existed on
+    # `SectionCapture` read as a passing test.
     seams = _scan_synthetic(_reach_through(statement.format(name="_extract_overlay")))
 
     assert [
@@ -1675,6 +1714,99 @@ def test_every_reach_through_shape_lands_on_the_collaborator(statement, line):
         r"unknown capture\.SectionCapture patch",
     ):
         _scan_synthetic(_reach_through(statement.format(name="made_up")))
+
+
+def test_an_annotation_without_a_value_replaces_nothing():
+    # `owner.name: T` declares a type and assigns nothing, so there is no
+    # replacement to record and no member to validate. Reading it as a patch
+    # would refuse a name the file never claims exists, while the reach-through
+    # above it stays on the record either way.
+    seams = _scan_synthetic(_reach_through("extractor._capture.made_up: object"))
+
+    assert not [seam for seam in seams if seam.kind.endswith("_patch_object")]
+    assert [seam.target for seam in seams if seam.kind == "private_facade_access"] == [
+        "_capture"
+    ]
+
+
+@pytest.mark.parametrize(
+    "rebinding",
+    [
+        "cap = thing",
+        "cap, pair = thing",
+        "cap += thing",
+        "(cap := thing)",
+        "for cap in thing:\n        pass",
+        "with thing as cap:\n        pass",
+    ],
+)
+def test_a_rebound_alias_stops_naming_the_collaborator(rebinding):
+    # `cap` holds the reach-through only until the next binding, whichever
+    # spelling makes it. A map collected over the whole function keeps
+    # answering `_capture` for every later use, which books a patch on a
+    # foreign object as a `SectionCapture` seam and refuses an unknown member
+    # of it by name. That is the safer direction of the two, and still wrong:
+    # one false failure here blocks every stage behind it.
+    seams = _scan_synthetic(
+        _reach_through(
+            "cap = extractor._capture\n"
+            f"    {rebinding}\n"
+            '    patch.object(cap, "_extract_overlay", replacement)'
+        )
+    )
+
+    assert not [seam for seam in seams if seam.kind.endswith("_patch_object")]
+
+
+def test_an_alias_bound_after_a_foreign_one_still_resolves():
+    # The retirement has to follow the order the statements are written in
+    # rather than switch the alias off, or the shape that motivated the alias
+    # stops resolving along with the stale answer.
+    seams = _scan_synthetic(
+        _reach_through(
+            "cap = thing\n"
+            "    cap = extractor._capture\n"
+            '    patch.object(cap, "_extract_overlay", replacement)'
+        )
+    )
+
+    assert [
+        (seam.kind, seam.target, seam.canonical_owner, seam.migration_stage)
+        for seam in seams
+        if seam.kind.endswith("_patch_object")
+    ] == [("private_patch_object", "_extract_overlay", "capture.SectionCapture", 6)]
+
+
+@pytest.mark.parametrize(
+    ("statement", "line"),
+    [
+        (
+            "cap = extractor._capture\n"
+            "    if flag:\n"
+            "        cap = thing\n"
+            '    patch.object(cap, "_extract_overlay", replacement)',
+            10,
+        ),
+        (
+            "for item in thing:\n"
+            '        patch.object(cap, "_extract_overlay", replacement)\n'
+            "        cap = extractor._capture",
+            8,
+        ),
+    ],
+)
+def test_a_conditionally_rebound_alias_names_its_call_site(statement, line):
+    # No single answer fits a name that held the collaborator down one path and
+    # something else down another, and a loop body is the same question asked
+    # about its own previous iteration. Keeping the stale answer or dropping it
+    # both invent one, so the call site is named instead, the way every other
+    # ambiguous binding in this scanner is.
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=rf"synthetic_inventory\.py:{line} cap: "
+        r"ambiguous collaborator alias after conditional control flow",
+    ):
+        _scan_synthetic(_reach_through(statement))
 
 
 def test_a_foreign_collaborator_of_its_own_stays_out_of_the_inventory():
