@@ -24,6 +24,7 @@ from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 from linkedin_mcp_server.callbacks import ProgressCallback
 from linkedin_mcp_server.scraping import capture as capture_module
 from linkedin_mcp_server.scraping import extractor as extractor_module
+from linkedin_mcp_server.scraping import feed as feed_module
 from linkedin_mcp_server.scraping import navigation as navigation_module
 from linkedin_mcp_server.scraping import session as session_module
 from linkedin_mcp_server.scraping.extractor import LinkedInExtractor
@@ -114,7 +115,7 @@ async def boundaries(
 ) -> AsyncIterator[None]:
     real_scroll_body = extractor_module.scroll_to_bottom
     real_scroll_sidebar = extractor_module.scroll_job_sidebar
-    real_drain = extractor_module._drain_listener_tasks
+    real_drain = feed_module.FeedScraper._drain_listener_tasks
 
     async def trace(_page: Any, label: str, *, extra: Any = None) -> None:
         recorder.record("boundary.trace", label=label, extra=extra)
@@ -180,9 +181,10 @@ async def boundaries(
         patch.object(navigation_module, "stabilize_navigation", stabilize),
         # Both bindings of each shared boundary, because the workflows that
         # reach it are split across the modules mid-relocation: generic capture
-        # goes through `ScrapingSession`, while the job, conversation and
-        # messaging workflows still call the imported helper on the facade.
-        # Patching one side only lets the real helper loose on a scripted page.
+        # and the feed go through `ScrapingSession`, while the job,
+        # conversation and messaging workflows still call the imported helper
+        # on the facade. Patching one side only lets the real helper loose on a
+        # scripted page.
         patch.object(session_module, "detect_rate_limit", rate_limit),
         patch.object(extractor_module, "detect_rate_limit", rate_limit),
         patch.object(session_module, "handle_modal_close", modal),
@@ -192,8 +194,15 @@ async def boundaries(
         patch.object(session_module, "scroll_job_sidebar", scroll_sidebar),
         patch.object(extractor_module, "scroll_job_sidebar", scroll_sidebar),
         patch.object(capture_module, "build_issue_diagnostics", diagnostics),
+        patch.object(feed_module, "build_issue_diagnostics", diagnostics),
         patch.object(extractor_module, "build_issue_diagnostics", diagnostics),
-        patch.object(extractor_module, "_drain_listener_tasks", drain),
+        # `staticmethod`, or the class attribute would bind `self` in front of
+        # the pending list and the replacement would never match the call.
+        patch.object(
+            feed_module.FeedScraper,
+            "_drain_listener_tasks",
+            staticmethod(drain),
+        ),
         patch.object(session_module.asyncio, "sleep", clock.sleep),
         patch.object(session_module.time, "monotonic", clock.monotonic),
     ):

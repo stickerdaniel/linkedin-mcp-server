@@ -24,11 +24,11 @@ SCRAPING_SYNTHETIC = (
 )
 
 _SHARED_BOUNDARY_STAGES = {
-    "detect_rate_limit": {5, 6, 9, 11, 12},
-    "handle_modal_close": {5, 6, 9, 11, 12},
+    "detect_rate_limit": {6, 9, 11, 12},
+    "handle_modal_close": {6, 9, 11, 12},
     "scroll_to_bottom": {9},
     "scroll_job_sidebar": {9},
-    "build_issue_diagnostics": {5, 6, 8, 9},
+    "build_issue_diagnostics": {6, 8, 9},
 }
 
 
@@ -323,7 +323,7 @@ def test_checker_rejects_obsolete_seams_at_their_migration_stage():
     # completed stage are closed by definition, so an override there proves
     # nothing; raise this number as each stage lands.
     result = subprocess.run(
-        [sys.executable, str(CHECKER), "--check", "--stage", "5"],
+        [sys.executable, str(CHECKER), "--check", "--stage", "6"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -331,12 +331,14 @@ def test_checker_rejects_obsolete_seams_at_their_migration_stage():
     )
 
     assert result.returncode == 1
-    assert "obsolete at stage 5:" in result.stderr
-    assert "module_attribute" in result.stderr
-    # Every extractor-rooted string patch aimed at generic capture moved with
-    # the test that held it, so no override below stage 6 can surface one. A
-    # capture test still reaching back through the facade would show up here.
-    assert "string_patch" not in result.stderr
+    assert "obsolete at stage 6:" in result.stderr
+    assert "public_patch_object" in result.stderr
+    assert "string_patch" in result.stderr
+    # Every direct read of an extractor module attribute aimed at the feed
+    # drain moved with the test that held it, so no override below stage 9 can
+    # surface one. A feed test still reaching back through the facade module
+    # would show up here.
+    assert "module_attribute" not in result.stderr
 
 
 def test_checkers_offer_no_fixture_update_mode():
@@ -961,8 +963,8 @@ def test_manifest_includes_extractor_access_from_nested_closure():
         (seam["line"], seam["canonical_owner"], seam["migration_stage"])
         for seam in accesses
     } == {
-        (592, "facade.LinkedInExtractor._scroll_seconds", 14),
-        (3704, "facade.LinkedInExtractor._scroll_seconds", 14),
+        (590, "facade.LinkedInExtractor._scroll_seconds", 14),
+        (3702, "facade.LinkedInExtractor._scroll_seconds", 14),
     }
 
 
@@ -1361,30 +1363,40 @@ async def boundaries(tasks):
 def test_direct_private_helper_calls_and_stage_gate_are_inventoried():
     current = migration.scan()
     drains = [
-        seam
-        for seam in current["seams"]
-        if seam["kind"] == "module_attribute"
-        and seam["target"] == "_drain_listener_tasks"
+        seam for seam in current["seams"] if seam["target"] == "_drain_listener_tasks"
     ]
 
-    assert {seam["path"] for seam in drains} == {
-        "tests/scraping/policy_scenarios.py",
-        "tests/scraping/test_policy_trace_support.py",
-        "tests/test_scraping.py",
-    }
-    assert all(seam["migration_stage"] == 5 for seam in drains)
-    direct_drains = [
+    # Closed by relocating the reads, not by dropping the entries that resolve
+    # them: a read that reappears has to be inventoried against
+    # `feed.FeedScraper` rather than fail closed as an unknown attribute.
+    assert drains == []
+    assert migration._PRIVATE_OWNERS["_drain_listener_tasks"] == ("feed.FeedScraper", 5)
+    assert migration._IMPORT_OWNERS["_drain_listener_tasks"] == (
+        "feed.FeedScraper._drain_listener_tasks",
+        5,
+    )
+
+    private_reads = [
         seam
         for seam in current["seams"]
-        if seam["kind"] == "direct_import" and seam["target"] == "_drain_listener_tasks"
+        if seam["kind"] == "module_attribute" and seam["target"].startswith("_")
+    ]
+    assert {seam["path"] for seam in private_reads} == {"tests/test_scraping.py"}
+    assert all(seam["migration_stage"] == 12 for seam in private_reads)
+    direct_privates = [
+        seam
+        for seam in current["seams"]
+        if seam["kind"] == "direct_import" and seam["target"].startswith("_")
     ]
     assert {
-        (seam["path"], seam["canonical_owner"], seam["migration_stage"])
-        for seam in direct_drains
-    } == {("tests/test_tools.py", "feed.FeedScraper._drain_listener_tasks", 5)}
+        (seam["canonical_owner"], seam["migration_stage"]) for seam in direct_privates
+    } >= {
+        ("connection_actions.ACTION_SIGNALS_JS", 7),
+        ("job_pages.JOB_IDS_JS", 9),
+    }
 
     result = subprocess.run(
-        [sys.executable, str(CHECKER), "--check", "--stage", "5"],
+        [sys.executable, str(CHECKER), "--check", "--stage", "12"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -1392,7 +1404,10 @@ def test_direct_private_helper_calls_and_stage_gate_are_inventoried():
     )
 
     assert result.returncode == 1
-    assert "module_attribute _drain_listener_tasks -> feed.FeedScraper" in result.stderr
+    assert (
+        "module_attribute _MESSAGING_COMPOSE_SELECTOR -> "
+        "message_sender.MESSAGE_COMPOSE_SELECTOR" in result.stderr
+    )
 
 
 def test_permanent_alias_module_attributes_keep_identity_compatibility():

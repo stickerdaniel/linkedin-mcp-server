@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 import asyncio
-import logging
 
 import pytest
-
-from linkedin_mcp_server.scraping import extractor as extractor_module
 
 from .support.policy_trace import (
     FakeClock,
@@ -116,57 +113,3 @@ async def test_fake_clock_advances_without_wall_clock_delay():
 
     assert clock.monotonic() == 12.5
     assert recorder.events == [{"kind": "sleep", "reason": "sleep", "seconds": 2.5}]
-
-
-async def test_listener_drain_waits_two_seconds_then_cancels_with_one_second_cap(
-    monkeypatch,
-):
-    waits: list[float | None] = []
-
-    async def blocked() -> None:
-        await asyncio.Event().wait()
-
-    task = asyncio.create_task(blocked())
-
-    async def wait(
-        pending: Any, *, timeout: float | None = None
-    ) -> tuple[set[Any], set[Any]]:
-        waits.append(timeout)
-        return set(), set(pending)
-
-    monkeypatch.setattr(extractor_module.asyncio, "wait", wait)
-
-    await extractor_module._drain_listener_tasks([task])
-
-    assert task.cancelled()
-    assert waits == [2.0, 1.0]
-
-
-async def test_listener_drain_logs_an_uncooperative_task(monkeypatch, caplog):
-    class PendingTask:
-        cancelled = False
-
-        def cancel(self) -> None:
-            self.cancelled = True
-
-        def done(self) -> bool:
-            return False
-
-    task = PendingTask()
-
-    waits: list[float | None] = []
-
-    async def wait(
-        _pending: Any, *, timeout: float | None = None
-    ) -> tuple[set[Any], set[Any]]:
-        waits.append(timeout)
-        return set(), {task}
-
-    monkeypatch.setattr(extractor_module.asyncio, "wait", wait)
-
-    with caplog.at_level(logging.WARNING):
-        await extractor_module._drain_listener_tasks([cast(asyncio.Task[None], task)])
-
-    assert task.cancelled is True
-    assert waits == [2.0, 1.0]
-    assert "leaking 1 task(s)" in caplog.text
