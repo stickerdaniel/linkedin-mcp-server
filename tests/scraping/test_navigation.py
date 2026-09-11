@@ -8,11 +8,24 @@ from patchright.async_api import Error as PatchrightError
 
 import pytest
 
-from linkedin_mcp_server.core.exceptions import ProxyConnectionError
+from linkedin_mcp_server.core.exceptions import (
+    AuthenticationError,
+    ProxyConnectionError,
+)
 from linkedin_mcp_server.scraping import session as session_module
 from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.session import ScrapingSession
 from .support.navigation import navigate
+
+
+def _recorders_registered(page) -> list:
+    """Every callback the page was handed, in the order it was handed them."""
+    return [call.args[1] for call in page.on.call_args_list]
+
+
+def _recorders_removed(page) -> list:
+    """Every callback the page was asked to drop, in the same order."""
+    return [call.args[1] for call in page.remove_listener.call_args_list]
 
 
 class TestNavigationDiagnostics:
@@ -203,6 +216,170 @@ class TestNavigationDiagnostics:
         mock_page.remove_listener.assert_called_once()
 
 
+class TestNavigationListenerIdentity:
+    """The callback removed has to be the callback that was registered.
+
+    `remove_listener` matches on the object, so removing anything else is a
+    silent no-op and the recorder stays attached: one more listener on the
+    page per navigation, for the life of the session. Counting the calls
+    cannot see that, because the call happens either way. What the page still
+    holds afterwards can.
+    """
+
+    async def test_a_failed_navigation_leaves_no_recorder_behind(self, mock_page):
+        navigator = PageNavigator(ScrapingSession(mock_page))
+        mock_page.goto = AsyncMock(side_effect=Exception("net::ERR_TOO_MANY_REDIRECTS"))
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.navigation.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.navigation.detect_auth_barrier",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            pytest.raises(Exception, match="ERR_TOO_MANY_REDIRECTS"),
+        ):
+            await navigator._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+        assert _recorders_removed(mock_page) == _recorders_registered(mock_page)
+        assert mock_page.listeners["framenavigated"] == []
+
+    async def test_a_retry_after_a_failed_navigation_removes_both_recorders(
+        self, mock_page
+    ):
+        """The retry unhooks before it recurses, and the `finally` above it
+        then has nothing left to do.
+
+        Removing an object already gone is silent, so a guard that stopped
+        working would show up nowhere except in the removals outnumbering the
+        registrations.
+        """
+        navigator = PageNavigator(ScrapingSession(mock_page))
+
+        async def goto_side_effect(*args, **kwargs):
+            if mock_page.goto.await_count == 1:
+                raise Exception("net::ERR_TOO_MANY_REDIRECTS")
+            return None
+
+        mock_page.goto = AsyncMock(side_effect=goto_side_effect)
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.navigation.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.navigation.detect_auth_barrier_quick",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+        ):
+            await navigator._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+        assert len(_recorders_registered(mock_page)) == 2
+        assert _recorders_removed(mock_page) == _recorders_registered(mock_page)
+        assert mock_page.listeners["framenavigated"] == []
+
+    async def test_a_retry_behind_a_barrier_removes_both_recorders(self, mock_page):
+        navigator = PageNavigator(ScrapingSession(mock_page))
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.navigation.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.navigation.detect_auth_barrier_quick",
+                new_callable=AsyncMock,
+                side_effect=["account picker", None],
+            ),
+        ):
+            await navigator._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+        assert len(_recorders_registered(mock_page)) == 2
+        assert _recorders_removed(mock_page) == _recorders_registered(mock_page)
+        assert mock_page.listeners["framenavigated"] == []
+
+    def test_the_watcher_removes_the_recorder_it_registered(self, mock_page):
+        navigator = PageNavigator(ScrapingSession(mock_page))
+
+        with navigator._watching_navigations():
+            navigate(mock_page)
+
+        assert _recorders_removed(mock_page) == _recorders_registered(mock_page)
+        assert mock_page.listeners["framenavigated"] == []
+
+
+class TestRememberMeRetriesOnlyOnce:
+    """The second attempt stands on its own, whatever the page keeps showing.
+
+    A prompt that resolves and re-renders on the next load is resolved again,
+    and a retry that hands its own permission down recurses until the
+    interpreter stops it. That is a `RecursionError` inside a tool call, from
+    a page that did nothing but keep asking.
+    """
+
+    async def test_a_prompt_behind_a_failing_navigation_retries_once(self, mock_page):
+        navigator = PageNavigator(ScrapingSession(mock_page))
+        mock_page.goto = AsyncMock(side_effect=Exception("net::ERR_TOO_MANY_REDIRECTS"))
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.navigation.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_resolve,
+            patch(
+                "linkedin_mcp_server.scraping.navigation.detect_auth_barrier",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            pytest.raises(Exception, match="ERR_TOO_MANY_REDIRECTS") as excinfo,
+        ):
+            await navigator._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+        assert not isinstance(excinfo.value, RecursionError)
+        assert mock_page.goto.await_count == 2
+        assert mock_resolve.await_count == 1
+
+    async def test_a_prompt_behind_a_standing_barrier_retries_once(self, mock_page):
+        navigator = PageNavigator(ScrapingSession(mock_page))
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.navigation.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_resolve,
+            patch(
+                "linkedin_mcp_server.scraping.navigation.detect_auth_barrier_quick",
+                new_callable=AsyncMock,
+                return_value="account picker",
+            ),
+            pytest.raises(AuthenticationError),
+        ):
+            await navigator._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+        assert mock_page.goto.await_count == 2
+        assert mock_resolve.await_count == 1
+
+
 class TestWatchingNavigations:
     def test_records_main_frame_hops_without_deduplicating_and_cleans_up(
         self, mock_page
@@ -299,8 +476,8 @@ class TestSettleNavigation:
                 await navigator._settle_navigation(hops, mock_page.time_origin) is False
             )
 
-        assert clock.now < PageNavigator.URL_SETTLE_QUIET
-        assert clock.now >= PageNavigator.URL_SETTLE_LAG
+        assert clock.now < PageNavigator._URL_SETTLE_QUIET
+        assert clock.now >= PageNavigator._URL_SETTLE_LAG
 
     async def test_a_reload_is_a_navigation_though_the_address_holds(self, mock_page):
         """A reload replaces the document and leaves the address alone.
@@ -348,7 +525,7 @@ class TestSettleNavigation:
             )
 
         assert len(hops) == 2
-        assert clock.now >= 0.4 + PageNavigator.URL_SETTLE_QUIET
+        assert clock.now >= 0.4 + PageNavigator._URL_SETTLE_QUIET
 
     async def test_a_history_change_is_not_a_navigation(self, mock_page):
         """LinkedIn rewrites its own address, and the event cannot tell.
@@ -375,8 +552,8 @@ class TestSettleNavigation:
         ):
             assert await navigator._settle_navigation(hops, origin) is False
 
-        assert clock.now >= PageNavigator.URL_SETTLE_LAG
-        assert clock.now < PageNavigator.URL_SETTLE_QUIET
+        assert clock.now >= PageNavigator._URL_SETTLE_LAG
+        assert clock.now < PageNavigator._URL_SETTLE_QUIET
         assert mock_page.wait_for_load_state.await_count == 0
 
     async def test_a_redirect_behind_a_history_change_is_still_caught(self, mock_page):

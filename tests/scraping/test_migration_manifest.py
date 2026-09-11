@@ -1339,11 +1339,11 @@ async def boundaries(tasks):
     assert {seam.migration_stage for seam in matching("scroll_job_sidebar")} == {9}
     assert {seam.migration_stage for seam in matching("_URL_SETTLE_LAG")} == {3}
     assert {seam.canonical_owner for seam in matching("_URL_SETTLE_LAG")} == {
-        "navigation.PageNavigator.URL_SETTLE_LAG"
+        "navigation.PageNavigator._URL_SETTLE_LAG"
     }
     assert {seam.migration_stage for seam in matching("_URL_SETTLE_QUIET")} == {3}
     assert {seam.canonical_owner for seam in matching("_URL_SETTLE_QUIET")} == {
-        "navigation.PageNavigator.URL_SETTLE_QUIET"
+        "navigation.PageNavigator._URL_SETTLE_QUIET"
     }
     messaging_targets = {
         "_MESSAGING_COMPOSE_SELECTOR",

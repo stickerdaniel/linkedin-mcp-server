@@ -35,12 +35,12 @@ class PageNavigator:
     # the rest of the budget is for a redirect chain that is still hopping. Only a
     # page that already looks wrong pays it, so the ceiling costs a healthy
     # ten-page search nothing and a broken one 25s of its 180s tool timeout.
-    URL_SETTLE_TIMEOUT = 2.5
-    URL_SETTLE_POLL = 0.01
+    _URL_SETTLE_TIMEOUT = 2.5
+    _URL_SETTLE_POLL = 0.01
     # How long the route has to hold still before it counts as the destination. A
     # redirect chain hops through intermediate documents, and judging one of those
     # calls a checkpoint healthy, or a healthy page a checkpoint.
-    URL_SETTLE_QUIET = 0.5
+    _URL_SETTLE_QUIET = 0.5
     # How long a navigation has to announce itself before the page counts as
     # going nowhere. Measured across 300 evaluations destroyed by a navigation:
     # 0.37ms at worst idle, 0.81ms at the 99th percentile with twenty-four
@@ -52,11 +52,11 @@ class PageNavigator:
     # the end, which a reload leaves nothing for. Three hundred times the
     # measured announcement is the trade, the other side of it being the wait
     # every ordinary DOM failure pays before it can report itself.
-    URL_SETTLE_LAG = 0.3
+    _URL_SETTLE_LAG = 0.3
     # How long the replacement document gets to reach `domcontentloaded`. It
     # renders after it commits, and an account picker was measured 200ms behind
     # its own navigation, so a page judged on arrival is judged empty.
-    DOCUMENT_READY_TIMEOUT = 5.0
+    _DOCUMENT_READY_TIMEOUT = 5.0
 
     def __init__(self, session: ScrapingSession):
         self._session = session
@@ -366,7 +366,7 @@ class PageNavigator:
         #
         # Each hop is read at most once, so a healthy page pays one evaluate
         # and the wait, and only a page that keeps moving pays more.
-        lag_deadline = self._session.monotonic() + self.URL_SETTLE_LAG
+        lag_deadline = self._session.monotonic() + self._URL_SETTLE_LAG
         judged = 0
         replaced = False
         while self._session.monotonic() < lag_deadline:
@@ -375,26 +375,26 @@ class PageNavigator:
                 if origin is None or await self._document_origin() != origin:
                     replaced = True
                     break
-            await self._session.delay(self.URL_SETTLE_POLL)
+            await self._session.delay(self._URL_SETTLE_POLL)
         if not replaced:
             if hops:
                 logger.debug("Same document after %d history change(s)", len(hops))
             return False
 
-        deadline = self._session.monotonic() + self.URL_SETTLE_TIMEOUT
+        deadline = self._session.monotonic() + self._URL_SETTLE_TIMEOUT
         seen = len(hops)
         quiet_since = self._session.monotonic()
         while self._session.monotonic() < deadline:
-            await self._session.delay(self.URL_SETTLE_POLL)
+            await self._session.delay(self._URL_SETTLE_POLL)
             if len(hops) != seen:
                 seen = len(hops)
                 quiet_since = self._session.monotonic()
-            elif self._session.monotonic() - quiet_since >= self.URL_SETTLE_QUIET:
+            elif self._session.monotonic() - quiet_since >= self._URL_SETTLE_QUIET:
                 break
 
         try:
             await self._session.page.wait_for_load_state(
-                "domcontentloaded", timeout=self.DOCUMENT_READY_TIMEOUT * 1000
+                "domcontentloaded", timeout=self._DOCUMENT_READY_TIMEOUT * 1000
             )
         except Exception:
             logger.debug("Replacement document was not ready in time", exc_info=True)

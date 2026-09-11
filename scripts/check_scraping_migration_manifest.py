@@ -157,8 +157,8 @@ _INSTANCE_ATTRIBUTE_OWNERS = {
 }
 
 _MODULE_ATTRIBUTE_OWNERS = {
-    "_URL_SETTLE_LAG": ("navigation.PageNavigator.URL_SETTLE_LAG", 3),
-    "_URL_SETTLE_QUIET": ("navigation.PageNavigator.URL_SETTLE_QUIET", 3),
+    "_URL_SETTLE_LAG": ("navigation.PageNavigator._URL_SETTLE_LAG", 3),
+    "_URL_SETTLE_QUIET": ("navigation.PageNavigator._URL_SETTLE_QUIET", 3),
     "_MESSAGING_COMPOSE_SELECTOR": ("message_sender.MESSAGE_COMPOSE_SELECTOR", 12),
     "_PROFILE_MESSAGE_TARGET_JS": ("message_sender.PROFILE_MESSAGE_TARGET_JS", 12),
     "_ProfileMessageTarget": ("message_sender.ProfileMessageTarget", 12),
