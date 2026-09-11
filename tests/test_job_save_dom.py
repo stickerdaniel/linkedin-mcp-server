@@ -137,18 +137,35 @@ class TestJobSaveStateJs:
 class TestJobSaveClickJs:
     async def test_click_dispatches_on_expected_label(self, dom_page):
         await dom_page.set_content(_page_html(UNSAVED_CARD))
+        await dom_page.evaluate(
+            """({ expectedLabel }) => {
+                const normalize = value => (value || '').replace(/\\s+/g, ' ').trim();
+                const target = Array.from(
+                    document.querySelectorAll('main button')
+                ).find(
+                    element =>
+                        normalize(element.innerText || element.textContent) ===
+                        expectedLabel
+                );
+                if (!target) throw new Error('Expected Save control was not found');
+                target.addEventListener('click', () => {
+                    target.dataset.clicked = 'true';
+                });
+            }""",
+            {"expectedLabel": LABELS["unsaved"]},
+        )
         clicked = await dom_page.evaluate(
             _JOB_SAVE_CLICK_JS, {"expectedLabel": LABELS["unsaved"]}
         )
         assert clicked is True
-        # The click really fired: mark the element and read it back.
+        # The event listener proves that the expected control received click().
         state = await dom_page.evaluate(
             """() => {
                 const buttons = document.querySelectorAll('main button');
                 return Array.from(buttons).some((b) => b.dataset.clicked);
             }"""
         )
-        assert state is False  # click() fired, no handler ran to set the marker
+        assert state is True
 
     async def test_click_refuses_when_label_not_found(self, dom_page):
         """Asking to click 'Saved' on an unsaved card dispatches nothing."""
