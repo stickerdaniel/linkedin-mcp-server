@@ -674,6 +674,7 @@ The local server uses the same managed-runtime flow as MCPB and `uvx`: it prepar
 
 - `--login` - Open a browser to sign in and save the session
 - `--import-from-browser [BROWSER]` - Reuse a session from a locally signed-in Chromium browser (`chrome`, `chromium`, `brave`, `edge`, `arc`, `vivaldi`, `helium`, `yandex`, `whale`, `auto`). Bare flag picks `auto`, the most recently used browser with a live LinkedIn session.
+- `--auto-import` / `--no-auto-import` - Import a session from a signed-in local browser on the first tool call that needs one, before falling back to manual login (default: on). Skipped in Docker, behind a proxy, and on a non-loopback HTTP bind. On macOS the keychain may prompt once.
 - `--status` - Check whether the stored session is valid, then exit
 - `--logout` - Clear the stored session
 - `--user-data-dir PATH` - Browser profile directory (default: ~/.linkedin-mcp/profile). Rotating or clearing a session deletes this directory *and its parent*, which holds the stored cookies and derived profiles.
@@ -688,6 +689,14 @@ The local server uses the same managed-runtime flow as MCPB and `uvx`: it prepar
 
 - `--timeout MS` - Timeout for a single page operation (default: 5000)
 - `--tool-timeout SECONDS` - Timeout for a whole tool call (default: 180). Raise it for heavy scrapes, slow networks, or a cold-start browser.
+- `--login-timeout SECONDS` - How long the login browser waits for you to finish signing in (default: 1800; 0 = no limit). `--login-viewer` ends the session after 30 minutes either way.
+- `--login-inline-wait SECONDS` - How long a tool call waits for a login to finish before telling the model to retry (default: 25, max 45; 0 = return at once)
+
+**Shared browser:**
+
+- `--browser-wait SECONDS` - How long to wait for another server process to hand over the shared browser (default: 25, max 45; 0 = report busy at once). Only matters with several MCP clients running at once.
+- `--browser-min-hold SECONDS` - Shortest time this process keeps the shared browser before handing it over (default: 20). Clamped to 3 seconds below `--browser-wait`, so raise that one along with it. Higher means fewer browser restarts but longer waits for other clients.
+- `--browser-idle-timeout SECONDS` - Close an idle browser and release the profile after this long without a tool call (default: 600; 0 = keep it open)
 
 **Browser:**
 
