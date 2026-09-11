@@ -95,37 +95,61 @@ AI agent? Get a quick confirmation from the user before enabling automatic updat
 <details>
 <summary><b>🔧 Configuration</b></summary>
 
-**Transport Modes:**
+<details>
+<summary>Transport modes</summary>
 
 - **Default (stdio)**: Standard communication for local MCP servers
-- **Streamable HTTP**: For web-based MCP server
+- **Streamable HTTP**: For a web-based MCP server
 - If no transport is specified, the server defaults to `stdio`
 - An interactive terminal without explicit transport shows a chooser prompt
 
-**CLI Options:**
+</details>
+
+<details>
+<summary>CLI options</summary>
+
+**Session:**
 
 - `--login` - Open a browser to sign in and save the session
 - `--import-from-browser [BROWSER]` - Reuse a session from a locally signed-in Chromium browser (`chrome`, `chromium`, `brave`, `edge`, `arc`, `vivaldi`, `helium`, `yandex`, `whale`, `auto`). Bare flag picks `auto`, the most recently used browser with a live LinkedIn session.
+- `--auto-import` / `--no-auto-import` - Import a session from a signed-in local browser on the first tool call that needs one, before falling back to manual login (default: on). Skipped in Docker, behind a proxy, and on a non-loopback HTTP bind. On macOS the keychain may prompt once.
 - `--logout` - Clear the stored session
-- `--no-headless` - Show the browser window (useful for debugging)
-- `--log-level {DEBUG,INFO,WARNING,ERROR}` - Logging level (default: WARNING)
+- `--login-viewer` - Docker only: show the `--login` browser at a token-protected URL on port 6080 (see [Authentication](#authentication))
+- `--user-data-dir PATH` - Browser profile directory (default: ~/.linkedin-mcp/profile). Rotating or clearing a session deletes this directory *and its parent*, which holds the stored cookies and derived profiles.
+- `--claim-profile-root` - Take over a profile directory the server will not claim on its own, such as one whose parent already holds other files. Needed once per directory.
+
+**Transport:**
+
 - `--transport {stdio,streamable-http}` - Force the transport mode (default: stdio)
 - `--host HOST` / `--port PORT` / `--path PATH` - HTTP server address (defaults: 127.0.0.1, 8000, /mcp)
+
+**Timeouts:**
+
 - `--timeout MS` - Timeout for a single page operation (default: 5000)
 - `--tool-timeout SECONDS` - Timeout for a whole tool call (default: 180). Raise it for heavy scrapes, slow networks, or a cold-start browser.
 - `--login-timeout SECONDS` - How long the login browser waits for you to finish signing in (default: 1800; 0 = no limit). `--login-viewer` ends the session after 30 minutes either way.
-- `--login-viewer` - Docker only: show the `--login` browser at a token-protected URL on port 6080 (see [Authentication](#authentication))
 - `--login-inline-wait SECONDS` - How long a tool call waits for a login to finish before telling the model to retry (default: 25, max 45; 0 = return at once)
+
+**Shared browser:**
+
 - `--browser-wait SECONDS` - How long to wait for another server process to hand over the shared browser (default: 25, max 45; 0 = report busy at once). Only matters with several MCP clients running at once.
 - `--browser-min-hold SECONDS` - Shortest time this process keeps the shared browser before handing it over (default: 20). Clamped to 3 seconds below `--browser-wait`, so raise that one along with it. Higher means fewer browser restarts but longer waits for other clients.
 - `--browser-idle-timeout SECONDS` - Close an idle browser and release the profile after this long without a tool call (default: 600; 0 = keep it open)
-- `--auto-import` / `--no-auto-import` - Import a session from a signed-in local browser on the first tool call that needs one, before falling back to manual login (default: on). Skipped in Docker, behind a proxy, and on a non-loopback HTTP bind. On macOS the keychain may prompt once.
-- `--user-data-dir PATH` - Browser profile directory (default: ~/.linkedin-mcp/profile). Rotating or clearing a session deletes this directory *and its parent*, which holds the stored cookies and derived profiles.
-- `--claim-profile-root` - Take over a profile directory the server will not claim on its own, such as one whose parent already holds other files. Needed once per directory.
-- `--chrome-path PATH` - Path to a Chrome/Chromium executable
-- `--proxy-server URL` - Route browser traffic through a proxy, as `scheme://host:port`. Set the password via `PROXY_PASSWORD`, which keeps it out of the process list.
 
-**Import a session from your everyday browser:**
+**Browser:**
+
+- `--no-headless` - Show the browser window (useful for debugging)
+- `--chrome-path PATH` - Path to a Chrome/Chromium executable
+- `--proxy-server URL` - Route browser traffic through a proxy, as `scheme://host:port`. Set it up **before** `--login`; see [Using a proxy](#using-a-proxy).
+
+**Other:**
+
+- `--log-level {DEBUG,INFO,WARNING,ERROR}` - Logging level (default: WARNING)
+
+</details>
+
+<details>
+<summary>Import a session from your everyday browser</summary>
 
 If you are already signed into LinkedIn in Chrome, Chromium, Brave, Edge, Arc, Vivaldi, Helium, Yandex, or Naver Whale, you can skip the manual `--login` step and reuse that session:
 
@@ -142,6 +166,11 @@ This reads the browser's LinkedIn cookies, validates them against your feed, and
 - On macOS the OS keychain may prompt to allow access to the browser's Safe Storage. Close the source browser first for the most reliable read.
 - Cookies protected by Chrome 127+ app-bound encryption (`v20`) cannot be decrypted without OS elevation; in that case use `--login` instead.
 - Imported cookies match a real login's on-disk set. The local server reads them back in full from the saved profile; the Docker bridge narrows to the same minimal auth subset it uses for a normal session.
+
+</details>
+
+<details>
+<summary>HTTP mode and debugging</summary>
 
 **Basic Usage Examples:**
 
@@ -182,67 +211,65 @@ while a container is running.
 
 </details>
 
+</details>
+
 <details>
 <summary><b>❗ Troubleshooting</b></summary>
 
-**Installation issues:**
+<details>
+<summary>Installation issues</summary>
 
 - Ensure you have uv installed: `curl -LsSf https://astral.sh/uv/install.sh | sh`
 - Check uv version: `uv --version` (should be 0.4.0 or higher)
 - On first run, `uvx` downloads all Python dependencies. On slow connections, uv's default 30s HTTP timeout may be too short. The recommended config above already sets `UV_HTTP_TIMEOUT=300` (seconds) to avoid this.
 - *Windows, `DLL load failed while importing _greenlet`*: move to greenlet 3.5.5 or newer, whose published Windows wheels carry the C++ runtime inside the extension again. A fresh `uvx` run resolves that on its own; an environment that pins its dependencies needs `uv lock --upgrade-package greenlet`. Only greenlet 3.3.1 through 3.5.4 need `MSVCP140.dll`, which neither the python.org installer nor the `uv`-managed builds carry, and a greenlet built from source can need it at any version. Where the version cannot be moved, the [Microsoft Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist) supplies that DLL. Reported as [greenlet#525](https://github.com/python-greenlet/greenlet/issues/525), fixed in [greenlet#526](https://github.com/python-greenlet/greenlet/pull/526).
 
-**Session issues:**
+</details>
+
+<details>
+<summary>Session issues</summary>
 
 - Browser profile is stored at `~/.linkedin-mcp/profile/`
 - Managed browser downloads are cached at `~/.linkedin-mcp/patchright-browsers/`
 - *The browser cache keeps growing*: a server upgrade can bring a new Chromium revision, and Patchright keeps the old one for as long as any installed version still references it. `uvx` keeps one archive per version you have ever run, so every one of them holds such a reference and the old revisions stay. The server logs a warning naming the revisions it is holding and how much space they take. To reclaim it, stop every LinkedIn MCP Server instance, delete `~/.linkedin-mcp/patchright-browsers/`, and let the next launch download the current browser.
+
+</details>
+
+<details>
+<summary>Login issues</summary>
+
 - Make sure you have only one active LinkedIn session at a time
-
-**Login issues:**
-
 - LinkedIn may require a login confirmation in the LinkedIn mobile app for `--login`
 - LinkedIn may show a captcha challenge during login. Run `uvx mcp-server-linkedin@latest --login` which opens a browser where you can solve it manually.
 
-**Timeout issues:**
+</details>
 
-- *Page operations failing* (elements not found, navigation hangs): increase the browser page-op timeout — `--timeout 10000` or `TIMEOUT=10000` (milliseconds, default 5000).
-- *Entire tool calls timing out* (e.g. multi-section profiles, cold-start Chromium, slow containers): increase the per-tool execution timeout — `--tool-timeout 300` or `TOOL_TIMEOUT=300` (seconds, default 180).
+<details>
+<summary>Timeout issues</summary>
+
+- *Page operations failing* (elements not found, navigation hangs): increase the browser page-op timeout: `--timeout 10000` or `TIMEOUT=10000` (milliseconds, default 5000).
+- *Entire tool calls timing out* (e.g. multi-section profiles, cold-start Chromium, slow containers): increase the per-tool execution timeout: `--tool-timeout 300` or `TOOL_TIMEOUT=300` (seconds, default 180).
 - *First tool call with no session*: if a locally logged-in browser has a live LinkedIn session, the server auto-imports it (see `AUTO_IMPORT_FROM_BROWSER` / `--auto-import`) instead of forcing a manual login. On macOS the keychain may prompt once for Safe Storage access. If no importable browser session exists, it falls back to opening a login window and waits up to `LOGIN_INLINE_WAIT` seconds (default 25, max 45; `--login-inline-wait`) so a quick sign-in resolves in one call. If the wait elapses, the tool returns a pending signal and the model retries in about 30 seconds. Neither the auto-import nor the inline wait applies under Docker or when the server is bound to a non-loopback HTTP host. Create the session on the host with `--login`, or use the explicit Docker `--login --login-viewer` command.
 - Users on slow connections may need higher values for either.
 
-**Told to run `--login` on the host when you already did:**
+</details>
+
+<details>
+<summary>Told to run <code>--login</code> on the host when you already did</summary>
 
 - If tool calls answer "No valid LinkedIn session is available in Docker" on a machine that is *not* a container, the runtime was misdetected. This happened on Linux hosts running a Docker daemon for unrelated services. Set `LINKEDIN_MCP_CONTAINER=false` to override the detection; `true` forces the opposite.
 
-**Using a proxy:**
+</details>
 
-> **Most people should not use one.** LinkedIn's own guidance for reducing
-> security challenges is to avoid a VPN or proxy, and it scores the addresses a
-> session signs in from. A home connection you have used for years is a trust
-> signal; a commercial exit node with a history you cannot see is not, and
-> switching to one is itself the kind of change that triggers a checkpoint.
-> A proxy is worth it in one case: the server runs somewhere its address is
-> obviously a data centre, or in a different country from the account's history.
-> Even then, a WireGuard or Tailscale exit node on your own home network beats
-> any paid provider, because the address really is yours. If you do buy one,
-> take a dedicated static ISP address and keep it, rather than a rotating
-> residential pool.
-
-- Route the browser through a proxy with `--proxy-server http://host:port` (`http`, `https`, `socks4` and `socks5` are accepted). Only browser traffic is routed, not the MCP transport.
-- Credentials go in `PROXY_USERNAME` and `PROXY_PASSWORD`. There is no `--proxy-password` flag on purpose: command-line arguments are readable by every other user on the machine. `PROXY_SERVER` also accepts the combined `http://user:pass@host:port` form most providers hand out.
-- Chromium cannot authenticate to a SOCKS proxy, so credentials require an `http(s)` endpoint. If your provider only offers authenticated SOCKS5, run a local relay that holds the credentials and point the server at that.
-- Local addresses go through the proxy too. Chromium's usual direct route for `localhost` is removed when a proxy is set, so add `PROXY_BYPASS=localhost,127.0.0.1,::1` if you need local targets reached directly.
-- Auto-import is skipped while a proxy is configured: a session taken from a local browser was created on your real address, and moving it to the proxy is the very change that triggers a checkpoint. Use `--login`.
-- A wrong proxy password does not report itself: Chromium retries the authentication challenge until the page times out, so it surfaces as a timeout or a failed sign-in. If sessions stop working right after you add a proxy, check the credentials before assuming the session expired.
-- **Set the proxy up before creating the session.** Run `--login` with the proxy already configured. Turning a proxy on for an existing profile moves a logged-in session to a new IP, which is what triggers a LinkedIn checkpoint. The same applies to `--import-from-browser`, which imports a session created on your real IP. Use a sticky session, not a rotating pool, for the same reason.
-
-**Custom Chrome path:**
+<details>
+<summary>Custom Chrome path</summary>
 
 - If Chrome is installed in a non-standard location, use `--chrome-path /path/to/chrome`
 - Can also set via environment variable: `CHROME_PATH=/path/to/chrome`
 - On macOS and Linux the browser must be at least as new as the one that last opened your profile, and the server refuses the launch otherwise. (Not on Windows: a browser there cannot be asked its version without starting one, so the check is off.) An older browser can silently drop stores a newer one wrote, the saved session among them, and the failure then looks exactly like an expired login. The message names both versions. Going back to the bundled Chromium after running a newer Chrome once is the usual way to meet this; either run the newer browser again, whichever one that was, or run `--login`, which moves the stored session aside and signs in fresh with the browser you have. `--logout` also clears it but discards the old session instead of keeping it recoverable, and it asks for confirmation on the terminal, so it is not usable from a server an MCP client started.
 - Only Chrome, Chromium and Chrome for Testing are compared this way. Forks number themselves differently (Vivaldi is on 7.x, Edge's build number sits far below Chrome's under the same major), so pointing `CHROME_PATH` at one turns the check off rather than producing a refusal nothing could satisfy.
+
+</details>
 
 </details>
 
@@ -266,7 +293,8 @@ On startup, the MCP Bundle starts preparing the shared Patchright Chromium brows
 <details>
 <summary><b>❗ Troubleshooting</b></summary>
 
-**First-time setup behavior:**
+<details>
+<summary>First-time setup behavior</summary>
 
 - Claude Desktop starts the bundle immediately; browser setup continues in the background
 - If the Patchright Chromium browser is still downloading, retry the tool after a short wait
@@ -274,22 +302,33 @@ On startup, the MCP Bundle starts preparing the shared Patchright Chromium brows
 - *The browser cache keeps growing*: Patchright keeps an old Chromium revision for as long as any installed version still references it, so an upgrade can leave both on disk. The server logs a warning naming what it holds. To reclaim the space, stop every LinkedIn MCP Server instance, delete `~/.linkedin-mcp/patchright-browsers/`, and let the next launch download the current browser.
 - *Windows, the bundle exits with `DLL load failed while importing _greenlet`*: install the [Microsoft Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist), or reinstall a bundle pinning greenlet 3.5.5 or newer, whose published Windows wheels carry the C++ runtime inside the extension again. A bundle pinning greenlet 3.3.1 through 3.5.4 needs `MSVCP140.dll` from that redistributable, which neither the python.org installer nor the `uv`-managed builds carry, and a greenlet built from source can need it at any version. The server names this itself on startup, and only after checking that the loader cannot produce that DLL. Reported as [greenlet#525](https://github.com/python-greenlet/greenlet/issues/525), fixed in [greenlet#526](https://github.com/python-greenlet/greenlet/pull/526).
 
-**Login issues:**
+</details>
+
+<details>
+<summary>Login issues</summary>
 
 - Make sure you have only one active LinkedIn session at a time
 - LinkedIn may require a login confirmation in the LinkedIn mobile app for `--login`
 - LinkedIn may show a captcha challenge during login. Run `uvx mcp-server-linkedin@latest --login` which opens a browser where you can solve captchas manually. See the [uvx setup](#-uvx-setup-recommended---universal) for prerequisites.
 
-**Timeout issues:**
+</details>
 
-- *Page operations failing* (elements not found, navigation hangs): increase the browser page-op timeout — `--timeout 10000` or `TIMEOUT=10000` (milliseconds, default 5000).
-- *Entire tool calls timing out* (e.g. multi-section profiles, cold-start Chromium, slow containers): increase the per-tool execution timeout — `--tool-timeout 300` or `TOOL_TIMEOUT=300` (seconds, default 180).
+<details>
+<summary>Timeout issues</summary>
+
+- *Page operations failing* (elements not found, navigation hangs): increase the browser page-op timeout: `--timeout 10000` or `TIMEOUT=10000` (milliseconds, default 5000).
+- *Entire tool calls timing out* (e.g. multi-section profiles, cold-start Chromium, slow containers): increase the per-tool execution timeout: `--tool-timeout 300` or `TOOL_TIMEOUT=300` (seconds, default 180).
 - *First tool call with no session*: if a locally logged-in browser has a live LinkedIn session, the server auto-imports it (see `AUTO_IMPORT_FROM_BROWSER` / `--auto-import`) instead of forcing a manual login. On macOS the keychain may prompt once for Safe Storage access. If no importable browser session exists, it falls back to opening a login window and waits up to `LOGIN_INLINE_WAIT` seconds (default 25, max 45; `--login-inline-wait`) so a quick sign-in resolves in one call. If the wait elapses, the tool returns a pending signal and the model retries in about 30 seconds. Neither the auto-import nor the inline wait applies under Docker or when the server is bound to a non-loopback HTTP host. Create the session on the host with `--login`, or use the explicit Docker `--login --login-viewer` command.
 - Users on slow connections may need higher values for either.
 
-**Told to run `--login` on the host when you already did:**
+</details>
+
+<details>
+<summary>Told to run <code>--login</code> on the host when you already did</summary>
 
 - If tool calls answer "No valid LinkedIn session is available in Docker" on a machine that is *not* a container, the runtime was misdetected. This happened on Linux hosts running a Docker daemon for unrelated services. Set `LINKEDIN_MCP_CONTAINER=false` to override the detection; `true` forces the opposite.
+
+</details>
 
 </details>
 
@@ -414,35 +453,61 @@ username.
 <details>
 <summary><b>🔧 Configuration</b></summary>
 
-**Transport Modes:**
+<details>
+<summary>Transport modes</summary>
 
 - **Default (stdio)**: Standard communication for local MCP servers
 - **Streamable HTTP**: For a web-based MCP server
 - If no transport is specified, the server defaults to `stdio`
 - An interactive terminal without explicit transport shows a chooser prompt
 
-**CLI Options:**
+</details>
 
-- `--log-level {DEBUG,INFO,WARNING,ERROR}` - Logging level (default: WARNING)
+<details>
+<summary>CLI options</summary>
+
+**Session:**
+
+- `--auto-import` / `--no-auto-import` - Import a session from a signed-in local browser on the first tool call that needs one, before falling back to manual login (ignored in Docker). On macOS the keychain may prompt once.
+- `--logout` - Clear the stored session and every profile derived from it
+- `--login-viewer` - With `--login`, show the login browser at a token-protected URL on port 6080. Needs the profile mount from [Authentication](#authentication).
+- `--user-data-dir PATH` - Browser profile directory (default: ~/.linkedin-mcp/profile). Rotating or clearing a session deletes this directory *and its parent*, which holds the stored cookies and derived profiles.
+- `--claim-profile-root` - Take over a profile directory the server will not claim on its own, such as one whose parent already holds other files. Needed once per directory.
+
+**Transport:**
+
 - `--transport {stdio,streamable-http}` - Force the transport mode (default: stdio)
 - `--host HOST` / `--port PORT` / `--path PATH` - HTTP server address (defaults: 127.0.0.1, 8000, /mcp)
-- `--logout` - Clear the stored session and every profile derived from it
+
+**Timeouts:**
+
 - `--timeout MS` - Timeout for a single page operation (default: 5000)
 - `--tool-timeout SECONDS` - Timeout for a whole tool call (default: 180). Raise it for heavy scrapes, slow networks, or a cold-start browser.
 - `--login-timeout SECONDS` - How long the login browser waits for you to finish signing in (default: 1800; 0 = no limit). `--login-viewer` ends the session after 30 minutes either way.
-- `--login-viewer` - With `--login`, show the login browser at a token-protected URL on port 6080. Needs the profile mount from [Authentication](#authentication).
 - `--login-inline-wait SECONDS` - How long a tool call waits for a login to finish before telling the model to retry (default: 25, max 45; 0 = return at once)
+
+**Shared browser:**
+
 - `--browser-wait SECONDS` - How long to wait for another server process to hand over the shared browser (default: 25, max 45; 0 = report busy at once). Only matters with several MCP clients running at once.
 - `--browser-min-hold SECONDS` - Shortest time this process keeps the shared browser before handing it over (default: 20). Clamped to 3 seconds below `--browser-wait`, so raise that one along with it. Higher means fewer browser restarts but longer waits for other clients.
 - `--browser-idle-timeout SECONDS` - Close an idle browser and release the profile after this long without a tool call (default: 600; 0 = keep it open)
-- `--auto-import` / `--no-auto-import` - Import a session from a signed-in local browser on the first tool call that needs one, before falling back to manual login (ignored in Docker). On macOS the keychain may prompt once.
-- `--user-data-dir PATH` - Browser profile directory (default: ~/.linkedin-mcp/profile). Rotating or clearing a session deletes this directory *and its parent*, which holds the stored cookies and derived profiles.
-- `--claim-profile-root` - Take over a profile directory the server will not claim on its own, such as one whose parent already holds other files. Needed once per directory.
+
+**Browser:**
+
 - `--chrome-path PATH` - Path to a Chrome/Chromium executable (rarely needed in Docker)
-- `--proxy-server URL` - Route browser traffic through a proxy, as `scheme://host:port`. Set the password via `PROXY_PASSWORD`, which keeps it out of the process list.
+- `--proxy-server URL` - Route browser traffic through a proxy, as `scheme://host:port`. Set it up **before** `--login`; see [Using a proxy](#using-a-proxy).
+
+**Other:**
+
+- `--log-level {DEBUG,INFO,WARNING,ERROR}` - Logging level (default: WARNING)
 
 > [!NOTE]
 > Plain `--login` still has no visible window in Docker. Add `--login-viewer` and publish `127.0.0.1:6080:6080` only for the one-shot login command. Docker is already headed by default, so `--no-headless` changes nothing. The experimental `--daemon` is ignored in Docker because its owner can outlive the virtual display.
+
+</details>
+
+<details>
+<summary>HTTP mode</summary>
 
 **HTTP Mode Example (for web-based MCP clients):**
 
@@ -511,62 +576,57 @@ belongs behind something that provides it.
 
 </details>
 
+</details>
+
 <details>
 <summary><b>❗ Troubleshooting</b></summary>
 
-**Docker issues:**
+<details>
+<summary>Docker issues</summary>
 
 - Make sure [Docker](https://www.docker.com/get-started/) is installed
 - Check if Docker is running: `docker ps`
 - *Permission errors on `~/.linkedin-mcp`*: an older rootful Docker run may have created the directory as root. Fix it with `sudo chown -R "$(id -u):$(id -g)" ~/.linkedin-mcp`.
 
-**Login issues:**
+</details>
+
+<details>
+<summary>Login issues</summary>
 
 - Make sure you have only one active LinkedIn session at a time
 - LinkedIn may require a login confirmation in the LinkedIn mobile app for `--login`
 - LinkedIn may show a captcha challenge during login. Run `uvx mcp-server-linkedin@latest --login` which opens a browser where you can solve captchas manually. See the [uvx setup](#-uvx-setup-recommended---universal) for prerequisites.
 - If Docker auth becomes stale after you re-login on the host, restart Docker once so it can fresh-bridge from the new source session generation.
 
-**Timeout issues:**
+</details>
 
-- *Page operations failing* (elements not found, navigation hangs): increase the browser page-op timeout — `--timeout 10000` or `TIMEOUT=10000` (milliseconds, default 5000).
-- *Entire tool calls timing out* (e.g. multi-section profiles, cold-start Chromium, slow containers): increase the per-tool execution timeout — `--tool-timeout 300` or `TOOL_TIMEOUT=300` (seconds, default 180).
+<details>
+<summary>Timeout issues</summary>
+
+- *Page operations failing* (elements not found, navigation hangs): increase the browser page-op timeout: `--timeout 10000` or `TIMEOUT=10000` (milliseconds, default 5000).
+- *Entire tool calls timing out* (e.g. multi-section profiles, cold-start Chromium, slow containers): increase the per-tool execution timeout: `--tool-timeout 300` or `TOOL_TIMEOUT=300` (seconds, default 180).
 - *First tool call with no session*: if a locally logged-in browser has a live LinkedIn session, the server auto-imports it (see `AUTO_IMPORT_FROM_BROWSER` / `--auto-import`) instead of forcing a manual login. On macOS the keychain may prompt once for Safe Storage access. If no importable browser session exists, it falls back to opening a login window and waits up to `LOGIN_INLINE_WAIT` seconds (default 25, max 45; `--login-inline-wait`) so a quick sign-in resolves in one call. If the wait elapses, the tool returns a pending signal and the model retries in about 30 seconds. Neither the auto-import nor the inline wait applies under Docker or when the server is bound to a non-loopback HTTP host. Create the session on the host with `--login`, or use the explicit Docker `--login --login-viewer` command.
 - Users on slow connections may need higher values for either.
 
-**Told to run `--login` on the host when you already did:**
+</details>
+
+<details>
+<summary>Told to run <code>--login</code> on the host when you already did</summary>
 
 - If tool calls answer "No valid LinkedIn session is available in Docker" on a machine that is *not* a container, the runtime was misdetected. This happened on Linux hosts running a Docker daemon for unrelated services. Set `LINKEDIN_MCP_CONTAINER=false` to override the detection; `true` forces the opposite.
 
-**Using a proxy:**
+</details>
 
-> **Most people should not use one.** LinkedIn's own guidance for reducing
-> security challenges is to avoid a VPN or proxy, and it scores the addresses a
-> session signs in from. A home connection you have used for years is a trust
-> signal; a commercial exit node with a history you cannot see is not, and
-> switching to one is itself the kind of change that triggers a checkpoint.
-> A proxy is worth it in one case: the server runs somewhere its address is
-> obviously a data centre, or in a different country from the account's history.
-> Even then, a WireGuard or Tailscale exit node on your own home network beats
-> any paid provider, because the address really is yours. If you do buy one,
-> take a dedicated static ISP address and keep it, rather than a rotating
-> residential pool.
-
-- Route the browser through a proxy with `--proxy-server http://host:port` (`http`, `https`, `socks4` and `socks5` are accepted). Only browser traffic is routed, not the MCP transport.
-- Credentials go in `PROXY_USERNAME` and `PROXY_PASSWORD`. There is no `--proxy-password` flag on purpose: command-line arguments are readable by every other user on the machine. `PROXY_SERVER` also accepts the combined `http://user:pass@host:port` form most providers hand out.
-- Chromium cannot authenticate to a SOCKS proxy, so credentials require an `http(s)` endpoint. If your provider only offers authenticated SOCKS5, run a local relay that holds the credentials and point the server at that.
-- Local addresses go through the proxy too. Chromium's usual direct route for `localhost` is removed when a proxy is set, so add `PROXY_BYPASS=localhost,127.0.0.1,::1` if you need local targets reached directly.
-- Auto-import is skipped while a proxy is configured: a session taken from a local browser was created on your real address, and moving it to the proxy is the very change that triggers a checkpoint. Use `--login`.
-- A wrong proxy password does not report itself: Chromium retries the authentication challenge until the page times out, so it surfaces as a timeout or a failed sign-in. If sessions stop working right after you add a proxy, check the credentials before assuming the session expired.
-- **Set the proxy up before creating the session.** Run `--login` with the proxy already configured. Turning a proxy on for an existing profile moves a logged-in session to a new IP, which is what triggers a LinkedIn checkpoint. The same applies to `--import-from-browser`, which imports a session created on your real IP. Use a sticky session, not a rotating pool, for the same reason.
-
-**Custom Chrome path:**
+<details>
+<summary>Custom Chrome path</summary>
 
 - If Chrome is installed in a non-standard location, use `--chrome-path /path/to/chrome`
 - Can also set via environment variable: `CHROME_PATH=/path/to/chrome`
 - On macOS and Linux the browser must be at least as new as the one that last opened your profile, and the server refuses the launch otherwise. (Not on Windows: a browser there cannot be asked its version without starting one, so the check is off.) An older browser can silently drop stores a newer one wrote, the saved session among them, and the failure then looks exactly like an expired login. The message names both versions. Going back to the bundled Chromium after running a newer Chrome once is the usual way to meet this; either run the newer browser again, whichever one that was, or run `--login`, which moves the stored session aside and signs in fresh with the browser you have. `--logout` also clears it but discards the old session instead of keeping it recoverable, and it asks for confirmation on the terminal, so it is not usable from a server an MCP client started.
 - Only Chrome, Chromium and Chrome for Testing are compared this way. Forks number themselves differently (Vivaldi is on 7.x, Edge's build number sits far below Chrome's under the same major), so pointing `CHROME_PATH` at one turns the check off rather than producing a refusal nothing could satisfy.
 - In the documented Docker setup this check does not apply. The container never opens the profile you created with `--login`; it derives its own from your cookies, and by default rebuilds that from scratch on every start, so there is nothing for an older image to downgrade. With `EXPERIMENTAL_PERSIST_DERIVED_RUNTIME` the derived profile is kept, and an image tag that moves backwards then throws it away and re-derives it, again with nothing for you to do. The check matters on the host, where the server opens that profile directly. Not during `--login` itself, which moves the old profile aside before it starts a browser and so can never trip it.
+
+</details>
 
 </details>
 
@@ -607,28 +667,48 @@ The local server uses the same managed-runtime flow as MCPB and `uvx`: it prepar
 <details>
 <summary><b>🔧 Configuration</b></summary>
 
-**CLI Options:**
+<details>
+<summary>CLI options</summary>
+
+**Session:**
 
 - `--login` - Open a browser to sign in and save the session
 - `--import-from-browser [BROWSER]` - Reuse a session from a locally signed-in Chromium browser (`chrome`, `chromium`, `brave`, `edge`, `arc`, `vivaldi`, `helium`, `yandex`, `whale`, `auto`). Bare flag picks `auto`, the most recently used browser with a live LinkedIn session.
 - `--status` - Check whether the stored session is valid, then exit
 - `--logout` - Clear the stored session
-- `--no-headless` - Show the browser window (useful for debugging)
-- `--log-level {DEBUG,INFO,WARNING,ERROR}` - Logging level (default: WARNING)
+- `--user-data-dir PATH` - Browser profile directory (default: ~/.linkedin-mcp/profile). Rotating or clearing a session deletes this directory *and its parent*, which holds the stored cookies and derived profiles.
+- `--claim-profile-root` - Take over a profile directory the server will not claim on its own, such as one whose parent already holds other files. Needed once per directory.
+
+**Transport:**
+
 - `--transport {stdio,streamable-http}` - Force the transport mode (default: stdio)
 - `--host HOST` / `--port PORT` / `--path PATH` - HTTP server address (defaults: 127.0.0.1, 8000, /mcp)
+
+**Timeouts:**
+
 - `--timeout MS` - Timeout for a single page operation (default: 5000)
 - `--tool-timeout SECONDS` - Timeout for a whole tool call (default: 180). Raise it for heavy scrapes, slow networks, or a cold-start browser.
-- `--user-data-dir PATH` - Browser profile directory (default: ~/.linkedin-mcp/profile). Rotating or clearing a session deletes this directory *and its parent*, which holds the stored cookies and derived profiles.
-- `--installer-temp-dir PATH` - Parent directory for temporary files created during browser installation bootstrap (default: system temporary directory). Useful when system %TEMP% ancestry has non-standard ACLs or permissions.
-- `--claim-profile-root` - Take over a profile directory the server will not claim on its own, such as one whose parent already holds other files. Needed once per directory.
+
+**Browser:**
+
+- `--no-headless` - Show the browser window (useful for debugging)
 - `--slow-mo MS` - Delay between browser actions (default: 0, useful for debugging)
 - `--viewport WxH` - Viewport size (default: 1280x720). Applies to windowless mode only; a headed launch uses the real window size.
 - `--chrome-path PATH` - Path to a Chrome/Chromium executable
-- `--proxy-server URL` - Route browser traffic through a proxy, as `scheme://host:port`. Set the password via `PROXY_PASSWORD`, which keeps it out of the process list.
+- `--installer-temp-dir PATH` - Parent directory for temporary files created during browser installation bootstrap (default: system temporary directory). Useful when system %TEMP% ancestry has non-standard ACLs or permissions.
+- `--proxy-server URL` - Route browser traffic through a proxy, as `scheme://host:port`. Set it up **before** `--login`; see [Using a proxy](#using-a-proxy).
+
+**Other:**
+
+- `--log-level {DEBUG,INFO,WARNING,ERROR}` - Logging level (default: WARNING)
 - `--help` - Show help
 
 > **Note:** Most CLI options have environment variable equivalents. See `.env.example` for details.
+
+</details>
+
+<details>
+<summary>HTTP mode and Claude Desktop</summary>
 
 **HTTP Mode Example (for web-based MCP clients):**
 
@@ -653,67 +733,66 @@ uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --por
 
 </details>
 
+</details>
+
 <details>
 <summary><b>❗ Troubleshooting</b></summary>
 
-**Login issues:**
+<details>
+<summary>Login issues</summary>
 
 - Make sure you have only one active LinkedIn session at a time
 - LinkedIn may require a login confirmation in the LinkedIn mobile app for `--login`
 - LinkedIn may show a captcha challenge during login. The `--login` command opens a browser where you can solve it manually.
 
-**Scraping issues:**
+</details>
+
+<details>
+<summary>Scraping issues</summary>
 
 - Use `--no-headless` to see browser actions and debug scraping problems
 - Add `--log-level DEBUG` to see more detailed logging
 
-**Session issues:**
+</details>
+
+<details>
+<summary>Session issues</summary>
 
 - Browser profile is stored at `~/.linkedin-mcp/profile/`
 - Managed browser downloads are cached at `~/.linkedin-mcp/patchright-browsers/`, shared with the `uvx` and MCP Bundle installations
 - *The browser cache keeps growing*: Patchright keeps an old Chromium revision for as long as any installed version still references it, and a `uv` archive or a second worktree is such a reference. The server logs a warning naming what it holds. To reclaim the space, stop every LinkedIn MCP Server instance, delete `~/.linkedin-mcp/patchright-browsers/`, and let the next launch download the current browser.
 - Use `--logout` to clear the profile and start fresh
 
-**Python/Patchright issues:**
+</details>
+
+<details>
+<summary>Python/Patchright issues</summary>
 
 - Check Python version: `python --version` (should be 3.12.4+)
 - Reinstall Patchright: `uv run patchright install chromium`
 - Reinstall dependencies: `uv sync --reinstall`
 
-**Timeout issues:**
+</details>
 
-- *Page operations failing* (elements not found, navigation hangs): increase the browser page-op timeout — `--timeout 10000` or `TIMEOUT=10000` (milliseconds, default 5000).
-- *Entire tool calls timing out* (e.g. multi-section profiles, cold-start Chromium, slow containers): increase the per-tool execution timeout — `--tool-timeout 300` or `TOOL_TIMEOUT=300` (seconds, default 180).
+<details>
+<summary>Timeout issues</summary>
+
+- *Page operations failing* (elements not found, navigation hangs): increase the browser page-op timeout: `--timeout 10000` or `TIMEOUT=10000` (milliseconds, default 5000).
+- *Entire tool calls timing out* (e.g. multi-section profiles, cold-start Chromium, slow containers): increase the per-tool execution timeout: `--tool-timeout 300` or `TOOL_TIMEOUT=300` (seconds, default 180).
 - *First tool call with no session*: if a locally logged-in browser has a live LinkedIn session, the server auto-imports it (see `AUTO_IMPORT_FROM_BROWSER` / `--auto-import`) instead of forcing a manual login. On macOS the keychain may prompt once for Safe Storage access. If no importable browser session exists, it falls back to opening a login window and waits up to `LOGIN_INLINE_WAIT` seconds (default 25, max 45; `--login-inline-wait`) so a quick sign-in resolves in one call. If the wait elapses, the tool returns a pending signal and the model retries in about 30 seconds. Neither the auto-import nor the inline wait applies under Docker or when the server is bound to a non-loopback HTTP host. Create the session on the host with `--login`, or use the explicit Docker `--login --login-viewer` command.
 - Users on slow connections may need higher values for either.
 
-**Told to run `--login` on the host when you already did:**
+</details>
+
+<details>
+<summary>Told to run <code>--login</code> on the host when you already did</summary>
 
 - If tool calls answer "No valid LinkedIn session is available in Docker" on a machine that is *not* a container, the runtime was misdetected. This happened on Linux hosts running a Docker daemon for unrelated services. Set `LINKEDIN_MCP_CONTAINER=false` to override the detection; `true` forces the opposite.
 
-**Using a proxy:**
+</details>
 
-> **Most people should not use one.** LinkedIn's own guidance for reducing
-> security challenges is to avoid a VPN or proxy, and it scores the addresses a
-> session signs in from. A home connection you have used for years is a trust
-> signal; a commercial exit node with a history you cannot see is not, and
-> switching to one is itself the kind of change that triggers a checkpoint.
-> A proxy is worth it in one case: the server runs somewhere its address is
-> obviously a data centre, or in a different country from the account's history.
-> Even then, a WireGuard or Tailscale exit node on your own home network beats
-> any paid provider, because the address really is yours. If you do buy one,
-> take a dedicated static ISP address and keep it, rather than a rotating
-> residential pool.
-
-- Route the browser through a proxy with `--proxy-server http://host:port` (`http`, `https`, `socks4` and `socks5` are accepted). Only browser traffic is routed, not the MCP transport.
-- Credentials go in `PROXY_USERNAME` and `PROXY_PASSWORD`. There is no `--proxy-password` flag on purpose: command-line arguments are readable by every other user on the machine. `PROXY_SERVER` also accepts the combined `http://user:pass@host:port` form most providers hand out.
-- Chromium cannot authenticate to a SOCKS proxy, so credentials require an `http(s)` endpoint. If your provider only offers authenticated SOCKS5, run a local relay that holds the credentials and point the server at that.
-- Local addresses go through the proxy too. Chromium's usual direct route for `localhost` is removed when a proxy is set, so add `PROXY_BYPASS=localhost,127.0.0.1,::1` if you need local targets reached directly.
-- Auto-import is skipped while a proxy is configured: a session taken from a local browser was created on your real address, and moving it to the proxy is the very change that triggers a checkpoint. Use `--login`.
-- A wrong proxy password does not report itself: Chromium retries the authentication challenge until the page times out, so it surfaces as a timeout or a failed sign-in. If sessions stop working right after you add a proxy, check the credentials before assuming the session expired.
-- **Set the proxy up before creating the session.** Run `--login` with the proxy already configured. Turning a proxy on for an existing profile moves a logged-in session to a new IP, which is what triggers a LinkedIn checkpoint. The same applies to `--import-from-browser`, which imports a session created on your real IP. Use a sticky session, not a rotating pool, for the same reason.
-
-**Custom Chrome path:**
+<details>
+<summary>Custom Chrome path</summary>
 
 - If Chrome is installed in a non-standard location, use `--chrome-path /path/to/chrome`
 - Can also set via environment variable: `CHROME_PATH=/path/to/chrome`
@@ -722,6 +801,27 @@ uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --por
 
 </details>
 
+</details>
+
+<br/>
+<br/>
+
+<a id="using-a-proxy"></a>
+
+## 🌐 Using a proxy
+
+LinkedIn scores the address a session signs in from, and the safest one is the address the account already uses. A proxy is the right tool when the server cannot sit on that address: it runs on a cloud host or in a different country from the account's history, or it serves a second LinkedIn account that should not share the first one's address. In that case take a dedicated static ISP address and keep it. If your provider only sells a residential pool, use a sticky session that holds one address, never per-request rotation. A WireGuard or Tailscale exit node on your own home network does the same job when you have one.
+
+The same flags and variables work for every install method: `--proxy-server`, `PROXY_SERVER`, `PROXY_USERNAME`, `PROXY_PASSWORD` and `PROXY_BYPASS`. The MCP Bundle exposes them in its Claude Desktop settings.
+
+- Route the browser through a proxy with `--proxy-server http://host:port` (`http`, `https`, `socks4` and `socks5` are accepted). Only browser traffic is routed, not the MCP transport.
+- Credentials go in `PROXY_USERNAME` and `PROXY_PASSWORD`. There is no `--proxy-password` flag on purpose: command-line arguments are readable by every other user on the machine. `PROXY_SERVER` also accepts the combined `http://user:pass@host:port` form most providers hand out.
+- Chromium cannot authenticate to a SOCKS proxy, so credentials require an `http(s)` endpoint. If your provider only offers authenticated SOCKS5, run a local relay that holds the credentials and point the server at that.
+- Local addresses go through the proxy too. Chromium's usual direct route for `localhost` is removed when a proxy is set, so add `PROXY_BYPASS=localhost,127.0.0.1,::1` if you need local targets reached directly.
+- A container on your own machine leaves through your address and needs no proxy. Inside a container `127.0.0.1` is the container itself, so a relay on the host is `host.docker.internal` (native Linux Docker also needs `--add-host=host.docker.internal:host-gateway`).
+- Auto-import is skipped while a proxy is configured: a session taken from a local browser was created on your real address, and moving it to the proxy is the very change that triggers a checkpoint. Use `--login`.
+- A wrong proxy password does not report itself: Chromium retries the authentication challenge until the page times out, so it surfaces as a timeout or a failed sign-in. If sessions stop working right after you add a proxy, check the credentials before assuming the session expired.
+- **Set the proxy up before creating the session.** Run `--login` with the proxy already configured. Turning a proxy on for an existing profile moves a logged-in session to a new IP, which is what triggers a LinkedIn checkpoint. The same applies to `--import-from-browser`, which imports a session created on your real IP.
 
 <br/>
 <br/>
