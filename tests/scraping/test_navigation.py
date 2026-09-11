@@ -146,9 +146,13 @@ class TestNavigationDiagnostics:
     async def test_a_hop_on_the_way_reaches_the_failure_log(self, mock_page):
         """Where a failed navigation went is the diagnostic it leaves behind.
 
-        The address is read off the frame the event carries and not off the
-        page, so a double whose frame never moves records nothing while
-        looking exactly like one that works.
+        The recorder reads the address off the frame the event carries, so a
+        double whose frame never moves records nothing while looking exactly
+        like one that works. That the frame and `page.url` agree is not an
+        accident this test could catch: patchright's `Page.url` returns
+        `self._main_frame.url`, and the frame's `_url` is set before
+        `framenavigated` is emitted, so for the main frame the two reads are
+        the same value at dispatch time.
         """
         navigator = PageNavigator(ScrapingSession(mock_page))
         checkpoint = "https://www.linkedin.com/checkpoint/challenge/"
