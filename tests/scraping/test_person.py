@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import importlib.util
 
 import pytest
 
@@ -16,6 +19,7 @@ from linkedin_mcp_server.core.exceptions import (
     ProxyConnectionError,
 )
 from linkedin_mcp_server.scraping import person as person_module
+from linkedin_mcp_server.scraping import text as text_module
 from linkedin_mcp_server.scraping.capture import SectionCapture
 from linkedin_mcp_server.scraping.content import PageContentReader
 from linkedin_mcp_server.scraping.contracts import (
@@ -1184,6 +1188,61 @@ class TestGetSidebarProfiles:
             "url": "https://www.linkedin.com/in/testuser/",
             "sidebar_profiles": {},
         }
+
+
+class TestSidebarProgramText:
+    """The program `get_sidebar_profiles` evaluates, as text."""
+
+    def test_every_substituted_heading_carries_the_template_indent(self):
+        # `",\n".join(...)` indents the first heading and nothing after it,
+        # because only the first one lands on the template's own indented
+        # line. Whitespace alone, and `program_digest` strips per-line
+        # whitespace before fingerprinting, so the traces hold the claim
+        # `_js_literal` makes about byte identity open on exactly this.
+        block = ",\n".join(
+            f'{" " * 20}"{heading}"'
+            for heading in text_module.SIDEBAR_CHROME_EN.section_headings
+        )
+
+        assert f"const SIDEBAR_SECTIONS = [\n{block}\n" in (
+            person_module._SIDEBAR_PROFILES_JS
+        )
+        assert not [
+            line
+            for line in person_module._SIDEBAR_PROFILES_JS.splitlines()[1:]
+            if line and not line.startswith(" ")
+        ]
+
+    @pytest.mark.parametrize(
+        ("value", "quote"),
+        [("voir l'ensemble", "'"), ('the "all" list', '"'), ("back\\slash", "'")],
+    )
+    def test_an_unquotable_locale_label_is_refused(self, value, quote):
+        with pytest.raises(ValueError, match="cannot be quoted"):
+            person_module._js_literal(value, quote)
+
+    def test_an_unquotable_locale_label_stops_the_import(self, monkeypatch):
+        # The only call sites are module-level, so a table entry carrying an
+        # apostrophe has to fail here rather than as a JavaScript
+        # `SyntaxError` out of the unguarded `page.evaluate` below — which
+        # surfaces against live LinkedIn only, and only once this table grows
+        # the locale it exists to accept. Loaded as a throwaway copy, so the
+        # module every other test holds is left alone.
+        monkeypatch.setattr(
+            text_module,
+            "SIDEBAR_CHROME_EN",
+            replace(
+                text_module.SIDEBAR_CHROME_EN, show_all_prefixes=("voir l'ensemble",)
+            ),
+        )
+        spec = importlib.util.spec_from_file_location(
+            "person_locale_probe", person_module.__file__
+        )
+        assert spec is not None and spec.loader is not None
+        probe = importlib.util.module_from_spec(spec)
+
+        with pytest.raises(ValueError, match="cannot be quoted"):
+            spec.loader.exec_module(probe)
 
 
 class TestSearchPeople:

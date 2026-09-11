@@ -45,12 +45,30 @@ def _js_literal(value: str, quote: str) -> str:
     """Quote one locale-table label for the program below.
 
     Both quoting styles already occur in that program, and reproducing each
-    exactly is what keeps it the byte-identical program the policy traces
-    fingerprint. Escaping is deliberately absent: the table holds visible
-    LinkedIn labels, and a label carrying a quote or a backslash would be a
-    reason to stop matching on text here, not a reason to escape it.
+    exactly is what keeps it the byte-identical program the inlined original
+    was. Escaping is deliberately absent: the table holds visible LinkedIn
+    labels, and a label carrying a quote or a backslash would be a reason to
+    stop matching on text here, not a reason to escape it.
+
+    So the label that cannot be quoted is refused instead, and at import,
+    because the alternative is a `SyntaxError` raised out of `page.evaluate`
+    under an unguarded call — reachable only against live LinkedIn, and only
+    once the table grows the locale this exists to accept.
     """
+    if quote in value or "\\" in value:
+        raise ValueError(
+            f"sidebar chrome label {value!r} cannot be quoted with {quote!r}: "
+            "a label carrying a quote or a backslash is a reason to stop "
+            "matching on text, not a reason to escape it"
+        )
     return f"{quote}{value}{quote}"
+
+
+# The template indents the first heading and the join has to carry the rest,
+# or headings two and three land at column zero. Only whitespace, and the
+# `program_digest` the policy traces fingerprint strips it either way, which
+# is exactly why nothing would have said so.
+_HEADING_INDENT = " " * 20
 
 
 # The sidebar headings and the "Show all" control are the one place this
@@ -126,7 +144,7 @@ _SIDEBAR_PROFILES_JS = """() => {
                 return { sections, showAllUrls };
             }""".replace(
     "__SECTION_HEADINGS__",
-    ",\n".join(
+    f",\n{_HEADING_INDENT}".join(
         _js_literal(heading, '"') for heading in SIDEBAR_CHROME_EN.section_headings
     ),
 ).replace(

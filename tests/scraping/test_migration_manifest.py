@@ -20,6 +20,7 @@ from scripts import check_scraping_migration_manifest as migration  # noqa: E402
 MANIFEST = ROOT / "tests" / "fixtures" / "scraping-policy" / "migration-manifest.json"
 CHECKER = ROOT / "scripts" / "check_scraping_migration_manifest.py"
 POLICY_SCENARIOS = ROOT / "tests" / "scraping" / "policy_scenarios.py"
+PERSON_TESTS = ROOT / "tests" / "scraping" / "test_person.py"
 SCRAPING_SYNTHETIC = (
     ROOT / "linkedin_mcp_server" / "scraping" / "synthetic_inventory.py"
 )
@@ -2837,6 +2838,65 @@ def test_a_conditionally_rebound_alias_names_its_call_site(statement, line):
         r"ambiguous collaborator alias after conditional control flow",
     ):
         _scan_synthetic(_reach_through(statement))
+
+
+def _owner_test(body: str) -> str:
+    return (
+        "\nfrom unittest.mock import patch\n"
+        "\nfrom linkedin_mcp_server.scraping.extractor import LinkedInExtractor\n"
+        "\n\nasync def test_owner(page, replacement):\n"
+        f"{body}\n"
+    )
+
+
+def test_an_owner_factory_binding_exempts_only_its_own_wiring():
+    # `_scraper` builds the migrated owner, whose instance carries the same
+    # `_capture` the facade wires, so the wiring signal has to let this one
+    # through. Every remaining stage is written this way, and a refusal here
+    # would block all of them.
+    seams = migration.scan_source(
+        PERSON_TESTS,
+        _owner_test(
+            "    scraper = _scraper(page)\n"
+            '    patch.object(scraper._capture, "extract_page", replacement)'
+        ),
+        *migration.extractor_methods(),
+    )
+
+    assert not [seam for seam in seams if seam.kind.endswith("_patch_object")]
+
+
+@pytest.mark.parametrize(
+    ("rebinding", "line"),
+    [
+        ("    for scraper in (LinkedInExtractor(page),):\n        pass", 11),
+        ("    with LinkedInExtractor(page) as scraper:\n        pass", 11),
+        ("    try:\n        pass\n    except Exception as scraper:\n        pass", 13),
+        ("    scraper, other = LinkedInExtractor(page), None", 10),
+    ],
+)
+def test_a_rebound_owner_name_loses_its_factory_exemption(rebinding, line):
+    # The exemption answers for a name the factory alone binds. A `for`, a
+    # `with`, an `except` or an unpack binds it again without ever being a
+    # facade binding, so the name signal never sees those shapes and the
+    # wiring signal is the only guard over `scraper._capture`. Left exempt,
+    # a stage-8 test comparing owner and facade through one loop variable
+    # would take its facade reach-through out of the inventory entirely, and
+    # stage 12 would retire nothing for it.
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=rf"test_person\.py:{line} scraper\._capture: "
+        r"unresolved patch\.object target",
+    ):
+        migration.scan_source(
+            PERSON_TESTS,
+            _owner_test(
+                "    scraper = _scraper(page)\n"
+                f"{rebinding}\n"
+                '    patch.object(scraper._capture, "extract_page", replacement)'
+            ),
+            *migration.extractor_methods(),
+        )
 
 
 def test_a_foreign_collaborator_of_its_own_stays_out_of_the_inventory():

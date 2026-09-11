@@ -698,6 +698,73 @@ def _owner_factory_bindings(
     return bindings
 
 
+class _NonFactoryBindingCollector(_LocalBindingCollector):
+    """Collect a scope's bindings except the ones an owner factory assigns."""
+
+    def __init__(self, path: Path | None, factories: tuple[str, ...]) -> None:
+        super().__init__(path)
+        self.factories = factories
+
+    def _binds_an_owner(self, value: ast.expr | None) -> bool:
+        return (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id in self.factories
+        )
+
+    def visit_Assign(self, node: ast.Assign) -> Any:
+        if not self._binds_an_owner(node.value):
+            self.generic_visit(node)
+            return
+        self.visit(node.value)
+        for target in node.targets:
+            if not isinstance(target, ast.Name):
+                self.visit(target)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> Any:
+        if not self._binds_an_owner(node.value):
+            self.generic_visit(node)
+            return
+        if node.value is not None:
+            self.visit(node.value)
+        if not isinstance(node.target, ast.Name):
+            self.visit(node.target)
+
+
+def _rebound_owner_names(
+    path: Path,
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    factories: tuple[str, ...],
+) -> set[str]:
+    """Collect names the scope also binds through anything but a factory call.
+
+    `_owner_factory_bindings` reads assignment targets and never takes a name
+    back, so a name the factory binds once and a `for`, a `with`, an `except`
+    or an unpack binds again keeps the owner exemption for every use of it.
+    None of those forms is a facade binding either, so `_extractor_bindings`
+    never saw them and the wiring signal in `_reaches_the_extractor` was the
+    only guard left standing over `scraper._capture`.
+
+    Whether the rebinding runs is not asked, the way `_function_shadowed_names`
+    does not ask: a name bound both ways fits no single answer, and the
+    exemption only ever narrows a refusal, so it is the side that gives way.
+    Parameters, `global` and `nonlocal` names count as other forms too — each
+    one says the name is not this scope's to answer for.
+    """
+
+    if not factories:
+        return set()
+    collector = _NonFactoryBindingCollector(path, factories)
+    for statement in node.body:
+        collector.visit(statement)
+    return (
+        collector.bindings
+        | collector.globals
+        | collector.nonlocals
+        | _argument_names(node.args)
+    )
+
+
 def _extractor_bindings(
     node: ast.FunctionDef | ast.AsyncFunctionDef,
     annotation_aliases: set[str],
@@ -2473,12 +2540,12 @@ class Scanner(ast.NodeVisitor):
         aliases, ambiguous_aliases = _collaborator_aliases(
             self.path, node, instance_names | class_names
         )
+        factories = _OWNER_FACTORIES.get(self.relative_path, ())
         owner_names = parent.closure_owner_names - _function_shadowed_names(
             self.path, node
         )
-        owner_names.update(
-            _owner_factory_bindings(node, _OWNER_FACTORIES.get(self.relative_path, ()))
-        )
+        owner_names.update(_owner_factory_bindings(node, factories))
+        owner_names.difference_update(_rebound_owner_names(self.path, node, factories))
         self.functions.append(node)
         self.frames.append(
             _ScopeFrame(
@@ -3483,7 +3550,10 @@ class Scanner(ast.NodeVisitor):
         facade at all. Names bound through ``_OWNER_FACTORIES`` are therefore
         excluded from that signal — from that signal only, and only as the
         immediate receiver, so ``self._capture`` and every unreducible shape
-        still refuse.
+        still refuse. A name the scope also binds some other way loses the
+        exemption in ``_rebound_owner_names``: ``for``, ``with`` and
+        ``except`` targets are no facade binding either, so this signal is the
+        only one that ever sees them.
         """
 
         frame = self.frames[-1]

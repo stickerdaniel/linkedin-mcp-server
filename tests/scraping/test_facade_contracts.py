@@ -4,16 +4,20 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import inspect
+
+import pytest
 
 from fastmcp.tools import FunctionTool
 from patchright.async_api import Page
 
 from linkedin_mcp_server import dependencies
+from linkedin_mcp_server.core.exceptions import InvalidReferenceError
 from linkedin_mcp_server.scraping import LinkedInExtractor as PackageExtractor
 from linkedin_mcp_server.scraping import contracts, text
+from linkedin_mcp_server.scraping.capture import SectionCapture
 from linkedin_mcp_server.scraping.extractor import (
     ExtractedSection,
     FilterValidationError,
@@ -122,6 +126,78 @@ async def test_company_posts_delegate_matches_registered_tool_consumer():
         "https://www.linkedin.com/company/example/posts/", section_name="posts"
     )
     extractor.scrape_company.assert_not_awaited()
+
+
+async def test_facade_scrape_person_forwards_its_keyword_only_arguments(mock_page):
+    # No production caller passes either one to the facade any more: the
+    # redirect path that drove `allow_self_alias` through it moved to the
+    # person owner, which calls its own `scrape_person`. Replacing both
+    # forwards with `False` survived the whole suite, so the delegate is
+    # pinned here, against the real owner rather than a mock of it.
+    mock_page.url = "https://www.linkedin.com/in/me/"
+    extractor = LinkedInExtractor(cast(Page, mock_page))
+    section = ExtractedSection(text="reused", references=[], error=None)
+
+    with (
+        patch.object(
+            SectionCapture,
+            "_extract_loaded_section",
+            new_callable=AsyncMock,
+            return_value=section,
+        ) as loaded,
+        patch.object(
+            SectionCapture,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=section,
+        ) as extract_page,
+    ):
+        result = await extractor.scrape_person(
+            "me",
+            {"main_profile"},
+            main_profile_already_loaded=True,
+            allow_self_alias=True,
+        )
+
+    # Reaching this line at all is what `allow_self_alias` buys; reusing the
+    # loaded page instead of navigating is what the other one buys.
+    assert result["url"] == "https://www.linkedin.com/in/me/"
+    loaded.assert_awaited_once()
+    extract_page.assert_not_awaited()
+
+
+async def test_facade_scrape_person_keeps_refusing_the_self_alias_by_default(mock_page):
+    # The other half of the forward above: without the argument `me` is a
+    # reserved name, so the assertion that it scraped says something.
+    extractor = LinkedInExtractor(cast(Page, mock_page))
+
+    with pytest.raises(InvalidReferenceError):
+        await extractor.scrape_person("me", {"main_profile"})
+
+
+async def test_the_profile_urn_reader_resolves_the_facade_at_call_time(mock_page):
+    # `__init__` wires a lambda rather than the bound method on purpose, and
+    # nothing held that line: the bound method survived the suite. The top-card
+    # read still belongs to the facade until the message sender owns it, so a
+    # replacement installed on the instance after construction has to be the
+    # one that runs.
+    extractor = LinkedInExtractor(cast(Page, mock_page))
+
+    async def replacement() -> SimpleNamespace:
+        return SimpleNamespace(target=SimpleNamespace(profile_urn="urn:late-bound"))
+
+    with (
+        patch.object(extractor, "_read_profile_message_target", replacement),
+        patch.object(
+            SectionCapture,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=ExtractedSection(text="profile", references=[], error=None),
+        ),
+    ):
+        result = await extractor.scrape_person("someone", {"main_profile"})
+
+    assert result["profile_urn"] == "urn:late-bound"
 
 
 def test_facade_methods_are_exactly_the_frozen_coroutine_surface():
