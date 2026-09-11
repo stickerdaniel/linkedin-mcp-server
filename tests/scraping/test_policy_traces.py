@@ -18,6 +18,7 @@ import pytest
 from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.scraping.extractor import LinkedInExtractor
 from linkedin_mcp_server.scraping.fields import COMPANY_SECTIONS, PERSON_SECTIONS
+from linkedin_mcp_server.scraping.person import PersonScraper
 
 from . import policy_scenarios
 from .policy_scenarios import (
@@ -262,7 +263,7 @@ async def test_facade_trace_detects_section_text_corruption():
 
 
 async def test_facade_trace_detects_lost_references():
-    original = LinkedInExtractor.scrape_person
+    original = PersonScraper.scrape_person
     removed: list[dict[str, Any]] = []
 
     @wraps(original)
@@ -273,7 +274,7 @@ async def test_facade_trace_detects_lost_references():
             removed.append(references)
         return result
 
-    with patch.object(LinkedInExtractor, "scrape_person", drop_references):
+    with patch.object(PersonScraper, "scrape_person", drop_references):
         mutated = await build_policy_traces()
 
     assert removed

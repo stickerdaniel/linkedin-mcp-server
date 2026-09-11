@@ -172,3 +172,41 @@ def strip_conversation_chrome(text: str, locale: str = "en") -> str:
                 break
 
     return "\n".join(lines[start:end]).strip()
+
+
+# Sidebar recommendation headings on a person page, and the control that opens
+# the full list behind one. Neither carries a URL, an attribute or a structural
+# count separating it from any other heading or anchor in the same container,
+# so both are matched on visible strings — guarded by an explicit per-locale
+# table (CLAUDE.md → Scraping Rules) exactly like the messaging chrome above.
+# This is the only place the strings are written down; `person.py` builds its
+# extraction program from this table rather than repeating them.
+@dataclass(frozen=True)
+class SidebarChromeTable:
+    # Headings of the recommendation sections worth collecting, matched whole
+    # against a normalized `h1`/`h2`/`h3`. A heading outside the table is left
+    # alone rather than guessed at.
+    section_headings: tuple[str, ...]
+    # Prefixes of the anchor that expands a section to its full list, matched
+    # against lowercased anchor text. LinkedIn labels that control either way
+    # depending on the surface, so both spellings are listed.
+    show_all_prefixes: tuple[str, ...]
+
+
+_SIDEBAR_CHROME_STRINGS: dict[str, SidebarChromeTable] = {
+    "en": SidebarChromeTable(
+        section_headings=(
+            "More profiles for you",
+            "Explore premium profiles",
+            "People you may know",
+        ),
+        show_all_prefixes=("show all", "see all"),
+    ),
+}
+
+# BrowserManager forces the context locale to en-US (core/browser.py), so this
+# is the entry a running server reads, and the dictionary above is what makes
+# that dependency visible instead of implicit. A locale with no entry would
+# collect nothing here, which is why the sidebar is the one workflow whose
+# coverage has to be stated per locale rather than assumed.
+SIDEBAR_CHROME_EN = _SIDEBAR_CHROME_STRINGS["en"]

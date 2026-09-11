@@ -22,6 +22,8 @@ from linkedin_mcp_server.scraping.extractor import (
     _ProfileMessageTargetResolution,
 )
 from linkedin_mcp_server.scraping.navigation import PageNavigator
+from linkedin_mcp_server.scraping.profile_page import ProfilePageReader
+from linkedin_mcp_server.scraping.session import ScrapingSession
 
 pytestmark = [
     pytest.mark.browser_dom,
@@ -372,11 +374,16 @@ class TestProfileMessageTargetDom:
             ),
         )
         extractor = LinkedInExtractor(dom_page)
+        # The reader borrows the facade's top-card read until the message
+        # sender owns it, so wiring it here is what the facade does.
+        reader = ProfilePageReader(
+            ScrapingSession(dom_page), extractor._read_profile_message_target
+        )
 
         resolution = await read_profile_target(dom_page, html)
 
         assert resolution.status == "unavailable"
-        assert await extractor._extract_profile_urn() is None
+        assert await reader._extract_profile_urn() is None
 
     async def test_hidden_top_card_action_proves_action_absence(self, dom_page):
         html = profile_page(
