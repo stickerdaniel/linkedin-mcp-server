@@ -829,7 +829,7 @@ Take a dedicated static ISP address and keep it. From a residential pool, use a 
 - `--proxy-server scheme://host:port` or `PROXY_SERVER`, with `http`, `https`, `socks4` or `socks5`. Only browser traffic is routed, not the MCP transport.
 - Credentials go in `PROXY_USERNAME` and `PROXY_PASSWORD`, or in the combined `http://user:pass@host:port` form. There is no `--proxy-password` flag: command-line arguments are readable by every other user on the machine.
 - `PROXY_BYPASS=localhost,127.0.0.1,::1` reaches local targets directly. With a proxy set, Chromium routes `localhost` through it too.
-- The MCP Bundle exposes the same four settings in Claude Desktop.
+- These flags and variables work with every install method. The MCP Bundle exposes the same four settings in Claude Desktop.
 
 <details>
 <summary>Pitfalls</summary>
