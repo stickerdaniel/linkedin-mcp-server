@@ -1500,6 +1500,11 @@ async def test_reach_through(page, replacement):
         patch.object(extractor._content, "_extract_root_content", replacement),
     ):
         await extractor.scrape_person("ada")
+
+async def test_company_reach_through(page, replacement):
+    extractor = LinkedInExtractor(page)
+    with patch.object(extractor._content, "_extract_root_content", replacement):
+        await extractor.scrape_company("acme")
 """
     )
 
@@ -1509,22 +1514,39 @@ async def test_reach_through(page, replacement):
         if seam.kind.endswith("_patch_object")
     ] == [
         ("private_patch_object", "_extract_overlay", "capture.SectionCapture", 6),
-        ("public_patch_object", "extract_page", "capture.SectionCapture dependency", 6),
+        # `extract_page` is not a dependency of `SectionCapture`, it *is*
+        # `SectionCapture`, so the owner names the workflow consuming it the
+        # way every other public entry does.
+        ("public_patch_object", "extract_page", "person.PersonScraper dependency", 6),
         (
             "private_patch_object",
             "_extract_root_content",
             "content.PageContentReader",
-            11,
+            6,
+        ),
+        (
+            "private_patch_object",
+            "_extract_root_content",
+            "content.PageContentReader",
+            8,
         ),
     ]
-    # The reach-through itself stays on the record next to the patch it
-    # carries, and both expire with the last workflow that still asks the
-    # facade for the collaborator.
-    assert {
-        (seam.target, seam.migration_stage)
+    # The reach-through stays on the record next to the patch it carries, and
+    # both expire with the workflow this call site drives. The same `_content`
+    # attribute therefore closes at 6 in the first test and at 8 in the second:
+    # once `scrape_person` owns its own reader, the stub in that test
+    # intercepts nothing while the `scrape_company` one is still live. A flat
+    # per-attribute maximum answered 11 for both.
+    assert [
+        (seam.target, seam.canonical_owner, seam.migration_stage)
         for seam in seams
         if seam.kind == "private_facade_access"
-    } == {("_capture", 6), ("_content", 11)}
+    ] == [
+        ("_capture", "person.PersonScraper -> facade.LinkedInExtractor._capture", 6),
+        ("_capture", "person.PersonScraper -> facade.LinkedInExtractor._capture", 6),
+        ("_content", "person.PersonScraper -> facade.LinkedInExtractor._content", 6),
+        ("_content", "company.CompanyScraper -> facade.LinkedInExtractor._content", 8),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1554,6 +1576,140 @@ async def test_typo(page):
         migration.UnresolvedSeamError, match=rf"synthetic_inventory\.py:7 .*{message}"
     ):
         _scan_synthetic(source)
+
+
+def _reach_through(statement: str) -> str:
+    """A workflow test whose single statement is the shape under test."""
+
+    return f"""
+from unittest.mock import patch
+from linkedin_mcp_server.scraping.extractor import LinkedInExtractor
+
+async def test_shape(page, replacement, monkeypatch, arguments, pair, thing):
+    extractor = LinkedInExtractor(page)
+    {statement}
+    await extractor.scrape_person("ada")
+"""
+
+
+@pytest.mark.parametrize(
+    ("statement", "message"),
+    [
+        (
+            'patch.object(self.extractor._capture, "made_up", replacement)',
+            r"self\.extractor\._capture: unresolved patch\.object target",
+        ),
+        (
+            'patch.object(extractor._capture._reader, "made_up", replacement)',
+            r"extractor\._capture\._reader: unresolved patch\.object target",
+        ),
+        (
+            'patch.object(getattr(extractor, "_capture"), "made_up", replacement)',
+            r"getattr\(extractor, '_capture'\): unresolved patch\.object target",
+        ),
+        (
+            "patch.object(*arguments)",
+            r"patch\.object\(\*arguments\): unresolved patch\.object arguments",
+        ),
+        (
+            "patch.object(extractor._capture)",
+            r"patch\.object\(extractor\._capture\): "
+            r"unresolved patch\.object arguments",
+        ),
+        (
+            "patch.object(*pair, replacement)",
+            r"\*pair: dynamic patch\.object attribute",
+        ),
+        (
+            'monkeypatch.setattr(extractor._capture._reader, "made_up", replacement)',
+            r"extractor\._capture\._reader: unresolved setattr target",
+        ),
+        (
+            "extractor._capture._reader.made_up = replacement",
+            r"extractor\._capture\._reader: unresolved attribute assignment target",
+        ),
+    ],
+)
+def test_unresolvable_replacement_targets_name_their_call_site(statement, message):
+    # Each of these replaces a name on something the reader cannot reduce to a
+    # collaborator, so nothing proves the patch intercepts the implementation.
+    # A chain of `if ...: return` blocks that simply ends answers "not a seam"
+    # to exactly that, which is indistinguishable from a foreign object.
+    with pytest.raises(
+        migration.UnresolvedSeamError, match=rf"synthetic_inventory\.py:7 .*{message}"
+    ):
+        _scan_synthetic(_reach_through(statement))
+
+
+@pytest.mark.parametrize(
+    ("statement", "line"),
+    [
+        ('cap = extractor._capture\n    patch.object(cap, "{name}", replacement)', 8),
+        ('patch.object(cap := extractor._capture, "{name}", replacement)', 7),
+        (
+            "patch.object(target=extractor._capture, "
+            'attribute="{name}", new=replacement)',
+            7,
+        ),
+        ('monkeypatch.setattr(extractor._capture, "{name}", replacement)', 7),
+        ('setattr(extractor._capture, "{name}", replacement)', 7),
+        ("extractor._capture.{name} = replacement", 7),
+    ],
+)
+def test_every_reach_through_shape_lands_on_the_collaborator(statement, line):
+    # An alias, a walrus, the keyword form and all three `setattr` spellings
+    # reach the same collaborator as `patch.object(extractor._capture, ...)`.
+    # A shape that produced no seam also produced no error, so a name that has
+    # never existed on `SectionCapture` read as a passing test.
+    seams = _scan_synthetic(_reach_through(statement.format(name="_extract_overlay")))
+
+    assert [
+        (seam.kind, seam.target, seam.canonical_owner, seam.migration_stage)
+        for seam in seams
+        if seam.kind.endswith("_patch_object")
+    ] == [("private_patch_object", "_extract_overlay", "capture.SectionCapture", 6)]
+
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=rf"synthetic_inventory\.py:{line} _capture\.made_up: "
+        r"unknown capture\.SectionCapture patch",
+    ):
+        _scan_synthetic(_reach_through(statement.format(name="made_up")))
+
+
+def test_a_foreign_collaborator_of_its_own_stays_out_of_the_inventory():
+    # The refusal has to stop at objects the reader knows nothing about, or it
+    # refuses the migration's own target state: `tests/scraping/test_feed.py`
+    # builds a `FeedScraper` and stubs `_extract_feed_body` on it, which is the
+    # identical shape and is exactly what stage 5 produced. Nothing in the
+    # expression names the extractor, so there is no reach-through to record.
+    seams = _scan_synthetic(
+        _reach_through('patch.object(thing, "_extract_overlay", replacement)')
+    )
+
+    assert not [seam for seam in seams if seam.kind.endswith("_patch_object")]
+
+
+def test_a_renamed_collaborator_class_names_its_call_site(monkeypatch):
+    # A rename used to reach `collaborator_methods`' bare `AssertionError`,
+    # which leaves the scan with a traceback and no location instead of a
+    # diagnostic naming the patch that can no longer be resolved.
+    monkeypatch.setitem(
+        migration._FACADE_COLLABORATORS,
+        "_capture",
+        ("capture.RenamedSectionCapture", "facade.LinkedInExtractor._capture"),
+    )
+
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=r"synthetic_inventory\.py:7 _capture\._extract_overlay: "
+        r"RenamedSectionCapture not found in scraping/capture\.py",
+    ):
+        _scan_synthetic(
+            _reach_through(
+                'patch.object(extractor._capture, "_extract_overlay", replacement)'
+            )
+        )
 
 
 @pytest.mark.parametrize(

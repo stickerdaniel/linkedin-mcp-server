@@ -149,34 +149,37 @@ _IMPORT_OWNERS = {
     ),
 }
 
-# `_content` and `_capture` are the facade's own wiring rather than a
-# collaborator a test could build for itself: reaching them is how a workflow
-# still living on the facade gets its capture stubbed, so the seam closes with
-# the last workflow that still asks the facade for it, not with the module that
-# owns the class and not with the facade. Measured over every reach-through in
-# the tree: all 19 `_capture` sites sit in `scrape_person` tests, which move at
-# stage 6, and the 14 `_content` sites spread over `scrape_company` (8),
-# `_extract_search_page`, `search_jobs`, `_extract_saved_jobs_page` (9) and
-# `get_inbox`, `get_conversation`, `search_conversations` (11). Pinning either
-# at the facade's own stage 14 would leave a stale reach-through unflagged for
-# the rest of the migration. `_session` and `_navigator` carry no such consumer
-# and stay pinned to their own stage.
+# Facade wiring a test reaches but never owns. These carry no consumer of their
+# own, so each one closes with the module that owns it.
 _INSTANCE_ATTRIBUTE_OWNERS = {
     "_page": ("facade.LinkedInExtractor._page", 14),
     "_session": ("session.ScrapingSession", 3),
     "_navigator": ("navigation.PageNavigator", 3),
-    "_content": ("facade.LinkedInExtractor._content", 11),
-    "_capture": ("facade.LinkedInExtractor._capture", 6),
     "_scroll_seconds": ("facade.LinkedInExtractor._scroll_seconds", 14),
 }
 
-# The collaborator behind each of those two attributes. A patch routed through
-# the attribute lands on the collaborator's own method, so the seam records the
-# collaborator as its owner while the stage stays the attribute's: what expires
-# is the reach-through, not the method.
+# `_content` and `_capture` are the facade's own wiring rather than a
+# collaborator a test could build for itself: reaching one is how a workflow
+# still living on the facade gets its reader stubbed. Each entry names the
+# collaborator the reach-through lands on and the facade binding the
+# reach-through itself consumes.
+#
+# Both the reach-through and the patch it carries expire with the workflow the
+# *call site* drives, never with a flat per-attribute maximum: the moment
+# `scrape_company` owns its own reader, a `_content` stub inside a
+# `scrape_company` test intercepts nothing, while a `get_inbox` test reaching
+# the same attribute is still live. Measured over every reach-through in the
+# tree: all 19 `_capture` sites drive `scrape_person` (6), and the 14 `_content`
+# sites split across `scrape_company` (8), `_extract_search_page` and
+# `search_jobs` (9) and `get_inbox`, `get_conversation`,
+# `search_conversations` (11). A single pin at 11 left the one stage-8 and the
+# four stage-9 reach-throughs unflagged for three and two stages; a pin at the
+# facade's own stage 14 would leave every one of them unflagged for the rest of
+# the migration. The stage therefore comes from `_callers`, exactly as a
+# boundary patch's does.
 _FACADE_COLLABORATORS = {
-    "_content": "content.PageContentReader",
-    "_capture": "capture.SectionCapture",
+    "_content": ("content.PageContentReader", "facade.LinkedInExtractor._content"),
+    "_capture": ("capture.SectionCapture", "facade.LinkedInExtractor._capture"),
 }
 
 _MODULE_ATTRIBUTE_OWNERS = {
@@ -628,6 +631,7 @@ class _ScopeFrame:
     closure_class_names: set[str]
     closure_instance_names: set[str]
     ambiguous_names: set[str] = field(default_factory=set)
+    collaborator_aliases: dict[str, str] = field(default_factory=dict)
 
 
 def _extractor_bindings(
@@ -667,6 +671,59 @@ def _extractor_bindings(
                 target.id for target in targets if isinstance(target, ast.Name)
             )
     return bindings
+
+
+def _patch_object_arguments(node: ast.Call) -> tuple[ast.expr | None, ast.expr | None]:
+    """Read ``patch.object``'s target and attribute across its call shapes.
+
+    ``mock`` accepts both by keyword, and an arity gate counting positional
+    arguments alone answers "not a patch" to the keyword form, to ``*args`` and
+    to a call missing its attribute. Returning ``None`` for either end tells the
+    caller to refuse rather than to skip.
+    """
+
+    if any(keyword.arg is None for keyword in node.keywords):
+        return (None, None)
+    keywords = {keyword.arg: keyword.value for keyword in node.keywords}
+    target = node.args[0] if node.args else keywords.get("target")
+    attribute = node.args[1] if len(node.args) > 1 else keywords.get("attribute")
+    return (target, attribute)
+
+
+def _collaborator_aliases(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    facade_names: set[str],
+) -> dict[str, str]:
+    """Map local names bound to a facade collaborator attribute.
+
+    ``cap = extractor._capture`` followed by ``patch.object(cap, ...)`` is the
+    same reach-through written over two statements, and without the alias the
+    patch lands on a bare local the reader cannot place. Collected over the
+    whole body like ``_extractor_bindings``, so a rebinding later in the
+    function is not tracked; the map is only ever consulted after every other
+    binding kind has been ruled out.
+    """
+
+    aliases: dict[str, str] = {}
+    for statement in node.body:
+        for item in (statement, *_walk_scope(statement)):
+            if not isinstance(item, (ast.Assign, ast.AnnAssign)):
+                continue
+            value = item.value
+            if not (
+                isinstance(value, ast.Attribute)
+                and isinstance(value.value, ast.Name)
+                and value.value.id in facade_names
+                and value.attr in _FACADE_COLLABORATORS
+            ):
+                continue
+            targets = item.targets if isinstance(item, ast.Assign) else [item.target]
+            aliases.update(
+                (target.id, value.attr)
+                for target in targets
+                if isinstance(target, ast.Name)
+            )
+    return aliases
 
 
 class _CalledMethodCollector(ast.NodeVisitor):
@@ -1079,7 +1136,14 @@ _COLLABORATOR_METHODS: dict[tuple[Path, str], frozenset[str]] = {}
 
 
 def collaborator_methods(owner: str, package: Path = PACKAGE) -> frozenset[str]:
-    """Read the method names of a facade collaborator named ``module.Class``."""
+    """Read the method names of a facade collaborator named ``module.Class``.
+
+    Only the class body is read, so a member reached through a base class or
+    produced by a decorator is not here and its patch is refused. That is the
+    acceptable direction: a loud refusal names the site and asks for the table
+    to be widened, while accepting an unknown name would let a patch that
+    intercepts nothing through.
+    """
 
     cached = _COLLABORATOR_METHODS.get((package, owner))
     if cached is not None:
@@ -1097,7 +1161,10 @@ def collaborator_methods(owner: str, package: Path = PACKAGE) -> frozenset[str]:
             )
             _COLLABORATOR_METHODS[package, owner] = methods
             return methods
-    raise AssertionError(f"{class_name} not found in scraping/{module}.py")
+    raise UnresolvedSeamError(
+        f"{class_name} not found in scraping/{module}.py: "
+        "rename the entry in _FACADE_COLLABORATORS"
+    )
 
 
 class Scanner(ast.NodeVisitor):
@@ -1252,6 +1319,9 @@ class Scanner(ast.NodeVisitor):
                 closure_module_names=set(module_names),
                 closure_class_names=set(class_names),
                 closure_instance_names=set(instance_names),
+                collaborator_aliases=_collaborator_aliases(
+                    node, instance_names | class_names
+                ),
             )
         )
         for statement in node.body:
@@ -1406,6 +1476,7 @@ class Scanner(ast.NodeVisitor):
             closure_class_names=set(frame.closure_class_names),
             closure_instance_names=set(frame.closure_instance_names),
             ambiguous_names=set(frame.ambiguous_names),
+            collaborator_aliases=dict(frame.collaborator_aliases),
         )
 
     def _visit_class_suite(self, statements: list[ast.stmt]) -> None:
@@ -1801,6 +1872,10 @@ class Scanner(ast.NodeVisitor):
     def _direct_facade_attribute(self, node: ast.Attribute, name: str) -> None:
         if not name.startswith("_"):
             return
+        collaborator = _FACADE_COLLABORATORS.get(name)
+        if collaborator is not None:
+            self._add_contextual("private_facade_access", node, name, collaborator[1])
+            return
         owner_stage = (
             _PRIVATE_OWNERS.get(name)
             or _WORKFLOW_OWNERS.get(name)
@@ -1869,11 +1944,85 @@ class Scanner(ast.NodeVisitor):
             and function.attr == "object"
             and isinstance(function.value, ast.Name)
             and function.value.id == "patch"
-            and len(node.args) >= 2
         ):
-            self._suppress_module_attributes(node.args[0])
-            self._patch_object(node, node.args[0], node.args[1])
+            target, attribute = _patch_object_arguments(node)
+            if target is None or attribute is None:
+                # An arity or keyword shape the reader cannot take apart hides
+                # both ends of the patch. Skipping it on a failed arity gate is
+                # indistinguishable from a patch that intercepts nothing, so
+                # the call names itself instead.
+                self._error(
+                    node, ast.unparse(node), "unresolved patch.object arguments"
+                )
+            else:
+                self._suppress_module_attributes(target)
+                self._patch_object(node, target, attribute)
+
+        if (isinstance(function, ast.Name) and function.id == "setattr") or (
+            isinstance(function, ast.Attribute) and function.attr == "setattr"
+        ):
+            self._setattr_call(node)
         self.generic_visit(node)
+
+    def _setattr_call(self, node: ast.Call) -> None:
+        """Inventory ``setattr`` and ``monkeypatch.setattr`` replacements.
+
+        The method name is matched on its own rather than against a receiver
+        named ``monkeypatch``, because the fixture is routinely bound to
+        another name and a receiver test would skip exactly the sites this
+        exists to see. Everything it resolves to is a foreign object unless the
+        target reaches the extractor, so the breadth costs nothing.
+        """
+
+        if not node.args:
+            return
+        target = node.args[0]
+        if (
+            isinstance(target, ast.Constant)
+            and isinstance(target.value, str)
+            and target.value.startswith(EXTRACTOR_MODULE + ".")
+        ):
+            self._string_patch(node, target.value)
+            return
+        if len(node.args) < 2:
+            return
+        attribute = node.args[1]
+        if not (
+            isinstance(attribute, ast.Constant) and isinstance(attribute.value, str)
+        ):
+            self._refuse_unresolved_target(node, target, "setattr")
+            return
+        self._suppress_module_attributes(target)
+        self._replacement(node, target, attribute.value, "setattr")
+
+    def visit_Assign(self, node: ast.Assign) -> Any:
+        for target in node.targets:
+            if isinstance(target, ast.Attribute):
+                self._assigned_replacement(node, target)
+        self.generic_visit(node)
+
+    def _assigned_replacement(self, node: ast.Assign, target: ast.Attribute) -> None:
+        """Inventory ``owner.name = replacement`` one level below the facade.
+
+        An attribute assigned on the facade itself is already on the record
+        through ``visit_Attribute``, which sees the replaced name directly. One
+        level deeper that attribute is the reach-through and never the replaced
+        member, so the collaborator's own name goes unchecked unless it is
+        resolved here.
+        """
+
+        owner = target.value
+        if isinstance(owner, ast.Name) and (
+            owner.id in self.frames[-1].instance_names
+            or owner.id in self.class_names
+            or owner.id in self.module_names
+        ):
+            return
+        collaborator = self._collaborator_reach(owner)
+        if collaborator is not None:
+            self._collaborator_patch(node, collaborator, target.attr)
+            return
+        self._refuse_unresolved_target(node, owner, "attribute assignment")
 
     def _string_patch(self, node: ast.Call, value: str) -> None:
         target = value.removeprefix(EXTRACTOR_MODULE + ".")
@@ -1915,7 +2064,15 @@ class Scanner(ast.NodeVisitor):
         ):
             self._error(node, ast.unparse(target), "dynamic patch.object attribute")
             return
-        name = attribute.value
+        self._replacement(node, target, attribute.value, "patch.object")
+
+    def _replacement(
+        self, node: ast.expr | ast.stmt, target: ast.expr, name: str, form: str
+    ) -> None:
+        # A walrus names the same object it evaluates to, so the binding is
+        # irrelevant to what the patch reaches.
+        while isinstance(target, ast.NamedExpr):
+            target = target.value
         if (
             isinstance(target, ast.Name)
             and target.id in self.frames[-1].ambiguous_names
@@ -2026,29 +2183,99 @@ class Scanner(ast.NodeVisitor):
             )
             return
 
+        collaborator = self._collaborator_reach(target)
+        if collaborator is not None:
+            self._collaborator_patch(node, collaborator, name)
+            return
+
+        self._refuse_unresolved_target(node, target, form)
+
+    def _collaborator_reach(self, target: ast.expr) -> str | None:
+        """Name the facade attribute a replacement target reaches through."""
+
         if (
             isinstance(target, ast.Attribute)
             and isinstance(target.value, ast.Name)
-            and (target.value.id in bindings or target.value.id in self.class_names)
+            and (
+                target.value.id in self.frames[-1].instance_names
+                or target.value.id in self.class_names
+            )
         ):
-            self._collaborator_patch(node, target.attr, name)
-            return
+            return target.attr
+        if isinstance(target, ast.Name):
+            for frame in reversed(self.frames):
+                alias = frame.collaborator_aliases.get(target.id)
+                if alias is not None:
+                    return alias
+        return None
 
-    def _collaborator_patch(self, node: ast.Call, attribute: str, name: str) -> None:
-        owner = _FACADE_COLLABORATORS.get(attribute)
-        owner_stage = _INSTANCE_ATTRIBUTE_OWNERS.get(attribute)
+    def _reaches_the_extractor(self, target: ast.expr) -> bool:
+        """Answer whether an unreduced target still names the extractor.
+
+        A refusal has to be narrower than "could not resolve", or every
+        ``patch.object`` in the tree that replaces a member of some foreign
+        object becomes an error. Two signals survive a shape the reader cannot
+        reduce: a name it already knows is the extractor module, the facade
+        class or a facade instance, and a facade wiring attribute anywhere in
+        the expression. Measured over every site that falls through today:
+        neither fires on any of the 137, and between them they catch the
+        chained, ``getattr``-routed and ``self``-rooted reach-throughs.
+        """
+
+        frame = self.frames[-1]
+        known = (
+            frame.module_names
+            | frame.class_names
+            | frame.instance_names
+            | frame.ambiguous_names
+        )
+        wiring = set(_FACADE_COLLABORATORS) | set(_INSTANCE_ATTRIBUTE_OWNERS)
+        return any(
+            (isinstance(item, ast.Name) and item.id in known)
+            or (isinstance(item, ast.Attribute) and item.attr in wiring)
+            for item in ast.walk(target)
+        )
+
+    def _refuse_unresolved_target(
+        self, node: ast.expr | ast.stmt, target: ast.expr, form: str
+    ) -> None:
+        if not self._reaches_the_extractor(target):
+            return
+        self._error(node, ast.unparse(target), f"unresolved {form} target")
+
+    def _collaborator_patch(
+        self, node: ast.expr | ast.stmt, attribute: str, name: str
+    ) -> None:
+        collaborator = _FACADE_COLLABORATORS.get(attribute)
         patch_target = f"{attribute}.{name}"
-        if owner is None or owner_stage is None:
+        if collaborator is None:
             self._error(node, patch_target, "unknown facade collaborator patch")
             return
-        if name not in collaborator_methods(owner):
+        owner, _ = collaborator
+        try:
+            methods = collaborator_methods(owner)
+        except UnresolvedSeamError as error:
+            self._error(node, patch_target, str(error))
+            return
+        if name not in methods:
             self._error(node, patch_target, f"unknown {owner} patch")
             return
-        _, stage = owner_stage
-        if name.startswith("_"):
-            self._add("private_patch_object", node, name, owner, stage)
+        callers = self._callers(name)
+        if not callers:
+            self._error(node, patch_target, "collaborator patch has no caller workflow")
             return
-        self._add("public_patch_object", node, name, f"{owner} dependency", stage)
+        for caller_owner, stage in callers:
+            if name.startswith("_"):
+                # A private member is owned where it is defined, so the owner
+                # stays the collaborator and only the stage follows the caller.
+                self._add("private_patch_object", node, name, owner, stage)
+                continue
+            # A public member *is* the collaborator rather than a dependency of
+            # it, so the owner names the workflow consuming it, matching every
+            # other `public_patch_object` entry.
+            self._add(
+                "public_patch_object", node, name, f"{caller_owner} dependency", stage
+            )
 
 
 def scan_source(
