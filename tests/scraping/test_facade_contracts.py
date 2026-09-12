@@ -220,6 +220,32 @@ async def test_connection_profile_read_resolves_the_facade_delegate_late(mock_pa
     replacement.assert_awaited_once_with("target", {"main_profile"})
 
 
+async def test_profile_urn_read_resolves_the_sender_delegate_late(mock_page):
+    extractor = LinkedInExtractor(cast(Page, mock_page))
+    section = ExtractedSection(text="Target profile", references=[], error=None)
+
+    with (
+        patch.object(
+            SectionCapture,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=section,
+        ),
+        patch.object(
+            MessageSender,
+            "_read_profile_message_target",
+            new_callable=AsyncMock,
+            return_value=SimpleNamespace(
+                target=SimpleNamespace(profile_urn="ACoAReplacement")
+            ),
+        ) as replacement,
+    ):
+        result = await extractor.scrape_person("target", {"main_profile"})
+
+    assert result["profile_urn"] == "ACoAReplacement"
+    replacement.assert_awaited_once_with()
+
+
 async def test_facade_search_posts_forwards_its_recency_filter(mock_page):
     # The scroll depth is held by the `search-posts` trace, which runs the
     # facade with `max_pages=2` and records the scrolls it buys. The recency
