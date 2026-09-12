@@ -1,5 +1,6 @@
 """Tests for scraping section config dicts and section parsers."""
 
+import linkedin_mcp_server.scraping as scraping
 from linkedin_mcp_server.scraping.fields import (
     COMPANY_SECTIONS,
     PERSON_SECTIONS,
@@ -9,6 +10,28 @@ from linkedin_mcp_server.scraping.fields import (
 
 
 class TestPersonSections:
+    def test_exported_mapping_retains_exact_tuple_contract_and_identity(self):
+        expected = {
+            "main_profile": ("/", False),
+            "experience": ("/details/experience/", False),
+            "education": ("/details/education/", False),
+            "interests": ("/details/interests/", False),
+            "honors": ("/details/honors/", False),
+            "languages": ("/details/languages/", False),
+            "certifications": ("/details/certifications/", False),
+            "skills": ("/details/skills/", False),
+            "projects": ("/details/projects/", False),
+            "contact_info": ("/overlay/contact-info/", True),
+            "posts": ("/recent-activity/all/", False),
+        }
+        assert PERSON_SECTIONS == expected
+        assert list(PERSON_SECTIONS.items()) == list(expected.items())
+        assert all(
+            type(value) is tuple and len(value) == 2 for value in expected.values()
+        )
+        assert PERSON_SECTIONS["contact_info"][0] == "/overlay/contact-info/"
+        assert scraping.PERSON_SECTIONS is PERSON_SECTIONS
+
     def test_expected_keys(self):
         expected = {
             "main_profile",
@@ -40,6 +63,20 @@ class TestPersonSections:
 
 
 class TestCompanySections:
+    def test_exported_mapping_retains_exact_tuple_contract_and_identity(self):
+        expected = {
+            "about": ("/about/", False),
+            "posts": ("/posts/", False),
+            "jobs": ("/jobs/", False),
+        }
+        assert COMPANY_SECTIONS == expected
+        assert list(COMPANY_SECTIONS.items()) == list(expected.items())
+        assert all(
+            type(value) is tuple and len(value) == 2 for value in expected.values()
+        )
+        assert COMPANY_SECTIONS["posts"][1] is False
+        assert scraping.COMPANY_SECTIONS is COMPANY_SECTIONS
+
     def test_expected_keys(self):
         assert set(COMPANY_SECTIONS) == {"about", "posts", "jobs"}
 

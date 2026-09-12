@@ -20,7 +20,7 @@ from linkedin_mcp_server.core.exceptions import (
 )
 from linkedin_mcp_server.scraping import person as person_module
 from linkedin_mcp_server.scraping import text as text_module
-from linkedin_mcp_server.scraping.capture import SectionCapture
+from linkedin_mcp_server.scraping.capture import CaptureMode, SectionCapture
 from linkedin_mcp_server.scraping.content import PageContentReader
 from linkedin_mcp_server.scraping.contracts import (
     RATE_LIMITED_SECTION_TEXT,
@@ -73,7 +73,7 @@ class TestScrapePersonUrls:
         with (
             patch.object(
                 scraper._capture,
-                "extract_page",
+                "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("text"),
             ) as mock_extract,
@@ -100,7 +100,7 @@ class TestScrapePersonUrls:
         with (
             patch.object(
                 scraper._capture,
-                "extract_page",
+                "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("profile text"),
             ) as mock_extract,
@@ -135,7 +135,7 @@ class TestScrapePersonUrls:
         with (
             patch.object(
                 scraper._capture,
-                "extract_page",
+                "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("profile text"),
             ) as mock_extract,
@@ -163,7 +163,7 @@ class TestScrapePersonUrls:
         # feed and return it as a profile.
         scraper = _scraper(mock_page)
         with patch.object(
-            scraper._capture, "extract_page", new_callable=AsyncMock
+            scraper._capture, "capture", new_callable=AsyncMock
         ) as mock_extract:
             with pytest.raises(LinkedInScraperException):
                 await scraper.scrape_person("testuser/../../feed", {"main_profile"})
@@ -181,7 +181,7 @@ class TestScrapePersonUrls:
         with (
             patch.object(
                 scraper._capture,
-                "extract_page",
+                "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("profile text"),
             ) as mock_extract,
@@ -210,7 +210,7 @@ class TestScrapePersonUrls:
         with (
             patch.object(
                 scraper._capture,
-                "extract_page",
+                "capture",
                 new_callable=AsyncMock,
                 side_effect=[
                     extracted("profile text"),
@@ -234,7 +234,7 @@ class TestScrapePersonUrls:
         with (
             patch.object(
                 scraper._capture,
-                "extract_page",
+                "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("text"),
             ) as mock_extract,
@@ -278,7 +278,7 @@ class TestScrapePersonUrls:
         with (
             patch.object(
                 scraper._capture,
-                "extract_page",
+                "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("text"),
             ) as mock_extract,
@@ -301,6 +301,11 @@ class TestScrapePersonUrls:
         # 10 full-page sections + 1 overlay (contact_info)
         assert len(page_urls) == 10
         assert len(overlay_urls) == 1
+        assert [
+            capture_call.kwargs["plan"].mode
+            for capture_call in mock_extract.call_args_list
+        ] == [CaptureMode.STANDARD, *([CaptureMode.DETAILS] * 8), CaptureMode.ACTIVITY]
+        assert mock_overlay.call_args.kwargs["plan"].mode is CaptureMode.OVERLAY
         # Verify each expected suffix was navigated
         assert any(u.endswith("/in/testuser/") for u in all_urls)
         assert any("/details/experience/" in u for u in all_urls)
@@ -320,7 +325,7 @@ class TestScrapePersonUrls:
         with (
             patch.object(
                 scraper._capture,
-                "extract_page",
+                "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("Post 1\nPost 2"),
             ) as mock_extract,
@@ -346,7 +351,7 @@ class TestScrapePersonUrls:
         with (
             patch.object(
                 scraper._capture,
-                "extract_page",
+                "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("Python for Data Science\nIBM"),
             ) as mock_extract,
@@ -372,7 +377,7 @@ class TestScrapePersonUrls:
         with (
             patch.object(
                 scraper._capture,
-                "extract_page",
+                "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("Python\nData Analysis"),
             ) as mock_extract,
@@ -398,7 +403,7 @@ class TestScrapePersonUrls:
         with (
             patch.object(
                 scraper._capture,
-                "extract_page",
+                "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("Portfolio Website\nBuilt with React"),
             ) as mock_extract,
@@ -424,7 +429,7 @@ class TestScrapePersonUrls:
         with (
             patch.object(
                 scraper._capture,
-                "extract_page",
+                "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("text"),
             ) as mock_extract,
@@ -441,8 +446,12 @@ class TestScrapePersonUrls:
         ):
             await scraper.scrape_person("test-user", {"certifications"}, max_scrolls=15)
 
-        for call in mock_extract.call_args_list:
-            assert call.kwargs.get("max_scrolls") == 15
+        assert [
+            capture_call.kwargs["plan"].mode
+            for capture_call in mock_extract.call_args_list
+        ] == [CaptureMode.STANDARD, CaptureMode.DETAILS]
+        for capture_call in mock_extract.call_args_list:
+            assert capture_call.kwargs["plan"].max_scrolls == 15
 
 
 class TestScrapePersonSectionOutcomes:
@@ -453,7 +462,7 @@ class TestScrapePersonSectionOutcomes:
         with (
             patch.object(
                 scraper._capture,
-                "extract_page",
+                "capture",
                 new_callable=AsyncMock,
                 side_effect=[
                     extracted(
@@ -512,7 +521,7 @@ class TestScrapePersonSectionOutcomes:
         with (
             patch.object(
                 scraper._capture,
-                "extract_page",
+                "capture",
                 side_effect=extract_with_failure,
             ),
             patch(
@@ -557,7 +566,7 @@ class TestScrapePersonSectionOutcomes:
         with (
             patch.object(
                 scraper._capture,
-                "extract_page",
+                "capture",
                 new_callable=AsyncMock,
                 side_effect=[
                     extracted(RATE_LIMITED_SECTION_TEXT),
@@ -595,7 +604,7 @@ class TestScrapePersonSectionOutcomes:
         with (
             patch.object(
                 scraper._capture,
-                "extract_page",
+                "capture",
                 new_callable=AsyncMock,
                 return_value=extracted(RATE_LIMITED_SECTION_TEXT),
             ),
@@ -621,7 +630,7 @@ class TestScrapePersonSectionOutcomes:
         with (
             patch.object(
                 scraper._capture,
-                "extract_page",
+                "capture",
                 new_callable=AsyncMock,
                 side_effect=[
                     extracted("Profile text"),
@@ -659,7 +668,7 @@ class TestScrapePersonCallbacks:
         with (
             patch.object(
                 scraper._capture,
-                "extract_page",
+                "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("text"),
             ),
@@ -702,7 +711,7 @@ class TestScrapePersonCallbacks:
         with (
             patch.object(
                 scraper._capture,
-                "extract_page",
+                "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("text"),
             ),
@@ -726,7 +735,7 @@ class TestScrapePersonCallbacks:
         with (
             patch.object(
                 scraper._capture,
-                "extract_page",
+                "capture",
                 new_callable=AsyncMock,
                 side_effect=LinkedInScraperException("boom"),
             ),
@@ -780,7 +789,7 @@ class TestMainProfileAlreadyLoaded:
                 return_value=extracted("reused"),
             ) as loaded,
             patch.object(
-                scraper._capture, "extract_page", new_callable=AsyncMock
+                scraper._capture, "capture", new_callable=AsyncMock
             ) as extract_page,
             patch.object(
                 PageNavigator, "_navigate_to_page", new_callable=AsyncMock
@@ -806,7 +815,7 @@ class TestMainProfileAlreadyLoaded:
         with (
             patch.object(
                 scraper._capture,
-                "extract_page",
+                "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("fallback"),
             ) as extract_page,
@@ -840,7 +849,7 @@ class TestMainProfileAlreadyLoaded:
             ) as loaded,
             patch.object(
                 scraper._capture,
-                "extract_page",
+                "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("retry succeeded"),
             ) as extract_page,
@@ -866,7 +875,7 @@ class TestScrapePersonProfileUrn:
         with (
             patch.object(
                 scraper._capture,
-                "extract_page",
+                "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("profile text"),
             ),
@@ -891,7 +900,7 @@ class TestScrapePersonProfileUrn:
         with (
             patch.object(
                 scraper._capture,
-                "extract_page",
+                "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("profile text"),
             ),
@@ -925,7 +934,7 @@ class TestGetMyProfileAlias:
         with (
             patch.object(
                 scraper._capture,
-                "extract_page",
+                "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("profile text"),
             ) as mock_extract,
@@ -946,7 +955,7 @@ class TestGetMyProfileAlias:
     async def test_refuses_the_alias_from_an_ordinary_caller(self, mock_page):
         scraper = _scraper(mock_page)
         with patch.object(
-            scraper._capture, "extract_page", new_callable=AsyncMock
+            scraper._capture, "capture", new_callable=AsyncMock
         ) as mock_extract:
             with pytest.raises(InvalidReferenceError):
                 await scraper.scrape_person("me", {"main_profile"})
@@ -1250,7 +1259,7 @@ class TestSearchPeople:
         scraper = _scraper(mock_page)
         with patch.object(
             scraper._capture,
-            "extract_page",
+            "capture",
             new_callable=AsyncMock,
             return_value=extracted(
                 "",
@@ -1262,9 +1271,10 @@ class TestSearchPeople:
                     }
                 ],
             ),
-        ):
+        ) as capture:
             result = await scraper.search_people("python")
 
+        assert capture.call_args.kwargs["plan"].mode is CaptureMode.SEARCH_RESULTS
         assert result["sections"] == {}
         assert "references" not in result
 
@@ -1272,7 +1282,7 @@ class TestSearchPeople:
         scraper = _scraper(mock_page)
         with patch.object(
             scraper._capture,
-            "extract_page",
+            "capture",
             new_callable=AsyncMock,
             return_value=extracted("Jane Doe"),
         ):
@@ -1284,7 +1294,7 @@ class TestSearchPeople:
         scraper = _scraper(mock_page)
         with patch.object(
             scraper._capture,
-            "extract_page",
+            "capture",
             new_callable=AsyncMock,
             return_value=extracted("Jane Doe"),
         ):
@@ -1296,7 +1306,7 @@ class TestSearchPeople:
         scraper = _scraper(mock_page)
         with patch.object(
             scraper._capture,
-            "extract_page",
+            "capture",
             new_callable=AsyncMock,
             return_value=extracted("Jane Doe"),
         ):
@@ -1331,7 +1341,7 @@ class TestSearchPeople:
         scraper = _scraper(mock_page)
         with patch.object(
             scraper._capture,
-            "extract_page",
+            "capture",
             new_callable=AsyncMock,
             return_value=extracted("Jane Doe"),
         ):
@@ -1343,7 +1353,7 @@ class TestSearchPeople:
         scraper = _scraper(mock_page)
         with patch.object(
             scraper._capture,
-            "extract_page",
+            "capture",
             new_callable=AsyncMock,
             return_value=extracted("Jane Doe"),
         ):

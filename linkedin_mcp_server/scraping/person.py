@@ -12,12 +12,16 @@ from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.core.exceptions import LinkedInScraperException
 from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
-from linkedin_mcp_server.scraping.capture import SectionCapture
+from linkedin_mcp_server.scraping.capture import (
+    CaptureMode,
+    CapturePlan,
+    SectionCapture,
+)
 from linkedin_mcp_server.scraping.contracts import (
     RATE_LIMITED_SECTION_TEXT,
     rate_limited_section_error,
 )
-from linkedin_mcp_server.scraping.fields import PERSON_SECTIONS
+from linkedin_mcp_server.scraping.fields import _person_section_specs
 from linkedin_mcp_server.scraping.identifiers import (
     normalize_person_identifier,
     person_profile_url,
@@ -223,9 +227,9 @@ class PersonScraper:
         rate_limited = False
 
         requested_ordered = [
-            (name, suffix, is_overlay)
-            for name, (suffix, is_overlay) in PERSON_SECTIONS.items()
-            if name in requested
+            spec
+            for spec in _person_section_specs(max_scrolls)
+            if spec.name in requested
         ]
         total = len(requested_ordered)
 
@@ -233,11 +237,12 @@ class PersonScraper:
             await callbacks.on_start("person profile", base_url)
 
         try:
-            for i, (section_name, suffix, is_overlay) in enumerate(requested_ordered):
+            for i, spec in enumerate(requested_ordered):
                 if i > 0:
                     await self._session.delay(NAV_DELAY)
 
-                url = base_url + suffix
+                section_name = spec.name
+                url = base_url + spec.suffix
                 try:
                     can_reuse_main = (
                         section_name == "main_profile"
@@ -249,27 +254,29 @@ class PersonScraper:
                         extracted = await self._capture._extract_loaded_section(
                             url,
                             section_name=section_name,
-                            max_scrolls=max_scrolls,
+                            plan=spec.plan,
                         )
                         if extracted.text == RATE_LIMITED_SECTION_TEXT:
                             logger.info(
                                 "Reuse path soft-rate-limited; falling back "
                                 "to extract_page for retry parity"
                             )
-                            extracted = await self._capture.extract_page(
+                            extracted = await self._capture.capture(
                                 url,
                                 section_name=section_name,
-                                max_scrolls=max_scrolls,
+                                plan=spec.plan,
                             )
-                    elif is_overlay:
+                    elif CaptureMode.OVERLAY in spec.plan.mode:
                         extracted = await self._capture._extract_overlay(
-                            url, section_name=section_name
-                        )
-                    else:
-                        extracted = await self._capture.extract_page(
                             url,
                             section_name=section_name,
-                            max_scrolls=max_scrolls,
+                            plan=spec.plan,
+                        )
+                    else:
+                        extracted = await self._capture.capture(
+                            url,
+                            section_name=section_name,
+                            plan=spec.plan,
                         )
 
                     if extracted.text and extracted.text != RATE_LIMITED_SECTION_TEXT:
@@ -496,7 +503,11 @@ class PersonScraper:
             network=network,
             current_company=current_company,
         )
-        extracted = await self._capture.extract_page(url, section_name="search_results")
+        extracted = await self._capture.capture(
+            url,
+            section_name="search_results",
+            plan=CapturePlan(CaptureMode.SEARCH_RESULTS),
+        )
 
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}

@@ -2,17 +2,26 @@
 
 from __future__ import annotations
 
+from dataclasses import FrozenInstanceError
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import ast
 import pytest
 
 from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.scraping.capture import (
     RATE_LIMIT_RETRY_DELAY,
+    CaptureMode,
+    CapturePlan,
     SectionCapture,
+    capture_plan_for_url,
 )
 from linkedin_mcp_server.scraping.content import PageContentReader
-from linkedin_mcp_server.scraping.contracts import RATE_LIMITED_SECTION_TEXT
+from linkedin_mcp_server.scraping.contracts import (
+    RATE_LIMITED_SECTION_TEXT,
+    ExtractedSection,
+)
 from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.session import ScrapingSession
 
@@ -57,6 +66,24 @@ class TestExtractPage:
         assert result.text == "Sample profile text"
         assert result.references == []
         mock_page.goto.assert_awaited_once()
+
+    async def test_extract_page_adapts_the_url_to_an_explicit_plan(self, mock_page):
+        capture = _capture(mock_page)
+        url = "https://www.linkedin.com/in/testuser/recent-activity/all/"
+        with patch.object(
+            capture,
+            "capture",
+            new_callable=AsyncMock,
+            return_value=ExtractedSection(text="posts", references=[]),
+        ) as explicit_capture:
+            result = await capture.extract_page(url, "posts", max_scrolls=7)
+
+        assert result.text == "posts"
+        explicit_capture.assert_awaited_once_with(
+            url,
+            "posts",
+            CapturePlan(CaptureMode.ACTIVITY, max_scrolls=7),
+        )
 
     async def test_extract_page_returns_empty_on_failure(self, mock_page):
         mock_page.goto = AsyncMock(side_effect=Exception("Network error"))
@@ -220,9 +247,10 @@ class TestExtractPage:
                 return_value=False,
             ),
         ):
-            result = await capture._extract_page_once(
+            result = await capture._capture_once(
                 "https://www.linkedin.com/in/testuser/recent-activity/all/",
                 section_name="posts",
+                plan=CapturePlan(CaptureMode.ACTIVITY),
             )
 
         assert result.text == ""
@@ -230,7 +258,7 @@ class TestExtractPage:
 
 
 class TestActivityFeedExtraction:
-    """Tests for activity page detection and wait behavior in _extract_page_once."""
+    """Tests for activity capture plans and wait behavior."""
 
     async def test_activity_page_waits_for_content_and_uses_slow_scroll(
         self, mock_page
@@ -260,9 +288,10 @@ class TestActivityFeedExtraction:
                 return_value=False,
             ),
         ):
-            result = await capture._extract_page_once(
+            result = await capture._capture_once(
                 "https://www.linkedin.com/in/billgates/recent-activity/all/",
                 section_name="posts",
+                plan=CapturePlan(CaptureMode.ACTIVITY),
             )
 
         mock_page.wait_for_function.assert_awaited_once()
@@ -301,9 +330,10 @@ class TestActivityFeedExtraction:
                 return_value=False,
             ),
         ):
-            result = await capture._extract_page_once(
+            result = await capture._capture_once(
                 "https://www.linkedin.com/company/microsoft/posts/",
                 section_name="posts",
+                plan=CapturePlan(CaptureMode.ACTIVITY),
             )
 
         mock_page.wait_for_function.assert_awaited_once()
@@ -340,9 +370,10 @@ class TestActivityFeedExtraction:
                 return_value=False,
             ),
         ):
-            await capture._extract_page_once(
+            await capture._capture_once(
                 "https://www.linkedin.com/company/microsoft/posts/?viewAsMember=true",
                 section_name="posts",
+                plan=CapturePlan(CaptureMode.ACTIVITY),
             )
 
         mock_page.wait_for_function.assert_awaited_once()
@@ -373,9 +404,10 @@ class TestActivityFeedExtraction:
                 return_value=False,
             ),
         ):
-            await capture._extract_page_once(
+            await capture._capture_once(
                 "https://www.linkedin.com/in/billgates/",
                 section_name="main_profile",
+                plan=CapturePlan(CaptureMode.STANDARD),
             )
 
         mock_page.wait_for_function.assert_not_awaited()
@@ -410,9 +442,10 @@ class TestActivityFeedExtraction:
                 return_value=False,
             ),
         ):
-            await capture._extract_page_once(
+            await capture._capture_once(
                 "https://www.linkedin.com/in/billgates/details/experience/",
                 section_name="experience",
+                plan=CapturePlan(CaptureMode.DETAILS),
             )
 
         mock_page.wait_for_function.assert_awaited_once()
@@ -447,10 +480,10 @@ class TestActivityFeedExtraction:
                 return_value=False,
             ),
         ):
-            await capture._extract_page_once(
+            await capture._capture_once(
                 "https://www.linkedin.com/in/billgates/details/certifications/",
                 section_name="certifications",
-                max_scrolls=20,
+                plan=CapturePlan(CaptureMode.DETAILS, max_scrolls=20),
             )
 
         mock_scroll.assert_awaited_once()
@@ -483,9 +516,10 @@ class TestActivityFeedExtraction:
                 return_value=False,
             ),
         ):
-            await capture._extract_page_once(
+            await capture._capture_once(
                 "https://www.linkedin.com/in/billgates/details/certifications/",
                 section_name="certifications",
+                plan=CapturePlan(CaptureMode.DETAILS),
             )
 
         mock_scroll.assert_awaited_once()
@@ -535,9 +569,10 @@ class TestActivityFeedExtraction:
                 new_callable=AsyncMock,
             ),
         ):
-            await capture._extract_page_once(
+            await capture._capture_once(
                 "https://www.linkedin.com/in/billgates/details/certifications/",
                 section_name="certifications",
+                plan=CapturePlan(CaptureMode.DETAILS),
             )
 
         assert show_more.click.await_count == 2
@@ -584,10 +619,10 @@ class TestActivityFeedExtraction:
                 new_callable=AsyncMock,
             ),
         ):
-            await capture._extract_page_once(
+            await capture._capture_once(
                 "https://www.linkedin.com/in/billgates/details/experience/",
                 section_name="experience",
-                max_scrolls=3,
+                plan=CapturePlan(CaptureMode.DETAILS, max_scrolls=3),
             )
 
         assert show_more.click.await_count == 3
@@ -641,9 +676,10 @@ class TestActivityFeedExtraction:
                 new_callable=AsyncMock,
             ),
         ):
-            await capture._extract_page_once(
+            await capture._capture_once(
                 "https://www.linkedin.com/in/billgates/details/experience/",
                 section_name="experience",
+                plan=CapturePlan(CaptureMode.DETAILS),
             )
 
         assert show_more.click.await_count == 5
@@ -684,9 +720,10 @@ class TestActivityFeedExtraction:
                 return_value=False,
             ),
         ):
-            await capture._extract_page_once(
+            await capture._capture_once(
                 "https://www.linkedin.com/in/billgates/",
                 section_name="main_profile",
+                plan=CapturePlan(CaptureMode.STANDARD),
             )
 
         show_more.click.assert_not_awaited()
@@ -718,9 +755,10 @@ class TestActivityFeedExtraction:
                 return_value=False,
             ),
         ):
-            result = await capture._extract_page_once(
+            result = await capture._capture_once(
                 "https://www.linkedin.com/in/billgates/recent-activity/all/",
                 section_name="posts",
+                plan=CapturePlan(CaptureMode.ACTIVITY),
             )
 
         # Should return whatever text is available, not crash
@@ -728,7 +766,7 @@ class TestActivityFeedExtraction:
 
 
 class TestCompanyPeopleExtraction:
-    """Tests for /company/<slug>/people/ hydration wait in _extract_page_once."""
+    """Tests for company-people plan hydration waits."""
 
     async def test_waits_for_listing_with_5s_timeout(self, mock_page):
         """Company /people/ pages call wait_for_function so the employee
@@ -759,9 +797,10 @@ class TestCompanyPeopleExtraction:
                 return_value=False,
             ),
         ):
-            await capture._extract_page_once(
+            await capture._capture_once(
                 "https://www.linkedin.com/company/anthropicresearch/people/",
                 section_name="employees",
+                plan=CapturePlan(CaptureMode.COMPANY_PEOPLE),
             )
 
         mock_page.wait_for_function.assert_awaited_once()
@@ -804,9 +843,10 @@ class TestCompanyPeopleExtraction:
                 return_value=False,
             ),
         ):
-            result = await capture._extract_page_once(
+            result = await capture._capture_once(
                 "https://www.linkedin.com/company/anthropicresearch/people/",
                 section_name="employees",
+                plan=CapturePlan(CaptureMode.COMPANY_PEOPLE),
             )
 
         mock_scroll.assert_awaited_once()
@@ -814,7 +854,7 @@ class TestCompanyPeopleExtraction:
 
 
 class TestSearchResultsExtraction:
-    """Tests for search results page detection and wait behavior in _extract_page_once."""
+    """Tests for search-results plan wait behavior."""
 
     async def test_search_results_page_waits_for_content(self, mock_page):
         """Search results URLs should call wait_for_function to wait for content."""
@@ -842,9 +882,10 @@ class TestSearchResultsExtraction:
                 return_value=False,
             ),
         ):
-            result = await capture._extract_page_once(
+            result = await capture._capture_once(
                 "https://www.linkedin.com/search/results/people/?keywords=John+Doe",
                 section_name="search_results",
+                plan=CapturePlan(CaptureMode.SEARCH_RESULTS),
             )
 
         mock_page.wait_for_function.assert_awaited_once()
@@ -872,9 +913,10 @@ class TestSearchResultsExtraction:
                 return_value=False,
             ),
         ):
-            await capture._extract_page_once(
+            await capture._capture_once(
                 "https://www.linkedin.com/in/billgates/",
                 section_name="main_profile",
+                plan=CapturePlan(CaptureMode.STANDARD),
             )
 
         mock_page.wait_for_function.assert_not_awaited()
@@ -906,9 +948,10 @@ class TestSearchResultsExtraction:
                 return_value=False,
             ),
         ):
-            result = await capture._extract_page_once(
+            result = await capture._capture_once(
                 "https://www.linkedin.com/search/results/people/?keywords=John+Doe",
                 section_name="search_results",
+                plan=CapturePlan(CaptureMode.SEARCH_RESULTS),
             )
 
         assert result.text == placeholder
@@ -1040,3 +1083,92 @@ class TestExtractOverlay:
         assert result.text == ""
         assert result.error == {"issue_template_path": "/tmp/issue.md"}
         assert diagnostics.call_args.kwargs["context"] == "extract_overlay"
+
+
+class TestCapturePlans:
+    @pytest.mark.parametrize(
+        ("url", "mode"),
+        [
+            ("https://www.linkedin.com/in/ada/", CaptureMode.STANDARD),
+            (
+                "https://www.linkedin.com/in/ada/recent-activity/all/",
+                CaptureMode.ACTIVITY,
+            ),
+            (
+                "https://www.linkedin.com/company/acme/posts/?viewAsMember=true",
+                CaptureMode.ACTIVITY,
+            ),
+            (
+                "https://www.linkedin.com/search/results/people/?keywords=ada",
+                CaptureMode.SEARCH_RESULTS,
+            ),
+            (
+                "https://www.linkedin.com/company/acme/people/",
+                CaptureMode.COMPANY_PEOPLE,
+            ),
+            (
+                "https://www.linkedin.com/in/ada/details/experience/",
+                CaptureMode.DETAILS,
+            ),
+        ],
+    )
+    def test_url_adapter_preserves_generic_mode_selection(self, url, mode):
+        assert capture_plan_for_url(url, 17) == CapturePlan(mode, max_scrolls=17)
+
+    def test_url_adapter_preserves_independent_mode_branches(self):
+        url = "https://www.linkedin.com/company/acme/people/search/results/"
+        assert capture_plan_for_url(url).mode == (
+            CaptureMode.SEARCH_RESULTS | CaptureMode.COMPANY_PEOPLE
+        )
+
+    def test_capture_plan_is_immutable(self):
+        plan = CapturePlan(CaptureMode.DETAILS, max_scrolls=3)
+        with pytest.raises(FrozenInstanceError):
+            setattr(plan, "max_scrolls", 4)
+
+
+def _generic_capture_domain_path_literals(source: str) -> set[str]:
+    tree = ast.parse(source)
+    generic_methods = {
+        "capture",
+        "_capture_once",
+        "_extract_loaded_section",
+        "_extract_overlay_content",
+    }
+    literals: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name not in generic_methods:
+            continue
+        for child in ast.walk(node):
+            if isinstance(child, ast.Constant) and isinstance(child.value, str):
+                if any(
+                    fragment in child.value
+                    for fragment in (
+                        "/recent-activity/",
+                        "/search/results/",
+                        "/company/",
+                        "/people/",
+                        "/details/",
+                    )
+                ):
+                    literals.add(child.value)
+    return literals
+
+
+def test_generic_capture_has_no_domain_path_policy_branches():
+    capture_source = Path("linkedin_mcp_server/scraping/capture.py").read_text(
+        encoding="utf-8"
+    )
+    assert _generic_capture_domain_path_literals(capture_source) == set()
+
+
+def test_generic_capture_ast_guard_rejects_a_reintroduced_domain_branch():
+    mutation = """
+class SectionCapture:
+    async def _extract_loaded_section(self, url):
+        if "/details/" in url:
+            return "domain policy"
+"""
+    assert _generic_capture_domain_path_literals(mutation) == {"/details/"}

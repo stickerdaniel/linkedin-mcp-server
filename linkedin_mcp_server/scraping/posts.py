@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from linkedin_mcp_server.scraping.capture import SectionCapture
+from linkedin_mcp_server.scraping.capture import (
+    CaptureMode,
+    CapturePlan,
+    SectionCapture,
+)
 from linkedin_mcp_server.scraping.contracts import RATE_LIMITED_SECTION_TEXT
 from linkedin_mcp_server.scraping.link_metadata import Reference
 from linkedin_mcp_server.scraping.search_urls import build_content_search_url
@@ -63,8 +67,10 @@ class PostSearch:
         # ignore is refused rather than answered with unfiltered results.
         url = build_content_search_url(keywords, date_posted=date_posted)
         max_scrolls = max(1, max_pages) * _CONTENT_SCROLLS_PER_REQUESTED_PAGE
-        extracted = await self._capture.extract_page(
-            url, section_name="search_results", max_scrolls=max_scrolls
+        extracted = await self._capture.capture(
+            url,
+            section_name="search_results",
+            plan=CapturePlan(CaptureMode.SEARCH_RESULTS, max_scrolls),
         )
 
         sections: dict[str, str] = {}
