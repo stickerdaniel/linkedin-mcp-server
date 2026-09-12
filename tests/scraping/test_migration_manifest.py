@@ -47,11 +47,7 @@ def test_manifest_matches_every_current_extractor_seam():
     assert result.returncode == 0, result.stderr
     assert current["extractor_parent"] == ("70e50ada68b9389f8d315df6ab1e56c08f6c985b")
     assert current["seams"]
-    assert {seam["kind"] for seam in current["seams"]} == {
-        "direct_import",
-        "permanent_alias_import",
-        "private_facade_access",
-    }
+    assert {seam["kind"] for seam in current["seams"]} == {"permanent_alias_import"}
     assert all(seam["canonical_owner"] for seam in current["seams"])
     assert not {
         "owner-local service",
@@ -80,33 +76,14 @@ def test_manifest_matches_every_current_extractor_seam():
     assert migration._WORKFLOW_OWNERS["extract_page"] == ("capture.SectionCapture", 4)
 
 
-def test_manifest_covers_production_callers_not_only_tests():
+def test_manifest_has_no_obsolete_production_callers():
     current = json.loads(MANIFEST.read_text(encoding="utf-8"))
-    production = {
-        seam["path"]
-        for seam in current["seams"]
-        if seam["path"].startswith("linkedin_mcp_server/")
-    }
 
-    assert production == {
-        "linkedin_mcp_server/dependencies.py",
-        "linkedin_mcp_server/scraping/__init__.py",
-        "linkedin_mcp_server/tools/company.py",
-        "linkedin_mcp_server/tools/feed.py",
-        "linkedin_mcp_server/tools/person.py",
-        "linkedin_mcp_server/tools/post.py",
-    }
-    assert {
-        seam["target"]
+    assert not [
+        seam
         for seam in current["seams"]
         if seam["path"].startswith("linkedin_mcp_server/")
-    } == {"rate_limited_section_error", "FilterValidationError", "LinkedInExtractor"}
-    assert all(
-        seam["kind"] == "permanent_alias_import"
-        for seam in current["seams"]
-        if seam["path"].startswith("linkedin_mcp_server/")
-        and seam["target"] != "LinkedInExtractor"
-    )
+    ]
 
 
 def test_final_messaging_seams_have_only_the_approved_stage_owners():
@@ -341,12 +318,7 @@ def test_manifest_is_canonical_portable_json():
     assert str(Path.home()) not in raw.decode("utf-8")
 
 
-def test_checker_rejects_obsolete_seams_at_their_migration_stage():
-    # The lowest stage that still holds an unclosed seam, which is the only
-    # kind of override that can surface one. Stages at or below the tree's own
-    # completed stage are closed by definition, so an override there proves
-    # nothing; raise this number as each stage lands. Stage 12 closed with the
-    # message sender, and the remaining facade seams close at stage 14.
+def test_checker_accepts_the_completed_facade_migration():
     result = subprocess.run(
         [sys.executable, str(CHECKER), "--check", "--stage", "14"],
         cwd=ROOT,
@@ -355,16 +327,8 @@ def test_checker_rejects_obsolete_seams_at_their_migration_stage():
         check=False,
     )
 
-    assert result.returncode == 1
-    assert "obsolete at stage 14:" in result.stderr
-    assert "private_facade_access" in result.stderr
-    assert "direct_import" in result.stderr
-    assert "boundary_patch_object" not in result.stderr
-    assert "private_patch_object" not in result.stderr
-    assert "string_patch" not in result.stderr
-    assert "module_attribute" not in result.stderr
-    assert "public_patch_object" not in result.stderr
-    assert "module_alias" not in result.stderr
+    assert result.returncode == 0, result.stderr
+    assert "obsolete at stage 14:" not in result.stderr
 
 
 def test_checkers_offer_no_fixture_update_mode():
@@ -460,7 +424,7 @@ async def outer(page):
     extractor = LinkedInExtractor(page)
 
     async def inherited():
-        extractor._scroll_seconds += 1.0
+        extractor._navigator = replacement
 
     async def parameter_shadow(extractor):
         extractor._unknown_helper()
@@ -474,7 +438,7 @@ async def outer(page):
     accesses = [seam for seam in seams if seam.kind == "private_facade_access"]
     assert [
         (seam.target, seam.canonical_owner, seam.migration_stage) for seam in accesses
-    ] == [("_scroll_seconds", "facade.LinkedInExtractor._scroll_seconds", 14)]
+    ] == [("_navigator", "navigation.PageNavigator", 3)]
 
 
 def test_unknown_private_closure_access_fails_closed():
@@ -1440,7 +1404,7 @@ def test_direct_private_helper_calls_and_stage_gate_are_inventoried():
     )
 
     result = subprocess.run(
-        [sys.executable, str(CHECKER), "--check", "--stage", "13"],
+        [sys.executable, str(CHECKER), "--check", "--stage", "14"],
         cwd=ROOT,
         text=True,
         capture_output=True,

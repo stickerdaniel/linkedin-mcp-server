@@ -15,7 +15,7 @@ from patchright.async_api import Page
 
 from linkedin_mcp_server import dependencies
 from linkedin_mcp_server.core.exceptions import InvalidReferenceError
-from linkedin_mcp_server.scraping import LinkedInExtractor as PackageExtractor
+from linkedin_mcp_server.scraping import LinkedInExtractor
 from linkedin_mcp_server.scraping import connection, contracts, text
 from linkedin_mcp_server.scraping.capture import SectionCapture
 from linkedin_mcp_server.scraping.connection import ActionSignals
@@ -25,7 +25,6 @@ from linkedin_mcp_server.scraping.conversations import ConversationReader
 from linkedin_mcp_server.scraping.extractor import (
     ExtractedSection,
     FilterValidationError,
-    LinkedInExtractor,
     rate_limited_section_error,
     strip_conversation_chrome,
     strip_linkedin_noise,
@@ -87,10 +86,21 @@ async def test_constructor_export_and_dependency_use_the_same_facade(monkeypatch
 
     constructed = await dependencies.get_ready_extractor(None, tool_name="policy-test")
 
-    assert PackageExtractor is LinkedInExtractor
-    assert extractor._page is page
+    expected_state = {
+        "_capture",
+        "_company",
+        "_connection",
+        "_content",
+        "_conversations",
+        "_feed",
+        "_jobs",
+        "_message_sender",
+        "_person",
+        "_posts",
+    }
+    assert set(vars(extractor)) == expected_state
     assert type(constructed) is LinkedInExtractor
-    assert constructed._page is page
+    assert set(vars(constructed)) == expected_state
     assert calls == ["ready", "browser", "authenticated"]
 
 

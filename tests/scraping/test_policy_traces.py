@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from functools import wraps
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 import importlib.util
@@ -18,14 +18,15 @@ import pytest
 from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.scraping.company import CompanyScraper
 from linkedin_mcp_server.scraping.fields import COMPANY_SECTIONS, PERSON_SECTIONS
+from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.person import PersonScraper
+from linkedin_mcp_server.scraping.session import ScrapingSession
 
 from . import policy_scenarios
 from .policy_scenarios import (
     TOOL_FACADE_METHODS,
     TRACE_ROOT,
     _complete_mapping_result,
-    _extractor,
     boundaries,
     build_policy_traces,
     canonical_json,
@@ -107,11 +108,11 @@ async def test_full_auth_boundary_propagates_a_detected_barrier():
     recorder = TraceRecorder("full-auth-barrier", {"boundary.auth"})
     clock = FakeClock(recorder)
     page = ScriptedPage(recorder)
-    extractor = _extractor(page)
+    navigator = PageNavigator(ScrapingSession(cast(Any, page)))
 
     async with boundaries(recorder, clock, auth_result="account picker"):
         with pytest.raises(AuthenticationError, match="interactive re-authentication"):
-            await extractor._navigator._raise_if_auth_barrier(
+            await navigator._raise_if_auth_barrier(
                 "https://www.linkedin.com/jobs/search/"
             )
 

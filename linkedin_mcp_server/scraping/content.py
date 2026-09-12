@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import logging
+import re
 from typing import Any
 
 from linkedin_mcp_server.scraping.session import ScrapingSession
+from linkedin_mcp_server.scraping.text import strip_linkedin_noise
+
+
+logger = logging.getLogger(__name__)
 
 
 class PageContentReader:
@@ -12,6 +18,38 @@ class PageContentReader:
 
     def __init__(self, session: ScrapingSession):
         self._session = session
+
+    async def get_page_text(self) -> str:
+        """Extract innerText from the main content area of the current page."""
+        text = await self._session.page.evaluate(
+            "() => (document.querySelector('main') || document.body).innerText || ''"
+        )
+        return strip_linkedin_noise(text) if isinstance(text, str) else ""
+
+    async def click_button_by_text(
+        self, text: str, *, scope: str = "main", timeout: int = 5000
+    ) -> bool:
+        """Click the first button or link whose visible text exactly matches."""
+        matches = (
+            self._session.page.locator(scope)
+            .locator("button, a, [role='button']")
+            .filter(has_text=re.compile(rf"^{re.escape(text)}$"))
+        )
+        count = await matches.count()
+        logger.debug("click_button_by_text(%r): %d matches in %s", text, count, scope)
+        if count == 0:
+            return False
+        target = matches.first
+        try:
+            await target.scroll_into_view_if_needed(timeout=timeout)
+        except Exception:
+            logger.debug("Scroll failed for button '%s'", text, exc_info=True)
+        try:
+            await target.click(timeout=timeout)
+            return True
+        except Exception:
+            logger.debug("Click failed for button '%s'", text, exc_info=True)
+            return False
 
     async def _extract_root_content(
         self,

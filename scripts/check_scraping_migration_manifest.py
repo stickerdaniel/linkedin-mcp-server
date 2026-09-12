@@ -3229,6 +3229,11 @@ class Scanner(ast.NodeVisitor):
     def visit_ImportFrom(self, node: ast.ImportFrom) -> Any:
         if _is_extractor_module_import(self.path, node):
             for alias in node.names:
+                if (
+                    self.path == PACKAGE / "scraping" / "__init__.py"
+                    and alias.name == "LinkedInExtractor"
+                ):
+                    continue
                 if alias.name in PERMANENT_ALIASES:
                     self._add(
                         "permanent_alias_import",
@@ -3255,12 +3260,7 @@ class Scanner(ast.NodeVisitor):
                         14,
                     )
                 elif alias.name == "LinkedInExtractor":
-                    self._add(
-                        "direct_import",
-                        node,
-                        alias.name,
-                        *_IMPORT_OWNERS[alias.name],
-                    )
+                    continue
         self.generic_visit(node)
 
     def _suppress_module_attributes(self, target: ast.expr) -> None:
