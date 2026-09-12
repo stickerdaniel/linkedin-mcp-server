@@ -171,11 +171,14 @@ def test_page_evidence_is_classified_as_page_owning(source: str):
         "self._profile_page.read_identity()\n",
         "browser_page.evaluate('1')\n",
         "self._job_page.capture()\n",
-        "def inspect(browser_page: 'Page'):\n    browser_page = collaborator\n"
+        "def inspect(session):\n    browser_page = session.page\n"
+        "    browser_page = collaborator\n"
         "    return browser_page.evaluate('1')\n",
-        "def outer(browser_page: 'Page'):\n"
+        "def outer(session):\n"
+        "    browser_page = session.page\n"
         "    def nested(browser_page):\n        return browser_page.evaluate('1')\n",
-        "def outer(browser_page: 'Page'):\n"
+        "def outer(session):\n"
+        "    browser_page = session.page\n"
         "    def nested():\n        browser_page = collaborator\n"
         "        return browser_page.evaluate('1')\n",
     ],
@@ -255,8 +258,8 @@ def test_page_evidence_survives_try_else_and_finally_merging():
 
 def test_definite_rebinding_on_all_conditional_paths_retires_page_evidence():
     source = (
-        "def inspect(browser_page: 'Page', condition):\n"
-        "    active_page = browser_page\n"
+        "def inspect(session, condition):\n"
+        "    active_page = session.page\n"
         "    if condition:\n"
         "        active_page = first_collaborator\n"
         "    else:\n"
@@ -293,10 +296,273 @@ def test_definite_try_match_and_loop_rebinding_retires_page_evidence(
     statement: str,
 ):
     source = (
-        "def inspect(browser_page: 'Page', value, values):\n"
-        "    active_page = browser_page\n"
+        "def inspect(session, value, values):\n"
+        "    active_page = session.page\n"
         f"{statement}"
         "    return active_page.evaluate('1')\n"
+    )
+
+    assert source_classification(ast.parse(source)) == "browser-free"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "def inspect(browser_page: 'Page'):\n    browser_page = collaborator\n",
+        "def inspect() -> 'Page':\n    return collaborator\n",
+        "def inspect():\n    browser_page: 'Page'\n",
+    ],
+)
+def test_page_annotations_establish_ownership_without_a_page_use(source: str):
+    assert source_classification(ast.parse(source)) == "page-owning"
+
+
+@pytest.mark.parametrize("transfer", ["break", "continue"])
+def test_loop_transfers_do_not_execute_later_statements(transfer: str):
+    source = (
+        "def inspect(session, values):\n"
+        "    for value in values:\n"
+        f"        {transfer}\n"
+        "        session.page.evaluate('1')\n"
+    )
+
+    assert source_classification(ast.parse(source)) == "browser-free"
+
+
+def test_break_state_is_an_exact_loop_exit():
+    source = (
+        "def inspect(session, values):\n"
+        "    active_page = session.page\n"
+        "    for value in values:\n"
+        "        active_page = collaborator\n"
+        "        break\n"
+        "    else:\n"
+        "        active_page = collaborator\n"
+        "    return active_page.evaluate('1')\n"
+    )
+
+    assert source_classification(ast.parse(source)) == "browser-free"
+
+
+def test_break_can_preserve_page_evidence_on_the_exit_path():
+    source = (
+        "def inspect(session, values):\n"
+        "    active_page = collaborator\n"
+        "    for value in values:\n"
+        "        active_page = session.page\n"
+        "        break\n"
+        "    else:\n"
+        "        active_page = collaborator\n"
+        "    return active_page.evaluate('1')\n"
+    )
+
+    assert source_classification(ast.parse(source)) == "page-owning"
+
+
+def test_continue_state_is_a_loop_back_edge():
+    source = (
+        "def inspect(session, values):\n"
+        "    active_page = collaborator\n"
+        "    for value in values:\n"
+        "        active_page = session.page\n"
+        "        continue\n"
+        "    else:\n"
+        "        active_page.evaluate('1')\n"
+    )
+
+    assert source_classification(ast.parse(source)) == "page-owning"
+
+
+def test_continue_state_can_be_definitely_retired():
+    source = (
+        "def inspect(session, values):\n"
+        "    active_page = session.page\n"
+        "    for value in values:\n"
+        "        active_page = collaborator\n"
+        "        continue\n"
+        "    else:\n"
+        "        active_page = collaborator\n"
+        "    return active_page.evaluate('1')\n"
+    )
+
+    assert source_classification(ast.parse(source)) == "browser-free"
+
+
+@pytest.mark.parametrize("branch", ["handler", "else"])
+def test_exceptional_branch_prefix_reaches_finally(branch: str):
+    if branch == "handler":
+        branch_source = (
+            "    try:\n"
+            "        raise LookupError\n"
+            "    except LookupError:\n"
+            "        active_page = session.page\n"
+            "        raise\n"
+        )
+    else:
+        branch_source = (
+            "    try:\n"
+            "        marker = collaborator\n"
+            "    except LookupError:\n"
+            "        marker = collaborator\n"
+            "    else:\n"
+            "        active_page = session.page\n"
+            "        raise RuntimeError\n"
+        )
+    source = (
+        "def inspect(session):\n"
+        "    active_page = collaborator\n"
+        f"{branch_source}"
+        "    finally:\n"
+        "        active_page.evaluate('1')\n"
+    )
+
+    assert source_classification(ast.parse(source)) == "page-owning"
+
+
+@pytest.mark.parametrize("branch", ["handler", "else"])
+def test_exceptional_finally_inputs_do_not_join_normal_continuation(branch: str):
+    if branch == "handler":
+        branch_source = (
+            "    try:\n"
+            "        marker = collaborator\n"
+            "    except LookupError:\n"
+            "        active_page = session.page\n"
+            "        raise\n"
+        )
+    else:
+        branch_source = (
+            "    try:\n"
+            "        marker = collaborator\n"
+            "    except LookupError:\n"
+            "        active_page = collaborator\n"
+            "    else:\n"
+            "        active_page = session.page\n"
+            "        raise RuntimeError\n"
+        )
+    source = (
+        "def inspect(session):\n"
+        "    active_page = collaborator\n"
+        f"{branch_source}"
+        "    finally:\n"
+        "        cleanup = collaborator\n"
+        "    return active_page.evaluate('1')\n"
+    )
+
+    assert source_classification(ast.parse(source)) == "browser-free"
+
+
+@pytest.mark.parametrize("branch", ["handler", "else"])
+def test_finally_can_retire_exceptional_branch_page_evidence(branch: str):
+    if branch == "handler":
+        branch_source = (
+            "    try:\n"
+            "        raise LookupError\n"
+            "    except LookupError:\n"
+            "        active_page = session.page\n"
+            "        raise\n"
+        )
+    else:
+        branch_source = (
+            "    try:\n"
+            "        marker = collaborator\n"
+            "    except LookupError:\n"
+            "        marker = collaborator\n"
+            "    else:\n"
+            "        active_page = session.page\n"
+            "        raise RuntimeError\n"
+        )
+    source = (
+        "def inspect(session):\n"
+        "    active_page = collaborator\n"
+        f"{branch_source}"
+        "    finally:\n"
+        "        active_page = collaborator\n"
+        "        active_page.evaluate('1')\n"
+    )
+
+    assert source_classification(ast.parse(source)) == "browser-free"
+
+
+def test_nested_definition_observes_later_outer_assignment():
+    source = (
+        "def outer(session):\n"
+        "    def nested():\n"
+        "        return active_page.evaluate('1')\n"
+        "    active_page = session.page\n"
+    )
+
+    assert source_classification(ast.parse(source)) == "page-owning"
+
+
+def test_nested_definition_observes_definite_outer_retirement():
+    source = (
+        "def outer(session):\n"
+        "    def nested():\n"
+        "        return active_page.evaluate('1')\n"
+        "    active_page = session.page\n"
+        "    active_page = collaborator\n"
+    )
+
+    assert source_classification(ast.parse(source)) == "browser-free"
+
+
+def test_match_capture_inherits_page_subject_state():
+    source = (
+        "def inspect(session):\n"
+        "    subject = session.page\n"
+        "    match subject:\n"
+        "        case captured:\n"
+        "            return captured.evaluate('1')\n"
+    )
+
+    assert source_classification(ast.parse(source)) == "page-owning"
+
+
+def test_match_capture_page_state_can_be_definitely_retired():
+    source = (
+        "def inspect(session):\n"
+        "    subject = session.page\n"
+        "    match subject:\n"
+        "        case captured:\n"
+        "            captured = collaborator\n"
+        "            return captured.evaluate('1')\n"
+    )
+
+    assert source_classification(ast.parse(source)) == "browser-free"
+
+
+def test_nested_match_as_capture_inherits_subject_state():
+    source = (
+        "def inspect(session):\n"
+        "    subject = session.page\n"
+        "    match subject:\n"
+        "        case _ as captured:\n"
+        "            return captured.evaluate('1')\n"
+    )
+
+    assert source_classification(ast.parse(source)) == "page-owning"
+
+
+@pytest.mark.parametrize("pattern", ["_ as captured", "(0 | _) as captured"])
+def test_nested_irrefutable_patterns_retire_fallthrough_state(pattern: str):
+    source = (
+        "def inspect(session, subject):\n"
+        "    active_page = session.page\n"
+        "    match subject:\n"
+        f"        case {pattern}:\n"
+        "            active_page = collaborator\n"
+        "    return active_page.evaluate('1')\n"
+    )
+
+    assert source_classification(ast.parse(source)) == "browser-free"
+
+
+def test_match_capture_rebinding_keeps_session_root_non_source():
+    source = (
+        "def inspect(session, collaborator):\n"
+        "    match collaborator:\n"
+        "        case session:\n"
+        "            return session.page.evaluate('1')\n"
     )
 
     assert source_classification(ast.parse(source)) == "browser-free"
