@@ -84,7 +84,8 @@ def _known_package_modules(scraping: Path) -> frozenset[str]:
             prefix = "linkedin_mcp_server"
         if parts[-1] == "__init__":
             parts = parts[:-1]
-        modules.add(".".join((prefix, *parts)))
+        for length in range(1, len(parts) + 1):
+            modules.add(".".join((prefix, *parts[:length])))
     return frozenset(modules)
 
 
@@ -121,8 +122,41 @@ def _assignment_names(node: ast.Assign | ast.AnnAssign) -> tuple[str, ...]:
     return tuple(target.id for target in targets if isinstance(target, ast.Name))
 
 
+_TYPE_ALIAS_FACTORIES = frozenset({"Callable", "Literal"})
+
+
+def _typing_alias_factories(tree: ast.Module) -> frozenset[str]:
+    factories: set[str] = set()
+    for node in tree.body:
+        if not isinstance(node, ast.ImportFrom) or node.module not in {
+            "collections.abc",
+            "typing",
+        }:
+            continue
+        factories.update(
+            alias.asname or alias.name
+            for alias in node.names
+            if alias.name in _TYPE_ALIAS_FACTORIES
+        )
+    return frozenset(factories)
+
+
+def _is_assignment_type_alias(
+    node: ast.Assign | ast.AnnAssign, factories: frozenset[str]
+) -> bool:
+    if not isinstance(node, ast.Assign):
+        return False
+    value = node.value
+    return (
+        isinstance(value, ast.Subscript)
+        and isinstance(value.value, ast.Name)
+        and value.value.id in factories
+    )
+
+
 def _public_owners(tree: ast.Module) -> tuple[str, ...]:
     owners: list[str] = []
+    factories = _typing_alias_factories(tree)
     for node in tree.body:
         if isinstance(node, ast.ClassDef) and not node.name.startswith("_"):
             owners.append(node.name)
@@ -130,11 +164,15 @@ def _public_owners(tree: ast.Module) -> tuple[str, ...]:
             node, (ast.FunctionDef, ast.AsyncFunctionDef)
         ) and not node.name.startswith("_"):
             owners.append(f"{node.name}()")
+        elif isinstance(node, ast.TypeAlias):
+            if isinstance(node.name, ast.Name) and not node.name.id.startswith("_"):
+                owners.append(node.name.id)
         elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            is_type_alias = _is_assignment_type_alias(node, factories)
             owners.extend(
                 name
                 for name in _assignment_names(node)
-                if not name.startswith("_") and name.isupper()
+                if not name.startswith("_") and (name.isupper() or is_type_alias)
             )
     return tuple(sorted(owners))
 
@@ -157,9 +195,8 @@ def _source_classification(tree: ast.Module) -> str:
                 return "page-owning"
         if isinstance(node, ast.Attribute):
             parts = _attribute_parts(node)
-            page_handles = parts[:-1]
-            if parts[-1] == "page" or any(
-                part == "page" or part.endswith("_page") for part in page_handles
+            if parts[-1] in {"page", "_page"} or any(
+                part in {"page", "_page"} for part in parts[:-1]
             ):
                 return "page-owning"
     return "browser-free"

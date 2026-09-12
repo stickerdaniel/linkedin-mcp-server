@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import shutil
 import sys
@@ -24,6 +25,7 @@ check = cast(Callable[[Path, Path], bool], GENERATOR.check)
 dependency_violations = GENERATOR.dependency_violations
 inspect_modules = GENERATOR.inspect_modules
 ModuleInfo = GENERATOR.ModuleInfo
+source_classification = GENERATOR._source_classification
 
 
 def _copy_scraping(tmp_path: Path) -> Path:
@@ -78,16 +80,91 @@ def test_import_from_normalization_keeps_modules_and_symbols_distinct(tmp_path: 
     )
 
 
-def test_public_assignments_are_owners_without_incidental_bindings():
-    fields = next(
+def test_namespace_package_imports_resolve_to_known_leaf_modules(tmp_path: Path):
+    scraping = _copy_scraping(tmp_path)
+    nested = scraping / "nested"
+    nested.mkdir()
+    (nested / "worker.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _prepend(scraping / "connection.py", "from .nested import worker\n")
+
+    connection = next(
         module
-        for module in inspect_modules(ROOT / "linkedin_mcp_server" / "scraping")
-        if module.name == "linkedin_mcp_server.scraping.fields"
+        for module in inspect_modules(scraping)
+        if module.name == "linkedin_mcp_server.scraping.connection"
     )
 
-    assert "COMPANY_SECTIONS" in fields.owners
-    assert "PERSON_SECTIONS" in fields.owners
-    assert "logger" not in fields.owners
+    assert "linkedin_mcp_server.scraping.nested.worker" in connection.imports
+    assert "linkedin_mcp_server.scraping.nested" not in connection.imports
+
+
+def test_public_assignments_are_owners_without_incidental_bindings():
+    modules = {
+        module.name: module
+        for module in inspect_modules(ROOT / "linkedin_mcp_server" / "scraping")
+    }
+
+    assert "COMPANY_SECTIONS" in modules["linkedin_mcp_server.scraping.fields"].owners
+    assert "PERSON_SECTIONS" in modules["linkedin_mcp_server.scraping.fields"].owners
+    assert (
+        "ConnectionState" in modules["linkedin_mcp_server.scraping.connection"].owners
+    )
+    assert (
+        "ReferenceKind" in modules["linkedin_mcp_server.scraping.link_metadata"].owners
+    )
+    assert "WaitUntil" in modules["linkedin_mcp_server.scraping.navigation"].owners
+    assert (
+        "ReadMainProfile"
+        in modules["linkedin_mcp_server.scraping.connection_actions"].owners
+    )
+    assert (
+        "ReadMessageTarget"
+        in modules["linkedin_mcp_server.scraping.profile_page"].owners
+    )
+    assert all("logger" not in module.owners for module in modules.values())
+
+
+def test_explicit_and_assignment_type_aliases_are_public_owners(tmp_path: Path):
+    scraping = _copy_scraping(tmp_path)
+    (scraping / "aliases.py").write_text(
+        "from typing import Literal\n\n"
+        "type ExplicitAlias = str\n"
+        "AssignmentAlias = Literal['value']\n"
+        "logger = object()\n",
+        encoding="utf-8",
+    )
+
+    aliases = next(
+        module
+        for module in inspect_modules(scraping)
+        if module.name == "linkedin_mcp_server.scraping.aliases"
+    )
+
+    assert aliases.owners == ("AssignmentAlias", "ExplicitAlias")
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "page.evaluate('1')\n",
+        "_page.evaluate('1')\n",
+        "session.page\n",
+        "self._session.page.evaluate('1')\n",
+    ],
+)
+def test_direct_page_handles_are_classified_as_page_owning(source: str):
+    assert source_classification(ast.parse(source)) == "page-owning"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "self._profile_page.read_identity()\n",
+        "browser_page.evaluate('1')\n",
+        "self._job_page.capture()\n",
+    ],
+)
+def test_page_named_collaborators_remain_browser_free(source: str):
+    assert source_classification(ast.parse(source)) == "browser-free"
 
 
 def test_nested_package_modules_are_inspected_with_stable_paths(tmp_path: Path):
@@ -97,7 +174,7 @@ def test_nested_package_modules_are_inspected_with_stable_paths(tmp_path: Path):
     (nested / "__init__.py").write_text(
         "PUBLIC_VALUE = 1\n"
         "class NestedOwner:\n    pass\n\n"
-        "def _inspect(browser_page):\n    return browser_page.evaluate('1')\n",
+        "def _inspect(page):\n    return page.evaluate('1')\n",
         encoding="utf-8",
     )
     (nested / "worker.py").write_text(
@@ -142,6 +219,24 @@ def test_nested_package_violations_cannot_bypass_checks(tmp_path: Path):
     assert any(
         violation.startswith("import cycle: `linkedin_mcp_server.scraping.nested`")
         for violation in violations
+    )
+
+
+def test_namespace_package_cycle_fails_even_after_regeneration(tmp_path: Path):
+    scraping = _copy_scraping(tmp_path)
+    nested = scraping / "nested"
+    nested.mkdir()
+    (nested / "worker.py").write_text("from .. import connection\n", encoding="utf-8")
+    _prepend(scraping / "connection.py", "from .nested import worker\n")
+    output = tmp_path / "scraping-architecture.md"
+    output.write_text(render(scraping), encoding="utf-8")
+
+    assert not check(output, scraping)
+    assert any(
+        "`linkedin_mcp_server.scraping.connection` -> "
+        "`linkedin_mcp_server.scraping.nested.worker` -> "
+        "`linkedin_mcp_server.scraping.connection`" in violation
+        for violation in dependency_violations(inspect_modules(scraping))
     )
 
 
