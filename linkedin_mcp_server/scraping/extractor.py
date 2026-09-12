@@ -55,6 +55,8 @@ from linkedin_mcp_server.scraping.identifiers import (
 from linkedin_mcp_server.scraping.link_metadata import (
     JOB_PATH_RE,
     Reference,
+    _DEFAULT_REFERENCE_CAP,
+    _REFERENCE_CAPS,
     _SEARCH_RESULTS_REFERENCE_CAP,
     build_references,
     dedupe_references,
@@ -1731,6 +1733,82 @@ def _is_feed_payload_response(url: str) -> bool:
     return url.split("?", 1)[0] in _FEED_DOCUMENT_URLS
 
 
+# Content types that never carry the JSON/RSC payloads _POST_SLUG_URL_RE
+# matches against. Company/person posts pages don't expose a stable SDUI
+# marker analogous to _FEED_RSC_MARKER (unverified whether one exists), so
+# _is_post_listing_response casts a wider net than _is_feed_payload_response
+# and relies on this prefix list plus the regex itself to stay cheap and
+# correct rather than on a guessed marker string.
+_NON_PAYLOAD_CONTENT_TYPE_PREFIXES = (
+    "image/",
+    "video/",
+    "audio/",
+    "font/",
+    "text/css",
+)
+
+
+def _is_post_listing_response(resp: Any) -> bool:
+    """True if a response on a posts-listing page is worth scanning for permalinks."""
+    try:
+        content_type = resp.headers.get("content-type", "")
+    except Exception:
+        return True
+    content_type = content_type.split(";", 1)[0].strip().lower()
+    return not content_type.startswith(_NON_PAYLOAD_CONTENT_TYPE_PREFIXES)
+
+
+def _is_post_listing_page(url: str) -> bool:
+    """True for pages whose posts render without a DOM permalink anchor.
+
+    Company posts pages (``/company/<slug>/posts/``) and a person's activity
+    feed (``/recent-activity/...``) both lazy-load posts the same way the
+    main feed does, and LinkedIn does not render a real ``<a href>`` for the
+    individual post on either — only the main feed has a dedicated
+    DOM-anchor path (``feed_post`` via ``/feed/update/<urn>/``). Matched on
+    the parsed path since the url can carry a query string
+    (``?viewAsMember=true``) that a raw suffix check would miss.
+    """
+    path = urlparse(url).path
+    return "/recent-activity/" in path or (
+        "/company/" in path and path.rstrip("/").endswith("/posts")
+    )
+
+
+def _append_captured_post_permalinks(
+    refs: list[Reference],
+    captured_urls: list[str],
+    *,
+    context: str,
+) -> list[Reference]:
+    """Append ``/posts/<slug>`` permalinks captured from network responses.
+
+    Skips any capture already present as an exact URL match. The two shapes
+    that can point at the same underlying post (a DOM-derived reference vs.
+    a captured ``/posts/<slug>`` permalink) will *not* collapse —
+    ``dedupe_references`` matches strings, not URNs. Both are valid
+    LinkedIn permalinks; URN-based equivalence is left to the consumer.
+    """
+    existing = {r["url"] for r in refs}
+    merged = list(refs)
+    for sdui_url in captured_urls:
+        # AGENTS.md mandates relative paths for LinkedIn references.
+        # The capture carries fully-qualified URLs like
+        # https://www.linkedin.com/posts/<slug>; strip the host so the
+        # relative-path convention holds. ``classify_link`` does not
+        # currently route ``/posts/<slug>`` paths to any kind, so we
+        # bypass it for this fallback append.
+        parsed = urlparse(sdui_url)
+        if not parsed.path.startswith("/posts/"):
+            continue
+        relative = parsed.path
+        if relative in existing:
+            continue
+        merged.append({"kind": "feed_post", "url": relative, "context": context})
+        existing.add(relative)
+    return merged
+
+
 def _build_feed_references(
     raw_references: list[Any],
     captured_urls: list[str],
@@ -1747,34 +1825,13 @@ def _build_feed_references(
       URLs (whatever ``classify_link`` recognises).
     - SDUI captures → ``feed_post`` entries with ``/posts/<slug>`` URLs
       for permalinks that the DOM does not surface as an anchor.
-
-    Both are deduped on exact URL string. The two shapes pointing at
-    the same underlying post will *not* collapse — ``dedupe_references``
-    matches strings, not URNs. Both are valid LinkedIn permalinks, so
-    consumers should treat ``feed_post`` as polymorphic on URL form;
-    URN-based equivalence is left to the consumer.
     """
     refs = [
         ref
         for ref in build_references(raw_references, "feed")
         if ref["kind"] == "feed_post"
     ]
-    existing = {r["url"] for r in refs}
-    for sdui_url in captured_urls:
-        # AGENTS.md mandates relative paths for LinkedIn references.
-        # The SDUI capture carries fully-qualified URLs like
-        # https://www.linkedin.com/posts/<slug>; strip the host so the
-        # relative-path convention holds. ``classify_link`` does not
-        # currently route ``/posts/<slug>`` paths to any kind, so we
-        # bypass it for this fallback append.
-        parsed = urlparse(sdui_url)
-        if not parsed.path.startswith("/posts/"):
-            continue
-        relative = parsed.path
-        if relative in existing:
-            continue
-        refs.append({"kind": "feed_post", "url": relative, "context": "feed"})
-        existing.add(relative)
+    refs = _append_captured_post_permalinks(refs, captured_urls, context="feed")
     # Cap kept in sync with _REFERENCE_CAPS["feed"] in link_metadata.py;
     # changing one without the other will drop or duplicate entries
     # silently. Matches get_feed's num_posts ceiling (Field(ge=1, le=50)).
@@ -2757,14 +2814,60 @@ class LinkedInExtractor:
         max_scrolls: int | None = None,
     ) -> ExtractedSection:
         """Single attempt to navigate, scroll, and extract innerText."""
-        await self._navigate_to_page(url)
-        return await self._extract_loaded_section(url, section_name, max_scrolls)
+        if not _is_post_listing_page(url):
+            await self._navigate_to_page(url)
+            return await self._extract_loaded_section(url, section_name, max_scrolls)
+
+        # Company/person posts pages don't render a DOM anchor for the
+        # individual post (see _is_post_listing_page), so listen for the
+        # permalink the same way _extract_feed_once does for the main feed:
+        # a network response carrying the post's real /posts/<slug> url.
+        # The listener must be live before navigation — the initial page
+        # load's own response can carry the first batch of permalinks.
+        captured_urls: list[str] = []
+        seen_urls: set[str] = set()
+        pending_reads: list[asyncio.Task[None]] = []
+
+        def _handle_response(resp: Any) -> None:
+            if not _is_post_listing_response(resp):
+                return
+
+            async def _read() -> None:
+                try:
+                    body = await resp.body()
+                except Exception:
+                    return
+                if not body:
+                    return
+                text = body.decode("utf-8", errors="replace")
+                for match in _POST_SLUG_URL_RE.finditer(text):
+                    post_url = f"https://www.linkedin.com/posts/{match.group('slug')}"
+                    if post_url not in seen_urls:
+                        seen_urls.add(post_url)
+                        captured_urls.append(post_url)
+
+            pending_reads.append(asyncio.create_task(_read()))
+
+        self._page.on("response", _handle_response)
+        try:
+            await self._navigate_to_page(url)
+            return await self._extract_loaded_section(
+                url, section_name, max_scrolls, captured_post_urls=captured_urls
+            )
+        finally:
+            try:
+                self._page.remove_listener("response", _handle_response)
+            except Exception:
+                pass
+            await _drain_listener_tasks(pending_reads)
 
     async def _extract_loaded_section(
         self,
         url: str,
         section_name: str,
         max_scrolls: int | None = None,
+        *,
+        captured_post_urls: list[str] | None = None,
     ) -> ExtractedSection:
         """Run the post-navigation extraction pipeline on the current page.
 
@@ -2786,13 +2889,8 @@ class LinkedInExtractor:
 
         # Activity feed pages lazy-load post content after the tab header.
         # Company posts pages (/company/<slug>/posts/) lazy-load the same way
-        # but don't carry a /recent-activity/ path, so match them too. Matched
-        # on the parsed path, since the url can carry a query string
-        # (?viewAsMember=true) that a raw suffix check would miss.
-        path = urlparse(url).path
-        is_activity = "/recent-activity/" in path or (
-            "/company/" in path and path.rstrip("/").endswith("/posts")
-        )
+        # but don't carry a /recent-activity/ path, so match them too.
+        is_activity = _is_post_listing_page(url)
         if is_activity:
             try:
                 await self._page.wait_for_function(
@@ -2897,6 +2995,11 @@ class LinkedInExtractor:
             scrolls = max_scrolls if max_scrolls is not None else 5
             await scroll_to_bottom(self._page, pause_time=0.5, max_scrolls=scrolls)
 
+        if captured_post_urls is not None:
+            # Give any in-flight response reads a beat to finish recording
+            # URLs before we read them (mirrors _extract_feed_body).
+            await asyncio.sleep(0.2)
+
         # Extract text from main content area
         raw_result = await self._extract_root_content(["main"])
         raw = raw_result["text"]
@@ -2910,10 +3013,24 @@ class LinkedInExtractor:
             )
             return ExtractedSection(text=_RATE_LIMITED_MSG, references=[])
         cleaned = _filter_linkedin_noise_lines(truncated)
-        return ExtractedSection(
-            text=cleaned,
-            references=build_references(raw_result["references"], section_name),
-        )
+
+        if captured_post_urls is not None:
+            # Merge DOM-derived references with permalinks captured from
+            # network responses before applying the section's cap, so the
+            # two compete fairly for the available slots (see
+            # _append_captured_post_permalinks).
+            refs = build_references(
+                raw_result["references"], section_name, apply_cap=False
+            )
+            refs = _append_captured_post_permalinks(
+                refs, captured_post_urls, context=section_name
+            )
+            cap = _REFERENCE_CAPS.get(section_name, _DEFAULT_REFERENCE_CAP)
+            references = dedupe_references(refs, cap=cap)
+        else:
+            references = build_references(raw_result["references"], section_name)
+
+        return ExtractedSection(text=cleaned, references=references)
 
     async def _extract_overlay(
         self,

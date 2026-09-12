@@ -36,7 +36,10 @@ from linkedin_mcp_server.scraping.extractor import (
     _MESSAGE_CONFIRMATION_PREPARE_JS,
     _MESSAGE_CONFIRMATION_READY_JS,
     _RATE_LIMITED_MSG,
+    _append_captured_post_permalinks,
     _build_feed_references,
+    _is_post_listing_page,
+    _is_post_listing_response,
     _truncate_linkedin_noise,
     strip_conversation_chrome,
     strip_linkedin_noise,
@@ -9940,7 +9943,164 @@ class TestBuildFeedReferences:
         assert kinds == {"feed_post"}
 
 
-class TestDrainListenerTasks:
+class TestIsPostListingPage:
+    """Tests for _is_post_listing_page URL matching (issue #788)."""
+
+    def test_recent_activity_path_matches(self):
+        assert _is_post_listing_page(
+            "https://www.linkedin.com/in/billgates/recent-activity/all/"
+        )
+
+    def test_company_posts_path_matches(self):
+        assert _is_post_listing_page(
+            "https://www.linkedin.com/company/microsoft/posts/"
+        )
+
+    def test_company_posts_path_with_query_string_matches(self):
+        assert _is_post_listing_page(
+            "https://www.linkedin.com/company/microsoft/posts/?viewAsMember=true"
+        )
+
+    def test_plain_profile_path_does_not_match(self):
+        assert not _is_post_listing_page("https://www.linkedin.com/in/billgates/")
+
+    def test_company_about_path_does_not_match(self):
+        assert not _is_post_listing_page(
+            "https://www.linkedin.com/company/microsoft/about/"
+        )
+
+
+class TestIsPostListingResponse:
+    """Tests for _is_post_listing_response content-type filtering."""
+
+    @staticmethod
+    def _response(content_type: str) -> SimpleNamespace:
+        return SimpleNamespace(headers={"content-type": content_type})
+
+    def test_json_response_is_capturable(self):
+        assert _is_post_listing_response(self._response("application/json"))
+
+    def test_html_response_is_capturable(self):
+        assert _is_post_listing_response(self._response("text/html; charset=utf-8"))
+
+    def test_missing_content_type_is_capturable(self):
+        assert _is_post_listing_response(SimpleNamespace(headers={}))
+
+    def test_image_response_is_skipped(self):
+        assert not _is_post_listing_response(self._response("image/png"))
+
+    def test_video_response_is_skipped(self):
+        assert not _is_post_listing_response(self._response("video/mp4"))
+
+    def test_css_response_is_skipped(self):
+        assert not _is_post_listing_response(self._response("text/css"))
+
+    def test_header_lookup_failure_defaults_to_capturable(self):
+        class ExplodingHeaders:
+            def get(self, *args, **kwargs):
+                raise RuntimeError("boom")
+
+        assert _is_post_listing_response(SimpleNamespace(headers=ExplodingHeaders()))
+
+
+class TestAppendCapturedPostPermalinks:
+    """Tests for _append_captured_post_permalinks (shared feed/posts merge)."""
+
+    def test_appends_new_permalink_with_given_context(self):
+        refs = _append_captured_post_permalinks(
+            [],
+            ["https://www.linkedin.com/posts/idsa_slug-activity-1-xx"],
+            context="posts",
+        )
+        assert refs == [
+            {
+                "kind": "feed_post",
+                "url": "/posts/idsa_slug-activity-1-xx",
+                "context": "posts",
+            }
+        ]
+
+    def test_skips_url_already_present(self):
+        existing: list[Reference] = [
+            {"kind": "company", "url": "/posts/idsa_slug-activity-1-xx"},
+        ]
+        refs = _append_captured_post_permalinks(
+            existing,
+            ["https://www.linkedin.com/posts/idsa_slug-activity-1-xx"],
+            context="posts",
+        )
+        assert refs == existing
+
+    def test_skips_non_posts_paths(self):
+        refs = _append_captured_post_permalinks(
+            [], ["https://www.linkedin.com/company/idsa/"], context="posts"
+        )
+        assert refs == []
+
+
+class TestExtractPageCapturesCompanyPostPermalinks:
+    """End-to-end: a company/person posts page's real network response
+    permalink (unreachable via DOM anchors, see issue #788) survives into
+    the final references."""
+
+    async def test_company_posts_page_merges_captured_permalink(self, mock_page):
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "source": "root",
+                "text": "Post content " * 50,
+                "references": [
+                    {
+                        "href": "https://www.linkedin.com/company/idsa/",
+                        "text": "International Data Spaces Association",
+                    }
+                ],
+            }
+        )
+
+        async def fake_body():
+            return (
+                b'{"postSlugUrl":"https://www.linkedin.com/posts/'
+                b'idsa_some-slug-activity-1234567890-xxXX"}'
+            )
+
+        fake_response = SimpleNamespace(
+            headers={"content-type": "application/json"},
+            body=fake_body,
+        )
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            extractor = LinkedInExtractor(mock_page)
+            call = asyncio.ensure_future(
+                extractor._extract_page_once(
+                    "https://www.linkedin.com/company/idsa/posts/",
+                    section_name="posts",
+                )
+            )
+            # Let _extract_page_once install its "response" listener before
+            # firing the simulated network event.
+            await asyncio.sleep(0)
+            for handler in mock_page.listeners.get("response", []):
+                handler(fake_response)
+            result = await call
+
+        urls = [r["url"] for r in result.references]
+        assert "/posts/idsa_some-slug-activity-1234567890-xxXX" in urls
+        assert any(r["url"] == "/company/idsa/" for r in result.references)
+
     """Teardown of the feed response reads, on every path out of it.
 
     The reads are fire-and-forget: ``_extract_feed_once`` unsubscribes the
