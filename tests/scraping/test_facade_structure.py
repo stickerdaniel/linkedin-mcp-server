@@ -211,12 +211,26 @@ def _assert_state(source: str) -> None:
 
 
 def _imports(path: Path, source: str) -> set[str]:
+    package_parts = list(path.parent.parts)
     modules: set[str] = set()
     for node in ast.walk(ast.parse(source, filename=str(path))):
         if isinstance(node, ast.Import):
             modules.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            modules.add(node.module)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                parent_parts = package_parts[: len(package_parts) - node.level + 1]
+                imported_from = ".".join(
+                    [*parent_parts, *(node.module or "").split(".")]
+                ).rstrip(".")
+            else:
+                imported_from = node.module or ""
+            if imported_from:
+                modules.add(imported_from)
+            modules.update(
+                f"{imported_from}.{alias.name}" if imported_from else alias.name
+                for alias in node.names
+                if alias.name != "*"
+            )
     return modules
 
 
@@ -359,6 +373,22 @@ def test_scraping_dependencies_are_one_way_acyclic_and_layered():
     _assert_scraping_dependencies(_sources(SCRAPING))
 
 
+def test_imports_canonicalize_absolute_and_relative_from_imports():
+    path = Path("linkedin_mcp_server/scraping/nested/module.py")
+    source = """
+from linkedin_mcp_server import process_protocol
+from .. import capture
+from ..capture import SectionCapture
+from ...config import settings
+"""
+
+    imports = _imports(path, source)
+
+    assert "linkedin_mcp_server.process_protocol" in imports
+    assert "linkedin_mcp_server.scraping.capture" in imports
+    assert "linkedin_mcp_server.config" in imports
+
+
 def test_obsolete_extractor_seams_and_private_accesses_are_absent():
     sources = {**_sources(PACKAGE), **_sources(ROOT / "tests")}
     _assert_no_obsolete_extractor_seams(sources)
@@ -414,7 +444,19 @@ def test_facade_ast_guards_reject_representative_mutations(mutate, guard):
     [
         (
             Path("linkedin_mcp_server/scraping/content.py"),
-            "from linkedin_mcp_server.scraping.capture import SectionCapture\n",
+            "from . import capture\n",
+        ),
+        (
+            Path("linkedin_mcp_server/scraping/content.py"),
+            "from .capture import SectionCapture\n",
+        ),
+        (
+            Path("linkedin_mcp_server/scraping/content.py"),
+            "from linkedin_mcp_server import process_protocol\n",
+        ),
+        (
+            Path("linkedin_mcp_server/scraping/content.py"),
+            "from .. import process_protocol\n",
         ),
         (
             Path("linkedin_mcp_server/scraping/content.py"),
