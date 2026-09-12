@@ -725,16 +725,23 @@ def _setattr_arguments(node: ast.Call) -> tuple[ast.expr | None, ast.expr | None
     ``None`` for the target tells the caller to refuse rather than to skip; a
     missing name is left to the caller because the two-argument
     ``setattr("dotted.path", value)`` form carries its member inside the
-    target and never has one.
+    target and never has one. A star after a readable first argument can hide
+    the member and value, but it cannot hide which object receives the patch.
     """
 
-    if any(keyword.arg is None for keyword in node.keywords) or any(
-        isinstance(argument, ast.Starred) for argument in node.args
-    ):
+    if any(keyword.arg is None for keyword in node.keywords):
         return (None, None)
     keywords = {keyword.arg: keyword.value for keyword in node.keywords}
-    target = node.args[0] if node.args else keywords.get("target")
-    name = node.args[1] if len(node.args) > 1 else keywords.get("name")
+    first = node.args[0] if node.args else None
+    target = first if first is not None and not isinstance(first, ast.Starred) else None
+    if not node.args:
+        target = keywords.get("target")
+    second = node.args[1] if len(node.args) > 1 else None
+    name = (
+        second if second is not None and not isinstance(second, ast.Starred) else None
+    )
+    if len(node.args) < 2:
+        name = keywords.get("name")
     return (target, name)
 
 
@@ -755,11 +762,12 @@ def _mentions_monkeypatch(expression: ast.expr) -> bool:
 class _MonkeyPatchCallCollector(ast.NodeVisitor):
     """Locate unreadable ``setattr`` calls on a live pytest patcher binding.
 
-    Receiver authority follows lexical scopes and statement order. That keeps
-    an alias in the scope where it was established, retires it when the same
-    target is rebound, and still lets an unshadowed outer alias reach a nested
-    function. Calls with readable targets do not need this evidence: the
-    extractor reachability checks scope those independently.
+    Receiver authority follows lexical scopes and reachable control-flow paths.
+    Branches start from the same incoming state and merge by union, so one live
+    path retains fail-closed authority while rebinding on every path retires it.
+    The closure state is merged alongside the current scope without turning a
+    class local into a method closure. Calls with readable targets do not need
+    this evidence: extractor reachability scopes those independently.
     """
 
     def __init__(self, path: Path) -> None:
@@ -768,6 +776,7 @@ class _MonkeyPatchCallCollector(ast.NodeVisitor):
         self.aliases = {"monkeypatch"}
         self.closure_aliases = set(self.aliases)
         self.scope_kinds = ["module"]
+        self.loop_break_states: list[list[tuple[set[str], set[str]]]] = []
 
     @staticmethod
     def _key(expression: ast.expr) -> str:
@@ -807,6 +816,45 @@ class _MonkeyPatchCallCollector(ast.NodeVisitor):
         self.aliases.difference_update(names)
         if self.scope_kinds[-1] != "class":
             self.closure_aliases.difference_update(names)
+
+    def _state(self) -> tuple[set[str], set[str]]:
+        return (set(self.aliases), set(self.closure_aliases))
+
+    def _restore(self, state: tuple[set[str], set[str]]) -> None:
+        self.aliases = set(state[0])
+        self.closure_aliases = set(state[1])
+
+    @staticmethod
+    def _merge(
+        states: list[tuple[set[str], set[str]]],
+    ) -> tuple[set[str], set[str]]:
+        return (
+            set().union(*(state[0] for state in states)),
+            set().union(*(state[1] for state in states)),
+        )
+
+    def _visit_suite(
+        self, statements: list[ast.stmt]
+    ) -> list[tuple[set[str], set[str]]]:
+        states = [self._state()]
+        for statement in statements:
+            self.visit(statement)
+            states.append(self._state())
+        return states
+
+    def _visit_branches(
+        self,
+        initial: tuple[set[str], set[str]],
+        suites: list[list[ast.stmt]],
+        *,
+        include_initial: bool = False,
+    ) -> None:
+        states = [initial] if include_initial else []
+        for suite in suites:
+            self._restore(initial)
+            self._visit_suite(suite)
+            states.append(self._state())
+        self._restore(self._merge(states))
 
     def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         for decorator in node.decorator_list:
@@ -893,17 +941,140 @@ class _MonkeyPatchCallCollector(ast.NodeVisitor):
     def visit_ImportFrom(self, node: ast.ImportFrom) -> Any:
         self._unbind({alias.asname or alias.name for alias in node.names})
 
+    def visit_If(self, node: ast.If) -> Any:
+        self.visit(node.test)
+        initial = self._state()
+        self._visit_branches(
+            initial,
+            [node.body, node.orelse],
+            include_initial=not node.orelse,
+        )
+
+    def _visit_try(self, node: ast.Try | ast.TryStar) -> None:
+        initial = self._state()
+        self._restore(initial)
+        body_states = self._visit_suite(node.body)
+        normal = self._state()
+        self._visit_suite(node.orelse)
+        continuing = [self._state()]
+        exception_entry = self._merge(body_states)
+
+        for handler in node.handlers:
+            self._restore(exception_entry)
+            if handler.type is not None:
+                self.visit(handler.type)
+            if handler.name is not None:
+                self._bind(ast.Name(id=handler.name, ctx=ast.Store()), False)
+            self._visit_suite(handler.body)
+            if handler.name is not None:
+                self._unbind({handler.name})
+            continuing.append(self._state())
+
+        merged = self._merge(continuing)
+        if not node.finalbody:
+            self._restore(merged)
+            return
+
+        self._restore(merged)
+        self._visit_suite(node.finalbody)
+        continuation = self._state()
+        exceptional = self._merge([exception_entry, normal])
+        self._restore(exceptional)
+        self._visit_suite(node.finalbody)
+        self._restore(continuation)
+
+    def visit_Try(self, node: ast.Try) -> Any:
+        self._visit_try(node)
+
+    def visit_TryStar(self, node: ast.TryStar) -> Any:
+        self._visit_try(node)
+
+    def _visit_loop(
+        self,
+        node: ast.For | ast.AsyncFor | ast.While,
+        initial: tuple[set[str], set[str]],
+    ) -> None:
+        head = initial
+        self.loop_break_states.append([])
+        while True:
+            self._restore(head)
+            if isinstance(node, ast.While):
+                self.visit(node.test)
+                iteration = self._state()
+            else:
+                self._bind(node.target, False)
+                iteration = self._state()
+            self._visit_suite(node.body)
+            widened = self._merge([initial, iteration, self._state()])
+            if widened == head:
+                break
+            head = widened
+
+        breaks = self.loop_break_states.pop()
+        self._restore(head)
+        if isinstance(node, ast.While):
+            self.visit(node.test)
+        self._visit_suite(node.orelse)
+        exits = [self._state(), *breaks]
+        self._restore(self._merge(exits))
+
+    def visit_Break(self, node: ast.Break) -> Any:
+        if self.loop_break_states:
+            self.loop_break_states[-1].append(self._state())
+
     def _visit_for(self, node: ast.For | ast.AsyncFor) -> None:
         self.visit(node.iter)
-        self._bind(node.target, False)
-        for statement in [*node.body, *node.orelse]:
-            self.visit(statement)
+        self._visit_loop(node, self._state())
 
     def visit_For(self, node: ast.For) -> Any:
         self._visit_for(node)
 
     def visit_AsyncFor(self, node: ast.AsyncFor) -> Any:
         self._visit_for(node)
+
+    def visit_While(self, node: ast.While) -> Any:
+        self._visit_loop(node, self._state())
+
+    @staticmethod
+    def _match_names(pattern: ast.pattern) -> set[str]:
+        names: set[str] = set()
+        for item in ast.walk(pattern):
+            if isinstance(item, ast.MatchAs) and item.name is not None:
+                names.add(item.name)
+            elif isinstance(item, ast.MatchStar) and item.name is not None:
+                names.add(item.name)
+            elif isinstance(item, ast.MatchMapping) and item.rest is not None:
+                names.add(item.rest)
+        return names
+
+    @classmethod
+    def _is_irrefutable(cls, pattern: ast.pattern) -> bool:
+        if isinstance(pattern, ast.MatchAs):
+            return pattern.pattern is None or cls._is_irrefutable(pattern.pattern)
+        if isinstance(pattern, ast.MatchOr):
+            return any(cls._is_irrefutable(item) for item in pattern.patterns)
+        return False
+
+    @classmethod
+    def _is_catch_all(cls, case: ast.match_case) -> bool:
+        return case.guard is None and cls._is_irrefutable(case.pattern)
+
+    def visit_Match(self, node: ast.Match) -> Any:
+        self.visit(node.subject)
+        initial = self._state()
+        authority = self._is_authority(node.subject)
+        states: list[tuple[set[str], set[str]]] = []
+        for case in node.cases:
+            self._restore(initial)
+            for name in self._match_names(case.pattern):
+                self._bind(ast.Name(id=name, ctx=ast.Store()), authority)
+            if case.guard is not None:
+                self.visit(case.guard)
+            self._visit_suite(case.body)
+            states.append(self._state())
+        if not node.cases or not self._is_catch_all(node.cases[-1]):
+            states.append(initial)
+        self._restore(self._merge(states))
 
     def visit_NamedExpr(self, node: ast.NamedExpr) -> Any:
         self.visit(node.value)

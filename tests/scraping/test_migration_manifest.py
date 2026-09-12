@@ -1840,6 +1840,215 @@ def test_rebinding_receiver_does_not_hide_extractor_reachability():
         _scan_synthetic(source)
 
 
+@pytest.mark.parametrize("receiver", ["monkeypatch", "helper"])
+def test_a_readable_setattr_target_survives_a_later_star(receiver):
+    source = _reach_through(f"{receiver}.setattr(extractor, *arguments)")
+
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=r"synthetic_inventory\.py:7 extractor: unresolved setattr target",
+    ):
+        _scan_synthetic(source)
+
+
+def _receiver_flow(statements: str, receiver: str = "patch") -> str:
+    return f"""
+async def test_shape(monkeypatch, helper, arguments, flag, value):
+    {statements}
+    {receiver}.setattr(*arguments)
+"""
+
+
+def _assert_authoritative_receiver(statements: str, receiver: str = "patch") -> None:
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=rf"{re.escape(receiver)}\.setattr\(\*arguments\): "
+        r"unresolved setattr arguments",
+    ):
+        _scan_synthetic(_receiver_flow(statements, receiver))
+
+
+@pytest.mark.parametrize(
+    "branches",
+    [
+        "if flag:\n        patch = monkeypatch\n    else:\n        patch = helper",
+        "if flag:\n        patch = helper\n    else:\n        patch = monkeypatch",
+    ],
+)
+def test_if_branches_merge_receiver_authority_in_either_order(branches):
+    _assert_authoritative_receiver(f"patch = helper\n    {branches}")
+
+
+@pytest.mark.parametrize(
+    "branches",
+    [
+        "if flag:\n        patch = monkeypatch\n    else:\n        copy = patch",
+        "if flag:\n        copy = patch\n    else:\n        patch = monkeypatch",
+    ],
+)
+def test_if_branches_do_not_share_impossible_alias_states(branches):
+    source = _receiver_flow(
+        f"patch = helper\n    copy = helper\n    {branches}", "copy"
+    )
+
+    assert _scan_synthetic(source) == []
+
+
+@pytest.mark.parametrize(
+    "statements",
+    [
+        "patch = helper\n"
+        "    try:\n"
+        "        patch = monkeypatch\n"
+        "    except Exception:\n"
+        "        patch = helper\n"
+        "    else:\n"
+        "        pass\n"
+        "    finally:\n"
+        "        pass",
+        "patch = helper\n"
+        "    try:\n"
+        "        patch = helper\n"
+        "    except Exception:\n"
+        "        patch = monkeypatch\n"
+        "    else:\n"
+        "        patch = helper\n"
+        "    finally:\n"
+        "        pass",
+    ],
+)
+def test_try_paths_merge_receiver_authority(statements):
+    _assert_authoritative_receiver(statements)
+
+
+def test_try_finally_rebinding_retires_receiver_authority_on_every_path():
+    source = _receiver_flow(
+        "patch = monkeypatch\n"
+        "    try:\n"
+        "        patch = monkeypatch\n"
+        "    except Exception:\n"
+        "        patch = monkeypatch\n"
+        "    else:\n"
+        "        patch = monkeypatch\n"
+        "    finally:\n"
+        "        patch = helper"
+    )
+
+    assert _scan_synthetic(source) == []
+
+
+def test_a_loop_retains_the_zero_iteration_receiver_path():
+    _assert_authoritative_receiver(
+        "patch = monkeypatch\n    for item in value:\n        patch = helper"
+    )
+
+
+def test_a_loop_revisits_calls_before_a_later_authority_assignment():
+    source = """
+async def test_shape(monkeypatch, helper, arguments, value):
+    patch = helper
+    for item in value:
+        patch.setattr(*arguments)
+        patch = monkeypatch
+"""
+
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=r"patch\.setattr\(\*arguments\): unresolved setattr arguments",
+    ):
+        _scan_synthetic(source)
+
+
+def test_a_loop_else_rebinding_retires_receiver_authority_without_a_break():
+    source = _receiver_flow(
+        "patch = monkeypatch\n"
+        "    for item in value:\n"
+        "        patch = helper\n"
+        "    else:\n"
+        "        patch = helper"
+    )
+
+    assert _scan_synthetic(source) == []
+
+
+@pytest.mark.parametrize(
+    "cases",
+    [
+        "case True:\n            patch = monkeypatch\n"
+        "        case False:\n            patch = helper",
+        "case True:\n            patch = helper\n"
+        "        case False:\n            patch = monkeypatch",
+    ],
+)
+def test_match_cases_merge_receiver_authority_in_either_order(cases):
+    _assert_authoritative_receiver(f"patch = helper\n    match flag:\n        {cases}")
+
+
+@pytest.mark.parametrize("catch_all", ["_", "ignored"])
+def test_exhaustive_match_rebinding_retires_receiver_authority(catch_all):
+    source = _receiver_flow(
+        "patch = monkeypatch\n"
+        "    match flag:\n"
+        "        case True:\n"
+        "            patch = helper\n"
+        f"        case {catch_all}:\n"
+        "            patch = helper"
+    )
+
+    assert _scan_synthetic(source) == []
+
+
+def test_a_conditional_receiver_merge_reaches_a_nested_closure():
+    source = """
+async def test_outer(monkeypatch, helper, arguments, flag):
+    patch = helper
+    if flag:
+        patch = monkeypatch
+
+    async def test_inner():
+        patch.setattr(*arguments)
+"""
+
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=r"patch\.setattr\(\*arguments\): unresolved setattr arguments",
+    ):
+        _scan_synthetic(source)
+
+
+def test_a_class_local_receiver_does_not_become_a_method_closure():
+    source = """
+import pytest
+
+class Scope:
+    patch = pytest.MonkeyPatch()
+
+    def method(self, arguments):
+        patch.setattr(*arguments)
+"""
+
+    assert _scan_synthetic(source) == []
+
+
+def test_a_method_still_closes_over_an_enclosing_function_receiver():
+    source = """
+async def test_outer(monkeypatch, arguments):
+    patch = monkeypatch
+
+    class Scope:
+        patch = object()
+
+        def method(self):
+            patch.setattr(*arguments)
+"""
+
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=r"patch\.setattr\(\*arguments\): unresolved setattr arguments",
+    ):
+        _scan_synthetic(source)
+
+
 @pytest.mark.parametrize(
     ("statement", "line"),
     [
