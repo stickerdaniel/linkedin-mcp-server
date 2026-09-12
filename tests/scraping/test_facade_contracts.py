@@ -16,7 +16,7 @@ from patchright.async_api import Page
 from linkedin_mcp_server import dependencies
 from linkedin_mcp_server.core.exceptions import InvalidReferenceError
 from linkedin_mcp_server.scraping import LinkedInExtractor as PackageExtractor
-from linkedin_mcp_server.scraping import contracts, text
+from linkedin_mcp_server.scraping import connection, contracts, text
 from linkedin_mcp_server.scraping.capture import SectionCapture
 from linkedin_mcp_server.scraping.connection import ActionSignals
 from linkedin_mcp_server.scraping.connection_actions import ConnectionActions
@@ -448,3 +448,36 @@ async def test_compatibility_helpers_keep_their_browser_behavior():
         "locator.scroll_into_view",
         "locator.click",
     ]
+
+
+async def test_connection_classifier_resolves_its_owner_at_call_time(
+    mock_page, monkeypatch
+):
+    # The classifier belongs to the browser-free connection owner. Rebinding it
+    # there after facade construction must affect the action workflow rather
+    # than leaving ConnectionActions with a frozen imported function.
+    extractor = LinkedInExtractor(cast(Page, mock_page))
+    extractor.scrape_person = AsyncMock(  # ty: ignore[invalid-assignment]
+        return_value={
+            "url": "https://www.linkedin.com/in/target/",
+            "sections": {"main_profile": "Target profile"},
+        }
+    )
+    signals = ActionSignals(False, False, False, False, False, False)
+    calls: list[ActionSignals] = []
+
+    def classify(value: ActionSignals) -> connection.ConnectionState:
+        calls.append(value)
+        return "self_profile"
+
+    monkeypatch.setattr(connection, "detect_connection_state", classify)
+    with patch.object(
+        ConnectionActions,
+        "_read_action_signals",
+        new_callable=AsyncMock,
+        return_value=signals,
+    ):
+        result = await extractor.connect_with_person("target")
+
+    assert result["message"] == "Cannot send a connection request to your own profile."
+    assert calls == [signals]

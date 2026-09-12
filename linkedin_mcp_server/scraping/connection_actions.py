@@ -13,7 +13,7 @@ Per the AGENTS.md Scraping Rules every decision here rests on a URL pattern
 opener) or on a structural count. No label value is read anywhere, so a
 German or an opaquely labelled page classifies exactly as an English one;
 ``tests/test_action_signals_dom.py`` holds that line against a real DOM in
-all three.
+all four label sets.
 
 The write gate is the reason the order of the checks below matters: the
 invite deeplink fires only after ``has_invite_anchor`` is true, and the only
@@ -32,10 +32,8 @@ import logging
 
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
-from linkedin_mcp_server.scraping.connection import (
-    ActionSignals,
-    detect_connection_state,
-)
+from linkedin_mcp_server.scraping import connection
+from linkedin_mcp_server.scraping.connection import ActionSignals
 from linkedin_mcp_server.scraping.identifiers import (
     normalize_person_identifier,
     person_profile_url,
@@ -698,7 +696,7 @@ class ConnectionActions:
             )
 
         signals = await self._read_action_signals(username)
-        state = detect_connection_state(signals)
+        state = connection.detect_connection_state(signals)
         logger.info(
             "Connection signals for %s: state=%s signals=%s", username, state, signals
         )
@@ -753,7 +751,7 @@ class ConnectionActions:
                 verified = await self._read_main_profile(username)
                 verified_text = verified.get("sections", {}).get("main_profile", "")
                 verified_signals = await self._read_action_signals(username)
-                verified_state = detect_connection_state(verified_signals)
+                verified_state = connection.detect_connection_state(verified_signals)
                 if verified_state == "already_connected":
                     break
             if verified_state != "already_connected":
@@ -847,7 +845,7 @@ class ConnectionActions:
         verified = await self._read_main_profile(username)
         verified_text = verified.get("sections", {}).get("main_profile", "")
         verified_signals = await self._read_action_signals(username)
-        verified_state = detect_connection_state(verified_signals)
+        verified_state = connection.detect_connection_state(verified_signals)
 
         if verified_signals.has_invite_anchor:
             return _connection_result(
