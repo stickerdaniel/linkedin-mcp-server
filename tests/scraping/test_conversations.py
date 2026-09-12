@@ -887,12 +887,25 @@ class TestSearchConversations:
             "https://www.linkedin.com/messaging/?searchTerm=hello+world"
         )
 
-    async def test_includes_conversation_thread_refs(self, mock_page):
-        """Per-result thread URLs, capped by the caller's ``limit``."""
+    async def test_click_captured_search_refs_lead_anchor_refs(self, mock_page):
+        """Search keeps click order and its metadata ahead of root anchors.
+
+        The duplicate carries an equally rich but conflicting anchor label, so
+        reversing ``conversation_refs + references`` changes both its metadata
+        and the complete result order instead of passing through a set compare.
+        """
         reader = _reader(mock_page)
-        thread_refs = [
-            _ref("/messaging/thread/2-abc/", "Jacki McMahan", "search_results"),
-            _ref("/messaging/thread/2-def/", "Jacki McMahan", "search_results"),
+        first = _ref("/messaging/thread/2-abc/", "Tony Chan", "search_results")
+        duplicate = _ref("/messaging/thread/2-def/", "Paul Jasper", "search_results")
+        anchors = [
+            {
+                "href": "https://www.linkedin.com/messaging/thread/2-def/",
+                "text": "Open thread",
+            },
+            {
+                "href": "https://www.linkedin.com/messaging/thread/2-anchor/",
+                "text": "Anchor only",
+            },
         ]
         with (
             patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
@@ -901,22 +914,28 @@ class TestSearchConversations:
                 PageContentReader,
                 "_extract_root_content",
                 new_callable=AsyncMock,
-                return_value=_root("Jacki McMahan\nJacki McMahan"),
+                return_value=_root("Tony Chan\nPaul Jasper", anchors),
             ),
             patch.object(
                 reader,
                 "_extract_conversation_thread_refs",
                 new_callable=AsyncMock,
-                return_value=thread_refs,
+                return_value=[first, duplicate],
             ) as mock_refs,
         ):
             result = await reader.search_conversations("Jacki")
 
         mock_refs.assert_awaited_once_with(limit=20, context="search_results")
-        assert {ref["url"] for ref in result["references"]["search_results"]} == {
-            "/messaging/thread/2-abc/",
-            "/messaging/thread/2-def/",
-        }
+        assert result["references"]["search_results"] == [
+            first,
+            duplicate,
+            {
+                "kind": "conversation",
+                "url": "/messaging/thread/2-anchor/",
+                "text": "Anchor only",
+                "context": "search result",
+            },
+        ]
 
     async def test_an_empty_result_page_omits_the_optional_keys(self, mock_page):
         reader = _reader(mock_page)

@@ -324,11 +324,11 @@ async def test_facade_get_conversation_forwards_its_username_and_index(mock_page
     ):
         await extractor.get_conversation(linkedin_username="jacki-old", index=1)
 
-    assert [
-        call.args[0]
-        for call in navigate.await_args_list
-        if call.args and "/messaging/thread/" in call.args[0]
-    ] == [threads[1]]
+    expected_navigations = [
+        "https://www.linkedin.com/in/jacki-old/",
+        threads[1],
+    ]
+    assert [call.args[0] for call in navigate.await_args_list] == expected_navigations
 
 
 async def test_facade_search_conversations_forwards_its_row_cap(mock_page):
@@ -396,6 +396,42 @@ async def test_the_profile_urn_reader_resolves_the_facade_at_call_time(mock_page
     assert result["profile_urn"] == "urn:late-bound"
 
 
+async def test_facade_direct_thread_ignores_username_and_index_validation(mock_page):
+    # The direct route exists to bypass participant resolution. A malformed
+    # username and negative index are both invalid on that other branch, so
+    # reaching the named thread proves neither ignored value is checked eagerly.
+    extractor = LinkedInExtractor(cast(Page, mock_page))
+
+    with (
+        patch.object(ScrapingSession, "check_rate_limit", new_callable=AsyncMock),
+        patch.object(ScrapingSession, "dismiss_modal", new_callable=AsyncMock),
+        patch.object(ScrapingSession, "delay", new_callable=AsyncMock),
+        patch.object(
+            PageNavigator, "_navigate_to_page", new_callable=AsyncMock
+        ) as navigate,
+        patch.object(ConversationReader, "_wait_for_main_text", new_callable=AsyncMock),
+        patch.object(
+            ConversationReader,
+            "_scroll_main_scrollable_region",
+            new_callable=AsyncMock,
+        ),
+        patch.object(
+            PageContentReader,
+            "_extract_root_content",
+            new_callable=AsyncMock,
+            return_value={"source": "root", "text": "msg", "references": []},
+        ),
+    ):
+        result = await extractor.get_conversation(
+            linkedin_username="../../feed", thread_id="2-direct", index=-1
+        )
+
+    assert result["sections"]["conversation"] == "msg"
+    navigate.assert_awaited_once_with(
+        "https://www.linkedin.com/messaging/thread/2-direct/"
+    )
+
+
 def test_facade_methods_are_exactly_the_frozen_coroutine_surface():
     expected = TOOL_FACADE_METHODS | COMPATIBILITY_METHODS
     # Enumerate the class, not the expectation: iterating over `expected` would
@@ -450,12 +486,11 @@ async def test_compatibility_helpers_keep_their_browser_behavior():
     ]
 
 
-async def test_connection_classifier_resolves_its_owner_at_call_time(
+async def test_incoming_verification_resolves_classifier_at_call_time(
     mock_page, monkeypatch
 ):
-    # The classifier belongs to the browser-free connection owner. Rebinding it
-    # there after facade construction must affect the action workflow rather
-    # than leaving ConnectionActions with a frozen imported function.
+    # Rebind after facade/action construction. Both the initial decision and the
+    # post-accept verification must resolve the canonical owner dynamically.
     extractor = LinkedInExtractor(cast(Page, mock_page))
     extractor.scrape_person = AsyncMock(  # ty: ignore[invalid-assignment]
         return_value={
@@ -463,21 +498,72 @@ async def test_connection_classifier_resolves_its_owner_at_call_time(
             "sections": {"main_profile": "Target profile"},
         }
     )
-    signals = ActionSignals(False, False, False, False, False, False)
+    incoming = ActionSignals(False, False, False, False, False, True)
+    connected = ActionSignals(False, True, False, False, False, False)
     calls: list[ActionSignals] = []
 
     def classify(value: ActionSignals) -> connection.ConnectionState:
         calls.append(value)
-        return "self_profile"
+        return "incoming_request" if value is incoming else "already_connected"
 
     monkeypatch.setattr(connection, "detect_connection_state", classify)
-    with patch.object(
-        ConnectionActions,
-        "_read_action_signals",
-        new_callable=AsyncMock,
-        return_value=signals,
+    with (
+        patch.object(
+            ConnectionActions,
+            "_read_action_signals",
+            new_callable=AsyncMock,
+            side_effect=[incoming, connected],
+        ),
+        patch.object(
+            ConnectionActions,
+            "_click_incoming_accept",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
     ):
         result = await extractor.connect_with_person("target")
 
-    assert result["message"] == "Cannot send a connection request to your own profile."
-    assert calls == [signals]
+    assert result["status"] == "accepted"
+    assert calls == [incoming, connected]
+
+
+async def test_submitted_invite_verification_resolves_classifier_at_call_time(
+    mock_page, monkeypatch
+):
+    # The fake navigator and submitter keep this entirely off LinkedIn while the
+    # verification branch still performs both classifier calls.
+    extractor = LinkedInExtractor(cast(Page, mock_page))
+    extractor.scrape_person = AsyncMock(  # ty: ignore[invalid-assignment]
+        return_value={
+            "url": "https://www.linkedin.com/in/target/",
+            "sections": {"main_profile": "Target profile"},
+        }
+    )
+    connectable = ActionSignals(True, False, False, False, False, False)
+    pending = ActionSignals(False, True, False, False, True, False)
+    calls: list[ActionSignals] = []
+
+    def classify(value: ActionSignals) -> connection.ConnectionState:
+        calls.append(value)
+        return "connectable" if value is connectable else "pending"
+
+    monkeypatch.setattr(connection, "detect_connection_state", classify)
+    with (
+        patch.object(
+            ConnectionActions,
+            "_read_action_signals",
+            new_callable=AsyncMock,
+            side_effect=[connectable, pending],
+        ),
+        patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
+        patch.object(
+            ConnectionActions,
+            "_submit_invite_dialog",
+            new_callable=AsyncMock,
+            return_value=(True, False, None),
+        ),
+    ):
+        result = await extractor.connect_with_person("target")
+
+    assert result["status"] == "connected"
+    assert calls == [connectable, pending]

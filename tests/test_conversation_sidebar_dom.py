@@ -424,24 +424,37 @@ class TestTheClickLoopAgainstRealDom:
             }
         ]
 
-    async def test_a_row_that_never_routes_yields_no_ref(self, dom_page):
-        """The loop waits for the SPA URL and gives up rather than guessing.
+    async def test_a_row_that_never_routes_uses_the_exact_poll_budget(self, dom_page):
+        """A stalled route gets exactly twelve 100 ms chances, then no ref.
 
-        Without the ``/messaging/thread/`` match the loop would take whatever
-        address the page happened to hold and parse a thread id out of the
-        inbox URL itself.
+        The timer is replaced inside Patchright's isolated evaluation world so
+        the browser still executes the production loop without making this test
+        spend the full 1.2 seconds. The delayed-route case above separately
+        proves that a non-thread transition can settle successfully.
         """
         await serve(
             dom_page,
             sidebar([("Select conversation with Ada Lovelace", "2-ada")], routes=False),
         )
+        await dom_page.evaluate(
+            """() => {
+                globalThis.linkedinMcpPollDelays = [];
+                const nativeSetTimeout = globalThis.setTimeout;
+                globalThis.setTimeout = (callback, delay, ...args) => {
+                    globalThis.linkedinMcpPollDelays.push(delay);
+                    return nativeSetTimeout(callback, 0, ...args);
+                };
+            }"""
+        )
 
         refs = await _reader(dom_page)._extract_conversation_thread_refs(
             limit=None, context="inbox"
         )
+        poll_delays = await dom_page.evaluate("() => globalThis.linkedinMcpPollDelays")
 
         assert await clicks(dom_page) == ["2-ada"]
         assert refs == []
+        assert poll_delays == [100] * 12
 
 
 class TestTheScrollWalkAgainstRealDom:
