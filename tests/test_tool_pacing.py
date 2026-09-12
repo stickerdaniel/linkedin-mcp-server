@@ -128,6 +128,7 @@ class TestLocalOnlyToolsAreNotPaced:
 
         await _timed_call(paced, "get_enrichment_status")
         await _timed_call(paced, "get_company_cache")
+        await _timed_call(paced, "query_company_cache")
         assert load_account_budget(store, now).ledger.spent(now) == 0
 
         await _timed_call(paced)

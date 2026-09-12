@@ -76,6 +76,40 @@ class TestBuildReferences:
             }
         ]
 
+    def test_company_subpages_dedupe_to_the_company(self):
+        """A company card links its root plus events/jobs/people tabs, each
+        an anchor of its own. Company-search pagination counts distinct
+        company urls to know when a page added nothing, so every sub-path
+        has to collapse onto ``/company/<slug>/`` and dedupe into one."""
+        references = build_references(
+            [
+                {"href": "https://www.linkedin.com/company/x/", "text": "X Corp"},
+                {"href": "https://www.linkedin.com/company/x/events/", "text": "X"},
+                {"href": "https://www.linkedin.com/company/x/jobs/", "text": "X"},
+                {
+                    "href": "https://www.linkedin.com/company/x/people/?keywords=a",
+                    "text": "X",
+                },
+                {"href": "https://www.linkedin.com/company/y/life/", "text": "Y Inc"},
+            ],
+            "search_results",
+        )
+
+        assert references == [
+            {
+                "kind": "company",
+                "url": "/company/x/",
+                "text": "X Corp",
+                "context": "search result",
+            },
+            {
+                "kind": "company",
+                "url": "/company/y/",
+                "text": "Y Inc",
+                "context": "search result",
+            },
+        ]
+
     def test_drops_person_details_subpage(self):
         references = build_references(
             [

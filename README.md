@@ -50,20 +50,21 @@ This MCP server is **free** and **open source**, supported by [**Unipile**](http
 | `send_message` | Compose/send a new message to a LinkedIn user (requires confirmation; profile-based targeting may open a separate DM instead of replying in an existing thread — see #483) |
 | `get_company_profile` | Extract company information with explicit section selection (posts, jobs); about-section references may include a `company_urn` entry carrying the numeric id used by LinkedIn's people-search `currentCompany` URL facet |
 | `get_company_posts` | Get recent posts from a company's LinkedIn feed |
-| `search_companies` | Search for companies on LinkedIn by keywords |
+| `search_companies` | Search for companies by keywords and/or Clay-style facets: `industry` (LinkedIn numeric id, or a known name such as "Software Development"), `size` (headcount bucket like `51-200` or facet letter `A`-`I`), `hq_location` (country/city, resolved like `search_people`'s location) and `has_jobs`, with `max_pages` pagination (1-10, 10 companies per page). Facets narrow at search time, so `enrich_companies` only pays for the shortlist. The `industry` and `size` parameter names/values are unverified against live LinkedIn; a wrong name is ignored, so cross-check results. Returns `companies` rows (`name`, `industry`, `location`, `tagline`, `followers`, `url`) parsed from the page text plus `result_count`, alongside the raw text |
 | `get_company_employees` | List employees at a company from the /people/ page, with optional keyword filter |
 | `search_jobs` | Search for jobs with keywords and location filters |
 | `get_saved_jobs` | List job postings saved by the authenticated user |
-| `search_people` | Search for people by keywords, location, connection degree (1st/2nd/3rd), and current company, with `max_pages` pagination (1-10, 10 people per page) |
+| `search_people` | Search for people by keywords (Boolean `AND`/`OR`/`NOT`, quotes, parentheses) and/or Clay-style facets: `location`, `network` (1st/2nd/3rd), `current_company` and `past_company` (one or a list; name, `/company/` slug URL, or numeric URN), `title` (sent as `titleFreeText`, which LinkedIn's current results page ignores; put the title in `keywords` as a quoted phrase instead. Refused as the only criterion, since that would return an unfiltered list), `industry` (numeric id or a known name, same table as `search_companies`), `school` (numeric id only: people search -> All filters -> School, then read `schoolFilter=["<id>"]` from the URL), `first_name`, `last_name`, `profile_language` (ISO 639-1 codes), with `max_pages` pagination (1-10, 10 people per page). Only `current_company` and `first_name` are measured live; the `past_company`, `industry`, `school`, `last_name` and `profile_language` parameter names/values are unverified against live LinkedIn, and a wrong name is ignored, so cross-check results. Returns `people` rows (`name`, `degree`, `headline`, `location`, `snippet`, `url`) parsed from the page text plus `result_count`, alongside the raw text. Funnel: `search_companies` -> `enrich_companies(about=True)` -> `query_company_cache` -> `search_people(current_company=[...], keywords='"<title>"')` |
 | `get_job_details` | Get detailed information about a specific job posting |
 | `get_feed` | Get recent posts from the authenticated user's home feed |
-| `search_posts` | Search posts/content globally by keyword (the "Posts" tab) with an optional recency filter (past-24h/past-week/past-month) |
+| `search_posts` | Search posts/content globally by keyword (the "Posts" tab) with an optional recency filter (past-24h/past-week/past-month), scrolling until `max_posts` results (1-50, default 10); author `/in/` references make it usable as a prospect list. Breaking change: `max_pages` was removed and replaced by `max_posts` (default 10) |
 | `start_enrichment_job` | Queue a resumable bulk profile-enrichment job from a list of usernames or profile URLs |
 | `run_enrichment_bunch` | Visit the next few profiles in a job, paced with randomized delays, a rolling 24h action budget and working hours; returns when to call it again |
 | `get_enrichment_status` | Progress and collected results for an enrichment job, or list all jobs |
-| `enrich_companies` | Firmographics for a list of companies, cache-first and paced; one company-search reveals ~10 companies at once, all cached. Cache TTLs are set in days via `COMPANY_FIRMOGRAPHICS_TTL_DAYS` (default 90) and `COMPANY_JOBS_TTL_DAYS` (default 14) |
-| `enrich_company_deep` | Deep firmographics plus live open roles for one company (About + Jobs tabs); cache-first, open roles on the shorter jobs TTL |
+| `enrich_companies` | Firmographics for a list of companies, cache-first and paced; one company-search reveals ~10 companies at once, all cached. With `about=true` each resolved company's About tab is read too (industry, headcount band, HQ, website, founded, company type, specialties) at one extra navigation per company. Cache TTLs are set in days via `COMPANY_FIRMOGRAPHICS_TTL_DAYS` (default 90) and `COMPANY_JOBS_TTL_DAYS` (default 14) |
+| `enrich_company_deep` | Deep firmographics (About tab: industry, headcount band, HQ, website, founded, company type, specialties) plus live open roles for one company; cache-first, open roles on the shorter jobs TTL |
 | `get_company_cache` | Read a cached company record (with per-half freshness), or list everything cached |
+| `query_company_cache` | Filter cached companies by industry, headquarters, headcount band, hiring status, and founding year; pure disk read, no LinkedIn access |
 | `close_session` | Close browser session and clean up resources |
 
 <br/>
@@ -599,6 +600,54 @@ belongs behind something that provides it.
 
 <br/>
 <br/>
+
+## Multiple Sessions / Clients
+
+Each stdio MCP client (Claude Code, Claude Desktop, Codex, or several
+instances of one) spawns its own server process, and all of them want the
+same `~/.linkedin-mcp/profile` browser. Tool calls are serialized, so this is
+safe, but shows up as frequent "browser is busy" waits. Pick one option:
+
+**Option A: `--daemon` in each client's config.** The first process to start
+elects itself owner of the browser; the rest proxy to it over loopback
+instead of opening their own (experimental):
+
+```json
+{
+  "mcpServers": {
+    "mcp-server-linkedin": {
+      "command": "uvx",
+      "args": ["mcp-server-linkedin@latest", "--daemon"]
+    }
+  }
+}
+```
+
+**Option B: one long-lived `--transport streamable-http` server**, with every
+client pointed at it instead of spawning its own process:
+
+```json
+{ "mcpServers": { "mcp-server-linkedin": {
+  "type": "http", "url": "http://127.0.0.1:8000/mcp"
+} } }
+```
+
+Keep it running with the OS's own service manager, not a terminal window.
+Service managers start with a minimal `PATH` and no working directory, so
+name `uvx` by its absolute path (`which uvx`). macOS launchd
+(`~/Library/LaunchAgents/com.linkedin-mcp-server.plist`, loaded with
+`launchctl load`):
+
+```xml
+<key>ProgramArguments</key>
+<array><string>/absolute/path/to/uvx</string>
+  <string>mcp-server-linkedin@latest</string>
+  <string>--transport</string><string>streamable-http</string></array>
+<key>KeepAlive</key><true/>
+```
+
+Linux systemd: `ExecStart=/absolute/path/to/uvx mcp-server-linkedin@latest
+--transport streamable-http` with `Restart=always`.
 
 ## 🐍 Local Setup (Develop & Contribute)
 

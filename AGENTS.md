@@ -144,6 +144,8 @@ Optional additional keys:
 - `section_errors: {section_name: {error_type, error_message, issue_template_path, runtime, ...}}`
 - `unknown_sections: [name, ...]`
 - `job_ids: [id, ...]` (search_jobs and get_saved_jobs)
+- `people: [{name, degree, headline, location, snippet, url[, followers]}]` (search_people) and `companies: [{name, industry, location, tagline, followers, url}]` (search_companies) — rows parsed from each page's text by `scraping/search_parse.py` before the pages are joined, deduped by `url` across pages; `url` may be null when a card could not be paired with an anchor. A parser failure logs a warning and yields an empty list; the raw text is still returned.
+- `result_count: int | null` (search_people and search_companies) — the first page's "About N results" header. Present on company search; null on the measured people-search page shape, which renders no such header.
 - `references["feed"]` (get_feed only) — every entry is `kind: "feed_post"`; non-post anchors (sidebar profiles, employer logos) are filtered. URLs may carry either `/feed/update/<urn>/` (DOM-anchor-derived) or `/posts/<slug>` (SDUI-derived) form; both are valid LinkedIn permalinks. Cap is 50 entries, matching `get_feed`'s `num_posts` ceiling.
 
 ## Tests

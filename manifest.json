@@ -73,7 +73,7 @@
     },
     {
       "name": "search_companies",
-      "description": "Search for companies on LinkedIn by keywords"
+      "description": "Search for companies by keywords and/or facets (industry, headcount size, HQ location, has open jobs) with page-by-page pagination, returning structured company rows and a result count alongside the raw text; facets narrow at search time so enrichment only pays for the shortlist. Industry and size facets are unverified against live LinkedIn; cross-check results"
     },
     {
       "name": "get_company_employees",
@@ -93,7 +93,7 @@
     },
     {
       "name": "search_people",
-      "description": "Search for people on LinkedIn by keywords, location, connection degree (1st/2nd/3rd), and current company, paginating up to max_pages result pages (10 people per page)"
+      "description": "Search for people on LinkedIn by Boolean keywords and/or Clay-style facets (location, connection degree, current/past company, industry, school, first/last name, profile language; title: pass as a quoted phrase in keywords), paginating up to max_pages result pages (10 people per page) and returning structured people rows and a result count alongside the raw text. Only current company and first name are verified live; the other facets are unverified, so cross-check results"
     },
     {
       "name": "get_inbox",
@@ -117,7 +117,7 @@
     },
     {
       "name": "search_posts",
-      "description": "Search LinkedIn posts/content globally by keyword (the 'Posts' tab) with an optional recency filter (past-24h/past-week/past-month)"
+      "description": "Search LinkedIn posts/content globally by keyword (the 'Posts' tab) with an optional recency filter (past-24h/past-week/past-month), scrolling until max_posts results are loaded"
     },
     {
       "name": "close_session",
@@ -137,15 +137,19 @@
     },
     {
       "name": "enrich_companies",
-      "description": "Firmographics for a list of companies, cache-first and paced within LinkedIn; one company-search reveals ~10 companies at once, all cached with a 90-day TTL"
+      "description": "Firmographics for a list of companies, cache-first and paced within LinkedIn; one company-search reveals ~10 companies at once, all cached with a 90-day TTL. Optionally reads each resolved company's About tab at one extra navigation per company"
     },
     {
       "name": "enrich_company_deep",
-      "description": "Deep firmographics plus live open roles for one company (About and Jobs tabs), cache-first; open roles carry a shorter 14-day TTL"
+      "description": "Deep firmographics (industry, headcount band, HQ, website, founded, company type, specialties) plus live open roles for one company, cache-first; open roles carry a shorter 14-day TTL"
     },
     {
       "name": "get_company_cache",
       "description": "Read a cached company record with per-half freshness, or list every cached company"
+    },
+    {
+      "name": "query_company_cache",
+      "description": "Filter cached companies by industry, headquarters, headcount band, hiring status and founding year; a pure disk read with no LinkedIn access"
     }
   ],
   "user_config": {

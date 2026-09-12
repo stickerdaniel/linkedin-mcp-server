@@ -28,6 +28,12 @@ from __future__ import annotations
 import re
 from typing import NamedTuple
 
+# The company-search card parser lives with its people-search twin; it is
+# re-exported here so enrichment reads every company parser from one module.
+from linkedin_mcp_server.scraping.search_parse import (
+    parse_company_cards as parse_company_cards,
+)
+
 # The headcount *band* is specifically a range or an open-ended top bucket:
 # "1,001-5,000 employees", "10,001+ employees", "51-200 employees". A bare
 # "1,234 employees" is NOT a band -- on real pages that is the follower /
@@ -47,8 +53,27 @@ _ABOUT_FIELDS = {
     "headquarters": re.compile(r"^\s*Headquarters\s*[:\n]\s*(.+)$", re.I | re.M),
     "website": re.compile(r"^\s*Website\s*[:\n]\s*(\S+)$", re.I | re.M),
     "founded": re.compile(r"^\s*Founded\s*[:\n]\s*(.+)$", re.I | re.M),
+    # "Company type" (e.g. "Privately Held") sits next to "Company size"; the
+    # label is matched whole so neither row can be read as the other.
+    "company_type": re.compile(r"^\s*Company type\s*[:\n]\s*(.+)$", re.I | re.M),
+    # Kept as LinkedIn's own comma-separated string, not split: the list is
+    # free text the company typed, and a split would only invent structure.
+    "specialties": re.compile(r"^\s*Specialties\s*[:\n]\s*(.+)$", re.I | re.M),
 }
 _URL = re.compile(r"https?://[^\s|,]+", re.I)
+# The About row labels, value or no value. A page carrying one of these is an
+# About page whatever its rows parse to; a page carrying none (a "page isn't
+# available" body, a redirect) is not, however much text it rendered.
+_ABOUT_LABELS = re.compile(
+    r"^\s*(?:Industry|Headquarters|Website|Founded|Company type|Company size"
+    r"|Specialties)\s*(?::|$)",
+    re.I | re.M,
+)
+
+
+def has_about_labels(text: str) -> bool:
+    """Whether the text carries any About row label, parsed or not."""
+    return bool(text) and _ABOUT_LABELS.search(text) is not None
 
 
 def _first_line(value: str) -> str:

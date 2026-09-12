@@ -3,7 +3,7 @@
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 from types import SimpleNamespace
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, call as mock_call, patch
 from urllib.parse import parse_qs, urlparse
 
 import asyncio
@@ -17,6 +17,7 @@ from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 import pytest
 
 from linkedin_mcp_server.callbacks import ProgressCallback
+from linkedin_mcp_server.company_cache import CompanyCache
 from linkedin_mcp_server.core.exceptions import (
     AuthenticationError,
     InvalidReferenceError,
@@ -33,6 +34,7 @@ from linkedin_mcp_server.scraping.extractor import (
     ExtractedSection,
     FilterValidationError,
     LinkedInExtractor,
+    _COMPANY_SIZE_LETTERS,
     _CONTENT_DATE_POSTED_MAP,
     _RATE_LIMITED_MSG,
     _build_feed_references,
@@ -4800,6 +4802,12 @@ class TestSearchJobs:
                 "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
                 side_effect=sleep,
             ),
+            # The arithmetic below assumes the delay is exactly _NAV_DELAY;
+            # human_pause jitters it by +/- 50%, and a long draw drops a page.
+            patch(
+                "linkedin_mcp_server.core.humanize.jitter",
+                side_effect=lambda base, spread=0.5: base,
+            ),
         ):
             result = await extractor.search_jobs("python", max_pages=10)
 
@@ -4859,6 +4867,12 @@ class TestSearchJobs:
             patch(
                 "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
                 side_effect=sleep,
+            ),
+            # Same as above: the budget sits 0.1s either side of the two
+            # arithmetics, so a jittered delay decides the page count.
+            patch(
+                "linkedin_mcp_server.core.humanize.jitter",
+                side_effect=lambda base, spread=0.5: base,
             ),
         ):
             # 176.25 * _SEARCH_TIMEOUT_FRACTION is a 141s budget.
@@ -6457,17 +6471,49 @@ class TestSearchPeople:
         with pytest.raises(ValueError, match="Invalid network token"):
             await extractor.search_people("engineer", network=["X"])
 
-    async def test_search_people_rejects_plain_company_name(self, mock_page):
+    async def test_search_people_resolves_company_name(self, mock_page):
+        """A name goes through ``_resolve_company_urn`` and the facet carries
+        the id it returned, never the name."""
         extractor = LinkedInExtractor(mock_page)
-        with pytest.raises(ValueError, match="must be a numeric"):
-            await extractor.search_people("engineer", current_company="SAP")
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("Jane Doe"),
+            ),
+            patch.object(
+                extractor,
+                "_resolve_company_urn",
+                new_callable=AsyncMock,
+                return_value="1115",
+            ) as resolve,
+        ):
+            result = await extractor.search_people("engineer", current_company="SAP")
 
-    async def test_search_people_rejects_unicode_digit_company(self, mock_page):
-        """LinkedIn URN ids are ASCII decimal; reject Unicode digits even
-        though ``str.isdigit()`` would accept them."""
+        resolve.assert_awaited_once_with("SAP")
+        assert "currentCompany=%5B%221115%22%5D" in result["url"]
+        assert "SAP" not in result["url"]
+
+    async def test_search_people_unicode_digit_company_is_not_a_urn(
+        self, mock_page, tmp_path
+    ):
+        """LinkedIn URN ids are ASCII decimal; Unicode digits are a name to
+        resolve (``str.isdigit()`` would have passed them through), and one
+        nothing matches raises."""
         extractor = LinkedInExtractor(mock_page)
-        with pytest.raises(ValueError, match="must be a numeric"):
-            await extractor.search_people("engineer", current_company="١١١٥")
+        extractor._company_cache = CompanyCache(tmp_path)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted("No results"),
+        ) as nav:
+            with pytest.raises(FilterValidationError, match="Could not resolve"):
+                await extractor.search_people("engineer", current_company="١١١٥")
+
+        assert nav.await_count == 1
+        assert "results/people" not in nav.await_args_list[-1].args[0]
 
     async def test_search_people_empty_current_company_is_noop(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
@@ -6552,6 +6598,674 @@ class TestSearchPeople:
             # is not driven again, so no further navigation happens.
             assert await extractor._resolve_geo_urn("EGYPT") == "106155005"
             assert goto.await_count == 1
+
+
+class TestSearchPeopleFacets:
+    """Clay-style facets reach the URL in LinkedIn's JSON-list encoding."""
+
+    @staticmethod
+    def _run(extractor):
+        return patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted("Jane Doe"),
+        )
+
+    async def test_no_criterion_raises_without_navigating(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with self._run(extractor) as nav:
+            with pytest.raises(FilterValidationError, match="at least one of"):
+                await extractor.search_people()
+            with pytest.raises(FilterValidationError, match="at least one of"):
+                await extractor.search_people("", current_company="", industry=[])
+
+        nav.assert_not_awaited()
+
+    async def test_title_alone_is_refused(self, mock_page):
+        """LinkedIn ignores titleFreeText, so a lone title would navigate and
+        return the unfiltered worldwide list."""
+        extractor = LinkedInExtractor(mock_page)
+        with self._run(extractor) as nav:
+            with pytest.raises(FilterValidationError, match="title alone") as info:
+                await extractor.search_people(title="Head of Sales")
+
+        nav.assert_not_awaited()
+        assert "keywords='\"Head of Sales\"'" in str(info.value)
+
+    async def test_title_with_location_navigates(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            self._run(extractor) as nav,
+            patch.object(
+                extractor,
+                "_resolve_geo_urn",
+                new_callable=AsyncMock,
+                return_value="104116203",
+            ),
+        ):
+            result = await extractor.search_people(
+                title="Head of Sales", location="Seattle"
+            )
+
+        nav.assert_awaited_once()
+        assert result["url"] == (
+            "https://www.linkedin.com/search/results/people/"
+            "?geoUrn=%5B%22104116203%22%5D&titleFreeText=Head+of+Sales"
+        )
+
+    async def test_current_company_list_is_resolved_per_element(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            self._run(extractor),
+            patch.object(
+                extractor,
+                "_resolve_company_urn",
+                new_callable=AsyncMock,
+                side_effect=["1115", "1441"],
+            ) as resolve,
+        ):
+            result = await extractor.search_people(
+                "engineer", current_company=["SAP", "Google"]
+            )
+
+        assert resolve.await_args_list == [mock_call("SAP"), mock_call("Google")]
+        assert "currentCompany=%5B%221115%22%2C%221441%22%5D" in result["url"]
+
+    async def test_past_company_names_resolve_to_urns(self, mock_page):
+        """A string or a list; each element goes through the company
+        resolver and only ids reach ``pastCompany``."""
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            self._run(extractor),
+            patch.object(
+                extractor,
+                "_resolve_company_urn",
+                new_callable=AsyncMock,
+                side_effect=lambda name: {"SAP": "1115", "1441": "1441"}[name],
+            ) as resolve,
+        ):
+            single = await extractor.search_people(past_company="SAP")
+            many = await extractor.search_people(past_company=["SAP", "1441"])
+
+        assert resolve.await_count == 3
+        assert "pastCompany=%5B%221115%22%5D" in single["url"]
+        assert "SAP" not in single["url"]
+        assert "pastCompany=%5B%221115%22%2C%221441%22%5D" in many["url"]
+        assert "currentCompany" not in many["url"]
+
+    async def test_company_resolution_is_spaced_from_the_first_results_page(
+        self, mock_page
+    ):
+        """A resolution navigates; the people search that follows gets the
+        same pause as a later results page, and a search with nothing to
+        resolve gets none."""
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            self._run(extractor),
+            patch.object(
+                extractor,
+                "_resolve_company_urn",
+                new_callable=AsyncMock,
+                return_value="1115",
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.human_pause",
+                new_callable=AsyncMock,
+            ) as pause,
+        ):
+            await extractor.search_people("engineer")
+            pause.assert_not_awaited()
+            await extractor.search_people(current_company="SAP")
+
+        pause.assert_awaited_once_with(extractor_module._NAV_DELAY)
+
+    async def test_industry_maps_names_and_passes_ids(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with self._run(extractor):
+            single = await extractor.search_people(industry="software development")
+            many = await extractor.search_people(
+                industry=["Software Development", "1862"]
+            )
+
+        assert "industry=%5B%224%22%5D" in single["url"]
+        assert "industry=%5B%224%22%2C%221862%22%5D" in many["url"]
+        assert "companyIndustry" not in many["url"]
+
+    async def test_unknown_industry_raises_listing_known_names(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with self._run(extractor) as nav:
+            with pytest.raises(FilterValidationError, match="Unknown industry") as e:
+                await extractor.search_people("engineer", industry=["Basket Weaving"])
+
+        assert "software development" in str(e.value)
+        nav.assert_not_awaited()
+
+    async def test_school_numeric_id_passes_through(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with self._run(extractor) as nav:
+            result = await extractor.search_people("engineer", school="1792")
+
+        assert "schoolFilter=%5B%221792%22%5D" in result["url"]
+        assert nav.await_count == 1
+
+    async def test_school_id_is_not_a_navigation(self, mock_page):
+        """An id needs no resolution, so a school alone costs no pause
+        before the first results page (unlike a company that resolved)."""
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            self._run(extractor),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.human_pause",
+                new_callable=AsyncMock,
+            ) as pause,
+        ):
+            result = await extractor.search_people(school=" 1792 ")
+
+        pause.assert_not_awaited()
+        assert result["url"].endswith("?schoolFilter=%5B%221792%22%5D")
+
+    @pytest.mark.parametrize("name", ["Stanford University", "17a92", "/school/x/"])
+    async def test_school_name_raises_with_the_way_to_the_id(self, mock_page, name):
+        """No schools-search page carries a ``schoolFilter`` id (measured
+        live), so a name is refused before any navigation, and the message
+        says where the id is."""
+        extractor = LinkedInExtractor(mock_page)
+        with self._run(extractor) as nav:
+            with pytest.raises(FilterValidationError, match="numeric school id") as e:
+                await extractor.search_people("engineer", school=name)
+
+        nav.assert_not_awaited()
+        assert 'schoolFilter=["<id>"]' in str(e.value)
+        assert "All filters -> School" in str(e.value)
+
+    async def test_names_and_languages_reach_the_url(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with self._run(extractor):
+            result = await extractor.search_people(
+                first_name="Jane",
+                last_name="Doe",
+                profile_language=["EN", " de"],
+            )
+
+        assert "firstName=Jane" in result["url"]
+        assert "lastName=Doe" in result["url"]
+        assert "profileLanguage=%5B%22en%22%2C%22de%22%5D" in result["url"]
+
+    async def test_profile_language_string_is_one_code(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with self._run(extractor):
+            result = await extractor.search_people(profile_language="fr")
+
+        assert result["url"].endswith("?profileLanguage=%5B%22fr%22%5D")
+
+    @pytest.mark.parametrize("code", ["eng", "e", "1n", "en-US", ""])
+    async def test_profile_language_rejects_non_iso_codes(self, mock_page, code):
+        extractor = LinkedInExtractor(mock_page)
+        with self._run(extractor) as nav:
+            with pytest.raises(FilterValidationError, match="profile_language"):
+                await extractor.search_people("engineer", profile_language=[code])
+
+        nav.assert_not_awaited()
+
+    async def test_facets_are_ordered_after_keywords(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            self._run(extractor),
+            patch.object(
+                extractor,
+                "_resolve_geo_urn",
+                new_callable=AsyncMock,
+                return_value="104116203",
+            ),
+        ):
+            result = await extractor.search_people(
+                "engineer",
+                location="Seattle",
+                network=["F"],
+                current_company="1115",
+                title="CTO",
+                past_company="1441",
+                industry="4",
+                school="1792",
+                first_name="Jane",
+                last_name="Doe",
+                profile_language="en",
+            )
+
+        assert result["url"] == (
+            "https://www.linkedin.com/search/results/people/?keywords=engineer"
+            "&geoUrn=%5B%22104116203%22%5D&network=%5B%22F%22%5D"
+            "&currentCompany=%5B%221115%22%5D&pastCompany=%5B%221441%22%5D"
+            "&industry=%5B%224%22%5D&schoolFilter=%5B%221792%22%5D"
+            "&titleFreeText=CTO&firstName=Jane&lastName=Doe"
+            "&profileLanguage=%5B%22en%22%5D"
+        )
+
+
+class TestResolveCompanyUrn:
+    """``current_company`` accepts a name, a /company/ URL, or the numeric id."""
+
+    SEARCH = "https://www.linkedin.com/search/results/companies/?keywords=SAP"
+    ABOUT = "https://www.linkedin.com/company/sap/about/"
+
+    @staticmethod
+    def _extractor(mock_page, tmp_path):
+        extractor = LinkedInExtractor(mock_page)
+        extractor._company_cache = CompanyCache(tmp_path)
+        return extractor
+
+    @staticmethod
+    def _urn_ref(urn: str) -> Reference:
+        return {
+            "kind": "company_urn",
+            "url": f"/search/results/people/?currentCompany=%5B%22{urn}%22%5D",
+            "value": urn,
+        }
+
+    @staticmethod
+    def _company_ref(slug: str) -> Reference:
+        return {"kind": "company", "url": f"/company/{slug}/", "text": slug}
+
+    async def test_digits_pass_through_without_navigating(self, mock_page, tmp_path):
+        extractor = self._extractor(mock_page, tmp_path)
+        with patch.object(extractor, "extract_page", new_callable=AsyncMock) as nav:
+            assert await extractor._resolve_company_urn("1115") == "1115"
+
+        nav.assert_not_awaited()
+        assert extractor._company_urn_cache == {}
+
+    async def test_disk_cache_hit_costs_no_navigation(self, mock_page, tmp_path):
+        """A company the enrichment tools already researched is keyed by its
+        normalised name, so the spelling need not match."""
+        extractor = self._extractor(mock_page, tmp_path)
+        assert extractor._company_cache is not None
+        extractor._company_cache.record_firmographics(
+            "SAP, Inc.", datetime.now(), source="company_page", company_urn="1115"
+        )
+        with patch.object(extractor, "extract_page", new_callable=AsyncMock) as nav:
+            assert await extractor._resolve_company_urn("sap") == "1115"
+
+        nav.assert_not_awaited()
+        assert extractor._company_urn_cache["sap"] == "1115"
+
+    async def test_unresolvable_name_raises_and_is_remembered(
+        self, mock_page, tmp_path
+    ):
+        extractor = self._extractor(mock_page, tmp_path)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted("No results found"),
+        ) as nav:
+            with pytest.raises(FilterValidationError) as excinfo:
+                await extractor._resolve_company_urn("Nowhere Corp")
+            # The miss is cached, so a repeated name in a batch does not search
+            # again -- and still raises rather than silently passing the name.
+            with pytest.raises(FilterValidationError):
+                await extractor._resolve_company_urn("nowhere corp")
+
+        assert "Nowhere Corp" in str(excinfo.value)
+        assert "get_company_profile" in str(excinfo.value)
+        assert nav.await_count == 1
+        assert extractor._company_cache is not None
+        assert extractor._company_cache.get("Nowhere Corp") is None
+
+    async def test_name_resolves_via_search_then_about(self, mock_page, tmp_path):
+        """Search finds the slug, the About page carries the id, and both
+        caches learn it so the next call (any spelling) is free."""
+        extractor = self._extractor(mock_page, tmp_path)
+        pages = {
+            self.SEARCH: extracted(
+                "SAP\nSoftware",
+                [self._company_ref("sap"), self._company_ref("sap-labs")],
+            ),
+            self.ABOUT: extracted("About SAP", [self._urn_ref("1115")]),
+        }
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                side_effect=lambda url, **_: pages[url],
+            ) as nav,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.human_pause",
+                new_callable=AsyncMock,
+            ),
+        ):
+            assert await extractor._resolve_company_urn("SAP") == "1115"
+            assert [c.args[0] for c in nav.await_args_list] == [
+                self.SEARCH,
+                self.ABOUT,
+            ]
+
+            assert await extractor._resolve_company_urn("sap") == "1115"
+            assert nav.await_count == 2
+
+        assert extractor._company_urn_cache["sap"] == "1115"
+        assert extractor._company_cache is not None
+        record = extractor._company_cache.get("SAP")
+        assert record is not None
+        assert record.company_urn == "1115"
+        assert record.linkedin_url == "https://www.linkedin.com/company/sap"
+        # Learning an id is not learning firmographics: the record must not
+        # read as fresh to the enrichment tools.
+        assert not record.has_firmographics()
+
+    async def test_search_card_with_own_urn_skips_about_page(self, mock_page, tmp_path):
+        """An id anchor between the top card's link and the next card's is the
+        top card's own, and saves the second navigation."""
+        extractor = self._extractor(mock_page, tmp_path)
+        refs = [
+            self._company_ref("sap"),
+            self._urn_ref("1115"),
+            self._company_ref("sap-labs"),
+            self._urn_ref("999"),
+        ]
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted("SAP", refs),
+        ) as nav:
+            assert await extractor._resolve_company_urn("SAP") == "1115"
+
+        assert nav.await_count == 1
+
+    async def test_urn_after_second_card_is_not_attributed(self, mock_page, tmp_path):
+        extractor = self._extractor(mock_page, tmp_path)
+        pages = {
+            self.SEARCH: extracted(
+                "SAP",
+                [
+                    self._company_ref("sap"),
+                    self._company_ref("sap-labs"),
+                    self._urn_ref("999"),
+                ],
+            ),
+            self.ABOUT: extracted("About SAP", [self._urn_ref("1115")]),
+        }
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                side_effect=lambda url, **_: pages[url],
+            ) as nav,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.human_pause",
+                new_callable=AsyncMock,
+            ),
+        ):
+            assert await extractor._resolve_company_urn("SAP") == "1115"
+
+        assert nav.await_count == 2
+
+    async def test_company_url_goes_straight_to_about(self, mock_page, tmp_path):
+        extractor = self._extractor(mock_page, tmp_path)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted("About SAP", [self._urn_ref("1115")]),
+        ) as nav:
+            urn = await extractor._resolve_company_urn(
+                "https://www.linkedin.com/company/sap/"
+            )
+
+        assert urn == "1115"
+        nav.assert_awaited_once()
+        assert nav.await_args_list[-1].args[0] == self.ABOUT
+        assert extractor._company_cache is not None
+        record = extractor._company_cache.get("sap")
+        assert record is not None
+        assert record.company_urn == "1115"
+
+    async def test_throttled_lookup_says_so(self, mock_page, tmp_path):
+        extractor = self._extractor(mock_page, tmp_path)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted(_RATE_LIMITED_MSG),
+        ):
+            with pytest.raises(FilterValidationError, match="throttled"):
+                await extractor._resolve_company_urn("SAP")
+
+    async def test_disk_record_with_url_only_skips_the_search(
+        self, mock_page, tmp_path
+    ):
+        """``enrich_companies`` stores the page URL from a search hit but no
+        id; the slug in that URL is enough to go straight to About."""
+        extractor = self._extractor(mock_page, tmp_path)
+        assert extractor._company_cache is not None
+        extractor._company_cache.record_firmographics(
+            "SAP",
+            datetime.now(),
+            source="search",
+            linkedin_url="https://www.linkedin.com/company/sap",
+        )
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted("About SAP", [self._urn_ref("1115")]),
+        ) as nav:
+            assert await extractor._resolve_company_urn("sap") == "1115"
+
+        nav.assert_awaited_once()
+        assert nav.await_args_list[0].args[0] == self.ABOUT
+        record = extractor._company_cache.get("SAP")
+        assert record is not None
+        assert record.company_urn == "1115"
+
+    async def test_promoted_top_card_for_another_company_is_skipped(
+        self, mock_page, tmp_path
+    ):
+        """The first card is often an ad for a different company; the card
+        whose name is the query wins, and the first card's own id anchor is
+        not attributed to it."""
+        extractor = self._extractor(mock_page, tmp_path)
+        pages = {
+            self.SEARCH: extracted(
+                "Page by Deloitte\nSAP",
+                [
+                    {
+                        "kind": "company",
+                        "url": "/company/deloitte/",
+                        "text": "Page by Deloitte",
+                    },
+                    self._urn_ref("999"),
+                    self._company_ref("sap"),
+                ],
+            ),
+            self.ABOUT: extracted("About SAP", [self._urn_ref("1115")]),
+        }
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                side_effect=lambda url, **_: pages[url],
+            ) as nav,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.human_pause",
+                new_callable=AsyncMock,
+            ),
+        ):
+            assert await extractor._resolve_company_urn("SAP") == "1115"
+
+        assert [c.args[0] for c in nav.await_args_list] == [self.SEARCH, self.ABOUT]
+        assert extractor._company_cache is not None
+        assert extractor._company_cache.get("deloitte") is None
+        record = extractor._company_cache.get("sap")
+        assert record is not None
+        assert record.company_urn == "1115"
+
+    async def test_no_card_named_like_the_query_raises_with_candidates(
+        self, mock_page, tmp_path
+    ):
+        extractor = self._extractor(mock_page, tmp_path)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted(
+                "Deloitte",
+                [self._company_ref("deloitte"), self._company_ref("deloitte-digital")],
+            ),
+        ) as nav:
+            with pytest.raises(FilterValidationError) as excinfo:
+                await extractor._resolve_company_urn("Deloitte Consulting")
+            with pytest.raises(FilterValidationError):
+                await extractor._resolve_company_urn("deloitte consulting")
+
+        message = str(excinfo.value)
+        assert "'deloitte'" in message
+        assert "'deloitte-digital'" in message
+        assert "/company/<slug>/" in message
+        # No About page was loaded for a card that was never accepted, and
+        # the clean miss is remembered for the batch.
+        assert nav.await_count == 1
+        assert extractor._company_cache is not None
+        assert extractor._company_cache.get("Deloitte Consulting") is None
+
+    async def test_cache_entry_is_written_under_the_hit_name(self, mock_page, tmp_path):
+        """The record carries the name LinkedIn shows, not the query's
+        spelling; both normalise to the same key."""
+        extractor = self._extractor(mock_page, tmp_path)
+        refs: list[Reference] = [
+            {"kind": "company", "url": "/company/sap/", "text": "SAP, Inc."},
+            self._urn_ref("1115"),
+        ]
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted("SAP, Inc.", refs),
+        ):
+            assert await extractor._resolve_company_urn("sap") == "1115"
+
+        assert extractor._company_cache is not None
+        record = extractor._company_cache.get("sap")
+        assert record is not None
+        assert record.display_name == "SAP, Inc."
+
+    @pytest.mark.parametrize(
+        "bad_page",
+        [
+            extracted(_RATE_LIMITED_MSG),
+            extracted("", error={"error_type": "NetworkError"}),
+        ],
+        ids=["throttled", "errored"],
+    )
+    async def test_a_throttled_or_failed_miss_is_not_cached(
+        self, mock_page, tmp_path, bad_page
+    ):
+        """A retry may succeed, so the second call searches again."""
+        extractor = self._extractor(mock_page, tmp_path)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=bad_page,
+            ) as nav,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.human_pause",
+                new_callable=AsyncMock,
+            ),
+        ):
+            with pytest.raises(FilterValidationError):
+                await extractor._resolve_company_urn("SAP")
+            with pytest.raises(FilterValidationError):
+                await extractor._resolve_company_urn("SAP")
+
+        assert nav.await_count == 2
+        assert "sap" not in extractor._company_urn_cache
+
+    async def test_every_hop_between_two_resolutions_is_paced(
+        self, mock_page, tmp_path
+    ):
+        """Two names resolve as search(A), about(A), search(B), about(B):
+        four navigations, so three pauses. The about(A) -> search(B) hop
+        is the one a per-resolution pause alone misses."""
+        extractor = self._extractor(mock_page, tmp_path)
+        pages = {
+            self.SEARCH: extracted("SAP", [self._company_ref("sap")]),
+            self.ABOUT: extracted("About SAP", [self._urn_ref("1115")]),
+            "https://www.linkedin.com/search/results/companies/?keywords=Bosch": (
+                extracted("Bosch", [self._company_ref("bosch")])
+            ),
+            "https://www.linkedin.com/company/bosch/about/": extracted(
+                "About Bosch", [self._urn_ref("2222")]
+            ),
+        }
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                side_effect=lambda url, **_: pages[url],
+            ) as nav,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.human_pause",
+                new_callable=AsyncMock,
+            ) as pause,
+        ):
+            assert await extractor._resolve_company_urn("SAP") == "1115"
+            assert await extractor._resolve_company_urn("Bosch") == "2222"
+
+        assert nav.await_count == 4
+        assert pause.await_count == nav.await_count - 1
+
+    async def test_the_first_navigation_of_a_batch_is_not_paced(
+        self, mock_page, tmp_path
+    ):
+        extractor = self._extractor(mock_page, tmp_path)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("About SAP", [self._urn_ref("1115")]),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.human_pause",
+                new_callable=AsyncMock,
+            ) as pause,
+        ):
+            await extractor._resolve_company_urn(
+                "https://www.linkedin.com/company/sap/"
+            )
+
+        pause.assert_not_awaited()
+
+    async def test_a_failing_write_back_does_not_fail_the_resolution(
+        self, mock_page, tmp_path, caplog
+    ):
+        """``CompanyCache._path`` refuses a name that normalises to nothing;
+        the id is the result, the cache write is not."""
+        extractor = self._extractor(mock_page, tmp_path)
+        refs: list[Reference] = [
+            {"kind": "company", "url": "/company/group/", "text": "Group"},
+            self._urn_ref("42"),
+        ]
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("Group", refs),
+            ),
+            caplog.at_level(logging.WARNING, logger=extractor_module.__name__),
+        ):
+            assert await extractor._resolve_company_urn("Group") == "42"
+
+        assert extractor._company_urn_cache["group"] == "42"
+        assert any("Could not cache company urn" in r.message for r in caplog.records)
 
 
 class TestSearchPeoplePagination:
@@ -6641,6 +7355,635 @@ class TestSearchPeoplePagination:
         assert result["section_errors"]["search_results"]["error_type"] == "rate_limit"
 
 
+class TestSearchCompanies:
+    """Facets reach the URL in LinkedIn's JSON-list encoding, or raise."""
+
+    @staticmethod
+    def _run(extractor, **kwargs):
+        return patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted("Stripe"),
+        )
+
+    async def test_keywords_only_builds_the_bare_url(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with self._run(extractor):
+            result = await extractor.search_companies("fintech")
+
+        assert (
+            result["url"]
+            == "https://www.linkedin.com/search/results/companies/?keywords=fintech"
+        )
+
+    async def test_industry_accepts_numeric_ids_verbatim(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with self._run(extractor):
+            result = await extractor.search_companies(industry=["4", "1862"])
+
+        assert "industryCompanyVertical=%5B%224%22%2C%221862%22%5D" in result["url"]
+        # Stripped by LinkedIn (measured live 2026-09-12).
+        assert "companyIndustry" not in result["url"]
+        assert "keywords=" not in result["url"]
+
+    async def test_industry_maps_known_names_case_insensitively(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with self._run(extractor):
+            result = await extractor.search_companies(
+                industry=[
+                    "software development",
+                    "Financial Services",
+                    "Technology, Information and Internet",
+                ]
+            )
+
+        assert (
+            "industryCompanyVertical=%5B%224%22%2C%2243%22%2C%226%22%5D"
+            in result["url"]
+        )
+
+    async def test_industry_unknown_name_names_the_table(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with pytest.raises(FilterValidationError, match="Unknown industry") as exc:
+            await extractor.search_companies(industry=["Underwater Basketry"])
+
+        assert "'software development'" in str(exc.value)
+        assert "numeric industry id" in str(exc.value)
+
+    def test_size_letters_follow_staff_count_range(self):
+        """LinkedIn's ``staffCountRange`` enum starts at self-employed, so the
+        headcount buckets map to A-I in ascending order from there."""
+        assert _COMPANY_SIZE_LETTERS == {
+            "self-employed": "A",
+            "1-10": "B",
+            "11-50": "C",
+            "51-200": "D",
+            "201-500": "E",
+            "501-1000": "F",
+            "1001-5000": "G",
+            "5001-10000": "H",
+            "10001+": "I",
+        }
+
+    async def test_size_accepts_letters_and_buckets(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with self._run(extractor):
+            result = await extractor.search_companies(
+                size=["b", "51-200", "10001+", "Self-Employed"]
+            )
+
+        assert (
+            "companySize=%5B%22B%22%2C%22D%22%2C%22I%22%2C%22A%22%5D" in result["url"]
+        )
+
+    @pytest.mark.parametrize("bad", ["J", "50-200", "huge"])
+    async def test_size_unknown_value_raises(self, mock_page, bad):
+        extractor = LinkedInExtractor(mock_page)
+        with pytest.raises(FilterValidationError, match="Unknown company size"):
+            await extractor.search_companies(size=[bad])
+
+    async def test_hq_location_resolves_to_company_hq_geo(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            self._run(extractor),
+            patch.object(
+                extractor,
+                "_resolve_geo_urn",
+                new_callable=AsyncMock,
+                return_value="101282230",
+            ) as resolve,
+        ):
+            result = await extractor.search_companies(hq_location="Germany")
+
+        resolve.assert_awaited_once_with("Germany")
+        assert "companyHqGeo=%5B%22101282230%22%5D" in result["url"]
+        assert "geoUrn" not in result["url"]
+
+    async def test_unresolvable_hq_location_raises(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor, "_resolve_geo_urn", new_callable=AsyncMock, return_value=None
+        ):
+            with pytest.raises(FilterValidationError, match="Could not resolve"):
+                await extractor.search_companies(hq_location="Nowhereland")
+
+    async def test_has_jobs_adds_the_flag_only_when_true(self, mock_page):
+        """LinkedIn rewrites a bare ``hasJobs=true`` to the JSON-string form
+        (measured live 2026-09-12), so that form is sent directly."""
+        extractor = LinkedInExtractor(mock_page)
+        with self._run(extractor):
+            on = await extractor.search_companies("fintech", has_jobs=True)
+            off = await extractor.search_companies("fintech", has_jobs=False)
+
+        assert on["url"].endswith("&hasJobs=%22true%22")
+        assert "hasJobs" not in off["url"]
+
+    async def test_all_facets_combine_in_one_url(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            self._run(extractor),
+            patch.object(
+                extractor,
+                "_resolve_geo_urn",
+                new_callable=AsyncMock,
+                return_value="101282230",
+            ),
+        ):
+            result = await extractor.search_companies(
+                "payments",
+                industry=["Financial Services"],
+                size=["C"],
+                hq_location="Germany",
+                has_jobs=True,
+            )
+
+        assert result["url"] == (
+            "https://www.linkedin.com/search/results/companies/?keywords=payments"
+            "&industryCompanyVertical=%5B%2243%22%5D&companySize=%5B%22C%22%5D"
+            "&companyHqGeo=%5B%22101282230%22%5D&hasJobs=%22true%22"
+        )
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [{}, {"keywords": ""}, {"has_jobs": True}, {"industry": [], "size": []}],
+    )
+    async def test_no_narrowing_criteria_raises(self, mock_page, kwargs):
+        extractor = LinkedInExtractor(mock_page)
+        with pytest.raises(FilterValidationError, match="at least one of"):
+            await extractor.search_companies(**kwargs)
+
+
+class TestSearchCompaniesPagination:
+    """``max_pages`` walks ``&page=N`` and stops once a page adds no company."""
+
+    @staticmethod
+    def _page(n: int) -> ExtractedSection:
+        return extracted(
+            f"Company {n}",
+            [{"kind": "company", "url": f"/company/co{n}/", "text": f"Company {n}"}],
+        )
+
+    async def test_default_fetches_only_first_page(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            side_effect=[self._page(1), self._page(2)],
+        ) as fetch:
+            result = await extractor.search_companies("fintech")
+
+        assert fetch.await_count == 1
+        assert "&page=" not in fetch.await_args_list[0].args[0]
+        assert result["sections"]["search_results"] == "Company 1"
+
+    async def test_pages_are_joined_and_references_merged(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                side_effect=[self._page(1), self._page(2), self._page(3)],
+            ) as fetch,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.human_pause",
+                new_callable=AsyncMock,
+            ) as pause,
+        ):
+            result = await extractor.search_companies("fintech", max_pages=3)
+
+        assert fetch.await_count == 3
+        urls = [call.args[0] for call in fetch.await_args_list]
+        assert "&page=" not in urls[0]
+        assert urls[1].endswith("&page=2")
+        assert urls[2].endswith("&page=3")
+        # One pause per page after the first, before its navigation.
+        assert pause.await_count == 2
+        assert (
+            result["sections"]["search_results"]
+            == "Company 1\n---\nCompany 2\n---\nCompany 3"
+        )
+        assert [r["url"] for r in result["references"]["search_results"]] == [
+            "/company/co1/",
+            "/company/co2/",
+            "/company/co3/",
+        ]
+        assert "&page=" not in result["url"]
+
+    async def test_stops_when_a_page_adds_no_new_company(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                side_effect=[self._page(1), self._page(1), self._page(3)],
+            ) as fetch,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.human_pause",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_companies("fintech", max_pages=10)
+
+        assert fetch.await_count == 2
+        assert result["sections"]["search_results"] == "Company 1\n---\nCompany 1"
+        assert [r["url"] for r in result["references"]["search_results"]] == [
+            "/company/co1/"
+        ]
+
+    async def test_only_company_refs_count_as_new(self, mock_page):
+        """A page of nothing but people/job anchors is the end of the results."""
+        extractor = LinkedInExtractor(mock_page)
+        filler = extracted(
+            "Sidebar",
+            [{"kind": "person", "url": "/in/someone/", "text": "Someone"}],
+        )
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                side_effect=[self._page(1), filler, self._page(3)],
+            ) as fetch,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.human_pause",
+                new_callable=AsyncMock,
+            ),
+        ):
+            await extractor.search_companies("fintech", max_pages=10)
+
+        assert fetch.await_count == 2
+
+    async def test_rate_limit_midway_keeps_earlier_pages(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                side_effect=[self._page(1), extracted(_RATE_LIMITED_MSG)],
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.human_pause",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_companies("fintech", max_pages=5)
+
+        assert result["sections"]["search_results"] == "Company 1"
+        assert result["section_errors"]["search_results"]["error_type"] == "rate_limit"
+
+
+def _person_card(name: str, headline: str, location: str) -> str:
+    return f"{name} • 2nd\n\n{headline}\n\n{location}"
+
+
+def _person_ref(slug: str, name: str) -> Reference:
+    return {"kind": "person", "url": f"/in/{slug}/", "text": name}
+
+
+def _company_card(name: str, industry: str, location: str, tagline: str) -> str:
+    return (
+        f"{name}\n\n{industry}\n\n{location}\n\nFollow\n\n{tagline}\n\n"
+        f"Ann & 3 other connections follow this page · 20K followers"
+    )
+
+
+def _company_ref(slug: str, name: str) -> Reference:
+    return {"kind": "company", "url": f"/company/{slug}/", "text": name}
+
+
+class TestSearchPeopleRows:
+    """``people`` rows come from ``search_parse`` per page, before the join.
+
+    The pages here are synthetic containers in the shape the parser's
+    docstring names -- a claim about the wiring, not about LinkedIn; the
+    parser's own suite holds the live fixtures.
+    """
+
+    # Ada / Bob on page 1, Bob again / Cy / Dee on page 2. Bob is the row a
+    # naive concatenation would double, and the last card of page 1, whose
+    # location would swallow the ``---`` separator and page 2's header if the
+    # pages were joined before parsing. Dee has no anchor.
+    PAGE_1 = "About 1,234 results\n\n" + "\n\n".join(
+        [
+            _person_card("Ada", "Engineer at Example", "London, United Kingdom"),
+            _person_card("Bob", "Founder", "Berlin, Germany"),
+        ]
+    )
+    PAGE_2 = "About 999 results\n\n" + "\n\n".join(
+        [
+            _person_card("Bob", "Founder", "Berlin, Germany"),
+            _person_card("Cy", "Designer", "Paris, France"),
+            _person_card("Dee", "Writer", "Rome, Italy"),
+        ]
+    )
+
+    @classmethod
+    def _pages(cls) -> list[ExtractedSection]:
+        return [
+            extracted(
+                cls.PAGE_1, [_person_ref("ada", "Ada"), _person_ref("bob", "Bob")]
+            ),
+            extracted(cls.PAGE_2, [_person_ref("bob", "Bob"), _person_ref("cy", "Cy")]),
+        ]
+
+    async def test_rows_are_parsed_per_page_and_deduped_by_url(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                side_effect=self._pages(),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.human_pause",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_people("engineer", max_pages=2)
+
+        assert [(row["name"], row["url"]) for row in result["people"]] == [
+            ("Ada", "/in/ada/"),
+            ("Bob", "/in/bob/"),
+            ("Cy", "/in/cy/"),
+            ("Dee", None),
+        ]
+        assert result["people"][1] == {
+            "name": "Bob",
+            "degree": "2nd",
+            "headline": "Founder",
+            "location": "Berlin, Germany",
+            "snippet": None,
+            "url": "/in/bob/",
+        }
+        assert result["result_count"] == 1234
+        # The raw text keeps its shape alongside the rows.
+        assert result["sections"]["search_results"] == (
+            self.PAGE_1 + "\n---\n" + self.PAGE_2
+        )
+
+    async def test_a_parser_failure_keeps_the_raw_text(self, mock_page, caplog):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                side_effect=self._pages()[:1],
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.parse_people_cards",
+                side_effect=RuntimeError("parser bug"),
+            ),
+            caplog.at_level(logging.WARNING),
+        ):
+            result = await extractor.search_people("engineer")
+
+        assert result["people"] == []
+        assert result["result_count"] == 1234
+        assert result["sections"]["search_results"] == self.PAGE_1
+        assert "Could not parse result cards on page 1" in caplog.text
+
+    async def test_anchors_without_rows_warn_of_an_unrecognised_layout(
+        self, mock_page, caplog
+    ):
+        """A page with profile anchors is a page of cards. Parsing none of
+        them is a layout the text parser does not know (or a locale whose
+        degree token differs), not an empty result, and must not pass as
+        one in silence."""
+        # The cards carry no ``• 2nd`` head, as a non-English page might.
+        page = "About 12 results\n\nAda\nIngenieurin\nBerlin\n\nBob\nGruender\nWien"
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted(
+                    page, [_person_ref("ada", "Ada"), _person_ref("bob", "Bob")]
+                ),
+            ),
+            caplog.at_level(logging.WARNING, logger=extractor_module.__name__),
+        ):
+            result = await extractor.search_people("engineer")
+
+        assert result["people"] == []
+        assert [r.message for r in caplog.records if r.levelno == logging.WARNING] == [
+            "Page 1: 2 references but no result rows parsed (unrecognised card "
+            "layout or locale)"
+        ]
+
+    async def test_a_page_without_anchors_or_rows_does_not_warn(
+        self, mock_page, caplog
+    ):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("No results found"),
+            ),
+            caplog.at_level(logging.WARNING, logger=extractor_module.__name__),
+        ):
+            result = await extractor.search_people("engineer")
+
+        assert result["people"] == []
+        assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+
+    async def test_no_page_means_no_rows(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted(_RATE_LIMITED_MSG),
+        ):
+            result = await extractor.search_people("engineer")
+
+        assert result["people"] == []
+        assert result["result_count"] is None
+
+    async def test_rows_pair_before_the_reference_cap(self, mock_page):
+        # Six cards naming two mutual connections each is 18 ``/in/``
+        # anchors, three past the section cap. The page is extracted
+        # uncapped so card six still finds its own anchor; the cap lands on
+        # ``references`` instead.
+        cards, refs = [], []
+        for i in range(1, 7):
+            cards.append(
+                _person_card(f"Person {i}", "Engineer", "Oslo, Norway")
+                + f"\n\nMutual {i}A & Mutual {i}B are mutual connections"
+            )
+            refs.append(_person_ref(f"person-{i}", f"Person {i}"))
+            refs.append(_person_ref(f"mutual-{i}a", f"Mutual {i}A"))
+            refs.append(_person_ref(f"mutual-{i}b", f"Mutual {i}B"))
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted("\n\n".join(cards), refs),
+        ) as extract:
+            result = await extractor.search_people("engineer")
+
+        assert extract.await_args is not None
+        assert extract.await_args.kwargs["apply_cap"] is False
+        assert [r["url"] for r in result["people"]] == [
+            f"/in/person-{i}/" for i in range(1, 7)
+        ]
+        assert len(result["references"]["search_results"]) == 15
+
+
+class TestSearchCompaniesRows:
+    """``companies`` rows, same wiring as ``TestSearchPeopleRows``."""
+
+    async def test_anchors_without_rows_warn_of_an_unrecognised_layout(
+        self, mock_page, caplog
+    ):
+        # Company cards are found by their followers line; a locale that
+        # spells it differently yields no rows from a page full of anchors.
+        page = "Acme\nSoftware\nOslo, Oslo\nFolgen\nTools\n1.200 Follower:innen"
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted(page, [_company_ref("acme", "Acme")]),
+            ),
+            caplog.at_level(logging.WARNING, logger=extractor_module.__name__),
+        ):
+            result = await extractor.search_companies("tools")
+
+        assert result["companies"] == []
+        assert [r.message for r in caplog.records if r.levelno == logging.WARNING] == [
+            "Page 1: 1 references but no result rows parsed (unrecognised card "
+            "layout or locale)"
+        ]
+
+    async def test_rows_pair_before_the_reference_cap(self, mock_page):
+        # Sixteen cards is one past the section cap; the page is extracted
+        # uncapped so the last card still finds its anchor.
+        cards = [
+            _company_card(f"Company {i}", "Banking", "Bern, Bern", "Vaults")
+            for i in range(1, 17)
+        ]
+        refs = [_company_ref(f"company-{i}", f"Company {i}") for i in range(1, 17)]
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted("\n\n".join(cards), refs),
+        ) as extract:
+            result = await extractor.search_companies("bank")
+
+        assert extract.await_args is not None
+        assert extract.await_args.kwargs["apply_cap"] is False
+        assert [r["url"] for r in result["companies"]] == [
+            f"/company/company-{i}/" for i in range(1, 17)
+        ]
+        assert len(result["references"]["search_results"]) == 15
+
+    # Beta is the repeat. Delta closes page 1: a company card is read
+    # backwards from its followers line, and joined before parsing that line
+    # would run into the separator and page 2's header and stop being one,
+    # so Delta would be lost rather than shifted.
+    PAGE_1 = "About 5,200 results\n\n" + "\n\n".join(
+        [
+            _company_card("Acme", "Software Development", "Austin, Texas", "Tools"),
+            _company_card("Beta Ltd", "Financial Services", "London, England", "Pay"),
+            _company_card("Delta", "Insurance", "Oslo, Oslo", "Cover"),
+        ]
+    )
+    PAGE_2 = "About 5,100 results\n\n" + "\n\n".join(
+        [
+            _company_card("Beta Ltd", "Financial Services", "London, England", "Pay"),
+            _company_card("Gamma", "Banking", "Zurich, Zurich", "Vault"),
+        ]
+    )
+
+    @classmethod
+    def _pages(cls) -> list[ExtractedSection]:
+        return [
+            extracted(
+                cls.PAGE_1,
+                [
+                    _company_ref("acme", "Acme"),
+                    _company_ref("beta", "Beta Ltd"),
+                    _company_ref("delta", "Delta"),
+                ],
+            ),
+            extracted(
+                cls.PAGE_2,
+                [_company_ref("beta", "Beta Ltd"), _company_ref("gamma", "Gamma")],
+            ),
+        ]
+
+    async def test_rows_are_parsed_per_page_and_deduped_by_url(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                side_effect=self._pages(),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.human_pause",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_companies("fintech", max_pages=2)
+
+        assert [(row["name"], row["url"]) for row in result["companies"]] == [
+            ("Acme", "/company/acme/"),
+            ("Beta Ltd", "/company/beta/"),
+            ("Delta", "/company/delta/"),
+            ("Gamma", "/company/gamma/"),
+        ]
+        assert result["companies"][2] == {
+            "name": "Delta",
+            "industry": "Insurance",
+            "location": "Oslo, Oslo",
+            "tagline": "Cover",
+            "followers": 20000,
+            "url": "/company/delta/",
+        }
+        assert result["result_count"] == 5200
+        assert result["sections"]["search_results"] == (
+            self.PAGE_1 + "\n---\n" + self.PAGE_2
+        )
+
+    async def test_a_parser_failure_keeps_the_raw_text(self, mock_page, caplog):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                side_effect=self._pages()[:1],
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.parse_company_cards",
+                side_effect=RuntimeError("parser bug"),
+            ),
+            caplog.at_level(logging.WARNING),
+        ):
+            result = await extractor.search_companies("fintech")
+
+        assert result["companies"] == []
+        assert result["result_count"] == 5200
+        assert result["sections"]["search_results"] == self.PAGE_1
+        assert "Could not parse result cards on page 1" in caplog.text
+
+
 class TestBuildContentSearchUrl:
     """Tests for _build_content_search_url URL construction."""
 
@@ -6700,9 +8043,8 @@ class TestSearchPosts:
         assert "/search/results/content/" in result["url"]
         assert "origin=FACETED_SEARCH" in result["url"]
         assert result["sections"]["search_results"] == "We're hiring a Unity dev"
-        # max_pages default (3) -> 15 scrolls
         mock_extract.assert_awaited_once_with(
-            ANY, section_name="search_results", max_scrolls=15
+            ANY, section_name="search_results", max_posts=10
         )
 
     async def test_date_posted_in_url(self, mock_page):
@@ -6719,7 +8061,7 @@ class TestSearchPosts:
 
         assert "datePosted=%5B%22past-week%22%5D" in result["url"]
 
-    async def test_max_pages_controls_scroll_depth(self, mock_page):
+    async def test_max_posts_reaches_extract_page(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         with patch.object(
             extractor,
@@ -6727,10 +8069,10 @@ class TestSearchPosts:
             new_callable=AsyncMock,
             return_value=extracted("post"),
         ) as mock_extract:
-            await extractor.search_posts("python", max_pages=2)
+            await extractor.search_posts("python", max_posts=25)
 
         mock_extract.assert_awaited_once_with(
-            ANY, section_name="search_results", max_scrolls=10
+            ANY, section_name="search_results", max_posts=25
         )
 
     async def test_invalid_date_posted_raises(self, mock_page):
@@ -6782,6 +8124,191 @@ class TestSearchPosts:
             "error_type": "navigation_error",
             "error_message": "timeout",
         }
+
+
+@pytest.mark.asyncio
+class TestContentSearchScroll:
+    """The count-driven wheel loop behind ``search_posts``.
+
+    Content search renders in an inner scroll container, so the generic
+    ``scroll_to_bottom`` never moved it and every search came back with the
+    first paint. These drive ``_scroll_content_search_results`` with a page
+    whose ``evaluate`` answers a scripted card count per call.
+    """
+
+    @staticmethod
+    def _page(counts: list[int]) -> MagicMock:
+        page = MagicMock()
+        page.viewport_size = {"width": 1280, "height": 720}
+        page.mouse.move = AsyncMock()
+        page.mouse.wheel = AsyncMock()
+        # Repeat the last value once the script runs out, so a stalled page
+        # keeps answering the same count for as long as it is polled.
+        page.evaluate = AsyncMock(
+            side_effect=lambda *_: counts.pop(0) if len(counts) > 1 else counts[0]
+        )
+        return page
+
+    async def test_stops_once_count_reaches_max_posts(self):
+        # 4 on first paint, then a batch of 3 per wheel: 4 -> 7 -> 10. The
+        # second batch lands exactly on the cap, so a loop that only stops
+        # past it would wheel a third time and answer 13.
+        page = self._page([4, 7, 10, 13])
+        extractor = LinkedInExtractor(page)
+        with patch(
+            "linkedin_mcp_server.scraping.extractor.human_pause",
+            new_callable=AsyncMock,
+        ):
+            count = await extractor._scroll_content_search_results(max_posts=10)
+
+        assert count == 10
+        assert page.mouse.wheel.await_count == 2
+
+    async def test_max_posts_already_met_does_not_scroll(self):
+        page = self._page([6, 9])
+        extractor = LinkedInExtractor(page)
+        with patch(
+            "linkedin_mcp_server.scraping.extractor.human_pause",
+            new_callable=AsyncMock,
+        ):
+            count = await extractor._scroll_content_search_results(max_posts=6)
+
+        assert count == 6
+        page.mouse.wheel.assert_not_awaited()
+
+    async def test_stops_after_three_stale_rounds(self):
+        # One productive wheel (3 -> 5), then the page never grows again.
+        page = self._page([3, 5])
+        extractor = LinkedInExtractor(page)
+        with patch(
+            "linkedin_mcp_server.scraping.extractor.human_pause",
+            new_callable=AsyncMock,
+        ):
+            count = await extractor._scroll_content_search_results(max_posts=50)
+
+        assert count == 5
+        assert page.mouse.wheel.await_count == 1 + 3
+
+    async def test_a_stale_stop_below_max_posts_warns(self, caplog):
+        page = self._page([3, 5])
+        extractor = LinkedInExtractor(page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.human_pause",
+                new_callable=AsyncMock,
+            ),
+            caplog.at_level(logging.WARNING, logger=extractor_module.__name__),
+        ):
+            await extractor._scroll_content_search_results(max_posts=50)
+
+        assert [r.message for r in caplog.records if r.levelno == logging.WARNING] == [
+            "content search stopped at 5 of max_posts 50: page stopped producing "
+            "new results"
+        ]
+
+    async def test_reaching_max_posts_does_not_warn(self, caplog):
+        page = self._page([4, 7, 10])
+        extractor = LinkedInExtractor(page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.human_pause",
+                new_callable=AsyncMock,
+            ),
+            caplog.at_level(logging.WARNING, logger=extractor_module.__name__),
+        ):
+            await extractor._scroll_content_search_results(max_posts=10)
+
+        assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+
+    class _Clock:
+        """A monotonic clock the pauses move, so the budget is testable."""
+
+        def __init__(self) -> None:
+            self.now = 0.0
+
+        def monotonic(self) -> float:
+            return self.now
+
+    async def test_stops_at_the_scroll_budget_while_still_loading(self, caplog):
+        """A page that keeps answering one more card never goes stale and
+        would otherwise wheel all twenty rounds; the 60s budget stops it."""
+        clock = self._Clock()
+        page = self._page(list(range(1, 40)))
+        extractor = LinkedInExtractor(page)
+
+        async def pause(seconds: float, spread: float = 0.5) -> None:
+            clock.now += 30.0
+
+        with (
+            patch.object(extractor_module, "time", clock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.human_pause",
+                side_effect=pause,
+            ),
+            caplog.at_level(logging.WARNING, logger=extractor_module.__name__),
+        ):
+            count = await extractor._scroll_content_search_results(max_posts=50)
+
+        # Two productive rounds land on the deadline; the third never wheels.
+        assert count == 3
+        assert page.mouse.wheel.await_count == 2
+        assert [r.message for r in caplog.records if r.levelno == logging.WARNING] == [
+            "content search stopped at 3 of max_posts 50: 60s scroll budget spent"
+        ]
+
+    async def test_the_budget_cuts_a_poll_short(self):
+        """The deadline is checked between polls too, so a stalled page does
+        not get its full six-second wait after the budget is gone."""
+        clock = self._Clock()
+        page = self._page([3])
+        extractor = LinkedInExtractor(page)
+
+        async def pause(seconds: float, spread: float = 0.5) -> None:
+            clock.now += 30.0
+
+        with (
+            patch.object(extractor_module, "time", clock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.human_pause",
+                side_effect=pause,
+            ) as pauses,
+        ):
+            count = await extractor._scroll_content_search_results(max_posts=50)
+
+        assert count == 3
+        assert page.mouse.wheel.await_count == 1
+        # The second pause reaches the deadline; four more would follow
+        # without the check inside the poll loop.
+        assert pauses.await_count == 2
+
+    async def test_loaded_section_routes_content_search_to_wheel_loop(self, mock_page):
+        mock_page.evaluate = AsyncMock(return_value={"text": "", "references": []})
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor, "_scroll_content_search_results", new_callable=AsyncMock
+            ) as wheel_loop,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ) as body_scroll,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+        ):
+            await extractor._extract_loaded_section(
+                "https://www.linkedin.com/search/results/content/?keywords=x",
+                "search_results",
+                max_posts=7,
+            )
+
+        wheel_loop.assert_awaited_once_with(7)
+        body_scroll.assert_not_awaited()
 
 
 class TestStripLinkedInNoise:

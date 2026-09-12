@@ -6,9 +6,11 @@ with configurable section selection.
 """
 
 import logging
-from typing import Any
+from typing import Annotated, Any
 
 from fastmcp import Context, FastMCP
+from fastmcp.exceptions import ToolError
+from pydantic import Field
 
 from linkedin_mcp_server.callbacks import MCPContextProgressCallback
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
@@ -18,8 +20,10 @@ from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.scraping import parse_company_sections
 from linkedin_mcp_server.scraping.extractor import (
     _RATE_LIMITED_MSG,
+    FilterValidationError,
     rate_limited_section_error,
 )
+from linkedin_mcp_server.tools.person import StrList
 from linkedin_mcp_server.scraping.identifiers import (
     company_page_url,
     normalize_company_identifier,
@@ -179,37 +183,112 @@ def register_company_tools(
         exclude_args=["extractor"],
     )
     async def search_companies(
-        keywords: str,
         ctx: Context,
+        keywords: str | None = None,
+        industry: StrList | None = None,
+        size: StrList | None = None,
+        hq_location: str | None = None,
+        has_jobs: bool | None = None,
+        max_pages: Annotated[int, Field(ge=1, le=10)] = 1,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
-        Search for companies on LinkedIn.
+        Search for companies on LinkedIn, with Clay-style facets.
+
+        Facets are applied by LinkedIn at search time, so they narrow the
+        shortlist before any per-company page is loaded: enrich_companies
+        then only pays for the companies that survived the filter. At least
+        one of keywords, industry, size or hq_location is required.
 
         Args:
-            keywords: Search keywords (e.g., "fintech", "anthropic", "electric vehicles")
             ctx: FastMCP context for progress reporting
+            keywords: Search keywords (e.g., "fintech", "anthropic", "electric vehicles")
+            industry: Optional industry filter. Each element is a numeric
+                LinkedIn industry id (always works, e.g. "4") or one of the
+                names this server knows, case-insensitive: Software
+                Development, Technology Information and Internet,
+                Telecommunications, Business Consulting and Services,
+                Biotechnology Research, Hospitals and Health Care,
+                Pharmaceutical Manufacturing, Retail, Banking, Insurance,
+                Financial Services, Real Estate, Construction, Advertising
+                Services, IT Services and IT Consulting, Staffing and
+                Recruiting. The name table is partial; an unknown name raises
+                an error listing it, so pass the numeric id for anything else.
+                A comma-separated string ("4,43") is also accepted, and a bare
+                string splits on every comma: a name that contains one, such
+                as "Technology, Information and Internet", must be passed
+                inside a JSON array or without its comma. The facet's URL
+                parameter name and values are unverified against live
+                LinkedIn; a wrong name is ignored, so cross-check results.
+            size: Optional headcount filter. Each element is a bucket as
+                LinkedIn labels it ("self-employed", "1-10", "11-50",
+                "51-200", "201-500", "501-1000", "1001-5000", "5001-10000",
+                "10001+") or its facet letter "A"-"I" in that order.
+                A comma-separated string ("51-200,201-500") is also accepted.
+                The facet's URL parameter name and values are unverified
+                against live LinkedIn; a wrong name is ignored, so
+                cross-check results.
+            hq_location: Optional headquarters filter: a country or city name
+                (e.g., "Germany", "Berlin"), resolved to LinkedIn's numeric geo
+                id through the site's own location dropdown. A name LinkedIn
+                does not recognize raises an error rather than silently
+                returning worldwide results.
+            has_jobs: When true, only companies with live job listings.
+            max_pages: Number of result pages to load, 1-10 (default 1).
+                LinkedIn returns 10 companies per page. Pagination stops early
+                once a page adds no new companies.
 
         Returns:
-            Dict with url, sections (search_results -> raw text), and optional references.
-            The LLM should parse the raw text to extract individual companies and their pages.
+            Dict with url, sections (search_results -> raw text), companies,
+            result_count, and optional references. Pages are joined by a "---"
+            line in the raw text; references are deduplicated by URL across
+            pages. companies is a list of rows {name, industry, location,
+            tagline, followers, url} parsed from the raw text, deduplicated by
+            url across pages; url is null when a card could not be paired with
+            a company link. result_count is the "About N results" header of
+            the first page, or null. Fall back to the raw text for anything
+            the rows do not carry.
         """
         try:
             extractor = extractor or await get_ready_extractor(
                 ctx, tool_name="search_companies"
             )
-            logger.info("Searching companies: keywords='%s'", keywords)
+            logger.info(
+                "Searching companies: keywords='%s', industry=%s, size=%s, "
+                "hq_location='%s', has_jobs=%s, max_pages=%d",
+                keywords,
+                industry,
+                size,
+                hq_location,
+                has_jobs,
+                max_pages,
+            )
 
             await ctx.report_progress(
                 progress=0, total=100, message="Starting company search"
             )
 
-            result = await extractor.search_companies(keywords)
+            try:
+                result = await extractor.search_companies(
+                    keywords,
+                    industry=industry,
+                    size=size,
+                    hq_location=hq_location,
+                    has_jobs=has_jobs,
+                    max_pages=max_pages,
+                )
+            except FilterValidationError as e:
+                # Validation messages carry actionable detail; surface them
+                # as ToolError so mask_error_details doesn't reduce them to
+                # "Error calling tool 'search_companies'".
+                raise ToolError(str(e)) from e
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
             return result
 
+        except ToolError:
+            raise
         except AuthenticationError as e:
             try:
                 await handle_auth_error(e, ctx)

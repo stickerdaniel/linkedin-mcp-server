@@ -52,6 +52,7 @@ class SequentialToolExecutionMiddleware(Middleware):
         {
             "get_enrichment_status",
             "get_company_cache",
+            "query_company_cache",
         }
     )
 

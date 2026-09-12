@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from linkedin_mcp_server.config.schema import AppConfig
-from linkedin_mcp_server.core.exceptions import ProxyConnectionError
+from linkedin_mcp_server.core.exceptions import NetworkError, ProxyConnectionError
 from linkedin_mcp_server.exceptions import BrowserShutdownUnconfirmedError
 from linkedin_mcp_server.drivers.browser import (
     _feed_auth_succeeds,
@@ -1135,6 +1135,43 @@ class TestProxyFailureIsNotAnAuthFailure:
         resolver.assert_awaited()
 
     @pytest.mark.asyncio
+    async def test_network_error_survives_the_remember_me_retry(self, monkeypatch):
+        # Same shape without a proxy: the retry raises NetworkError, and the
+        # outer generic handler used to catch it, re-probe the remember-me
+        # prompt on the failed page, and trace and log the failure twice.
+        monkeypatch.setattr(
+            "linkedin_mcp_server.config.get_config",
+            browser_module.get_config,
+        )
+        browser = _make_mock_browser()
+        browser.page.goto = AsyncMock(
+            side_effect=[None, Exception("Page.goto: Timeout 30000ms exceeded.")]
+        )
+
+        with (
+            patch(
+                "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as resolver,
+            patch(
+                "linkedin_mcp_server.drivers.browser.record_page_trace",
+                new_callable=AsyncMock,
+            ) as record_page_trace,
+            pytest.raises(NetworkError, match="no auth barrier was found") as excinfo,
+        ):
+            await _feed_auth_succeeds(browser)
+
+        resolver.assert_awaited_once()
+        steps = [call.args[1] for call in record_page_trace.await_args_list]
+        assert steps.count("feed-navigation-error") == 1
+        assert "feed-after-remember-me-error-recovery" not in steps
+        assert browser.page.goto.await_count == 2
+        assert not isinstance(excinfo.value, ProxyConnectionError)
+        # Wrapped once: the inner message must not be nested inside another.
+        assert str(excinfo.value).count("no auth barrier was found") == 1
+
+    @pytest.mark.asyncio
     async def test_proxy_password_is_not_in_the_message(self, monkeypatch):
         browser_module.get_config().browser.proxy_server = "http://gate.example:7000"
         browser_module.get_config().browser.proxy_password = "s3cr3t"
@@ -1152,8 +1189,9 @@ class TestProxyFailureIsNotAnAuthFailure:
         assert "s3cr3t" not in str(excinfo.value)
 
     @pytest.mark.asyncio
-    async def test_ordinary_navigation_error_still_returns_false(self, monkeypatch):
-        # The existing behaviour for a genuinely broken session is unchanged.
+    async def test_ordinary_navigation_error_raises_network_error(self, monkeypatch):
+        # A navigation failure without a barrier is not evidence of expiry.
+        # False would become an AuthenticationError and rotate the profile.
         monkeypatch.setattr(
             "linkedin_mcp_server.config.get_config",
             browser_module.get_config,
@@ -1163,12 +1201,16 @@ class TestProxyFailureIsNotAnAuthFailure:
             side_effect=Exception("net::ERR_TOO_MANY_REDIRECTS")
         )
 
-        with patch(
-            "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
-            new_callable=AsyncMock,
-            return_value=False,
+        with (
+            patch(
+                "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            pytest.raises(NetworkError, match="ERR_TOO_MANY_REDIRECTS") as excinfo,
         ):
-            assert await _feed_auth_succeeds(browser) is False
+            await _feed_auth_succeeds(browser)
+        assert not isinstance(excinfo.value, ProxyConnectionError)
 
 
 class TestAmbiguousProxyFailureKeepsTheSession:
@@ -1202,11 +1244,12 @@ class TestAmbiguousProxyFailureKeepsTheSession:
             await _feed_auth_succeeds(browser)
 
     @pytest.mark.asyncio
-    async def test_the_same_timeout_without_a_proxy_still_returns_false(
+    async def test_the_same_timeout_without_a_proxy_raises_network_error(
         self, monkeypatch
     ):
-        # Unchanged behaviour when no proxy is configured: a broken session
-        # must still be reported as one.
+        # Without a proxy the timeout is still not a dead session. Measured:
+        # /feed/ had rendered logged in and the load event ran past 30 s, and
+        # False rotated that working session into invalid-state-*.
         monkeypatch.setattr(
             "linkedin_mcp_server.config.get_config", browser_module.get_config
         )
@@ -1215,12 +1258,16 @@ class TestAmbiguousProxyFailureKeepsTheSession:
             side_effect=Exception("Page.goto: Timeout 30000ms exceeded.")
         )
 
-        with patch(
-            "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
-            new_callable=AsyncMock,
-            return_value=False,
+        with (
+            patch(
+                "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            pytest.raises(NetworkError, match="no auth barrier was found") as excinfo,
         ):
-            assert await _feed_auth_succeeds(browser) is False
+            await _feed_auth_succeeds(browser)
+        assert not isinstance(excinfo.value, ProxyConnectionError)
 
     @pytest.mark.asyncio
     async def test_an_auth_barrier_under_a_proxy_still_reports_false(self, monkeypatch):

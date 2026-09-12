@@ -99,8 +99,12 @@ class CompanyRecord:
     employee_count: str = ""
     headquarters: str = ""
     website: str = ""
+    founded: str = ""  # as LinkedIn shows it, usually a bare year
+    company_type: str = ""  # "Privately Held", "Public Company", ...
+    specialties: str = ""  # LinkedIn's own comma-separated free text
     linkedin_url: str = ""
     company_urn: str = ""  # numeric LinkedIn company id, for job-search-by-company
+    followers: int | None = None  # from the search card; the About page has none
     firmographics_source: str = ""  # "search" | "company_page"
     firmographics_fetched_at: str = ""  # ISO 8601, empty = never
 
@@ -212,41 +216,76 @@ class CompanyCache:
         employee_count: str = "",
         headquarters: str = "",
         website: str = "",
+        founded: str = "",
+        company_type: str = "",
+        specialties: str = "",
         linkedin_url: str = "",
         company_urn: str = "",
+        followers: int | None = None,
         raw_about: str = "",
     ) -> CompanyRecord:
         rec = self.get_or_new(name)
 
         # Only overwrite a field when the new fetch actually carries it; a
         # cheap search hit must not blank out headquarters a deep fetch found.
-        if industry:
-            rec.industry = industry
-        if employee_count:
-            rec.employee_count = employee_count
-        if headquarters:
-            rec.headquarters = headquarters
-        if website:
-            rec.website = website
+        # Nor may it overwrite one: a search card's industry and location are
+        # the About page's own rows abbreviated, so once a deep fetch has
+        # written the record its typed fields stand and a search only refreshes
+        # what the About page does not carry (URL, URN, followers). That holds
+        # even for a field the About page left empty: it is not back-filled
+        # from a later search card, so the source label stays honest.
+        deep = rec.firmographics_source == "company_page"
+        if source == "company_page" or not deep:
+            if industry:
+                rec.industry = industry
+            if employee_count:
+                rec.employee_count = employee_count
+            if headquarters:
+                rec.headquarters = headquarters
+            if website:
+                rec.website = website
+            if founded:
+                rec.founded = founded
+            if company_type:
+                rec.company_type = company_type
+            if specialties:
+                rec.specialties = specialties
         if linkedin_url:
             rec.linkedin_url = linkedin_url
         if company_urn:
             rec.company_urn = company_urn
+        if followers is not None:
+            rec.followers = followers
         if raw_about:
             rec.raw_about = raw_about
 
-        # Freshness tracks *real firmographic content*, not the mere fact of a
-        # write. A company-search pass only learns a company's URL, so it must
-        # not (a) stamp a bare stub as fresh-for-90-days -- which would make
-        # enrich_company_deep skip a company it never actually read -- nor
-        # (b) reset the timestamp/source of a record a deep fetch already
-        # populated. So stamp only when the write brings a firmographic field.
+        # Freshness tracks a *read of the About page*, not the mere fact of a
+        # write, because the stamp is what lets enrich_company_deep skip the
+        # load. A company-search pass never reads that page: its card carries
+        # an industry and a location, which are stored and reported under
+        # ``source: "search"``, but stamping them fresh-for-90-days would make
+        # the deep tier skip a company it never actually read, and would reset
+        # the timestamp/source of a record a deep fetch already populated. So
+        # only an About write stamps -- when it brings a firmographic field,
+        # or when ``raw_about`` holds what the page showed, so an About that
+        # parsed to nothing is not re-spent on every call until the TTL. An
+        # About write with nothing in ``raw_about`` showed nothing, so it earns
+        # no stamp: a failed load must stay stale and be retried.
         carries_firmographics = bool(
-            industry or employee_count or headquarters or website
+            industry
+            or employee_count
+            or headquarters
+            or website
+            or founded
+            or company_type
+            or specialties
         )
-        if carries_firmographics:
+        if source == "company_page":
+            if carries_firmographics or raw_about:
+                rec.firmographics_source = source
+                rec.firmographics_fetched_at = now.isoformat()
+        elif carries_firmographics and not deep:
             rec.firmographics_source = source
-            rec.firmographics_fetched_at = now.isoformat()
 
         self.save(rec)
         return rec
@@ -273,3 +312,105 @@ class CompanyCache:
         if not self.root.exists():
             return []
         return sorted(p.stem for p in self.root.glob("*.json"))
+
+    def all_records(self) -> list[CompanyRecord]:
+        """Every readable record, in key order.
+
+        A linear scan of the directory, one JSON parse per company. The cache
+        grows by the companies one account's network touches -- thousands,
+        not millions -- and a few thousand small files read in well under a
+        second, so nothing is indexed. Past ~50k records this is the first
+        thing to revisit; until then an index would be more code than the
+        scan it replaces.
+        """
+        if not self.root.exists():
+            return []
+        out: list[CompanyRecord] = []
+        for path in sorted(self.root.glob("*.json")):
+            try:
+                out.append(CompanyRecord.from_dict(json.loads(path.read_text("utf-8"))))
+            except (json.JSONDecodeError, OSError, TypeError) as e:
+                logger.warning("Skipping unreadable cache file %s: %s", path, e)
+        return out
+
+
+# The headcount is stored as LinkedIn's band string ("51-200 employees",
+# "10,001+ employees"), never a bare number, so a numeric filter has to reason
+# about the band's ends rather than a point.
+_BAND_RANGE = re.compile(r"(\d[\d,]*)\s*-\s*(\d[\d,]*)")
+_BAND_OPEN = re.compile(r"(\d[\d,]*)\s*\+")
+_YEAR = re.compile(r"\b(\d{4})\b")
+
+
+def employee_band_bounds(band: str) -> tuple[int, int | None] | None:
+    """(low, high) of a stored headcount band; high is None for "N+".
+
+    Returns None when the string is not a band at all, so a caller filtering
+    on headcount can exclude the record rather than guess.
+    """
+    if not band:
+        return None
+    m = _BAND_RANGE.search(band)
+    if m:
+        return int(m.group(1).replace(",", "")), int(m.group(2).replace(",", ""))
+    m = _BAND_OPEN.search(band)
+    if m:
+        return int(m.group(1).replace(",", "")), None
+    return None
+
+
+def founded_year(founded: str) -> int | None:
+    """The four-digit year in a stored ``founded`` value, if there is one."""
+    m = _YEAR.search(founded or "")
+    return int(m.group(1)) if m else None
+
+
+def record_matches(
+    rec: CompanyRecord,
+    *,
+    industry: str | None = None,
+    headquarters: str | None = None,
+    min_employees: int | None = None,
+    max_employees: int | None = None,
+    hiring: bool | None = None,
+    founded_after: int | None = None,
+    founded_before: int | None = None,
+) -> bool:
+    """Whether a record satisfies every given criterion.
+
+    A record that lacks a field being filtered on is excluded, not passed
+    through: a query for "companies with 200+ staff" must not return the ones
+    whose headcount was never fetched. Text criteria are case-insensitive
+    substrings. Headcount is matched by band overlap -- a 51-200 company
+    satisfies ``min_employees=100`` because its band reaches 100 -- since the
+    stored value is a band, not a count. Year bounds are inclusive.
+    """
+    if industry is not None:
+        if not rec.industry or industry.lower() not in rec.industry.lower():
+            return False
+    if headquarters is not None:
+        if not rec.headquarters or headquarters.lower() not in rec.headquarters.lower():
+            return False
+    if min_employees is not None or max_employees is not None:
+        bounds = employee_band_bounds(rec.employee_count)
+        if bounds is None:
+            return False
+        low, high = bounds
+        if min_employees is not None and high is not None and high < min_employees:
+            return False
+        if max_employees is not None and low > max_employees:
+            return False
+    if hiring is not None:
+        if rec.open_roles_count is None:
+            return False
+        if (rec.open_roles_count > 0) != hiring:
+            return False
+    if founded_after is not None or founded_before is not None:
+        year = founded_year(rec.founded)
+        if year is None:
+            return False
+        if founded_after is not None and year < founded_after:
+            return False
+        if founded_before is not None and year > founded_before:
+            return False
+    return True
