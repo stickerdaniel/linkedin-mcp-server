@@ -9,15 +9,17 @@ from typing import Any, Literal
 import logging
 import re
 
-from linkedin_mcp_server.core import (
+from linkedin_mcp_server.core.auth import (
     detect_auth_barrier,
     detect_auth_barrier_quick,
-    raise_if_proxy_error,
-    redact_proxy_credentials,
-    redacted_copy,
     resolve_remember_me_prompt,
 )
 from linkedin_mcp_server.core.exceptions import AuthenticationError
+from linkedin_mcp_server.core.proxy_errors import (
+    raise_if_proxy_error,
+    redact_proxy_credentials,
+    redacted_copy,
+)
 from linkedin_mcp_server.debug_trace import record_page_trace
 from linkedin_mcp_server.debug_utils import stabilize_navigation
 from linkedin_mcp_server.scraping.session import ScrapingSession

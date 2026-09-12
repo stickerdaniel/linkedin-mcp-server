@@ -78,6 +78,73 @@ def test_import_from_normalization_keeps_modules_and_symbols_distinct(tmp_path: 
     )
 
 
+def test_public_assignments_are_owners_without_incidental_bindings():
+    fields = next(
+        module
+        for module in inspect_modules(ROOT / "linkedin_mcp_server" / "scraping")
+        if module.name == "linkedin_mcp_server.scraping.fields"
+    )
+
+    assert "COMPANY_SECTIONS" in fields.owners
+    assert "PERSON_SECTIONS" in fields.owners
+    assert "logger" not in fields.owners
+
+
+def test_nested_package_modules_are_inspected_with_stable_paths(tmp_path: Path):
+    scraping = _copy_scraping(tmp_path)
+    nested = scraping / "nested"
+    nested.mkdir()
+    (nested / "__init__.py").write_text(
+        "PUBLIC_VALUE = 1\n"
+        "class NestedOwner:\n    pass\n\n"
+        "def _inspect(browser_page):\n    return browser_page.evaluate('1')\n",
+        encoding="utf-8",
+    )
+    (nested / "worker.py").write_text(
+        "from ..fields import PERSON_SECTIONS\n", encoding="utf-8"
+    )
+
+    modules = {module.name: module for module in inspect_modules(scraping)}
+    package = modules["linkedin_mcp_server.scraping.nested"]
+    worker = modules["linkedin_mcp_server.scraping.nested.worker"]
+
+    assert package.path == "linkedin_mcp_server/scraping/nested/__init__.py"
+    assert package.owners == ("NestedOwner", "PUBLIC_VALUE")
+    assert package.source_classification == "page-owning"
+    assert worker.path == "linkedin_mcp_server/scraping/nested/worker.py"
+    assert worker.imports == ("linkedin_mcp_server.scraping.fields",)
+
+
+def test_nested_package_violations_cannot_bypass_checks(tmp_path: Path):
+    scraping = _copy_scraping(tmp_path)
+    nested = scraping / "nested"
+    nested.mkdir()
+    (nested / "__init__.py").write_text(
+        "from ..extractor import LinkedInExtractor\n"
+        "from ...core import browser\n"
+        "from . import worker\n",
+        encoding="utf-8",
+    )
+    (nested / "worker.py").write_text(
+        "from . import LinkedInExtractor\n", encoding="utf-8"
+    )
+
+    violations = dependency_violations(inspect_modules(scraping))
+
+    assert (
+        "reverse facade import: `linkedin_mcp_server.scraping.nested` -> "
+        "`linkedin_mcp_server.scraping.extractor`"
+    ) in violations
+    assert (
+        "forbidden layer import: `linkedin_mcp_server.scraping.nested` -> "
+        "`linkedin_mcp_server.core.browser`"
+    ) in violations
+    assert any(
+        violation.startswith("import cycle: `linkedin_mcp_server.scraping.nested`")
+        for violation in violations
+    )
+
+
 @pytest.mark.parametrize(
     "mutate",
     [
@@ -109,10 +176,18 @@ def test_import_from_normalization_keeps_modules_and_symbols_distinct(tmp_path: 
         pytest.param(
             lambda scraping: (scraping / "connection.py").write_text(
                 (scraping / "connection.py").read_text(encoding="utf-8")
-                + "\n\ndef inspect_page(session):\n    return session.page\n",
+                + "\n\ndef public_helper():\n    return None\n",
                 encoding="utf-8",
             ),
-            id="ownership-and-source-classification",
+            id="ownership",
+        ),
+        pytest.param(
+            lambda scraping: (scraping / "connection.py").write_text(
+                (scraping / "connection.py").read_text(encoding="utf-8")
+                + "\n\ndef _inspect_page(page):\n    return page.evaluate('1')\n",
+                encoding="utf-8",
+            ),
+            id="source-classification-bare-page",
         ),
     ],
 )
@@ -159,6 +234,23 @@ def test_dependency_direction_violations_are_reported_deterministically():
     )
 
 
+def test_intended_core_leaf_imports_are_allowed():
+    module = ModuleInfo(
+        "linkedin_mcp_server.scraping.alpha",
+        "linkedin_mcp_server/scraping/alpha.py",
+        (
+            "linkedin_mcp_server.core.auth",
+            "linkedin_mcp_server.core.exceptions",
+            "linkedin_mcp_server.core.proxy_errors",
+            "linkedin_mcp_server.core.utils",
+        ),
+        (),
+        "browser-free",
+    )
+
+    assert dependency_violations((module,)) == ()
+
+
 @pytest.mark.parametrize(
     "path,source",
     [
@@ -181,6 +273,31 @@ def test_dependency_direction_violations_are_reported_deterministically():
             "session.py",
             "from ..scraping import capture\n",
             id="multi-level-relative-cycle",
+        ),
+        pytest.param(
+            "session.py",
+            "from . import session\n",
+            id="relative-self-cycle",
+        ),
+        pytest.param(
+            "connection.py",
+            "import linkedin_mcp_server.core\n",
+            id="forbidden-core-aggregate",
+        ),
+        pytest.param(
+            "connection.py",
+            "from linkedin_mcp_server import core\n",
+            id="forbidden-core-aggregate-package-submodule",
+        ),
+        pytest.param(
+            "connection.py",
+            "import linkedin_mcp_server.core.browser\n",
+            id="forbidden-core-browser",
+        ),
+        pytest.param(
+            "connection.py",
+            "from linkedin_mcp_server.core import browser\n",
+            id="forbidden-core-browser-package-submodule",
         ),
     ],
 )

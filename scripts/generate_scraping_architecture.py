@@ -17,8 +17,12 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRAPING = ROOT / "linkedin_mcp_server" / "scraping"
 OUTPUT = ROOT / "docs" / "scraping-architecture.md"
 PACKAGE = "linkedin_mcp_server.scraping"
+FORBIDDEN_LAYER_MODULES = frozenset(
+    {"linkedin_mcp_server.core", "linkedin_mcp_server.core.browser"}
+)
 FORBIDDEN_LAYER_PREFIXES = (
     "linkedin_mcp_server.browser_",
+    "linkedin_mcp_server.core.browser.",
     "linkedin_mcp_server.daemon",
     "linkedin_mcp_server.drivers",
     "linkedin_mcp_server.hidden_target",
@@ -48,11 +52,13 @@ def _module_name(path: Path, scraping: Path) -> str:
     return ".".join((PACKAGE, *parts))
 
 
-def _resolve_import(module: str, node: ast.ImportFrom) -> str | None:
+def _resolve_import(
+    module: str, node: ast.ImportFrom, *, package_initializer: bool
+) -> str | None:
     if node.level == 0:
         return node.module
     package = module.split(".")
-    if module != PACKAGE:
+    if not package_initializer:
         package = package[:-1]
     keep = len(package) - node.level + 1
     if keep < 0:
@@ -65,17 +71,17 @@ def _resolve_import(module: str, node: ast.ImportFrom) -> str | None:
 
 def _known_package_modules(scraping: Path) -> frozenset[str]:
     package_root = ROOT / "linkedin_mcp_server"
-    paths = {*package_root.rglob("*.py"), *scraping.glob("*.py")}
+    paths = {*package_root.rglob("*.py"), *scraping.rglob("*.py")}
     modules = {"linkedin_mcp_server", PACKAGE}
     for path in paths:
-        if path.is_relative_to(package_root):
-            relative = path.relative_to(package_root).with_suffix("")
-            parts = relative.parts
-            prefix = "linkedin_mcp_server"
-        else:
+        if path.is_relative_to(scraping):
             relative = path.relative_to(scraping).with_suffix("")
             parts = relative.parts
             prefix = PACKAGE
+        else:
+            relative = path.relative_to(package_root).with_suffix("")
+            parts = relative.parts
+            prefix = "linkedin_mcp_server"
         if parts[-1] == "__init__":
             parts = parts[:-1]
         modules.add(".".join((prefix, *parts)))
@@ -83,7 +89,11 @@ def _known_package_modules(scraping: Path) -> frozenset[str]:
 
 
 def _imports(
-    module: str, tree: ast.Module, known_modules: frozenset[str]
+    module: str,
+    tree: ast.Module,
+    known_modules: frozenset[str],
+    *,
+    package_initializer: bool,
 ) -> tuple[str, ...]:
     imports: set[str] = set()
     for node in ast.walk(tree):
@@ -92,7 +102,9 @@ def _imports(
             continue
         if not isinstance(node, ast.ImportFrom):
             continue
-        resolved = _resolve_import(module, node)
+        resolved = _resolve_import(
+            module, node, package_initializer=package_initializer
+        )
         if resolved is None:
             continue
         if resolved not in known_modules:
@@ -101,8 +113,12 @@ def _imports(
         for alias in node.names:
             candidate = f"{resolved}.{alias.name}"
             imports.add(candidate if candidate in known_modules else resolved)
-    imports.discard(module)
     return tuple(sorted(imports))
+
+
+def _assignment_names(node: ast.Assign | ast.AnnAssign) -> tuple[str, ...]:
+    targets = node.targets if isinstance(node, ast.Assign) else (node.target,)
+    return tuple(target.id for target in targets if isinstance(target, ast.Name))
 
 
 def _public_owners(tree: ast.Module) -> tuple[str, ...]:
@@ -114,6 +130,12 @@ def _public_owners(tree: ast.Module) -> tuple[str, ...]:
             node, (ast.FunctionDef, ast.AsyncFunctionDef)
         ) and not node.name.startswith("_"):
             owners.append(f"{node.name}()")
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            owners.extend(
+                name
+                for name in _assignment_names(node)
+                if not name.startswith("_") and name.isupper()
+            )
     return tuple(sorted(owners))
 
 
@@ -135,7 +157,10 @@ def _source_classification(tree: ast.Module) -> str:
                 return "page-owning"
         if isinstance(node, ast.Attribute):
             parts = _attribute_parts(node)
-            if parts[-1] == "page" or "_page" in parts:
+            page_handles = parts[:-1]
+            if parts[-1] == "page" or any(
+                part == "page" or part.endswith("_page") for part in page_handles
+            ):
                 return "page-owning"
     return "browser-free"
 
@@ -143,15 +168,21 @@ def _source_classification(tree: ast.Module) -> str:
 def inspect_modules(scraping: Path = SCRAPING) -> tuple[ModuleInfo, ...]:
     modules: list[ModuleInfo] = []
     known_modules = _known_package_modules(scraping)
-    for path in sorted(scraping.glob("*.py")):
+    for path in sorted(scraping.rglob("*.py")):
+        relative_path = path.relative_to(scraping)
         source = path.read_text(encoding="utf-8")
-        tree = ast.parse(source, filename=path.name)
+        tree = ast.parse(source, filename=relative_path.as_posix())
         module = _module_name(path, scraping)
         modules.append(
             ModuleInfo(
                 name=module,
-                path=f"linkedin_mcp_server/scraping/{path.name}",
-                imports=_imports(module, tree, known_modules),
+                path=(Path("linkedin_mcp_server/scraping") / relative_path).as_posix(),
+                imports=_imports(
+                    module,
+                    tree,
+                    known_modules,
+                    package_initializer=path.name == "__init__.py",
+                ),
                 owners=_public_owners(tree),
                 source_classification=_source_classification(tree),
             )
@@ -223,7 +254,9 @@ def dependency_violations(modules: Iterable[ModuleInfo]) -> tuple[str, ...]:
                         f"reverse facade import: `{module.name}` -> `{dependency}`"
                     )
         for imported in module.imports:
-            if imported.startswith(FORBIDDEN_LAYER_PREFIXES):
+            if imported in FORBIDDEN_LAYER_MODULES or imported.startswith(
+                FORBIDDEN_LAYER_PREFIXES
+            ):
                 violations.add(
                     f"forbidden layer import: `{module.name}` -> `{imported}`"
                 )
