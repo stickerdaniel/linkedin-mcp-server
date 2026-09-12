@@ -1810,6 +1810,50 @@ async def test_outer(monkeypatch, arguments):
         _scan_synthetic(source)
 
 
+@pytest.mark.parametrize(
+    "nested",
+    [
+        "async def inner():\n        patch.setattr(*arguments)",
+        "class Holder:\n        def method(self):\n            patch.setattr(*arguments)",
+    ],
+)
+def test_nested_bodies_use_authority_assigned_after_their_definition(nested):
+    source = f"""
+async def outer(monkeypatch, helper, arguments):
+    patch = helper
+
+    {nested}
+
+    patch = monkeypatch
+"""
+
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=r"patch\.setattr\(\*arguments\): unresolved setattr arguments",
+    ):
+        _scan_synthetic(source)
+
+
+@pytest.mark.parametrize(
+    "nested",
+    [
+        "async def inner():\n        patch.setattr(*arguments)",
+        "class Holder:\n        def method(self):\n            patch.setattr(*arguments)",
+    ],
+)
+def test_nested_bodies_drop_authority_retired_after_their_definition(nested):
+    source = f"""
+async def outer(monkeypatch, helper, arguments):
+    patch = monkeypatch
+
+    {nested}
+
+    patch = helper
+"""
+
+    assert _scan_synthetic(source) == []
+
+
 def test_a_live_context_alias_remains_authoritative():
     source = """
 import pytest
@@ -1937,6 +1981,64 @@ def test_try_finally_rebinding_retires_receiver_authority_on_every_path():
     assert _scan_synthetic(source) == []
 
 
+@pytest.mark.parametrize("suite", ["else", "handler"])
+def test_finally_sees_authority_before_else_and_handler_raises(suite):
+    if suite == "else":
+        statements = (
+            "patch = helper\n"
+            "    try:\n"
+            "        pass\n"
+            "    except Exception:\n"
+            "        pass\n"
+            "    else:\n"
+            "        patch = monkeypatch\n"
+            "        raise RuntimeError\n"
+            "    finally:\n"
+            "        patch.setattr(*arguments)"
+        )
+    else:
+        statements = (
+            "patch = helper\n"
+            "    try:\n"
+            "        raise RuntimeError\n"
+            "    except RuntimeError:\n"
+            "        patch = monkeypatch\n"
+            "        raise ValueError\n"
+            "    finally:\n"
+            "        patch.setattr(*arguments)"
+        )
+    _assert_authoritative_receiver(statements)
+
+
+@pytest.mark.parametrize("suite", ["else", "handler"])
+def test_finally_ignores_definitely_retired_else_and_handler_states(suite):
+    if suite == "else":
+        statements = (
+            "patch = helper\n"
+            "    try:\n"
+            "        pass\n"
+            "    except Exception:\n"
+            "        pass\n"
+            "    else:\n"
+            "        patch = helper\n"
+            "        raise RuntimeError\n"
+            "    finally:\n"
+            "        patch.setattr(*arguments)"
+        )
+    else:
+        statements = (
+            "patch = helper\n"
+            "    try:\n"
+            "        raise RuntimeError\n"
+            "    except RuntimeError:\n"
+            "        patch = helper\n"
+            "        raise ValueError\n"
+            "    finally:\n"
+            "        patch.setattr(*arguments)"
+        )
+    assert _scan_synthetic(_receiver_flow(statements)) == []
+
+
 def test_a_loop_retains_the_zero_iteration_receiver_path():
     _assert_authoritative_receiver(
         "patch = monkeypatch\n    for item in value:\n        patch = helper"
@@ -1965,6 +2067,35 @@ def test_a_loop_else_rebinding_retires_receiver_authority_without_a_break():
         "    for item in value:\n"
         "        patch = helper\n"
         "    else:\n"
+        "        patch = helper"
+    )
+
+    assert _scan_synthetic(source) == []
+
+
+@pytest.mark.parametrize("transfer", ["break", "continue"])
+def test_loop_transfers_keep_their_exact_authoritative_source(transfer):
+    _assert_authoritative_receiver(
+        "patch = helper\n"
+        "    for item in value:\n"
+        "        if flag:\n"
+        "            patch = monkeypatch\n"
+        f"            {transfer}\n"
+        "            patch = helper\n"
+        "        patch = helper"
+    )
+
+
+@pytest.mark.parametrize("transfer", ["break", "continue"])
+def test_loop_transfers_keep_definitely_retired_source_states(transfer):
+    source = _receiver_flow(
+        "patch = helper\n"
+        "    for item in value:\n"
+        "        if flag:\n"
+        "            patch = monkeypatch\n"
+        "            patch = helper\n"
+        f"            {transfer}\n"
+        "            patch = monkeypatch\n"
         "        patch = helper"
     )
 

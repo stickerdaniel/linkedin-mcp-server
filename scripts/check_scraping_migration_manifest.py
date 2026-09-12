@@ -751,6 +751,36 @@ def _setattr_arguments(node: ast.Call) -> tuple[ast.expr | None, ast.expr | None
 _MONKEYPATCH_NAMES = frozenset({"monkeypatch", "MonkeyPatch"})
 
 
+_MonkeyPatchState = tuple[set[str], set[str]]
+
+
+@dataclass(slots=True)
+class _FlowResult:
+    normal: list[_MonkeyPatchState] = field(default_factory=list)
+    breaks: list[_MonkeyPatchState] = field(default_factory=list)
+    continues: list[_MonkeyPatchState] = field(default_factory=list)
+    returns: list[_MonkeyPatchState] = field(default_factory=list)
+    exceptional: list[_MonkeyPatchState] = field(default_factory=list)
+
+    def extend(self, other: _FlowResult) -> None:
+        self.normal.extend(other.normal)
+        self.breaks.extend(other.breaks)
+        self.continues.extend(other.continues)
+        self.returns.extend(other.returns)
+        self.exceptional.extend(other.exceptional)
+
+
+@dataclass(slots=True)
+class _ClosureCell:
+    aliases: set[str]
+
+
+@dataclass(slots=True)
+class _DeferredFunction:
+    node: ast.FunctionDef | ast.AsyncFunctionDef
+    cell: _ClosureCell
+
+
 def _mentions_monkeypatch(expression: ast.expr) -> bool:
     return any(
         (isinstance(item, ast.Name) and item.id in _MONKEYPATCH_NAMES)
@@ -776,7 +806,9 @@ class _MonkeyPatchCallCollector(ast.NodeVisitor):
         self.aliases = {"monkeypatch"}
         self.closure_aliases = set(self.aliases)
         self.scope_kinds = ["module"]
-        self.loop_break_states: list[list[tuple[set[str], set[str]]]] = []
+        self.cells = [_ClosureCell(set(self.closure_aliases))]
+        self.deferred: list[_DeferredFunction] = []
+        self.deferred_ids: set[int] = set()
 
     @staticmethod
     def _key(expression: ast.expr) -> str:
@@ -833,40 +865,67 @@ class _MonkeyPatchCallCollector(ast.NodeVisitor):
             set().union(*(state[1] for state in states)),
         )
 
-    def _visit_suite(
-        self, statements: list[ast.stmt]
-    ) -> list[tuple[set[str], set[str]]]:
-        states = [self._state()]
+    def _visit_suite(self, statements: list[ast.stmt]) -> _FlowResult:
+        result = _FlowResult()
+        active = True
         for statement in statements:
-            self.visit(statement)
-            states.append(self._state())
-        return states
+            if not active:
+                break
+            prefix = self._state()
+            flowed = self.visit(statement)
+            result.exceptional.append(prefix)
+            if not isinstance(flowed, _FlowResult):
+                continue
+            result.breaks.extend(flowed.breaks)
+            result.continues.extend(flowed.continues)
+            result.returns.extend(flowed.returns)
+            result.exceptional.extend(flowed.exceptional)
+            if flowed.normal:
+                self._restore(self._merge(flowed.normal))
+            else:
+                active = False
+        if active:
+            result.normal.append(self._state())
+        return result
 
     def _visit_branches(
         self,
-        initial: tuple[set[str], set[str]],
+        initial: _MonkeyPatchState,
         suites: list[list[ast.stmt]],
         *,
         include_initial: bool = False,
-    ) -> None:
-        states = [initial] if include_initial else []
+    ) -> _FlowResult:
+        result = _FlowResult(normal=[initial] if include_initial else [])
         for suite in suites:
             self._restore(initial)
-            self._visit_suite(suite)
-            states.append(self._state())
-        self._restore(self._merge(states))
+            result.extend(self._visit_suite(suite))
+        if result.normal:
+            self._restore(self._merge(result.normal))
+        return result
 
-    def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+    def _visit_function_expressions(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef
+    ) -> None:
         for decorator in node.decorator_list:
             self.visit(decorator)
-        for default in [*node.args.defaults, *node.args.kw_defaults]:
-            if default is not None:
-                self.visit(default)
+        for expression in _signature_expressions(node.args):
+            self.visit(expression)
+        if node.returns is not None:
+            self.visit(node.returns)
 
+    def _defer_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        self._visit_function_expressions(node)
+        if id(node) not in self.deferred_ids:
+            self.deferred_ids.add(id(node))
+            self.deferred.append(_DeferredFunction(node, self.cells[-1]))
+        self._unbind({node.name})
+
+    def _evaluate_function(self, item: _DeferredFunction) -> None:
+        node = item.node
         collector = _scope_collector(self.path, node.body)
         parameters = _argument_names(node.args)
         local_bindings = collector.bindings - collector.globals - collector.nonlocals
-        inherited = self.closure_aliases - local_bindings - parameters
+        inherited = item.cell.aliases - local_bindings - parameters
         for argument in [
             *node.args.posonlyargs,
             *node.args.args,
@@ -880,21 +939,42 @@ class _MonkeyPatchCallCollector(ast.NodeVisitor):
             ):
                 inherited.add(argument.arg)
 
-        previous = (self.aliases, self.closure_aliases)
-        self.aliases = inherited
+        previous = self._state()
+        self.aliases = set(inherited)
         self.closure_aliases = set(inherited)
+        cell = _ClosureCell(set(inherited))
+        self.cells.append(cell)
         self.scope_kinds.append("function")
-        for statement in node.body:
-            self.visit(statement)
+        flow = self._visit_suite(node.body)
+        endings = [*flow.normal, *flow.breaks, *flow.continues, *flow.returns]
+        if endings:
+            cell.aliases = set(self._merge(endings)[1])
         self.scope_kinds.pop()
-        self.aliases, self.closure_aliases = previous
-        self._unbind({node.name})
+        self.cells.pop()
+        self._restore(previous)
+        self._drain_deferred(cell)
+
+    def _drain_deferred(self, cell: _ClosureCell) -> None:
+        while True:
+            pending = [item for item in self.deferred if item.cell is cell]
+            if not pending:
+                return
+            self.deferred = [item for item in self.deferred if item.cell is not cell]
+            for item in pending:
+                self._evaluate_function(item)
+
+    def visit_Module(self, node: ast.Module) -> Any:
+        flow = self._visit_suite(node.body)
+        endings = list(flow.normal)
+        if endings:
+            self.cells[-1].aliases = set(self._merge(endings)[1])
+        self._drain_deferred(self.cells[-1])
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> Any:
-        self._visit_function(node)
+        self._defer_function(node)
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> Any:
-        self._visit_function(node)
+        self._defer_function(node)
 
     def visit_ClassDef(self, node: ast.ClassDef) -> Any:
         for decorator in node.decorator_list:
@@ -904,8 +984,7 @@ class _MonkeyPatchCallCollector(ast.NodeVisitor):
         previous = (self.aliases, self.closure_aliases)
         self.aliases = set(self.closure_aliases)
         self.scope_kinds.append("class")
-        for statement in node.body:
-            self.visit(statement)
+        self._visit_suite(node.body)
         self.scope_kinds.pop()
         self.aliases, self.closure_aliases = previous
         self._unbind({node.name})
@@ -944,96 +1023,154 @@ class _MonkeyPatchCallCollector(ast.NodeVisitor):
     def visit_If(self, node: ast.If) -> Any:
         self.visit(node.test)
         initial = self._state()
-        self._visit_branches(
+        return self._visit_branches(
             initial,
             [node.body, node.orelse],
             include_initial=not node.orelse,
         )
 
-    def _visit_try(self, node: ast.Try | ast.TryStar) -> None:
+    def _visit_try(self, node: ast.Try | ast.TryStar) -> _FlowResult:
         initial = self._state()
         self._restore(initial)
-        body_states = self._visit_suite(node.body)
-        normal = self._state()
-        self._visit_suite(node.orelse)
-        continuing = [self._state()]
-        exception_entry = self._merge(body_states)
+        body = self._visit_suite(node.body)
+        result = _FlowResult(
+            breaks=list(body.breaks),
+            continues=list(body.continues),
+            returns=list(body.returns),
+            exceptional=list(body.exceptional),
+        )
 
+        if body.normal:
+            self._restore(self._merge(body.normal))
+            result.extend(self._visit_suite(node.orelse))
+
+        handler_entry = self._merge(body.exceptional)
         for handler in node.handlers:
-            self._restore(exception_entry)
+            self._restore(handler_entry)
             if handler.type is not None:
                 self.visit(handler.type)
             if handler.name is not None:
                 self._bind(ast.Name(id=handler.name, ctx=ast.Store()), False)
-            self._visit_suite(handler.body)
-            if handler.name is not None:
-                self._unbind({handler.name})
-            continuing.append(self._state())
+            handled = self._visit_suite(handler.body)
+            for states in (
+                handled.normal,
+                handled.breaks,
+                handled.continues,
+                handled.returns,
+                handled.exceptional,
+            ):
+                for index, state in enumerate(states):
+                    self._restore(state)
+                    if handler.name is not None:
+                        self._unbind({handler.name})
+                    states[index] = self._state()
+            result.extend(handled)
 
-        merged = self._merge(continuing)
         if not node.finalbody:
-            self._restore(merged)
-            return
+            if result.normal:
+                self._restore(self._merge(result.normal))
+            return result
 
-        self._restore(merged)
-        self._visit_suite(node.finalbody)
-        continuation = self._state()
-        exceptional = self._merge([exception_entry, normal])
-        self._restore(exceptional)
-        self._visit_suite(node.finalbody)
-        self._restore(continuation)
+        finished = _FlowResult()
+        for states, continuation in (
+            (result.normal, "normal"),
+            (result.breaks, "break"),
+            (result.continues, "continue"),
+            (result.returns, "return"),
+            (result.exceptional, "exceptional"),
+        ):
+            if not states:
+                continue
+            self._restore(self._merge(states))
+            final = self._visit_suite(node.finalbody)
+            finished.breaks.extend(final.breaks)
+            finished.continues.extend(final.continues)
+            finished.returns.extend(final.returns)
+            finished.exceptional.extend(final.exceptional)
+            if continuation == "normal":
+                finished.normal.extend(final.normal)
+            elif continuation == "break":
+                finished.breaks.extend(final.normal)
+            elif continuation == "continue":
+                finished.continues.extend(final.normal)
+            elif continuation == "return":
+                finished.returns.extend(final.normal)
+            else:
+                finished.exceptional.extend(final.normal)
+        if finished.normal:
+            self._restore(self._merge(finished.normal))
+        return finished
 
     def visit_Try(self, node: ast.Try) -> Any:
-        self._visit_try(node)
+        return self._visit_try(node)
 
     def visit_TryStar(self, node: ast.TryStar) -> Any:
-        self._visit_try(node)
+        return self._visit_try(node)
 
     def _visit_loop(
         self,
         node: ast.For | ast.AsyncFor | ast.While,
-        initial: tuple[set[str], set[str]],
-    ) -> None:
+        initial: _MonkeyPatchState,
+    ) -> _FlowResult:
         head = initial
-        self.loop_break_states.append([])
+        body = _FlowResult()
         while True:
             self._restore(head)
             if isinstance(node, ast.While):
                 self.visit(node.test)
-                iteration = self._state()
             else:
                 self._bind(node.target, False)
-                iteration = self._state()
-            self._visit_suite(node.body)
-            widened = self._merge([initial, iteration, self._state()])
+            body = self._visit_suite(node.body)
+            widened = self._merge([initial, *body.normal, *body.continues])
             if widened == head:
                 break
             head = widened
 
-        breaks = self.loop_break_states.pop()
         self._restore(head)
         if isinstance(node, ast.While):
             self.visit(node.test)
-        self._visit_suite(node.orelse)
-        exits = [self._state(), *breaks]
-        self._restore(self._merge(exits))
+        no_break = self._visit_suite(node.orelse)
+        normal = [*no_break.normal, *body.breaks]
+        if normal:
+            self._restore(self._merge(normal))
+        return _FlowResult(
+            normal=normal,
+            breaks=no_break.breaks,
+            continues=no_break.continues,
+            returns=[*body.returns, *no_break.returns],
+            exceptional=[*body.exceptional, *no_break.exceptional],
+        )
 
     def visit_Break(self, node: ast.Break) -> Any:
-        if self.loop_break_states:
-            self.loop_break_states[-1].append(self._state())
+        return _FlowResult(breaks=[self._state()])
 
-    def _visit_for(self, node: ast.For | ast.AsyncFor) -> None:
+    def visit_Continue(self, node: ast.Continue) -> Any:
+        return _FlowResult(continues=[self._state()])
+
+    def visit_Raise(self, node: ast.Raise) -> Any:
+        if node.exc is not None:
+            self.visit(node.exc)
+        if node.cause is not None:
+            self.visit(node.cause)
+        return _FlowResult(exceptional=[self._state()])
+
+    def visit_Return(self, node: ast.Return) -> Any:
+        if node.value is not None:
+            self.visit(node.value)
+        return _FlowResult(returns=[self._state()])
+
+    def _visit_for(self, node: ast.For | ast.AsyncFor) -> _FlowResult:
         self.visit(node.iter)
-        self._visit_loop(node, self._state())
+        return self._visit_loop(node, self._state())
 
     def visit_For(self, node: ast.For) -> Any:
-        self._visit_for(node)
+        return self._visit_for(node)
 
     def visit_AsyncFor(self, node: ast.AsyncFor) -> Any:
-        self._visit_for(node)
+        return self._visit_for(node)
 
     def visit_While(self, node: ast.While) -> Any:
-        self._visit_loop(node, self._state())
+        return self._visit_loop(node, self._state())
 
     @staticmethod
     def _match_names(pattern: ast.pattern) -> set[str]:
@@ -1063,36 +1200,36 @@ class _MonkeyPatchCallCollector(ast.NodeVisitor):
         self.visit(node.subject)
         initial = self._state()
         authority = self._is_authority(node.subject)
-        states: list[tuple[set[str], set[str]]] = []
+        result = _FlowResult()
         for case in node.cases:
             self._restore(initial)
             for name in self._match_names(case.pattern):
                 self._bind(ast.Name(id=name, ctx=ast.Store()), authority)
             if case.guard is not None:
                 self.visit(case.guard)
-            self._visit_suite(case.body)
-            states.append(self._state())
+            result.extend(self._visit_suite(case.body))
         if not node.cases or not self._is_catch_all(node.cases[-1]):
-            states.append(initial)
-        self._restore(self._merge(states))
+            result.normal.append(initial)
+        if result.normal:
+            self._restore(self._merge(result.normal))
+        return result
 
     def visit_NamedExpr(self, node: ast.NamedExpr) -> Any:
         self.visit(node.value)
         self._bind(node.target, self._is_authority(node.value))
 
-    def _visit_with(self, node: ast.With | ast.AsyncWith) -> None:
+    def _visit_with(self, node: ast.With | ast.AsyncWith) -> _FlowResult:
         for item in node.items:
             self.visit(item.context_expr)
             if item.optional_vars is not None:
                 self._bind(item.optional_vars, self._is_authority(item.context_expr))
-        for statement in node.body:
-            self.visit(statement)
+        return self._visit_suite(node.body)
 
     def visit_With(self, node: ast.With) -> Any:
-        self._visit_with(node)
+        return self._visit_with(node)
 
     def visit_AsyncWith(self, node: ast.AsyncWith) -> Any:
-        self._visit_with(node)
+        return self._visit_with(node)
 
     def visit_Call(self, node: ast.Call) -> Any:
         if (
