@@ -162,7 +162,7 @@ Hard flags (any one = downgrade from ✓ to ⚠):
 - **Locale-dependent detection**: any `== "Connect"`, `in ["Pending", "Follow"]`, `contains("1st")`, `aria-label="..."` with translated text. The verb is locale-dependent; attribute *presence* is not. See `CLAUDE.md → detection must be locale-independent`.
 - **LinkedIn-class-name selectors**: `.entity-result__item`, `.artdeco-button__text`, etc. Only minimal generic selectors are acceptable (`a[href*="/jobs/view/"]`).
 - **Multiple navigations behind one section**: any new entry in `PERSON_SECTIONS` / `COMPANY_SECTIONS` (`scraping/fields.py`) must map to exactly one URL.
-- **Missing tests**: bug fixes should add or update a test in `tests/test_scraping.py`. Pure-DOM fixes without test coverage are a yellow flag.
+- **Missing tests**: bug fixes should add or update the canonical owner's matching `tests/scraping/test_<owner>.py`, using `docs/scraping-architecture.md` to locate ownership. Facade-only changes belong in `tests/scraping/test_facade_*.py`; `scraping/extractor.py` and a monolithic `tests/test_scraping.py` are not default destinations. Pure-DOM fixes without test coverage are a yellow flag.
 
 ## Phase 7 — Report
 

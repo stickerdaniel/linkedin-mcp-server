@@ -29,9 +29,9 @@ From the issue body extract:
 Map the tool to code so you know where to look if the repro confirms the bug:
 
 1. `linkedin_mcp_server/tools/<surface>.py` — MCP entrypoint and arg validation
-2. `linkedin_mcp_server/scraping/<feature>.py` — actual scraping (`extractor.py`, `connection.py`, `feed.py`, `inbox.py`, …)
+2. `docs/scraping-architecture.md` — generated ownership table; follow it to the canonical `linkedin_mcp_server/scraping/<owner>.py` module rather than treating `scraping/extractor.py` as the implementation
 3. `linkedin_mcp_server/scraping/fields.py` — `PERSON_SECTIONS` / `COMPANY_SECTIONS` (each entry = one navigation)
-4. Existing test in `tests/test_scraping.py` covering the same surface
+4. The owner-local test in `tests/scraping/test_<owner>.py`; use `tests/scraping/test_facade_*.py` only for facade delegation contracts
 
 State out loud before running anything: "Reproducing tool `X` with args `Y` on branch `<current>` — expecting `<failure mode from issue>`."
 

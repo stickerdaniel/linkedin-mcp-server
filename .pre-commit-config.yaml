@@ -32,6 +32,12 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+    -   id: scraping-architecture
+        name: scraping architecture
+        entry: uv run python scripts/generate_scraping_architecture.py --check
+        language: system
+        pass_filenames: false
+        always_run: true
     -   id: ty
         name: ty
         entry: uv run ty check
