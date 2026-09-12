@@ -184,6 +184,159 @@ def test_collaborators_and_rebound_names_remain_browser_free(source: str):
     assert source_classification(ast.parse(source)) == "browser-free"
 
 
+@pytest.mark.parametrize(
+    "branches",
+    [
+        "    if condition:\n"
+        "        active_page = browser_page\n"
+        "    else:\n"
+        "        active_page = collaborator\n",
+        "    if condition:\n"
+        "        active_page = collaborator\n"
+        "    else:\n"
+        "        active_page = browser_page\n",
+    ],
+)
+def test_page_evidence_survives_either_conditional_branch_order(branches: str):
+    source = (
+        "def inspect(browser_page: 'Page', condition):\n"
+        f"{branches}"
+        "    return active_page.evaluate('1')\n"
+    )
+
+    assert source_classification(ast.parse(source)) == "page-owning"
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "    try:\n"
+        "        active_page = collaborator\n"
+        "    except LookupError:\n"
+        "        active_page = browser_page\n"
+        "    else:\n"
+        "        active_page = collaborator\n",
+        "    match value:\n"
+        "        case 0:\n"
+        "            active_page = collaborator\n"
+        "        case _:\n"
+        "            active_page = browser_page\n",
+        "    for item in values:\n        active_page = browser_page\n",
+    ],
+)
+def test_page_evidence_survives_try_match_and_loop_paths(statement: str):
+    source = (
+        "def inspect(browser_page: 'Page', collaborator, value, values):\n"
+        "    active_page = collaborator\n"
+        f"{statement}"
+        "    return active_page.evaluate('1')\n"
+    )
+
+    assert source_classification(ast.parse(source)) == "page-owning"
+
+
+def test_page_evidence_survives_try_else_and_finally_merging():
+    source = (
+        "def inspect(browser_page: 'Page'):\n"
+        "    active_page = collaborator\n"
+        "    try:\n"
+        "        active_page = browser_page\n"
+        "    except LookupError:\n"
+        "        active_page = collaborator\n"
+        "    else:\n"
+        "        marker = collaborator\n"
+        "    finally:\n"
+        "        cleanup = collaborator\n"
+        "    return active_page.evaluate('1')\n"
+    )
+
+    assert source_classification(ast.parse(source)) == "page-owning"
+
+
+def test_definite_rebinding_on_all_conditional_paths_retires_page_evidence():
+    source = (
+        "def inspect(browser_page: 'Page', condition):\n"
+        "    active_page = browser_page\n"
+        "    if condition:\n"
+        "        active_page = first_collaborator\n"
+        "    else:\n"
+        "        active_page = second_collaborator\n"
+        "    return active_page.evaluate('1')\n"
+    )
+
+    assert source_classification(ast.parse(source)) == "browser-free"
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "    try:\n"
+        "        active_page = first_collaborator\n"
+        "    except LookupError:\n"
+        "        active_page = second_collaborator\n"
+        "    else:\n"
+        "        active_page = third_collaborator\n"
+        "    finally:\n"
+        "        active_page = final_collaborator\n",
+        "    match value:\n"
+        "        case 0:\n"
+        "            active_page = first_collaborator\n"
+        "        case _:\n"
+        "            active_page = second_collaborator\n",
+        "    for item in values:\n"
+        "        active_page = first_collaborator\n"
+        "    else:\n"
+        "        active_page = second_collaborator\n",
+    ],
+)
+def test_definite_try_match_and_loop_rebinding_retires_page_evidence(
+    statement: str,
+):
+    source = (
+        "def inspect(browser_page: 'Page', value, values):\n"
+        "    active_page = browser_page\n"
+        f"{statement}"
+        "    return active_page.evaluate('1')\n"
+    )
+
+    assert source_classification(ast.parse(source)) == "browser-free"
+
+
+@pytest.mark.parametrize("root", ["session", "_session"])
+def test_rebound_session_roots_do_not_supply_page_evidence(root: str):
+    source = (
+        f"def inspect({root}):\n"
+        f"    {root} = collaborator\n"
+        f"    return {root}.page.render()\n"
+    )
+
+    assert source_classification(ast.parse(source)) == "browser-free"
+
+
+@pytest.mark.parametrize(
+    "branches",
+    [
+        "    if condition:\n"
+        "        session = original_session\n"
+        "    else:\n"
+        "        session = collaborator\n",
+        "    if condition:\n"
+        "        session = collaborator\n"
+        "    else:\n"
+        "        session = original_session\n",
+    ],
+)
+def test_known_session_source_survives_either_branch_order(branches: str):
+    source = (
+        "def inspect(session, condition):\n"
+        "    original_session = session\n"
+        f"{branches}"
+        "    return session.page.render()\n"
+    )
+
+    assert source_classification(ast.parse(source)) == "page-owning"
+
+
 def test_nested_package_modules_are_inspected_with_stable_paths(tmp_path: Path):
     scraping = _copy_scraping(tmp_path)
     nested = scraping / "nested"

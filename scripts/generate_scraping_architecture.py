@@ -225,14 +225,22 @@ def _bound_names(nodes: list[ast.stmt]) -> frozenset[str]:
     return frozenset(names)
 
 
+_PAGE = "page"
+_SOURCE = "source"
+_NON_PAGE = "non-page"
+_UNBOUND = "unbound"
+_AbstractState = frozenset[str]
+_ScopeState = dict[tuple[str, ...], _AbstractState]
+
+
 class _PageUseVisitor(ast.NodeVisitor):
     def __init__(self, page_types: frozenset[str]) -> None:
         self.page_types = page_types
-        self.scopes: list[dict[tuple[str, ...], bool]] = [{}]
+        self.scopes: list[_ScopeState] = [{}]
         self.found = False
 
     @property
-    def scope(self) -> dict[tuple[str, ...], bool]:
+    def scope(self) -> _ScopeState:
         return self.scopes[-1]
 
     def _key(self, node: ast.expr) -> tuple[str, ...] | None:
@@ -243,32 +251,74 @@ class _PageUseVisitor(ast.NodeVisitor):
             return parts if parts else None
         return None
 
+    def _state(self, key: tuple[str, ...]) -> _AbstractState:
+        resolved: set[str] = set()
+        for scope in reversed(self.scopes):
+            state = scope.get(key)
+            if state is None:
+                continue
+            resolved.update(state - {_UNBOUND})
+            if _UNBOUND not in state:
+                return frozenset(resolved)
+        resolved.add(_UNBOUND)
+        return frozenset(resolved)
+
     def _tracked(self, node: ast.expr) -> bool:
+        key = self._key(node)
+        return key is not None and _PAGE in self._state(key)
+
+    def _source_root(self, node: ast.expr) -> bool:
         key = self._key(node)
         if key is None:
             return False
-        for scope in reversed(self.scopes):
-            if key in scope:
-                return scope[key]
-        return False
+        state = self._state(key)
+        return _SOURCE in state or (
+            key[-1] in {"session", "_session"} and _UNBOUND in state
+        )
 
     def _known_source(self, node: ast.expr) -> bool:
-        if not isinstance(node, ast.Attribute) or node.attr not in {"page", "_page"}:
-            return False
-        receiver = self._key(node.value)
-        return receiver is not None and receiver[-1] in {"session", "_session"}
+        return (
+            isinstance(node, ast.Attribute)
+            and node.attr in {"page", "_page"}
+            and self._source_root(node.value)
+        )
 
     def _page_value(self, node: ast.expr | None) -> bool:
         return node is not None and (self._tracked(node) or self._known_source(node))
 
-    def _bind(self, target: ast.expr, is_page: bool) -> None:
+    def _value_state(self, node: ast.expr | None) -> _AbstractState:
+        if node is not None and self._page_value(node):
+            return frozenset({_PAGE})
+        if node is not None and self._source_root(node):
+            return frozenset({_SOURCE})
+        return frozenset({_NON_PAGE})
+
+    def _bind(self, target: ast.expr, state: _AbstractState) -> None:
         if isinstance(target, (ast.Tuple, ast.List)):
             for element in target.elts:
-                self._bind(element, False)
+                self._bind(element, frozenset({_NON_PAGE}))
             return
         key = self._key(target)
         if key is not None:
-            self.scope[key] = is_page
+            self.scope[key] = state
+
+    def _merge(self, states: Iterable[_ScopeState]) -> _ScopeState:
+        alternatives = tuple(states)
+        keys = set().union(*(state.keys() for state in alternatives))
+        return {
+            key: frozenset().union(
+                *(state.get(key, frozenset({_UNBOUND})) for state in alternatives)
+            )
+            for key in keys
+        }
+
+    def _run_block(
+        self, statements: Iterable[ast.stmt], initial: _ScopeState
+    ) -> _ScopeState:
+        self.scopes[-1] = dict(initial)
+        for statement in statements:
+            self.visit(statement)
+        return dict(self.scope)
 
     def _visit_arguments(self, arguments: ast.arguments) -> None:
         for argument in [
@@ -276,21 +326,83 @@ class _PageUseVisitor(ast.NodeVisitor):
             *arguments.args,
             *arguments.kwonlyargs,
         ]:
-            self.scope[(argument.arg,)] = _page_annotation(
-                argument.annotation, self.page_types
-            )
+            if _page_annotation(argument.annotation, self.page_types):
+                state = frozenset({_PAGE})
+            elif argument.arg in {"session", "_session"}:
+                state = frozenset({_SOURCE})
+            else:
+                state = frozenset({_NON_PAGE})
+            self.scope[(argument.arg,)] = state
         if arguments.vararg is not None:
-            self.scope[(arguments.vararg.arg,)] = False
+            self.scope[(arguments.vararg.arg,)] = frozenset({_NON_PAGE})
         if arguments.kwarg is not None:
-            self.scope[(arguments.kwarg.arg,)] = False
+            self.scope[(arguments.kwarg.arg,)] = frozenset({_NON_PAGE})
 
     def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
-        local = {name: False for name in _bound_names(node.body)}
-        self.scopes.append({(name,): value for name, value in local.items()})
+        local: _ScopeState = {
+            (name,): frozenset({_NON_PAGE}) for name in _bound_names(node.body)
+        }
+        self.scopes.append(local)
         self._visit_arguments(node.args)
         for statement in node.body:
             self.visit(statement)
         self.scopes.pop()
+
+    def _loop_has_break(self, statements: Iterable[ast.stmt]) -> bool:
+        class BreakVisitor(ast.NodeVisitor):
+            found = False
+
+            def visit_Break(self, node: ast.Break) -> None:
+                self.found = True
+
+            def visit_For(self, node: ast.For) -> None:
+                return
+
+            def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
+                return
+
+            def visit_While(self, node: ast.While) -> None:
+                return
+
+            def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+                return
+
+            def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+                return
+
+            def visit_Lambda(self, node: ast.Lambda) -> None:
+                return
+
+        visitor = BreakVisitor()
+        for statement in statements:
+            visitor.visit(statement)
+        return visitor.found
+
+    def _visit_loop(
+        self,
+        body: list[ast.stmt],
+        orelse: list[ast.stmt],
+        initial: _ScopeState,
+        target: ast.expr | None = None,
+    ) -> None:
+        entry = dict(initial)
+        iteration_exit = dict(entry)
+        while True:
+            iteration_entry = self._merge((entry, iteration_exit))
+            self.scopes[-1] = iteration_entry
+            if target is not None:
+                self._bind(target, frozenset({_NON_PAGE}))
+            body_exit = self._run_block(body, self.scope)
+            widened = self._merge((iteration_exit, body_exit))
+            if widened == iteration_exit:
+                break
+            iteration_exit = widened
+
+        normal_exit = self._run_block(orelse, self._merge((entry, iteration_exit)))
+        if self._loop_has_break(body):
+            self.scopes[-1] = self._merge((normal_exit, iteration_exit))
+        else:
+            self.scopes[-1] = normal_exit
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         self._visit_function(node)
@@ -306,27 +418,104 @@ class _PageUseVisitor(ast.NodeVisitor):
 
     def visit_Assign(self, node: ast.Assign) -> None:
         self.visit(node.value)
-        is_page = self._page_value(node.value)
+        state = self._value_state(node.value)
         for target in node.targets:
-            self._bind(target, is_page)
+            self._bind(target, state)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
         self.visit(node.annotation)
         if node.value is not None:
             self.visit(node.value)
-        self._bind(
-            node.target,
-            _page_annotation(node.annotation, self.page_types)
-            or self._page_value(node.value),
+        state = (
+            frozenset({_PAGE})
+            if _page_annotation(node.annotation, self.page_types)
+            else self._value_state(node.value)
         )
+        self._bind(node.target, state)
 
     def visit_AugAssign(self, node: ast.AugAssign) -> None:
         self.visit(node.value)
-        self._bind(node.target, False)
+        self._bind(node.target, frozenset({_NON_PAGE}))
 
     def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
         self.visit(node.value)
-        self._bind(node.target, self._page_value(node.value))
+        self._bind(node.target, self._value_state(node.value))
+
+    def visit_If(self, node: ast.If) -> None:
+        self.visit(node.test)
+        initial = dict(self.scope)
+        body = self._run_block(node.body, initial)
+        orelse = self._run_block(node.orelse, initial)
+        self.scopes[-1] = self._merge((body, orelse))
+
+    def _visit_try(self, node: ast.Try | ast.TryStar) -> None:
+        initial = dict(self.scope)
+        prefixes = [initial]
+        self.scopes[-1] = dict(initial)
+        for statement in node.body:
+            self.visit(statement)
+            prefixes.append(dict(self.scope))
+        body_exit = dict(self.scope)
+        normal_exit = self._run_block(node.orelse, body_exit)
+        handler_entry = self._merge(prefixes)
+        handler_exits: list[_ScopeState] = []
+        for handler in node.handlers:
+            self.scopes[-1] = dict(handler_entry)
+            if handler.type is not None:
+                self.visit(handler.type)
+            if handler.name is not None:
+                self.scope[(handler.name,)] = frozenset({_NON_PAGE})
+            handler_exits.append(self._run_block(handler.body, self.scope))
+        continuing = self._merge((normal_exit, *handler_exits))
+        if not node.finalbody:
+            self.scopes[-1] = continuing
+            return
+
+        final_entry = self._merge((handler_entry, continuing))
+        self._run_block(node.finalbody, final_entry)
+        self.scopes[-1] = self._run_block(node.finalbody, continuing)
+
+    def visit_Try(self, node: ast.Try) -> None:
+        self._visit_try(node)
+
+    def visit_TryStar(self, node: ast.TryStar) -> None:
+        self._visit_try(node)
+
+    def visit_For(self, node: ast.For) -> None:
+        self.visit(node.iter)
+        self._visit_loop(node.body, node.orelse, dict(self.scope), node.target)
+
+    def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
+        self.visit(node.iter)
+        self._visit_loop(node.body, node.orelse, dict(self.scope), node.target)
+
+    def visit_While(self, node: ast.While) -> None:
+        self.visit(node.test)
+        self._visit_loop(node.body, node.orelse, dict(self.scope))
+
+    def visit_Match(self, node: ast.Match) -> None:
+        self.visit(node.subject)
+        initial = dict(self.scope)
+        exits: list[_ScopeState] = []
+        exhaustive = False
+        for case in node.cases:
+            self.scopes[-1] = dict(initial)
+            for pattern_node in ast.walk(case.pattern):
+                name = getattr(pattern_node, "name", None)
+                if isinstance(name, str):
+                    self.scope[(name,)] = frozenset({_NON_PAGE})
+            if case.guard is not None:
+                self.visit(case.guard)
+            exits.append(self._run_block(case.body, self.scope))
+            if (
+                case.guard is None
+                and isinstance(case.pattern, ast.MatchAs)
+                and case.pattern.pattern is None
+            ):
+                exhaustive = True
+        if not exhaustive:
+            exits.append(initial)
+        self.scopes[-1] = self._merge(exits)
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
         if self._known_source(node) or self._tracked(node.value):
