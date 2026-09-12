@@ -395,6 +395,55 @@ def _is_approved_facade_package_importer(path: Path) -> bool:
     return path.relative_to(ROOT).as_posix() in _FACADE_PACKAGE_IMPORTERS
 
 
+def _attribute_parts(node: ast.expr) -> tuple[str, ...] | None:
+    parts: list[str] = []
+    current = node
+    while isinstance(current, ast.Attribute):
+        parts.append(current.attr)
+        current = current.value
+    if not isinstance(current, ast.Name):
+        return None
+    return (current.id, *reversed(parts))
+
+
+def _facade_package_accesses(path: Path, tree: ast.AST) -> list[ast.AST]:
+    """Return every import form that exposes the scraping package facade."""
+
+    package_aliases: set[tuple[str, ...]] = set()
+    accesses: list[ast.AST] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name != "linkedin_mcp_server.scraping":
+                    continue
+                package_aliases.add(
+                    (alias.asname,)
+                    if alias.asname
+                    else ("linkedin_mcp_server", "scraping")
+                )
+        elif isinstance(node, ast.ImportFrom):
+            resolved = _resolved_import_module(path, node)
+            if resolved == "linkedin_mcp_server.scraping":
+                if any(
+                    alias.name in {"LinkedInExtractor", "*"} for alias in node.names
+                ):
+                    accesses.append(node)
+            elif resolved == "linkedin_mcp_server":
+                package_aliases.update(
+                    (alias.asname or alias.name,)
+                    for alias in node.names
+                    if alias.name == "scraping"
+                )
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Attribute) or node.attr != "LinkedInExtractor":
+            continue
+        parts = _attribute_parts(node)
+        if parts is not None and parts[:-1] in package_aliases:
+            accesses.append(node)
+    return accesses
+
+
 def _annotation_name(annotation: ast.expr | None) -> str | None:
     if isinstance(annotation, ast.Name):
         return annotation.id
@@ -3829,6 +3878,18 @@ def scan_source(
     """Scan one source string and fail on every unresolved extractor seam."""
 
     tree = ast.parse(source, filename=str(path))
+    if not _is_approved_facade_package_importer(path):
+        facade_accesses = _facade_package_accesses(path, tree)
+        if facade_accesses:
+            relative_path = path.relative_to(ROOT).as_posix()
+            raise UnresolvedSeamError(
+                "\n".join(
+                    f"{relative_path}:{getattr(node, 'lineno', 0)} LinkedInExtractor: "
+                    "scraping package facade import is not an approved construction "
+                    "or contract boundary"
+                    for node in facade_accesses
+                )
+            )
     module_aliases(path, tree)
     root = _scope_collector(path, tree.body)
     class_names = set(root.class_aliases)
