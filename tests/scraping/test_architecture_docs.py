@@ -145,13 +145,23 @@ def test_explicit_and_assignment_type_aliases_are_public_owners(tmp_path: Path):
 @pytest.mark.parametrize(
     "source",
     [
-        "page.evaluate('1')\n",
-        "_page.evaluate('1')\n",
-        "session.page\n",
-        "self._session.page.evaluate('1')\n",
+        "from patchright.async_api import Page\n",
+        "def inspect(browser_page: 'Page'):\n    return browser_page.evaluate('1')\n",
+        "def inspect(active_page: 'Page'):\n    return active_page.goto('/')\n",
+        "def inspect():\n    active_page: 'Page' = acquire()\n"
+        "    return active_page.evaluate('1')\n",
+        "def inspect(browser_page: 'Page'):\n    active_page = browser_page\n"
+        "    return active_page.evaluate('1')\n",
+        "def inspect(session):\n    browser_page = session.page\n"
+        "    return browser_page.evaluate('1')\n",
+        "def inspect():\n    return self._session.page.evaluate('1')\n",
+        "import patchright.async_api as api\n"
+        "def inspect(active_page: api.Page):\n    return active_page.evaluate('1')\n",
+        "def outer(browser_page: 'Page'):\n    active_page = browser_page\n"
+        "    def nested():\n        return active_page.evaluate('1')\n",
     ],
 )
-def test_direct_page_handles_are_classified_as_page_owning(source: str):
+def test_page_evidence_is_classified_as_page_owning(source: str):
     assert source_classification(ast.parse(source)) == "page-owning"
 
 
@@ -161,9 +171,16 @@ def test_direct_page_handles_are_classified_as_page_owning(source: str):
         "self._profile_page.read_identity()\n",
         "browser_page.evaluate('1')\n",
         "self._job_page.capture()\n",
+        "def inspect(browser_page: 'Page'):\n    browser_page = collaborator\n"
+        "    return browser_page.evaluate('1')\n",
+        "def outer(browser_page: 'Page'):\n"
+        "    def nested(browser_page):\n        return browser_page.evaluate('1')\n",
+        "def outer(browser_page: 'Page'):\n"
+        "    def nested():\n        browser_page = collaborator\n"
+        "        return browser_page.evaluate('1')\n",
     ],
 )
-def test_page_named_collaborators_remain_browser_free(source: str):
+def test_collaborators_and_rebound_names_remain_browser_free(source: str):
     assert source_classification(ast.parse(source)) == "browser-free"
 
 
@@ -174,7 +191,7 @@ def test_nested_package_modules_are_inspected_with_stable_paths(tmp_path: Path):
     (nested / "__init__.py").write_text(
         "PUBLIC_VALUE = 1\n"
         "class NestedOwner:\n    pass\n\n"
-        "def _inspect(page):\n    return page.evaluate('1')\n",
+        "def _inspect(active_page: 'Page'):\n    return active_page.evaluate('1')\n",
         encoding="utf-8",
     )
     (nested / "worker.py").write_text(
@@ -279,10 +296,21 @@ def test_namespace_package_cycle_fails_even_after_regeneration(tmp_path: Path):
         pytest.param(
             lambda scraping: (scraping / "connection.py").write_text(
                 (scraping / "connection.py").read_text(encoding="utf-8")
-                + "\n\ndef _inspect_page(page):\n    return page.evaluate('1')\n",
+                + "\n\ndef _inspect_page(browser_page: 'Page'):\n"
+                "    return browser_page.evaluate('1')\n",
                 encoding="utf-8",
             ),
-            id="source-classification-bare-page",
+            id="source-classification-page-type",
+        ),
+        pytest.param(
+            lambda scraping: (scraping / "connection.py").write_text(
+                (scraping / "connection.py").read_text(encoding="utf-8")
+                + "\n\ndef _inspect_page(browser_page: 'Page'):\n"
+                "    active_page = browser_page\n"
+                "    return active_page.evaluate('1')\n",
+                encoding="utf-8",
+            ),
+            id="source-classification-page-alias",
         ),
     ],
 )

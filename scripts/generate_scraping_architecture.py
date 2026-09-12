@@ -188,18 +188,179 @@ def _attribute_parts(node: ast.Attribute) -> tuple[str, ...]:
     return tuple(reversed(parts))
 
 
-def _source_classification(tree: ast.Module) -> str:
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "patchright.async_api":
-            if any(alias.name == "Page" for alias in node.names):
-                return "page-owning"
+def _page_annotation(annotation: ast.expr | None, page_types: frozenset[str]) -> bool:
+    if annotation is None:
+        return False
+    if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+        try:
+            annotation = ast.parse(annotation.value, mode="eval").body
+        except SyntaxError:
+            return False
+    return any(
+        isinstance(node, (ast.Name, ast.Attribute)) and ast.unparse(node) in page_types
+        for node in ast.walk(annotation)
+    )
+
+
+def _bound_names(nodes: list[ast.stmt]) -> frozenset[str]:
+    names: set[str] = set()
+
+    class BindingVisitor(ast.NodeVisitor):
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            names.add(node.name)
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            names.add(node.name)
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            names.add(node.name)
+
+        def visit_Name(self, node: ast.Name) -> None:
+            if isinstance(node.ctx, (ast.Store, ast.Del)):
+                names.add(node.id)
+
+    visitor = BindingVisitor()
+    for node in nodes:
+        visitor.visit(node)
+    return frozenset(names)
+
+
+class _PageUseVisitor(ast.NodeVisitor):
+    def __init__(self, page_types: frozenset[str]) -> None:
+        self.page_types = page_types
+        self.scopes: list[dict[tuple[str, ...], bool]] = [{}]
+        self.found = False
+
+    @property
+    def scope(self) -> dict[tuple[str, ...], bool]:
+        return self.scopes[-1]
+
+    def _key(self, node: ast.expr) -> tuple[str, ...] | None:
+        if isinstance(node, ast.Name):
+            return (node.id,)
         if isinstance(node, ast.Attribute):
             parts = _attribute_parts(node)
-            if parts[-1] in {"page", "_page"} or any(
-                part in {"page", "_page"} for part in parts[:-1]
-            ):
-                return "page-owning"
-    return "browser-free"
+            return parts if parts else None
+        return None
+
+    def _tracked(self, node: ast.expr) -> bool:
+        key = self._key(node)
+        if key is None:
+            return False
+        for scope in reversed(self.scopes):
+            if key in scope:
+                return scope[key]
+        return False
+
+    def _known_source(self, node: ast.expr) -> bool:
+        if not isinstance(node, ast.Attribute) or node.attr not in {"page", "_page"}:
+            return False
+        receiver = self._key(node.value)
+        return receiver is not None and receiver[-1] in {"session", "_session"}
+
+    def _page_value(self, node: ast.expr | None) -> bool:
+        return node is not None and (self._tracked(node) or self._known_source(node))
+
+    def _bind(self, target: ast.expr, is_page: bool) -> None:
+        if isinstance(target, (ast.Tuple, ast.List)):
+            for element in target.elts:
+                self._bind(element, False)
+            return
+        key = self._key(target)
+        if key is not None:
+            self.scope[key] = is_page
+
+    def _visit_arguments(self, arguments: ast.arguments) -> None:
+        for argument in [
+            *arguments.posonlyargs,
+            *arguments.args,
+            *arguments.kwonlyargs,
+        ]:
+            self.scope[(argument.arg,)] = _page_annotation(
+                argument.annotation, self.page_types
+            )
+        if arguments.vararg is not None:
+            self.scope[(arguments.vararg.arg,)] = False
+        if arguments.kwarg is not None:
+            self.scope[(arguments.kwarg.arg,)] = False
+
+    def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        local = {name: False for name in _bound_names(node.body)}
+        self.scopes.append({(name,): value for name, value in local.items()})
+        self._visit_arguments(node.args)
+        for statement in node.body:
+            self.visit(statement)
+        self.scopes.pop()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_function(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_function(node)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        self.scopes.append({})
+        self._visit_arguments(node.args)
+        self.visit(node.body)
+        self.scopes.pop()
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        self.visit(node.value)
+        is_page = self._page_value(node.value)
+        for target in node.targets:
+            self._bind(target, is_page)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        self.visit(node.annotation)
+        if node.value is not None:
+            self.visit(node.value)
+        self._bind(
+            node.target,
+            _page_annotation(node.annotation, self.page_types)
+            or self._page_value(node.value),
+        )
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        self.visit(node.value)
+        self._bind(node.target, False)
+
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+        self.visit(node.value)
+        self._bind(node.target, self._page_value(node.value))
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        if self._known_source(node) or self._tracked(node.value):
+            self.found = True
+        self.generic_visit(node)
+
+
+def _page_types(tree: ast.Module) -> tuple[frozenset[str], bool]:
+    types = {"Page"}
+    imported = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "patchright.async_api":
+            for alias in node.names:
+                if alias.name == "Page":
+                    types.add(alias.asname or alias.name)
+                    imported = True
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "patchright.async_api":
+                    types.add(f"{alias.asname or alias.name}.Page")
+        elif isinstance(node, ast.ImportFrom) and node.module == "patchright":
+            for alias in node.names:
+                if alias.name == "async_api":
+                    types.add(f"{alias.asname or alias.name}.Page")
+    return frozenset(types), imported
+
+
+def _source_classification(tree: ast.Module) -> str:
+    page_types, imports_page = _page_types(tree)
+    if imports_page:
+        return "page-owning"
+    visitor = _PageUseVisitor(page_types)
+    visitor.visit(tree)
+    return "page-owning" if visitor.found else "browser-free"
 
 
 def inspect_modules(scraping: Path = SCRAPING) -> tuple[ModuleInfo, ...]:
