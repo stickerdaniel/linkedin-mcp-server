@@ -87,7 +87,11 @@ async def dom_page():
 
 
 def sidebar(
-    rows: list[tuple[str, str]], *, clickable: bool = True, routes: bool = True
+    rows: list[tuple[str, str]],
+    *,
+    clickable: bool = True,
+    routes: bool = True,
+    unclickable: set[str] | None = None,
 ) -> str:
     """A messaging sidebar of ``(aria-label, thread-id)`` rows.
 
@@ -105,10 +109,11 @@ def sidebar(
     handler reads back as ``undefined`` and every such assertion would pass
     vacuously.
 
-    ``clickable=False`` drops that inner div, standing in for a row LinkedIn
-    rendered without a handler. ``routes=False`` keeps the handler and drops
-    only the ``pushState``, standing in for a row whose click never reaches the
-    thread route. Both are built here rather than patched in afterwards,
+    ``clickable=False`` drops every inner div, while ``unclickable`` can drop
+    individual rows, standing in for a row LinkedIn rendered without a handler.
+    ``routes=False`` keeps the handler and drops only the ``pushState``, standing
+    in for a row whose click never reaches the thread route. Both are built here
+    rather than patched in afterwards,
     because rewriting an ``onclick`` attribute from the isolated world leaves
     the page's own compiled handler in place and adds a second one: measured,
     the row then logs its click twice.
@@ -126,7 +131,7 @@ def sidebar(
             f".textContent += ' {thread_id}'; "
             f'{route}">'
             f"<span>{label}</span></div>"
-            if clickable
+            if clickable and thread_id not in (unclickable or set())
             else f"<span>{label}</span>"
         )
         items.append(f'<li><label aria-label="{label}">{inner}</label></li>')
@@ -136,6 +141,27 @@ def sidebar(
   <body>
     <p id="log"></p>
     <main><ul>{"".join(items)}</ul></main>
+  </body>
+</html>
+"""
+
+
+def delayed_thread_route_sidebar() -> str:
+    """One row whose click visits a non-thread route before its thread route."""
+    return """<!DOCTYPE html>
+<html lang="en">
+  <head><meta charset="utf-8"><title>Messaging</title></head>
+  <body>
+    <p id="log"></p>
+    <main><ul><li><label aria-label="Select conversation with Ada Lovelace">
+      <div class="msg-conversation-listitem__link" onclick="
+        document.getElementById('log').textContent += ' 2-ada';
+        history.pushState({}, '', '/messaging/loading/');
+        setTimeout(() => history.pushState(
+          {}, '', '/messaging/thread/2-ada/'
+        ), 250);
+      "><span>Select conversation with Ada Lovelace</span></div>
+    </label></li></ul></main>
   </body>
 </html>
 """
@@ -323,6 +349,38 @@ class TestTheClickLoopAgainstRealDom:
         assert refs == []
         assert await clicks(dom_page) == []
 
+    async def test_an_unclickable_row_cannot_reuse_the_previous_thread(self, dom_page):
+        """A later row without a handler is omitted after a successful click.
+
+        The page still carries the prior thread URL, so proceeding past the
+        missing click target could report that thread again under the later
+        row's participant label.
+        """
+        await serve(
+            dom_page,
+            sidebar(
+                [
+                    ("Select conversation with Ada Lovelace", "2-ada"),
+                    ("Select conversation with Grace Hopper", "2-grace"),
+                ],
+                unclickable={"2-grace"},
+            ),
+        )
+
+        refs = await _reader(dom_page)._extract_conversation_thread_refs(
+            limit=None, context="inbox"
+        )
+
+        assert await clicks(dom_page) == ["2-ada"]
+        assert refs == [
+            {
+                "kind": "conversation",
+                "url": "/messaging/thread/2-ada/",
+                "context": "inbox",
+                "text": "Ada Lovelace",
+            }
+        ]
+
     async def test_the_aria_label_reaches_python_unmodified(self, dom_page):
         """The locale strip is Python's job, so the browser must not do it.
 
@@ -345,6 +403,24 @@ class TestTheClickLoopAgainstRealDom:
                 "url": "/messaging/thread/2-ada/",
                 "context": "inbox",
                 "text": "Konversation auswählen mit Ada Lovelace",
+            }
+        ]
+
+    async def test_a_non_thread_transition_waits_for_the_thread_route(self, dom_page):
+        """The first changed URL is not necessarily the settled SPA route."""
+        await serve(dom_page, delayed_thread_route_sidebar())
+
+        refs = await _reader(dom_page)._extract_conversation_thread_refs(
+            limit=None, context="inbox"
+        )
+
+        assert await clicks(dom_page) == ["2-ada"]
+        assert refs == [
+            {
+                "kind": "conversation",
+                "url": "/messaging/thread/2-ada/",
+                "context": "inbox",
+                "text": "Ada Lovelace",
             }
         ]
 

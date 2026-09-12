@@ -552,6 +552,43 @@ class TestGetInbox:
 
         assert result["references"]["inbox"] == thread_refs
 
+    async def test_click_captured_duplicate_keeps_its_richer_metadata(self, mock_page):
+        """The first duplicate wins, so the click-captured ref must lead.
+
+        Root anchors can expose the same URL with less or different metadata.
+        Reversing the merge order would silently replace the participant name
+        and inbox context captured from the conversation row.
+        """
+        reader = _reader(mock_page)
+        url = "/messaging/thread/2-abc123/"
+        click_ref = _ref(url, "Tony Chan", "inbox")
+        anchor_ref = {
+            "href": f"https://www.linkedin.com{url}",
+            "text": "Open chat",
+        }
+        with (
+            patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(reader, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                reader, "_scroll_main_scrollable_region", new_callable=AsyncMock
+            ),
+            patch.object(
+                PageContentReader,
+                "_extract_root_content",
+                new_callable=AsyncMock,
+                return_value=_root("Tony Chan", [anchor_ref]),
+            ),
+            patch.object(
+                reader,
+                "_extract_conversation_thread_refs",
+                new_callable=AsyncMock,
+                return_value=[click_ref],
+            ),
+        ):
+            result = await reader.get_inbox(limit=10)
+
+        assert result["references"]["inbox"] == [click_ref]
+
     @pytest.mark.parametrize(
         ("limit", "attempts"),
         [(5, 1), (10, 1), (20, 2), (55, 5)],
@@ -935,11 +972,13 @@ class TestSearchConversations:
 
 
 class TestScrollMainScrollableRegion:
-    async def test_each_attempt_is_one_evaluation_paced_by_the_delay(self, mock_page):
+    async def test_each_attempt_is_one_evaluation_paced_by_the_delay(
+        self, mock_page, session_boundaries
+    ):
         """The loop runs the program once per attempt and pauses after each.
 
-        Dropping the pause runs every scroll before the browser has appended
-        anything, which reads as a sidebar with nothing more to load.
+        Dropping or zeroing the pause runs every scroll before the browser has
+        appended anything, which reads as a sidebar with nothing more to load.
         """
         reader = _reader(mock_page)
         mock_page.evaluate = AsyncMock(return_value=True)
@@ -952,6 +991,12 @@ class TestScrollMainScrollableRegion:
         assert [call.args[1] for call in mock_page.evaluate.await_args_list] == [
             {"position": "bottom"}
         ] * 3
+        assert session_boundaries.delay.await_count == 3
+        assert [call.args for call in session_boundaries.delay.await_args_list] == [
+            (0.25,),
+            (0.25,),
+            (0.25,),
+        ]
 
     async def test_a_zero_budget_evaluates_nothing(self, mock_page):
         reader = _reader(mock_page)
