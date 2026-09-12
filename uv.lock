@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.12.4, <3.15"
 
 [[package]]
@@ -1040,7 +1040,7 @@ wheels = [
 
 [[package]]
 name = "mcp-server-linkedin"
-version = "4.24.0"
+version = "4.25.0"
 source = { editable = "." }
 dependencies = [
     { name = "anyio" },
