@@ -25,9 +25,14 @@ SCRAPING_SYNTHETIC = (
     ROOT / "linkedin_mcp_server" / "scraping" / "synthetic_inventory.py"
 )
 
+# `handle_modal_close` left this table with the conversation reader, which
+# held the last facade caller of it: `scraping.extractor` has no binding of
+# that name any more, so there is no site in `boundaries` to date. The
+# rate-limit check is down to `send_message` alone for the same reason, and
+# both keep their `_BOUNDARY_OWNERS` entries so a patch that reappears is
+# dated against its caller rather than failing closed as unknown.
 _SHARED_BOUNDARY_STAGES = {
-    "detect_rate_limit": {11, 12},
-    "handle_modal_close": {11, 12},
+    "detect_rate_limit": {12},
 }
 
 
@@ -223,7 +228,17 @@ def test_module_boundary_patches_follow_their_callers():
     # relocating the reads rather than by dropping `_BOUNDARY_OWNERS`
     # entries: one that comes back has to be dated against its caller instead
     # of failing closed as unknown.
-    retired = ("scroll_to_bottom", "scroll_job_sidebar", "build_issue_diagnostics")
+    # `handle_modal_close` and `build_references` joined them with the
+    # conversation reader: it closes modals through `ScrapingSession` and
+    # builds its references from `link_metadata` directly, so neither name is
+    # bound in `scraping.extractor` any more.
+    retired = (
+        "scroll_to_bottom",
+        "scroll_job_sidebar",
+        "build_issue_diagnostics",
+        "handle_modal_close",
+        "build_references",
+    )
     assert not [seam for seam in current["seams"] if seam["target"] in retired]
     assert all(name in migration._BOUNDARY_OWNERS for name in retired)
 
@@ -249,23 +264,22 @@ def test_module_boundary_patches_follow_their_callers():
     assert "logger" in migration._CONTEXTUAL_MODULE_NAMES
 
 
-@pytest.mark.parametrize(
-    ("target", "expected_stages"),
-    [
-        (target, stages)
-        for target, stages in _SHARED_BOUNDARY_STAGES.items()
-        if len(stages) > 1
-    ],
-)
-def test_shared_boundary_patches_retain_later_consumers_after_early_migration(
-    monkeypatch, target, expected_stages
-):
-    key = ("tests/scraping/policy_scenarios.py", "boundaries", target)
+def test_a_shared_boundary_patch_is_dated_once_per_consuming_stage(monkeypatch):
+    """One site, one seam per owner that still consumes the binding.
+
+    The live tree no longer spans two stages here: `detect_rate_limit` is down
+    to `send_message` alone now that the conversation reader takes the check
+    through `ScrapingSession`, and a single-consumer site proves nothing about
+    a reader that returned only the earliest owner. Restoring one retired
+    consumer is what keeps the mechanism measured — `_callers` has to answer
+    with both owners, or the site closes at stage 11 while `send_message`
+    still needs it.
+    """
+    key = ("tests/scraping/policy_scenarios.py", "boundaries", "detect_rate_limit")
     owners = migration._WORKFLOW_OWNERS | migration._PRIVATE_OWNERS
-    consumers = migration._EXPLICIT_CALLER_CONTEXTS[key]
-    earliest_stage = min(owners[name][1] for name in consumers)
-    remaining = tuple(name for name in consumers if owners[name][1] != earliest_stage)
-    monkeypatch.setitem(migration._EXPLICIT_CALLER_CONTEXTS, key, remaining)
+    live = migration._EXPLICIT_CALLER_CONTEXTS[key]
+    restored = ("get_conversation", *live)
+    monkeypatch.setitem(migration._EXPLICIT_CALLER_CONTEXTS, key, restored)
 
     publics, privates = migration.extractor_methods()
     seams = migration.scan_source(
@@ -275,11 +289,13 @@ def test_shared_boundary_patches_retain_later_consumers_after_early_migration(
         privates,
     )
 
+    assert live == ("send_message",)
+    assert {owners[name][1] for name in restored} == {11, 12}
     assert {
         seam.migration_stage
         for seam in seams
-        if seam.kind == "boundary_patch_object" and seam.target == target
-    } == expected_stages - {earliest_stage}
+        if seam.kind == "boundary_patch_object" and seam.target == "detect_rate_limit"
+    } == {11, 12}
 
 
 def test_the_last_public_facade_patch_retired_with_the_post_search():
@@ -359,9 +375,10 @@ def test_checker_rejects_obsolete_seams_at_their_migration_stage():
     # The lowest stage that still holds an unclosed seam, which is the only
     # kind of override that can surface one. Stages at or below the tree's own
     # completed stage are closed by definition, so an override there proves
-    # nothing; raise this number as each stage lands.
+    # nothing; raise this number as each stage lands. Stage 11 closed with the
+    # conversation reader, so 12 is the lowest open one.
     result = subprocess.run(
-        [sys.executable, str(CHECKER), "--check", "--stage", "11"],
+        [sys.executable, str(CHECKER), "--check", "--stage", "12"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -369,18 +386,21 @@ def test_checker_rejects_obsolete_seams_at_their_migration_stage():
     )
 
     assert result.returncode == 1
-    assert "obsolete at stage 11:" in result.stderr
-    # Stage 11 is the conversation reader, and its seams reach the facade four
-    # different ways. `public_patch_object` and `module_attribute` are named
-    # too, negatively: the first retired with the post search and the second
-    # does not open before 12, so either one surfacing here would mean a
-    # closed stage left a seam behind.
+    assert "obsolete at stage 12:" in result.stderr
+    # Stage 12 is the message sender, and its seams reach the facade six
+    # different ways — `module_attribute` among them, which is what separates
+    # this list from the stage-11 one it replaced. `public_patch_object` and
+    # `module_alias` are named negatively: the first retired with the post
+    # search and the second belongs to the facade's own stage 14, so either
+    # one surfacing here would mean a closed stage left a seam behind.
     assert "boundary_patch_object" in result.stderr
     assert "private_patch_object" in result.stderr
     assert "private_facade_access" in result.stderr
     assert "string_patch" in result.stderr
+    assert "direct_import" in result.stderr
+    assert "module_attribute" in result.stderr
     assert "public_patch_object" not in result.stderr
-    assert "module_attribute" not in result.stderr
+    assert "module_alias" not in result.stderr
 
 
 def test_checkers_offer_no_fixture_update_mode():

@@ -20,6 +20,8 @@ from linkedin_mcp_server.scraping import contracts, text
 from linkedin_mcp_server.scraping.capture import SectionCapture
 from linkedin_mcp_server.scraping.connection import ActionSignals
 from linkedin_mcp_server.scraping.connection_actions import ConnectionActions
+from linkedin_mcp_server.scraping.content import PageContentReader
+from linkedin_mcp_server.scraping.conversations import ConversationReader
 from linkedin_mcp_server.scraping.extractor import (
     ExtractedSection,
     FilterValidationError,
@@ -29,6 +31,9 @@ from linkedin_mcp_server.scraping.extractor import (
     strip_linkedin_noise,
 )
 from linkedin_mcp_server.scraping.jobs import JobScraper
+from linkedin_mcp_server.scraping.navigation import PageNavigator
+from linkedin_mcp_server.scraping.profile_page import ProfilePageReader
+from linkedin_mcp_server.scraping.session import ScrapingSession
 from linkedin_mcp_server.server import create_mcp_server
 
 from .policy_scenarios import COMPATIBILITY_METHODS, TOOL_FACADE_METHODS
@@ -275,6 +280,86 @@ async def test_facade_search_jobs_forwards_every_filter_in_order(mock_page):
         "recent",
         17.5,
     )
+
+
+async def test_facade_get_conversation_forwards_its_username_and_index(mock_page):
+    # The `conversation` trace drives this delegate by `thread_id` alone, so
+    # neither of the other two arguments is pinned there: replacing both
+    # forwards with their defaults survives every trace. Pinned here against
+    # the real owner, because dropping the username answers a by-participant
+    # request with "Provide at least one of ...", and dropping the index
+    # answers it with somebody's most recent thread instead of the one asked
+    # for.
+    extractor = LinkedInExtractor(cast(Page, mock_page))
+    threads = [
+        "https://www.linkedin.com/messaging/thread/2-newer/",
+        "https://www.linkedin.com/messaging/thread/2-older/",
+    ]
+
+    with (
+        patch.object(ScrapingSession, "check_rate_limit", new_callable=AsyncMock),
+        patch.object(ScrapingSession, "dismiss_modal", new_callable=AsyncMock),
+        patch.object(ScrapingSession, "delay", new_callable=AsyncMock),
+        patch.object(
+            PageNavigator, "_navigate_to_page", new_callable=AsyncMock
+        ) as navigate,
+        patch.object(
+            ProfilePageReader,
+            "_read_profile_display_name",
+            new_callable=AsyncMock,
+            return_value="Jacki McMahan",
+        ),
+        patch.object(
+            ConversationReader,
+            "_resolve_conversation_thread_urls",
+            new_callable=AsyncMock,
+            return_value=threads,
+        ),
+        patch.object(
+            PageContentReader,
+            "_extract_root_content",
+            new_callable=AsyncMock,
+            return_value={"source": "root", "text": "msg", "references": []},
+        ),
+    ):
+        await extractor.get_conversation(linkedin_username="jacki-old", index=1)
+
+    assert [
+        call.args[0]
+        for call in navigate.await_args_list
+        if call.args and "/messaging/thread/" in call.args[0]
+    ] == [threads[1]]
+
+
+async def test_facade_search_conversations_forwards_its_row_cap(mock_page):
+    # `limit` reaches nothing the `search-conversations` trace records: the
+    # scripted row wait times out, so the cap never gets as far as the click
+    # loop it bounds. Replacing the forward with the default survives the
+    # traces, and every row the loop visits may be marked read, which is the
+    # side effect the cap exists to bound.
+    extractor = LinkedInExtractor(cast(Page, mock_page))
+
+    with (
+        patch.object(ScrapingSession, "check_rate_limit", new_callable=AsyncMock),
+        patch.object(ScrapingSession, "dismiss_modal", new_callable=AsyncMock),
+        patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
+        patch.object(ConversationReader, "_wait_for_main_text", new_callable=AsyncMock),
+        patch.object(
+            PageContentReader,
+            "_extract_root_content",
+            new_callable=AsyncMock,
+            return_value={"source": "root", "text": "hit", "references": []},
+        ),
+        patch.object(
+            ConversationReader,
+            "_extract_conversation_thread_refs",
+            new_callable=AsyncMock,
+            return_value=[],
+        ) as refs,
+    ):
+        await extractor.search_conversations("engine", limit=7)
+
+    refs.assert_awaited_once_with(limit=7, context="search_results")
 
 
 async def test_facade_scrape_person_keeps_refusing_the_self_alias_by_default(mock_page):
