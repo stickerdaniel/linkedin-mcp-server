@@ -22,6 +22,20 @@ FIXTURE_ROOT = TESTS / "fixtures" / "scraping-policy"
 MANIFEST = FIXTURE_ROOT / "migration-manifest.json"
 EXTRACTOR_MODULE = "linkedin_mcp_server.scraping.extractor"
 
+# The package facade is a composition boundary, not a production import
+# shortcut. Keep the exact consumers that exercise that boundary beside the
+# checker so a new tool or service cannot acquire the facade unnoticed.
+_FACADE_PACKAGE_IMPORTERS = frozenset(
+    {
+        "linkedin_mcp_server/dependencies.py",
+        "tests/scraping/policy_scenarios.py",
+        "tests/scraping/test_facade_contracts.py",
+        "tests/scraping/test_facade_results.py",
+        "tests/scraping/test_facade_structure.py",
+        "tests/test_dependencies.py",
+    }
+)
+
 # Public-named contracts that keep a permanent identity alias in
 # scraping.extractor. An import through the alias reaches the same object as an
 # import from the canonical owner, so it never goes obsolete. A *patch* against
@@ -375,6 +389,10 @@ def _is_extractor_module_import(path: Path, node: ast.ImportFrom) -> bool:
 
 def _is_scraping_package_import(path: Path, node: ast.ImportFrom) -> bool:
     return _resolved_import_module(path, node) == "linkedin_mcp_server.scraping"
+
+
+def _is_approved_facade_package_importer(path: Path) -> bool:
+    return path.relative_to(ROOT).as_posix() in _FACADE_PACKAGE_IMPORTERS
 
 
 def _annotation_name(annotation: ast.expr | None) -> str | None:
@@ -3260,7 +3278,13 @@ class Scanner(ast.NodeVisitor):
                         14,
                     )
                 elif alias.name == "LinkedInExtractor":
-                    continue
+                    if not _is_approved_facade_package_importer(self.path):
+                        self._error(
+                            node,
+                            alias.name,
+                            "scraping package facade import is not an approved "
+                            "construction or contract boundary",
+                        )
         self.generic_visit(node)
 
     def _suppress_module_attributes(self, target: ast.expr) -> None:

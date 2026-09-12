@@ -20,6 +20,14 @@ ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = ROOT / "linkedin_mcp_server"
 SCRAPING = PACKAGE / "scraping"
 EXTRACTOR = SCRAPING / "extractor.py"
+FACADE_PACKAGE_IMPORTERS = {
+    Path("linkedin_mcp_server/dependencies.py"),
+    Path("tests/scraping/policy_scenarios.py"),
+    Path("tests/scraping/test_facade_contracts.py"),
+    Path("tests/scraping/test_facade_results.py"),
+    Path("tests/scraping/test_facade_structure.py"),
+    Path("tests/test_dependencies.py"),
+}
 
 PUBLIC_SIGNATURES = {
     "click_button_by_text": "(self, text: 'str', *, scope: 'str' = 'main', timeout: 'int' = 5000) -> 'bool'",
@@ -319,6 +327,12 @@ def _assert_no_obsolete_extractor_seams(sources: dict[Path, str]) -> None:
                 names = {alias.name for alias in node.names}
                 assert path == Path("tests/scraping/test_facade_contracts.py")
                 assert names <= set(PERMANENT_ALIASES)
+            if isinstance(node, ast.ImportFrom) and node.module == (
+                "linkedin_mcp_server.scraping"
+            ):
+                names = {alias.name for alias in node.names}
+                if "LinkedInExtractor" in names:
+                    assert path in FACADE_PACKAGE_IMPORTERS
             if isinstance(node, ast.Call) and node.args:
                 function = node.func
                 is_patch = isinstance(function, ast.Name) and function.id == "patch"
@@ -481,6 +495,10 @@ def test_dependency_guards_reject_cycles_layers_and_reverse_imports(path, additi
         (
             Path("linkedin_mcp_server/tools/feed.py"),
             "from linkedin_mcp_server.scraping.extractor import LinkedInExtractor\n",
+        ),
+        (
+            Path("linkedin_mcp_server/server.py"),
+            "from linkedin_mcp_server.scraping import LinkedInExtractor\n",
         ),
         (
             Path("tests/test_tools.py"),

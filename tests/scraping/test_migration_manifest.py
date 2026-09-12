@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import ast
 import json
 import logging
 import re
@@ -17,6 +18,8 @@ sys.path.insert(0, str(ROOT))
 
 from scripts import check_scraping_migration_manifest as migration  # noqa: E402
 
+TESTS = ROOT / "tests"
+PACKAGE = ROOT / "linkedin_mcp_server"
 MANIFEST = ROOT / "tests" / "fixtures" / "scraping-policy" / "migration-manifest.json"
 CHECKER = ROOT / "scripts" / "check_scraping_migration_manifest.py"
 POLICY_SCENARIOS = ROOT / "tests" / "scraping" / "policy_scenarios.py"
@@ -84,6 +87,62 @@ def test_manifest_has_no_obsolete_production_callers():
         for seam in current["seams"]
         if seam["path"].startswith("linkedin_mcp_server/")
     ]
+
+
+def _facade_package_importers() -> set[str]:
+    importers: set[str] = set()
+    for path in [*TESTS.rglob("*.py"), *PACKAGE.rglob("*.py")]:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        if any(
+            isinstance(node, ast.ImportFrom)
+            and migration._is_scraping_package_import(path, node)
+            and any(alias.name == "LinkedInExtractor" for alias in node.names)
+            for node in ast.walk(tree)
+        ):
+            importers.add(path.relative_to(ROOT).as_posix())
+    return importers
+
+
+def test_facade_package_import_allowlist_matches_actual_consumers():
+    assert _facade_package_importers() == migration._FACADE_PACKAGE_IMPORTERS
+
+
+def test_package_export_dependency_composition_and_facade_contracts_are_allowed():
+    publics, privates = migration.extractor_methods()
+    approved = {ROOT / path for path in migration._FACADE_PACKAGE_IMPORTERS} | {
+        PACKAGE / "scraping" / "__init__.py"
+    }
+
+    assert publics == migration._TOOL_METHODS | migration._COMPATIBILITY_METHODS
+    assert len(publics) == 20
+    for path in approved:
+        migration.scan_source(
+            path,
+            path.read_text(encoding="utf-8"),
+            publics,
+            privates,
+        )
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        PACKAGE / "tools" / "feed.py",
+        PACKAGE / "server.py",
+    ],
+)
+def test_unauthorized_production_package_facade_imports_fail_closed(path):
+    source = "from linkedin_mcp_server.scraping import LinkedInExtractor\n"
+
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=(
+            rf"{re.escape(path.relative_to(ROOT).as_posix())}:1 LinkedInExtractor: "
+            r"scraping package facade import is not an approved construction "
+            r"or contract boundary"
+        ),
+    ):
+        _scan_synthetic(source, path=path)
 
 
 def test_final_messaging_seams_have_only_the_approved_stage_owners():
