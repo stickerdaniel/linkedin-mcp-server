@@ -22,6 +22,7 @@ SPEC.loader.exec_module(GENERATOR)
 render = cast(Callable[[Path], str], GENERATOR.render)
 check = cast(Callable[[Path, Path], bool], GENERATOR.check)
 dependency_violations = GENERATOR.dependency_violations
+inspect_modules = GENERATOR.inspect_modules
 ModuleInfo = GENERATOR.ModuleInfo
 
 
@@ -37,6 +38,10 @@ def _replace(path: Path, old: str, new: str) -> None:
     path.write_text(source.replace(old, new, 1), encoding="utf-8")
 
 
+def _prepend(path: Path, source: str) -> None:
+    path.write_text(source + path.read_text(encoding="utf-8"), encoding="utf-8")
+
+
 def test_generated_architecture_is_current_deterministic_and_checkout_neutral():
     first = render(ROOT / "linkedin_mcp_server" / "scraping")
     second = render(ROOT / "linkedin_mcp_server" / "scraping")
@@ -47,6 +52,30 @@ def test_generated_architecture_is_current_deterministic_and_checkout_neutral():
     )
     assert str(ROOT) not in first
     assert "None detected." in first
+
+
+def test_import_from_normalization_keeps_modules_and_symbols_distinct(tmp_path: Path):
+    scraping = _copy_scraping(tmp_path)
+    _prepend(
+        scraping / "connection.py",
+        "from . import capture\n"
+        "from .capture import SectionCapture\n"
+        "from ..scraping import navigation\n"
+        "from linkedin_mcp_server import process_protocol\n",
+    )
+
+    connection = next(
+        module
+        for module in inspect_modules(scraping)
+        if module.name == "linkedin_mcp_server.scraping.connection"
+    )
+
+    assert "linkedin_mcp_server.scraping.capture" in connection.imports
+    assert "linkedin_mcp_server.scraping.navigation" in connection.imports
+    assert "linkedin_mcp_server.process_protocol" in connection.imports
+    assert (
+        "linkedin_mcp_server.scraping.capture.SectionCapture" not in connection.imports
+    )
 
 
 @pytest.mark.parametrize(
@@ -128,6 +157,42 @@ def test_dependency_direction_violations_are_reported_deterministically():
         "reverse facade import: `linkedin_mcp_server.scraping.alpha` -> "
         "`linkedin_mcp_server.scraping.extractor`",
     )
+
+
+@pytest.mark.parametrize(
+    "path,source",
+    [
+        pytest.param(
+            "connection.py",
+            "from linkedin_mcp_server import process_protocol\n",
+            id="forbidden-package-alias",
+        ),
+        pytest.param(
+            "session.py",
+            "from . import content\n",
+            id="relative-package-cycle",
+        ),
+        pytest.param(
+            "session.py",
+            "from .capture import SectionCapture\n",
+            id="relative-module-cycle",
+        ),
+        pytest.param(
+            "session.py",
+            "from ..scraping import capture\n",
+            id="multi-level-relative-cycle",
+        ),
+    ],
+)
+def test_normalized_violations_fail_after_regeneration(
+    tmp_path: Path, path: str, source: str
+):
+    scraping = _copy_scraping(tmp_path)
+    _prepend(scraping / path, source)
+    output = tmp_path / "scraping-architecture.md"
+    output.write_text(render(scraping), encoding="utf-8")
+
+    assert not check(output, scraping)
 
 
 def test_check_fails_even_when_a_violation_is_regenerated(tmp_path: Path):

@@ -63,15 +63,44 @@ def _resolve_import(module: str, node: ast.ImportFrom) -> str | None:
     return ".".join(resolved)
 
 
-def _imports(module: str, tree: ast.Module) -> tuple[str, ...]:
+def _known_package_modules(scraping: Path) -> frozenset[str]:
+    package_root = ROOT / "linkedin_mcp_server"
+    paths = {*package_root.rglob("*.py"), *scraping.glob("*.py")}
+    modules = {"linkedin_mcp_server", PACKAGE}
+    for path in paths:
+        if path.is_relative_to(package_root):
+            relative = path.relative_to(package_root).with_suffix("")
+            parts = relative.parts
+            prefix = "linkedin_mcp_server"
+        else:
+            relative = path.relative_to(scraping).with_suffix("")
+            parts = relative.parts
+            prefix = PACKAGE
+        if parts[-1] == "__init__":
+            parts = parts[:-1]
+        modules.add(".".join((prefix, *parts)))
+    return frozenset(modules)
+
+
+def _imports(
+    module: str, tree: ast.Module, known_modules: frozenset[str]
+) -> tuple[str, ...]:
     imports: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             imports.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom):
-            resolved = _resolve_import(module, node)
-            if resolved is not None:
-                imports.add(resolved)
+            continue
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        resolved = _resolve_import(module, node)
+        if resolved is None:
+            continue
+        if resolved not in known_modules:
+            imports.add(resolved)
+            continue
+        for alias in node.names:
+            candidate = f"{resolved}.{alias.name}"
+            imports.add(candidate if candidate in known_modules else resolved)
     imports.discard(module)
     return tuple(sorted(imports))
 
@@ -113,6 +142,7 @@ def _source_classification(tree: ast.Module) -> str:
 
 def inspect_modules(scraping: Path = SCRAPING) -> tuple[ModuleInfo, ...]:
     modules: list[ModuleInfo] = []
+    known_modules = _known_package_modules(scraping)
     for path in sorted(scraping.glob("*.py")):
         source = path.read_text(encoding="utf-8")
         tree = ast.parse(source, filename=path.name)
@@ -121,7 +151,7 @@ def inspect_modules(scraping: Path = SCRAPING) -> tuple[ModuleInfo, ...]:
             ModuleInfo(
                 name=module,
                 path=f"linkedin_mcp_server/scraping/{path.name}",
-                imports=_imports(module, tree),
+                imports=_imports(module, tree, known_modules),
                 owners=_public_owners(tree),
                 source_classification=_source_classification(tree),
             )
