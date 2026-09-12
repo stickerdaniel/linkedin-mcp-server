@@ -5,9 +5,10 @@ The unit suite mocks ``page.evaluate``, so the programs in
 ``scraping/connection_actions.py`` never execute there. These tests run the
 real ones against synthetic HTML in headless chromium.
 
-Every fixture is built from one set of templates and three sets of words:
-English, German, and one whose labels are opaque tokens carrying no verb at
-all. The structure is therefore identical across the three, and each case
+Every fixture is built from one set of templates, three sets of words and
+one set whose ARIA values are empty: English, German, opaque tokens carrying
+no verb, and present-but-empty attributes. The structure is identical across
+all four, and each case
 asserts the *same* answer for all of them in one assertion that names the
 locales. A decision that differs between two of them is a decision that read
 a word, which the AGENTS.md Scraping Rules forbid; the opaque set is the
@@ -67,7 +68,7 @@ USER = "testuser"
 class Labels:
     """Every visible string and aria-label value one locale contributes.
 
-    Only these words change between the three fixture sets, so nothing else
+    Only these values change between the four fixture sets, so nothing else
     can explain a decision that changes with them.
     """
 
@@ -153,7 +154,30 @@ OPAQUE = Labels(
     comment="d4e8b7",
 )
 
-LOCALES = (ENGLISH, GERMAN, OPAQUE)
+# Attribute presence and attribute truthiness are different contracts. This
+# set keeps every aria-label attribute in the markup while making its value
+# empty, so `hasAttribute` survives and `getAttribute(...)` truthiness does not.
+EMPTY_ARIA = Labels(
+    locale="empty-aria",
+    accept="",
+    ignore="",
+    more="",
+    message="",
+    connect="",
+    follow="",
+    pending="",
+    edit="",
+    play="",
+    mute="",
+    captions="",
+    fullscreen="",
+    settings="",
+    show_all="",
+    like="",
+    comment="",
+)
+
+LOCALES = (ENGLISH, GERMAN, OPAQUE, EMPTY_ARIA)
 
 Build = Callable[[Labels], str]
 
@@ -167,10 +191,10 @@ def incoming_action_row(labels: Labels) -> str:
     return f"""
   <div class="actions">
     <button type="button" aria-label="{labels.accept}"
-      onclick="document.body.setAttribute('data-clicked','accept')"
+      onclick="document.body.setAttribute('data-clicked','first-labeled')"
       >{labels.accept}</button>
     <button type="button" aria-label="{labels.ignore}"
-      onclick="document.body.setAttribute('data-clicked','ignore')"
+      onclick="document.body.setAttribute('data-clicked','second-labeled')"
       >{labels.ignore}</button>
     <button type="button" aria-expanded="false">{labels.more}</button>
   </div>
@@ -264,12 +288,12 @@ def follow_only_top_card(labels: Labels) -> str:
   <h1>Verena</h1>
   <div class="actions">
     <button type="button" aria-label="{labels.follow}"
-      onclick="document.body.setAttribute('data-clicked','follow')"
+      onclick="document.body.setAttribute('data-clicked','primary-labeled')"
       >{labels.follow}</button>
     <a href="/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3ACCC"
       >{labels.message}</a>
     <button type="button" aria-expanded="false"
-      onclick="document.body.setAttribute('data-clicked','more')"
+      onclick="document.body.setAttribute('data-clicked','expander')"
       >{labels.more}</button>
   </div>
 </section>
@@ -444,7 +468,7 @@ async def _in_every_locale(
     expected: Any,
     read: Callable[[Any, str], Awaitable[Any]],
 ) -> None:
-    """Assert one answer for the same structure in all three locales.
+    """Assert one answer for the same structure in all four label sets.
 
     The assertion carries the whole mapping rather than one locale at a
     time, so a divergence names the locale that diverged instead of failing
@@ -486,7 +510,7 @@ FINGERPRINT_CASES: tuple[tuple[str, Build, bool], ...] = (
 
 
 class TestConnectionStateIsStructural:
-    """Every state the classifier can reach, decided in three locales.
+    """Every state the classifier can reach, decided in all four label sets.
 
     Each case runs the real probe and the real classifier, so it covers the
     whole path from rendered markup to the decision the write gate reads.
@@ -512,7 +536,7 @@ class TestConnectionStateIsStructural:
 
 
 class TestIncomingActionRowFingerprint:
-    """The structural fingerprint, positive and negative, in three locales."""
+    """The structural fingerprint, positive and negative, in all four label sets."""
 
     @pytest.mark.parametrize(
         ("build", "expected"),
@@ -526,7 +550,7 @@ class TestIncomingActionRowFingerprint:
 
 
 class TestActionChoiceIsStructural:
-    """Which control each write-side program picks, in three locales."""
+    """Which control each write-side program picks, in all four label sets."""
 
     async def test_accept_clicks_the_first_labeled_button_only(self, dom_page):
         # Clicking the second labeled button would silently and irreversibly
@@ -535,7 +559,7 @@ class TestActionChoiceIsStructural:
         await _in_every_locale(
             dom_page,
             _both(incoming_top_card, sidebar_section),
-            (True, "accept"),
+            (True, "first-labeled"),
             lambda page, html: _click(page, html, CLICK_INCOMING_ACCEPT_JS),
         )
 
@@ -550,12 +574,12 @@ class TestActionChoiceIsStructural:
     async def test_the_more_opener_is_the_expander_not_the_primary(self, dom_page):
         # The More button is the one control in the action row *without* an
         # aria-label, and the Follow button beside it is the one with one. A
-        # text match would pick the wrong control in two of these three
-        # locales; the attribute picks the same one in all of them.
+        # text match cannot pick that control consistently across these
+        # fixtures; the attribute picks the same one in all of them.
         await _in_every_locale(
             dom_page,
             follow_only_top_card,
-            (True, "more"),
+            (True, "expander"),
             lambda page, html: _click(page, html, OPEN_MORE_BUTTON_JS),
         )
 

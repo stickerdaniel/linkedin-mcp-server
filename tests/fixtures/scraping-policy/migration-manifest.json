@@ -109,7 +109,7 @@
     {
       "canonical_owner": "facade.LinkedInExtractor",
       "kind": "direct_import",
-      "line": 21,
+      "line": 23,
       "migration_stage": 14,
       "path": "tests/scraping/test_facade_contracts.py",
       "target": "LinkedInExtractor"
@@ -117,7 +117,7 @@
     {
       "canonical_owner": "contracts.ExtractedSection",
       "kind": "permanent_alias_import",
-      "line": 21,
+      "line": 23,
       "migration_stage": null,
       "path": "tests/scraping/test_facade_contracts.py",
       "target": "ExtractedSection"
@@ -125,7 +125,7 @@
     {
       "canonical_owner": "contracts.FilterValidationError",
       "kind": "permanent_alias_import",
-      "line": 21,
+      "line": 23,
       "migration_stage": null,
       "path": "tests/scraping/test_facade_contracts.py",
       "target": "FilterValidationError"
@@ -133,7 +133,7 @@
     {
       "canonical_owner": "contracts.rate_limited_section_error",
       "kind": "permanent_alias_import",
-      "line": 21,
+      "line": 23,
       "migration_stage": null,
       "path": "tests/scraping/test_facade_contracts.py",
       "target": "rate_limited_section_error"
@@ -141,7 +141,7 @@
     {
       "canonical_owner": "text.strip_conversation_chrome",
       "kind": "permanent_alias_import",
-      "line": 21,
+      "line": 23,
       "migration_stage": null,
       "path": "tests/scraping/test_facade_contracts.py",
       "target": "strip_conversation_chrome"
@@ -149,7 +149,7 @@
     {
       "canonical_owner": "text.strip_linkedin_noise",
       "kind": "permanent_alias_import",
-      "line": 21,
+      "line": 23,
       "migration_stage": null,
       "path": "tests/scraping/test_facade_contracts.py",
       "target": "strip_linkedin_noise"
@@ -157,7 +157,7 @@
     {
       "canonical_owner": "facade.LinkedInExtractor._page",
       "kind": "private_facade_access",
-      "line": 82,
+      "line": 85,
       "migration_stage": 14,
       "path": "tests/scraping/test_facade_contracts.py",
       "target": "_page"
@@ -165,7 +165,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 212,
+      "line": 301,
       "migration_stage": 12,
       "path": "tests/scraping/test_facade_contracts.py",
       "target": "_read_profile_message_target"

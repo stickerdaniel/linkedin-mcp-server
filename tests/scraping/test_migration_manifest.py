@@ -2955,6 +2955,31 @@ def test_a_rebound_owner_name_loses_its_factory_exemption(rebinding, line):
         "def _scraper(page):\n    return page\n\n\ndef _scraper(page):\n    return page",
         "def _scraper(page):\n    return page\n\n\n_scraper = LinkedInExtractor",
         "from helpers import _scraper",
+        # Decorated: the name ends up bound to whatever came back, and this
+        # decorator returns the facade. Nothing about the `def` says so.
+        "def replace(function):\n"
+        "    return LinkedInExtractor\n"
+        "\n\n@replace\n"
+        "def _scraper(page):\n    return page",
+        # A `global` assignment rebinds the module name from inside a scope
+        # the module-level collector never enters.
+        "def _scraper(page):\n    return page\n\n\n"
+        "def poison():\n    global _scraper\n    _scraper = LinkedInExtractor",
+        # A walrus in a signature is evaluated by the scope holding the `def`,
+        # so this binds at module level while the collector reads only `poison`.
+        "def _scraper(page):\n    return page\n\n\n"
+        "def poison(value=(_scraper := LinkedInExtractor)):\n    return value",
+        # Lambda defaults are also evaluated by the containing scope; the
+        # lambda body is the only part that gets its own scope.
+        "def _scraper(page):\n    return page\n\n\n"
+        "poison = lambda value=(_scraper := LinkedInExtractor): value",
+        # The lambda can itself sit inside another definition-time expression;
+        # its defaults still run in that expression's containing scope.
+        "def _scraper(page):\n    return page\n\n\n"
+        "def poison(\n"
+        "    outer=(lambda value=(_scraper := LinkedInExtractor): value)\n"
+        "):\n"
+        "    return outer",
     ],
 )
 def test_a_module_level_factory_shadow_names_its_entry(factory):
@@ -2965,7 +2990,7 @@ def test_a_module_level_factory_shadow_names_its_entry(factory):
     with pytest.raises(
         migration.UnresolvedSeamError,
         match=r"test_person\.py:\d+ _scraper: "
-        r"owner factory is not a single module-level definition",
+        r"owner factory is not a single undecorated module-level definition",
     ):
         migration.scan_source(
             PERSON_TESTS,
@@ -2976,6 +3001,89 @@ def test_a_module_level_factory_shadow_names_its_entry(factory):
             ),
             *migration.extractor_methods(),
         )
+
+
+def test_a_nested_local_walrus_does_not_rebind_the_module_factory():
+    # The default is evaluated in `outer`, not at module level. Without a
+    # `global` declaration it shadows only that function's local name, so a
+    # sibling owner test still reaches the declared module factory.
+    seams = migration.scan_source(
+        PERSON_TESTS,
+        _owner_test(
+            "    scraper = _scraper(page)\n"
+            '    patch.object(scraper._capture, "extract_page", replacement)',
+            factory="def _scraper(page):\n    return page\n\n\n"
+            "def outer():\n"
+            "    def inner(value=(_scraper := LinkedInExtractor)):\n"
+            "        return value\n"
+            "    return inner",
+        ),
+        *migration.extractor_methods(),
+    )
+
+    assert not [seam for seam in seams if seam.kind.endswith("_patch_object")]
+
+
+def test_a_nested_default_shadows_the_factory_in_its_enclosing_function():
+    # The inner function's default runs while `test_owner` defines it. Its
+    # walrus therefore binds a local `_scraper` in `test_owner`, and the later
+    # call constructs the facade rather than the module-level owner.
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=r"test_person\.py:16 scraper\._capture: "
+        r"unresolved patch\.object target",
+    ):
+        migration.scan_source(
+            PERSON_TESTS,
+            _owner_test(
+                "    def poison(value=(_scraper := LinkedInExtractor)):\n"
+                "        return value\n"
+                "\n"
+                "    scraper = _scraper(page)\n"
+                '    patch.object(scraper._capture, "extract_page", replacement)'
+            ),
+            *migration.extractor_methods(),
+        )
+
+
+def test_a_nested_lambda_default_shadows_its_enclosing_function():
+    # Visiting the outer function's default reaches the nested lambda, whose
+    # own default is still evaluated in `test_owner`. Stopping at the lambda
+    # silently restores the owner exemption for a facade-producing call.
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=r"test_person\.py:18 scraper\._capture: "
+        r"unresolved patch\.object target",
+    ):
+        migration.scan_source(
+            PERSON_TESTS,
+            _owner_test(
+                "    def poison(\n"
+                "        outer=(lambda value=(_scraper := LinkedInExtractor): value)\n"
+                "    ):\n"
+                "        return outer\n"
+                "\n"
+                "    scraper = _scraper(page)\n"
+                '    patch.object(scraper._capture, "extract_page", replacement)'
+            ),
+            *migration.extractor_methods(),
+        )
+
+
+def test_a_global_declaration_without_a_write_keeps_the_factory():
+    # `global` controls name resolution. It does not rebind anything by
+    # itself, so the call still reaches the honored module factory.
+    seams = migration.scan_source(
+        PERSON_TESTS,
+        _owner_test(
+            "    global _scraper\n"
+            "    scraper = _scraper(page)\n"
+            '    patch.object(scraper._capture, "extract_page", replacement)'
+        ),
+        *migration.extractor_methods(),
+    )
+
+    assert not [seam for seam in seams if seam.kind.endswith("_patch_object")]
 
 
 def test_a_nested_factory_shadow_loses_the_exemption_where_it_shadows():

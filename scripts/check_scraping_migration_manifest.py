@@ -495,7 +495,10 @@ class _LocalBindingCollector(ast.NodeVisitor):
         self.bindings.add(node.name)
 
     def visit_Lambda(self, node: ast.Lambda) -> Any:
-        return None
+        # Defaults and annotations are evaluated by the scope containing the
+        # lambda. Its body alone belongs to the lambda's own scope.
+        for expression in _signature_expressions(node.args):
+            self.visit(expression)
 
     def _visit_comprehension(
         self, generators: list[ast.comprehension], values: list[ast.expr]
@@ -568,7 +571,10 @@ def _function_shadowed_names(
     path: Path, node: ast.FunctionDef | ast.AsyncFunctionDef
 ) -> set[str]:
     collector = _scope_collector(path, node.body)
-    local_bindings = collector.bindings - collector.globals - collector.nonlocals
+    evaluated = _scope_definition_time_bindings(path, node.body)
+    local_bindings = (
+        (collector.bindings | evaluated) - collector.globals - collector.nonlocals
+    )
     return _argument_names(node.args) | local_bindings
 
 
@@ -669,6 +675,97 @@ class _ScopeFrame:
     closure_owner_factories: frozenset[str] = frozenset()
 
 
+def _nested_definition_scopes(
+    statements: list[ast.stmt],
+) -> list[ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Lambda]:
+    """Find definitions evaluated by one scope without entering their bodies."""
+
+    definitions: list[
+        ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Lambda
+    ] = []
+
+    def visit(node: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(
+                child,
+                (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda),
+            ):
+                definitions.append(child)
+            else:
+                visit(child)
+
+    for statement in statements:
+        if isinstance(
+            statement,
+            (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda),
+        ):
+            definitions.append(statement)
+        else:
+            visit(statement)
+    return definitions
+
+
+def _definition_time_bindings(
+    path: Path,
+    definitions: list[
+        ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Lambda
+    ],
+) -> set[str]:
+    """Collect names bound while definitions are created in their parent scope."""
+
+    collector = _LocalBindingCollector(path)
+    for definition in definitions:
+        if isinstance(definition, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            expressions = [
+                *definition.decorator_list,
+                *_signature_expressions(definition.args),
+            ]
+        elif isinstance(definition, ast.Lambda):
+            expressions = _signature_expressions(definition.args)
+        else:
+            expressions = [
+                *definition.decorator_list,
+                *definition.bases,
+                *(keyword.value for keyword in definition.keywords),
+            ]
+        for expression in expressions:
+            collector.visit(expression)
+    return collector.bindings
+
+
+def _scope_definition_time_bindings(path: Path, statements: list[ast.stmt]) -> set[str]:
+    return _definition_time_bindings(path, _nested_definition_scopes(statements))
+
+
+def _indirect_module_bindings(path: Path, tree: ast.Module) -> set[str]:
+    """Collect bindings that reach the module from another lexical scope.
+
+    `_LocalBindingCollector` deliberately stops at nested definitions. That is
+    correct for local shadowing, but module factory resolution also has to see
+    two bindings beyond that boundary: definition-time expressions evaluated
+    by the enclosing scope, and assignments made through `global`.
+    """
+
+    names: set[str] = set()
+
+    def visit_scope(statements: list[ast.stmt], *, module: bool) -> None:
+        collector = _scope_collector(path, statements)
+        definitions = _nested_definition_scopes(statements)
+        evaluated = _definition_time_bindings(path, definitions)
+        if module:
+            names.update(evaluated)
+        else:
+            names.update((collector.bindings | evaluated) & collector.globals)
+        for definition in definitions:
+            if isinstance(
+                definition, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+            ):
+                visit_scope(definition.body, module=False)
+
+    visit_scope(tree.body, module=True)
+    return names
+
+
 def _resolved_owner_factories(
     path: Path,
     tree: ast.Module,
@@ -681,19 +778,29 @@ def _resolved_owner_factories(
     inventory instead of refusing, which is the one direction this checker
     must not fail in.
 
-    A name is honored only where the module body defines it exactly once, as a
-    plain `def` or `async def`, and binds it no other way at that level. A
-    second definition, an import, an assignment or a class of the same name
-    all disqualify it outright and say so, because which of them a call site
-    reaches is a question about execution order that this reader cannot
-    answer. Shadowing deeper than module level is left to the scope chain: the
-    frame carries the honored set, and a scope that binds the name drops it
-    for itself and everything nested inside it.
+    A name is honored only where the module body defines it exactly once, as
+    an undecorated `def` or `async def`, and binds it no other way anywhere in
+    the file. A second definition, an import, an assignment or a class of the
+    same name all disqualify it outright and say so, because which of them a
+    call site reaches is a question about execution order that this reader
+    cannot answer.
+
+    A decorator disqualifies it for a plainer reason: the name ends up bound
+    to whatever the decorator returned, and a decorator that returns
+    `LinkedInExtractor` reads here as a factory while building the facade.
+    Nothing about the `def` tells this reader otherwise.
+
+    `_indirect_module_bindings` covers the two rebindings that reach the
+    module namespace from inside a scope, a `global` assignment and a walrus
+    in a signature or decorator. Shadowing that stays local is left to the
+    scope chain: the frame carries the honored set, and a scope that binds the
+    name drops it for itself and everything nested inside it.
     """
 
     declared = _OWNER_FACTORIES.get(path.relative_to(ROOT).as_posix(), ())
     if not declared:
         return frozenset(), []
+    indirect = _indirect_module_bindings(path, tree)
     honored: set[str] = set()
     errors: list[str] = []
     for name in declared:
@@ -711,14 +818,20 @@ def _resolved_owner_factories(
                 if not any(statement is definition for definition in definitions)
             ],
         ).bindings
-        if len(definitions) == 1 and name not in others:
+        if (
+            len(definitions) == 1
+            and not definitions[0].decorator_list
+            and name not in others
+            and name not in indirect
+        ):
             honored.add(name)
             continue
         line = definitions[-1].lineno if definitions else 0
         errors.append(
             f"{path.relative_to(ROOT).as_posix()}:{line} {name}: "
-            "owner factory is not a single module-level definition; "
-            "remove the entry from _OWNER_FACTORIES or the rebinding"
+            "owner factory is not a single undecorated module-level "
+            "definition; remove the entry from _OWNER_FACTORIES or the "
+            "rebinding"
         )
     return frozenset(honored), errors
 
@@ -2602,7 +2715,14 @@ class Scanner(ast.NodeVisitor):
         aliases, ambiguous_aliases = _collaborator_aliases(
             self.path, node, instance_names | class_names
         )
-        owner_factories = parent.closure_owner_factories - shadowed
+        # `shadowed` reports local bindings. A `global` or `nonlocal`
+        # declaration alone still resolves the inherited factory, but a write
+        # through either declaration changes which callable the name reaches.
+        evaluated = _scope_definition_time_bindings(self.path, node.body)
+        outer_rebindings = (collector.bindings | evaluated) & (
+            collector.globals | collector.nonlocals
+        )
+        owner_factories = parent.closure_owner_factories - shadowed - outer_rebindings
         factories = tuple(sorted(owner_factories))
         owner_names = parent.closure_owner_names - shadowed
         owner_names.update(_owner_factory_bindings(node, factories))
@@ -2781,6 +2901,9 @@ class Scanner(ast.NodeVisitor):
             ambiguous_aliases=set(frame.ambiguous_aliases),
             owner_names=set(frame.owner_names),
             closure_owner_names=set(frame.closure_owner_names),
+            # Omitting this handed every class branch the empty default, which
+            # refuses a legitimate owner test for sitting under a class-body
+            # `if` or `try` rather than beside one.
             owner_factories=frame.owner_factories,
             closure_owner_factories=frame.closure_owner_factories,
         )

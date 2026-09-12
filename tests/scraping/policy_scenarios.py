@@ -112,7 +112,7 @@ class TraceCallbacks(ProgressCallback):
 
 @contextmanager
 def _diagnostics_bindings(diagnostics: Any) -> Iterator[None]:
-    """Bind the issue-report boundary in every module that imports it.
+    """Bind the issue-report boundary in each exercised scraping module.
 
     A separate context manager rather than more items in `boundaries`, which
     sat on exactly 20 and is the whole of CPython's static block budget inside
