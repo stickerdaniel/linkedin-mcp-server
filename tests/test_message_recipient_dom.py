@@ -14,12 +14,20 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from patchright.async_api import BrowserType, async_playwright
 
-from linkedin_mcp_server.scraping.extractor import (
-    LinkedInExtractor,
+from linkedin_mcp_server.scraping.message_sender import (
+    MessageSender,
     _MESSAGE_COMPOSER_STATE_JS,
     _PROFILE_MESSAGE_TARGET_JS,
     _ProfileMessageTarget,
 )
+from linkedin_mcp_server.scraping.navigation import PageNavigator
+from linkedin_mcp_server.scraping.session import ScrapingSession
+
+
+def _sender(page) -> MessageSender:
+    session = ScrapingSession(page)
+    return MessageSender(session, PageNavigator(session))
+
 
 pytestmark = [
     pytest.mark.browser_dom,
@@ -152,9 +160,7 @@ class TestMessageSurfaceDom:
         )
         started = time.monotonic()
 
-        result = await LinkedInExtractor(dom_page)._wait_for_message_surface(
-            _message_target()
-        )
+        result = await _sender(dom_page)._wait_for_message_surface(_message_target())
 
         assert result == "composer"
         assert time.monotonic() - started >= 0.2
@@ -178,9 +184,7 @@ class TestMessageSurfaceDom:
         )
         started = time.monotonic()
 
-        result = await LinkedInExtractor(dom_page)._wait_for_message_surface(
-            _message_target()
-        )
+        result = await _sender(dom_page)._wait_for_message_surface(_message_target())
 
         assert result == "composer"
         assert time.monotonic() - started >= 0.2
@@ -201,9 +205,7 @@ class TestMessageSurfaceDom:
         dom_page.set_default_timeout(350)
         started = time.monotonic()
 
-        result = await LinkedInExtractor(dom_page)._wait_for_message_surface(
-            _message_target()
-        )
+        result = await _sender(dom_page)._wait_for_message_surface(_message_target())
 
         assert result is None
         assert time.monotonic() - started >= 0.25
@@ -253,8 +255,8 @@ class TestMessageComposerDom:
                 buttons='<button type="submit">Send</button>',
             ),
         )
-        extractor = LinkedInExtractor(dom_page)
-        owner = await extractor._resolve_message_owner(
+        sender = _sender(dom_page)
+        owner = await sender._resolve_message_owner(
             _message_target(), expected_route=dom_page.url
         )
 
@@ -267,7 +269,7 @@ class TestMessageComposerDom:
             }"""
         )
         assert await owner.evaluate("node => node.isConnected") is False
-        await extractor._dispose_message_owner(owner)
+        await sender._dispose_message_owner(owner)
         with pytest.raises(Exception, match="closed"):
             await owner.evaluate("node => node.isConnected")
 
@@ -307,19 +309,19 @@ class TestMessageComposerDom:
                 buttons='<button type="submit">Send</button>',
             ),
         )
-        extractor = LinkedInExtractor(dom_page)
+        sender = _sender(dom_page)
 
-        owner = await extractor._resolve_message_owner(
+        owner = await sender._resolve_message_owner(
             _message_target(), expected_route=dom_page.url
         )
         assert owner is not None
         assert (
-            await extractor._write_verified_message(
+            await sender._write_verified_message(
                 "Hello!", target=_message_target(), owner=owner
             )
             == "written"
         )
-        await extractor._dispose_message_owner(owner)
+        await sender._dispose_message_owner(owner)
 
     async def test_hidden_conflicts_do_not_override_visible_identity(self, dom_page):
         await _set_composer_content(
@@ -334,19 +336,19 @@ class TestMessageComposerDom:
                 buttons='<button type="submit">Send</button>',
             ),
         )
-        extractor = LinkedInExtractor(dom_page)
+        sender = _sender(dom_page)
 
-        owner = await extractor._resolve_message_owner(
+        owner = await sender._resolve_message_owner(
             _message_target(), expected_route=dom_page.url
         )
         assert owner is not None
         assert (
-            await extractor._write_verified_message(
+            await sender._write_verified_message(
                 "Hello!", target=_message_target(), owner=owner
             )
             == "written"
         )
-        await extractor._dispose_message_owner(owner)
+        await sender._dispose_message_owner(owner)
 
     async def test_second_urn_attribute_on_one_element_is_never_skipped(self, dom_page):
         conflicting = await _state(
@@ -416,18 +418,18 @@ class TestMessageComposerDom:
             </body></html>""",
         )
 
-        extractor = LinkedInExtractor(dom_page)
-        owner = await extractor._resolve_message_owner(
+        sender = _sender(dom_page)
+        owner = await sender._resolve_message_owner(
             _message_target(), expected_route=dom_page.url
         )
         assert owner is not None
-        written = await extractor._write_verified_message(
+        written = await sender._write_verified_message(
             "Hello!", target=_message_target(), owner=owner
         )
-        submitted = await extractor._submit_verified_message(
+        submitted = await sender._submit_verified_message(
             "Hello!", target=_message_target(), owner=owner
         )
-        await extractor._dispose_message_owner(owner)
+        await sender._dispose_message_owner(owner)
 
         assert written == "written"
         assert submitted == "clicked"
@@ -467,19 +469,19 @@ class TestMessageComposerDom:
                 document.body.dataset.submitted=this.id"></form>
             </body></html>""",
         )
-        extractor = LinkedInExtractor(dom_page)
-        owner = await extractor._resolve_message_owner(
+        sender = _sender(dom_page)
+        owner = await sender._resolve_message_owner(
             _message_target(), expected_route=dom_page.url
         )
         written = submitted = None
         if owner is not None:
-            written = await extractor._write_verified_message(
+            written = await sender._write_verified_message(
                 "Hello!", target=_message_target(), owner=owner
             )
-            submitted = await extractor._submit_verified_message(
+            submitted = await sender._submit_verified_message(
                 "Hello!", target=_message_target(), owner=owner
             )
-            await extractor._dispose_message_owner(owner)
+            await sender._dispose_message_owner(owner)
 
         if expected is None:
             assert owner is None
@@ -639,18 +641,18 @@ class TestMessageComposerDom:
             ),
         )
 
-        extractor = LinkedInExtractor(dom_page)
-        owner = await extractor._resolve_message_owner(
+        sender = _sender(dom_page)
+        owner = await sender._resolve_message_owner(
             _message_target(), expected_route=dom_page.url
         )
         assert owner is not None
-        written = await extractor._write_verified_message(
+        written = await sender._write_verified_message(
             "Hello!", target=_message_target(), owner=owner
         )
-        submitted = await extractor._submit_verified_message(
+        submitted = await sender._submit_verified_message(
             "Hello!", target=_message_target(), owner=owner
         )
-        await extractor._dispose_message_owner(owner)
+        await sender._dispose_message_owner(owner)
 
         assert written == "written"
         assert submitted == "clicked"
@@ -674,7 +676,7 @@ class TestMessageComposerDom:
         )
 
         assert (
-            await LinkedInExtractor(dom_page)._resolve_message_owner(
+            await _sender(dom_page)._resolve_message_owner(
                 _message_target(), expected_route=dom_page.url
             )
             is None
@@ -691,27 +693,27 @@ class TestMessageComposerDom:
                 buttons=f'<button type="submit" {disabled_attribute}>A</button>',
             ),
         )
-        extractor = LinkedInExtractor(dom_page)
+        sender = _sender(dom_page)
 
-        owner = await extractor._resolve_message_owner(
+        owner = await sender._resolve_message_owner(
             _message_target(), expected_route=dom_page.url
         )
 
         assert owner is not None
         assert (
-            await extractor._write_verified_message(
+            await sender._write_verified_message(
                 "Hello!", target=_message_target(), owner=owner
             )
             == "written"
         )
         assert (
-            await extractor._submit_verified_message(
+            await sender._submit_verified_message(
                 "Hello!", target=_message_target(), owner=owner
             )
             == "invalid"
         )
-        await extractor._cleanup_owned_message("Hello!", owner)
-        await extractor._dispose_message_owner(owner)
+        await sender._cleanup_owned_message("Hello!", owner)
+        await sender._dispose_message_owner(owner)
         assert await dom_page.locator('[role="textbox"]').inner_text() == ""
 
     async def test_removed_submit_or_changed_recipient_invalidates_pins(self, dom_page):
@@ -720,36 +722,36 @@ class TestMessageComposerDom:
             dom_page,
             _composer(identity=identity, buttons='<button type="submit">Send</button>'),
         )
-        extractor = LinkedInExtractor(dom_page)
-        owner = await extractor._resolve_message_owner(
+        sender = _sender(dom_page)
+        owner = await sender._resolve_message_owner(
             _message_target(), expected_route=dom_page.url
         )
         assert owner is not None
         assert (
-            await extractor._write_verified_message(
+            await sender._write_verified_message(
                 "Hello!", target=_message_target(), owner=owner
             )
             == "written"
         )
         await dom_page.locator("form button").evaluate("element => element.remove()")
         assert (
-            await extractor._submit_verified_message(
+            await sender._submit_verified_message(
                 "Hello!", target=_message_target(), owner=owner
             )
             == "invalid"
         )
-        await extractor._dispose_message_owner(owner)
+        await sender._dispose_message_owner(owner)
 
         await _set_composer_content(
             dom_page,
             _composer(identity=identity, buttons='<button type="submit">Send</button>'),
         )
-        owner = await extractor._resolve_message_owner(
+        owner = await sender._resolve_message_owner(
             _message_target(), expected_route=dom_page.url
         )
         assert owner is not None
         assert (
-            await extractor._write_verified_message(
+            await sender._write_verified_message(
                 "Hello!", target=_message_target(), owner=owner
             )
             == "written"
@@ -758,26 +760,26 @@ class TestMessageComposerDom:
             "element => element.setAttribute('href', 'https://www.linkedin.com/in/other/')"
         )
         assert (
-            await extractor._submit_verified_message(
+            await sender._submit_verified_message(
                 "Hello!", target=_message_target(), owner=owner
             )
             == "invalid"
         )
-        await extractor._dispose_message_owner(owner)
+        await sender._dispose_message_owner(owner)
 
     async def test_queryless_thread_route_is_pinned_exactly(self, dom_page):
         await dom_page.goto("https://www.linkedin.com/messaging/thread/INITIAL/")
         await dom_page.set_content(
             _composer(identity="", buttons='<button type="submit">Send</button>')
         )
-        extractor = LinkedInExtractor(dom_page)
-        owner = await extractor._resolve_message_owner(
+        sender = _sender(dom_page)
+        owner = await sender._resolve_message_owner(
             _message_target(), expected_route=dom_page.url
         )
 
         assert owner is not None
         assert (
-            await extractor._write_verified_message(
+            await sender._write_verified_message(
                 "Hello!", target=_message_target(), owner=owner
             )
             == "written"
@@ -786,14 +788,42 @@ class TestMessageComposerDom:
             "history.replaceState({}, '', '/messaging/thread/OTHER/')"
         )
         assert (
-            await extractor._submit_verified_message(
+            await sender._submit_verified_message(
                 "Hello!", target=_message_target(), owner=owner
             )
             == "invalid"
         )
-        await extractor._cleanup_owned_message("Hello!", owner)
-        await extractor._dispose_message_owner(owner)
+        await sender._cleanup_owned_message("Hello!", owner)
+        await sender._dispose_message_owner(owner)
         assert await dom_page.locator('[role="textbox"]').inner_text() == ""
+
+    async def test_cleanup_leaves_replaced_draft_untouched(self, dom_page):
+        await _set_composer_content(
+            dom_page,
+            _composer(
+                identity='<a href="https://www.linkedin.com/in/testuser/">Test</a>',
+                buttons='<button type="submit">Send</button>',
+            ),
+        )
+        sender = _sender(dom_page)
+        owner = await sender._resolve_message_owner(
+            _message_target(), expected_route=dom_page.url
+        )
+        assert owner is not None
+        assert (
+            await sender._write_verified_message(
+                "Hello!", target=_message_target(), owner=owner
+            )
+            == "written"
+        )
+        await dom_page.locator('[role="textbox"]').evaluate(
+            "editor => editor.replaceChildren('Author draft')"
+        )
+
+        await sender._cleanup_owned_message("Hello!", owner)
+        await sender._dispose_message_owner(owner)
+
+        assert await dom_page.locator('[role="textbox"]').inner_text() == "Author draft"
 
     async def test_missing_submit_never_falls_back_to_enter(self, dom_page):
         await _set_composer_content(
@@ -812,7 +842,7 @@ class TestMessageComposerDom:
         await dom_page.locator("#foreign").focus()
 
         assert (
-            await LinkedInExtractor(dom_page)._resolve_message_owner(
+            await _sender(dom_page)._resolve_message_owner(
                 _message_target(), expected_route=dom_page.url
             )
             is None

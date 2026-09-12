@@ -4,22 +4,18 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock
 
-from linkedin_mcp_server.scraping import extractor as extractor_module
-from linkedin_mcp_server.scraping.extractor import LinkedInExtractor
+from linkedin_mcp_server.scraping import message_sender as message_sender_module
+from linkedin_mcp_server.scraping.message_sender import MessageSender
+from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.profile_page import ProfilePageReader
 from linkedin_mcp_server.scraping.session import ScrapingSession
 
 
 def _reader(page) -> ProfilePageReader:
-    """Wire the reader the way the facade does.
-
-    The top-card read is still the facade's, so borrowing it here is what
-    keeps these tests about the reader and not about a double of the read.
-    """
-    extractor = LinkedInExtractor(page)
-    return ProfilePageReader(
-        ScrapingSession(page), extractor._read_profile_message_target
-    )
+    """Wire the reader the way the facade does."""
+    session = ScrapingSession(page)
+    sender = MessageSender(session, PageNavigator(session))
+    return ProfilePageReader(session, sender._read_profile_message_target)
 
 
 class TestExtractProfileUrn:
@@ -40,7 +36,7 @@ class TestExtractProfileUrn:
 
         assert result == "ACoAAB"
         mock_page.evaluate.assert_awaited_once_with(
-            extractor_module._PROFILE_MESSAGE_TARGET_JS
+            message_sender_module._PROFILE_MESSAGE_TARGET_JS
         )
 
     async def test_returns_none_for_ambiguous_top_card_links(self, mock_page):

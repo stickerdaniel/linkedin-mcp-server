@@ -31,6 +31,7 @@ from linkedin_mcp_server.scraping.extractor import (
     strip_linkedin_noise,
 )
 from linkedin_mcp_server.scraping.jobs import JobScraper
+from linkedin_mcp_server.scraping.message_sender import MessageSender
 from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.profile_page import ProfilePageReader
 from linkedin_mcp_server.scraping.session import ScrapingSession
@@ -371,29 +372,33 @@ async def test_facade_scrape_person_keeps_refusing_the_self_alias_by_default(moc
         await extractor.scrape_person("me", {"main_profile"})
 
 
-async def test_the_profile_urn_reader_resolves_the_facade_at_call_time(mock_page):
-    # `__init__` wires a lambda rather than the bound method on purpose, and
-    # nothing held that line: the bound method survived the suite. The top-card
-    # read still belongs to the facade until the message sender owns it, so a
-    # replacement installed on the instance after construction has to be the
-    # one that runs.
+async def test_facade_send_message_forwards_every_argument(mock_page):
     extractor = LinkedInExtractor(cast(Page, mock_page))
+    expected = {
+        "url": "https://www.linkedin.com/in/target/",
+        "status": "confirmation_required",
+    }
 
-    async def replacement() -> SimpleNamespace:
-        return SimpleNamespace(target=SimpleNamespace(profile_urn="urn:late-bound"))
+    with patch.object(
+        MessageSender,
+        "send_message",
+        new_callable=AsyncMock,
+        return_value=expected,
+    ) as send_message:
+        result = await extractor.send_message(
+            "target",
+            "Message text",
+            confirm_send=False,
+            profile_urn="ACoAAB",
+        )
 
-    with (
-        patch.object(extractor, "_read_profile_message_target", replacement),
-        patch.object(
-            SectionCapture,
-            "extract_page",
-            new_callable=AsyncMock,
-            return_value=ExtractedSection(text="profile", references=[], error=None),
-        ),
-    ):
-        result = await extractor.scrape_person("someone", {"main_profile"})
-
-    assert result["profile_urn"] == "urn:late-bound"
+    assert result is expected
+    send_message.assert_awaited_once_with(
+        "target",
+        "Message text",
+        confirm_send=False,
+        profile_urn="ACoAAB",
+    )
 
 
 async def test_facade_direct_thread_ignores_username_and_index_validation(mock_page):
