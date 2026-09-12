@@ -59,10 +59,11 @@ class LinkedInExtractor:
         self._content = PageContentReader(self._session)
         self._capture = SectionCapture(self._session, self._navigator, self._content)
         self._feed = FeedScraper(self._session, self._navigator, self._content)
-        self._message_sender = MessageSender(self._session, self._navigator)
+        message_sender = MessageSender(self._session, self._navigator)
+        self._message_sender = message_sender
         self._profile_page = ProfilePageReader(
             self._session,
-            lambda: self._message_sender._read_profile_message_target(),
+            lambda: message_sender._read_profile_message_target(),
         )
         self._person = PersonScraper(
             self._session, self._navigator, self._capture, self._profile_page

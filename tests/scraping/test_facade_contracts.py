@@ -246,6 +246,18 @@ async def test_profile_urn_read_resolves_the_sender_delegate_late(mock_page):
     replacement.assert_awaited_once_with()
 
 
+def test_profile_urn_callback_does_not_retain_the_facade(mock_page):
+    with patch.object(ProfilePageReader, "__init__", return_value=None) as construct:
+        extractor = LinkedInExtractor(cast(Page, mock_page))
+
+    callback = construct.call_args.args[1]
+    captured = inspect.getclosurevars(callback).nonlocals
+
+    assert extractor not in captured.values()
+    assert list(captured) == ["message_sender"]
+    assert isinstance(captured["message_sender"], MessageSender)
+
+
 async def test_facade_search_posts_forwards_its_recency_filter(mock_page):
     # The scroll depth is held by the `search-posts` trace, which runs the
     # facade with `max_pages=2` and records the scrolls it buys. The recency
