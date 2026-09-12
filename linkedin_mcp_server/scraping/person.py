@@ -21,7 +21,7 @@ from linkedin_mcp_server.scraping.contracts import (
     RATE_LIMITED_SECTION_TEXT,
     rate_limited_section_error,
 )
-from linkedin_mcp_server.scraping.fields import _person_section_specs
+from linkedin_mcp_server.scraping.fields import PERSON_SECTIONS, _person_section_specs
 from linkedin_mcp_server.scraping.identifiers import (
     normalize_person_identifier,
     person_profile_url,
@@ -228,7 +228,7 @@ class PersonScraper:
 
         requested_ordered = [
             spec
-            for spec in _person_section_specs(max_scrolls)
+            for spec in _person_section_specs(PERSON_SECTIONS, max_scrolls)
             if spec.name in requested
         ]
         total = len(requested_ordered)

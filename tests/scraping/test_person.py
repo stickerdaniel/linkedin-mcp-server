@@ -453,6 +453,69 @@ class TestScrapePersonUrls:
         for capture_call in mock_extract.call_args_list:
             assert capture_call.kwargs["plan"].max_scrolls == 15
 
+    async def test_runtime_section_table_patch_controls_order_suffix_and_plans(
+        self, mock_page
+    ):
+        table = {
+            "main_profile": ("/patched-root/", False),
+            "contact_info": ("/patched-overlay/", True),
+            "experience": ("/patched-details/", False),
+            "posts": ("/patched-activity/", False),
+            "custom": ("/patched-custom/", False),
+        }
+        scraper = _scraper(mock_page)
+        calls = []
+
+        async def record_capture(url, section_name, plan):
+            calls.append((url, section_name, plan))
+            return extracted("page text")
+
+        async def record_overlay(url, section_name, plan):
+            calls.append((url, section_name, plan))
+            return extracted("overlay text")
+
+        with (
+            patch.object(person_module, "PERSON_SECTIONS", table),
+            patch.object(
+                scraper._capture,
+                "capture",
+                new_callable=AsyncMock,
+                side_effect=record_capture,
+            ),
+            patch.object(
+                scraper._capture,
+                "_extract_overlay",
+                new_callable=AsyncMock,
+                side_effect=record_overlay,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await scraper.scrape_person("testuser", set(table), max_scrolls=13)
+
+        assert [section_name for _url, section_name, _plan in calls] == list(table)
+        assert [
+            url.removeprefix("https://www.linkedin.com/in/testuser")
+            for url, _section_name, _plan in calls
+        ] == [suffix for suffix, _is_overlay in table.values()]
+        assert [plan.mode for _url, _section_name, plan in calls] == [
+            CaptureMode.STANDARD,
+            CaptureMode.OVERLAY,
+            CaptureMode.DETAILS,
+            CaptureMode.ACTIVITY,
+            CaptureMode.STANDARD,
+        ]
+        assert [plan.max_scrolls for _url, _section_name, plan in calls] == [
+            13,
+            13,
+            13,
+            13,
+            13,
+        ]
+        assert list(result["sections"]) == list(table)
+
 
 class TestScrapePersonSectionOutcomes:
     """What one section's result does to the walk and to the response."""

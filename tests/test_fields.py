@@ -1,5 +1,7 @@
 """Tests for scraping section config dicts and section parsers."""
 
+from collections import namedtuple
+
 import linkedin_mcp_server.scraping as scraping
 from linkedin_mcp_server.scraping.fields import (
     COMPANY_SECTIONS,
@@ -7,6 +9,10 @@ from linkedin_mcp_server.scraping.fields import (
     parse_company_sections,
     parse_person_sections,
 )
+
+
+def _has_exact_tuple_contract(sections: dict[str, tuple[str, bool]]) -> bool:
+    return all(type(value) is tuple and len(value) == 2 for value in sections.values())
 
 
 class TestPersonSections:
@@ -26,9 +32,7 @@ class TestPersonSections:
         }
         assert PERSON_SECTIONS == expected
         assert list(PERSON_SECTIONS.items()) == list(expected.items())
-        assert all(
-            type(value) is tuple and len(value) == 2 for value in expected.values()
-        )
+        assert _has_exact_tuple_contract(PERSON_SECTIONS)
         assert PERSON_SECTIONS["contact_info"][0] == "/overlay/contact-info/"
         assert scraping.PERSON_SECTIONS is PERSON_SECTIONS
 
@@ -71,9 +75,7 @@ class TestCompanySections:
         }
         assert COMPANY_SECTIONS == expected
         assert list(COMPANY_SECTIONS.items()) == list(expected.items())
-        assert all(
-            type(value) is tuple and len(value) == 2 for value in expected.values()
-        )
+        assert _has_exact_tuple_contract(COMPANY_SECTIONS)
         assert COMPANY_SECTIONS["posts"][1] is False
         assert scraping.COMPANY_SECTIONS is COMPANY_SECTIONS
 
@@ -83,6 +85,17 @@ class TestCompanySections:
     def test_no_overlays(self):
         for name, (_suffix, is_overlay) in COMPANY_SECTIONS.items():
             assert is_overlay is False, f"{name} should not be an overlay"
+
+
+def test_exact_tuple_contract_rejects_equal_tuple_subclasses():
+    class EqualTuple(tuple):
+        pass
+
+    SectionTuple = namedtuple("SectionTuple", "suffix is_overlay")
+    assert EqualTuple(("/about/", False)) == ("/about/", False)
+    assert SectionTuple("/about/", False) == ("/about/", False)
+    assert not _has_exact_tuple_contract({"about": EqualTuple(("/about/", False))})
+    assert not _has_exact_tuple_contract({"about": SectionTuple("/about/", False)})
 
 
 class TestParsePersonSections:

@@ -77,9 +77,16 @@ class CompanyScraper:
                 section_name = spec.name
                 url = base_url + spec.suffix
                 try:
-                    extracted = await self._capture.capture(
-                        url, section_name, spec.plan
-                    )
+                    if CaptureMode.OVERLAY in spec.plan.mode:
+                        extracted = await self._capture._extract_overlay(
+                            url,
+                            section_name,
+                            plan=spec.plan,
+                        )
+                    else:
+                        extracted = await self._capture.capture(
+                            url, section_name, spec.plan
+                        )
 
                     if extracted.text and extracted.text != RATE_LIMITED_SECTION_TEXT:
                         sections[section_name] = extracted.text

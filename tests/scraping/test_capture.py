@@ -1121,6 +1121,36 @@ class TestCapturePlans:
             CaptureMode.SEARCH_RESULTS | CaptureMode.COMPANY_PEOPLE
         )
 
+    @pytest.mark.parametrize(
+        ("url", "mode"),
+        [
+            (
+                "https://www.linkedin.com/in/ada/?next=/details/experience/",
+                CaptureMode.DETAILS,
+            ),
+            (
+                "https://www.linkedin.com/in/ada/#/search/results/people/",
+                CaptureMode.SEARCH_RESULTS,
+            ),
+            (
+                "https://www.linkedin.com/in/ada/?next=/company/acme/people/",
+                CaptureMode.COMPANY_PEOPLE,
+            ),
+        ],
+    )
+    def test_url_adapter_raw_url_markers_include_query_and_fragment(self, url, mode):
+        assert capture_plan_for_url(url).mode is mode
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://www.linkedin.com/in/ada/?next=/recent-activity/all/",
+            "https://www.linkedin.com/in/ada/#/company/acme/posts/",
+        ],
+    )
+    def test_url_adapter_activity_markers_use_parsed_path_only(self, url):
+        assert capture_plan_for_url(url).mode is CaptureMode.STANDARD
+
     def test_capture_plan_is_immutable(self):
         plan = CapturePlan(CaptureMode.DETAILS, max_scrolls=3)
         with pytest.raises(FrozenInstanceError):
@@ -1129,31 +1159,82 @@ class TestCapturePlans:
 
 def _generic_capture_domain_path_literals(source: str) -> set[str]:
     tree = ast.parse(source)
-    generic_methods = {
+    domain_fragments = (
+        "/recent-activity/",
+        "/search/results/",
+        "/company/",
+        "/people/",
+        "/details/",
+    )
+    root_names = {
         "capture",
         "_capture_once",
         "_extract_loaded_section",
         "_extract_overlay_content",
     }
-    literals: set[str] = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        if node.name not in generic_methods:
-            continue
-        for child in ast.walk(node):
+    module_helpers = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    class_methods = {
+        child.name: child
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "SectionCapture"
+        for child in node.body
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    module_constants: dict[str, ast.AST] = {}
+    for node in tree.body:
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            value = node.value
+            if value is None:
+                continue
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    module_constants[target.id] = value
+
+    def referenced_constant_literals(name: str, seen: set[str]) -> set[str]:
+        if name in seen or name not in module_constants:
+            return set()
+        seen.add(name)
+        literals: set[str] = set()
+        for child in ast.walk(module_constants[name]):
             if isinstance(child, ast.Constant) and isinstance(child.value, str):
-                if any(
-                    fragment in child.value
-                    for fragment in (
-                        "/recent-activity/",
-                        "/search/results/",
-                        "/company/",
-                        "/people/",
-                        "/details/",
-                    )
-                ):
+                if any(fragment in child.value for fragment in domain_fragments):
                     literals.add(child.value)
+            elif isinstance(child, ast.Name):
+                literals.update(referenced_constant_literals(child.id, seen))
+        return literals
+
+    pending = [method for name, method in class_methods.items() if name in root_names]
+    visited: set[int] = set()
+    literals: set[str] = set()
+    while pending:
+        function = pending.pop()
+        if id(function) in visited:
+            continue
+        visited.add(id(function))
+        for child in ast.walk(function):
+            if isinstance(child, ast.Constant) and isinstance(child.value, str):
+                if any(fragment in child.value for fragment in domain_fragments):
+                    literals.add(child.value)
+            elif isinstance(child, ast.Name):
+                literals.update(referenced_constant_literals(child.id, set()))
+            elif isinstance(child, ast.Call):
+                target: ast.AST | None = None
+                if isinstance(child.func, ast.Name):
+                    if child.func.id != "capture_plan_for_url":
+                        target = module_helpers.get(child.func.id)
+                elif (
+                    isinstance(child.func, ast.Attribute)
+                    and isinstance(child.func.value, ast.Name)
+                    and child.func.value.id in {"self", "cls"}
+                ):
+                    target = class_methods.get(child.func.attr)
+                if target is not None:
+                    pending.append(target)
     return literals
 
 
@@ -1172,3 +1253,40 @@ class SectionCapture:
             return "domain policy"
 """
     assert _generic_capture_domain_path_literals(mutation) == {"/details/"}
+
+
+def test_generic_capture_ast_guard_follows_referenced_module_constants():
+    mutation = """
+DETAILS_PATH = "/details/"
+class SectionCapture:
+    async def capture(self, url):
+        if DETAILS_PATH in url:
+            return "domain policy"
+"""
+    assert _generic_capture_domain_path_literals(mutation) == {"/details/"}
+
+
+def test_generic_capture_ast_guard_follows_same_module_helper_calls():
+    mutation = """
+def _is_company_people(url):
+    return "/company/" in url and "/people/" in url
+class SectionCapture:
+    async def _capture_once(self, url):
+        if _is_company_people(url):
+            return "domain policy"
+"""
+    assert _generic_capture_domain_path_literals(mutation) == {
+        "/company/",
+        "/people/",
+    }
+
+
+def test_generic_capture_ast_guard_excludes_url_compatibility_adapter():
+    allowed = """
+def capture_plan_for_url(url):
+    return "/search/results/" in url
+class SectionCapture:
+    async def capture(self, url):
+        return capture_plan_for_url(url)
+"""
+    assert _generic_capture_domain_path_literals(allowed) == set()

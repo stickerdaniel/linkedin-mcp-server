@@ -52,7 +52,10 @@ _PERSON_SECTION_MODES = {
 _COMPANY_SECTION_MODES = {"posts": CaptureMode.ACTIVITY}
 
 
-def _person_section_specs(max_scrolls: int | None = None) -> tuple[_SectionSpec, ...]:
+def _person_section_specs(
+    sections: dict[str, tuple[str, bool]],
+    max_scrolls: int | None = None,
+) -> tuple[_SectionSpec, ...]:
     return tuple(
         _SectionSpec(
             name,
@@ -64,7 +67,7 @@ def _person_section_specs(max_scrolls: int | None = None) -> tuple[_SectionSpec,
                 max_scrolls,
             ),
         )
-        for name, (suffix, is_overlay) in PERSON_SECTIONS.items()
+        for name, (suffix, is_overlay) in sections.items()
     )
 
 

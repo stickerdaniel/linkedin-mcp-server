@@ -235,6 +235,51 @@ class TestScrapeCompany:
         ]
         assert list(result["sections"]) == list(table)
 
+    async def test_custom_overlay_table_routes_through_compatibility_seam(
+        self, mock_page
+    ):
+        table = {
+            "about": ("/custom-about-overlay/", True),
+            "custom": ("/custom-standard/", False),
+        }
+        scraper = _scraper(mock_page)
+        with (
+            patch.object(company_module, "COMPANY_SECTIONS", table),
+            patch.object(
+                scraper._capture,
+                "capture",
+                new_callable=AsyncMock,
+                return_value=extracted("standard text"),
+            ) as mock_capture,
+            patch.object(
+                scraper._capture,
+                "_extract_overlay",
+                new_callable=AsyncMock,
+                return_value=extracted("overlay text"),
+            ) as mock_overlay,
+            patch(
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await scraper.scrape_company("testcorp", set(table))
+
+        mock_overlay.assert_awaited_once()
+        assert mock_overlay.call_args.args[:2] == (
+            "https://www.linkedin.com/company/testcorp/custom-about-overlay/",
+            "about",
+        )
+        assert mock_overlay.call_args.kwargs["plan"] == CapturePlan(CaptureMode.OVERLAY)
+        mock_capture.assert_awaited_once_with(
+            "https://www.linkedin.com/company/testcorp/custom-standard/",
+            "custom",
+            CapturePlan(CaptureMode.STANDARD),
+        )
+        assert result["sections"] == {
+            "about": "overlay text",
+            "custom": "standard text",
+        }
+
     async def test_the_delay_is_taken_between_sections_and_not_before_the_first(
         self, mock_page
     ):
