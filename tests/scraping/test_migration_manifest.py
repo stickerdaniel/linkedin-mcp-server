@@ -3001,6 +3001,54 @@ def test_a_sibling_test_keeps_the_exemption_a_nested_shadow_loses():
     assert not [seam for seam in seams if seam.kind.endswith("_patch_object")]
 
 
+def test_a_class_branch_copy_keeps_both_factory_views():
+    frame = migration._ScopeFrame(
+        kind="class",
+        module_names=set(),
+        class_names=set(),
+        instance_names=set(),
+        closure_module_names=set(),
+        closure_class_names=set(),
+        closure_instance_names=set(),
+        owner_factories=frozenset({"current_factory"}),
+        closure_owner_factories=frozenset({"enclosing_factory"}),
+    )
+
+    copied = migration.Scanner._copy_frame(frame)
+
+    assert copied.owner_factories == frozenset({"current_factory"})
+    assert copied.closure_owner_factories == frozenset({"enclosing_factory"})
+
+
+@pytest.mark.parametrize(
+    "branch",
+    [
+        "    if os.environ.get('FLAG'):\n{test}\n    else:\n        pass\n",
+        "    try:\n{test}\n    except Exception:\n        pass\n",
+    ],
+    ids=["if", "try"],
+)
+def test_a_class_branch_keeps_the_factory_its_class_body_shadows(branch):
+    test = (
+        "        async def test_owner(self, page, replacement):\n"
+        "            scraper = _scraper(page)\n"
+        "            patch.object("
+        'scraper._capture, "extract_page", replacement)'
+    )
+    seams = migration.scan_source(
+        PERSON_TESTS,
+        "\nimport os\n"
+        "from unittest.mock import patch\n"
+        "\nfrom linkedin_mcp_server.scraping.extractor import LinkedInExtractor\n"
+        "\n\ndef _scraper(page):\n    return page\n"
+        "\n\nclass TestOwner:\n"
+        "    _scraper = object()\n" + branch.format(test=test),
+        *migration.extractor_methods(),
+    )
+
+    assert not [seam for seam in seams if seam.kind.endswith("_patch_object")]
+
+
 def test_a_foreign_collaborator_of_its_own_stays_out_of_the_inventory():
     # The refusal has to stop at objects the reader knows nothing about, or it
     # refuses the migration's own target state: `tests/scraping/test_feed.py`

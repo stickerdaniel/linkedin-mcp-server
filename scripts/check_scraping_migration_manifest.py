@@ -665,6 +665,7 @@ class _ScopeFrame:
     # declares them per file; a scope that binds one itself drops it, and its
     # nested scopes inherit the reduced set rather than the table's.
     owner_factories: frozenset[str] = frozenset()
+    closure_owner_factories: frozenset[str] = frozenset()
 
 
 def _resolved_owner_factories(
@@ -2479,6 +2480,7 @@ class Scanner(ast.NodeVisitor):
                 closure_class_names=set(class_names),
                 closure_instance_names=set(),
                 owner_factories=owner_factories,
+                closure_owner_factories=owner_factories,
             )
         ]
         self.caller_contexts: list[set[str]] = []
@@ -2599,7 +2601,7 @@ class Scanner(ast.NodeVisitor):
         aliases, ambiguous_aliases = _collaborator_aliases(
             self.path, node, instance_names | class_names
         )
-        owner_factories = parent.owner_factories - shadowed
+        owner_factories = parent.closure_owner_factories - shadowed
         factories = tuple(sorted(owner_factories))
         owner_names = parent.closure_owner_names - shadowed
         owner_names.update(_owner_factory_bindings(node, factories))
@@ -2619,6 +2621,7 @@ class Scanner(ast.NodeVisitor):
                 owner_names=owner_names,
                 closure_owner_names=set(owner_names),
                 owner_factories=owner_factories,
+                closure_owner_factories=owner_factories,
             )
         )
         for statement in node.body:
@@ -2777,6 +2780,8 @@ class Scanner(ast.NodeVisitor):
             ambiguous_aliases=set(frame.ambiguous_aliases),
             owner_names=set(frame.owner_names),
             closure_owner_names=set(frame.closure_owner_names),
+            owner_factories=frame.owner_factories,
+            closure_owner_factories=frame.closure_owner_factories,
         )
 
     def _visit_class_suite(self, statements: list[ast.stmt]) -> None:
@@ -2894,8 +2899,9 @@ class Scanner(ast.NodeVisitor):
             closure_instance_names=set(parent.closure_instance_names),
             owner_names=set(parent.closure_owner_names),
             closure_owner_names=set(parent.closure_owner_names),
-            owner_factories=parent.owner_factories
+            owner_factories=parent.closure_owner_factories
             - _scope_collector(self.path, node.body).bindings,
+            closure_owner_factories=parent.closure_owner_factories,
         )
         self.frames.append(frame)
         self._visit_class_suite(node.body)
@@ -2935,7 +2941,10 @@ class Scanner(ast.NodeVisitor):
                 closure_module_names=set(module_names),
                 closure_class_names=set(class_names),
                 closure_instance_names=set(instance_names),
-                owner_factories=parent.owner_factories
+                owner_factories=parent.closure_owner_factories
+                - collector.bindings
+                - parameters,
+                closure_owner_factories=parent.closure_owner_factories
                 - collector.bindings
                 - parameters,
             )
