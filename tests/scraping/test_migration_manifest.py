@@ -30,7 +30,7 @@ _SHARED_BOUNDARY_STAGES = {
     "handle_modal_close": {9, 11, 12},
     "scroll_to_bottom": {9},
     "scroll_job_sidebar": {9},
-    "build_issue_diagnostics": {8, 9},
+    "build_issue_diagnostics": {9},
 }
 
 
@@ -287,11 +287,19 @@ def test_public_facade_patches_follow_each_calling_workflow():
 
     assert {
         seam["migration_stage"] for seam in public if seam["target"] == "extract_page"
-    } == {8, 9, 10}
+    } == {9, 10}
     # Enumerated rather than checked one target at a time, so a public patch
     # arriving for a workflow nobody expected fails here instead of passing
     # unnoticed.
-    assert {seam["target"] for seam in public} == {"extract_page", "search_companies"}
+    assert {seam["target"] for seam in public} == {"extract_page"}
+    # `search_companies` was the last one, and the two traces that mutated it
+    # now mutate `CompanyScraper` instead. Its table entry stays for the same
+    # reason the others do.
+    assert not [seam for seam in public if seam["target"] == "search_companies"]
+    assert migration._WORKFLOW_OWNERS["search_companies"] == (
+        "company.CompanyScraper",
+        8,
+    )
     # Both of the stage-7 targets were `connect_with_person` tests and closed
     # by moving to the owner: it takes its one main-profile read as an injected
     # callable, and it holds no click-by-text helper at all. The table keeps
@@ -346,7 +354,7 @@ def test_checker_rejects_obsolete_seams_at_their_migration_stage():
     # completed stage are closed by definition, so an override there proves
     # nothing; raise this number as each stage lands.
     result = subprocess.run(
-        [sys.executable, str(CHECKER), "--check", "--stage", "8"],
+        [sys.executable, str(CHECKER), "--check", "--stage", "9"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -354,18 +362,16 @@ def test_checker_rejects_obsolete_seams_at_their_migration_stage():
     )
 
     assert result.returncode == 1
-    assert "obsolete at stage 8:" in result.stderr
+    assert "obsolete at stage 9:" in result.stderr
     assert "public_patch_object" in result.stderr
     assert "private_patch_object" in result.stderr
-    # Every direct read of an extractor module attribute aimed at the feed
-    # drain moved with the test that held it, so no override below stage 9 can
-    # surface one. A feed test still reaching back through the facade module
-    # would show up here.
-    assert "module_attribute" not in result.stderr
-    # `string_patch` runs the other way: the person workflow held the last one
-    # below stage 8, and the three the company workflow drives sit at exactly
-    # 8, so raising this override past the connection stage brought them back.
     assert "string_patch" in result.stderr
+    # The two direct reads of an extractor module attribute that are still
+    # open both drive the job rail, so stage 9 is the first override that
+    # surfaces one and this assertion had to flip with it. The feed's, which
+    # is what it was written for, moved with the test that held it and stays
+    # closed either way.
+    assert "module_attribute" in result.stderr
 
 
 def test_checkers_offer_no_fixture_update_mode():
@@ -990,8 +996,8 @@ def test_manifest_includes_extractor_access_from_nested_closure():
         (seam["line"], seam["canonical_owner"], seam["migration_stage"])
         for seam in accesses
     } == {
-        (590, "facade.LinkedInExtractor._scroll_seconds", 14),
-        (2298, "facade.LinkedInExtractor._scroll_seconds", 14),
+        (589, "facade.LinkedInExtractor._scroll_seconds", 14),
+        (2109, "facade.LinkedInExtractor._scroll_seconds", 14),
     }
 
 

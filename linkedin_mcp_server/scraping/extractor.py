@@ -30,6 +30,7 @@ from linkedin_mcp_server.scraping.capture import (
     RATE_LIMIT_RETRY_DELAY,
     SectionCapture,
 )
+from linkedin_mcp_server.scraping.company import CompanyScraper
 from linkedin_mcp_server.scraping.connection_actions import ConnectionActions
 from linkedin_mcp_server.scraping.content import PageContentReader
 from linkedin_mcp_server.scraping.contracts import (
@@ -43,10 +44,8 @@ from linkedin_mcp_server.scraping.contracts import (
 )
 from linkedin_mcp_server.scraping.feed import FeedScraper
 from linkedin_mcp_server.scraping.identifiers import (
-    company_page_url,
     job_view_url,
     messaging_thread_url,
-    normalize_company_identifier,
     normalize_job_id,
     normalize_thread_id,
     normalize_person_identifier,
@@ -69,16 +68,15 @@ from linkedin_mcp_server.scraping.job_policy import (
     same_job_search,
 )
 from linkedin_mcp_server.scraping.navigation import PageNavigator
-from linkedin_mcp_server.scraping.person import NAV_DELAY, PersonScraper
+from linkedin_mcp_server.scraping.person import PersonScraper
 from linkedin_mcp_server.scraping.profile_page import ProfilePageReader
-from linkedin_mcp_server.scraping.session import ScrapingSession
+from linkedin_mcp_server.scraping.session import NAV_DELAY, ScrapingSession
 from linkedin_mcp_server.scraping.link_metadata import (
     Reference,
     build_references,
     dedupe_references,
 )
 from linkedin_mcp_server.scraping.search_urls import (
-    build_company_search_url,
     build_content_search_url,
     build_job_search_url,
 )
@@ -89,7 +87,6 @@ from linkedin_mcp_server.scraping.text import (
     truncate_linkedin_noise,
 )
 
-from .fields import COMPANY_SECTIONS
 
 if TYPE_CHECKING:
     from linkedin_mcp_server.callbacks import ProgressCallback
@@ -1135,6 +1132,7 @@ class LinkedInExtractor:
         self._person = PersonScraper(
             self._session, self._navigator, self._capture, self._profile_page
         )
+        self._company = CompanyScraper(self._session, self._capture)
         # Narrow and late-bound, like the reader above: the workflow needs one
         # main-profile read and nothing else of the person scraper, and
         # resolving `scrape_person` at call time keeps the facade's own frozen
@@ -1801,131 +1799,16 @@ class LinkedInExtractor:
         requested: set[str],
         callbacks: ProgressCallback | None = None,
     ) -> dict[str, Any]:
-        """Scrape a company profile with configurable sections.
-
-        Returns:
-            {url, sections: {name: text}}
-        """
-        requested = requested | {"about"}
-        company_name = normalize_company_identifier(company_name)
-        base_url = company_page_url(company_name)
-        sections: dict[str, str] = {}
-        references: dict[str, list[Reference]] = {}
-        section_errors: dict[str, dict[str, Any]] = {}
-        rate_limited = False
-
-        requested_ordered = [
-            (name, suffix, is_overlay)
-            for name, (suffix, is_overlay) in COMPANY_SECTIONS.items()
-            if name in requested
-        ]
-        total = len(requested_ordered)
-
-        if callbacks:
-            await callbacks.on_start("company profile", base_url)
-
-        try:
-            for i, (section_name, suffix, is_overlay) in enumerate(requested_ordered):
-                if i > 0:
-                    await asyncio.sleep(NAV_DELAY)
-
-                url = base_url + suffix
-                try:
-                    if is_overlay:
-                        extracted = await self._capture._extract_overlay(
-                            url, section_name=section_name
-                        )
-                    else:
-                        extracted = await self.extract_page(
-                            url, section_name=section_name
-                        )
-
-                    if extracted.text and extracted.text != RATE_LIMITED_SECTION_TEXT:
-                        sections[section_name] = extracted.text
-                        if extracted.references:
-                            references[section_name] = extracted.references
-                    elif extracted.text == RATE_LIMITED_SECTION_TEXT:
-                        section_errors[section_name] = rate_limited_section_error()
-                        rate_limited = True
-                    elif extracted.error:
-                        section_errors[section_name] = extracted.error
-                except LinkedInScraperException:
-                    raise
-                except Exception as e:
-                    logger.warning("Error scraping section %s: %s", section_name, e)
-                    section_errors[section_name] = build_issue_diagnostics(
-                        e,
-                        context="scrape_company",
-                        target_url=url,
-                        section_name=section_name,
-                    )
-
-                # "Scraped" = processed/attempted, not necessarily successful.
-                # Per-section failures are captured in section_errors.
-                if callbacks:
-                    percent = round((i + 1) / total * 95)
-                    await callbacks.on_progress(
-                        f"Scraped {section_name} ({i + 1}/{total})", percent
-                    )
-
-                if rate_limited:
-                    break
-        except LinkedInScraperException as e:
-            if callbacks:
-                await callbacks.on_error(e)
-            raise
-
-        result: dict[str, Any] = {
-            "url": f"{base_url}/",
-            "sections": sections,
-        }
-        if references:
-            result["references"] = references
-        if section_errors:
-            result["section_errors"] = section_errors
-
-        if callbacks:
-            await callbacks.on_complete("company profile", result)
-
-        return result
+        """Scrape a company profile with configurable sections."""
+        return await self._company.scrape_company(company_name, requested, callbacks)
 
     async def get_company_employees(
         self,
         company_name: str,
         keywords: str | None = None,
     ) -> dict[str, Any]:
-        """List employees at a company from the /people/ page.
-
-        Returns:
-            {url, sections: {employees: text}, references: {employees: [...]}}
-        """
-        company_name = normalize_company_identifier(company_name)
-        url = company_page_url(company_name, "/people/")
-        if keywords:
-            url += f"?keywords={quote_plus(keywords)}"
-        extracted = await self.extract_page(url, section_name="employees")
-
-        sections: dict[str, str] = {}
-        references: dict[str, list[Reference]] = {}
-        section_errors: dict[str, dict[str, Any]] = {}
-        if extracted.text and extracted.text != RATE_LIMITED_SECTION_TEXT:
-            sections["employees"] = extracted.text
-            if extracted.references:
-                references["employees"] = extracted.references
-        elif extracted.text == RATE_LIMITED_SECTION_TEXT:
-            section_errors["employees"] = rate_limited_section_error()
-        elif extracted.error:
-            section_errors["employees"] = extracted.error
-
-        result: dict[str, Any] = {
-            "url": url,
-            "sections": sections,
-        }
-        if references:
-            result["references"] = references
-        if section_errors:
-            result["section_errors"] = section_errors
-        return result
+        """List employees at a company from the /people/ page."""
+        return await self._company.get_company_employees(company_name, keywords)
 
     async def scrape_job(self, job_id: str) -> dict[str, Any]:
         """Scrape a single job posting.
@@ -2889,35 +2772,8 @@ class LinkedInExtractor:
         self,
         keywords: str,
     ) -> dict[str, Any]:
-        """Search for companies and extract the results page.
-
-        Returns:
-            {url, sections: {search_results: text}}
-        """
-        url = build_company_search_url(keywords)
-        extracted = await self.extract_page(url, section_name="search_results")
-
-        sections: dict[str, str] = {}
-        references: dict[str, list[Reference]] = {}
-        section_errors: dict[str, dict[str, Any]] = {}
-        if extracted.text and extracted.text != RATE_LIMITED_SECTION_TEXT:
-            sections["search_results"] = extracted.text
-            if extracted.references:
-                references["search_results"] = extracted.references
-        elif extracted.text == RATE_LIMITED_SECTION_TEXT:
-            section_errors["search_results"] = rate_limited_section_error()
-        elif extracted.error:
-            section_errors["search_results"] = extracted.error
-
-        result: dict[str, Any] = {
-            "url": url,
-            "sections": sections,
-        }
-        if references:
-            result["references"] = references
-        if section_errors:
-            result["section_errors"] = section_errors
-        return result
+        """Search for companies and extract the results page."""
+        return await self._company.search_companies(keywords)
 
     async def search_posts(
         self,

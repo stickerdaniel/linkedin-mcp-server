@@ -17,6 +17,14 @@ from linkedin_mcp_server.core.utils import (
 )
 
 
+# Pacing between page navigations. Owned by the boundary that performs the
+# pause rather than by any one workflow, because the person, company and job
+# walks pace themselves the same way and a domain service may not import a
+# peer's constant: two copies would let one relocation give two workflows
+# different policies without anything failing.
+NAV_DELAY = 2.0
+
+
 @dataclass(frozen=True, slots=True)
 class ScrapingSession:
     """Immutable page adapter shared by every scraping service."""

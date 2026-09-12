@@ -26,19 +26,13 @@ from linkedin_mcp_server.scraping.link_metadata import Reference
 from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.profile_page import ProfilePageReader
 from linkedin_mcp_server.scraping.search_urls import build_people_search_url
-from linkedin_mcp_server.scraping.session import ScrapingSession
+from linkedin_mcp_server.scraping.session import NAV_DELAY, ScrapingSession
 from linkedin_mcp_server.scraping.text import SIDEBAR_CHROME_EN
 
 if TYPE_CHECKING:
     from linkedin_mcp_server.callbacks import ProgressCallback
 
 logger = logging.getLogger(__name__)
-
-# Pacing between page navigations. Owned here rather than copied, because the
-# company and job walks that still sit on the facade pace themselves the same
-# way: two constants would let one relocation give two workflows different
-# policies without anything failing.
-NAV_DELAY = 2.0
 
 
 def _js_literal(value: str, quote: str) -> str:
