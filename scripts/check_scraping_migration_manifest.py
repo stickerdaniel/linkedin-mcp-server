@@ -739,8 +739,8 @@ def _setattr_arguments(node: ast.Call) -> tuple[ast.expr | None, ast.expr | None
 
 
 # The fixture's own name, and the class a private context is opened from. A
-# binding reading from either holds the same object, which is the whole signal
-# `_monkeypatch_names` follows.
+# binding reading from either holds the same object, which is the authority the
+# use-site collector follows.
 _MONKEYPATCH_NAMES = frozenset({"monkeypatch", "MonkeyPatch"})
 
 
@@ -752,52 +752,191 @@ def _mentions_monkeypatch(expression: ast.expr) -> bool:
     )
 
 
-def _monkeypatch_names(tree: ast.Module) -> set[str]:
-    """Name every local in one file that plausibly holds a pytest fixture.
+class _MonkeyPatchCallCollector(ast.NodeVisitor):
+    """Locate unreadable ``setattr`` calls on a live pytest patcher binding.
 
-    ``with pytest.MonkeyPatch.context() as patching`` and a parameter annotated
-    ``pytest.MonkeyPatch`` are the fixture under another name, which is why a
-    receiver test spelled ``monkeypatch`` alone would not find them. Read over
-    the whole module rather than per scope, and kept for a name a later
-    statement reuses for something else: this set only ever decides whether an
-    unreadable ``setattr`` is loud, so a name too many costs a refusal that
-    names its site and a name too few costs a silent skip. The bare end of an
-    attribute target joins it for the same reason, because ``self.patcher``
-    reads back through ``patcher``.
+    Receiver authority follows lexical scopes and statement order. That keeps
+    an alias in the scope where it was established, retires it when the same
+    target is rebound, and still lets an unshadowed outer alias reach a nested
+    function. Calls with readable targets do not need this evidence: the
+    extractor reachability checks scope those independently.
     """
 
-    names = {"monkeypatch"}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.withitem):
-            if isinstance(node.optional_vars, ast.Name) and _mentions_monkeypatch(
-                node.context_expr
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.calls: set[int] = set()
+        self.aliases = {"monkeypatch"}
+        self.closure_aliases = set(self.aliases)
+        self.scope_kinds = ["module"]
+
+    @staticmethod
+    def _key(expression: ast.expr) -> str:
+        if isinstance(expression, (ast.Name, ast.Attribute)):
+            return ast.unparse(expression)
+        return ""
+
+    @staticmethod
+    def _targets(target: ast.expr) -> set[str]:
+        if isinstance(target, (ast.Tuple, ast.List)):
+            return {
+                name
+                for item in target.elts
+                if (name := _MonkeyPatchCallCollector._key(item))
+            }
+        name = _MonkeyPatchCallCollector._key(target)
+        return {name} if name else set()
+
+    def _is_authority(self, expression: ast.expr) -> bool:
+        return any(
+            (isinstance(item, ast.expr) and self._key(item) in self.aliases)
+            or (isinstance(item, ast.Name) and item.id == "MonkeyPatch")
+            or (isinstance(item, ast.Attribute) and item.attr == "MonkeyPatch")
+            for item in ast.walk(expression)
+        )
+
+    def _bind(self, target: ast.expr, authority: bool) -> None:
+        names = self._targets(target)
+        self.aliases.difference_update(names)
+        if authority and isinstance(target, (ast.Name, ast.Attribute)):
+            self.aliases.update(names)
+        if self.scope_kinds[-1] != "class":
+            self.closure_aliases.difference_update(names)
+            self.closure_aliases.update(self.aliases & names)
+
+    def _unbind(self, names: set[str]) -> None:
+        self.aliases.difference_update(names)
+        if self.scope_kinds[-1] != "class":
+            self.closure_aliases.difference_update(names)
+
+    def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for default in [*node.args.defaults, *node.args.kw_defaults]:
+            if default is not None:
+                self.visit(default)
+
+        collector = _scope_collector(self.path, node.body)
+        parameters = _argument_names(node.args)
+        local_bindings = collector.bindings - collector.globals - collector.nonlocals
+        inherited = self.closure_aliases - local_bindings - parameters
+        for argument in [
+            *node.args.posonlyargs,
+            *node.args.args,
+            *node.args.kwonlyargs,
+            *([node.args.vararg] if node.args.vararg else []),
+            *([node.args.kwarg] if node.args.kwarg else []),
+        ]:
+            if argument.arg == "monkeypatch" or (
+                argument.annotation is not None
+                and _mentions_monkeypatch(argument.annotation)
             ):
-                names.add(node.optional_vars.id)
-        elif isinstance(node, ast.Assign) and _mentions_monkeypatch(node.value):
-            names.update(_bound_name(target) for target in node.targets)
-        elif isinstance(node, ast.AnnAssign):
-            if _mentions_monkeypatch(node.annotation) or (
-                node.value is not None and _mentions_monkeypatch(node.value)
-            ):
-                names.add(_bound_name(node.target))
-        elif (
-            isinstance(node, ast.arg)
-            and node.annotation is not None
-            and _mentions_monkeypatch(node.annotation)
+                inherited.add(argument.arg)
+
+        previous = (self.aliases, self.closure_aliases)
+        self.aliases = inherited
+        self.closure_aliases = set(inherited)
+        self.scope_kinds.append("function")
+        for statement in node.body:
+            self.visit(statement)
+        self.scope_kinds.pop()
+        self.aliases, self.closure_aliases = previous
+        self._unbind({node.name})
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> Any:
+        self._visit_function(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> Any:
+        self._visit_function(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> Any:
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for base in node.bases:
+            self.visit(base)
+        previous = (self.aliases, self.closure_aliases)
+        self.aliases = set(self.closure_aliases)
+        self.scope_kinds.append("class")
+        for statement in node.body:
+            self.visit(statement)
+        self.scope_kinds.pop()
+        self.aliases, self.closure_aliases = previous
+        self._unbind({node.name})
+
+    def visit_Assign(self, node: ast.Assign) -> Any:
+        self.visit(node.value)
+        authority = self._is_authority(node.value)
+        for target in node.targets:
+            self._bind(target, authority)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> Any:
+        if node.value is not None:
+            self.visit(node.value)
+        self._bind(
+            node.target,
+            _mentions_monkeypatch(node.annotation)
+            or (node.value is not None and self._is_authority(node.value)),
+        )
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> Any:
+        self.visit(node.value)
+        self._bind(node.target, False)
+
+    def visit_Delete(self, node: ast.Delete) -> Any:
+        for target in node.targets:
+            self._bind(target, False)
+
+    def visit_Import(self, node: ast.Import) -> Any:
+        self._unbind(
+            {alias.asname or alias.name.split(".", 1)[0] for alias in node.names}
+        )
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> Any:
+        self._unbind({alias.asname or alias.name for alias in node.names})
+
+    def _visit_for(self, node: ast.For | ast.AsyncFor) -> None:
+        self.visit(node.iter)
+        self._bind(node.target, False)
+        for statement in [*node.body, *node.orelse]:
+            self.visit(statement)
+
+    def visit_For(self, node: ast.For) -> Any:
+        self._visit_for(node)
+
+    def visit_AsyncFor(self, node: ast.AsyncFor) -> Any:
+        self._visit_for(node)
+
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> Any:
+        self.visit(node.value)
+        self._bind(node.target, self._is_authority(node.value))
+
+    def _visit_with(self, node: ast.With | ast.AsyncWith) -> None:
+        for item in node.items:
+            self.visit(item.context_expr)
+            if item.optional_vars is not None:
+                self._bind(item.optional_vars, self._is_authority(item.context_expr))
+        for statement in node.body:
+            self.visit(statement)
+
+    def visit_With(self, node: ast.With) -> Any:
+        self._visit_with(node)
+
+    def visit_AsyncWith(self, node: ast.AsyncWith) -> Any:
+        self._visit_with(node)
+
+    def visit_Call(self, node: ast.Call) -> Any:
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "setattr"
+            and self._is_authority(node.func.value)
         ):
-            names.add(node.arg)
-    names.discard("")
-    return names
+            self.calls.add(id(node))
+        self.generic_visit(node)
 
 
-def _bound_name(target: ast.expr) -> str:
-    """Name what one assignment target binds, or nothing for a shape without one."""
-
-    if isinstance(target, ast.Name):
-        return target.id
-    if isinstance(target, ast.Attribute):
-        return target.attr
-    return ""
+def _monkeypatch_calls(path: Path, tree: ast.Module) -> set[int]:
+    collector = _MonkeyPatchCallCollector(path)
+    collector.visit(tree)
+    return collector.calls
 
 
 class _CollaboratorAliasCollector:
@@ -1545,14 +1684,14 @@ class Scanner(ast.NodeVisitor):
         class_names: set[str],
         facade_publics: frozenset[str],
         facade_privates: frozenset[str],
-        monkeypatch_names: set[str],
+        monkeypatch_calls: set[int],
     ):
         self.path = path
         self.root_module_names = module_names
         self.root_class_names = class_names
         self.facade_publics = facade_publics
         self.facade_privates = facade_privates
-        self.monkeypatch_names = monkeypatch_names
+        self.monkeypatch_calls = monkeypatch_calls
         self.functions: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
         self.frames = [
             _ScopeFrame(
@@ -2387,31 +2526,17 @@ class Scanner(ast.NodeVisitor):
         against the docstring above: matching the method name alone is what
         keeps an aliased fixture inventoried, and it is free only while a
         readable target does the scoping. With the target gone the receiver has
-        to answer instead, so ``_monkeypatch_names`` stands in for it, widened
-        past the fixture's own name for exactly the aliases that docstring
-        warns about.
+        to answer instead, so the use-site collector proves that its binding is
+        still authoritative in this lexical scope.
         """
 
         function = node.func
-        if isinstance(function, ast.Attribute) and not self._monkeypatch_receiver(
-            function.value
+        if (
+            isinstance(function, ast.Attribute)
+            and id(node) not in self.monkeypatch_calls
         ):
             return
         self._error(node, ast.unparse(node), "unresolved setattr arguments")
-
-    def _monkeypatch_receiver(self, receiver: ast.expr) -> bool:
-        """Answer whether a ``.setattr`` receiver plausibly holds the fixture.
-
-        A mention anywhere in the receiver is enough: ``self.patcher`` reaches
-        the same object as the bare local, and the attribute name is all of it
-        there is to recognise.
-        """
-
-        return any(
-            (isinstance(item, ast.Name) and item.id in self.monkeypatch_names)
-            or (isinstance(item, ast.Attribute) and item.attr in self.monkeypatch_names)
-            for item in ast.walk(receiver)
-        )
 
     def visit_Assign(self, node: ast.Assign) -> Any:
         for target in node.targets:
@@ -2755,7 +2880,7 @@ def scan_source(
         class_names,
         facade_publics,
         facade_privates,
-        _monkeypatch_names(tree),
+        _monkeypatch_calls(path, tree),
     )
     scanner.visit(tree)
     if scanner.errors:

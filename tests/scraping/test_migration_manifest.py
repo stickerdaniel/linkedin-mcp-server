@@ -1745,8 +1745,8 @@ def test_an_unreadable_setattr_through_the_fixture_names_its_call_site(
     # The fixture is the one receiver whose `setattr` routinely lands on the
     # extractor, and it is routinely bound to another name: a private context
     # manager, an annotated parameter, a plain alias. Testing the receiver
-    # against the literal `monkeypatch` would skip exactly those, so the names
-    # the fixture is bound to in the file are collected first.
+    # against the literal `monkeypatch` would skip exactly those, so the live
+    # bindings at each call site are resolved first.
     with pytest.raises(
         migration.UnresolvedSeamError,
         match=rf"synthetic_inventory\.py:{line} "
@@ -1754,6 +1754,90 @@ def test_an_unreadable_setattr_through_the_fixture_names_its_call_site(
         r"unresolved setattr arguments",
     ):
         _scan_synthetic(_fixture_alias(binding, call))
+
+
+def test_a_context_alias_does_not_leak_into_a_sibling_scope():
+    source = """
+import pytest
+
+async def test_first():
+    with pytest.MonkeyPatch.context() as patch:
+        pass
+
+async def test_second(arguments):
+    patch.setattr(*arguments)
+"""
+
+    assert _scan_synthetic(source) == []
+
+
+def test_a_rebound_monkeypatch_alias_loses_receiver_authority():
+    source = """
+async def test_shape(monkeypatch, helper, arguments):
+    patch = monkeypatch
+    patch = helper
+    patch.setattr(*arguments)
+"""
+
+    assert _scan_synthetic(source) == []
+
+
+def test_a_nested_scope_can_shadow_an_outer_monkeypatch_alias():
+    source = """
+async def test_outer(monkeypatch, helper, arguments):
+    patch = monkeypatch
+
+    async def test_inner(patch=helper):
+        patch.setattr(*arguments)
+"""
+
+    assert _scan_synthetic(source) == []
+
+
+def test_a_nested_scope_inherits_a_live_monkeypatch_alias():
+    source = """
+async def test_outer(monkeypatch, arguments):
+    patch = monkeypatch
+
+    async def test_inner():
+        patch.setattr(*arguments)
+"""
+
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=r"patch\.setattr\(\*arguments\): unresolved setattr arguments",
+    ):
+        _scan_synthetic(source)
+
+
+def test_a_live_context_alias_remains_authoritative():
+    source = """
+import pytest
+
+async def test_shape(arguments):
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(*arguments)
+"""
+
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=r"patch\.setattr\(\*arguments\): unresolved setattr arguments",
+    ):
+        _scan_synthetic(source)
+
+
+def test_rebinding_receiver_does_not_hide_extractor_reachability():
+    source = _reach_through(
+        "patch = monkeypatch\n"
+        "    patch = helper\n"
+        '    patch.setattr(extractor._capture, "made_up", replacement)'
+    )
+
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=r"_capture\.made_up: unknown capture\.SectionCapture patch",
+    ):
+        _scan_synthetic(source)
 
 
 @pytest.mark.parametrize(
