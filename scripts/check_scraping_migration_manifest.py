@@ -661,6 +661,64 @@ class _ScopeFrame:
     ambiguous_aliases: set[int] = field(default_factory=set)
     owner_names: set[str] = field(default_factory=set)
     closure_owner_names: set[str] = field(default_factory=set)
+    # The factory names still answering for this scope. `_OWNER_FACTORIES`
+    # declares them per file; a scope that binds one itself drops it, and its
+    # nested scopes inherit the reduced set rather than the table's.
+    owner_factories: frozenset[str] = frozenset()
+
+
+def _resolved_owner_factories(
+    path: Path,
+    tree: ast.Module,
+) -> tuple[frozenset[str], list[str]]:
+    """Resolve the declared factory names against what the module defines.
+
+    The exemption was granted on the spelling alone, so any `_scraper(...)`
+    call carried it, including one reaching a name the module rebound to
+    something that builds the facade. The patch behind such a call left the
+    inventory instead of refusing, which is the one direction this checker
+    must not fail in.
+
+    A name is honored only where the module body defines it exactly once, as a
+    plain `def` or `async def`, and binds it no other way at that level. A
+    second definition, an import, an assignment or a class of the same name
+    all disqualify it outright and say so, because which of them a call site
+    reaches is a question about execution order that this reader cannot
+    answer. Shadowing deeper than module level is left to the scope chain: the
+    frame carries the honored set, and a scope that binds the name drops it
+    for itself and everything nested inside it.
+    """
+
+    declared = _OWNER_FACTORIES.get(path.relative_to(ROOT).as_posix(), ())
+    if not declared:
+        return frozenset(), []
+    honored: set[str] = set()
+    errors: list[str] = []
+    for name in declared:
+        definitions = [
+            statement
+            for statement in tree.body
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and statement.name == name
+        ]
+        others = _scope_collector(
+            path,
+            [
+                statement
+                for statement in tree.body
+                if not any(statement is definition for definition in definitions)
+            ],
+        ).bindings
+        if len(definitions) == 1 and name not in others:
+            honored.add(name)
+            continue
+        line = definitions[-1].lineno if definitions else 0
+        errors.append(
+            f"{path.relative_to(ROOT).as_posix()}:{line} {name}: "
+            "owner factory is not a single module-level definition; "
+            "remove the entry from _OWNER_FACTORIES or the rebinding"
+        )
+    return frozenset(honored), errors
 
 
 def _owner_factory_bindings(
@@ -2402,6 +2460,7 @@ class Scanner(ast.NodeVisitor):
         facade_publics: frozenset[str],
         facade_privates: frozenset[str],
         monkeypatch_calls: set[int],
+        owner_factories: frozenset[str] = frozenset(),
     ):
         self.path = path
         self.root_module_names = module_names
@@ -2419,6 +2478,7 @@ class Scanner(ast.NodeVisitor):
                 closure_module_names=set(module_names),
                 closure_class_names=set(class_names),
                 closure_instance_names=set(),
+                owner_factories=owner_factories,
             )
         ]
         self.caller_contexts: list[set[str]] = []
@@ -2523,9 +2583,8 @@ class Scanner(ast.NodeVisitor):
             collector.class_aliases,
             parameters,
         )
-        instance_names = parent.closure_instance_names - _function_shadowed_names(
-            self.path, node
-        )
+        shadowed = _function_shadowed_names(self.path, node)
+        instance_names = parent.closure_instance_names - shadowed
         instance_names.update(
             _extractor_bindings(
                 node,
@@ -2540,10 +2599,9 @@ class Scanner(ast.NodeVisitor):
         aliases, ambiguous_aliases = _collaborator_aliases(
             self.path, node, instance_names | class_names
         )
-        factories = _OWNER_FACTORIES.get(self.relative_path, ())
-        owner_names = parent.closure_owner_names - _function_shadowed_names(
-            self.path, node
-        )
+        owner_factories = parent.owner_factories - shadowed
+        factories = tuple(sorted(owner_factories))
+        owner_names = parent.closure_owner_names - shadowed
         owner_names.update(_owner_factory_bindings(node, factories))
         owner_names.difference_update(_rebound_owner_names(self.path, node, factories))
         self.functions.append(node)
@@ -2560,6 +2618,7 @@ class Scanner(ast.NodeVisitor):
                 ambiguous_aliases=ambiguous_aliases,
                 owner_names=owner_names,
                 closure_owner_names=set(owner_names),
+                owner_factories=owner_factories,
             )
         )
         for statement in node.body:
@@ -2835,6 +2894,8 @@ class Scanner(ast.NodeVisitor):
             closure_instance_names=set(parent.closure_instance_names),
             owner_names=set(parent.closure_owner_names),
             closure_owner_names=set(parent.closure_owner_names),
+            owner_factories=parent.owner_factories
+            - _scope_collector(self.path, node.body).bindings,
         )
         self.frames.append(frame)
         self._visit_class_suite(node.body)
@@ -2874,6 +2935,9 @@ class Scanner(ast.NodeVisitor):
                 closure_module_names=set(module_names),
                 closure_class_names=set(class_names),
                 closure_instance_names=set(instance_names),
+                owner_factories=parent.owner_factories
+                - collector.bindings
+                - parameters,
             )
         )
         self.visit(node.body)
@@ -3553,7 +3617,10 @@ class Scanner(ast.NodeVisitor):
         still refuse. A name the scope also binds some other way loses the
         exemption in ``_rebound_owner_names``: ``for``, ``with`` and
         ``except`` targets are no facade binding either, so this signal is the
-        only one that ever sees them.
+        only one that ever sees them. The factory the exemption comes from is
+        resolved rather than matched, in ``_resolved_owner_factories`` for the
+        module level and along the frame chain below it, so a shadowed
+        ``_scraper`` grants nothing.
         """
 
         frame = self.frames[-1]
@@ -3635,6 +3702,7 @@ def scan_source(
     class_names = set(root.class_aliases)
     if path == PACKAGE / "scraping" / "extractor.py":
         class_names.add("LinkedInExtractor")
+    owner_factories, factory_errors = _resolved_owner_factories(path, tree)
     scanner = Scanner(
         path,
         root.module_aliases,
@@ -3642,10 +3710,11 @@ def scan_source(
         facade_publics,
         facade_privates,
         _monkeypatch_calls(path, tree),
+        owner_factories,
     )
     scanner.visit(tree)
-    if scanner.errors:
-        raise UnresolvedSeamError("\n".join(scanner.errors))
+    if factory_errors or scanner.errors:
+        raise UnresolvedSeamError("\n".join([*factory_errors, *scanner.errors]))
     return scanner.seams
 
 
