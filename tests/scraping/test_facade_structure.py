@@ -330,59 +330,35 @@ def _resolved_import_module(path: Path, node: ast.ImportFrom) -> str | None:
     return ".".join(resolved)
 
 
-def _attribute_parts(node: ast.expr) -> tuple[str, ...] | None:
-    parts: list[str] = []
-    current = node
-    while isinstance(current, ast.Attribute):
-        parts.append(current.attr)
-        current = current.value
-    if not isinstance(current, ast.Name):
-        return None
-    return (current.id, *reversed(parts))
-
-
-def _facade_package_accesses(path: Path, tree: ast.AST) -> list[ast.AST]:
-    package_aliases: set[tuple[str, ...]] = set()
-    accesses: list[ast.AST] = []
+def _facade_package_imports(
+    path: Path, tree: ast.AST
+) -> list[ast.Import | ast.ImportFrom]:
+    imports: list[ast.Import | ast.ImportFrom] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name == "linkedin_mcp_server.scraping":
-                    package_aliases.add(
-                        (alias.asname,)
-                        if alias.asname
-                        else ("linkedin_mcp_server", "scraping")
-                    )
+        if isinstance(node, ast.Import) and any(
+            alias.name == "linkedin_mcp_server.scraping" for alias in node.names
+        ):
+            imports.append(node)
         elif isinstance(node, ast.ImportFrom):
             resolved = _resolved_import_module(path, node)
-            if resolved == "linkedin_mcp_server.scraping" and any(
+            if resolved == "linkedin_mcp_server" and any(
+                alias.name == "scraping" for alias in node.names
+            ):
+                imports.append(node)
+            elif resolved == "linkedin_mcp_server.scraping" and any(
                 alias.name in {"LinkedInExtractor", "*"} for alias in node.names
             ):
-                accesses.append(node)
-            elif resolved == "linkedin_mcp_server":
-                package_aliases.update(
-                    (alias.asname or alias.name,)
-                    for alias in node.names
-                    if alias.name == "scraping"
-                )
-
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Attribute) or node.attr != "LinkedInExtractor":
-            continue
-        parts = _attribute_parts(node)
-        if parts is not None and parts[:-1] in package_aliases:
-            accesses.append(node)
-    return accesses
+                imports.append(node)
+    return imports
 
 
 def _assert_no_obsolete_extractor_seams(sources: dict[Path, str]) -> None:
     for path, source in sources.items():
         tree = ast.parse(source, filename=str(path))
         if path not in FACADE_PACKAGE_IMPORTERS:
-            accesses = _facade_package_accesses(path, tree)
-            assert not accesses, (
-                f"{path}:{getattr(accesses[0], 'lineno', 0)}: "
-                "unauthorized scraping facade access"
+            imports = _facade_package_imports(path, tree)
+            assert not imports, (
+                f"{path}:{imports[0].lineno}: unauthorized scraping facade import"
             )
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.module == (
@@ -562,20 +538,30 @@ def test_dependency_guards_reject_cycles_layers_and_reverse_imports(path, additi
         ),
         (
             Path("linkedin_mcp_server/server.py"),
+            "import linkedin_mcp_server.scraping\n",
+        ),
+        (
+            Path("linkedin_mcp_server/server.py"),
+            "import linkedin_mcp_server.scraping as scraping\n",
+        ),
+        (
+            Path("linkedin_mcp_server/server.py"),
+            "from linkedin_mcp_server import scraping\n",
+        ),
+        (
+            Path("linkedin_mcp_server/server.py"),
+            "from linkedin_mcp_server import scraping as scraping_package\n",
+        ),
+        (
+            Path("linkedin_mcp_server/server.py"),
             "from linkedin_mcp_server.scraping import LinkedInExtractor\n",
         ),
         (
-            Path("linkedin_mcp_server/tools/feed.py"),
-            "import linkedin_mcp_server.scraping as scraping\n"
-            "scraping.LinkedInExtractor\n",
+            Path("linkedin_mcp_server/server.py"),
+            "from linkedin_mcp_server.scraping import LinkedInExtractor as Facade\n",
         ),
         (
-            Path("linkedin_mcp_server/tools/feed.py"),
-            "import linkedin_mcp_server.scraping\n"
-            "linkedin_mcp_server.scraping.LinkedInExtractor\n",
-        ),
-        (
-            Path("linkedin_mcp_server/tools/feed.py"),
+            Path("linkedin_mcp_server/server.py"),
             "from linkedin_mcp_server.scraping import *\n",
         ),
         (
@@ -593,15 +579,32 @@ def test_obsolete_extractor_seam_guard_rejects_mutations(path, addition):
 @pytest.mark.parametrize(
     "source",
     [
-        "import linkedin_mcp_server.scraping as scraping\nscraping.LinkedInExtractor\n",
-        "import linkedin_mcp_server.scraping\n"
-        "linkedin_mcp_server.scraping.LinkedInExtractor\n",
+        "import linkedin_mcp_server.scraping\n",
+        "import linkedin_mcp_server.scraping as scraping\n",
+        "from linkedin_mcp_server import scraping\n",
+        "from linkedin_mcp_server import scraping as scraping_package\n",
+        "from linkedin_mcp_server.scraping import LinkedInExtractor\n",
+        "from linkedin_mcp_server.scraping import LinkedInExtractor as Facade\n",
         "from linkedin_mcp_server.scraping import *\n",
     ],
 )
 def test_approved_facade_consumers_accept_equivalent_import_forms(source):
     _assert_no_obsolete_extractor_seams(
         {Path("linkedin_mcp_server/dependencies.py"): source}
+    )
+
+
+def test_non_facade_scraping_imports_and_unrelated_scopes_are_allowed():
+    _assert_no_obsolete_extractor_seams(
+        {
+            Path("linkedin_mcp_server/tools/feed.py"): (
+                "from linkedin_mcp_server.scraping import contracts, fields\n"
+                "from linkedin_mcp_server.scraping.contracts import ExtractedSection\n"
+                "\n"
+                "def unrelated(scraping):\n"
+                "    return scraping.LinkedInExtractor\n"
+            )
+        }
     )
 
 

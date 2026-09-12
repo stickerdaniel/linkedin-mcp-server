@@ -93,7 +93,7 @@ def _facade_package_importers() -> set[str]:
     importers: set[str] = set()
     for path in [*TESTS.rglob("*.py"), *PACKAGE.rglob("*.py")]:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        if migration._facade_package_accesses(path, tree):
+        if migration._facade_package_imports(path, tree):
             importers.add(path.relative_to(ROOT).as_posix())
     return importers
 
@@ -120,37 +120,23 @@ def test_package_export_dependency_composition_and_facade_contracts_are_allowed(
 
 
 @pytest.mark.parametrize(
-    "path,source,line",
+    "source",
     [
-        (
-            PACKAGE / "server.py",
-            "from linkedin_mcp_server.scraping import LinkedInExtractor\n",
-            1,
-        ),
-        (
-            PACKAGE / "tools" / "feed.py",
-            "import linkedin_mcp_server.scraping as scraping\n"
-            "scraping.LinkedInExtractor\n",
-            2,
-        ),
-        (
-            PACKAGE / "tools" / "feed.py",
-            "import linkedin_mcp_server.scraping\n"
-            "linkedin_mcp_server.scraping.LinkedInExtractor\n",
-            2,
-        ),
-        (
-            PACKAGE / "tools" / "feed.py",
-            "from linkedin_mcp_server.scraping import *\n",
-            1,
-        ),
+        "import linkedin_mcp_server.scraping\n",
+        "import linkedin_mcp_server.scraping as scraping\n",
+        "from linkedin_mcp_server import scraping\n",
+        "from linkedin_mcp_server import scraping as scraping_package\n",
+        "from linkedin_mcp_server.scraping import LinkedInExtractor\n",
+        "from linkedin_mcp_server.scraping import LinkedInExtractor as Facade\n",
+        "from linkedin_mcp_server.scraping import *\n",
     ],
 )
-def test_unauthorized_production_package_facade_imports_fail_closed(path, source, line):
+def test_unauthorized_facade_import_forms_fail_at_the_import_site(source):
+    path = PACKAGE / "tools" / "feed.py"
     with pytest.raises(
         migration.UnresolvedSeamError,
         match=(
-            rf"{re.escape(path.relative_to(ROOT).as_posix())}:{line} LinkedInExtractor: "
+            rf"{re.escape(path.relative_to(ROOT).as_posix())}:1 LinkedInExtractor: "
             r"scraping package facade import is not an approved construction "
             r"or contract boundary"
         ),
@@ -161,14 +147,55 @@ def test_unauthorized_production_package_facade_imports_fail_closed(path, source
 @pytest.mark.parametrize(
     "source",
     [
-        "import linkedin_mcp_server.scraping as scraping\nscraping.LinkedInExtractor\n",
-        "import linkedin_mcp_server.scraping\n"
-        "linkedin_mcp_server.scraping.LinkedInExtractor\n",
+        "import linkedin_mcp_server.scraping as scraping\n"
+        "copied = scraping\n"
+        "copied.LinkedInExtractor\n",
+        "import linkedin_mcp_server.scraping as scraping\n"
+        "scraping = object()\n"
+        "scraping.LinkedInExtractor\n",
+    ],
+    ids=["alias-copy", "definite-rebinding"],
+)
+def test_unauthorized_package_imports_do_not_depend_on_later_bindings(source):
+    path = PACKAGE / "tools" / "feed.py"
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=rf"{re.escape(path.relative_to(ROOT).as_posix())}:1 LinkedInExtractor:",
+    ):
+        _scan_synthetic(source, path=path)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [ROOT / relative for relative in sorted(migration._FACADE_PACKAGE_IMPORTERS)],
+)
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import linkedin_mcp_server.scraping\n",
+        "import linkedin_mcp_server.scraping as scraping\n",
+        "from linkedin_mcp_server import scraping\n",
+        "from linkedin_mcp_server import scraping as scraping_package\n",
+        "from linkedin_mcp_server.scraping import LinkedInExtractor\n",
+        "from linkedin_mcp_server.scraping import LinkedInExtractor as Facade\n",
         "from linkedin_mcp_server.scraping import *\n",
     ],
 )
-def test_approved_facade_consumers_accept_equivalent_import_forms(source):
-    _scan_synthetic(source, path=PACKAGE / "dependencies.py")
+def test_approved_facade_consumers_accept_equivalent_import_forms(path, source):
+    _scan_synthetic(source, path=path)
+
+
+def test_non_facade_imports_and_unrelated_scope_names_are_allowed():
+    seams = _scan_synthetic(
+        "from linkedin_mcp_server.scraping import contracts, fields\n"
+        "from linkedin_mcp_server.scraping.contracts import ExtractedSection\n"
+        "\n"
+        "def unrelated(scraping):\n"
+        "    return scraping.LinkedInExtractor\n",
+        path=PACKAGE / "tools" / "feed.py",
+    )
+
+    assert seams == []
 
 
 def test_final_messaging_seams_have_only_the_approved_stage_owners():
