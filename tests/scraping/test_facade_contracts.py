@@ -166,6 +166,28 @@ async def test_facade_scrape_person_forwards_its_keyword_only_arguments(mock_pag
     extract_page.assert_not_awaited()
 
 
+async def test_facade_search_posts_forwards_its_recency_filter(mock_page):
+    # The scroll depth is held by the `search-posts` trace, which runs the
+    # facade with `max_pages=2` and records the scrolls it buys. The recency
+    # filter is not: no scenario passes one, and replacing the forward with
+    # `None` survived the whole suite. Pinned here against the real owner,
+    # because dropping it answers a filtered request with unfiltered results
+    # under a URL that says otherwise.
+    extractor = LinkedInExtractor(cast(Page, mock_page))
+
+    with patch.object(
+        SectionCapture,
+        "extract_page",
+        new_callable=AsyncMock,
+        return_value=ExtractedSection(text="post", references=[], error=None),
+    ):
+        result = await extractor.search_posts("unity", date_posted="past-week")
+
+    assert "datePosted=%5B%22past-week%22%5D" in result["url"]
+    with pytest.raises(FilterValidationError):
+        await extractor.search_posts("unity", date_posted="last-year")
+
+
 async def test_facade_scrape_person_keeps_refusing_the_self_alias_by_default(mock_page):
     # The other half of the forward above: without the argument `me` is a
     # reserved name, so the assertion that it scraped says something.

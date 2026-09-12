@@ -262,6 +262,7 @@ _OWNER_FACTORIES: dict[str, tuple[str, ...]] = {
     "tests/scraping/test_company.py": ("_scraper",),
     "tests/scraping/test_job_pages.py": ("_reader",),
     "tests/scraping/test_jobs.py": ("_scraper",),
+    "tests/scraping/test_posts.py": ("_search",),
 }
 
 _EXPLICIT_CALLER_CONTEXTS: dict[tuple[str, str, str], tuple[str, ...]] = {

@@ -55,7 +55,6 @@ def test_manifest_matches_every_current_extractor_seam():
         "permanent_alias_import",
         "private_patch_object",
         "boundary_patch_object",
-        "public_patch_object",
         "imported_module_patch",
         "module_attribute",
         "private_facade_access",
@@ -78,6 +77,14 @@ def test_manifest_matches_every_current_extractor_seam():
         seam for seam in current["seams"] if seam["kind"] == "module_rebind_patch"
     ]
     assert "time" in migration._IMPORTED_MODULE_NAMES
+    # `public_patch_object` went the same way with the post search, which held
+    # the last six. Same reasoning: the kind leaves the required set, not the
+    # checker, so a facade delegate patched again in place of its owner is
+    # inventoried rather than unseen.
+    assert not [
+        seam for seam in current["seams"] if seam["kind"] == "public_patch_object"
+    ]
+    assert migration._WORKFLOW_OWNERS["extract_page"] == ("capture.SectionCapture", 4)
 
 
 def test_manifest_covers_production_callers_not_only_tests():
@@ -275,20 +282,24 @@ def test_shared_boundary_patches_retain_later_consumers_after_early_migration(
     } == expected_stages - {earliest_stage}
 
 
-def test_public_facade_patches_follow_each_calling_workflow():
+def test_the_last_public_facade_patch_retired_with_the_post_search():
+    """No workflow reaches its collaborator through a facade delegate now.
+
+    The six that remained were the post-search tests patching `extract_page`
+    on the facade, and they moved to `PostSearch` with the workflow. Every
+    table entry below stays for the reason each retired one does: a public
+    patch that reappears has to be dated against the workflow driving it
+    rather than fail closed as an unknown target.
+    """
     current = json.loads(MANIFEST.read_text(encoding="utf-8"))
     public = [
         seam for seam in current["seams"] if seam["kind"] == "public_patch_object"
     ]
 
-    assert {
-        seam["migration_stage"] for seam in public if seam["target"] == "extract_page"
-    } == {10}
-    # Enumerated rather than checked one target at a time, so a public patch
-    # arriving for a workflow nobody expected fails here instead of passing
-    # unnoticed.
-    assert {seam["target"] for seam in public} == {"extract_page"}
-    # `search_companies` was the last one, and the two traces that mutated it
+    assert public == []
+    assert migration._WORKFLOW_OWNERS["extract_page"] == ("capture.SectionCapture", 4)
+    assert migration._WORKFLOW_OWNERS["search_posts"] == ("posts.PostSearch", 10)
+    # `search_companies` was the last one before them, and the two traces that mutated it
     # now mutate `CompanyScraper` instead. Its table entry stays for the same
     # reason the others do.
     assert not [seam for seam in public if seam["target"] == "search_companies"]
@@ -350,7 +361,7 @@ def test_checker_rejects_obsolete_seams_at_their_migration_stage():
     # completed stage are closed by definition, so an override there proves
     # nothing; raise this number as each stage lands.
     result = subprocess.run(
-        [sys.executable, str(CHECKER), "--check", "--stage", "10"],
+        [sys.executable, str(CHECKER), "--check", "--stage", "11"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -358,15 +369,17 @@ def test_checker_rejects_obsolete_seams_at_their_migration_stage():
     )
 
     assert result.returncode == 1
-    assert "obsolete at stage 10:" in result.stderr
-    assert "public_patch_object" in result.stderr
-    # Stage 10 is the post search, and all six of its seams are one public
-    # patch of `extract_page`. Every other kind now opens at 11 or later, so
-    # these three say so rather than quietly stop proving anything: a private
-    # patch or a module attribute surfacing at this override would mean a
-    # stage-9 seam survived the job relocation.
-    assert "private_patch_object" not in result.stderr
-    assert "string_patch" not in result.stderr
+    assert "obsolete at stage 11:" in result.stderr
+    # Stage 11 is the conversation reader, and its seams reach the facade four
+    # different ways. `public_patch_object` and `module_attribute` are named
+    # too, negatively: the first retired with the post search and the second
+    # does not open before 12, so either one surfacing here would mean a
+    # closed stage left a seam behind.
+    assert "boundary_patch_object" in result.stderr
+    assert "private_patch_object" in result.stderr
+    assert "private_facade_access" in result.stderr
+    assert "string_patch" in result.stderr
+    assert "public_patch_object" not in result.stderr
     assert "module_attribute" not in result.stderr
 
 
