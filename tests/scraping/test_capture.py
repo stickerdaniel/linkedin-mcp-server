@@ -1185,27 +1185,57 @@ def _generic_capture_domain_path_literals(source: str) -> set[str]:
         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
     module_constants: dict[str, ast.AST] = {}
-    for node in tree.body:
-        if isinstance(node, (ast.Assign, ast.AnnAssign)):
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            value = node.value
-            if value is None:
-                continue
-            for target in targets:
-                if isinstance(target, ast.Name):
-                    module_constants[target.id] = value
+    class_constants: dict[str, ast.AST] = {}
 
-    def referenced_constant_literals(name: str, seen: set[str]) -> set[str]:
-        if name in seen or name not in module_constants:
+    def record_constants(nodes: list[ast.stmt], constants: dict[str, ast.AST]) -> None:
+        for node in nodes:
+            if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                targets = (
+                    node.targets if isinstance(node, ast.Assign) else [node.target]
+                )
+                value = node.value
+                if value is None:
+                    continue
+                for target in targets:
+                    if isinstance(target, ast.Name):
+                        constants[target.id] = value
+
+    record_constants(tree.body, module_constants)
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == "SectionCapture":
+            record_constants(node.body, class_constants)
+
+    def referenced_constant_literals(
+        name: str,
+        constants: dict[str, ast.AST],
+        seen: set[tuple[int, str]],
+    ) -> set[str]:
+        key = (id(constants), name)
+        if key in seen or name not in constants:
             return set()
-        seen.add(name)
+        seen.add(key)
         literals: set[str] = set()
-        for child in ast.walk(module_constants[name]):
+        for child in ast.walk(constants[name]):
             if isinstance(child, ast.Constant) and isinstance(child.value, str):
                 if any(fragment in child.value for fragment in domain_fragments):
                     literals.add(child.value)
             elif isinstance(child, ast.Name):
-                literals.update(referenced_constant_literals(child.id, seen))
+                referenced = (
+                    class_constants if constants is class_constants else constants
+                )
+                if child.id not in referenced:
+                    referenced = module_constants
+                literals.update(
+                    referenced_constant_literals(child.id, referenced, seen)
+                )
+            elif (
+                isinstance(child, ast.Attribute)
+                and isinstance(child.value, ast.Name)
+                and child.value.id in {"self", "cls", "SectionCapture"}
+            ):
+                literals.update(
+                    referenced_constant_literals(child.attr, class_constants, seen)
+                )
         return literals
 
     pending = [method for name, method in class_methods.items() if name in root_names]
@@ -1221,7 +1251,17 @@ def _generic_capture_domain_path_literals(source: str) -> set[str]:
                 if any(fragment in child.value for fragment in domain_fragments):
                     literals.add(child.value)
             elif isinstance(child, ast.Name):
-                literals.update(referenced_constant_literals(child.id, set()))
+                literals.update(
+                    referenced_constant_literals(child.id, module_constants, set())
+                )
+            elif (
+                isinstance(child, ast.Attribute)
+                and isinstance(child.value, ast.Name)
+                and child.value.id in {"self", "cls", "SectionCapture"}
+            ):
+                literals.update(
+                    referenced_constant_literals(child.attr, class_constants, set())
+                )
             elif isinstance(child, ast.Call):
                 target: ast.AST | None = None
                 if isinstance(child.func, ast.Name):
@@ -1230,7 +1270,7 @@ def _generic_capture_domain_path_literals(source: str) -> set[str]:
                 elif (
                     isinstance(child.func, ast.Attribute)
                     and isinstance(child.func.value, ast.Name)
-                    and child.func.value.id in {"self", "cls"}
+                    and child.func.value.id in {"self", "cls", "SectionCapture"}
                 ):
                     target = class_methods.get(child.func.attr)
                 if target is not None:
@@ -1279,6 +1319,57 @@ class SectionCapture:
         "/company/",
         "/people/",
     }
+
+
+@pytest.mark.parametrize("receiver", ["self", "cls"])
+def test_generic_capture_ast_guard_follows_same_class_helper_calls(receiver):
+    mutation = f"""
+class SectionCapture:
+    async def capture({receiver}, url):
+        return {receiver}._is_details(url)
+
+    def _is_details({receiver}, url):
+        return "/details/" in url
+"""
+    assert _generic_capture_domain_path_literals(mutation) == {"/details/"}
+
+
+def test_generic_capture_ast_guard_follows_class_qualified_helper_calls():
+    mutation = """
+class SectionCapture:
+    async def capture(self, url):
+        return SectionCapture._is_details(url)
+
+    @staticmethod
+    def _is_details(url):
+        return "/details/" in url
+"""
+    assert _generic_capture_domain_path_literals(mutation) == {"/details/"}
+
+
+@pytest.mark.parametrize("receiver", ["self", "cls", "SectionCapture"])
+def test_generic_capture_ast_guard_follows_class_constant_access(receiver):
+    mutation = f"""
+class SectionCapture:
+    DETAILS_PATH = "/details/"
+
+    async def capture(self, url):
+        return {receiver}.DETAILS_PATH in url
+"""
+    assert _generic_capture_domain_path_literals(mutation) == {"/details/"}
+
+
+def test_generic_capture_ast_guard_follows_chained_class_constants():
+    mutation = """
+class SectionCapture:
+    DETAILS_PATH = "/details/"
+    DOMAIN_PATH = DETAILS_PATH
+    CAPTURE_PATH = SectionCapture.DOMAIN_PATH
+
+    async def capture(self, url):
+        return self.CAPTURE_PATH in url
+"""
+    assert _generic_capture_domain_path_literals(mutation) == {"/details/"}
 
 
 def test_generic_capture_ast_guard_excludes_url_compatibility_adapter():
