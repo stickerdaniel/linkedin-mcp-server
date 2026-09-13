@@ -1,0 +1,114 @@
+{
+  "call": {
+    "arguments": {
+      "company_name": "analytical-engine",
+      "keywords": "math"
+    },
+    "method": "get_company_employees"
+  },
+  "events": [
+    {
+      "call": "get_company_employees",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add"
+    },
+    {
+      "call": "get_company_employees",
+      "extra": {
+        "target_url": "https://www.linkedin.com/company/analytical-engine/people/?keywords=math",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto"
+    },
+    {
+      "call": "get_company_employees",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/company/analytical-engine/people/?keywords=math",
+      "requested_url": "https://www.linkedin.com/company/analytical-engine/people/?keywords=math",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "get_company_employees",
+      "description": "goto https://www.linkedin.com/company/analytical-engine/people/?keywords=math",
+      "kind": "boundary.stabilize",
+      "result": null
+    },
+    {
+      "call": "get_company_employees",
+      "extra": {
+        "target_url": "https://www.linkedin.com/company/analytical-engine/people/?keywords=math",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto"
+    },
+    {
+      "call": "get_company_employees",
+      "kind": "boundary.auth_quick",
+      "result": null
+    },
+    {
+      "call": "get_company_employees",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove"
+    },
+    {
+      "call": "get_company_employees",
+      "kind": "boundary.rate_limit"
+    },
+    {
+      "call": "get_company_employees",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "selector": "main",
+      "state": "visible",
+      "timeout_ms": null
+    },
+    {
+      "call": "get_company_employees",
+      "dismissed": false,
+      "kind": "boundary.modal"
+    },
+    {
+      "arg": null,
+      "call": "get_company_employees",
+      "kind": "wait_for_function",
+      "operation": "company_people_ready",
+      "program_digest": "6615c14bd135",
+      "timeout_ms": 5000
+    },
+    {
+      "actual_scrolls": 2,
+      "call": "get_company_employees",
+      "kind": "boundary.scroll_body",
+      "max_scrolls": 5,
+      "pause_time": 0.5
+    },
+    {
+      "arg": {
+        "selectors": [
+          "main"
+        ]
+      },
+      "call": "get_company_employees",
+      "kind": "evaluate",
+      "operation": "root_content",
+      "program_digest": "e8a0e21ac6f5"
+    }
+  ],
+  "result": {
+    "section_names": [
+      "employees"
+    ],
+    "sections": {
+      "employees": "Result content"
+    },
+    "url": "https://www.linkedin.com/company/analytical-engine/people/?keywords=math"
+  },
+  "scenario": "get_company_employees__baseline",
+  "schema_version": 1
+}

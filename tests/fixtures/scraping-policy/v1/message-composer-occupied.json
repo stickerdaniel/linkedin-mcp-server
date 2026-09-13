@@ -1,0 +1,211 @@
+{
+  "call": {
+    "arguments": {
+      "composer_occupied": "existing_draft",
+      "confirm_send": true
+    },
+    "method": "send_message"
+  },
+  "events": [
+    {
+      "call": "send_message",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "extra": {
+        "target_url": "https://www.linkedin.com/in/ada-lovelace/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/in/ada-lovelace/",
+      "requested_url": "https://www.linkedin.com/in/ada-lovelace/",
+      "section": "message",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "send_message",
+      "description": "goto https://www.linkedin.com/in/ada-lovelace/",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "extra": {
+        "target_url": "https://www.linkedin.com/in/ada-lovelace/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "boundary.rate_limit",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "section": "message",
+      "selector": "main",
+      "state": "visible",
+      "timeout_ms": null
+    },
+    {
+      "arg": null,
+      "call": "send_message",
+      "kind": "wait_for_function",
+      "operation": "profile_message_target_ready",
+      "program_digest": "96d99936369a",
+      "section": "message",
+      "timeout_ms": 1000
+    },
+    {
+      "call": "send_message",
+      "kind": "evaluate",
+      "operation": "profile_message_target",
+      "program_digest": "33b2fb160e45",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "callback_id": "callback-2",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "extra": {
+        "target_url": "https://www.linkedin.com/messaging/compose/?recipient=ACoAA-policy&profileUrn=urn%3Ali%3Afsd_profile%3AACoAA-policy",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/messaging/thread/2-policy-thread==/",
+      "requested_url": "https://www.linkedin.com/messaging/compose/?recipient=ACoAA-policy&profileUrn=urn%3Ali%3Afsd_profile%3AACoAA-policy",
+      "section": "message",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "send_message",
+      "description": "goto https://www.linkedin.com/messaging/compose/?recipient=ACoAA-policy&profileUrn=urn%3Ali%3Afsd_profile%3AACoAA-policy",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "extra": {
+        "target_url": "https://www.linkedin.com/messaging/compose/?recipient=ACoAA-policy&profileUrn=urn%3Ali%3Afsd_profile%3AACoAA-policy",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "callback_id": "callback-2",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "boundary.rate_limit",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "section": "message",
+      "selector": "main",
+      "state": "visible",
+      "timeout_ms": null
+    },
+    {
+      "arg": {
+        "profilePath": "/in/ada-lovelace/",
+        "profileUrn": "ACoAA-policy"
+      },
+      "call": "send_message",
+      "kind": "wait_for_function",
+      "operation": "message_composer_ready",
+      "program_digest": "55fbb455644d",
+      "section": "message",
+      "timeout_ms": null
+    },
+    {
+      "arg": {
+        "profilePath": "/in/ada-lovelace/",
+        "profileUrn": "ACoAA-policy"
+      },
+      "call": "send_message",
+      "kind": "evaluate",
+      "operation": "message_composer_state",
+      "program_digest": "5b716974716a",
+      "section": "message"
+    },
+    {
+      "arg": {
+        "profilePath": "/in/ada-lovelace/",
+        "profileUrn": "ACoAA-policy"
+      },
+      "call": "send_message",
+      "kind": "evaluate",
+      "operation": "message_composer_state",
+      "program_digest": "5b716974716a",
+      "section": "message"
+    }
+  ],
+  "result": {
+    "message": "The composer already holds a draft that would be sent along with the message. The draft was left untouched.",
+    "recipient_selected": true,
+    "retry_safe": true,
+    "sent": false,
+    "status": "composer_occupied",
+    "url": "https://www.linkedin.com/messaging/thread/2-policy-thread==/"
+  },
+  "scenario": "send_message__existing_draft",
+  "schema_version": 1
+}

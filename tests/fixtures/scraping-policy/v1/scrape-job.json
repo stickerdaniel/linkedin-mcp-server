@@ -1,0 +1,105 @@
+{
+  "call": {
+    "arguments": {
+      "job_id": "123"
+    },
+    "method": "scrape_job"
+  },
+  "events": [
+    {
+      "call": "scrape_job",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add"
+    },
+    {
+      "call": "scrape_job",
+      "extra": {
+        "target_url": "https://www.linkedin.com/jobs/view/123/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto"
+    },
+    {
+      "call": "scrape_job",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/jobs/view/123/",
+      "requested_url": "https://www.linkedin.com/jobs/view/123/",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "scrape_job",
+      "description": "goto https://www.linkedin.com/jobs/view/123/",
+      "kind": "boundary.stabilize",
+      "result": null
+    },
+    {
+      "call": "scrape_job",
+      "extra": {
+        "target_url": "https://www.linkedin.com/jobs/view/123/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto"
+    },
+    {
+      "call": "scrape_job",
+      "kind": "boundary.auth_quick",
+      "result": null
+    },
+    {
+      "call": "scrape_job",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove"
+    },
+    {
+      "call": "scrape_job",
+      "kind": "boundary.rate_limit"
+    },
+    {
+      "call": "scrape_job",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "selector": "main",
+      "state": "visible",
+      "timeout_ms": null
+    },
+    {
+      "call": "scrape_job",
+      "dismissed": false,
+      "kind": "boundary.modal"
+    },
+    {
+      "actual_scrolls": 2,
+      "call": "scrape_job",
+      "kind": "boundary.scroll_body",
+      "max_scrolls": 5,
+      "pause_time": 0.5
+    },
+    {
+      "arg": {
+        "selectors": [
+          "main"
+        ]
+      },
+      "call": "scrape_job",
+      "kind": "evaluate",
+      "operation": "root_content",
+      "program_digest": "e8a0e21ac6f5"
+    }
+  ],
+  "result": {
+    "section_names": [
+      "job_posting"
+    ],
+    "sections": {
+      "job_posting": "Result content"
+    },
+    "url": "https://www.linkedin.com/jobs/view/123/"
+  },
+  "scenario": "scrape_job__baseline",
+  "schema_version": 1
+}

@@ -1,0 +1,107 @@
+{
+  "call": {
+    "arguments": {
+      "confirm_send": true,
+      "target_resolution": "unresolved"
+    },
+    "method": "send_message"
+  },
+  "events": [
+    {
+      "call": "send_message",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "extra": {
+        "target_url": "https://www.linkedin.com/in/ada-lovelace/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/in/ada-lovelace/",
+      "requested_url": "https://www.linkedin.com/in/ada-lovelace/",
+      "section": "message",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "send_message",
+      "description": "goto https://www.linkedin.com/in/ada-lovelace/",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "extra": {
+        "target_url": "https://www.linkedin.com/in/ada-lovelace/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "boundary.rate_limit",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "section": "message",
+      "selector": "main",
+      "state": "visible",
+      "timeout_ms": null
+    },
+    {
+      "arg": null,
+      "call": "send_message",
+      "kind": "wait_for_function",
+      "operation": "profile_message_target_ready",
+      "program_digest": "96d99936369a",
+      "section": "message",
+      "timeout_ms": 1000
+    },
+    {
+      "call": "send_message",
+      "kind": "evaluate",
+      "operation": "profile_message_target",
+      "program_digest": "33b2fb160e45",
+      "section": "message"
+    }
+  ],
+  "result": {
+    "message": "LinkedIn did not expose one unambiguous recipient-specific Message action.",
+    "recipient_selected": false,
+    "retry_safe": true,
+    "sent": false,
+    "status": "recipient_resolution_failed",
+    "url": "https://www.linkedin.com/in/ada-lovelace/"
+  },
+  "scenario": "send_message__target_unresolved",
+  "schema_version": 1
+}

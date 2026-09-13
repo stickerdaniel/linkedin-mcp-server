@@ -1,0 +1,162 @@
+{
+  "call": {
+    "arguments": {
+      "thread_id": "2-abc"
+    },
+    "method": "get_conversation"
+  },
+  "events": [
+    {
+      "call": "get_conversation",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "section": "conversation"
+    },
+    {
+      "call": "get_conversation",
+      "extra": {
+        "target_url": "https://www.linkedin.com/messaging/thread/2-abc/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "section": "conversation"
+    },
+    {
+      "call": "get_conversation",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/messaging/thread/2-abc/",
+      "requested_url": "https://www.linkedin.com/messaging/thread/2-abc/",
+      "section": "conversation",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "get_conversation",
+      "description": "goto https://www.linkedin.com/messaging/thread/2-abc/",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "conversation"
+    },
+    {
+      "call": "get_conversation",
+      "extra": {
+        "target_url": "https://www.linkedin.com/messaging/thread/2-abc/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "section": "conversation"
+    },
+    {
+      "call": "get_conversation",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "section": "conversation"
+    },
+    {
+      "call": "get_conversation",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "section": "conversation"
+    },
+    {
+      "call": "get_conversation",
+      "kind": "boundary.rate_limit",
+      "section": "conversation"
+    },
+    {
+      "arg": {
+        "minimumLength": 100
+      },
+      "call": "get_conversation",
+      "kind": "wait_for_function",
+      "operation": "main_text_minimum",
+      "program_digest": "9ab4343bf5cb",
+      "section": "conversation",
+      "timeout_ms": 10000
+    },
+    {
+      "call": "get_conversation",
+      "dismissed": false,
+      "kind": "boundary.modal",
+      "section": "conversation"
+    },
+    {
+      "arg": {
+        "position": "top"
+      },
+      "call": "get_conversation",
+      "kind": "evaluate",
+      "operation": "scroll_main_region",
+      "program_digest": "2a74f7f069d9",
+      "section": "conversation"
+    },
+    {
+      "call": "get_conversation",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.5,
+      "section": "conversation"
+    },
+    {
+      "arg": {
+        "position": "top"
+      },
+      "call": "get_conversation",
+      "kind": "evaluate",
+      "operation": "scroll_main_region",
+      "program_digest": "2a74f7f069d9",
+      "section": "conversation"
+    },
+    {
+      "call": "get_conversation",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.5,
+      "section": "conversation"
+    },
+    {
+      "arg": {
+        "position": "top"
+      },
+      "call": "get_conversation",
+      "kind": "evaluate",
+      "operation": "scroll_main_region",
+      "program_digest": "2a74f7f069d9",
+      "section": "conversation"
+    },
+    {
+      "call": "get_conversation",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.5,
+      "section": "conversation"
+    },
+    {
+      "arg": {
+        "selectors": [
+          "main"
+        ]
+      },
+      "call": "get_conversation",
+      "kind": "evaluate",
+      "operation": "root_content",
+      "program_digest": "e8a0e21ac6f5",
+      "section": "conversation"
+    }
+  ],
+  "result": {
+    "section_names": [
+      "conversation"
+    ],
+    "sections": {
+      "conversation": "Conversation content"
+    },
+    "url": "https://www.linkedin.com/messaging/thread/2-abc/"
+  },
+  "scenario": "get_conversation__baseline",
+  "schema_version": 1
+}

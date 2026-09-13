@@ -1,0 +1,137 @@
+{
+  "call": {
+    "arguments": {
+      "limit": 10
+    },
+    "method": "get_inbox"
+  },
+  "events": [
+    {
+      "call": "get_inbox",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "section": "conversation"
+    },
+    {
+      "call": "get_inbox",
+      "extra": {
+        "target_url": "https://www.linkedin.com/messaging/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "section": "conversation"
+    },
+    {
+      "call": "get_inbox",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/messaging/",
+      "requested_url": "https://www.linkedin.com/messaging/",
+      "section": "conversation",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "get_inbox",
+      "description": "goto https://www.linkedin.com/messaging/",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "conversation"
+    },
+    {
+      "call": "get_inbox",
+      "extra": {
+        "target_url": "https://www.linkedin.com/messaging/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "section": "conversation"
+    },
+    {
+      "call": "get_inbox",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "section": "conversation"
+    },
+    {
+      "call": "get_inbox",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "section": "conversation"
+    },
+    {
+      "call": "get_inbox",
+      "kind": "boundary.rate_limit",
+      "section": "conversation"
+    },
+    {
+      "arg": {
+        "minimumLength": 100
+      },
+      "call": "get_inbox",
+      "kind": "wait_for_function",
+      "operation": "main_text_minimum",
+      "program_digest": "9ab4343bf5cb",
+      "section": "conversation",
+      "timeout_ms": 10000
+    },
+    {
+      "call": "get_inbox",
+      "dismissed": false,
+      "kind": "boundary.modal",
+      "section": "conversation"
+    },
+    {
+      "arg": {
+        "position": "bottom"
+      },
+      "call": "get_inbox",
+      "kind": "evaluate",
+      "operation": "scroll_main_region",
+      "program_digest": "2a74f7f069d9",
+      "section": "conversation"
+    },
+    {
+      "call": "get_inbox",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.5,
+      "section": "conversation"
+    },
+    {
+      "arg": {
+        "selectors": [
+          "main"
+        ]
+      },
+      "call": "get_inbox",
+      "kind": "evaluate",
+      "operation": "root_content",
+      "program_digest": "e8a0e21ac6f5",
+      "section": "conversation"
+    },
+    {
+      "call": "get_inbox",
+      "kind": "wait_for_selector",
+      "operation": "conversation_rows",
+      "section": "conversation",
+      "selector": "main li label[aria-label]",
+      "state": "attached",
+      "timeout_ms": 10000
+    }
+  ],
+  "result": {
+    "section_names": [
+      "inbox"
+    ],
+    "sections": {
+      "inbox": "Conversation content"
+    },
+    "url": "https://www.linkedin.com/messaging/"
+  },
+  "scenario": "get_inbox__baseline",
+  "schema_version": 1
+}

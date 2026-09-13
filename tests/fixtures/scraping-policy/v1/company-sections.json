@@ -1,0 +1,332 @@
+{
+  "call": {
+    "arguments": {
+      "company_name": "analytical-engine",
+      "requested": [
+        "about",
+        "posts",
+        "jobs"
+      ]
+    },
+    "method": "scrape_company"
+  },
+  "events": [
+    {
+      "call": "scrape_company",
+      "kind": "callback.start",
+      "operation": "company profile",
+      "url": "https://www.linkedin.com/company/analytical-engine"
+    },
+    {
+      "call": "scrape_company",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add"
+    },
+    {
+      "call": "scrape_company",
+      "extra": {
+        "target_url": "https://www.linkedin.com/company/analytical-engine/about/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto"
+    },
+    {
+      "call": "scrape_company",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/company/analytical-engine/about/",
+      "requested_url": "https://www.linkedin.com/company/analytical-engine/about/",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "scrape_company",
+      "description": "goto https://www.linkedin.com/company/analytical-engine/about/",
+      "kind": "boundary.stabilize",
+      "result": null
+    },
+    {
+      "call": "scrape_company",
+      "extra": {
+        "target_url": "https://www.linkedin.com/company/analytical-engine/about/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto"
+    },
+    {
+      "call": "scrape_company",
+      "kind": "boundary.auth_quick",
+      "result": null
+    },
+    {
+      "call": "scrape_company",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove"
+    },
+    {
+      "call": "scrape_company",
+      "kind": "boundary.rate_limit"
+    },
+    {
+      "call": "scrape_company",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "selector": "main",
+      "state": "visible",
+      "timeout_ms": null
+    },
+    {
+      "call": "scrape_company",
+      "dismissed": false,
+      "kind": "boundary.modal"
+    },
+    {
+      "actual_scrolls": 2,
+      "call": "scrape_company",
+      "kind": "boundary.scroll_body",
+      "max_scrolls": 5,
+      "pause_time": 0.5
+    },
+    {
+      "arg": {
+        "selectors": [
+          "main"
+        ]
+      },
+      "call": "scrape_company",
+      "kind": "evaluate",
+      "operation": "root_content",
+      "program_digest": "e8a0e21ac6f5"
+    },
+    {
+      "call": "scrape_company",
+      "kind": "callback.progress",
+      "message": "Scraped about (1/3)",
+      "percent": 32
+    },
+    {
+      "call": "scrape_company",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 2.0
+    },
+    {
+      "call": "scrape_company",
+      "callback_id": "callback-2",
+      "event": "framenavigated",
+      "kind": "listener.add"
+    },
+    {
+      "call": "scrape_company",
+      "extra": {
+        "target_url": "https://www.linkedin.com/company/analytical-engine/posts/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto"
+    },
+    {
+      "call": "scrape_company",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/company/analytical-engine/posts/",
+      "requested_url": "https://www.linkedin.com/company/analytical-engine/posts/",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "scrape_company",
+      "description": "goto https://www.linkedin.com/company/analytical-engine/posts/",
+      "kind": "boundary.stabilize",
+      "result": null
+    },
+    {
+      "call": "scrape_company",
+      "extra": {
+        "target_url": "https://www.linkedin.com/company/analytical-engine/posts/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto"
+    },
+    {
+      "call": "scrape_company",
+      "kind": "boundary.auth_quick",
+      "result": null
+    },
+    {
+      "call": "scrape_company",
+      "callback_id": "callback-2",
+      "event": "framenavigated",
+      "kind": "listener.remove"
+    },
+    {
+      "call": "scrape_company",
+      "kind": "boundary.rate_limit"
+    },
+    {
+      "call": "scrape_company",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "selector": "main",
+      "state": "visible",
+      "timeout_ms": null
+    },
+    {
+      "call": "scrape_company",
+      "dismissed": false,
+      "kind": "boundary.modal"
+    },
+    {
+      "arg": null,
+      "call": "scrape_company",
+      "kind": "wait_for_function",
+      "operation": "main_text_200",
+      "program_digest": "24943facf9de",
+      "timeout_ms": 10000
+    },
+    {
+      "actual_scrolls": 2,
+      "call": "scrape_company",
+      "kind": "boundary.scroll_body",
+      "max_scrolls": 10,
+      "pause_time": 1.0
+    },
+    {
+      "arg": {
+        "selectors": [
+          "main"
+        ]
+      },
+      "call": "scrape_company",
+      "kind": "evaluate",
+      "operation": "root_content",
+      "program_digest": "e8a0e21ac6f5"
+    },
+    {
+      "call": "scrape_company",
+      "kind": "callback.progress",
+      "message": "Scraped posts (2/3)",
+      "percent": 63
+    },
+    {
+      "call": "scrape_company",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 2.0
+    },
+    {
+      "call": "scrape_company",
+      "callback_id": "callback-3",
+      "event": "framenavigated",
+      "kind": "listener.add"
+    },
+    {
+      "call": "scrape_company",
+      "extra": {
+        "target_url": "https://www.linkedin.com/company/analytical-engine/jobs/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto"
+    },
+    {
+      "call": "scrape_company",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/company/analytical-engine/jobs/",
+      "requested_url": "https://www.linkedin.com/company/analytical-engine/jobs/",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "scrape_company",
+      "description": "goto https://www.linkedin.com/company/analytical-engine/jobs/",
+      "kind": "boundary.stabilize",
+      "result": null
+    },
+    {
+      "call": "scrape_company",
+      "extra": {
+        "target_url": "https://www.linkedin.com/company/analytical-engine/jobs/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto"
+    },
+    {
+      "call": "scrape_company",
+      "kind": "boundary.auth_quick",
+      "result": null
+    },
+    {
+      "call": "scrape_company",
+      "callback_id": "callback-3",
+      "event": "framenavigated",
+      "kind": "listener.remove"
+    },
+    {
+      "call": "scrape_company",
+      "kind": "boundary.rate_limit"
+    },
+    {
+      "call": "scrape_company",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "selector": "main",
+      "state": "visible",
+      "timeout_ms": null
+    },
+    {
+      "call": "scrape_company",
+      "dismissed": false,
+      "kind": "boundary.modal"
+    },
+    {
+      "actual_scrolls": 2,
+      "call": "scrape_company",
+      "kind": "boundary.scroll_body",
+      "max_scrolls": 5,
+      "pause_time": 0.5
+    },
+    {
+      "arg": {
+        "selectors": [
+          "main"
+        ]
+      },
+      "call": "scrape_company",
+      "kind": "evaluate",
+      "operation": "root_content",
+      "program_digest": "e8a0e21ac6f5"
+    },
+    {
+      "call": "scrape_company",
+      "kind": "callback.progress",
+      "message": "Scraped jobs (3/3)",
+      "percent": 95
+    },
+    {
+      "call": "scrape_company",
+      "kind": "callback.complete",
+      "operation": "company profile",
+      "result_url": "https://www.linkedin.com/company/analytical-engine/"
+    }
+  ],
+  "result": {
+    "section_names": [
+      "about",
+      "posts",
+      "jobs"
+    ],
+    "sections": {
+      "about": "about content",
+      "jobs": "jobs content",
+      "posts": "posts content"
+    },
+    "url": "https://www.linkedin.com/company/analytical-engine/"
+  },
+  "scenario": "scrape_company__all_sections",
+  "schema_version": 1
+}

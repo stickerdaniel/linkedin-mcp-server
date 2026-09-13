@@ -1,0 +1,749 @@
+{
+  "call": {
+    "arguments": {
+      "constructor": "Page"
+    },
+    "method": "LinkedInExtractor"
+  },
+  "events": [],
+  "result": {
+    "compatibility_methods": [
+      "click_button_by_text",
+      "get_page_text"
+    ],
+    "methods": {
+      "click_button_by_text": {
+        "coroutine": true,
+        "signature": "(self, text: 'str', *, scope: 'str' = 'main', timeout: 'int' = 5000) -> 'bool'"
+      },
+      "connect_with_person": {
+        "coroutine": true,
+        "signature": "(self, username: 'str', *, note: 'str | None' = None) -> 'dict[str, Any]'"
+      },
+      "extract_feed": {
+        "coroutine": true,
+        "signature": "(self, num_posts: 'int' = 10) -> 'ExtractedSection'"
+      },
+      "extract_page": {
+        "coroutine": true,
+        "signature": "(self, url: 'str', section_name: 'str', max_scrolls: 'int | None' = None) -> 'ExtractedSection'"
+      },
+      "get_company_employees": {
+        "coroutine": true,
+        "signature": "(self, company_name: 'str', keywords: 'str | None' = None) -> 'dict[str, Any]'"
+      },
+      "get_conversation": {
+        "coroutine": true,
+        "signature": "(self, linkedin_username: 'str | None' = None, thread_id: 'str | None' = None, index: 'int' = 0) -> 'dict[str, Any]'"
+      },
+      "get_inbox": {
+        "coroutine": true,
+        "signature": "(self, limit: 'int' = 20) -> 'dict[str, Any]'"
+      },
+      "get_my_profile": {
+        "coroutine": true,
+        "signature": "(self, sections: 'set[str] | None' = None, callbacks: 'ProgressCallback | None' = None, max_scrolls: 'int | None' = None) -> 'dict[str, Any]'"
+      },
+      "get_page_text": {
+        "coroutine": true,
+        "signature": "(self) -> 'str'"
+      },
+      "get_saved_jobs": {
+        "coroutine": true,
+        "signature": "(self, max_pages: 'int' = 3) -> 'dict[str, Any]'"
+      },
+      "get_sidebar_profiles": {
+        "coroutine": true,
+        "signature": "(self, username: 'str') -> 'dict[str, Any]'"
+      },
+      "scrape_company": {
+        "coroutine": true,
+        "signature": "(self, company_name: 'str', requested: 'set[str]', callbacks: 'ProgressCallback | None' = None) -> 'dict[str, Any]'"
+      },
+      "scrape_job": {
+        "coroutine": true,
+        "signature": "(self, job_id: 'str') -> 'dict[str, Any]'"
+      },
+      "scrape_person": {
+        "coroutine": true,
+        "signature": "(self, username: 'str', requested: 'set[str]', callbacks: 'ProgressCallback | None' = None, max_scrolls: 'int | None' = None, *, main_profile_already_loaded: 'bool' = False, allow_self_alias: 'bool' = False) -> 'dict[str, Any]'"
+      },
+      "search_companies": {
+        "coroutine": true,
+        "signature": "(self, keywords: 'str') -> 'dict[str, Any]'"
+      },
+      "search_conversations": {
+        "coroutine": true,
+        "signature": "(self, keywords: 'str', limit: 'int' = 20) -> 'dict[str, Any]'"
+      },
+      "search_jobs": {
+        "coroutine": true,
+        "signature": "(self, keywords: 'str', location: 'str | None' = None, max_pages: 'int' = 3, date_posted: 'str | None' = None, job_type: 'str | None' = None, experience_level: 'str | None' = None, work_type: 'str | None' = None, easy_apply: 'bool' = False, sort_by: 'str | None' = None, tool_timeout: 'float' = 180.0) -> 'dict[str, Any]'"
+      },
+      "search_people": {
+        "coroutine": true,
+        "signature": "(self, keywords: 'str', location: 'str | None' = None, network: 'list[str] | None' = None, current_company: 'str | None' = None) -> 'dict[str, Any]'"
+      },
+      "search_posts": {
+        "coroutine": true,
+        "signature": "(self, keywords: 'str', date_posted: 'str | None' = None, max_pages: 'int' = 3) -> 'dict[str, Any]'"
+      },
+      "send_message": {
+        "coroutine": true,
+        "signature": "(self, linkedin_username: 'str', message: 'str', *, confirm_send: 'bool', profile_urn: 'str | None' = None) -> 'dict[str, Any]'"
+      }
+    },
+    "tool_methods": [
+      "connect_with_person",
+      "extract_feed",
+      "extract_page",
+      "get_company_employees",
+      "get_conversation",
+      "get_inbox",
+      "get_my_profile",
+      "get_saved_jobs",
+      "get_sidebar_profiles",
+      "scrape_company",
+      "scrape_job",
+      "scrape_person",
+      "search_companies",
+      "search_conversations",
+      "search_jobs",
+      "search_people",
+      "search_posts",
+      "send_message"
+    ],
+    "tool_schemas": {
+      "close_session": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {},
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "connect_with_person": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "linkedin_username": {
+              "description": "LinkedIn username (e.g., \"stickerdaniel\", \"williamhgates\"). A full profile URL is accepted too and is reduced to the username.",
+              "type": "string"
+            },
+            "note": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional note to include with the invitation"
+            }
+          },
+          "required": [
+            "linkedin_username"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "get_company_employees": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "company_name": {
+              "description": "LinkedIn company URL slug (e.g., \"docker\", \"anthropicresearch\", \"microsoft\"). A full company URL is accepted too and is reduced to the slug.",
+              "type": "string"
+            },
+            "keywords": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional filter by name, job title, or skill (e.g., \"engineer\", \"sales\")"
+            }
+          },
+          "required": [
+            "company_name"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "get_company_posts": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "company_name": {
+              "description": "LinkedIn company name (e.g., \"docker\", \"anthropic\", \"microsoft\"). A full company URL is accepted too and is reduced to the slug.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "company_name"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "get_company_profile": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "company_name": {
+              "description": "LinkedIn company name (e.g., \"docker\", \"anthropic\", \"microsoft\"). A full company URL is accepted too and is reduced to the slug.",
+              "type": "string"
+            },
+            "sections": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Comma-separated list of extra sections to scrape.\nThe about page is always included.\nAvailable sections: posts, jobs\nExamples: \"posts\", \"posts,jobs\"\nDefault (None) scrapes only the about page."
+            }
+          },
+          "required": [
+            "company_name"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "get_conversation": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "index": {
+              "default": 0,
+              "description": "0-based selector for which thread to open when the\nparticipant has multiple threads (e.g. an organic 1-on-1 plus\nan InMail). Ignored when thread_id is provided. To enumerate\nthread IDs first, call search_conversations.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "linkedin_username": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "LinkedIn username of the conversation participant; a full profile URL is accepted too"
+            },
+            "thread_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "LinkedIn messaging thread ID"
+            }
+          },
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "get_feed": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "num_posts": {
+              "default": 10,
+              "description": "Number of posts to fetch (1-50, default 10).\n       Posts are loaded in batches of ~5 as the page scrolls,\n       so the actual count may slightly exceed the target.",
+              "maximum": 50,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "get_inbox": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "limit": {
+              "default": 20,
+              "description": "Maximum number of conversations to load (1-50, default 20)",
+              "maximum": 50,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "get_job_details": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "job_id": {
+              "description": "LinkedIn job ID (e.g., \"4252026496\", \"3856789012\")",
+              "type": "string"
+            }
+          },
+          "required": [
+            "job_id"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "get_my_profile": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "max_scrolls": {
+              "anyOf": [
+                {
+                  "maximum": 50,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Maximum pagination attempts per section (same as get_person_profile)."
+            },
+            "sections": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Comma-separated list of extra sections to scrape.\nThe main profile page is always included.\nAvailable sections: experience, education, interests, honors, languages, certifications, skills, projects, contact_info, posts\nExamples: \"experience,education\", \"contact_info\", \"skills,projects\"\nDefault (None) scrapes only the main profile page."
+            }
+          },
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "get_person_profile": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "linkedin_username": {
+              "description": "LinkedIn username (e.g., \"stickerdaniel\", \"williamhgates\"). A full profile URL is accepted too and is reduced to the username.",
+              "type": "string"
+            },
+            "max_scrolls": {
+              "anyOf": [
+                {
+                  "maximum": 50,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Maximum pagination attempts per section to load more content.\nOn detail sections (experience, certifications, skills, etc.) this\nis the max number of \"Show more\" button clicks. On activity/posts\nit is the max scroll-to-bottom iterations. Applies to all sections\nin this call. Default (None) uses 5 for detail sections and 10 for\nposts. Increase when a profile has many items in a section\n(e.g., 30+ certifications, max_scrolls=20). To avoid slowing down\nother sections, request heavy sections in a separate call."
+            },
+            "sections": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Comma-separated list of extra sections to scrape.\nThe main profile page is always included.\nAvailable sections: experience, education, interests, honors, languages, certifications, skills, projects, contact_info, posts\nExamples: \"experience,education\", \"contact_info\", \"skills,projects\", \"honors,languages\", \"posts\"\nDefault (None) scrapes only the main profile page."
+            }
+          },
+          "required": [
+            "linkedin_username"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "get_saved_jobs": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "max_pages": {
+              "default": 3,
+              "description": "Maximum number of saved-jobs pages to load (1-10, default 3)",
+              "maximum": 10,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "get_sidebar_profiles": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "linkedin_username": {
+              "description": "LinkedIn username of the profile page to scrape; a full profile URL is accepted too\n(e.g., \"stickerdaniel\", \"williamhgates\")",
+              "type": "string"
+            }
+          },
+          "required": [
+            "linkedin_username"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "search_companies": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "keywords": {
+              "description": "Search keywords (e.g., \"fintech\", \"anthropic\", \"electric vehicles\")",
+              "type": "string"
+            }
+          },
+          "required": [
+            "keywords"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "search_conversations": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "keywords": {
+              "description": "Search keywords to filter conversations",
+              "type": "string"
+            },
+            "limit": {
+              "default": 20,
+              "description": "Maximum number of search-result rows to enumerate as\nconversation references (1-50, default 20). Each enumeration\nselects the row in LinkedIn's UI and may mark it as read, so\na low cap is preferable for noisy queries.",
+              "maximum": 50,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "keywords"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "search_jobs": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "date_posted": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Filter by posting date (past_hour, past_24_hours, past_week, past_month)"
+            },
+            "easy_apply": {
+              "default": false,
+              "description": "Only show Easy Apply jobs (default false)",
+              "type": "boolean"
+            },
+            "experience_level": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Filter by experience level, comma-separated (internship, entry, associate, mid_senior, director, executive)"
+            },
+            "job_type": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Filter by job type, comma-separated (full_time, part_time, contract, temporary, volunteer, internship, other)"
+            },
+            "keywords": {
+              "description": "Search keywords (e.g., \"software engineer\", \"data scientist\")",
+              "type": "string"
+            },
+            "location": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional location filter (e.g., \"San Francisco\", \"Remote\")"
+            },
+            "max_pages": {
+              "default": 3,
+              "description": "Maximum number of result pages to load (1-10, default 3)",
+              "maximum": 10,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "sort_by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Sort results (date, relevance)"
+            },
+            "work_type": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Filter by work type, comma-separated (on_site, remote, hybrid)"
+            }
+          },
+          "required": [
+            "keywords"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "search_people": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "current_company": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional current-employer filter. LinkedIn's\ncurrentCompany facet only filters on the numeric company URN id\n(e.g. \"1115\" for SAP); plain company names are accepted by the\nURL but ignored by LinkedIn and return the unfiltered result\nset. Look up a company's URN via get_company_profile -- it is\nexposed under references[\"about\"]. For company-wide employee\ndemographics (location/education/function breakdown) plus a\nslug-based lookup, use get_company_employees instead."
+            },
+            "keywords": {
+              "description": "Search keywords (e.g., \"software engineer\", \"recruiter at Google\")",
+              "type": "string"
+            },
+            "location": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional location filter (e.g., \"New York\", \"Remote\")"
+            },
+            "network": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional connection-degree filter. Each element is one of\n\"F\" (1st-degree), \"S\" (2nd-degree), \"O\" (3rd-degree and beyond).\nExample: [\"F\"] to only return 1st-degree connections. A single\ntoken (\"F\") or a comma-separated string (\"F,S\") is also\naccepted, for clients that cannot transmit an array."
+            }
+          },
+          "required": [
+            "keywords"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "search_posts": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "date_posted": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional recency filter. One of \"past-24h\",\n\"past-week\", \"past-month\"; the \"past_24_hours\" / \"past_week\" /\n\"past_month\" spellings used by search_jobs are accepted too.\nOmit for any time."
+            },
+            "keywords": {
+              "description": "Search keywords (e.g., \"Buscamos Unity\", \"AI automation hiring\")",
+              "type": "string"
+            },
+            "max_pages": {
+              "default": 3,
+              "description": "Scroll depth as result \"pages\" of ~5 scrolls each\n(1-10, default 3). Content search is an infinite scroll, so\nthis caps how far the page is scrolled rather than fetching\ndiscrete pages.",
+              "maximum": 10,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "keywords"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "send_message": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "confirm_send": {
+              "description": "Must be True to send the message",
+              "type": "boolean"
+            },
+            "linkedin_username": {
+              "description": "LinkedIn username of the recipient; a full profile URL is accepted too",
+              "type": "string"
+            },
+            "message": {
+              "description": "Single-line message text to send. C0 control characters and\nDEL are rejected, including CR, LF, and tab.",
+              "type": "string"
+            },
+            "profile_urn": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional profile URN (e.g. ACoAAB...) to verify against\nthe URN exposed by the loaded profile before opening its Message\naction. It never bypasses recipient verification. Obtain via\nget_person_profile. Note: inbox may not always show all messages;\nuse search_conversations as a fallback."
+            }
+          },
+          "required": [
+            "linkedin_username",
+            "message",
+            "confirm_send"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      }
+    }
+  },
+  "scenario": "facade_contract",
+  "schema_version": 1
+}
