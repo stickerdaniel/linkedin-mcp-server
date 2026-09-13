@@ -10,6 +10,7 @@ import ast
 import re
 
 import pytest
+from patchright._impl._errors import TargetClosedError
 
 from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.scraping.capture import (
@@ -328,6 +329,23 @@ class TestExtractPage:
             RATE_LIMIT_RETRY_DELAY,
             RATE_LIMIT_RETRY_DELAY * 2,
         ]
+
+    async def test_extract_page_reraises_closed_target(self, mock_page):
+        """The isolation handler is where the incident's error was swallowed;
+        re-raising only in the section walks would never see it."""
+        capture = _capture(mock_page)
+        with (
+            patch.object(
+                capture,
+                "_capture_once",
+                new_callable=AsyncMock,
+                side_effect=TargetClosedError("closed"),
+            ),
+            pytest.raises(TargetClosedError),
+        ):
+            await capture.extract_page(
+                "https://www.linkedin.com/in/testuser/", section_name="main_profile"
+            )
 
     async def test_media_only_controls_are_not_misclassified_as_rate_limited(
         self, mock_page

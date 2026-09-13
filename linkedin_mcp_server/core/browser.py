@@ -360,6 +360,36 @@ class BrowserManager:
         self._is_authenticated = False
         self._containment = None
 
+    def _announce_a_disconnect(self, context: BrowserContext) -> None:
+        """Have the browser's exit written down, whether or not it was asked for.
+
+        Nothing else here sees that exit. ``close()`` logs what *it* did, and a
+        Chromium that leaves on its own mid-scrape surfaces only later, as a
+        protocol error on whatever call came next. That is what happened when
+        a browser exited cleanly at 00:48 with no line to say so.
+
+        A warning only for an exit nobody asked for. ``close()`` takes the
+        handle before its first await, so during a teardown ``self._context``
+        is already something else and the same event reads as expected.
+        """
+        # ``None`` outside a normal browser, which ``open_hidden_page`` already
+        # refuses; nothing to listen to then.
+        browser = getattr(context, "browser", None)
+        if browser is None:
+            return
+
+        def announce(_browser: object) -> None:
+            if self._context is not context:
+                logger.debug("Browser disconnected during close")
+                return
+            logger.warning(
+                "Browser disconnected while in use (headless=%s, user_data_dir=%s)",
+                self.headless,
+                self.user_data_dir,
+            )
+
+        browser.on("disconnected", announce)
+
     async def start(self) -> None:
         """Start Patchright and launch persistent browser context."""
         if self._context is not None:
@@ -535,6 +565,7 @@ class BrowserManager:
             # that group before page setup or authentication can fail and before
             # the Node driver can exit and reparent it.
             remember_detached_process_groups(self._process_marker)
+            self._announce_a_disconnect(self._context)
             logger.info(
                 "Persistent browser launched (headless=%s, user_data_dir=%s)",
                 self.headless,

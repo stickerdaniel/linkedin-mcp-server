@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 import logging
 import re
 
+from patchright._impl._errors import TargetClosedError
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.core.exceptions import LinkedInScraperException
@@ -29,7 +30,7 @@ from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.profile_page import ProfilePageReader
 from linkedin_mcp_server.scraping.search_pages import paginate_search
 from linkedin_mcp_server.scraping.search_urls import build_people_search_url
-from linkedin_mcp_server.scraping.session import NAV_DELAY, ScrapingSession
+from linkedin_mcp_server.scraping.session import ScrapingSession, nav_delay
 from linkedin_mcp_server.scraping.text import SIDEBAR_CHROME_EN
 
 if TYPE_CHECKING:
@@ -240,7 +241,7 @@ class PersonScraper:
         try:
             for i, spec in enumerate(requested_ordered):
                 if i > 0:
-                    await self._session.pace(NAV_DELAY)
+                    await self._session.pace(nav_delay())
 
                 section_name = spec.name
                 url = base_url + spec.suffix
@@ -307,6 +308,11 @@ class PersonScraper:
                         profile_urn = await self._profile_page._extract_profile_urn()
                 except LinkedInScraperException:
                     raise
+                except TargetClosedError:
+                    # A closed target is not a property of the section; every
+                    # later section would fail identically, so it is the call
+                    # that has to fail, not the section.
+                    raise
                 except Exception as e:
                     logger.warning("Error scraping section %s: %s", section_name, e)
                     section_errors[section_name] = build_issue_diagnostics(
@@ -326,7 +332,9 @@ class PersonScraper:
 
                 if rate_limited:
                     break
-        except LinkedInScraperException as e:
+        except (LinkedInScraperException, TargetClosedError) as e:
+            # The closed target is re-raised past the section loop above, so
+            # it reaches the caller only through this handler.
             if callbacks:
                 await callbacks.on_error(e)
             raise
@@ -417,7 +425,7 @@ class PersonScraper:
                 continue
 
             if not first_show_all:
-                await self._session.pace(NAV_DELAY)
+                await self._session.pace(nav_delay())
             first_show_all = False
 
             try:

@@ -18,8 +18,9 @@ from linkedin_mcp_server.scraping.contracts import (
 )
 from linkedin_mcp_server.scraping.link_metadata import Reference
 from linkedin_mcp_server.scraping.navigation import PageNavigator
+from linkedin_mcp_server.scraping import search_pages as search_pages_module
 from linkedin_mcp_server.scraping.search_pages import SearchPages, paginate_search
-from linkedin_mcp_server.scraping.session import NAV_DELAY, ScrapingSession
+from linkedin_mcp_server.scraping.session import ScrapingSession
 
 PEOPLE = "https://www.linkedin.com/search/results/people/?keywords=engineer"
 
@@ -116,17 +117,15 @@ class TestPaginateSearch:
                 "linkedin_mcp_server.scraping.session.jitter",
                 side_effect=lambda base, spread=0.5: base,
             ),
+            patch.object(search_pages_module, "nav_delay", return_value=7.0),
         ):
             gathered = await self._walk(capture, max_pages=3)
 
         urls = [c.args[0] for c in fetch.await_args_list]
         assert urls == [PEOPLE, f"{PEOPLE}&page=2", f"{PEOPLE}&page=3"]
         # One pause per page after the first, before its navigation, at the
-        # navigation delay.
-        assert [c.args for c in sleep.await_args_list] == [
-            (NAV_DELAY,),
-            (NAV_DELAY,),
-        ]
+        # navigation delay read at call time.
+        assert [c.args for c in sleep.await_args_list] == [(7.0,), (7.0,)]
         assert gathered.page_texts == ["Person 1", "Person 2", "Person 3"]
         assert [r["url"] for r in gathered.page_references] == [
             "/in/person1/",

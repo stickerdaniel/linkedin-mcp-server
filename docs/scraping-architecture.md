@@ -39,10 +39,10 @@ a page-owning collaborator.
 | `person` | `PersonScraper` | `page-owning` |
 | `posts` | `PostSearch` | `browser-free` |
 | `profile_page` | `MessageTarget`, `MessageTargetResolution`, `ProfilePageReader`, `ReadMessageTarget` | `page-owning` |
-| `rate_limit` | `HTTP_STATUS_NAV_FAILURE`, `HTTP_STATUS_ON_INTERSTITIAL`, `HTTP_TOO_MANY_REQUESTS`, `RATE_LIMIT_BACKOFF_DELAY`, `RATE_LIMIT_BACKOFF_MAX`, `RATE_LIMIT_BACKOFF_MAX_DOUBLINGS`, `RATE_LIMIT_RETRY_BUDGET`, `RATE_LIMIT_RETRY_DELAY`, `RETRY_AFTER_CEILING`, `RateLimitBudget`, `retry_after_seconds()` | `browser-free` |
+| `rate_limit` | `HTTP_STATUS_NAV_FAILURE`, `HTTP_STATUS_ON_INTERSTITIAL`, `HTTP_TOO_MANY_REQUESTS`, `RATE_LIMIT_BACKOFF_DELAY`, `RATE_LIMIT_BACKOFF_MAX`, `RATE_LIMIT_BACKOFF_MAX_DOUBLINGS`, `RATE_LIMIT_RETRY_BUDGET`, `RATE_LIMIT_RETRY_DELAY`, `RETRY_AFTER_CEILING`, `RateLimitBudget`, `rate_limit_backoff_delay()`, `rate_limit_backoff_max()`, `rate_limit_backoff_max_doublings()`, `rate_limit_retry_budget()`, `rate_limit_retry_delay()`, `retry_after_ceiling()`, `retry_after_seconds()` | `browser-free` |
 | `search_pages` | `SearchPages`, `paginate_search()` | `browser-free` |
 | `search_urls` | `CONTENT_DATE_POSTED_MAP`, `EXPERIENCE_LEVEL_MAP`, `JOB_DATE_POSTED_MAP`, `JOB_TYPE_MAP`, `NETWORK_TOKENS`, `SORT_BY_MAP`, `WORK_TYPE_MAP`, `build_company_search_url()`, `build_content_search_url()`, `build_job_search_url()`, `build_people_search_url()` | `browser-free` |
-| `session` | `NAV_DELAY`, `ScrapingSession` | `page-owning` |
+| `session` | `NAV_DELAY`, `ScrapingSession`, `nav_delay()` | `page-owning` |
 | `text` | `DETAIL_CAPTURE_EN_US`, `DetailCaptureTextTable`, `SIDEBAR_CHROME_EN`, `SidebarChromeTable`, `filter_linkedin_noise_lines()`, `strip_conversation_chrome()`, `strip_linkedin_noise()`, `truncate_linkedin_noise()` | `browser-free` |
 
 ## Internal import graph

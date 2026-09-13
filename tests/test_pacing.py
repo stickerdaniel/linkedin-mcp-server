@@ -3,10 +3,12 @@
 Every function under test takes ``now`` explicitly, so nothing here sleeps.
 """
 
+import logging
 from datetime import date, datetime, timedelta
 
 import pytest
 
+from linkedin_mcp_server.config.loaders import EnvironmentKeys
 from linkedin_mcp_server.pacing import (
     ACCOUNT_BUDGET_JOB,
     DEFAULT_TOOL_CALL_GAP,
@@ -21,6 +23,7 @@ from linkedin_mcp_server.pacing import (
     jittered_cap,
     load_account_budget,
     next_bunch_delay,
+    step_delay,
     tool_call_gap,
     warmup_cap,
 )
@@ -341,3 +344,195 @@ class TestToolCallGap:
         # A typo must not be a second way of disabling the pacing, which is why
         # only an explicit 0 does that.
         assert tool_call_gap(raw) > 0
+
+
+class TestConfigurableLimits:
+    """Every pacing constant is a default an environment variable replaces.
+
+    Each variable gets one test that moves the behaviour and one that shows a
+    garbage value falling back to the default with a warning, since a typo
+    must not be the way pacing is turned off.
+    """
+
+    START = date(2020, 1, 1)  # long past any warm-up ramp
+
+    def _warned(self, caplog, key):
+        return any(key in r.getMessage() for r in caplog.records)
+
+    # DAILY_ACTIONS_MAX
+
+    def test_daily_max_raises_the_ceiling(self, monkeypatch):
+        monkeypatch.setenv(EnvironmentKeys.DAILY_ACTIONS_MAX, "200")
+        monkeypatch.setenv(EnvironmentKeys.DAILY_CAP_JITTER, "0")
+        job = Job(name="j", started_on=self.START, daily_cap=200, warmup=True)
+        assert job.effective_cap(WED_10AM) == 200
+
+    def test_daily_max_garbage_falls_back_with_a_warning(self, monkeypatch, caplog):
+        monkeypatch.setenv(EnvironmentKeys.DAILY_ACTIONS_MAX, "lots")
+        job = Job(name="j", started_on=self.START, daily_cap=200, warmup=False)
+        with caplog.at_level(logging.WARNING):
+            assert job.effective_cap(WED_10AM) <= 150
+        assert self._warned(caplog, EnvironmentKeys.DAILY_ACTIONS_MAX)
+
+    # DAILY_ACTIONS_DEFAULT
+
+    def test_daily_default_is_what_an_unconfigured_job_gets(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv(EnvironmentKeys.DAILY_ACTIONS_DEFAULT, "40")
+        assert Job(name="j", started_on=self.START).daily_cap == 40
+        assert Job.from_dict({"name": "j", "started_on": "2020-01-01"}).daily_cap == 40
+        budget = load_account_budget(JobStore(tmp_path), WED_10AM)
+        assert budget.daily_cap == 40
+
+    def test_daily_default_garbage_falls_back_with_a_warning(self, monkeypatch, caplog):
+        monkeypatch.setenv(EnvironmentKeys.DAILY_ACTIONS_DEFAULT, "0")
+        with caplog.at_level(logging.WARNING):
+            assert Job(name="j", started_on=self.START).daily_cap == 100
+        assert self._warned(caplog, EnvironmentKeys.DAILY_ACTIONS_DEFAULT)
+
+    # DAILY_CAP_JITTER
+
+    def test_cap_jitter_zero_leaves_the_cap_whole(self, monkeypatch):
+        monkeypatch.setenv(EnvironmentKeys.DAILY_CAP_JITTER, "0")
+        assert all(
+            jittered_cap(100, date(2026, 8, 5) + timedelta(days=d), "job") == 100
+            for d in range(30)
+        )
+
+    def test_cap_jitter_widens_the_band(self, monkeypatch):
+        monkeypatch.setenv(EnvironmentKeys.DAILY_CAP_JITTER, "0.5")
+        caps = [
+            jittered_cap(100, date(2026, 8, 5) + timedelta(days=d), "job")
+            for d in range(60)
+        ]
+        assert min(caps) < 85
+        assert all(50 <= cap <= 100 for cap in caps)
+
+    def test_cap_jitter_above_one_is_clamped(self, monkeypatch):
+        monkeypatch.setenv(EnvironmentKeys.DAILY_CAP_JITTER, "5")
+        for d in range(60):
+            assert 1 <= jittered_cap(100, date(2026, 8, 5) + timedelta(days=d)) <= 100
+
+    def test_cap_jitter_garbage_falls_back_with_a_warning(self, monkeypatch, caplog):
+        monkeypatch.setenv(EnvironmentKeys.DAILY_CAP_JITTER, "some")
+        with caplog.at_level(logging.WARNING):
+            for d in range(60):
+                cap = jittered_cap(100, date(2026, 8, 5) + timedelta(days=d), "job")
+                assert 85 <= cap <= 100
+        assert self._warned(caplog, EnvironmentKeys.DAILY_CAP_JITTER)
+
+    # WARMUP_CAPS / WARMUP_DAYS
+
+    def test_warmup_ramp_follows_the_configured_steps(self, monkeypatch):
+        monkeypatch.setenv(EnvironmentKeys.WARMUP_CAPS, "5,15")
+        monkeypatch.setenv(EnvironmentKeys.WARMUP_DAYS, "3,6")
+        start = date(2026, 8, 5)
+        assert warmup_cap(100, start, start) == 5
+        assert warmup_cap(100, start, start + timedelta(days=3)) == 15
+        assert warmup_cap(100, start, start + timedelta(days=6)) == 100
+
+    def test_warmup_ramp_of_mismatched_lengths_falls_back_with_a_warning(
+        self, monkeypatch, caplog
+    ):
+        monkeypatch.setenv(EnvironmentKeys.WARMUP_CAPS, "5,15,30")
+        monkeypatch.setenv(EnvironmentKeys.WARMUP_DAYS, "3,6")
+        start = date(2026, 8, 5)
+        with caplog.at_level(logging.WARNING):
+            assert warmup_cap(100, start, start) == 10
+        assert self._warned(caplog, EnvironmentKeys.WARMUP_CAPS)
+
+    def test_warmup_ramp_out_of_order_days_falls_back_with_a_warning(
+        self, monkeypatch, caplog
+    ):
+        monkeypatch.setenv(EnvironmentKeys.WARMUP_CAPS, "10,20,50")
+        monkeypatch.setenv(EnvironmentKeys.WARMUP_DAYS, "21,14,7")
+        start = date(2026, 8, 5)
+        with caplog.at_level(logging.WARNING):
+            assert warmup_cap(100, start, start) == 10
+        assert self._warned(caplog, EnvironmentKeys.WARMUP_DAYS)
+
+    def test_warmup_ramp_garbage_falls_back_with_a_warning(self, monkeypatch, caplog):
+        monkeypatch.setenv(EnvironmentKeys.WARMUP_CAPS, "ten,twenty,fifty")
+        start = date(2026, 8, 5)
+        with caplog.at_level(logging.WARNING):
+            assert warmup_cap(100, start, start + timedelta(days=7)) == 20
+        assert self._warned(caplog, EnvironmentKeys.WARMUP_CAPS)
+
+    # STEP_DELAY_MIN_SECONDS / STEP_DELAY_MAX_SECONDS
+
+    def test_step_delay_range_is_the_configured_one(self, monkeypatch):
+        monkeypatch.setenv(EnvironmentKeys.STEP_DELAY_MIN_SECONDS, "1")
+        monkeypatch.setenv(EnvironmentKeys.STEP_DELAY_MAX_SECONDS, "2")
+        assert all(1.0 <= step_delay() <= 2.0 for _ in range(100))
+
+    def test_step_delay_inverted_range_falls_back_with_a_warning(
+        self, monkeypatch, caplog
+    ):
+        monkeypatch.setenv(EnvironmentKeys.STEP_DELAY_MIN_SECONDS, "30")
+        monkeypatch.setenv(EnvironmentKeys.STEP_DELAY_MAX_SECONDS, "2")
+        with caplog.at_level(logging.WARNING):
+            assert all(8.0 <= step_delay() <= 25.0 for _ in range(100))
+        assert self._warned(caplog, EnvironmentKeys.STEP_DELAY_MIN_SECONDS)
+
+    def test_step_delay_garbage_falls_back_with_a_warning(self, monkeypatch, caplog):
+        monkeypatch.setenv(EnvironmentKeys.STEP_DELAY_MAX_SECONDS, "soon")
+        with caplog.at_level(logging.WARNING):
+            assert all(8.0 <= step_delay() <= 25.0 for _ in range(100))
+        assert self._warned(caplog, EnvironmentKeys.STEP_DELAY_MAX_SECONDS)
+
+    # BUNCH_PAUSE_MIN_SECONDS / BUNCH_PAUSE_MAX_SECONDS
+
+    def test_bunch_pause_range_is_the_configured_one(self, monkeypatch):
+        monkeypatch.setenv(EnvironmentKeys.BUNCH_PAUSE_MIN_SECONDS, "10")
+        monkeypatch.setenv(EnvironmentKeys.BUNCH_PAUSE_MAX_SECONDS, "20")
+        assert next_bunch_delay(0, 5, WED_10AM, BH()) == 20.0
+        assert 10.0 <= next_bunch_delay(100, 5, WED_10AM, BH()) <= 20.0
+
+    def test_bunch_pause_inverted_range_falls_back_with_a_warning(
+        self, monkeypatch, caplog
+    ):
+        monkeypatch.setenv(EnvironmentKeys.BUNCH_PAUSE_MIN_SECONDS, "500")
+        monkeypatch.setenv(EnvironmentKeys.BUNCH_PAUSE_MAX_SECONDS, "20")
+        with caplog.at_level(logging.WARNING):
+            assert next_bunch_delay(0, 5, WED_10AM, BH()) == MAX_BUNCH_PAUSE
+        assert self._warned(caplog, EnvironmentKeys.BUNCH_PAUSE_MIN_SECONDS)
+
+    def test_bunch_pause_garbage_falls_back_with_a_warning(self, monkeypatch, caplog):
+        monkeypatch.setenv(EnvironmentKeys.BUNCH_PAUSE_MAX_SECONDS, "-1")
+        with caplog.at_level(logging.WARNING):
+            assert next_bunch_delay(0, 5, WED_10AM, BH()) == MAX_BUNCH_PAUSE
+        assert self._warned(caplog, EnvironmentKeys.BUNCH_PAUSE_MAX_SECONDS)
+
+    # BUNCH_PAUSE_JITTER
+
+    def test_bunch_pause_jitter_zero_makes_the_spacing_exact(self, monkeypatch):
+        monkeypatch.setenv(EnvironmentKeys.BUNCH_PAUSE_JITTER, "0")
+        # 7 usable hours, 100 left, bunches of 5 -> 20 bunches -> 1260s flat.
+        assert next_bunch_delay(100, 5, WED_10AM, BH()) == 7 * 3600 / 20
+
+    def test_bunch_pause_jitter_garbage_falls_back_with_a_warning(
+        self, monkeypatch, caplog
+    ):
+        monkeypatch.setenv(EnvironmentKeys.BUNCH_PAUSE_JITTER, "wide")
+        with caplog.at_level(logging.WARNING):
+            delays = {next_bunch_delay(100, 5, WED_10AM, BH()) for _ in range(50)}
+        assert all(0.75 * 1260 <= d <= 1.25 * 1260 for d in delays)
+        assert len(delays) > 1
+        assert self._warned(caplog, EnvironmentKeys.BUNCH_PAUSE_JITTER)
+
+    # TOOL_CALL_GAP_JITTER
+
+    def test_tool_call_gap_jitter_zero_makes_the_gap_exact(self, monkeypatch):
+        monkeypatch.setenv(EnvironmentKeys.TOOL_CALL_GAP_JITTER, "0")
+        assert tool_call_gap("10") == 10.0
+
+    def test_tool_call_gap_jitter_garbage_falls_back_with_a_warning(
+        self, monkeypatch, caplog
+    ):
+        monkeypatch.setenv(EnvironmentKeys.TOOL_CALL_GAP_JITTER, "lots")
+        with caplog.at_level(logging.WARNING):
+            gaps = {tool_call_gap("10") for _ in range(50)}
+        assert all(8.0 <= g <= 12.0 for g in gaps)
+        assert len(gaps) > 1
+        assert self._warned(caplog, EnvironmentKeys.TOOL_CALL_GAP_JITTER)

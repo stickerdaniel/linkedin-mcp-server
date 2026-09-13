@@ -9,6 +9,7 @@ import time
 
 from patchright.async_api import Page
 
+from linkedin_mcp_server.config.loaders import EnvironmentKeys
 from linkedin_mcp_server.core.humanize import jitter
 from linkedin_mcp_server.core.utils import (
     detect_rate_limit,
@@ -16,6 +17,7 @@ from linkedin_mcp_server.core.utils import (
     scroll_job_sidebar,
     scroll_to_bottom,
 )
+from linkedin_mcp_server.limits import env_float
 from linkedin_mcp_server.scraping.rate_limit import RateLimitBudget
 
 
@@ -23,8 +25,17 @@ from linkedin_mcp_server.scraping.rate_limit import RateLimitBudget
 # pause rather than by any one workflow, because the person, company and job
 # walks pace themselves the same way and a domain service may not import a
 # peer's constant: two copies would let one relocation give two workflows
-# different policies without anything failing.
+# different policies without anything failing. Default for `NAV_DELAY_SECONDS`.
 NAV_DELAY = 2.0
+
+
+def nav_delay() -> float:
+    """The pause between navigations, read at call time.
+
+    Read at call time so an operator's environment replaces the default
+    without an import-order dependency; see `linkedin_mcp_server.limits`.
+    """
+    return env_float(EnvironmentKeys.NAV_DELAY_SECONDS, NAV_DELAY)
 
 
 @dataclass(frozen=True, slots=True)

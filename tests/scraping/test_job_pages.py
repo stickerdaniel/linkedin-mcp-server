@@ -19,7 +19,6 @@ from linkedin_mcp_server.scraping.contracts import (
 from linkedin_mcp_server.scraping.job_pages import JobPageReader, _ScrollCharge
 from linkedin_mcp_server.scraping.link_metadata import Reference
 from linkedin_mcp_server.scraping.navigation import PageNavigator
-from linkedin_mcp_server.scraping import rate_limit as rate_limit_module
 from linkedin_mcp_server.scraping.rate_limit import (
     RATE_LIMIT_RETRY_BUDGET,
     RATE_LIMIT_RETRY_DELAY,
@@ -1148,7 +1147,7 @@ class TestExtractSearchPage:
         Nothing is slept and nothing is re-navigated, and the one scroll that
         did run is still charged to the capture.
         """
-        monkeypatch.setattr(rate_limit_module, "RATE_LIMIT_RETRY_BUDGET", 0)
+        monkeypatch.setenv("RATE_LIMIT_RETRY_BUDGET", "0")
 
         class Clock:
             def __init__(self) -> None:

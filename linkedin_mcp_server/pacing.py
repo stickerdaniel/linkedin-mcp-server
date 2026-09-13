@@ -41,6 +41,9 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from linkedin_mcp_server.config.loaders import EnvironmentKeys
+from linkedin_mcp_server.limits import env_float, env_int, env_int_list
+
 logger = logging.getLogger(__name__)
 
 WINDOW_SECONDS = 24 * 60 * 60
@@ -54,36 +57,140 @@ request_arrived_at: contextvars.ContextVar[float | None] = contextvars.ContextVa
     "linkedin_mcp_request_arrived_at", default=None
 )
 
-# Ceiling across all action types, per the limits every major tool publishes.
-# Profile views are cheaper than invites, so the view-only default sits below
-# it; neither is an official LinkedIn number -- LinkedIn publishes none.
+# Every number below is a default; the named environment variable replaces it
+# at call time through the accessor next to it. Nothing reads these module
+# constants for behaviour, so tests and operators can set the variable without
+# racing the import. None of them is an official LinkedIn number -- LinkedIn
+# publishes none; they follow what the major automation tools converged on.
+
+# Ceiling across all action types (DAILY_ACTIONS_MAX) and the view-only
+# default below it (DAILY_ACTIONS_DEFAULT), since views are cheaper than invites.
 MAX_DAILY_ACTIONS = 150
 DEFAULT_DAILY_ACTIONS = 100
 
-# Gap inside a bunch. Short enough that a bunch fits one MCP tool call,
-# long enough that page loads are not back-to-back.
+# Slice shaved off the daily cap by the per-day draw (DAILY_CAP_JITTER):
+# uniform(1 - jitter, 1.0), so the total is never a round number.
+DAILY_CAP_JITTER = 0.15
+
+# Warm-up ramp for a fresh job: the cap on days before each threshold
+# (WARMUP_CAPS / WARMUP_DAYS, comma-separated, same length).
+WARMUP_CAPS = (10, 20, 50)
+WARMUP_DAYS = (7, 14, 21)
+
+# Gap inside a bunch (STEP_DELAY_MIN_SECONDS / STEP_DELAY_MAX_SECONDS).
 DEFAULT_STEP_DELAY = (8.0, 25.0)
 
 # Bunches are spaced to spread the daily budget across the working window,
-# then clamped to this range so the spacing stays plausible either way.
+# jittered by BUNCH_PAUSE_JITTER, then clamped to BUNCH_PAUSE_MIN_SECONDS /
+# BUNCH_PAUSE_MAX_SECONDS so the spacing stays plausible either way.
 MIN_BUNCH_PAUSE = 60.0
 MAX_BUNCH_PAUSE = 3600.0
+BUNCH_PAUSE_JITTER = 0.25
 
-# Minimum spacing between two consecutive MCP tool calls, in seconds, before
-# jitter. Zero turns the spacing off. Nothing enforced any gap here until now:
-# a get_inbox followed straight by a get_conversation ran back to back and
-# LinkedIn answered 429.
-#
-# The commercial tools pace much harder -- Waalaxy publishes a minute between
-# profile visits and two and a half between messages -- but they drive
-# unattended campaigns where nobody waits on a result. This server is driven
-# interactively by an MCP client, and a minute of silence on every call reads
-# as a hung server. Five seconds is the compromise: it holds a burst to about
-# a dozen page loads a minute instead of as fast as Chromium can navigate,
-# while staying inside what a person waits through. An operator who wants
-# vendor spacing raises it; the jitter is theirs too, so no gap is a constant.
+# Most profiles one run_enrichment_bunch call may visit (BUNCH_SIZE_MAX) and
+# most navigations one enrich_companies call may run (BUNCH_SEARCHES_MAX).
+BUNCH_SIZE_MAX = 25
+BUNCH_SEARCHES_MAX = 20
+
+# Minimum spacing between two consecutive MCP tool calls, in seconds
+# (TOOL_CALL_GAP_SECONDS), jittered by TOOL_CALL_GAP_JITTER. Zero turns the
+# spacing off. Five seconds is the compromise between vendor spacing (a minute
+# or more, for unattended campaigns) and an interactive MCP client where a
+# minute of silence reads as a hung server: it holds a burst to about a dozen
+# page loads a minute while staying inside what a person waits through.
 DEFAULT_TOOL_CALL_GAP = 5.0
 TOOL_CALL_GAP_JITTER = 0.2
+
+
+def max_daily_actions() -> int:
+    """The configured ceiling on the daily cap."""
+    return env_int(EnvironmentKeys.DAILY_ACTIONS_MAX, MAX_DAILY_ACTIONS, minimum=1)
+
+
+def default_daily_actions() -> int:
+    """The daily cap a job or budget gets when none is given."""
+    return env_int(
+        EnvironmentKeys.DAILY_ACTIONS_DEFAULT, DEFAULT_DAILY_ACTIONS, minimum=1
+    )
+
+
+def daily_cap_jitter() -> float:
+    return _fraction(EnvironmentKeys.DAILY_CAP_JITTER, DAILY_CAP_JITTER)
+
+
+def bunch_pause_jitter() -> float:
+    return _fraction(EnvironmentKeys.BUNCH_PAUSE_JITTER, BUNCH_PAUSE_JITTER)
+
+
+def tool_call_gap_jitter() -> float:
+    return _fraction(EnvironmentKeys.TOOL_CALL_GAP_JITTER, TOOL_CALL_GAP_JITTER)
+
+
+def _fraction(key: str, default: float) -> float:
+    return min(env_float(key, default), 1.0)
+
+
+def warmup_ramp() -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """The (caps, day thresholds) pairs of the warm-up ramp."""
+    caps = env_int_list(EnvironmentKeys.WARMUP_CAPS, WARMUP_CAPS)
+    days = env_int_list(EnvironmentKeys.WARMUP_DAYS, WARMUP_DAYS)
+    if len(caps) != len(days):
+        logger.warning(
+            "Ignoring %s=%r and %s=%r of different lengths; using %s / %s",
+            EnvironmentKeys.WARMUP_CAPS,
+            caps,
+            EnvironmentKeys.WARMUP_DAYS,
+            days,
+            WARMUP_CAPS,
+            WARMUP_DAYS,
+        )
+        return WARMUP_CAPS, WARMUP_DAYS
+    if list(days) != sorted(days):
+        logger.warning(
+            "Ignoring %s=%r that is not sorted ascending; using %s",
+            EnvironmentKeys.WARMUP_DAYS,
+            days,
+            WARMUP_DAYS,
+        )
+        return WARMUP_CAPS, WARMUP_DAYS
+    return caps, days
+
+
+def step_delay_range() -> tuple[float, float]:
+    return _seconds_range(
+        EnvironmentKeys.STEP_DELAY_MIN_SECONDS,
+        EnvironmentKeys.STEP_DELAY_MAX_SECONDS,
+        DEFAULT_STEP_DELAY,
+    )
+
+
+def bunch_pause_range() -> tuple[float, float]:
+    return _seconds_range(
+        EnvironmentKeys.BUNCH_PAUSE_MIN_SECONDS,
+        EnvironmentKeys.BUNCH_PAUSE_MAX_SECONDS,
+        (MIN_BUNCH_PAUSE, MAX_BUNCH_PAUSE),
+    )
+
+
+def _seconds_range(
+    min_key: str, max_key: str, default: tuple[float, float]
+) -> tuple[float, float]:
+    low = env_float(min_key, default[0])
+    high = env_float(max_key, default[1])
+    if low > high:
+        logger.warning(
+            "Ignoring %s=%s above %s=%s; using %s", min_key, low, max_key, high, default
+        )
+        return default
+    return low, high
+
+
+def bunch_size_max() -> int:
+    return env_int(EnvironmentKeys.BUNCH_SIZE_MAX, BUNCH_SIZE_MAX, minimum=1)
+
+
+def bunch_searches_max() -> int:
+    return env_int(EnvironmentKeys.BUNCH_SEARCHES_MAX, BUNCH_SEARCHES_MAX, minimum=1)
 
 
 @dataclass(frozen=True)
@@ -211,12 +318,10 @@ def warmup_cap(base_cap: int, started_on: date, today: date) -> int:
     days = (today - started_on).days
     if days < 0:
         days = 0
-    if days < 7:
-        return min(10, base_cap)
-    if days < 14:
-        return min(20, base_cap)
-    if days < 21:
-        return min(50, base_cap)
+    caps, thresholds = warmup_ramp()
+    for cap, threshold in zip(caps, thresholds):
+        if days < threshold:
+            return min(cap, base_cap)
     return base_cap
 
 
@@ -228,7 +333,7 @@ def jittered_cap(cap: int, today: date, salt: str = "") -> int:
     effective cap would wobble between calls and the job could overshoot.
     """
     rng = random.Random(f"{salt}:{today.isoformat()}")
-    return max(1, int(cap * rng.uniform(0.85, 1.0)))
+    return max(1, int(cap * rng.uniform(1.0 - daily_cap_jitter(), 1.0)))
 
 
 def next_bunch_delay(
@@ -245,27 +350,29 @@ def next_bunch_delay(
     through it by lunch.
     """
     rng = rng or random.Random()
+    min_pause, max_pause = bunch_pause_range()
 
     if remaining_budget <= 0:
-        return MAX_BUNCH_PAUSE
+        return max_pause
 
     open_seconds = schedule.seconds_until_close(now)
     if open_seconds <= 0:
-        return MAX_BUNCH_PAUSE
+        return max_pause
 
     bunches_left = max(math.ceil(remaining_budget / max(bunch_size, 1)), 1)
     base = open_seconds / bunches_left
-    jittered = base * rng.uniform(0.75, 1.25)
-    return max(MIN_BUNCH_PAUSE, min(jittered, MAX_BUNCH_PAUSE))
+    jitter = bunch_pause_jitter()
+    jittered = base * rng.uniform(1.0 - jitter, 1.0 + jitter)
+    return max(min_pause, min(jittered, max_pause))
 
 
 def step_delay(
-    delay_range: tuple[float, float] = DEFAULT_STEP_DELAY,
+    delay_range: tuple[float, float] | None = None,
     rng: random.Random | None = None,
 ) -> float:
     """A randomized gap between two profile loads inside one bunch."""
     rng = rng or random.Random()
-    low, high = delay_range
+    low, high = delay_range or step_delay_range()
     return rng.uniform(low, high)
 
 
@@ -280,7 +387,7 @@ def tool_call_gap(raw: str | None = None, rng: random.Random | None = None) -> f
     base = _configured_tool_call_gap(raw)
     if base <= 0:
         return 0.0
-    spread = base * TOOL_CALL_GAP_JITTER
+    spread = base * tool_call_gap_jitter()
     return step_delay((base - spread, base + spread), rng=rng)
 
 
@@ -319,13 +426,13 @@ class Job:
     # never loads can be struck out instead of blocking the queue for good.
     strikes: dict[str, int] = field(default_factory=dict)
     ledger: Ledger = field(default_factory=Ledger)
-    daily_cap: int = DEFAULT_DAILY_ACTIONS
+    daily_cap: int = field(default_factory=default_daily_actions)
     schedule: Schedule = field(default_factory=Schedule)
     warmup: bool = True
 
     def effective_cap(self, now: datetime) -> int:
         """Today's cap after the warm-up ramp and the daily jitter."""
-        cap = min(self.daily_cap, MAX_DAILY_ACTIONS)
+        cap = min(self.daily_cap, max_daily_actions())
         if self.warmup:
             cap = warmup_cap(cap, self.started_on, now.date())
         return jittered_cap(cap, now.date(), salt=self.name)
@@ -371,7 +478,7 @@ class Job:
             failed=dict(raw.get("failed", {})),
             strikes=dict(raw.get("strikes", {})),
             ledger=Ledger(actions=list(raw.get("actions", []))),
-            daily_cap=raw.get("daily_cap", DEFAULT_DAILY_ACTIONS),
+            daily_cap=raw.get("daily_cap", default_daily_actions()),
             schedule=schedule,
             warmup=raw.get("warmup", True),
         )
@@ -469,7 +576,7 @@ def load_account_budget(
     budget = Job(
         name=ACCOUNT_BUDGET_JOB,
         started_on=now.date(),
-        daily_cap=daily_cap if daily_cap is not None else DEFAULT_DAILY_ACTIONS,
+        daily_cap=daily_cap if daily_cap is not None else default_daily_actions(),
         warmup=warmup if warmup is not None else False,
         schedule=schedule if schedule is not None else Schedule(),
     )

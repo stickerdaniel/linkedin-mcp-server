@@ -19,6 +19,16 @@ from linkedin_mcp_server.debug_trace import cleanup_trace_dir, get_trace_dir
 _TRACE_FILE_HANDLER: logging.Handler | None = None
 _TRACE_CLEANUP_REGISTERED = False
 
+#: Loggers whose INFO records are kept whatever level the server runs at. A
+#: browser that exits mid-scrape is only explicable from the lines around it
+#: -- the launch, the close that was or was not asked for -- and those are
+#: INFO. At the default WARNING they were never created, so the persisted log
+#: held the symptom and nothing that could say why.
+_BROWSER_LIFECYCLE_LOGGERS = (
+    "linkedin_mcp_server.core.browser",
+    "linkedin_mcp_server.drivers.browser",
+)
+
 
 class MCPJSONFormatter(logging.Formatter):
     """JSON formatter for MCP server logs."""
@@ -141,6 +151,19 @@ def configure_logging(log_level: str = "WARNING", json_format: bool = False) -> 
             # trace retention state via cleanup_trace_dir().
             atexit.register(teardown_trace_logging)
             _TRACE_CLEANUP_REGISTERED = True
+
+    # Per logger rather than per handler: the root level is what gates record
+    # creation, so a handler alone could never see an INFO record from these.
+    # ``min`` so a DEBUG run is not raised to INFO. The floor only applies at
+    # WARNING and below; an operator who asked for ERROR-only gets ERROR-only
+    # rather than having it lowered back to INFO.
+    browser_level = (
+        min(numeric_level, logging.INFO)
+        if numeric_level <= logging.WARNING
+        else numeric_level
+    )
+    for name in _BROWSER_LIFECYCLE_LOGGERS:
+        logging.getLogger(name).setLevel(browser_level)
 
     # Set specific loggers to reduce noise
     logging.getLogger("urllib3").setLevel(logging.ERROR)

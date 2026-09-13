@@ -16,10 +16,14 @@ from email.utils import parsedate_to_datetime
 import logging
 import re
 
+from linkedin_mcp_server.config.loaders import EnvironmentKeys
+from linkedin_mcp_server.limits import env_float, env_int
+
 logger = logging.getLogger(__name__)
 
 # Backoff before retrying a temporarily blocked page. Each retry within one
-# scrape waits twice as long as the one before it, jittered.
+# scrape waits twice as long as the one before it, jittered. Default for
+# `RATE_LIMIT_RETRY_DELAY_SECONDS`.
 RATE_LIMIT_RETRY_DELAY = 5.0
 
 # How many soft rate-limit retries one scrape may spend in total. A budget
@@ -28,7 +32,8 @@ RATE_LIMIT_RETRY_DELAY = 5.0
 # meant an eight-section scrape that had started to be throttled sent eight
 # extra navigations -- doubling its request volume at the moment LinkedIn was
 # asking for less. Two keeps the original benefit for a genuine one-off blip
-# while capping the amplification at a constant.
+# while capping the amplification at a constant. Default for
+# `RATE_LIMIT_RETRY_BUDGET`.
 RATE_LIMIT_RETRY_BUDGET = 2
 
 # A hard 429 never reaches `detect_rate_limit`, which reads a page that
@@ -68,15 +73,54 @@ HTTP_TOO_MANY_REQUESTS = 429
 # under the tool timeout on purpose: this cannot wait out a real limit, it
 # only stops the next tool call from leaving for it immediately. How long to
 # actually wait is carried to the client on `RateLimitError.suggested_wait_time`.
+# Defaults for `RATE_LIMIT_BACKOFF_DELAY_SECONDS` and
+# `RATE_LIMIT_BACKOFF_MAX_SECONDS`.
 RATE_LIMIT_BACKOFF_DELAY = 5.0
 RATE_LIMIT_BACKOFF_MAX = 30.0
 # Enough doublings to reach the cap from the base delay, and no more.
+# Default for `RATE_LIMIT_BACKOFF_MAX_DOUBLINGS`.
 RATE_LIMIT_BACKOFF_MAX_DOUBLINGS = 8
 
 # The longest `Retry-After` worth repeating to a client. LinkedIn asking for a
 # day off is a real answer, but relaying it unchanged makes the tool look hung;
 # the cap keeps the report actionable and the server still refuses to scrape.
+# Default for `RETRY_AFTER_CEILING_SECONDS`.
 RETRY_AFTER_CEILING = 3600
+
+
+# Read at call time so an operator's environment replaces the defaults above
+# without an import-order dependency; see `linkedin_mcp_server.limits`.
+def rate_limit_retry_delay() -> float:
+    return env_float(
+        EnvironmentKeys.RATE_LIMIT_RETRY_DELAY_SECONDS, RATE_LIMIT_RETRY_DELAY
+    )
+
+
+def rate_limit_retry_budget() -> int:
+    return env_int(EnvironmentKeys.RATE_LIMIT_RETRY_BUDGET, RATE_LIMIT_RETRY_BUDGET)
+
+
+def rate_limit_backoff_delay() -> float:
+    return env_float(
+        EnvironmentKeys.RATE_LIMIT_BACKOFF_DELAY_SECONDS, RATE_LIMIT_BACKOFF_DELAY
+    )
+
+
+def rate_limit_backoff_max() -> float:
+    return env_float(
+        EnvironmentKeys.RATE_LIMIT_BACKOFF_MAX_SECONDS, RATE_LIMIT_BACKOFF_MAX
+    )
+
+
+def rate_limit_backoff_max_doublings() -> int:
+    return env_int(
+        EnvironmentKeys.RATE_LIMIT_BACKOFF_MAX_DOUBLINGS,
+        RATE_LIMIT_BACKOFF_MAX_DOUBLINGS,
+    )
+
+
+def retry_after_ceiling() -> int:
+    return env_int(EnvironmentKeys.RETRY_AFTER_CEILING_SECONDS, RETRY_AFTER_CEILING)
 
 
 def retry_after_seconds(value: str | None) -> int | None:
@@ -99,7 +143,7 @@ def retry_after_seconds(value: str | None) -> int | None:
         return None
     value = value.strip()
     if value.isascii() and value.isdigit():
-        return min(RETRY_AFTER_CEILING, int(value))
+        return min(retry_after_ceiling(), int(value))
     try:
         when = parsedate_to_datetime(value)
     except (TypeError, ValueError):
@@ -107,7 +151,7 @@ def retry_after_seconds(value: str | None) -> int | None:
     if when.tzinfo is None:
         when = when.replace(tzinfo=timezone.utc)
     seconds = int((when - datetime.now(timezone.utc)).total_seconds())
-    return min(RETRY_AFTER_CEILING, max(0, seconds))
+    return min(retry_after_ceiling(), max(0, seconds))
 
 
 class RateLimitBudget:
@@ -139,15 +183,16 @@ class RateLimitBudget:
         pacing boundary, so the randomness stays behind the one seam a test
         or a policy trace neutralises.
         """
-        if self.soft_retries_used >= RATE_LIMIT_RETRY_BUDGET:
+        budget = rate_limit_retry_budget()
+        if self.soft_retries_used >= budget:
             logger.warning(
                 "Soft rate-limit retry budget (%d) spent, not re-fetching %s",
-                RATE_LIMIT_RETRY_BUDGET,
+                budget,
                 url,
             )
             return False
 
-        delay = RATE_LIMIT_RETRY_DELAY * 2**self.soft_retries_used
+        delay = rate_limit_retry_delay() * 2**self.soft_retries_used
         self.soft_retries_used += 1
         logger.info("Retrying %s after ~%.1fs backoff", url, delay)
         await sleep(delay)
