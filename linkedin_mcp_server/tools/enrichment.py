@@ -23,19 +23,26 @@ from typing import Annotated, Any
 
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
+from patchright._impl._errors import TargetClosedError
+from patchright.async_api import Error as PatchrightError
 from pydantic import Field
 
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
-from linkedin_mcp_server.core.exceptions import AuthenticationError, RateLimitError
+from linkedin_mcp_server.core.exceptions import (
+    AuthenticationError,
+    RateLimitError,
+    ScrapingError,
+)
 from linkedin_mcp_server.dependencies import get_ready_extractor
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.pacing import (
     ACCOUNT_BUDGET_JOB,
-    DEFAULT_DAILY_ACTIONS,
-    MAX_DAILY_ACTIONS,
     Job,
     JobStore,
+    bunch_size_max,
+    default_daily_actions,
     load_account_budget,
+    max_daily_actions,
     next_bunch_delay,
     request_arrived_at,
     step_delay,
@@ -54,6 +61,65 @@ RETRY_AFTER_QUEUED_OUT = 10.0
 # Empty pages in a row before a profile is filed as failed rather than read
 # as a rate limit: a deleted or private URL looks exactly like a throttle.
 EMPTY_PAGE_STRIKES = 2
+
+_CLOSED_TARGET_MSG = "Target page, context or browser has been closed"
+
+
+def _browser_gone(e: BaseException) -> bool:
+    """Whether ``e`` says the browser itself is gone, not the page asked for."""
+    return isinstance(e, TargetClosedError) or (
+        isinstance(e, PatchrightError) and _CLOSED_TARGET_MSG in str(e)
+    )
+
+
+class _BrowserGone(ScrapingError):
+    """A navigation that loaded nothing because the browser itself is gone.
+
+    Measured: the daemon's Chrome died mid-run, the scrapers filed every
+    section as an error, and the bunch loops marked the target done and
+    charged the budget for zero LinkedIn traffic. One class for both shapes
+    of that incident -- the swallowed one (``sections`` empty, the reasons in
+    ``section_errors``) and the re-raised ``TargetClosedError`` -- so a loop
+    can relaunch the browser and retry once, and decline to charge either.
+    """
+
+    def __init__(
+        self, message: str, section_errors: dict[str, Any] | None = None
+    ) -> None:
+        super().__init__(message)
+        self.section_errors = section_errors or {}
+
+
+def _closed_target_filed(errors: dict[str, Any]) -> bool:
+    """Whether a swallowed section error is the browser being gone.
+
+    ``error_type`` is the exception's class name, so an empty result alone
+    does not say why: a navigation ``TimeoutError``, a blank page or an
+    auth-walled tab file the same shape, and none of them is a dead browser.
+    Treating those as one relaunched a live browser and left the target at
+    the head of the queue for every later call to retry.
+    """
+    return any(
+        _CLOSED_TARGET_MSG in (e.get("error_message") or "")
+        or e.get("error_type") == "TargetClosedError"
+        for e in errors.values()
+    )
+
+
+class _RelaunchFailed(Exception):
+    """A relaunch that failed, carried past the per-target handlers.
+
+    ``raise_tool_error`` re-raises an exception it cannot classify as-is, so
+    calling it inside the retry path would land that exception in the loop's
+    generic handler, which files the target as failed and moves on to scrape
+    the next one on the same dead extractor -- until the bunch is exhausted.
+    Measured with ``BrowserBusyError``: a 3-profile queue drained into
+    ``failed``. The cause is re-raised only once it is outside those handlers.
+    """
+
+    def __init__(self, cause: Exception) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
 
 
 class _EmptyPage(RateLimitError):
@@ -113,9 +179,7 @@ def register_enrichment_tools(
     async def start_enrichment_job(
         job_name: str,
         usernames: list[str],
-        daily_cap: Annotated[int, Field(ge=1, le=MAX_DAILY_ACTIONS)] = (
-            DEFAULT_DAILY_ACTIONS
-        ),
+        daily_cap: Annotated[int, Field(ge=1)] | None = None,
         warmup: bool = True,
         replace_existing: bool = False,
     ) -> dict[str, Any]:
@@ -129,9 +193,11 @@ def register_enrichment_tools(
             job_name: Short identifier, e.g. "egypt-gulf". Reused to resume.
             usernames: LinkedIn usernames or profile URLs. Deduplicated;
                 already-completed people are skipped when a job is resumed.
-            daily_cap: Profile views allowed per rolling 24 hours (1-150,
-                default 100). This is a behavioral budget, not a LinkedIn API
-                limit -- LinkedIn publishes no official number.
+            daily_cap: Profile views allowed per rolling 24 hours (default
+                100, ceiling 150; DAILY_ACTIONS_DEFAULT / DAILY_ACTIONS_MAX
+                move both). Anything above the ceiling is clamped to it. This
+                is a behavioral budget, not a LinkedIn API limit -- LinkedIn
+                publishes no official number.
             warmup: Ramp the cap over four weeks (10/day in week 1, 20 in
                 week 2, 50 in week 3, full cap after). Leave on unless this
                 account already runs automation at volume.
@@ -149,6 +215,15 @@ def register_enrichment_tools(
                 raise ToolError("No usable usernames were provided.")
 
             now = datetime.now().astimezone()
+
+            if daily_cap is None:
+                daily_cap = default_daily_actions()
+            ceiling = max_daily_actions()
+            if daily_cap > ceiling:
+                logger.info(
+                    "Clamping daily_cap=%d to the ceiling %d", daily_cap, ceiling
+                )
+                daily_cap = ceiling
 
             # daily_cap and warmup configure the one shared account budget, not
             # this queue -- the cap is account-wide, so several jobs cannot each
@@ -197,7 +272,7 @@ def register_enrichment_tools(
     async def run_enrichment_bunch(
         job_name: str,
         ctx: Context,
-        bunch_size: Annotated[int, Field(ge=1, le=25)] = 5,
+        bunch_size: Annotated[int, Field(ge=1)] = 5,
         sections: str | None = None,
         ignore_schedule: bool = False,
         extractor: Any | None = None,
@@ -207,14 +282,18 @@ def register_enrichment_tools(
 
         Stops early -- persisting everything gathered -- when the bunch is
         done, the rolling 24-hour budget is spent, the working window closes,
-        the tool timeout approaches, or LinkedIn signals a rate limit.
+        the tool timeout approaches, LinkedIn signals a rate limit, or the
+        browser has gone away and a relaunch did not bring it back
+        (browser_unavailable: the profile stays pending and nothing is
+        charged).
 
         Args:
             job_name: The job created by start_enrichment_job.
             ctx: FastMCP context for progress reporting.
-            bunch_size: Profiles to visit in this call (1-25, default 5).
-                Larger bunches are denser activity; the default keeps a call
-                inside the tool timeout with randomized gaps between loads.
+            bunch_size: Profiles to visit in this call (default 5, ceiling
+                25 unless BUNCH_SIZE_MAX moves it; more is clamped). Larger
+                bunches are denser activity; the default keeps a call inside
+                the tool timeout with randomized gaps between loads.
             sections: Comma-separated extra profile sections, as in
                 get_person_profile. Each extra section is another page load
                 and counts separately against the budget, so leave this unset
@@ -234,6 +313,11 @@ def register_enrichment_tools(
             raise ToolError(
                 f"No job named {job_name!r}. Create it with start_enrichment_job."
             ) from None
+
+        ceiling = bunch_size_max()
+        if bunch_size > ceiling:
+            logger.info("Clamping bunch_size=%d to the ceiling %d", bunch_size, ceiling)
+            bunch_size = ceiling
 
         now = datetime.now().astimezone()
         rng = random.Random()
@@ -326,15 +410,57 @@ def register_enrichment_tools(
         struck_this_call: str | None = None
 
         async def _scrape(username: str) -> dict[str, Any]:
-            """One profile visit, with a soft rate limit raised as such."""
-            result = await extractor.scrape_person(
-                username, requested_sections, callbacks=None
-            )
+            """One profile visit, with both shapes of a dead browser raised
+            as ``_BrowserGone`` and a soft rate limit raised as such."""
+            try:
+                result = await extractor.scrape_person(
+                    username, requested_sections, callbacks=None
+                )
+            except Exception as e:
+                if _browser_gone(e):
+                    raise _BrowserGone(str(e)) from e
+                raise
             if not result.get("sections"):
-                # With nothing loaded, a filed rate limit is the whole answer.
+                # With nothing loaded, a filed rate limit is the whole answer,
+                # and it is a rate limit, not a dead browser.
                 if limit := _soft_rate_limit(result):
                     raise _EmptyPage(limit)
+                errors = result.get("section_errors", {})
+                if _closed_target_filed(errors):
+                    raise _BrowserGone("every section failed", errors)
             return result
+
+        async def _relaunch(username: str) -> Any:
+            # Re-acquiring goes through get_or_create_browser, which relaunches
+            # a dead browser; the extractor is bound to the old page, so it is
+            # re-created too. The caller retries the same profile once.
+            logger.warning(
+                "browser gone under %s; relaunching and retrying once", username
+            )
+            try:
+                return await get_ready_extractor(ctx, tool_name="run_enrichment_bunch")
+            except Exception as e:
+                raise _RelaunchFailed(e) from e
+
+        def _browser_unavailable(e: _BrowserGone) -> dict[str, Any]:
+            # A closed browser is not a fact about the profile; nothing was
+            # loaded, so nothing is charged, and the profile stays pending.
+            logger.warning("Browser unavailable during enrichment bunch: %s", e)
+            store.save(job)
+            store.save(budget)
+            return _status(
+                job,
+                budget,
+                now,
+                stopped="browser_unavailable",
+                next_run_after=60.0,
+                gathered=gathered,
+                detail=(
+                    "The browser is gone and a relaunch did not bring it back; "
+                    "nothing was loaded and nothing was charged. Progress saved."
+                ),
+                section_errors=e.section_errors,
+            )
 
         for index in range(planned):
             if time.monotonic() >= deadline:
@@ -345,7 +471,19 @@ def register_enrichment_tools(
             now = datetime.now().astimezone()
 
             try:
-                result = await _scrape(username)
+                try:
+                    result = await _scrape(username)
+                except _BrowserGone:
+                    # One retry of the same profile: a second failure is the
+                    # stop below.
+                    extractor = await _relaunch(username)
+                    result = await _scrape(username)
+            except _RelaunchFailed as e:
+                # The profile was never read and stays pending, uncharged.
+                store.save(job)
+                raise_tool_error(e.cause, "run_enrichment_bunch")  # NoReturn
+            except _BrowserGone as e:
+                return _browser_unavailable(e)
             except (RateLimitError, AuthenticationError) as e:
                 # Neither consumes the queue entry -- the profile was never
                 # read. A rate limit means back off; an expired session means
@@ -523,6 +661,7 @@ def _status(
     next_run_after: float | None,
     gathered: dict[str, Any],
     detail: str | None = None,
+    section_errors: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Shared progress payload.
 
@@ -550,6 +689,8 @@ def _status(
         out["gathered"] = gathered
     if detail:
         out["detail"] = detail
+    if section_errors:
+        out["section_errors"] = section_errors
     return out
 
 

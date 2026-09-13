@@ -112,6 +112,17 @@ async def test_pace_is_jittered_by_default(mock_page, monkeypatch):
     assert len(set(slept)) > 1
 
 
+def test_nav_delay_defaults_to_the_shared_constant(monkeypatch):
+    monkeypatch.delenv("NAV_DELAY_SECONDS", raising=False)
+    assert session_module.nav_delay() == session_module.NAV_DELAY
+
+
+def test_nav_delay_is_read_from_the_environment(monkeypatch):
+    monkeypatch.setenv("NAV_DELAY_SECONDS", "0.75")
+    assert session_module.nav_delay() == 0.75
+    assert session_module.nav_delay() != session_module.NAV_DELAY
+
+
 def test_each_session_carries_its_own_rate_limit_budget(mock_page):
     first = ScrapingSession(mock_page)
     second = ScrapingSession(mock_page)

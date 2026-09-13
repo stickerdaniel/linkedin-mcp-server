@@ -2185,13 +2185,17 @@ class TestGetSavedJobs:
             "https://www.linkedin.com/my-items/saved-jobs/?start=20",
         ]
 
-    async def test_pages_after_the_first_are_paced_by_the_session(self, mock_page):
+    async def test_pages_after_the_first_are_paced_by_the_session(
+        self, mock_page, monkeypatch
+    ):
         """Every page but the first waits the navigation delay, jittered.
 
         The pause goes through the session rather than a bare sleep, so it
-        carries the same jitter as every other pause: a fixed period between
-        list pages is a signal the list walk has no reason to give.
+        reads the operator's `NAV_DELAY_SECONDS` and carries the same jitter
+        as every other pause: a fixed period between list pages is a signal
+        the list walk has no reason to give.
         """
+        monkeypatch.setenv("NAV_DELAY_SECONDS", "0.75")
         scraper = _scraper(mock_page)
         id_pages = iter([["100"], ["200"], ["300"]])
         navigate = self._navigating(mock_page, [extracted("page text")] * 3)
@@ -2216,7 +2220,6 @@ class TestGetSavedJobs:
                 new_callable=AsyncMock,
                 return_value=None,
             ),
-            patch.object(jobs_module, "NAV_DELAY", 0.75),
             patch(
                 "linkedin_mcp_server.scraping.session.jitter",
                 side_effect=lambda base, *a, **kw: base * 1.5,

@@ -579,8 +579,7 @@
           "properties": {
             "bunch_size": {
               "default": 5,
-              "description": "Profiles to visit in this call (1-25, default 5).\nLarger bunches are denser activity; the default keeps a call\ninside the tool timeout with randomized gaps between loads.",
-              "maximum": 25,
+              "description": "Profiles to visit in this call (default 5, ceiling\n25 unless BUNCH_SIZE_MAX moves it; more is clamped). Larger\nbunches are denser activity; the default keeps a call inside\nthe tool timeout with randomized gaps between loads.",
               "minimum": 1,
               "type": "integer"
             },
@@ -913,11 +912,17 @@
           "additionalProperties": false,
           "properties": {
             "daily_cap": {
-              "default": 100,
-              "description": "Profile views allowed per rolling 24 hours (1-150,\ndefault 100). This is a behavioral budget, not a LinkedIn API\nlimit -- LinkedIn publishes no official number.",
-              "maximum": 150,
-              "minimum": 1,
-              "type": "integer"
+              "anyOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Profile views allowed per rolling 24 hours (default\n100, ceiling 150; DAILY_ACTIONS_DEFAULT / DAILY_ACTIONS_MAX\nmove both). Anything above the ceiling is clamped to it. This\nis a behavioral budget, not a LinkedIn API limit -- LinkedIn\npublishes no official number."
             },
             "job_name": {
               "description": "Short identifier, e.g. \"egypt-gulf\". Reused to resume.",

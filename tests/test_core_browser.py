@@ -3,10 +3,12 @@
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import subprocess
 import sys
 import time
+from typing import Any
 from unittest import mock
 from unittest.mock import AsyncMock, MagicMock
 
@@ -272,6 +274,9 @@ class TestTheWindowlessLaunchEndToEnd:
                 return {"targetId": "T"}
 
         class _Browser:
+            def on(self, event, handler):
+                return None
+
             async def new_browser_cdp_session(self):
                 return _Session()
 
@@ -1372,3 +1377,103 @@ class TestStartingAgainAfterAClose:
         assert manager._containment is None
         assert record["drained"] == [(first_marker, job)]
         assert record["drivers"][1].stops == 1, "the uncontained driver kept running"
+
+
+class TestABrowserThatLeavesOnItsOwn:
+    """A Chromium exit nobody asked for is written down, at a level that is kept.
+
+    Measured: a browser exited cleanly mid-scrape and the persisted log held
+    no line for it, because nothing listened for the event and the close
+    path only logs what it does itself.
+    """
+
+    @staticmethod
+    def _wired(tmp_path, monkeypatch):
+        manager = BrowserManager(user_data_dir=tmp_path / "profile", headless=True)
+        listeners: dict[str, Any] = {}
+
+        class _Browser:
+            def on(self, event, handler):
+                listeners[event] = handler
+
+        class _Context:
+            def __init__(self) -> None:
+                self.pages = [MagicMock(name="startup-page")]
+                self.browser = _Browser()
+
+            async def route(self, pattern, handler) -> None:
+                return None
+
+            async def close(self) -> None:
+                # Patchright closes the browser behind a persistent context,
+                # and the disconnect event arrives while close() is awaiting.
+                listeners["disconnected"](self.browser)
+
+        class _Chromium:
+            async def launch_persistent_context(self, user_data_dir, **kwargs):
+                return _Context()
+
+        class _Driver:
+            chromium = _Chromium()
+
+            async def stop(self) -> None:
+                return None
+
+        async def start_driver():
+            return _Driver()
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.core.browser.remember_detached_process_groups",
+            lambda marker: None,
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.core.browser.drain_browser_process_marker",
+            lambda marker, *, containment=None: True,
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.core.browser.forget_browser_process_marker",
+            lambda marker: None,
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.core.browser.hidden_target_is_supported",
+            lambda: False,
+        )
+        return manager, listeners, start_driver
+
+    @pytest.mark.asyncio
+    async def test_a_disconnect_mid_run_is_a_warning(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        manager, listeners, start_driver = self._wired(tmp_path, monkeypatch)
+
+        with TestStartingAgainAfterAClose._driving(start_driver):
+            await manager.start()
+            assert "disconnected" in listeners, "nothing listens for the exit"
+
+            with caplog.at_level(
+                logging.WARNING, logger="linkedin_mcp_server.core.browser"
+            ):
+                listeners["disconnected"](manager._context.browser)
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert warnings[0].getMessage().startswith("Browser disconnected")
+        assert str(tmp_path / "profile") in warnings[0].getMessage()
+
+    @pytest.mark.asyncio
+    async def test_a_disconnect_during_close_is_not_a_warning(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """The same event fires on every close; only the unasked one warns."""
+        manager, _listeners, start_driver = self._wired(tmp_path, monkeypatch)
+
+        with TestStartingAgainAfterAClose._driving(start_driver):
+            await manager.start()
+            with caplog.at_level(
+                logging.DEBUG, logger="linkedin_mcp_server.core.browser"
+            ):
+                assert await manager.close() is True
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert "Browser disconnected during close" in messages
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]

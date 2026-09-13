@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 
 import logging
 
+from patchright._impl._errors import TargetClosedError
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.core.exceptions import LinkedInScraperException
@@ -118,6 +119,12 @@ class SectionCapture:
             return await self._capture_once(url, section_name, plan)
 
         except LinkedInScraperException:
+            raise
+        except TargetClosedError:
+            # A closed target is not a property of the section; every later
+            # section would fail identically, so it is the call that has to
+            # fail, not the section. Isolating it here is where the incident's
+            # error was swallowed.
             raise
         except Exception as e:
             is_overlay = CaptureMode.OVERLAY in plan.mode

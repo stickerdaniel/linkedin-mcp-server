@@ -2,6 +2,8 @@ import logging
 
 import pytest
 from fastmcp.exceptions import ToolError
+from patchright._impl._errors import TargetClosedError
+from patchright.async_api import Error as PlaywrightError
 
 from linkedin_mcp_server.core.exceptions import (
     NetworkError,
@@ -224,6 +226,31 @@ def test_reraises_unknown_exception():
     """Unknown exceptions are re-raised as-is, not wrapped in ToolError."""
     with pytest.raises(ValueError, match="oops"):
         raise_tool_error(ValueError("oops"))
+
+
+def test_closed_target_says_the_next_call_relaunches():
+    """A dead browser reaches a single-tool caller as ``TargetClosedError``
+    (``scraping/extractor.py`` re-raises it); left to the catch-all it is masked
+    to "Error calling tool", which says nothing about the relaunch."""
+    with pytest.raises(ToolError, match="relaunched on the next one"):
+        raise_tool_error(
+            TargetClosedError("Target page, context or browser has been closed"),
+            "get_person_profile",
+        )
+
+
+def test_closed_target_is_matched_by_message_too():
+    # Patchright raises the plain ``Error`` with the same text from some
+    # paths, so the class alone would miss it.
+    with pytest.raises(ToolError, match="relaunched on the next one"):
+        raise_tool_error(
+            PlaywrightError("Target page, context or browser has been closed")
+        )
+
+
+def test_other_playwright_errors_stay_unclassified():
+    with pytest.raises(PlaywrightError, match="Timeout 30000ms"):
+        raise_tool_error(PlaywrightError("Timeout 30000ms exceeded"))
 
 
 def test_proxy_error_reports_the_proxy_not_a_network_problem():

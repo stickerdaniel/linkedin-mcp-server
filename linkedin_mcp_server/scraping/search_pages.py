@@ -17,7 +17,7 @@ from linkedin_mcp_server.scraping.contracts import (
     rate_limited_section_error,
 )
 from linkedin_mcp_server.scraping.link_metadata import Reference
-from linkedin_mcp_server.scraping.session import NAV_DELAY, ScrapingSession
+from linkedin_mcp_server.scraping.session import ScrapingSession, nav_delay
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +56,7 @@ async def paginate_search(
 
     for page_num in range(1, max_pages + 1):
         if page_num > 1:
-            await session.pace(NAV_DELAY)
+            await session.pace(nav_delay())
 
         url = base_url if page_num == 1 else f"{base_url}&page={page_num}"
         extracted = await capture.capture(

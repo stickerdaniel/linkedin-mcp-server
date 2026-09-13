@@ -13,6 +13,12 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import unquote, urlsplit
 
+from linkedin_mcp_server.limits import (
+    BROWSER_WAIT_MAX_KEY,
+    LOGIN_INLINE_WAIT_MAX_KEY,
+    env_float,
+)
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_TOOL_TIMEOUT_SECONDS: float = 180.0
@@ -20,14 +26,14 @@ DEFAULT_LOGIN_TIMEOUT_SECONDS: float = 1800.0  # 30 min; 0 = no limit
 DEFAULT_LOGIN_INLINE_WAIT_SECONDS: float = 25.0  # bounded inline wait
 # Clamp ceiling: scrape time stacks on top of the inline wait inside one tool
 # call and the smallest MCP client timeout is ~60s, so the wait alone must stay
-# well under that floor.
+# well under that floor. Default for LOGIN_INLINE_WAIT_MAX.
 MAX_LOGIN_INLINE_WAIT_SECONDS: float = 45.0
 
 # How long a tool call waits for another process to hand over the browser. Same
 # budget and ceiling as the login inline wait, for the same reason: the wait is
 # spent inside one tool call, ahead of the scrape itself.
 DEFAULT_BROWSER_WAIT_SECONDS: float = 25.0
-MAX_BROWSER_WAIT_SECONDS: float = 45.0
+MAX_BROWSER_WAIT_SECONDS: float = 45.0  # default for BROWSER_WAIT_MAX
 # Shortest time an owner keeps the browser before honouring a handoff request.
 # Every handoff costs a reopen, and a reopen re-validates /feed/, so handing over
 # on literally every call would multiply LinkedIn requests. Matched to the wait
@@ -238,15 +244,19 @@ class BrowserConfig:
             )
         # Clamp (do not reject) so a misconfigured large value can never alone
         # approach the client timeout floor once scrape time is added on top.
-        if self.login_inline_wait_seconds > MAX_LOGIN_INLINE_WAIT_SECONDS:
+        # LOGIN_INLINE_WAIT_MAX moves the ceiling; raising it is the operator's call.
+        max_login_inline_wait = env_float(
+            LOGIN_INLINE_WAIT_MAX_KEY, MAX_LOGIN_INLINE_WAIT_SECONDS
+        )
+        if self.login_inline_wait_seconds > max_login_inline_wait:
             logger.warning(
                 "login_inline_wait_seconds %.1f exceeds the %.1fs ceiling; "
                 "clamping (scrape time stacks on top of the wait inside one "
                 "tool call).",
                 self.login_inline_wait_seconds,
-                MAX_LOGIN_INLINE_WAIT_SECONDS,
+                max_login_inline_wait,
             )
-            self.login_inline_wait_seconds = MAX_LOGIN_INLINE_WAIT_SECONDS
+            self.login_inline_wait_seconds = max_login_inline_wait
         for name in (
             "browser_wait_seconds",
             "browser_min_hold_seconds",
@@ -258,14 +268,15 @@ class BrowserConfig:
                     f"{name} must be a non-negative finite number, got {value}"
                 )
         # Clamped for the same reason as the login inline wait: the wait happens
-        # inside a tool call, ahead of the scrape.
-        if self.browser_wait_seconds > MAX_BROWSER_WAIT_SECONDS:
+        # inside a tool call, ahead of the scrape. BROWSER_WAIT_MAX moves the ceiling.
+        max_browser_wait = env_float(BROWSER_WAIT_MAX_KEY, MAX_BROWSER_WAIT_SECONDS)
+        if self.browser_wait_seconds > max_browser_wait:
             logger.warning(
                 "browser_wait_seconds %.1f exceeds the %.1fs ceiling; clamping.",
                 self.browser_wait_seconds,
-                MAX_BROWSER_WAIT_SECONDS,
+                max_browser_wait,
             )
-            self.browser_wait_seconds = MAX_BROWSER_WAIT_SECONDS
+            self.browser_wait_seconds = max_browser_wait
         # The hold window has to end far enough inside the wait budget that the
         # owner still notices and finishes closing before the waiter gives up.
         # Equal values are not enough: the owner polls on an interval and then

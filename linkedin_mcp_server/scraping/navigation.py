@@ -27,9 +27,9 @@ from linkedin_mcp_server.scraping.rate_limit import (
     HTTP_STATUS_NAV_FAILURE,
     HTTP_STATUS_ON_INTERSTITIAL,
     HTTP_TOO_MANY_REQUESTS,
-    RATE_LIMIT_BACKOFF_DELAY,
-    RATE_LIMIT_BACKOFF_MAX,
-    RATE_LIMIT_BACKOFF_MAX_DOUBLINGS,
+    rate_limit_backoff_delay,
+    rate_limit_backoff_max,
+    rate_limit_backoff_max_doublings,
     retry_after_seconds,
 )
 from linkedin_mcp_server.scraping.session import ScrapingSession
@@ -184,10 +184,10 @@ class PageNavigator:
         # exponent is capped too -- it is bounded in practice because every
         # hit sleeps, but nothing in the type says so.
         delay = min(
-            RATE_LIMIT_BACKOFF_MAX,
+            rate_limit_backoff_max(),
             self._session.jittered(
-                RATE_LIMIT_BACKOFF_DELAY
-                * 2 ** min(budget.rate_limit_hits, RATE_LIMIT_BACKOFF_MAX_DOUBLINGS)
+                rate_limit_backoff_delay()
+                * 2 ** min(budget.rate_limit_hits, rate_limit_backoff_max_doublings())
             ),
         )
         budget.rate_limit_hits += 1

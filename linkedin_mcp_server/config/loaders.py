@@ -15,6 +15,8 @@ from urllib.parse import unquote, urlsplit
 
 from dotenv import load_dotenv
 
+from linkedin_mcp_server import limits
+
 from .schema import AppConfig, ConfigurationError
 
 # Load .env file if present
@@ -155,6 +157,32 @@ class EnvironmentKeys:
     # Minimum gap between two tool calls, in seconds, jittered by +/-20%.
     # 0 removes the spacing; see pacing.DEFAULT_TOOL_CALL_GAP for the default.
     TOOL_CALL_GAP_SECONDS = "TOOL_CALL_GAP_SECONDS"
+    # Pacing limits. Every one of these has a built-in default in ``pacing.py``
+    # or ``scraping/extractor.py``; the variable replaces it per process, and a
+    # process is one profile. See ``limits.py`` for the parse rules.
+    TOOL_CALL_GAP_JITTER = "TOOL_CALL_GAP_JITTER"
+    DAILY_ACTIONS_MAX = "DAILY_ACTIONS_MAX"
+    DAILY_ACTIONS_DEFAULT = "DAILY_ACTIONS_DEFAULT"
+    DAILY_CAP_JITTER = "DAILY_CAP_JITTER"
+    WARMUP_CAPS = "WARMUP_CAPS"
+    WARMUP_DAYS = "WARMUP_DAYS"
+    STEP_DELAY_MIN_SECONDS = "STEP_DELAY_MIN_SECONDS"
+    STEP_DELAY_MAX_SECONDS = "STEP_DELAY_MAX_SECONDS"
+    BUNCH_PAUSE_MIN_SECONDS = "BUNCH_PAUSE_MIN_SECONDS"
+    BUNCH_PAUSE_MAX_SECONDS = "BUNCH_PAUSE_MAX_SECONDS"
+    BUNCH_PAUSE_JITTER = "BUNCH_PAUSE_JITTER"
+    BUNCH_SIZE_MAX = "BUNCH_SIZE_MAX"
+    BUNCH_SEARCHES_MAX = "BUNCH_SEARCHES_MAX"
+    NAV_DELAY_SECONDS = "NAV_DELAY_SECONDS"
+    RATE_LIMIT_RETRY_DELAY_SECONDS = "RATE_LIMIT_RETRY_DELAY_SECONDS"
+    RATE_LIMIT_RETRY_BUDGET = "RATE_LIMIT_RETRY_BUDGET"
+    RATE_LIMIT_BACKOFF_DELAY_SECONDS = "RATE_LIMIT_BACKOFF_DELAY_SECONDS"
+    RATE_LIMIT_BACKOFF_MAX_SECONDS = "RATE_LIMIT_BACKOFF_MAX_SECONDS"
+    RATE_LIMIT_BACKOFF_MAX_DOUBLINGS = "RATE_LIMIT_BACKOFF_MAX_DOUBLINGS"
+    RETRY_AFTER_CEILING_SECONDS = "RETRY_AFTER_CEILING_SECONDS"
+    # Ceilings on the two inline waits; the defaults are already tunable.
+    LOGIN_INLINE_WAIT_MAX = limits.LOGIN_INLINE_WAIT_MAX_KEY
+    BROWSER_WAIT_MAX = limits.BROWSER_WAIT_MAX_KEY
 
 
 # What ``manifest.json`` fills from ``user_config``, and the exact string each

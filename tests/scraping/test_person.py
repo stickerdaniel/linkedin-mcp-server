@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 import importlib.util
 
 import pytest
+from patchright._impl._errors import TargetClosedError
 
 from linkedin_mcp_server.callbacks import ProgressCallback
 from linkedin_mcp_server.core.exceptions import (
@@ -19,6 +20,7 @@ from linkedin_mcp_server.core.exceptions import (
     ProxyConnectionError,
 )
 from linkedin_mcp_server.scraping import person as person_module
+from linkedin_mcp_server.scraping import search_pages as search_pages_module
 from linkedin_mcp_server.scraping import text as text_module
 from linkedin_mcp_server.scraping.capture import CaptureMode, SectionCapture
 from linkedin_mcp_server.scraping.content import PageContentReader
@@ -32,7 +34,7 @@ from linkedin_mcp_server.scraping.link_metadata import Reference
 from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.person import PersonScraper
 from linkedin_mcp_server.scraping.profile_page import ProfilePageReader
-from linkedin_mcp_server.scraping.session import NAV_DELAY, ScrapingSession
+from linkedin_mcp_server.scraping.session import ScrapingSession
 
 
 def _scraper(page, *, message_target: Any = None) -> PersonScraper:
@@ -744,11 +746,61 @@ class TestScrapePersonSectionOutcomes:
         assert result["sections"]["main_profile"] == "Profile text"
         assert result["section_errors"]["posts"]["error_type"] == "rate_limit"
 
+    async def test_scrape_person_reraises_closed_target(self, mock_page):
+        """A dead browser fails the call, not the section.
+
+        Measured: Chromium exited mid-call and every later section was recorded
+        as its own ``TargetClosedError`` while the call returned normally, so a
+        bunch loop walked eight more profiles against the dead page.
+        """
+        scraper = _scraper(mock_page)
+        with (
+            patch.object(
+                scraper._capture,
+                "capture",
+                new_callable=AsyncMock,
+                side_effect=[
+                    extracted("profile text"),
+                    TargetClosedError(
+                        "Target page, context or browser has been closed"
+                    ),
+                ],
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+            pytest.raises(TargetClosedError),
+        ):
+            await scraper.scrape_person("testuser", {"posts"})
+
+    async def test_scrape_person_closed_target_reaches_on_error(self, mock_page):
+        """The re-raise bypasses the ``LinkedInScraperException`` handler that
+        reports to ``callbacks.on_error``; the tool layer reports through it."""
+        scraper = _scraper(mock_page)
+        callbacks = AsyncMock()
+        closed = TargetClosedError("closed")
+        with (
+            patch.object(
+                scraper._capture,
+                "capture",
+                new_callable=AsyncMock,
+                side_effect=closed,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+            pytest.raises(TargetClosedError),
+        ):
+            await scraper.scrape_person("testuser", {"posts"}, callbacks=callbacks)
+        callbacks.on_error.assert_awaited_once_with(closed)
+
     async def test_sections_are_paced_through_the_jittered_navigation_delay(
         self, mock_page
     ):
-        """One pause per gap, at ``NAV_DELAY`` jittered by the session, never
-        a fixed sleep."""
+        """One pause per gap, at ``nav_delay()`` read at call time and
+        jittered by the session, never a fixed sleep."""
         scraper = _scraper(mock_page)
         with (
             patch.object(
@@ -763,7 +815,7 @@ class TestScrapePersonSectionOutcomes:
                 new_callable=AsyncMock,
                 return_value=extracted(""),
             ),
-            patch.object(person_module, "NAV_DELAY", 7.0),
+            patch.object(person_module, "nav_delay", return_value=7.0),
             patch(
                 "linkedin_mcp_server.scraping.session.jitter",
                 side_effect=lambda base, *a, **kw: base + 0.5,
@@ -1134,7 +1186,7 @@ class TestGetSidebarProfiles:
 
     async def test_show_all_pages_are_paced_through_the_jittered_delay(self, mock_page):
         """The first Show all follows the profile page unpaced; each later
-        one waits ``NAV_DELAY``, jittered by the session."""
+        one waits ``nav_delay()``, jittered by the session."""
         sidebar_js_result = {
             "sections": {
                 "more_profiles_for_you": ["/in/alice/"],
@@ -1162,7 +1214,7 @@ class TestGetSidebarProfiles:
                 new_callable=AsyncMock,
                 return_value=False,
             ),
-            patch.object(person_module, "NAV_DELAY", 7.0),
+            patch.object(person_module, "nav_delay", return_value=7.0),
             patch(
                 "linkedin_mcp_server.scraping.session.jitter",
                 side_effect=lambda base, *a, **kw: base + 0.5,
@@ -1578,6 +1630,7 @@ class TestSearchPeoplePagination:
         scraper = _scraper(mock_page)
         with (
             _results(scraper, self._page(1), self._page(2), self._page(3)) as fetch,
+            patch.object(search_pages_module, "nav_delay", return_value=7.0),
             _identity_jitter(),
             _sleep() as sleep,
         ):
@@ -1589,7 +1642,7 @@ class TestSearchPeoplePagination:
         assert urls[1].endswith("&page=2")
         assert urls[2].endswith("&page=3")
         # Paced between pages, not before the first, at the navigation delay.
-        assert sleep.await_args_list == [call(NAV_DELAY), call(NAV_DELAY)]
+        assert sleep.await_args_list == [call(7.0), call(7.0)]
         assert (
             result["sections"]["search_results"]
             == "Person 1\n---\nPerson 2\n---\nPerson 3"

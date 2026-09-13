@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import logging
+
 from patchright.async_api import Error as PatchrightError
 
 import pytest
@@ -1104,3 +1106,86 @@ class TestHttp429Navigation:
             )
 
         assert navigator._session.rate_limit.rate_limit_hits == 0
+
+
+class TestConfigurableBackoff:
+    """Each backoff constant is a default an environment variable replaces.
+
+    Read at call time, so `monkeypatch.setenv` inside the test is enough; no
+    module reload. Each asserts a value the default cannot produce.
+    """
+
+    @staticmethod
+    def _hard_limited(mock_page) -> PageNavigator:
+        _refused(mock_page, "https://www.linkedin.com/in/testuser/")
+        _show_the_interstitial(mock_page, 429)
+        return PageNavigator(ScrapingSession(mock_page))
+
+    async def test_backoff_delay_is_read_from_the_environment(
+        self, mock_page, monkeypatch
+    ):
+        monkeypatch.setenv("RATE_LIMIT_BACKOFF_DELAY_SECONDS", "0.5")
+        slept: list[float] = []
+        navigator = self._hard_limited(mock_page)
+
+        with _identity_jitter(), _recording_sleep(slept), pytest.raises(RateLimitError):
+            await navigator._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+        assert slept == [0.5]
+
+    async def test_backoff_max_caps_the_first_hit(self, mock_page, monkeypatch):
+        """A cap below the base delay is visible on the very first hit."""
+        monkeypatch.setenv("RATE_LIMIT_BACKOFF_MAX_SECONDS", "1")
+        slept: list[float] = []
+        navigator = self._hard_limited(mock_page)
+
+        with _identity_jitter(), _recording_sleep(slept), pytest.raises(RateLimitError):
+            await navigator._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+        assert slept == [1.0]
+
+    async def test_backoff_max_doublings_stops_the_escalation(
+        self, mock_page, monkeypatch
+    ):
+        """With no doublings allowed, the second hit waits the base delay."""
+        monkeypatch.setenv("RATE_LIMIT_BACKOFF_MAX_DOUBLINGS", "0")
+        slept: list[float] = []
+        navigator = self._hard_limited(mock_page)
+
+        with _identity_jitter(), _recording_sleep(slept):
+            for _ in range(2):
+                with pytest.raises(RateLimitError):
+                    await navigator._goto_with_auth_checks(
+                        "https://www.linkedin.com/in/testuser/"
+                    )
+
+        base = RATE_LIMIT_BACKOFF_DELAY
+        assert slept == [base, base]
+
+    async def test_garbage_falls_back_to_the_default_with_a_warning(
+        self, mock_page, monkeypatch, caplog
+    ):
+        monkeypatch.setenv("RATE_LIMIT_BACKOFF_DELAY_SECONDS", "soon")
+        slept: list[float] = []
+        navigator = self._hard_limited(mock_page)
+
+        with (
+            caplog.at_level(logging.WARNING, logger="linkedin_mcp_server.limits"),
+            _identity_jitter(),
+            _recording_sleep(slept),
+            pytest.raises(RateLimitError),
+        ):
+            await navigator._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+        assert slept == [RATE_LIMIT_BACKOFF_DELAY]
+        assert any(
+            "RATE_LIMIT_BACKOFF_DELAY_SECONDS" in r.getMessage()
+            and "'soon'" in r.getMessage()
+            for r in caplog.records
+        )
