@@ -8,6 +8,10 @@ from unittest.mock import AsyncMock
 import pytest
 
 from linkedin_mcp_server.scraping import session as session_module
+from linkedin_mcp_server.scraping.rate_limit import (
+    RATE_LIMIT_RETRY_DELAY,
+    RateLimitBudget,
+)
 from linkedin_mcp_server.scraping.session import ScrapingSession
 
 
@@ -106,3 +110,31 @@ async def test_pace_is_jittered_by_default(mock_page, monkeypatch):
 
     assert all(1.0 <= s <= 3.0 for s in slept)
     assert len(set(slept)) > 1
+
+
+def test_each_session_carries_its_own_rate_limit_budget(mock_page):
+    first = ScrapingSession(mock_page)
+    second = ScrapingSession(mock_page)
+
+    assert isinstance(first.rate_limit, RateLimitBudget)
+    assert first.rate_limit is not second.rate_limit
+    first.rate_limit.rate_limit_hits += 1
+    assert second.rate_limit.rate_limit_hits == 0
+
+
+async def test_claim_soft_retry_paces_through_the_session(mock_page, monkeypatch):
+    session = ScrapingSession(mock_page)
+    slept: list[float] = []
+
+    async def record(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr(session_module.asyncio, "sleep", record)
+    monkeypatch.setattr(session_module, "jitter", lambda base, *a, **kw: base)
+
+    assert await session.claim_soft_retry("https://www.linkedin.com/in/x/") is True
+    assert await session.claim_soft_retry("https://www.linkedin.com/in/x/") is True
+    assert await session.claim_soft_retry("https://www.linkedin.com/in/x/") is False
+
+    assert slept == [RATE_LIMIT_RETRY_DELAY, RATE_LIMIT_RETRY_DELAY * 2]
+    assert session.rate_limit.soft_retries_used == 2

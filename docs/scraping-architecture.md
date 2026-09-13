@@ -16,7 +16,7 @@ a page-owning collaborator.
 | Module | Canonical public owners | Source classification |
 | --- | --- | --- |
 | `__init__` | _(no public definitions)_ | `browser-free` |
-| `capture` | `CaptureMode`, `CapturePlan`, `RATE_LIMIT_RETRY_DELAY`, `SectionCapture`, `capture_plan_for_url()` | `page-owning` |
+| `capture` | `CaptureMode`, `CapturePlan`, `SectionCapture`, `capture_plan_for_url()` | `page-owning` |
 | `company` | `CompanyScraper` | `browser-free` |
 | `company_parse` | `ParsedJobs`, `parse_about()`, `parse_job_search()`, `parse_search_results()` | `browser-free` |
 | `connection` | `ActionSignals`, `ConnectionState`, `detect_connection_state()` | `browser-free` |
@@ -39,6 +39,7 @@ a page-owning collaborator.
 | `person` | `PersonScraper` | `page-owning` |
 | `posts` | `PostSearch` | `browser-free` |
 | `profile_page` | `MessageTarget`, `MessageTargetResolution`, `ProfilePageReader`, `ReadMessageTarget` | `page-owning` |
+| `rate_limit` | `HTTP_STATUS_NAV_FAILURE`, `HTTP_STATUS_ON_INTERSTITIAL`, `HTTP_TOO_MANY_REQUESTS`, `RATE_LIMIT_BACKOFF_DELAY`, `RATE_LIMIT_BACKOFF_MAX`, `RATE_LIMIT_BACKOFF_MAX_DOUBLINGS`, `RATE_LIMIT_RETRY_BUDGET`, `RATE_LIMIT_RETRY_DELAY`, `RETRY_AFTER_CEILING`, `RateLimitBudget`, `retry_after_seconds()` | `browser-free` |
 | `search_pages` | `SearchPages`, `paginate_search()` | `browser-free` |
 | `search_urls` | `CONTENT_DATE_POSTED_MAP`, `EXPERIENCE_LEVEL_MAP`, `JOB_DATE_POSTED_MAP`, `JOB_TYPE_MAP`, `NETWORK_TOKENS`, `SORT_BY_MAP`, `WORK_TYPE_MAP`, `build_company_search_url()`, `build_content_search_url()`, `build_job_search_url()`, `build_people_search_url()` | `browser-free` |
 | `session` | `NAV_DELAY`, `ScrapingSession` | `page-owning` |
@@ -61,18 +62,19 @@ a page-owning collaborator.
 - `feed_payload` -> `link_metadata`
 - `fields` -> `capture`
 - `identifiers` -> _(none)_
-- `job_pages` -> `capture`, `content`, `contracts`, `job_policy`, `link_metadata`, `navigation`, `session`, `text`
+- `job_pages` -> `content`, `contracts`, `job_policy`, `link_metadata`, `navigation`, `session`, `text`
 - `job_policy` -> `link_metadata`
 - `jobs` -> `capture`, `contracts`, `identifiers`, `job_pages`, `job_policy`, `link_metadata`, `navigation`, `search_urls`, `session`
 - `link_metadata` -> _(none)_
 - `message_sender` -> `contracts`, `identifiers`, `navigation`, `session`
-- `navigation` -> `session`
+- `navigation` -> `rate_limit`, `session`
 - `person` -> `capture`, `contracts`, `facets`, `fields`, `identifiers`, `link_metadata`, `navigation`, `profile_page`, `search_pages`, `search_urls`, `session`, `text`
 - `posts` -> `capture`, `contracts`, `link_metadata`, `search_urls`
 - `profile_page` -> `session`
+- `rate_limit` -> _(none)_
 - `search_pages` -> `capture`, `contracts`, `link_metadata`, `session`
 - `search_urls` -> `contracts`
-- `session` -> _(none)_
+- `session` -> `rate_limit`
 - `text` -> _(none)_
 
 ## `LinkedInExtractor` public coroutine surface

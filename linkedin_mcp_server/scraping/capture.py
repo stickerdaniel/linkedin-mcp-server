@@ -29,12 +29,6 @@ from linkedin_mcp_server.scraping.text import (
 
 logger = logging.getLogger(__name__)
 
-# Backoff before retrying a temporarily blocked page. Owned here rather than
-# copied, because the job-page reads that still sit on the facade share it: two
-# constants would let one relocation give the two retry paths different policies
-# without anything failing.
-RATE_LIMIT_RETRY_DELAY = 5.0
-
 
 class CaptureMode(Flag):
     """Independent post-navigation behaviors applied during section capture."""
@@ -106,23 +100,21 @@ class SectionCapture:
         section_name: str,
         plan: CapturePlan,
     ) -> ExtractedSection:
-        """Navigate and capture a section according to an explicit plan."""
+        """Navigate and capture a section according to an explicit plan.
+
+        Retries after a backoff when the page returns only LinkedIn chrome
+        (sidebar/footer noise with no actual content), which indicates a soft
+        rate limit, for as long as the scrape-wide retry budget allows. Page
+        and overlay reads draw on the same budget, because the requests land
+        on the same limit.
+        """
         try:
             result = await self._capture_once(url, section_name, plan)
             if result.text != RATE_LIMITED_SECTION_TEXT:
                 return result
 
-            if CaptureMode.OVERLAY in plan.mode:
-                logger.info(
-                    "Retrying overlay %s after %.0fs backoff",
-                    url,
-                    RATE_LIMIT_RETRY_DELAY,
-                )
-            else:
-                logger.info(
-                    "Retrying %s after %.0fs backoff", url, RATE_LIMIT_RETRY_DELAY
-                )
-            await self._session.delay(RATE_LIMIT_RETRY_DELAY)
+            if not await self._session.claim_soft_retry(url):
+                return result
             return await self._capture_once(url, section_name, plan)
 
         except LinkedInScraperException:

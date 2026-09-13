@@ -133,6 +133,8 @@ Use `$env:USERPROFILE\.linkedin-mcp` when constructing the host path outside JSO
 | `BROWSER_WAIT` | `25` | How long to wait for another server process to hand over the shared browser, in seconds (max 45; `0` = report busy at once). |
 | `BROWSER_MIN_HOLD` | `20` | Shortest time a process keeps the shared browser before handing it over, in seconds. Clamped to 3 seconds below `BROWSER_WAIT`, so raise that one along with it. Higher means fewer browser restarts but longer waits for other clients. |
 | `BROWSER_IDLE_TIMEOUT` | `600` | Close an idle browser and release the profile after this many seconds without a tool call (`0` = keep it open). |
+| `TOOL_CALL_GAP_SECONDS` | `5.0` | Minimum gap between two tool calls, in seconds, jittered by ±20% (`0` = no spacing). LinkedIn answers bursts of navigations with HTTP 429; this caps one client at roughly 12 page loads a minute. Tools answered from local disk never wait. |
+| `BLOCK_SUBRESOURCES` | on | Abort images, fonts and media instead of fetching them. A LinkedIn page pulls 100+ subrequests and text extraction reads none of these three, so this is the largest single lever against HTTP 429. Stylesheets are always fetched: layout decides `innerText` and visibility. |
 | `AUTO_IMPORT_FROM_BROWSER` | on | Import a session from a signed-in local browser on the first tool call that needs one. Skipped in containers, which have no host browser or keychain. |
 | `TRANSPORT` | `stdio` | Transport mode: stdio, streamable-http |
 | `HOST` | `127.0.0.1` | HTTP server host (for streamable-http transport) |

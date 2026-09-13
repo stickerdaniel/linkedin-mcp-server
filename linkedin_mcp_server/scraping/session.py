@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import asyncio
 import time
@@ -16,6 +16,7 @@ from linkedin_mcp_server.core.utils import (
     scroll_job_sidebar,
     scroll_to_bottom,
 )
+from linkedin_mcp_server.scraping.rate_limit import RateLimitBudget
 
 
 # Pacing between page navigations. Owned by the boundary that performs the
@@ -28,9 +29,16 @@ NAV_DELAY = 2.0
 
 @dataclass(frozen=True, slots=True)
 class ScrapingSession:
-    """Immutable page adapter shared by every scraping service."""
+    """Immutable page adapter shared by every scraping service.
+
+    The binding is frozen; the rate-limit budget it carries is not. One
+    session is built per tool call, so the budget spans the whole scrape,
+    which is what lets a throttled scrape stop asking instead of sending one
+    more navigation per remaining section.
+    """
 
     page: Page
+    rate_limit: RateLimitBudget = field(default_factory=RateLimitBudget)
 
     def monotonic(self) -> float:
         """Read the session clock."""
@@ -55,6 +63,10 @@ class ScrapingSession:
         onto; this is the pause every workflow takes between navigations.
         """
         await self.delay(self.jittered(seconds))
+
+    async def claim_soft_retry(self, url: str) -> bool:
+        """Take one retry from this scrape's soft rate-limit budget, pacing it."""
+        return await self.rate_limit.claim_soft_retry(url, sleep=self.pace)
 
     async def check_rate_limit(self) -> None:
         """Raise when the current page is rate-limited or challenged."""

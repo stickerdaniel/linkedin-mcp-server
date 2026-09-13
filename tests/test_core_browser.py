@@ -280,6 +280,12 @@ class TestTheWindowlessLaunchEndToEnd:
                 self.pages = pages
                 self.browser = _Browser()
 
+            async def route(self, pattern, handler):
+                # Only has to exist: every launch installs a subresource
+                # route, and what it does is asserted in
+                # test_subresource_blocking.
+                return None
+
         class _Chromium:
             async def launch_persistent_context(self, user_data_dir, **kwargs):
                 recorder["options"] = kwargs
@@ -695,6 +701,9 @@ class TestTheFallbackDrainAgainstRealProcesses:
 
         class _Context:
             pages = [MagicMock(url="about:blank")]
+
+            async def route(self, pattern, handler):
+                return None
 
         class _Driver:
             chromium = _Chromium()
@@ -1127,6 +1136,9 @@ class TestStartingAgainAfterAClose:
                 self.closes = 0
                 self.hangs = False
                 self.entered_close = asyncio.Event()
+
+            async def route(self, pattern, handler) -> None:
+                return None
 
             async def close(self) -> None:
                 self.closes += 1
