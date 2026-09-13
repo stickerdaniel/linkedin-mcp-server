@@ -64,6 +64,9 @@ This MCP server is **free** and **open source**, supported by [**Unipile**](http
 | `get_job_details` | Get detailed information about a specific job posting |
 | `get_feed` | Get recent posts from the authenticated user's home feed |
 | `search_posts` | Search posts/content globally by keyword (the "Posts" tab) with an optional recency filter (past-24h/past-week/past-month) |
+| `start_enrichment_job` | Queue a resumable bulk profile-enrichment job from a list of usernames or profile URLs |
+| `run_enrichment_bunch` | Visit the next few profiles in a job, paced with randomized delays, a rolling 24h action budget and working hours; returns when to call it again |
+| `get_enrichment_status` | Progress and collected results for an enrichment job, or list all jobs |
 | `close_session` | Close browser session and clean up resources |
 
 <br/>

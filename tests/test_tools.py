@@ -1662,6 +1662,9 @@ class TestToolTimeouts:
             "send_message",
             "get_feed",
             "search_posts",
+            "start_enrichment_job",
+            "run_enrichment_bunch",
+            "get_enrichment_status",
             "close_session",
         )
 
@@ -1695,6 +1698,9 @@ class TestToolTimeouts:
             "send_message",
             "get_feed",
             "search_posts",
+            "start_enrichment_job",
+            "run_enrichment_bunch",
+            "get_enrichment_status",
             "close_session",
         )
 
