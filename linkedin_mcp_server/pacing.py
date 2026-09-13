@@ -490,6 +490,11 @@ class JobStore:
     Persisted after every single profile rather than at the end of a bunch: a
     crash or a kill mid-bunch should cost at most one duplicated page view,
     never the day's progress.
+
+    The default root is under the home directory, not ``USER_DATA_DIR``, so
+    the account budget it holds is shared by every browser profile of one
+    user; the limits in ``limits.py`` are per process but the ledger they
+    bound is not.
     """
 
     def __init__(self, root: Path | str = "~/.linkedin-mcp/jobs") -> None:
