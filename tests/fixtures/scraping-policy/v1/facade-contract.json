@@ -172,7 +172,7 @@
               "type": "integer"
             },
             "company_names": {
-              "description": "Company names or LinkedIn company URLs.",
+              "description": "Company names or LinkedIn company URLs. A URL\nneeds no search; it is worked on, and reported, as its slug.",
               "items": {
                 "type": "string"
               },
