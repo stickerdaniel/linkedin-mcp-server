@@ -38,6 +38,10 @@ class FacetResolver:
         # location name (casefolded) -> numeric geo id ("" means "did not
         # resolve"), so a repeated region in a batch resolves once.
         self._geo_cache: dict[str, str] = {}
+        # Whether a resolution has navigated on this resolver: the next
+        # navigation, here or the caller's first results page, is paced like
+        # every later hop.
+        self.navigated = False
 
     async def resolve_geo_urn(self, location: str) -> str | None:
         """Resolve a free-text location to LinkedIn's numeric geo id.
@@ -66,6 +70,7 @@ class FacetResolver:
         await self._navigator._goto_with_auth_checks(
             "https://www.linkedin.com/jobs/search/?keywords="
         )
+        self.navigated = True
         # The id is structural; an ``aria-label`` fallback would carry the
         # locale's own words for "location", which is exactly the kind of text
         # match that reads as a miss on a non-English profile.

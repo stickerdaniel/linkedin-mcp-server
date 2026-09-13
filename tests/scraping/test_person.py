@@ -32,7 +32,7 @@ from linkedin_mcp_server.scraping.link_metadata import Reference
 from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.person import PersonScraper
 from linkedin_mcp_server.scraping.profile_page import ProfilePageReader
-from linkedin_mcp_server.scraping.session import ScrapingSession
+from linkedin_mcp_server.scraping.session import NAV_DELAY, ScrapingSession
 
 
 def _scraper(page, *, message_target: Any = None) -> PersonScraper:
@@ -65,6 +65,31 @@ def extracted(
 ) -> ExtractedSection:
     """Create an ExtractedSection for tests."""
     return ExtractedSection(text=text, references=references or [], error=error)
+
+
+def _results(scraper, *pages: ExtractedSection):
+    """Patch the results-page capture with one page per positional argument."""
+    return patch.object(
+        scraper._capture,
+        "capture",
+        new_callable=AsyncMock,
+        side_effect=list(pages) if len(pages) > 1 else None,
+        return_value=pages[0] if len(pages) == 1 else None,
+    )
+
+
+def _sleep():
+    return patch(
+        "linkedin_mcp_server.scraping.session.asyncio.sleep", new_callable=AsyncMock
+    )
+
+
+def _identity_jitter():
+    """Neutralise the session's pause jitter so a delay is readable."""
+    return patch(
+        "linkedin_mcp_server.scraping.session.jitter",
+        side_effect=lambda base, *a, **kw: base,
+    )
 
 
 class TestScrapePersonUrls:
@@ -1404,11 +1429,9 @@ class TestSidebarProgramText:
 class TestSearchPeople:
     async def test_search_people_omits_orphaned_references(self, mock_page):
         scraper = _scraper(mock_page)
-        with patch.object(
-            scraper._capture,
-            "capture",
-            new_callable=AsyncMock,
-            return_value=extracted(
+        with _results(
+            scraper,
+            extracted(
                 "",
                 [
                     {
@@ -1421,42 +1444,27 @@ class TestSearchPeople:
         ) as capture:
             result = await scraper.search_people("python")
 
-        assert capture.call_args.kwargs["plan"].mode is CaptureMode.SEARCH_RESULTS
+        assert capture.call_args.args[2].mode is CaptureMode.SEARCH_RESULTS
         assert result["sections"] == {}
         assert "references" not in result
 
     async def test_search_people_network_filter_first_degree(self, mock_page):
         scraper = _scraper(mock_page)
-        with patch.object(
-            scraper._capture,
-            "capture",
-            new_callable=AsyncMock,
-            return_value=extracted("Jane Doe"),
-        ):
+        with _results(scraper, extracted("Jane Doe")):
             result = await scraper.search_people("engineer", network=["F"])
 
         assert "network=%5B%22F%22%5D" in result["url"]
 
     async def test_search_people_network_filter_multi_degree(self, mock_page):
         scraper = _scraper(mock_page)
-        with patch.object(
-            scraper._capture,
-            "capture",
-            new_callable=AsyncMock,
-            return_value=extracted("Jane Doe"),
-        ):
+        with _results(scraper, extracted("Jane Doe")):
             result = await scraper.search_people("engineer", network=["F", "S"])
 
         assert "network=%5B%22F%22%2C%22S%22%5D" in result["url"]
 
     async def test_search_people_current_company_filter(self, mock_page):
         scraper = _scraper(mock_page)
-        with patch.object(
-            scraper._capture,
-            "capture",
-            new_callable=AsyncMock,
-            return_value=extracted("Jane Doe"),
-        ):
+        with _results(scraper, extracted("Jane Doe")):
             result = await scraper.search_people("engineer", current_company="1115")
 
         assert "currentCompany=%5B%221115%22%5D" in result["url"]
@@ -1486,12 +1494,7 @@ class TestSearchPeople:
 
     async def test_search_people_empty_current_company_is_noop(self, mock_page):
         scraper = _scraper(mock_page)
-        with patch.object(
-            scraper._capture,
-            "capture",
-            new_callable=AsyncMock,
-            return_value=extracted("Jane Doe"),
-        ):
+        with _results(scraper, extracted("Jane Doe")):
             result = await scraper.search_people("engineer", current_company="")
 
         assert "currentCompany" not in result["url"]
@@ -1549,3 +1552,79 @@ class TestSearchPeople:
                 await scraper.search_people("engineer", location="Nowhereland")
 
         nav.assert_not_awaited()
+
+
+class TestSearchPeoplePagination:
+    """``max_pages`` walks LinkedIn's ``&page=N`` facet (issue #526)."""
+
+    @staticmethod
+    def _page(n: int) -> ExtractedSection:
+        """One results page holding a single, page-unique person."""
+        return extracted(
+            f"Person {n}",
+            [{"kind": "person", "url": f"/in/person{n}/", "text": f"Person {n}"}],
+        )
+
+    async def test_default_fetches_only_first_page(self, mock_page):
+        scraper = _scraper(mock_page)
+        with _results(scraper, self._page(1), self._page(2)) as fetch:
+            result = await scraper.search_people("engineer")
+
+        assert fetch.await_count == 1
+        assert "&page=" not in fetch.await_args_list[0].args[0]
+        assert result["sections"]["search_results"] == "Person 1"
+
+    async def test_pages_are_joined_and_references_merged(self, mock_page):
+        scraper = _scraper(mock_page)
+        with (
+            _results(scraper, self._page(1), self._page(2), self._page(3)) as fetch,
+            _identity_jitter(),
+            _sleep() as sleep,
+        ):
+            result = await scraper.search_people("engineer", max_pages=3)
+
+        assert fetch.await_count == 3
+        urls = [c.args[0] for c in fetch.await_args_list]
+        assert "&page=" not in urls[0]
+        assert urls[1].endswith("&page=2")
+        assert urls[2].endswith("&page=3")
+        # Paced between pages, not before the first, at the navigation delay.
+        assert sleep.await_args_list == [call(NAV_DELAY), call(NAV_DELAY)]
+        assert (
+            result["sections"]["search_results"]
+            == "Person 1\n---\nPerson 2\n---\nPerson 3"
+        )
+        assert [r["url"] for r in result["references"]["search_results"]] == [
+            "/in/person1/",
+            "/in/person2/",
+            "/in/person3/",
+        ]
+        # Paged results collapse onto the unpaged URL, so the caller can rerun it.
+        assert "&page=" not in result["url"]
+
+    async def test_stops_when_a_page_repeats_people(self, mock_page):
+        """Running past the last page re-serves it; stop instead of looping."""
+        scraper = _scraper(mock_page)
+        with (
+            _results(scraper, self._page(1), self._page(1), self._page(3)) as fetch,
+            _sleep(),
+        ):
+            result = await scraper.search_people("engineer", max_pages=10)
+
+        assert fetch.await_count == 2
+        # The repeated page is kept -- it is real text, just not new people.
+        assert result["sections"]["search_results"] == "Person 1\n---\nPerson 1"
+        assert [r["url"] for r in result["references"]["search_results"]] == [
+            "/in/person1/"
+        ]
+
+    async def test_rate_limit_midway_keeps_earlier_pages(self, mock_page):
+        scraper = _scraper(mock_page)
+        with (
+            _results(scraper, self._page(1), extracted(RATE_LIMITED_SECTION_TEXT)),
+            _sleep(),
+        ):
+            result = await scraper.search_people("engineer", max_pages=5)
+
+        assert result["sections"]["search_results"] == "Person 1"
+        assert result["section_errors"]["search_results"]["error_type"] == "rate_limit"
