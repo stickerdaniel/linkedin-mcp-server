@@ -109,7 +109,9 @@ _REFERENCE_CAPS = {
     "jobs": 8,
     "employees": 12,
     "search_results": _SEARCH_RESULTS_REFERENCE_CAP,
-    "job_posting": 8,
+    # The "More jobs" module sits at the bottom of a posting and lists a dozen
+    # jobs, so a cap applied in page order has to reach past everything above.
+    "job_posting": 25,
     "contact_info": 8,
     "inbox": 30,
     "conversation": 12,
@@ -216,11 +218,15 @@ def normalize_reference(
         text = None
     else:
         text = choose_reference_text(raw, kind)
+    # A job is kept without a label because its id is the useful part, and a
+    # card-wide anchor has none: the "More jobs" cards wrap title, company,
+    # location and insights in one link, which no label survives.
     if text is None and kind not in {
         "feed_post",
         "external",
         "conversation",
         "company_urn",
+        "job",
     }:
         return None
 
@@ -316,6 +322,15 @@ def classify_link(href: str) -> tuple[ReferenceKind, str] | None:
 
     if match := JOB_PATH_RE.match(path):
         return "job", f"/jobs/view/{match.group(1)}/"
+
+    # A job card that opens inside a search links to the search with the job
+    # selected rather than to the job. The "More jobs" cards on a posting are
+    # built this way, measured on 2026-09-13, and every one of them was dropped.
+    # ASCII digits for the same reason as `JOB_PATH_RE`.
+    if path.rstrip("/") in {"/jobs/search", "/jobs/search-results"}:
+        job_id = (parse_qs(parsed.query).get("currentJobId") or [""])[0]
+        if re.fullmatch(r"[0-9]+", job_id):
+            return "job", f"/jobs/view/{job_id}/"
 
     if match := _NEWSLETTER_PATH_RE.match(path):
         return "newsletter", f"/newsletters/{match.group(1)}/"
