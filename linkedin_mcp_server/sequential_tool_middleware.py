@@ -57,6 +57,10 @@ class SequentialToolExecutionMiddleware(Middleware):
         {
             "get_enrichment_status",
             "get_company_cache",
+            # Writes the queue to disk; the visits happen in run_enrichment_bunch.
+            "start_enrichment_job",
+            # Closes the browser; the only page it touches is the one going away.
+            "close_session",
         }
     )
 
