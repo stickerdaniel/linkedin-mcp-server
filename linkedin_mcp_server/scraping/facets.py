@@ -54,7 +54,9 @@ class FacetResolver:
         geoUrn. Works for any country/city LinkedIn's own dropdown knows.
 
         Returns the id, or ``None`` if the dropdown offered no match. Results
-        are cached per resolver so a repeated region costs one resolution.
+        are cached per resolver so a repeated region costs one resolution; a
+        dropdown that never opened is not, since a timeout says nothing about
+        the name.
         """
         key = location.casefold()
         if key in self._geo_cache:
@@ -69,26 +71,27 @@ class FacetResolver:
         # match that reads as a miss on a non-English profile.
         box = await page.query_selector(LOCATION_BOX_SELECTOR)
 
-        geo_id: str | None = None
-        if box is not None:
-            await box.click()
-            await box.fill("")
-            # Type it like a person; the dropdown resolves as we type.
-            await human_type(page, location)
-            suggestion = await self._first_location_suggestion(box)
-            if suggestion is not None:
-                await suggestion.click()
-                try:
-                    await page.wait_for_url(
-                        GEO_ID_PATTERN, timeout=TYPEAHEAD_TIMEOUT_MS
-                    )
-                except PlaywrightTimeoutError:
-                    pass
-                match = GEO_ID_PATTERN.search(page.url)
-                if match:
-                    geo_id = match.group(1)
-
-        # Cache the outcome (including a miss) to avoid re-driving the dropdown.
+        if box is None:
+            return None
+        await box.click()
+        await box.fill("")
+        # Type it like a person; the dropdown resolves as we type.
+        await human_type(page, location)
+        suggestion = await self._first_location_suggestion(box)
+        if suggestion is None:
+            # A dropdown that never opened is a stalled page as often as an
+            # unknown name; remembering it would pin a valid location as a
+            # miss for the rest of the batch.
+            return None
+        await suggestion.click()
+        try:
+            await page.wait_for_url(GEO_ID_PATTERN, timeout=TYPEAHEAD_TIMEOUT_MS)
+        except PlaywrightTimeoutError:
+            pass
+        match = GEO_ID_PATTERN.search(page.url)
+        geo_id = match.group(1) if match else None
+        # LinkedIn answered, with or without an id: cache either so a repeated
+        # name does not re-drive the dropdown.
         self._geo_cache[key] = geo_id or ""
         return geo_id
 

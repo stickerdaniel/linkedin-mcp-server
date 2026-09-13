@@ -170,7 +170,11 @@ class TestResolveGeoUrn:
 
         assert resolver._geo_cache["atlantis"] == ""
 
-    async def test_no_suggestion_is_a_cached_miss(self, mock_page):
+    async def test_typeahead_timeout_is_not_cached(self, mock_page):
+        """A dropdown that never opens within the timeout says nothing about
+        the name: a stalled network answers the same for a valid location. Only
+        a clicked suggestion that yields no geoId is a miss worth remembering,
+        so a timeout leaves the cache alone and the next call re-drives."""
         resolver = _resolver(mock_page)
         box = _location_box(**{"aria-controls": "location-listbox"})
         mock_page.url = "https://www.linkedin.com/jobs/search/?keywords="
@@ -182,12 +186,18 @@ class TestResolveGeoUrn:
         ):
             # The location box is found; the dropdown then never opens.
             mock_page.wait_for_selector.side_effect = PlaywrightTimeoutError("empty")
-            assert await resolver.resolve_geo_urn("Nowhereland") is None
-            assert await resolver.resolve_geo_urn("nowhereland") is None
+            assert await resolver.resolve_geo_urn("Egypt") is None
+            assert "egypt" not in resolver._geo_cache
+            mock_page.wait_for_url.assert_not_awaited()
 
-        assert resolver._geo_cache["nowhereland"] == ""
-        assert goto.await_count == 1
-        mock_page.wait_for_url.assert_not_awaited()
+            # Second attempt: the dropdown answers this time.
+            mock_page.wait_for_selector.side_effect = None
+            mock_page.wait_for_selector.return_value = AsyncMock()
+            mock_page.url = "https://www.linkedin.com/jobs/search/?geoId=106155005"
+            assert await resolver.resolve_geo_urn("egypt") == "106155005"
+
+        assert goto.await_count == 2
+        assert resolver._geo_cache["egypt"] == "106155005"
 
     async def test_no_location_box_is_a_miss_without_typing(self, mock_page):
         resolver = _resolver(mock_page)
