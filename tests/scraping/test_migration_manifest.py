@@ -1756,6 +1756,38 @@ def test_an_unreadable_setattr_through_the_fixture_names_its_call_site(
         _scan_synthetic(_fixture_alias(binding, call))
 
 
+@pytest.mark.parametrize(
+    "binding",
+    [
+        "patch, other = monkeypatch, helper",
+        "[patch, other] = [monkeypatch, helper]",
+        "(first, [patch, other]) = (value, [monkeypatch, helper])",
+        "other, patch = helper, monkeypatch",
+    ],
+)
+def test_destructuring_preserves_the_corresponding_patcher_authority(binding):
+    # Mutating assignment handling back to one authority bit for the whole RHS
+    # either drops `patch` or blesses its unrelated sibling. The call is the
+    # observable authority check, not merely a count of names visited.
+    _assert_authoritative_receiver(binding)
+
+
+def test_exact_destructuring_keeps_an_unrelated_target_non_authoritative():
+    source = _receiver_flow("patch, other = helper, monkeypatch", receiver="patch")
+
+    assert _scan_synthetic(source) == []
+
+
+def test_unpairable_starred_destructuring_keeps_possible_authority():
+    _assert_authoritative_receiver("patch, *other = (monkeypatch, helper)")
+
+
+def test_unpairable_destructuring_without_authority_stays_non_authoritative():
+    source = _receiver_flow("patch, *other = (helper, value)")
+
+    assert _scan_synthetic(source) == []
+
+
 def test_a_context_alias_does_not_leak_into_a_sibling_scope():
     source = """
 import pytest
@@ -1953,6 +1985,7 @@ def test_if_branches_do_not_share_impossible_alias_states(branches):
         "patch = helper\n"
         "    try:\n"
         "        patch = helper\n"
+        "        value()\n"
         "    except Exception:\n"
         "        patch = monkeypatch\n"
         "    else:\n"
@@ -2037,6 +2070,123 @@ def test_finally_ignores_definitely_retired_else_and_handler_states(suite):
             "        patch.setattr(*arguments)"
         )
     assert _scan_synthetic(_receiver_flow(statements)) == []
+
+
+def test_a_handled_raise_that_completes_does_not_poison_finally():
+    # Greptile's reproducer: retaining the original RuntimeError beside the
+    # handler result makes finally merge an impossible authoritative state. The
+    # mutation that seeds `result.exceptional` directly from the try body makes
+    # this fail again.
+    source = _receiver_flow(
+        "patch = monkeypatch\n"
+        "    try:\n"
+        "        raise RuntimeError\n"
+        "    except RuntimeError:\n"
+        "        patch = helper\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+    assert _scan_synthetic(source) == []
+
+
+@pytest.mark.parametrize("handler", ["RuntimeError", "Exception", "BaseException", ""])
+def test_matching_handlers_consume_a_known_raise_before_finally(handler):
+    clause = f"except {handler}:" if handler else "except:"
+    source = _receiver_flow(
+        "patch = monkeypatch\n"
+        "    try:\n"
+        "        raise RuntimeError\n"
+        f"    {clause}\n"
+        "        patch = helper\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+    assert _scan_synthetic(source) == []
+
+
+def test_an_unmatched_known_raise_still_reaches_finally():
+    _assert_authoritative_receiver(
+        "patch = monkeypatch\n"
+        "    try:\n"
+        "        raise ValueError\n"
+        "    except TypeError:\n"
+        "        patch = helper\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+
+def test_a_bare_reraise_from_a_handler_still_reaches_finally():
+    _assert_authoritative_receiver(
+        "patch = helper\n"
+        "    try:\n"
+        "        raise RuntimeError\n"
+        "    except RuntimeError:\n"
+        "        patch = monkeypatch\n"
+        "        raise\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+
+def test_a_later_matching_handler_receives_the_known_raise():
+    _assert_authoritative_receiver(
+        "patch = helper\n"
+        "    try:\n"
+        "        raise ValueError\n"
+        "    except TypeError:\n"
+        "        patch = helper\n"
+        "    except Exception:\n"
+        "        patch = monkeypatch\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+
+def test_a_nonmatching_handler_prefix_does_not_survive_a_later_match():
+    source = _receiver_flow(
+        "patch = monkeypatch\n"
+        "    try:\n"
+        "        raise ValueError\n"
+        "    except TypeError:\n"
+        "        patch = monkeypatch\n"
+        "    except Exception:\n"
+        "        patch = helper\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+    assert _scan_synthetic(source) == []
+
+
+def test_an_unknown_exception_keeps_the_non_exception_branch_alive():
+    _assert_authoritative_receiver(
+        "patch = monkeypatch\n"
+        "    try:\n"
+        "        raise error\n"
+        "    except Exception:\n"
+        "        patch = helper\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+
+@pytest.mark.parametrize("handler", ["BaseException", ""])
+def test_catch_all_handlers_consume_unknown_exception_kinds(handler):
+    clause = f"except {handler}:" if handler else "except:"
+    source = _receiver_flow(
+        "patch = monkeypatch\n"
+        "    try:\n"
+        "        raise error\n"
+        f"    {clause}\n"
+        "        patch = helper\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+    assert _scan_synthetic(source) == []
 
 
 def test_a_loop_retains_the_zero_iteration_receiver_path():

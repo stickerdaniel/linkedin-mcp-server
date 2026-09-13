@@ -10,6 +10,7 @@ from typing import Any
 
 import argparse
 import ast
+import builtins
 import json
 import sys
 
@@ -755,12 +756,19 @@ _MonkeyPatchState = tuple[set[str], set[str]]
 
 
 @dataclass(slots=True)
+class _ExceptionalState:
+    state: _MonkeyPatchState
+    # ``None`` is an exception whose runtime kind cannot be bounded from the AST.
+    kind: str | None
+
+
+@dataclass(slots=True)
 class _FlowResult:
     normal: list[_MonkeyPatchState] = field(default_factory=list)
     breaks: list[_MonkeyPatchState] = field(default_factory=list)
     continues: list[_MonkeyPatchState] = field(default_factory=list)
     returns: list[_MonkeyPatchState] = field(default_factory=list)
-    exceptional: list[_MonkeyPatchState] = field(default_factory=list)
+    exceptional: list[_ExceptionalState] = field(default_factory=list)
 
     def extend(self, other: _FlowResult) -> None:
         self.normal.extend(other.normal)
@@ -787,6 +795,103 @@ def _mentions_monkeypatch(expression: ast.expr) -> bool:
         or (isinstance(item, ast.Attribute) and item.attr in _MONKEYPATCH_NAMES)
         for item in ast.walk(expression)
     )
+
+
+def _exception_type_name(expression: ast.expr) -> str | None:
+    if isinstance(expression, ast.Name):
+        return expression.id
+    if isinstance(expression, ast.Attribute):
+        return expression.attr
+    return None
+
+
+def _non_raising_binding_value(value: ast.expr) -> bool:
+    if isinstance(value, (ast.Name, ast.Constant)):
+        return True
+    if isinstance(value, (ast.Tuple, ast.List)):
+        return all(
+            not isinstance(item, ast.Starred) and _non_raising_binding_value(item)
+            for item in value.elts
+        )
+    return False
+
+
+def _non_raising_assignment(target: ast.expr, value: ast.expr) -> bool:
+    if isinstance(target, ast.Name):
+        return _non_raising_binding_value(value)
+    if not (
+        isinstance(target, (ast.Tuple, ast.List))
+        and isinstance(value, (ast.Tuple, ast.List))
+        and len(target.elts) == len(value.elts)
+        and not any(isinstance(item, ast.Starred) for item in target.elts)
+        and not any(isinstance(item, ast.Starred) for item in value.elts)
+    ):
+        return False
+    return all(
+        _non_raising_assignment(target_item, value_item)
+        for target_item, value_item in zip(target.elts, value.elts, strict=True)
+    )
+
+
+def _may_raise_implicitly(statement: ast.stmt) -> bool:
+    if isinstance(statement, (ast.Raise, ast.Pass, ast.Break, ast.Continue)):
+        return False
+    if isinstance(statement, ast.Assign):
+        return not all(
+            _non_raising_assignment(target, statement.value)
+            for target in statement.targets
+        )
+    if isinstance(statement, ast.AnnAssign):
+        return not (
+            isinstance(statement.target, ast.Name)
+            and (statement.value is None or _non_raising_binding_value(statement.value))
+        )
+    return True
+
+
+def _handler_match(handler: ast.ExceptHandler, kind: str | None) -> bool | None:
+    """Return whether one bounded exception kind reaches ``handler``.
+
+    ``None`` means both outcomes remain possible. Explicit built-in raises can be
+    compared through Python's real exception hierarchy; project-local exception
+    classes stay conservative unless the spelling matches. A bare handler and
+    ``BaseException`` cover every raisable value, while ``Exception`` deliberately
+    leaves the non-``Exception`` branch of an unknown kind alive.
+    """
+
+    if handler.type is None:
+        return True
+    candidates = (
+        handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
+    )
+    answers: list[bool | None] = []
+    for candidate in candidates:
+        candidate_name = _exception_type_name(candidate)
+        if candidate_name == "BaseException":
+            answers.append(True)
+            continue
+        if kind is None or candidate_name is None:
+            answers.append(None)
+            continue
+        if candidate_name == kind:
+            answers.append(True)
+            continue
+        raised_type = getattr(builtins, kind, None)
+        handled_type = getattr(builtins, candidate_name, None)
+        if (
+            isinstance(raised_type, type)
+            and issubclass(raised_type, BaseException)
+            and isinstance(handled_type, type)
+            and issubclass(handled_type, BaseException)
+        ):
+            answers.append(issubclass(raised_type, handled_type))
+        else:
+            answers.append(False if raised_type is not None else None)
+    if any(answer is True for answer in answers):
+        return True
+    if all(answer is False for answer in answers):
+        return False
+    return None
 
 
 class _MonkeyPatchCallCollector(ast.NodeVisitor):
@@ -819,11 +924,11 @@ class _MonkeyPatchCallCollector(ast.NodeVisitor):
     @staticmethod
     def _targets(target: ast.expr) -> set[str]:
         if isinstance(target, (ast.Tuple, ast.List)):
-            return {
-                name
-                for item in target.elts
-                if (name := _MonkeyPatchCallCollector._key(item))
-            }
+            return set().union(
+                *(_MonkeyPatchCallCollector._targets(item) for item in target.elts)
+            )
+        if isinstance(target, ast.Starred):
+            return _MonkeyPatchCallCollector._targets(target.value)
         name = _MonkeyPatchCallCollector._key(target)
         return {name} if name else set()
 
@@ -838,11 +943,37 @@ class _MonkeyPatchCallCollector(ast.NodeVisitor):
     def _bind(self, target: ast.expr, authority: bool) -> None:
         names = self._targets(target)
         self.aliases.difference_update(names)
-        if authority and isinstance(target, (ast.Name, ast.Attribute)):
+        if authority:
             self.aliases.update(names)
         if self.scope_kinds[-1] != "class":
             self.closure_aliases.difference_update(names)
             self.closure_aliases.update(self.aliases & names)
+
+    def _bind_assignment(self, target: ast.expr, value: ast.expr) -> None:
+        """Pair destructuring targets with their corresponding RHS values.
+
+        Exact tuple/list shapes retain element-level authority. Stars, arity
+        mismatches, and opaque RHS values cannot be paired, so every target that
+        could receive the authoritative value remains possible rather than
+        silently losing it. The exact case is what keeps unrelated siblings
+        definitely non-authoritative.
+        """
+
+        if isinstance(target, (ast.Tuple, ast.List)) and isinstance(
+            value, (ast.Tuple, ast.List)
+        ):
+            pairable = (
+                len(target.elts) == len(value.elts)
+                and not any(isinstance(item, ast.Starred) for item in target.elts)
+                and not any(isinstance(item, ast.Starred) for item in value.elts)
+            )
+            if pairable:
+                for target_item, value_item in zip(
+                    target.elts, value.elts, strict=True
+                ):
+                    self._bind_assignment(target_item, value_item)
+                return
+        self._bind(target, self._is_authority(value))
 
     def _unbind(self, names: set[str]) -> None:
         self.aliases.difference_update(names)
@@ -873,7 +1004,8 @@ class _MonkeyPatchCallCollector(ast.NodeVisitor):
                 break
             prefix = self._state()
             flowed = self.visit(statement)
-            result.exceptional.append(prefix)
+            if _may_raise_implicitly(statement):
+                result.exceptional.append(_ExceptionalState(prefix, None))
             if not isinstance(flowed, _FlowResult):
                 continue
             result.breaks.extend(flowed.breaks)
@@ -991,9 +1123,8 @@ class _MonkeyPatchCallCollector(ast.NodeVisitor):
 
     def visit_Assign(self, node: ast.Assign) -> Any:
         self.visit(node.value)
-        authority = self._is_authority(node.value)
         for target in node.targets:
-            self._bind(target, authority)
+            self._bind_assignment(target, node.value)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> Any:
         if node.value is not None:
@@ -1037,16 +1168,32 @@ class _MonkeyPatchCallCollector(ast.NodeVisitor):
             breaks=list(body.breaks),
             continues=list(body.continues),
             returns=list(body.returns),
-            exceptional=list(body.exceptional),
         )
 
         if body.normal:
             self._restore(self._merge(body.normal))
             result.extend(self._visit_suite(node.orelse))
 
-        handler_entry = self._merge(body.exceptional)
+        # Route each exceptional path through handlers in source order. A known
+        # matching kind is consumed and therefore cannot also enter ``finally``
+        # as the original exception. Unknown relationships branch conservatively:
+        # the handler may run, while the still-unmatched branch reaches the next
+        # handler (or finally).
+        unmatched = list(body.exceptional)
         for handler in node.handlers:
-            self._restore(handler_entry)
+            handler_inputs: list[_ExceptionalState] = []
+            still_unmatched: list[_ExceptionalState] = []
+            for exceptional in unmatched:
+                match = _handler_match(handler, exceptional.kind)
+                if match is not False:
+                    handler_inputs.append(exceptional)
+                if match is not True:
+                    still_unmatched.append(exceptional)
+            unmatched = still_unmatched
+            if not handler_inputs:
+                continue
+
+            self._restore(self._merge([item.state for item in handler_inputs]))
             if handler.type is not None:
                 self.visit(handler.type)
             if handler.name is not None:
@@ -1057,14 +1204,19 @@ class _MonkeyPatchCallCollector(ast.NodeVisitor):
                 handled.breaks,
                 handled.continues,
                 handled.returns,
-                handled.exceptional,
             ):
                 for index, state in enumerate(states):
                     self._restore(state)
                     if handler.name is not None:
                         self._unbind({handler.name})
                     states[index] = self._state()
+            for exceptional in handled.exceptional:
+                self._restore(exceptional.state)
+                if handler.name is not None:
+                    self._unbind({handler.name})
+                exceptional.state = self._state()
             result.extend(handled)
+        result.exceptional.extend(unmatched)
 
         if not node.finalbody:
             if result.normal:
@@ -1077,7 +1229,6 @@ class _MonkeyPatchCallCollector(ast.NodeVisitor):
             (result.breaks, "break"),
             (result.continues, "continue"),
             (result.returns, "return"),
-            (result.exceptional, "exceptional"),
         ):
             if not states:
                 continue
@@ -1093,10 +1244,23 @@ class _MonkeyPatchCallCollector(ast.NodeVisitor):
                 finished.breaks.extend(final.normal)
             elif continuation == "continue":
                 finished.continues.extend(final.normal)
-            elif continuation == "return":
-                finished.returns.extend(final.normal)
             else:
-                finished.exceptional.extend(final.normal)
+                finished.returns.extend(final.normal)
+
+        if result.exceptional:
+            self._restore(
+                self._merge([exceptional.state for exceptional in result.exceptional])
+            )
+            final = self._visit_suite(node.finalbody)
+            finished.breaks.extend(final.breaks)
+            finished.continues.extend(final.continues)
+            finished.returns.extend(final.returns)
+            finished.exceptional.extend(final.exceptional)
+            kinds = {exceptional.kind for exceptional in result.exceptional}
+            for state in final.normal:
+                finished.exceptional.extend(
+                    _ExceptionalState(state, kind) for kind in kinds
+                )
         if finished.normal:
             self._restore(self._merge(finished.normal))
         return finished
@@ -1152,7 +1316,9 @@ class _MonkeyPatchCallCollector(ast.NodeVisitor):
             self.visit(node.exc)
         if node.cause is not None:
             self.visit(node.cause)
-        return _FlowResult(exceptional=[self._state()])
+        return _FlowResult(
+            exceptional=[_ExceptionalState(self._state(), _raised_exception_name(node))]
+        )
 
     def visit_Return(self, node: ast.Return) -> Any:
         if node.value is not None:
