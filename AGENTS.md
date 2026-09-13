@@ -198,20 +198,14 @@ gt submit                        # merge PR to trigger release workflow
 
 The CI release workflow automatically updates `manifest.json`, `docker-compose.yml` and `server.json` with the new version. Do not update them manually.
 
-After the workflow completes, file a PR against
-[`docker/mcp-registry`](https://github.com/docker/mcp-registry) updating
-`servers/linkedin-mcp-server/server.yaml`. Docker's own sweep refreshes
-`source.commit` only, and only for images in its `mcp/` namespace
-(`cmd/ci/update_pins.go`); this entry names `stickerdaniel/linkedin-mcp-server`,
-so neither its tag nor its pin ever moves on its own. Skipping it is why that
-entry sat on 1.4.0 for a year.
-
-The first such PR is more than a tag: that entry still advertises a
-`LINKEDIN_COOKIE` secret and a `USER_AGENT` field for an authentication path
-this server no longer has, and `USER_AGENT` now refuses to start
-(`config/loaders.py`). It needs the session directory as a mount instead. Docker
-validates a changed entry by pulling the image and listing its tools over stdio,
-so the tag it moves to has to be a release where that works.
+Once the Docker MCP Catalog entry uses Docker's managed
+`mcp/linkedin-mcp-server` image, the release handoff is automatic. After the
+GitHub release succeeds, `advance-docker-catalog` fast-forwards
+`docker-release` to the released commit. Docker's daily pin sweep opens a
+`source.commit` update, builds the image, runs its security review and merges a
+green bot PR. Follow that PR through the published image and tool listing. A
+manual `docker/mcp-registry` PR is needed only when the catalog metadata,
+authentication setup or documentation changes.
 
 `server.json` is a different registry: the official one at
 `registry.modelcontextprotocol.io`, which is a service reached through
