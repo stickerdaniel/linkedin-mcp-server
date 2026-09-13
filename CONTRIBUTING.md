@@ -41,7 +41,7 @@ PERSON_SECTIONS: dict[str, tuple[str, bool]] = {
 
 The `is_overlay` boolean distinguishes modal overlays (like contact info) from full page navigations — overlays use a different extraction method that reads from the `<dialog>` element.
 
-The extractor iterates the config dict directly, checking which sections the caller requested:
+The canonical owner modules iterate the config dict directly, checking which sections the caller requested. `scraping/person.py` owns person sections and `scraping/company.py` owns company sections; `scraping/extractor.py` is only the stable delegating facade. See the generated [scraping architecture reference](docs/scraping-architecture.md) for the current ownership table, import graph, facade surface, and page-owning classification.
 
 ```python
 for section_name, (suffix, is_overlay) in PERSON_SECTIONS.items():
@@ -78,8 +78,8 @@ When adding a section to an existing tool (e.g., adding "certifications" to `get
 
 - [ ] Add to `test_expected_keys` (`tests/test_fields.py`)
 - [ ] Add to `test_all_sections` parse test (`tests/test_fields.py`)
-- [ ] Update `test_all_sections_visit_all_urls` — add section to set, update assertions (`tests/test_scraping.py`)
-- [ ] Add dedicated navigation test (e.g., `test_certifications_visits_details_page`) (`tests/test_scraping.py`)
+- [ ] Update the owner-local all-sections navigation test (`tests/scraping/test_person.py` or `tests/scraping/test_company.py`)
+- [ ] Add the dedicated navigation test beside the canonical owner (`tests/scraping/test_person.py` or `tests/scraping/test_company.py`)
 
 ### Docs
 
@@ -99,7 +99,7 @@ When adding an entirely new MCP tool (e.g., `search_companies`):
 
 ### Code
 
-- [ ] Add extractor method to `LinkedInExtractor` if needed (`scraping/extractor.py`)
+- [ ] Add the workflow to its canonical owner module from `docs/scraping-architecture.md`; keep `LinkedInExtractor` in `scraping/extractor.py` as a thin delegate only if the stable facade needs a new method
 - [ ] Add or extend tool registration function (`tools/*.py`)
 - [ ] Register tools in `create_mcp_server()` if new file (`server.py`)
 
@@ -107,7 +107,7 @@ When adding an entirely new MCP tool (e.g., `search_companies`):
 
 - [ ] Add mock method to `_make_mock_extractor` (`tests/test_tools.py`)
 - [ ] Add tool-level test class/method (`tests/test_tools.py`)
-- [ ] Add extractor-level tests if new method (`tests/test_scraping.py`)
+- [ ] Add workflow tests in the canonical owner's matching `tests/scraping/test_<owner>.py`; add facade-only contract coverage in `tests/scraping/test_facade_*.py` when the delegate surface changes
 
 ### Docs
 
@@ -120,6 +120,17 @@ When adding an entirely new MCP tool (e.g., `search_companies`):
 - [ ] `uv run pytest --cov`
 - [ ] `uv run ruff check . --fix && uv run ruff format .`
 - [ ] `uv run pre-commit run --all-files`
+
+## Regenerating the Scraping Architecture Reference
+
+The architecture reference is generated from the scraping package's Python AST.
+Do not edit it by hand. Regenerate it after changing module imports, public owners,
+the facade coroutine surface, facade construction state, or direct page access:
+
+```bash
+uv run python scripts/generate_scraping_architecture.py
+uv run python scripts/generate_scraping_architecture.py --check
+```
 
 ## Regenerating Scraping Policy Fixtures
 

@@ -50,7 +50,7 @@ For every open PR, on top of its linked-issue score:
 - **Scope**: `additions + deletions` and `changedFiles`. Flag scope creep — does it touch unrelated files? Cross-check `gh pr diff <N> --name-only`.
 - **Locale + DOM safety audit**: do `gh pr diff <N> | grep -E "['\"](Connect|Follow|Message|Pending|1st|2nd|3rd)['\"]"` (matches both Python-style `'Connect'` and JS/Go-style `"Connect"`). Any string match on locale-dependent button text is a red flag per `CLAUDE.md → Scraping Rules → detection must be locale-independent`. Also flag class-name selectors (`.entity-result__item`), minimal generic selectors only.
 - **One-section-one-navigation**: if the PR touches `PERSON_SECTIONS` / `COMPANY_SECTIONS` in `scraping/fields.py`, check that each entry still maps to exactly one URL.
-- **Test coverage**: does the diff add a test in `tests/test_scraping.py`? Mandatory for new tool surfaces, strongly preferred for bug fixes.
+- **Test coverage**: does the diff add coverage beside the canonical owner from `docs/scraping-architecture.md`? Most owners use `tests/scraping/test_<owner>.py`; `fields`, `identifiers`, and `link_metadata` use `tests/test_fields.py`, `tests/test_identifiers.py`, and `tests/test_link_metadata.py`. Facade-only changes belong in `tests/scraping/test_facade_*.py`. Mandatory for new tool surfaces, strongly preferred for bug fixes.
 - **Contributor audit**:
   ```bash
   gh search prs --repo $REPO --author <login> --state merged --json number,createdAt,mergedAt,additions,deletions --limit 20
@@ -58,7 +58,7 @@ For every open PR, on top of its linked-issue score:
   ```
   Compute: prior merged PRs in this repo, average time-to-merge, ratio of merged-vs-closed-unmerged. First-time contributors are not penalised — but a contributor whose previous PRs were all closed-unmerged with maintainer pushback is a yellow flag, especially on a large diff. Cite specific PR numbers in the rationale.
 
-For very large or architecturally-loaded PRs (changes to `scraping/extractor.py`, `client/`, or session/auth code), spawn an `Explore` subagent to deep-dive how the PR integrates with the codebase and report integration risk. Use this sparingly — only for PRs over ~200 LOC or PRs touching core paths.
+For very large or architecturally-loaded PRs (changes spanning canonical scraping owners or the generated graph in `docs/scraping-architecture.md`, `client/`, or session/auth code), spawn an `Explore` subagent to deep-dive how the PR integrates with the codebase and report integration risk. Treat `scraping/extractor.py` as the thin facade, not the default workflow owner. Use this sparingly — only for PRs over ~200 LOC or PRs touching core paths.
 
 ## Phase 4 — Rank and report
 
