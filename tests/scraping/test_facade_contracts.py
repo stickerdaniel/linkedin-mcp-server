@@ -60,6 +60,14 @@ TOOL_DELEGATES = {
     "search_posts": "search_posts",
     "send_message": "send_message",
 }
+# Enrichment tools compose several facade calls, or none when they only read
+# the on-disk cache or the job ledger; a tuple lists every facade method a
+# tool reaches, and none of them may reach past TOOL_FACADE_METHODS.
+ENRICHMENT_TOOL_DELEGATES: dict[str, tuple[str, ...]] = {
+    "get_enrichment_status": (),
+    "run_enrichment_bunch": ("scrape_person",),
+    "start_enrichment_job": (),
+}
 
 
 async def test_constructor_export_and_dependency_use_the_same_facade(monkeypatch):
@@ -119,11 +127,18 @@ async def test_registered_tools_and_extractor_delegates_are_counted_separately()
     tools = await create_mcp_server().list_tools()
     tool_names = {tool.name for tool in tools}
 
-    assert len(tool_names) == 19
-    assert tool_names == {*TOOL_DELEGATES, "close_session"}
+    assert len(tool_names) == 22
+    assert tool_names == {*TOOL_DELEGATES, *ENRICHMENT_TOOL_DELEGATES, "close_session"}
     assert len(TOOL_DELEGATES) == 18
+    assert len(ENRICHMENT_TOOL_DELEGATES) == 3
+    assert TOOL_DELEGATES.keys().isdisjoint(ENRICHMENT_TOOL_DELEGATES)
     assert set(TOOL_DELEGATES.values()) == TOOL_FACADE_METHODS
+    reached = {
+        method for methods in ENRICHMENT_TOOL_DELEGATES.values() for method in methods
+    }
+    assert reached <= TOOL_FACADE_METHODS
     assert "close_session" not in TOOL_DELEGATES
+    assert "close_session" not in ENRICHMENT_TOOL_DELEGATES
 
 
 async def test_company_posts_delegate_matches_registered_tool_consumer():
