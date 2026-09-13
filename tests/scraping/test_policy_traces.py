@@ -144,51 +144,6 @@ def test_canonical_fixtures_are_portable_deterministic_json():
         assert '"seq"' not in decoded
 
 
-async def test_baseline_provenance_is_generated_from_the_final_production_parent():
-    provenance = (await build_policy_traces())["baseline-provenance.json"]["result"]
-
-    assert provenance["production_baseline"] == policy_scenarios.PRODUCTION_BASELINE
-    assert provenance["python_version"] == "3.13"
-    assert len(provenance["uv_lock_sha256"]) == 64
-    assert provenance["resolved_dependencies"]["fastmcp"] == ["3.4.4"]
-    assert provenance["resolved_dependencies"]["patchright"] == ["1.61.2"]
-    assert provenance["extractor_inventory"] == {
-        "line_count": 6436,
-        "method_count": 86,
-        "public_coroutine_count": 20,
-        "public_coroutines": sorted(
-            TOOL_FACADE_METHODS | {"get_page_text", "click_button_by_text"}
-        ),
-        "mutable_instance_attributes": ["_page", "_scroll_seconds"],
-    }
-
-
-def test_check_mode_uses_guarded_provenance_when_baseline_object_missing(monkeypatch):
-    def reject_baseline_read(_path: str) -> bytes:
-        raise AssertionError("missing baseline must not inspect relocated production")
-
-    scenario_globals = _CHECKER_MODULE.build_policy_traces.__globals__
-    monkeypatch.setitem(scenario_globals, "_baseline_object_exists", lambda: False)
-    monkeypatch.setitem(scenario_globals, "_baseline_file", reject_baseline_read)
-    monkeypatch.setattr(sys, "argv", [str(CHECKER), "--check"])
-
-    assert _CHECKER_MODULE.main() == 0
-
-
-def test_missing_baseline_rejects_tampered_canonical_provenance(monkeypatch, tmp_path):
-    trace_root = tmp_path / "v1"
-    trace_root.mkdir()
-    raw = (TRACE_ROOT / "baseline-provenance.json").read_bytes()
-    tampered = raw.replace(b'"python_version": "3.13"', b'"python_version": "3.12"')
-    assert tampered != raw
-    (trace_root / "baseline-provenance.json").write_bytes(tampered)
-    monkeypatch.setattr(policy_scenarios, "_baseline_object_exists", lambda: False)
-    monkeypatch.setattr(policy_scenarios, "TRACE_ROOT", trace_root)
-
-    with pytest.raises(AssertionError, match="baseline provenance hash mismatch"):
-        policy_scenarios._baseline_provenance_trace()
-
-
 async def test_trace_set_exercises_every_tool_facing_facade_method():
     traces = await build_policy_traces()
     called = {

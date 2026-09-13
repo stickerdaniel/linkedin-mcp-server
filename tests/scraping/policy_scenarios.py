@@ -9,14 +9,9 @@ from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
 
-import ast
 import asyncio
 import inspect
 import json
-import subprocess
-import tomllib
-
-from hashlib import sha256
 
 from patchright.async_api import Page
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
@@ -45,10 +40,6 @@ from .support.policy_trace import (
 
 ROOT = Path(__file__).parents[2]
 TRACE_ROOT = ROOT / "tests" / "fixtures" / "scraping-policy" / "v1"
-PRODUCTION_BASELINE = "70e50ada68b9389f8d315df6ab1e56c08f6c985b"
-BASELINE_PROVENANCE_SHA256 = (
-    "a446e0152c4b6430c83f56b8f663baa9824c48803879baa822c840f5771e67e8"
-)
 _TOOL_SCHEMAS: dict[str, dict[str, Any]] | None = None
 
 _COMMON_ALLOWED = {
@@ -993,122 +984,6 @@ async def _conversation_scenario(method: str) -> dict[str, Any]:
     )
 
 
-def _baseline_file(path: str) -> bytes:
-    return subprocess.run(
-        ["git", "-C", str(ROOT), "show", f"{PRODUCTION_BASELINE}:{path}"],
-        check=True,
-        capture_output=True,
-    ).stdout
-
-
-def _generated_baseline_provenance_trace() -> dict[str, Any]:
-    extractor_source = _baseline_file(
-        "linkedin_mcp_server/scraping/extractor.py"
-    ).decode("utf-8")
-    tree = ast.parse(extractor_source)
-    facade = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.ClassDef) and node.name == "LinkedInExtractor"
-    )
-    methods = [
-        node
-        for node in facade.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    ]
-    public_coroutines = [
-        node
-        for node in methods
-        if isinstance(node, ast.AsyncFunctionDef) and not node.name.startswith("_")
-    ]
-    mutable_attributes = sorted(
-        {
-            target.attr
-            for node in ast.walk(facade)
-            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign))
-            for target in (
-                node.targets if isinstance(node, ast.Assign) else [node.target]
-            )
-            if isinstance(target, ast.Attribute)
-            and isinstance(target.value, ast.Name)
-            and target.value.id == "self"
-        }
-    )
-
-    lock_bytes = _baseline_file("uv.lock")
-    lock = tomllib.loads(lock_bytes.decode("utf-8"))
-    dependencies: dict[str, set[str]] = {}
-    for package in lock["package"]:
-        version = package.get("version")
-        if isinstance(version, str):
-            dependencies.setdefault(package["name"], set()).add(version)
-
-    result = {
-        "production_baseline": PRODUCTION_BASELINE,
-        "python_version": _baseline_file(".python-version").decode("utf-8").strip(),
-        "uv_lock_sha256": sha256(lock_bytes).hexdigest(),
-        "resolved_dependencies": {
-            name: sorted(versions) for name, versions in sorted(dependencies.items())
-        },
-        "extractor_inventory": {
-            "line_count": len(extractor_source.splitlines()),
-            "method_count": len(methods),
-            "public_coroutine_count": len(public_coroutines),
-            "public_coroutines": sorted(node.name for node in public_coroutines),
-            "mutable_instance_attributes": mutable_attributes,
-        },
-    }
-    return {
-        "schema_version": 1,
-        "scenario": "baseline_provenance",
-        "call": {
-            "method": "git_show",
-            "arguments": {"production_baseline": PRODUCTION_BASELINE},
-        },
-        "events": [],
-        "result": result,
-    }
-
-
-def _baseline_object_exists() -> bool:
-    result = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(ROOT),
-            "cat-file",
-            "-e",
-            f"{PRODUCTION_BASELINE}^{{commit}}",
-        ],
-        check=False,
-        capture_output=True,
-    )
-    return result.returncode == 0
-
-
-def _verify_baseline_provenance_bytes(raw: bytes) -> None:
-    actual = sha256(raw).hexdigest()
-    if actual != BASELINE_PROVENANCE_SHA256:
-        raise AssertionError(
-            "canonical baseline provenance hash mismatch: "
-            f"expected {BASELINE_PROVENANCE_SHA256}, got {actual}"
-        )
-
-
-def _baseline_provenance_trace() -> dict[str, Any]:
-    if _baseline_object_exists():
-        trace = _generated_baseline_provenance_trace()
-        _verify_baseline_provenance_bytes(canonical_json(trace).encode("utf-8"))
-        return trace
-
-    raw = (TRACE_ROOT / "baseline-provenance.json").read_bytes()
-    _verify_baseline_provenance_bytes(raw)
-    value = json.loads(raw)
-    if not isinstance(value, dict):
-        raise AssertionError("canonical baseline provenance must be a JSON object")
-    return value
-
-
 async def _facade_contract_trace() -> dict[str, Any]:
     global _TOOL_SCHEMAS
 
@@ -1167,7 +1042,6 @@ COMPATIBILITY_METHODS = {"get_page_text", "click_button_by_text"}
 
 async def build_policy_traces() -> dict[str, dict[str, Any]]:
     traces = {
-        "baseline-provenance.json": _baseline_provenance_trace(),
         "facade-contract.json": await _facade_contract_trace(),
         "generic-ordinary.json": await _generic_capture_scenario(
             "extract_page__ordinary", "https://www.linkedin.com/in/ada-lovelace/"

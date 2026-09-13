@@ -1,0 +1,26 @@
+name: Chore
+description: Request maintenance, cleanup, or internal tooling work that is not a feature or bug
+title: "[CHORE] "
+labels: ["chore"]
+body:
+  - type: textarea
+    id: chore-description
+    attributes:
+      label: Chore Description
+      description: What should be maintained or cleaned up.
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: Why this maintenance work is worthwhile.
+    validations:
+      required: true
+  - type: textarea
+    id: suggested-approach
+    attributes:
+      label: Suggested Approach
+      description: How you would approach it. Leave blank if unsure.
+    validations:
+      required: false
