@@ -240,7 +240,7 @@ class SectionCapture:
                         break
                     await target.scroll_into_view_if_needed(timeout=2000)
                     await target.click(timeout=2000)
-                    await self._session.delay(1.0)
+                    await self._session.pace(1.0)
                 except PlaywrightTimeoutError:
                     logger.debug("Show more click timed out after %d clicks", i)
                     break

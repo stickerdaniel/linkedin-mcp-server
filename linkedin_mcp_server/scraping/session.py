@@ -9,6 +9,7 @@ import time
 
 from patchright.async_api import Page
 
+from linkedin_mcp_server.core.humanize import jitter
 from linkedin_mcp_server.core.utils import (
     detect_rate_limit,
     handle_modal_close,
@@ -38,6 +39,22 @@ class ScrapingSession:
     async def delay(self, seconds: float) -> None:
         """Pause through the session delay boundary."""
         await asyncio.sleep(seconds)
+
+    def jittered(self, seconds: float) -> float:
+        """A pause length near `seconds`, through the session jitter boundary.
+
+        Every deliberate pause is jittered here and nowhere else, so a test or
+        a policy trace neutralises the randomness at one seam.
+        """
+        return jitter(seconds)
+
+    async def pace(self, seconds: float) -> None:
+        """Pause for a jittered interval around `seconds`.
+
+        A constant delay between actions gives the traffic a period to lock
+        onto; this is the pause every workflow takes between navigations.
+        """
+        await self.delay(self.jittered(seconds))
 
     async def check_rate_limit(self) -> None:
         """Raise when the current page is rate-limited or challenged."""

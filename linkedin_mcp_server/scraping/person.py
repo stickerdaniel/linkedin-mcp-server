@@ -239,7 +239,7 @@ class PersonScraper:
         try:
             for i, spec in enumerate(requested_ordered):
                 if i > 0:
-                    await self._session.delay(NAV_DELAY)
+                    await self._session.pace(NAV_DELAY)
 
                 section_name = spec.name
                 url = base_url + spec.suffix
@@ -416,7 +416,7 @@ class PersonScraper:
                 continue
 
             if not first_show_all:
-                await self._session.delay(NAV_DELAY)
+                await self._session.pace(NAV_DELAY)
             first_show_all = False
 
             try:

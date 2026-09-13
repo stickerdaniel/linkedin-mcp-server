@@ -73,3 +73,36 @@ async def test_scroll_sidebar_delegates_every_utility_default(mock_page, monkeyp
         max_scrolls=10,
         deadline=12.0,
     )
+
+
+async def test_pace_jitters_through_the_session_boundary(mock_page, monkeypatch):
+    session = ScrapingSession(mock_page)
+    sleep = AsyncMock()
+    monkeypatch.setattr(session_module.asyncio, "sleep", sleep)
+    monkeypatch.setattr(session_module, "jitter", lambda base, *a, **kw: base * 1.25)
+
+    await session.pace(2.0)
+
+    sleep.assert_awaited_once_with(2.5)
+
+
+async def test_pace_is_jittered_by_default(mock_page, monkeypatch):
+    """Unpatched, no two pauses of the same base are equal.
+
+    The point of `pace` over `delay` is the missing fixed period. Two hundred
+    draws that all landed on the base would be the constant delay this exists
+    to remove.
+    """
+    session = ScrapingSession(mock_page)
+    slept: list[float] = []
+
+    async def record(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr(session_module.asyncio, "sleep", record)
+
+    for _ in range(200):
+        await session.pace(2.0)
+
+    assert all(1.0 <= s <= 3.0 for s in slept)
+    assert len(set(slept)) > 1

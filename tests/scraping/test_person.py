@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import importlib.util
 
@@ -716,6 +716,39 @@ class TestScrapePersonSectionOutcomes:
         assert result["sections"]["main_profile"] == "Profile text"
         assert result["section_errors"]["posts"]["error_type"] == "rate_limit"
 
+    async def test_sections_are_paced_through_the_jittered_navigation_delay(
+        self, mock_page
+    ):
+        """One pause per gap, at ``NAV_DELAY`` jittered by the session, never
+        a fixed sleep."""
+        scraper = _scraper(mock_page)
+        with (
+            patch.object(
+                scraper._capture,
+                "capture",
+                new_callable=AsyncMock,
+                return_value=extracted("text"),
+            ),
+            patch.object(
+                scraper._capture,
+                "_extract_overlay",
+                new_callable=AsyncMock,
+                return_value=extracted(""),
+            ),
+            patch.object(person_module, "NAV_DELAY", 7.0),
+            patch(
+                "linkedin_mcp_server.scraping.session.jitter",
+                side_effect=lambda base, *a, **kw: base + 0.5,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
+                new_callable=AsyncMock,
+            ) as sleep,
+        ):
+            await scraper.scrape_person("testuser", {"experience", "posts"})
+
+        assert sleep.await_args_list == [call(7.5), call(7.5)]
+
 
 class TestScrapePersonCallbacks:
     """Test that scrape_person invokes callbacks at each stage."""
@@ -1070,6 +1103,54 @@ class TestGetSidebarProfiles:
         assert mpfy == ["/in/alice/", "/in/bob/", "/in/eve/", "/in/frank/"]
         assert result["sidebar_profiles"]["explore_premium_profiles"] == ["/in/carol/"]
         assert result["sidebar_profiles"]["people_you_may_know"] == ["/in/dave/"]
+
+    async def test_show_all_pages_are_paced_through_the_jittered_delay(self, mock_page):
+        """The first Show all follows the profile page unpaced; each later
+        one waits ``NAV_DELAY``, jittered by the session."""
+        sidebar_js_result = {
+            "sections": {
+                "more_profiles_for_you": ["/in/alice/"],
+                "people_you_may_know": ["/in/dave/"],
+            },
+            "showAllUrls": {
+                "more_profiles_for_you": "https://www.linkedin.com/search/results/people/?keywords=a",
+                "people_you_may_know": "https://www.linkedin.com/search/results/people/?keywords=b",
+            },
+        }
+        mock_page.evaluate = AsyncMock(
+            side_effect=[sidebar_js_result, ["/in/eve/"], ["/in/frank/"]]
+        )
+        mock_page.url = "https://www.linkedin.com/in/testuser/"
+
+        scraper = _scraper(mock_page)
+        with (
+            patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.session.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch.object(person_module, "NAV_DELAY", 7.0),
+            patch(
+                "linkedin_mcp_server.scraping.session.jitter",
+                side_effect=lambda base, *a, **kw: base + 0.5,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
+                new_callable=AsyncMock,
+            ) as sleep,
+        ):
+            result = await scraper.get_sidebar_profiles("testuser")
+
+        assert sleep.await_args_list == [call(7.5)]
+        assert result["sidebar_profiles"]["people_you_may_know"] == [
+            "/in/dave/",
+            "/in/frank/",
+        ]
 
     @pytest.mark.parametrize(
         ("error_type", "message"),
