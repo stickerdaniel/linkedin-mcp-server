@@ -32,7 +32,7 @@ import logging
 
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
-from linkedin_mcp_server.scraping import connection
+import linkedin_mcp_server.scraping.connection as connection
 from linkedin_mcp_server.scraping.connection import ActionSignals
 from linkedin_mcp_server.scraping.identifiers import (
     normalize_person_identifier,

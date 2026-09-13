@@ -15,7 +15,7 @@ import anyio.lowlevel
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.core.exceptions import LinkedInScraperException
-from linkedin_mcp_server.scraping import contracts
+import linkedin_mcp_server.scraping.contracts as contracts
 from linkedin_mcp_server.scraping.identifiers import (
     normalize_person_identifier,
     person_profile_url,

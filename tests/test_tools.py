@@ -12,7 +12,7 @@ from linkedin_mcp_server.scraping.contracts import (
     RATE_LIMITED_SECTION_TEXT,
     SEND_INTERRUPTED_WARNING,
 )
-from linkedin_mcp_server.scraping.extractor import ExtractedSection
+from linkedin_mcp_server.scraping.contracts import ExtractedSection
 
 
 async def get_tool_fn(
@@ -379,7 +379,7 @@ class TestPersonTool:
         being collapsed to the generic "Error calling tool" mask."""
         from fastmcp.exceptions import ToolError
 
-        from linkedin_mcp_server.scraping.extractor import FilterValidationError
+        from linkedin_mcp_server.scraping.contracts import FilterValidationError
         from linkedin_mcp_server.tools.person import register_person_tools
 
         mock_extractor = MagicMock()
@@ -1588,7 +1588,7 @@ class TestPostTools:
         a ToolError carrying the same message, not the generic mask."""
         from fastmcp.exceptions import ToolError
 
-        from linkedin_mcp_server.scraping.extractor import FilterValidationError
+        from linkedin_mcp_server.scraping.contracts import FilterValidationError
         from linkedin_mcp_server.tools.post import register_post_tools
 
         mock_extractor = MagicMock()

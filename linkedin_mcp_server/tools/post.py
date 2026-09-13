@@ -19,7 +19,7 @@ from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
 from linkedin_mcp_server.error_handler import raise_tool_error
-from linkedin_mcp_server.scraping.extractor import FilterValidationError
+from linkedin_mcp_server.scraping.contracts import FilterValidationError
 
 logger = logging.getLogger(__name__)
 

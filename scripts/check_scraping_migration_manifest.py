@@ -22,6 +22,20 @@ FIXTURE_ROOT = TESTS / "fixtures" / "scraping-policy"
 MANIFEST = FIXTURE_ROOT / "migration-manifest.json"
 EXTRACTOR_MODULE = "linkedin_mcp_server.scraping.extractor"
 
+# The package facade is a composition boundary, not a production import
+# shortcut. Keep the exact consumers that exercise that boundary beside the
+# checker so a new tool or service cannot acquire the facade unnoticed.
+_FACADE_PACKAGE_IMPORTERS = frozenset(
+    {
+        "linkedin_mcp_server/dependencies.py",
+        "tests/scraping/policy_scenarios.py",
+        "tests/scraping/test_facade_contracts.py",
+        "tests/scraping/test_facade_results.py",
+        "tests/scraping/test_facade_structure.py",
+        "tests/test_dependencies.py",
+    }
+)
+
 # Public-named contracts that keep a permanent identity alias in
 # scraping.extractor. An import through the alias reaches the same object as an
 # import from the canonical owner, so it never goes obsolete. A *patch* against
@@ -375,6 +389,34 @@ def _is_extractor_module_import(path: Path, node: ast.ImportFrom) -> bool:
 
 def _is_scraping_package_import(path: Path, node: ast.ImportFrom) -> bool:
     return _resolved_import_module(path, node) == "linkedin_mcp_server.scraping"
+
+
+def _is_approved_facade_package_importer(path: Path) -> bool:
+    return path.relative_to(ROOT).as_posix() in _FACADE_PACKAGE_IMPORTERS
+
+
+def _facade_package_imports(
+    path: Path, tree: ast.AST
+) -> list[ast.Import | ast.ImportFrom]:
+    """Return every import form that exposes the scraping package facade."""
+
+    imports: list[ast.Import | ast.ImportFrom] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import) and any(
+            alias.name == "linkedin_mcp_server.scraping" for alias in node.names
+        ):
+            imports.append(node)
+        elif isinstance(node, ast.ImportFrom):
+            resolved = _resolved_import_module(path, node)
+            if resolved == "linkedin_mcp_server" and any(
+                alias.name == "scraping" for alias in node.names
+            ):
+                imports.append(node)
+            elif resolved == "linkedin_mcp_server.scraping" and any(
+                alias.name in {"LinkedInExtractor", "*"} for alias in node.names
+            ):
+                imports.append(node)
+    return imports
 
 
 def _annotation_name(annotation: ast.expr | None) -> str | None:
@@ -3229,6 +3271,11 @@ class Scanner(ast.NodeVisitor):
     def visit_ImportFrom(self, node: ast.ImportFrom) -> Any:
         if _is_extractor_module_import(self.path, node):
             for alias in node.names:
+                if (
+                    self.path == PACKAGE / "scraping" / "__init__.py"
+                    and alias.name == "LinkedInExtractor"
+                ):
+                    continue
                 if alias.name in PERMANENT_ALIASES:
                     self._add(
                         "permanent_alias_import",
@@ -3253,13 +3300,6 @@ class Scanner(ast.NodeVisitor):
                         alias.asname or alias.name,
                         "owner-local scraping modules",
                         14,
-                    )
-                elif alias.name == "LinkedInExtractor":
-                    self._add(
-                        "direct_import",
-                        node,
-                        alias.name,
-                        *_IMPORT_OWNERS[alias.name],
                     )
         self.generic_visit(node)
 
@@ -3805,6 +3845,18 @@ def scan_source(
     """Scan one source string and fail on every unresolved extractor seam."""
 
     tree = ast.parse(source, filename=str(path))
+    if not _is_approved_facade_package_importer(path):
+        facade_imports = _facade_package_imports(path, tree)
+        if facade_imports:
+            relative_path = path.relative_to(ROOT).as_posix()
+            raise UnresolvedSeamError(
+                "\n".join(
+                    f"{relative_path}:{node.lineno} LinkedInExtractor: "
+                    "scraping package facade import is not an approved construction "
+                    "or contract boundary"
+                    for node in facade_imports
+                )
+            )
     module_aliases(path, tree)
     root = _scope_collector(path, tree.body)
     class_names = set(root.class_aliases)

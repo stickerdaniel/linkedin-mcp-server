@@ -2,7 +2,10 @@
 
 from collections import namedtuple
 
-import linkedin_mcp_server.scraping as scraping
+from linkedin_mcp_server.scraping import (
+    COMPANY_SECTIONS as EXPORTED_COMPANY_SECTIONS,
+)
+from linkedin_mcp_server.scraping import PERSON_SECTIONS as EXPORTED_PERSON_SECTIONS
 from linkedin_mcp_server.scraping.fields import (
     COMPANY_SECTIONS,
     PERSON_SECTIONS,
@@ -34,7 +37,7 @@ class TestPersonSections:
         assert list(PERSON_SECTIONS.items()) == list(expected.items())
         assert _has_exact_tuple_contract(PERSON_SECTIONS)
         assert PERSON_SECTIONS["contact_info"][0] == "/overlay/contact-info/"
-        assert scraping.PERSON_SECTIONS is PERSON_SECTIONS
+        assert EXPORTED_PERSON_SECTIONS is PERSON_SECTIONS
 
     def test_expected_keys(self):
         expected = {
@@ -77,7 +80,7 @@ class TestCompanySections:
         assert list(COMPANY_SECTIONS.items()) == list(expected.items())
         assert _has_exact_tuple_contract(COMPANY_SECTIONS)
         assert COMPANY_SECTIONS["posts"][1] is False
-        assert scraping.COMPANY_SECTIONS is COMPANY_SECTIONS
+        assert EXPORTED_COMPANY_SECTIONS is COMPANY_SECTIONS
 
     def test_expected_keys(self):
         assert set(COMPANY_SECTIONS) == {"about", "posts", "jobs"}
