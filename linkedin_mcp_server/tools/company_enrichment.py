@@ -384,6 +384,9 @@ def register_company_enrichment_tools(
         )
         slug = _slug(company)
         urn = rec.company_urn if rec else ""
+        # Why the jobs half was not recorded, when it was wanted and the load
+        # came back unusable; the caller must not read that as a refresh.
+        jobs_failure: str | None = None
 
         try:
             # Firmographics from the About tab; also yields the numeric company
@@ -423,7 +426,15 @@ def register_company_enrichment_tools(
                 # real data. Only record on a genuine page; the load happened
                 # either way, so it still costs a budget action, and the jobs
                 # half stays stale so the next call retries.
-                if text and text != RATE_LIMITED_SECTION_TEXT and not extracted.error:
+                if text == RATE_LIMITED_SECTION_TEXT:
+                    jobs_failure = "rate_limited"
+                elif extracted.error:
+                    jobs_failure = str(
+                        extracted.error.get("error_message") or "extraction failed"
+                    )[:160]
+                elif not text:
+                    jobs_failure = "empty page"
+                else:
                     parsed = parse_job_search(text)
                     cache.record_jobs(
                         company,
@@ -450,12 +461,24 @@ def register_company_enrichment_tools(
             raise_tool_error(e, "enrich_company_deep")  # NoReturn
 
         jobs.save(budget)
+        if jobs_failure == "rate_limited":
+            return {
+                "company": company,
+                "status": "rate_limited",
+                "next_run_after_seconds": 3600,
+                **_firmographics_view(cache.get(company) or rec, "cache"),
+            }
         out = {
             "company": company,
-            "status": "fetched",
+            "status": "jobs_failed" if jobs_failure else "fetched",
             **_firmographics_view(cache.get(company), "company_page"),
         }
-        if want_jobs and not urn:
+        if jobs_failure:
+            out["jobs_note"] = (
+                f"Open roles not refreshed ({jobs_failure}); the cached jobs "
+                "half is left stale so the next call retries it."
+            )
+        elif want_jobs and not urn:
             out["jobs_note"] = (
                 "Open roles unavailable: no company URN known (fetch "
                 "firmographics first, or the About page exposed no id)."
