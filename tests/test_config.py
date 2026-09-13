@@ -343,6 +343,34 @@ class TestUserAgentRefusal:
 
 
 class TestLoaders:
+    def test_load_from_args_explicit_argv_ignores_runner_argv(self, monkeypatch):
+        # #929: explicit argv must win over whatever the runner was invoked with.
+        monkeypatch.setattr("sys.argv", ["pytest", "-q", "-k", "whatever"])
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        config = load_from_args(AppConfig(), argv=[])
+        assert config.server.log_level == "WARNING"
+        config = load_from_args(
+            AppConfig(), argv=["--log-level", "DEBUG"]
+        )
+        assert config.server.log_level == "DEBUG"
+
+    def test_load_from_args_explicit_argv_stays_strict(self, monkeypatch):
+        # The new parameter must not smuggle in leniency: unknown flags still fail.
+        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        with pytest.raises(SystemExit):
+            load_from_args(AppConfig(), argv=["--bogus"])
+
+    def test_load_from_args_default_still_reads_own_argv(self, monkeypatch):
+        # Pins the hazard the conftest fixture exists for: a bare call parses
+        # this process's argv, so it must stay out of the suite's default path.
+        monkeypatch.setattr("sys.argv", ["pytest", "-q"])
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        with pytest.raises(SystemExit):
+            load_from_args(AppConfig())
     def test_load_from_env_headless_false(self, monkeypatch):
         monkeypatch.setenv("HEADLESS", "false")
         from linkedin_mcp_server.config.loaders import load_from_env

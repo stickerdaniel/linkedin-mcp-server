@@ -441,8 +441,18 @@ def load_from_env(config: AppConfig) -> AppConfig:
     return config
 
 
-def load_from_args(config: AppConfig) -> AppConfig:
-    """Load configuration from command line arguments."""
+def load_from_args(
+    config: AppConfig, argv: list[str] | None = None
+) -> AppConfig:
+    """Load configuration from command line arguments.
+
+    ``argv`` is the argument list *without* the program name, as accepted by
+    :meth:`argparse.ArgumentParser.parse_args`. ``None`` (the default) keeps
+    the historical behavior of parsing this process's own ``sys.argv`` — the
+    real CLI entry point relies on it. Anything that loads configuration
+    outside a real CLI invocation (notably the test suite, where ``sys.argv``
+    belongs to pytest) must pass an explicit argv instead; see #929.
+    """
     parser = argparse.ArgumentParser(
         description="LinkedIn MCP Server - A Model Context Protocol server for LinkedIn integration"
     )
@@ -755,7 +765,7 @@ def load_from_args(config: AppConfig) -> AppConfig:
         help="Give every stdio client its own browser (default; overrides DAEMON_ENABLED=true).",
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     # Update configuration with parsed arguments
     if args.no_headless:

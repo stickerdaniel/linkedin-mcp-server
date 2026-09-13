@@ -102,6 +102,26 @@ def ignore_the_developers_environment(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def isolate_process_argv(monkeypatch):
+    """Give every test a clean argv instead of the test runner's own.
+
+    #929: ``load_config()`` parses this process's ``sys.argv``. Under pytest
+    that is pytest's own command line, so any extra token the suite was
+    invoked with (``-q``, ``-k``, ``--cov``, a CI ``--junitxml``) makes
+    argparse exit(2) in whichever test happens to load configuration first —
+    73 of them. A bare ``pytest`` passes by accident, which is why this looks
+    like it "usually passes".
+
+    Tests that prove CLI parsing set ``sys.argv`` themselves (``test_config.py``
+    does throughout); a test-body assignment always wins over a fixture, so
+    this only covers the tests that never mention argv. Deliberately just the
+    program name: with no tokens ``parse_args`` applies no overrides, and the
+    loader resolves environment/defaults exactly as a flagless start would.
+    """
+    monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
+
+
+@pytest.fixture(autouse=True)
 def isolate_profile_dir(ignore_the_developers_environment, tmp_path, monkeypatch):
     """Redirect profile directory to tmp_path via config and DEFAULT_PROFILE_DIR.
 
