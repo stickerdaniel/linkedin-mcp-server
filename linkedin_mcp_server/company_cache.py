@@ -58,13 +58,26 @@ def ttl_from_days(raw: str | None, default: timedelta) -> timedelta:
     return timedelta(days=days)
 
 
+# Anchored to the end of the name: a legal suffix is only a suffix when it
+# trails. Unanchored, "Global Payments" lost its "global" and collided with
+# "Payments", so a search hit for one was served as a confident match for the
+# other. Stripped repeatedly so "Acme Holdings Group Inc." still reaches "acme".
 _LEGAL_SUFFIX = re.compile(
-    r"\b(inc|llc|ltd|limited|gmbh|bv|b\.v|nv|plc|sa|s\.a|ag|co|corp|"
+    r"[\s,.\-]*\b(inc|llc|ltd|limited|gmbh|bv|b\.v|nv|plc|sa|s\.a|ag|co|corp|"
     r"corporation|company|group|holdings?|international|global|"
-    r"technologies|technology|pvt|private|pte|llp|kft|as|oy|ab)\b\.?",
+    r"technologies|technology|pvt|private|pte|llp|kft|as|oy|ab)\b\.?\s*$",
     re.I,
 )
 _TLD = re.compile(r"\.(com|io|co|net|org|ai|cloud|dev|app|inc)\b", re.I)
+
+
+def _strip_legal_suffixes(s: str) -> str:
+    """Peel trailing legal tokens one at a time, keeping a name that is only one."""
+    while True:
+        stripped = _LEGAL_SUFFIX.sub("", s)
+        if stripped == s or not stripped.strip():
+            return s
+        s = stripped
 
 
 def normalize_company_name(name: str) -> str:
@@ -82,7 +95,7 @@ def normalize_company_name(name: str) -> str:
     s = re.sub(r"[‐-―]", "-", s)
     s = re.sub(r"\s+-\s+.*$", "", s)  # drop " - descriptor" tails
     s = _TLD.sub("", s)
-    s = _LEGAL_SUFFIX.sub(" ", s)
+    s = _strip_legal_suffixes(s)
     s = re.sub(r"[^a-z0-9 ]+", " ", s)
     return re.sub(r"\s+", " ", s).strip()
 
