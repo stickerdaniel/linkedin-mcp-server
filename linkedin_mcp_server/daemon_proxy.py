@@ -680,11 +680,24 @@ class FrontendOwnerRecoveryMiddleware(Middleware):
                 # already sent the connection request or the message, and asking
                 # costs one retry while guessing wrong sends it twice. The user
                 # knows which happened; this process does not.
+                #
+                # Raise a ``ToolError`` so ``mask_error_details`` does not reduce
+                # it to a generic message.  An autonomous client that reads a
+                # masked error as transient would retry, which is exactly the
+                # second delivery this refusal is protecting against (#891).
                 logger.info(
                     "Attached to a replacement owner; not repeating a call that "
                     "could change something"
                 )
-                raise
+                from fastmcp.exceptions import ToolError
+
+                tool_name = getattr(context.message, "name", "tool")
+                raise ToolError(
+                    f"The shared browser owner disappeared while '{tool_name}' "
+                    f"was in flight. The call may have taken effect; do not "
+                    f"retry automatically as repeating it could deliver a "
+                    f"duplicate (e.g. a second connection request or message)."
+                ) from exc
 
             logger.info("Attached to a replacement owner; running the call again")
             return await call_next(context)
