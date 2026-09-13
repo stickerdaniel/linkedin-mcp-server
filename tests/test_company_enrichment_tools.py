@@ -412,6 +412,41 @@ class TestEnrichCompanyDeep:
         assert "empty page" in out["jobs_note"]
         assert not cache.get("Acme").has_jobs()
 
+    async def test_an_unparsed_count_is_stamped_fresh_but_said_so(
+        self, mcp, wired, mock_context
+    ):
+        """The "N results" header is matched in English only, so on any other
+        locale the count is None on every fetch. Refusing the stamp would make
+        jobs never fresh there; the page is recorded and the view says the
+        count could not be read, so a None is not mistaken for zero."""
+        from linkedin_mcp_server.scraping.contracts import ExtractedSection
+
+        cache, _ = wired
+        extractor = self._deep_extractor()
+        extractor.extract_page = AsyncMock(
+            return_value=ExtractedSection(
+                text=(
+                    "Jobs in Weltweit\n42 Ergebnisse\n"
+                    "Salesforce Administrator\nSalesforce Administrator\n"
+                ),
+                references=[],
+            )
+        )
+
+        fn = await get_tool_fn(mcp, "enrich_company_deep")
+        out = await fn("Acme", mock_context, extractor=extractor)
+
+        assert out["status"] == "fetched"
+        assert out["open_roles_count"] is None
+        assert out["open_roles_sample"] == ["Salesforce Administrator"]
+        assert "count unparsed" in out["jobs_note"]
+        rec = cache.get("Acme")
+        assert rec.has_jobs()  # stamped: the page loaded, only the header is foreign
+
+        # The same note travels with the cached record.
+        read = await get_tool_fn(mcp, "get_company_cache")
+        assert "count unparsed" in (await read("Acme"))["jobs_note"]
+
     async def test_stale_jobs_refetch_uses_cached_urn_without_about(
         self, mcp, wired, mock_context
     ):

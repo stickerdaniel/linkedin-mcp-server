@@ -538,7 +538,7 @@ def _firmographics_view(
 ) -> dict[str, Any]:
     if rec is None:
         return {"status": "unknown", "source": source, "raw_about": fallback_raw}
-    return {
+    view = {
         "display_name": rec.display_name,
         "industry": rec.industry,
         "employee_count": rec.employee_count,
@@ -551,6 +551,16 @@ def _firmographics_view(
         "firmographics_fetched_at": rec.firmographics_fetched_at,
         "jobs_fetched_at": rec.jobs_fetched_at,
     }
+    if rec.has_jobs() and rec.open_roles_count is None:
+        # The "N results" header is matched in English only, so on another
+        # locale the count is None on every fetch. The page is still stamped
+        # (refusing would leave jobs never fresh there); say so, or a None
+        # reads as a zero.
+        view["jobs_note"] = (
+            "Open roles count unparsed: the jobs page loaded but its results "
+            "header was not recognised (English only); the sample is intact."
+        )
+    return view
 
 
 def _paced_return(
