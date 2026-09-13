@@ -64,6 +64,9 @@ TOOL_DELEGATES = {
 # the on-disk cache or the job ledger; a tuple lists every facade method a
 # tool reaches, and none of them may reach past TOOL_FACADE_METHODS.
 ENRICHMENT_TOOL_DELEGATES: dict[str, tuple[str, ...]] = {
+    "enrich_companies": ("search_companies",),
+    "enrich_company_deep": ("scrape_company", "extract_page"),
+    "get_company_cache": (),
     "get_enrichment_status": (),
     "run_enrichment_bunch": ("scrape_person",),
     "start_enrichment_job": (),
@@ -127,10 +130,10 @@ async def test_registered_tools_and_extractor_delegates_are_counted_separately()
     tools = await create_mcp_server().list_tools()
     tool_names = {tool.name for tool in tools}
 
-    assert len(tool_names) == 22
+    assert len(tool_names) == 25
     assert tool_names == {*TOOL_DELEGATES, *ENRICHMENT_TOOL_DELEGATES, "close_session"}
     assert len(TOOL_DELEGATES) == 18
-    assert len(ENRICHMENT_TOOL_DELEGATES) == 3
+    assert len(ENRICHMENT_TOOL_DELEGATES) == 6
     assert TOOL_DELEGATES.keys().isdisjoint(ENRICHMENT_TOOL_DELEGATES)
     assert set(TOOL_DELEGATES.values()) == TOOL_FACADE_METHODS
     reached = {

@@ -18,6 +18,7 @@ a page-owning collaborator.
 | `__init__` | _(no public definitions)_ | `browser-free` |
 | `capture` | `CaptureMode`, `CapturePlan`, `RATE_LIMIT_RETRY_DELAY`, `SectionCapture`, `capture_plan_for_url()` | `page-owning` |
 | `company` | `CompanyScraper` | `browser-free` |
+| `company_parse` | `ParsedJobs`, `parse_about()`, `parse_job_search()`, `parse_search_results()` | `browser-free` |
 | `connection` | `ActionSignals`, `ConnectionState`, `detect_connection_state()` | `browser-free` |
 | `connection_actions` | `ACTION_SIGNALS_JS`, `CLICK_INCOMING_ACCEPT_JS`, `ConnectionActions`, `OPEN_MORE_BUTTON_JS`, `ReadMainProfile` | `page-owning` |
 | `content` | `PageContentReader` | `page-owning` |
@@ -48,6 +49,7 @@ a page-owning collaborator.
 - `__init__` -> `extractor`, `fields`
 - `capture` -> `content`, `contracts`, `link_metadata`, `navigation`, `session`, `text`
 - `company` -> `capture`, `contracts`, `fields`, `identifiers`, `link_metadata`, `search_urls`, `session`
+- `company_parse` -> _(none)_
 - `connection` -> _(none)_
 - `connection_actions` -> `connection`, `identifiers`, `navigation`, `session`
 - `content` -> `session`, `text`

@@ -134,6 +134,18 @@
     {
       "name": "get_enrichment_status",
       "description": "Report progress and collected results for a bulk enrichment job, or list all jobs"
+    },
+    {
+      "name": "enrich_companies",
+      "description": "Firmographics for a list of companies, cache-first and paced within LinkedIn; one company-search reveals ~10 companies at once, all cached with a 90-day TTL"
+    },
+    {
+      "name": "enrich_company_deep",
+      "description": "Deep firmographics plus live open roles for one company (About and Jobs tabs), cache-first; open roles carry a shorter 14-day TTL"
+    },
+    {
+      "name": "get_company_cache",
+      "description": "Read a cached company record with per-half freshness, or list every cached company"
     }
   ],
   "user_config": {
