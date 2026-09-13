@@ -1,11 +1,19 @@
 # tests/test_action_signals_dom.py
-"""Browser-DOM tests for the incoming-request action-row fingerprint.
+"""Browser-DOM tests for the locale independence of the action-area reads.
 
-The unit suite mocks ``page.evaluate``, so the JS in ``_ACTION_SIGNALS_JS``
-and ``_CLICK_INCOMING_ACCEPT_JS`` never executes there. These tests run the
-real JS against synthetic HTML in headless chromium. Fixtures use German
-labels throughout: the fingerprint must classify without reading any label
-text. Skipped automatically when chromium is not installed; run locally after
+The unit suite mocks ``page.evaluate``, so the programs in
+``scraping/connection_actions.py`` never execute there. These tests run the
+real ones against synthetic HTML in headless chromium.
+
+Every fixture is built from one set of templates and three sets of words:
+English, German, and one whose labels are opaque tokens carrying no verb at
+all. The structure is therefore identical across the three, and each case
+asserts the *same* answer for all of them in one assertion that names the
+locales. A decision that differs between two of them is a decision that read
+a word, which the AGENTS.md Scraping Rules forbid; the opaque set is the
+control, because a label with no verb in it cannot be matched by one.
+
+Skipped automatically when chromium is not installed; run locally after
 ``uv run patchright install chromium --no-shell``. CI installs it, so these
 run there, but a skip is still the right answer for a missing browser here:
 this file checks extraction JS rather than the browser, and
@@ -15,17 +23,33 @@ Fixture structure mirrors the live DOM dumps of two incoming-request
 profiles (2026-06-11): three buttons sharing one parent, Accept and Ignore
 carrying aria-label, More carrying aria-expanded without aria-label, plus
 sidebar cards with labeled compose anchors and other-user invite anchors.
+Every control row sits in a container of its own inside its section, the way
+LinkedIn renders them, so the walk that fingerprints the row actually
+reaches the guards: a row that *is* the scope stops the walk before any of
+them, which is a pass for the wrong reason.
 """
 
 from __future__ import annotations
 
-import pytest
-from patchright.async_api import async_playwright
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from typing import Any, cast
 
-from linkedin_mcp_server.scraping.extractor import (
-    _ACTION_SIGNALS_JS,
-    _CLICK_INCOMING_ACCEPT_JS,
+import pytest
+from patchright.async_api import Page, async_playwright
+
+from linkedin_mcp_server.scraping.connection import (
+    ConnectionState,
+    detect_connection_state,
 )
+from linkedin_mcp_server.scraping.connection_actions import (
+    ACTION_SIGNALS_JS,
+    CLICK_INCOMING_ACCEPT_JS,
+    OPEN_MORE_BUTTON_JS,
+    ConnectionActions,
+)
+from linkedin_mcp_server.scraping.navigation import PageNavigator
+from linkedin_mcp_server.scraping.session import ScrapingSession
 
 #: CI uses ``--dist loadgroup``. Keep every test that launches Chromium on one
 #: worker so browser startups cannot compete with the DOM cases' wall-clock
@@ -36,131 +60,313 @@ pytestmark = [
     pytest.mark.xdist_group("browser_runtime"),
 ]
 
+USER = "testuser"
 
-# Each constant is a full <section>. The top card is always the first
-# section of <main>; the fingerprint is scoped there, so sidebar and feed
-# widgets live in later sections and must never match.
 
-INCOMING_ACTION_ROW = """
+@dataclass(frozen=True, slots=True)
+class Labels:
+    """Every visible string and aria-label value one locale contributes.
+
+    Only these words change between the three fixture sets, so nothing else
+    can explain a decision that changes with them.
+    """
+
+    locale: str
+    accept: str
+    ignore: str
+    more: str
+    message: str
+    connect: str
+    follow: str
+    pending: str
+    edit: str
+    play: str
+    mute: str
+    captions: str
+    fullscreen: str
+    settings: str
+    show_all: str
+    like: str
+    comment: str
+
+
+ENGLISH = Labels(
+    locale="en",
+    accept="Accept Eric Langlouis' invitation to connect",
+    ignore="Ignore Eric Langlouis' invitation",
+    more="More",
+    message="Message Julien",
+    connect="Invite Rahul to connect",
+    follow="Follow Verena",
+    pending="Pending, click to withdraw the invitation sent to Florian",
+    edit="Edit intro",
+    play="Play",
+    mute="Mute",
+    captions="Captions",
+    fullscreen="Full screen",
+    settings="Settings",
+    show_all="Show all",
+    like="Like",
+    comment="Comment",
+)
+
+GERMAN = Labels(
+    locale="de",
+    accept="Kontaktanfrage von Eric Langlouis annehmen",
+    ignore="Kontaktanfrage von Eric Langlouis ignorieren",
+    more="Mehr",
+    message="Nachricht an Julien senden",
+    connect="Rahul als Kontakt einladen",
+    follow="Verena folgen",
+    pending="Ausstehend, klicken zum Zurückziehen",
+    edit="Intro bearbeiten",
+    play="Abspielen",
+    mute="Stummschalten",
+    captions="Untertitel",
+    fullscreen="Vollbild",
+    settings="Einstellungen",
+    show_all="Mehr anzeigen",
+    like="Gefällt mir",
+    comment="Kommentieren",
+)
+
+# No verb anywhere, in any language: these labels are identifiers. Whatever
+# still classifies correctly here is reading structure, and this set is the
+# one a locale table could not rescue.
+OPAQUE = Labels(
+    locale="opaque",
+    accept="a7f3c1",
+    ignore="b2e9d4",
+    more="c8a0b5",
+    message="d1f6e2",
+    connect="e4b7a9",
+    follow="f0c3d8",
+    pending="a9e2f7",
+    edit="b5d8c0",
+    play="c2f4a6",
+    mute="d7b1e3",
+    captions="e9a5b8",
+    fullscreen="f3c7d1",
+    settings="a0b4e6",
+    show_all="b8f2c9",
+    like="c6d0a3",
+    comment="d4e8b7",
+)
+
+LOCALES = (ENGLISH, GERMAN, OPAQUE)
+
+Build = Callable[[Labels], str]
+
+
+# Each builder returns one full <section>. The top card is always the first
+# section of <main>; the incoming fingerprint is scoped there, so sidebar and
+# feed widgets live in later sections and must never match.
+
+
+def incoming_action_row(labels: Labels) -> str:
+    return f"""
   <div class="actions">
-    <button type="button" aria-label="Kontaktanfrage von Eric Langlouis annehmen"
-      onclick="document.body.setAttribute('data-clicked','accept')">Annehmen</button>
-    <button type="button" aria-label="Kontaktanfrage von Eric Langlouis ignorieren"
-      onclick="document.body.setAttribute('data-clicked','ignore')">Ignorieren</button>
-    <button type="button" aria-expanded="false">Mehr</button>
+    <button type="button" aria-label="{labels.accept}"
+      onclick="document.body.setAttribute('data-clicked','accept')"
+      >{labels.accept}</button>
+    <button type="button" aria-label="{labels.ignore}"
+      onclick="document.body.setAttribute('data-clicked','ignore')"
+      >{labels.ignore}</button>
+    <button type="button" aria-expanded="false">{labels.more}</button>
   </div>
 """
 
-INCOMING_TOP_CARD = f"""
+
+def incoming_top_card(labels: Labels) -> str:
+    return f"""
 <section class="topcard">
   <h1>Eric Langlouis</h1>
-  {INCOMING_ACTION_ROW}
+  {incoming_action_row(labels)}
 </section>
 """
 
-VIDEO_PLAYER_BAR = """
+
+def video_player_bar(labels: Labels) -> str:
+    """Every control carries aria-label here, the settings one included."""
+    return f"""
   <div class="player">
-    <button type="button" aria-label="Abspielen">▶</button>
-    <button type="button" aria-label="Stummschalten">🔇</button>
-    <button type="button" aria-label="Untertitel">CC</button>
-    <button type="button" aria-label="Vollbild">⛶</button>
-    <button type="button" aria-expanded="false" aria-label="Einstellungen">⚙</button>
+    <button type="button" aria-label="{labels.play}">&#9654;</button>
+    <button type="button" aria-label="{labels.mute}">&#128264;</button>
+    <button type="button" aria-label="{labels.captions}">CC</button>
+    <button type="button" aria-label="{labels.fullscreen}">&#9727;</button>
+    <button type="button" aria-expanded="false"
+      aria-label="{labels.settings}">&#9881;</button>
   </div>
 """
 
-# Cover-video profile: the player's expander renders before the action row
-# within the same top card. The scan must skip it and still find the row.
-INCOMING_TOP_CARD_WITH_COVER = f"""
+
+def incoming_top_card_with_cover(labels: Labels) -> str:
+    """Cover-video profile: the player's expander precedes the action row."""
+    return f"""
 <section class="topcard">
   <h1>Eric Langlouis</h1>
-  {VIDEO_PLAYER_BAR}
-  {INCOMING_ACTION_ROW}
+  {video_player_bar(labels)}
+  {incoming_action_row(labels)}
 </section>
 """
 
-SIDEBAR_SECTION = """
+
+def sidebar_section(labels: Labels) -> str:
+    """Mutual-connection cards: labeled compose and *other-user* invite anchors."""
+    return f"""
 <section class="sidebar">
   <div class="card">
     <a href="https://www.linkedin.com/in/julien-f/">Julien</a>
     <a href="/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3AAAA"
-      aria-label="Nachricht an Julien senden">Nachricht</a>
+      aria-label="{labels.message}">{labels.message}</a>
   </div>
   <div class="card">
     <a href="https://www.linkedin.com/in/rahul-g/">Rahul</a>
     <a href="/preload/custom-invite/?vanityName=rahul-g"
-      aria-label="Rahul als Kontakt einladen">Vernetzen</a>
+      aria-label="{labels.connect}">{labels.connect}</a>
   </div>
-  <button type="button">Mehr anzeigen</button>
+  <button type="button">{labels.show_all}</button>
 </section>
 """
 
-# A widget elsewhere in main with the exact incoming-row shape (two labeled
-# buttons + one unlabeled expander). It must NOT match because it lives in a
-# later section, outside the scoped top card.
-UNRELATED_MATCHING_WIDGET = """
+
+def unrelated_matching_widget(labels: Labels) -> str:
+    """A later-section widget with the exact incoming-row shape."""
+    return f"""
 <section class="feed">
   <div class="actions">
-    <button type="button" aria-label="Gefällt mir">A</button>
-    <button type="button" aria-label="Kommentieren">B</button>
-    <button type="button" aria-expanded="false">Mehr</button>
+    <button type="button" aria-label="{labels.like}">A</button>
+    <button type="button" aria-label="{labels.comment}">B</button>
+    <button type="button" aria-expanded="false">{labels.more}</button>
   </div>
 </section>
 """
 
-CONNECTED_TOP_CARD = """
+
+def connected_top_card(labels: Labels) -> str:
+    """1st degree: a compose anchor carrying only aria-disabled, and More."""
+    return f"""
 <section class="topcard">
   <h1>Fadi Al Eliwi</h1>
   <div class="actions">
     <a href="/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3ABBB"
-      aria-disabled="false">Nachricht</a>
-    <button type="button" aria-expanded="false">Mehr</button>
+      aria-disabled="false">{labels.message}</a>
+    <button type="button" aria-expanded="false">{labels.more}</button>
   </div>
 </section>
 """
 
-FOLLOW_ONLY_TOP_CARD = """
+
+def follow_only_top_card(labels: Labels) -> str:
+    """Creator-mode profile: a labeled primary button, no invite anchor."""
+    return f"""
 <section class="topcard">
   <h1>Verena</h1>
   <div class="actions">
-    <button type="button" aria-label="Verena folgen">Folgen</button>
-    <a href="/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3ACCC">Nachricht</a>
-    <button type="button" aria-expanded="false">Mehr</button>
+    <button type="button" aria-label="{labels.follow}"
+      onclick="document.body.setAttribute('data-clicked','follow')"
+      >{labels.follow}</button>
+    <a href="/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3ACCC"
+      >{labels.message}</a>
+    <button type="button" aria-expanded="false"
+      onclick="document.body.setAttribute('data-clicked','more')"
+      >{labels.more}</button>
   </div>
 </section>
 """
 
-PENDING_TOP_CARD = """
+
+def pending_top_card(labels: Labels) -> str:
+    """Awaiting response: the Pending control is a labeled <a>, not a button."""
+    return f"""
 <section class="topcard">
   <h1>Florian</h1>
   <div class="actions">
-    <a href="/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3ADDD">Nachricht</a>
+    <a href="/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3ADDD"
+      >{labels.message}</a>
     <a href="https://www.linkedin.com/in/florian/"
-      aria-label="Ausstehend, klicken zum Zurückziehen">Ausstehend</a>
-    <button type="button" aria-expanded="false">Mehr</button>
+      aria-label="{labels.pending}">{labels.pending}</a>
+    <button type="button" aria-expanded="false">{labels.more}</button>
   </div>
 </section>
 """
 
-EXPANDER_FIRST_BAR = """
-<section class="hostile">
-  <button type="button" aria-expanded="false">⚙</button>
-  <button type="button" aria-label="Aktion A">A</button>
-  <button type="button" aria-label="Aktion B">B</button>
+
+def connectable_top_card(labels: Labels) -> str:
+    """The vanityName invite anchor for *this* user, which is the write gate."""
+    return f"""
+<section class="topcard">
+  <h1>Jane</h1>
+  <div class="actions">
+    <a href="/preload/custom-invite/?vanityName={USER}"
+      aria-label="{labels.connect}">{labels.connect}</a>
+    <a href="/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3AEEE"
+      >{labels.message}</a>
+    <button type="button" aria-expanded="false">{labels.more}</button>
+  </div>
 </section>
 """
 
-EXTRA_BUTTON_ROW = """
+
+def self_top_card(labels: Labels) -> str:
+    """Own profile: the edit-intro URL, and no compose action at all."""
+    return f"""
+<section class="topcard">
+  <h1>Daniel</h1>
+  <div class="actions">
+    <a href="/in/{USER}/edit/intro/" aria-label="{labels.edit}">{labels.edit}</a>
+    <button type="button" aria-expanded="false">{labels.more}</button>
+  </div>
+</section>
+"""
+
+
+def restricted_top_card(labels: Labels) -> str:
+    """Out-of-network profile: nothing but the More menu to act on."""
+    return f"""
+<section class="topcard">
+  <h1>Unknown</h1>
+  <div class="actions">
+    <button type="button" aria-expanded="false">{labels.more}</button>
+  </div>
+</section>
+"""
+
+
+def expander_first_bar(labels: Labels) -> str:
+    """DOM-order guard: the expander leads, so this is not an action row."""
+    return f"""
 <section class="hostile">
-  <button type="button" aria-label="Aktion A">A</button>
-  <button type="button" aria-label="Aktion B">B</button>
-  <button type="button" aria-expanded="false">Mehr</button>
-  <button type="button">Extra</button>
+  <div class="bar">
+    <button type="button" aria-expanded="false">{labels.settings}</button>
+    <button type="button" aria-label="{labels.like}">A</button>
+    <button type="button" aria-label="{labels.comment}">B</button>
+  </div>
+</section>
+"""
+
+
+def extra_button_row(labels: Labels) -> str:
+    """Count guard: a fourth button, unlabeled, after the expander."""
+    return f"""
+<section class="hostile">
+  <div class="bar">
+    <button type="button" aria-label="{labels.like}">A</button>
+    <button type="button" aria-label="{labels.comment}">B</button>
+    <button type="button" aria-expanded="false">{labels.more}</button>
+    <button type="button">{labels.show_all}</button>
+  </div>
 </section>
 """
 
 
 def _page_html(*sections: str) -> str:
     return f"<html><body><main>{''.join(sections)}</main></body></html>"
+
+
+def _both(first: Build, second: Build) -> Build:
+    """One page carrying two of the sections above, in that order."""
+    return lambda labels: first(labels) + second(labels)
 
 
 @pytest.fixture
@@ -189,70 +395,176 @@ async def dom_page():
             await browser.close()
 
 
+def _actions(page) -> ConnectionActions:
+    """The owner wired the way the facade does, over a real browser page.
+
+    The main-profile read is never reached: every case here stops at the
+    signal read, so the borrow is a callable that refuses to be called.
+    """
+
+    async def unreachable(_username: str) -> dict[str, Any]:
+        raise AssertionError("the DOM cases never read a profile")
+
+    session = ScrapingSession(cast(Page, page))
+    return ConnectionActions(session, PageNavigator(session), unreachable)
+
+
 async def _signals(page, html: str) -> dict:
-    await page.set_content(html)
-    return await page.evaluate(_ACTION_SIGNALS_JS, "testuser")
+    await page.set_content(_page_html(html))
+    return await page.evaluate(ACTION_SIGNALS_JS, USER)
+
+
+async def _fingerprint(page, html: str) -> bool:
+    return bool((await _signals(page, html))["hasIncomingActionRow"])
+
+
+async def _state(page, html: str) -> ConnectionState:
+    """Drive the production probe and classifier over one rendered page."""
+    await page.set_content(_page_html(html))
+    signals = await _actions(page)._read_action_signals(USER)
+    return detect_connection_state(signals)
+
+
+async def _click(page, html: str, program: str) -> tuple[bool, str | None]:
+    """Run one click program: what it reported, and what it actually hit.
+
+    Patchright evaluates in an isolated world, so page-world variables are
+    invisible there, but the DOM is shared — the inline onclick records the
+    click as a body attribute.
+    """
+    await page.set_content(_page_html(html))
+    clicked = bool(await page.evaluate(program))
+    recorded = await page.evaluate("document.body.getAttribute('data-clicked')")
+    return (clicked, recorded)
+
+
+async def _in_every_locale(
+    page,
+    build: Build,
+    expected: Any,
+    read: Callable[[Any, str], Awaitable[Any]],
+) -> None:
+    """Assert one answer for the same structure in all three locales.
+
+    The assertion carries the whole mapping rather than one locale at a
+    time, so a divergence names the locale that diverged instead of failing
+    on whichever case ran first.
+    """
+    answers = {labels.locale: await read(page, build(labels)) for labels in LOCALES}
+    assert answers == {labels.locale: expected for labels in LOCALES}
+
+
+STATE_CASES: tuple[tuple[str, Build, ConnectionState], ...] = (
+    ("self_profile", self_top_card, "self_profile"),
+    ("connectable", connectable_top_card, "connectable"),
+    (
+        "incoming_request",
+        _both(incoming_top_card, sidebar_section),
+        "incoming_request",
+    ),
+    ("pending", pending_top_card, "pending"),
+    ("already_connected", connected_top_card, "already_connected"),
+    ("follow_only", follow_only_top_card, "follow_only"),
+    ("unavailable", restricted_top_card, "unavailable"),
+)
+
+FINGERPRINT_CASES: tuple[tuple[str, Build, bool], ...] = (
+    ("incoming-next-to-sidebar-cards", _both(incoming_top_card, sidebar_section), True),
+    ("cover-video-expander-first-in-card", incoming_top_card_with_cover, True),
+    ("video-player-bar", _both(connected_top_card, video_player_bar), False),
+    ("expander-first-order-guard", expander_first_bar, False),
+    (
+        "matching-widget-outside-top-card",
+        _both(connected_top_card, unrelated_matching_widget),
+        False,
+    ),
+    ("extra-unlabeled-button", extra_button_row, False),
+    ("follow-only-row", follow_only_top_card, False),
+    ("pending-row", pending_top_card, False),
+    ("connected-row", _both(connected_top_card, sidebar_section), False),
+)
+
+
+class TestConnectionStateIsStructural:
+    """Every state the classifier can reach, decided in three locales.
+
+    Each case runs the real probe and the real classifier, so it covers the
+    whole path from rendered markup to the decision the write gate reads.
+    """
+
+    @pytest.mark.parametrize(
+        ("build", "expected"),
+        [case[1:] for case in STATE_CASES],
+        ids=[case[0] for case in STATE_CASES],
+    )
+    async def test_state_is_the_same_in_every_locale(self, dom_page, build, expected):
+        await _in_every_locale(dom_page, build, expected, _state)
+
+    async def test_a_sidebar_invite_for_another_user_is_not_connectable(self, dom_page):
+        # The invite anchor is vanityName-scoped, so a mutual-connection card
+        # offering Connect for somebody else must not open the write gate.
+        await _in_every_locale(
+            dom_page,
+            _both(connected_top_card, sidebar_section),
+            "already_connected",
+            _state,
+        )
 
 
 class TestIncomingActionRowFingerprint:
-    async def test_incoming_row_detected_next_to_sidebar_cards(self, dom_page):
-        data = await _signals(dom_page, _page_html(INCOMING_TOP_CARD, SIDEBAR_SECTION))
-        assert data["hasIncomingActionRow"] is True
+    """The structural fingerprint, positive and negative, in three locales."""
 
-    async def test_video_player_bar_not_detected(self, dom_page):
-        data = await _signals(
-            dom_page, _page_html(CONNECTED_TOP_CARD, VIDEO_PLAYER_BAR)
+    @pytest.mark.parametrize(
+        ("build", "expected"),
+        [case[1:] for case in FINGERPRINT_CASES],
+        ids=[case[0] for case in FINGERPRINT_CASES],
+    )
+    async def test_fingerprint_answers_the_same_in_every_locale(
+        self, dom_page, build, expected
+    ):
+        await _in_every_locale(dom_page, build, expected, _fingerprint)
+
+
+class TestActionChoiceIsStructural:
+    """Which control each write-side program picks, in three locales."""
+
+    async def test_accept_clicks_the_first_labeled_button_only(self, dom_page):
+        # Clicking the second labeled button would silently and irreversibly
+        # Ignore the request, and the difference between the two is nothing
+        # but their words.
+        await _in_every_locale(
+            dom_page,
+            _both(incoming_top_card, sidebar_section),
+            (True, "accept"),
+            lambda page, html: _click(page, html, CLICK_INCOMING_ACCEPT_JS),
         )
-        assert data["hasIncomingActionRow"] is False
 
-    async def test_expander_first_order_guard(self, dom_page):
-        data = await _signals(dom_page, _page_html(EXPANDER_FIRST_BAR))
-        assert data["hasIncomingActionRow"] is False
-
-    async def test_preceding_nonmatching_expander_does_not_abort_scan(self, dom_page):
-        # Cover-video layout: the player's expander renders before the
-        # action row inside the same top card; the scan must continue past
-        # it and still find the row.
-        data = await _signals(dom_page, _page_html(INCOMING_TOP_CARD_WITH_COVER))
-        assert data["hasIncomingActionRow"] is True
-
-    async def test_matching_widget_outside_top_card_not_detected(self, dom_page):
-        # F1 regression: a widget with the exact incoming-row shape in a
-        # later section must not match — the scan is scoped to the top card.
-        data = await _signals(
-            dom_page, _page_html(CONNECTED_TOP_CARD, UNRELATED_MATCHING_WIDGET)
+    async def test_accept_does_not_click_without_a_fingerprint_match(self, dom_page):
+        await _in_every_locale(
+            dom_page,
+            _both(follow_only_top_card, video_player_bar),
+            (False, None),
+            lambda page, html: _click(page, html, CLICK_INCOMING_ACCEPT_JS),
         )
-        assert data["hasIncomingActionRow"] is False
 
-    async def test_extra_unlabeled_button_fails_count_guard(self, dom_page):
-        data = await _signals(dom_page, _page_html(EXTRA_BUTTON_ROW))
-        assert data["hasIncomingActionRow"] is False
+    async def test_the_more_opener_is_the_expander_not_the_primary(self, dom_page):
+        # The More button is the one control in the action row *without* an
+        # aria-label, and the Follow button beside it is the one with one. A
+        # text match would pick the wrong control in two of these three
+        # locales; the attribute picks the same one in all of them.
+        await _in_every_locale(
+            dom_page,
+            follow_only_top_card,
+            (True, "more"),
+            lambda page, html: _click(page, html, OPEN_MORE_BUTTON_JS),
+        )
 
-    async def test_follow_only_row_not_detected(self, dom_page):
-        data = await _signals(dom_page, _page_html(FOLLOW_ONLY_TOP_CARD))
-        assert data["hasIncomingActionRow"] is False
-
-    async def test_pending_row_not_detected(self, dom_page):
-        data = await _signals(dom_page, _page_html(PENDING_TOP_CARD))
-        assert data["hasIncomingActionRow"] is False
-
-    async def test_connected_row_not_detected(self, dom_page):
-        data = await _signals(dom_page, _page_html(CONNECTED_TOP_CARD, SIDEBAR_SECTION))
-        assert data["hasIncomingActionRow"] is False
-
-
-class TestClickIncomingAccept:
-    async def test_clicks_first_labeled_button_only(self, dom_page):
-        await dom_page.set_content(_page_html(INCOMING_TOP_CARD, SIDEBAR_SECTION))
-        clicked = await dom_page.evaluate(_CLICK_INCOMING_ACCEPT_JS)
-        assert clicked is True
-        # Patchright evaluates in an isolated world; page-world variables
-        # are invisible there, but the DOM is shared — the inline onclick
-        # records the click as a body attribute.
-        recorded = await dom_page.evaluate("document.body.getAttribute('data-clicked')")
-        assert recorded == "accept"
-
-    async def test_no_click_without_fingerprint_match(self, dom_page):
-        await dom_page.set_content(_page_html(FOLLOW_ONLY_TOP_CARD, VIDEO_PLAYER_BAR))
-        clicked = await dom_page.evaluate(_CLICK_INCOMING_ACCEPT_JS)
-        assert clicked is False
+    async def test_no_more_opener_outside_an_action_root(self, dom_page):
+        # No compose anchor means no action root, so there is no More button
+        # to find even though the page renders one.
+        await _in_every_locale(
+            dom_page,
+            self_top_card,
+            (False, None),
+            lambda page, html: _click(page, html, OPEN_MORE_BUTTON_JS),
+        )
