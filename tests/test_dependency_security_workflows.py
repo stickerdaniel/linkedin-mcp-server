@@ -121,7 +121,7 @@ def test_dependency_audit_is_scheduled_manual_and_informational() -> None:
     assert "push" not in triggers
     assert audit["strategy"]["fail-fast"] is False
     assert audit["strategy"]["matrix"]["scope"] == ["runtime", "full"]
-    assert audit["steps"][1]["with"]["version"] == "0.12.5"
+    assert audit["steps"][1]["with"]["version"] == "0.12.13"
     assert audit["steps"][1]["with"]["enable-cache"] is False
     assert "scripts/run_uv_audit.py" in audit["steps"][2]["run"]
     assert audit["steps"][3]["if"] == "always()"
