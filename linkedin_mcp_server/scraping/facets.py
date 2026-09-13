@@ -307,7 +307,7 @@ class FacetResolver:
             )
         self._company_urn_cache[key] = urn
         # The write-back is an optimisation, not the result: ``_path`` refuses
-        # a name that normalises to nothing ("Group", "Co") with ValueError.
+        # a name that normalises to nothing (punctuation only) with ValueError.
         try:
             self._company_cache.record_firmographics(
                 cache_name,

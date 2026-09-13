@@ -719,7 +719,7 @@ def register_company_enrichment_tools(
                         raw_jobs=text,
                     )
         except RateLimitError:
-            budget.ledger.record(now)  # the throttled load still happened
+            # Already charged: each navigation above records in its finally.
             jobs.save(budget)
             return {
                 "company": company,

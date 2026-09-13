@@ -624,14 +624,14 @@ class TestResolveCompanyUrn:
         the id is the result, the cache write is not."""
         resolver = self._resolver(mock_page, tmp_path)
         refs: list[Reference] = [
-            {"kind": "company", "url": "/company/group/", "text": "Group"},
+            {"kind": "company", "url": "/company/stars/", "text": "***"},
             self._urn_ref("42"),
         ]
         with (
-            self._nav(resolver, return_value=extracted("Group", refs)),
+            self._nav(resolver, return_value=extracted("***", refs)),
             caplog.at_level(logging.WARNING, logger=facets_module.__name__),
         ):
-            assert await resolver.resolve_company_urn("Group") == "42"
+            assert await resolver.resolve_company_urn("***") == "42"
 
-        assert resolver._company_urn_cache["group"] == "42"
+        assert resolver._company_urn_cache["***"] == "42"
         assert any("Could not cache company urn" in r.message for r in caplog.records)
