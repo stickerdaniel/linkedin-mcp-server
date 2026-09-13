@@ -7868,3 +7868,69 @@ class TestTheHandshakeFrameIsNotPlatformTranslated:
             election_module._reported_owner_verdict(f"{frame}\r\n".encode(), nonce)
             is None
         ), "the carriage return stays part of the payload and matches no verdict"
+
+
+class TestCpython3124Workaround:
+    """Guard against the CPython 3.12.4 daemon-thread access-violation."""
+
+    def test_bootstrap_report_suppresses_on_3124(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ):
+        """A BaseException from the bootstrap reader is swallowed on 3.12.4."""
+        from io import BytesIO
+
+        from linkedin_mcp_server.daemon_election import (
+            _BootstrapReport,
+            _CPYTHON_3124_WORKAROUND,
+        )
+
+        class _ExplodingStream:
+            """Stream that raises ``BaseException`` on ``readline``."""
+
+            def readline(self, _size: int = -1) -> bytes:
+                raise BaseException("simulated 3.12.4 access violation")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                pass
+
+        monkeypatch.setattr(
+            election_module,
+            "_CPYTHON_3124_WORKAROUND",
+            True,
+        )
+        with caplog.at_level("DEBUG"):
+            report = _BootstrapReport(_ExplodingStream())  # type: ignore[arg-type]
+            result = report.read(timeout=1.0)
+
+        assert result is None
+        assert "CPython 3.12.4" in caplog.text
+
+    def test_bootstrap_report_raises_off_3124(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Away from 3.12.4 the same fault is re-raised normally."""
+        from linkedin_mcp_server.daemon_election import _BootstrapReport
+
+        class _ExplodingStream:
+            def readline(self, _size: int = -1) -> bytes:
+                raise BaseException("should propagate off 3.12.4")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                pass
+
+        monkeypatch.setattr(
+            election_module,
+            "_CPYTHON_3124_WORKAROUND",
+            False,
+        )
+        # ``BaseException`` propagates out of the daemon thread; the Queue
+        # never gets a value and ``read`` times out.
+        report = _BootstrapReport(_ExplodingStream())  # type: ignore[arg-type]
+        result = report.read(timeout=0.05)
+        assert result is None

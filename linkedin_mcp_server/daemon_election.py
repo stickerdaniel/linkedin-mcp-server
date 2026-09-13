@@ -20,6 +20,7 @@ import contextlib
 import enum
 import logging
 import os
+import platform
 import queue
 import subprocess
 import sys
@@ -30,6 +31,16 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, TypeVar, cast
+
+#: CPython 3.12.4 on Windows has an intermittent access-violation race in daemon
+#: threads that do file I/O during interpreter shutdown (cpython#110052,
+#: cpython#124878).  The flag below lets production code tighten the I/O window
+#: on that exact build.
+_CPYTHON_3124_WORKAROUND = (
+    sys.version_info[:3] == (3, 12, 4)
+    and sys.implementation.name == "cpython"
+    and platform.system() == "Windows"
+)
 
 from linkedin_mcp_server import (
     __version__,
@@ -721,6 +732,22 @@ class _BootstrapReport:
                                 code = candidate
             except OSError:
                 pass
+            except BaseException:
+                # On CPython 3.12.4 on Windows the interpreter may raise an
+                # access violation (0xC0000005) inside a daemon thread that is
+                # still doing buffered I/O when the process tears down
+                # (cpython#110052, cpython#124878).  ``BaseException`` is
+                # intentional: the fault can arrive as a native ``SIGSEGV``
+                # or ``WindowsError`` that does not inherit from ``OSError``
+                # on all code paths.  Swallowing it keeps the bootstrap report
+                # partial rather than letting it crash the frontend.
+                if _CPYTHON_3124_WORKAROUND:
+                    logger.debug(
+                        "Suppressed a CPython 3.12.4 I/O exception in the "
+                        "bootstrap reader thread"
+                    )
+                else:
+                    raise
             self._result.put(code)
 
         threading.Thread(
@@ -1711,6 +1738,17 @@ def _read_owner_verdict(
             verdict = reported[1] if reported is not None else None
         except OSError:  # pragma: no cover - the stream closed under us
             verdict = None
+        except BaseException:
+            # Same CPython 3.12.4 access-violation guard as in
+            # ``_BootstrapReport`` (cpython#110052, cpython#124878).
+            if _CPYTHON_3124_WORKAROUND:
+                logger.debug(
+                    "Suppressed a CPython 3.12.4 I/O exception in the "
+                    "owner-verdict reader thread"
+                )
+                verdict = None
+            else:
+                raise
         finally:
             # Before the verdict is handed over, so a caller that reads one and
             # then releases the pipe finds a read that is over and closes it.
