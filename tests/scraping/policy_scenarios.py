@@ -26,6 +26,8 @@ from linkedin_mcp_server.scraping import capture as capture_module
 from linkedin_mcp_server.scraping import company as company_module
 from linkedin_mcp_server.scraping import extractor as extractor_module
 from linkedin_mcp_server.scraping import feed as feed_module
+from linkedin_mcp_server.scraping import job_pages as job_pages_module
+from linkedin_mcp_server.scraping import jobs as jobs_module
 from linkedin_mcp_server.scraping import navigation as navigation_module
 from linkedin_mcp_server.scraping import person as person_module
 from linkedin_mcp_server.scraping import session as session_module
@@ -112,12 +114,12 @@ class TraceCallbacks(ProgressCallback):
 def _diagnostics_bindings(diagnostics: Any) -> Iterator[None]:
     """Bind the issue-report boundary in every module that imports it.
 
-    A separate context manager rather than five more items in `boundaries`,
-    which sat on exactly 20 and is the whole of CPython's static block budget:
-    the twenty-first raised `SyntaxError: too many statically nested blocks` at
-    import, before any test ran. Each module holds its own name for the
-    function, so patching fewer than all of them lets the real one write an
-    issue report for a scripted page.
+    A separate context manager rather than more items in `boundaries`, which
+    sat on exactly 20 and is the whole of CPython's static block budget inside
+    an async generator: the twenty-first raised `SyntaxError: too many
+    statically nested blocks` at import, before any test ran. Each module
+    holds its own name for the function, so patching fewer than all of them
+    lets the real one write an issue report for a scripted page.
     """
 
     with (
@@ -125,7 +127,8 @@ def _diagnostics_bindings(diagnostics: Any) -> Iterator[None]:
         patch.object(feed_module, "build_issue_diagnostics", diagnostics),
         patch.object(person_module, "build_issue_diagnostics", diagnostics),
         patch.object(company_module, "build_issue_diagnostics", diagnostics),
-        patch.object(extractor_module, "build_issue_diagnostics", diagnostics),
+        patch.object(job_pages_module, "build_issue_diagnostics", diagnostics),
+        patch.object(jobs_module, "build_issue_diagnostics", diagnostics),
     ):
         yield
 
@@ -137,8 +140,8 @@ async def boundaries(
     *,
     auth_result: str | None = None,
 ) -> AsyncIterator[None]:
-    real_scroll_body = extractor_module.scroll_to_bottom
-    real_scroll_sidebar = extractor_module.scroll_job_sidebar
+    real_scroll_body = session_module.scroll_to_bottom
+    real_scroll_sidebar = session_module.scroll_job_sidebar
     real_drain = feed_module.FeedScraper._drain_listener_tasks
 
     async def trace(_page: Any, label: str, *, extra: Any = None) -> None:
@@ -203,20 +206,23 @@ async def boundaries(
         patch.object(navigation_module, "detect_auth_barrier", auth),
         patch.object(navigation_module, "resolve_remember_me_prompt", remember),
         patch.object(navigation_module, "stabilize_navigation", stabilize),
-        # Both bindings of each shared boundary, because the workflows that
+        # Every binding of each shared boundary, because the workflows that
         # reach it are split across the modules mid-relocation: generic capture
-        # and the feed go through `ScrapingSession`, while the job,
-        # conversation and messaging workflows still call the imported helper
-        # on the facade. Patching one side only lets the real helper loose on a
-        # scripted page.
+        # and the feed go through `ScrapingSession`, the job pages import the
+        # helper into `job_pages`, and the conversation and messaging
+        # workflows still call it on the facade. Patching one side only lets
+        # the real helper loose on a scripted page. The scrolls have no facade
+        # binding left at all — the job reader held the last one.
         patch.object(session_module, "detect_rate_limit", rate_limit),
         patch.object(extractor_module, "detect_rate_limit", rate_limit),
+        patch.object(job_pages_module, "detect_rate_limit", rate_limit),
         patch.object(session_module, "handle_modal_close", modal),
         patch.object(extractor_module, "handle_modal_close", modal),
+        patch.object(job_pages_module, "handle_modal_close", modal),
         patch.object(session_module, "scroll_to_bottom", scroll_body),
-        patch.object(extractor_module, "scroll_to_bottom", scroll_body),
+        patch.object(job_pages_module, "scroll_to_bottom", scroll_body),
         patch.object(session_module, "scroll_job_sidebar", scroll_sidebar),
-        patch.object(extractor_module, "scroll_job_sidebar", scroll_sidebar),
+        patch.object(job_pages_module, "scroll_job_sidebar", scroll_sidebar),
         _diagnostics_bindings(diagnostics),
         # `staticmethod`, or the class attribute would bind `self` in front of
         # the pending list and the replacement would never match the call.

@@ -26,11 +26,8 @@ SCRAPING_SYNTHETIC = (
 )
 
 _SHARED_BOUNDARY_STAGES = {
-    "detect_rate_limit": {9, 11, 12},
-    "handle_modal_close": {9, 11, 12},
-    "scroll_to_bottom": {9},
-    "scroll_job_sidebar": {9},
-    "build_issue_diagnostics": {9},
+    "detect_rate_limit": {11, 12},
+    "handle_modal_close": {11, 12},
 }
 
 
@@ -58,7 +55,6 @@ def test_manifest_matches_every_current_extractor_seam():
         "permanent_alias_import",
         "private_patch_object",
         "boundary_patch_object",
-        "module_rebind_patch",
         "public_patch_object",
         "imported_module_patch",
         "module_attribute",
@@ -74,6 +70,14 @@ def test_manifest_matches_every_current_extractor_seam():
         seam["migration_stage"] is None or seam["migration_stage"] >= 1
         for seam in current["seams"]
     )
+    # `module_rebind_patch` was the job budget tests replacing the facade's
+    # whole `time` module, and all five retired with the job owner. The kind
+    # is dropped from the required set rather than from the checker: a rebind
+    # that comes back has to be inventoried against the workflow driving it.
+    assert not [
+        seam for seam in current["seams"] if seam["kind"] == "module_rebind_patch"
+    ]
+    assert "time" in migration._IMPORTED_MODULE_NAMES
 
 
 def test_manifest_covers_production_callers_not_only_tests():
@@ -206,23 +210,15 @@ def test_module_boundary_patches_follow_their_callers():
     } == _SHARED_BOUNDARY_STAGES
     assert all(seam["migration_stage"] is not None for seam in boundary)
 
-    direct_attributes = [
-        seam
-        for seam in current["seams"]
-        if seam["kind"] == "module_attribute"
-        and seam["target"] in {"scroll_to_bottom", "scroll_job_sidebar"}
-    ]
-    assert {
-        target: {
-            seam["migration_stage"]
-            for seam in direct_attributes
-            if seam["target"] == target
-        }
-        for target in ("scroll_to_bottom", "scroll_job_sidebar")
-    } == {
-        target: _SHARED_BOUNDARY_STAGES[target]
-        for target in ("scroll_to_bottom", "scroll_job_sidebar")
-    }
+    # Neither scroll has a consumer left on the facade now that the job
+    # reader imports both, so the patches and the direct reads that sized
+    # them are gone together, and so is the issue-report binding. Closed by
+    # relocating the reads rather than by dropping `_BOUNDARY_OWNERS`
+    # entries: one that comes back has to be dated against its caller instead
+    # of failing closed as unknown.
+    retired = ("scroll_to_bottom", "scroll_job_sidebar", "build_issue_diagnostics")
+    assert not [seam for seam in current["seams"] if seam["target"] in retired]
+    assert all(name in migration._BOUNDARY_OWNERS for name in retired)
 
     imported_patches = [
         seam for seam in current["seams"] if seam["kind"] == "imported_module_patch"
@@ -287,7 +283,7 @@ def test_public_facade_patches_follow_each_calling_workflow():
 
     assert {
         seam["migration_stage"] for seam in public if seam["target"] == "extract_page"
-    } == {9, 10}
+    } == {10}
     # Enumerated rather than checked one target at a time, so a public patch
     # arriving for a workflow nobody expected fails here instead of passing
     # unnoticed.
@@ -354,7 +350,7 @@ def test_checker_rejects_obsolete_seams_at_their_migration_stage():
     # completed stage are closed by definition, so an override there proves
     # nothing; raise this number as each stage lands.
     result = subprocess.run(
-        [sys.executable, str(CHECKER), "--check", "--stage", "9"],
+        [sys.executable, str(CHECKER), "--check", "--stage", "10"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -362,16 +358,16 @@ def test_checker_rejects_obsolete_seams_at_their_migration_stage():
     )
 
     assert result.returncode == 1
-    assert "obsolete at stage 9:" in result.stderr
+    assert "obsolete at stage 10:" in result.stderr
     assert "public_patch_object" in result.stderr
-    assert "private_patch_object" in result.stderr
-    assert "string_patch" in result.stderr
-    # The two direct reads of an extractor module attribute that are still
-    # open both drive the job rail, so stage 9 is the first override that
-    # surfaces one and this assertion had to flip with it. The feed's, which
-    # is what it was written for, moved with the test that held it and stays
-    # closed either way.
-    assert "module_attribute" in result.stderr
+    # Stage 10 is the post search, and all six of its seams are one public
+    # patch of `extract_page`. Every other kind now opens at 11 or later, so
+    # these three say so rather than quietly stop proving anything: a private
+    # patch or a module attribute surfacing at this override would mean a
+    # stage-9 seam survived the job relocation.
+    assert "private_patch_object" not in result.stderr
+    assert "string_patch" not in result.stderr
+    assert "module_attribute" not in result.stderr
 
 
 def test_checkers_offer_no_fixture_update_mode():
@@ -984,21 +980,26 @@ async def outer(page):
         )
 
 
-def test_manifest_includes_extractor_access_from_nested_closure():
+def test_the_ambient_scroll_field_left_no_reach_through_behind():
+    """`_scroll_seconds` is gone from the facade, and so are its two readers.
+
+    Both sat inside a `with` block in a job test and reached the facade from
+    a nested closure, which is the shape the synthetic case above covers in
+    general. The table entry stays for the reason every other retired one
+    does: a reach-through that reappears has to be dated at the facade's own
+    stage rather than fail closed as an unknown private attribute.
+    """
     accesses = [
         seam
         for seam in migration.scan()["seams"]
-        if seam["path"] == "tests/test_scraping.py"
-        and seam["target"] == "_scroll_seconds"
+        if seam["target"] == "_scroll_seconds"
     ]
 
-    assert {
-        (seam["line"], seam["canonical_owner"], seam["migration_stage"])
-        for seam in accesses
-    } == {
-        (589, "facade.LinkedInExtractor._scroll_seconds", 14),
-        (2109, "facade.LinkedInExtractor._scroll_seconds", 14),
-    }
+    assert accesses == []
+    assert migration._INSTANCE_ATTRIBUTE_OWNERS["_scroll_seconds"] == (
+        "facade.LinkedInExtractor._scroll_seconds",
+        14,
+    )
 
 
 def test_caller_resolution_ignores_test_class_names():
@@ -1427,9 +1428,12 @@ def test_direct_private_helper_calls_and_stage_gate_are_inventoried():
         for seam in current["seams"]
         if seam["kind"] == "direct_import" and seam["target"].startswith("_")
     ]
-    assert {
-        (seam["canonical_owner"], seam["migration_stage"]) for seam in direct_privates
-    } >= {("job_pages.JOB_IDS_JS", 9)}
+    # The job-id program was the stage-9 half of that pair. It moved with its
+    # owner and the DOM test imports it from `job_pages`, which is no seam at
+    # all, so messaging is what remains.
+    assert {seam["migration_stage"] for seam in direct_privates} == {12}
+    assert not [seam for seam in current["seams"] if seam["target"] == "_JOB_IDS_JS"]
+    assert migration._IMPORT_OWNERS["_JOB_IDS_JS"] == ("job_pages.JOB_IDS_JS", 9)
     # The two action-signal programs were the stage-7 half of that pair. They
     # moved with their owner and the DOM test imports them from
     # `connection_actions`, which is no seam at all. Closed by relocating the

@@ -18,13 +18,13 @@ import pytest
 from patchright.async_api import async_playwright
 
 from linkedin_mcp_server.core.utils import _JOB_CARD_SELECTOR, scroll_job_sidebar
-from linkedin_mcp_server.scraping.extractor import _JOB_IDS_JS
+from linkedin_mcp_server.scraping.job_pages import JOB_IDS_JS
 
 
 async def job_ids(page, *, scoped: bool = False) -> list[str]:
     """What `_extract_job_ids` reads, argument and return shape alike."""
     result = await page.evaluate(
-        _JOB_IDS_JS, {"selector": _JOB_CARD_SELECTOR, "scoped": scoped}
+        JOB_IDS_JS, {"selector": _JOB_CARD_SELECTOR, "scoped": scoped}
     )
     return result["ids"]
 
@@ -748,7 +748,7 @@ class TestRedesignedCards:
     async def test_scrolls_a_lazily_growing_redesigned_rail(self, dom_page):
         """The broadened selector belongs to scrolling as well as reading.
 
-        A direct `_JOB_IDS_JS` test stays green if the sidebar wait or scroll
+        A direct `JOB_IDS_JS` test stays green if the sidebar wait or scroll
         quietly returns to legacy anchors. The redesigned page then reads its
         initial cards correctly but never loads the batch behind them.
         """
