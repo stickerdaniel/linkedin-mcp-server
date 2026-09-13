@@ -370,12 +370,47 @@ class TestEnrichCompanyDeep:
         )
 
         fn = await get_tool_fn(mcp, "enrich_company_deep")
-        await fn("Acme", mock_context, extractor=extractor)
+        out = await fn("Acme", mock_context, extractor=extractor)
 
         rec = cache.get("Acme")
         assert rec.has_firmographics()  # About succeeded
         assert not rec.has_jobs()  # rate-limited jobs NOT stamped fresh
         assert cache.needs_jobs("Acme", datetime.now().astimezone())  # retried next
+        # And the caller is told, exactly as when the throttle raised.
+        assert out["status"] == "rate_limited"
+        assert out["next_run_after_seconds"] == 3600
+        assert out["industry"] == "Retail"
+
+    async def test_a_failed_jobs_page_is_not_reported_as_fetched(
+        self, mcp, wired, mock_context
+    ):
+        """An error section or an empty page skips the cache write; the
+        status has to say so, or stale open roles read as a refresh."""
+        from linkedin_mcp_server.scraping.contracts import ExtractedSection
+
+        cache, _ = wired
+        fn = await get_tool_fn(mcp, "enrich_company_deep")
+
+        extractor = self._deep_extractor()
+        extractor.extract_page = AsyncMock(
+            return_value=ExtractedSection(
+                text="",
+                references=[],
+                error={"error_type": "TimeoutError", "error_message": "slow"},
+            )
+        )
+        out = await fn("Acme", mock_context, extractor=extractor)
+        assert out["status"] == "jobs_failed"
+        assert "slow" in out["jobs_note"]
+        assert not cache.get("Acme").has_jobs()
+
+        extractor.extract_page = AsyncMock(
+            return_value=ExtractedSection(text="", references=[])
+        )
+        out = await fn("Acme", mock_context, extractor=extractor, refresh=True)
+        assert out["status"] == "jobs_failed"
+        assert "empty page" in out["jobs_note"]
+        assert not cache.get("Acme").has_jobs()
 
     async def test_stale_jobs_refetch_uses_cached_urn_without_about(
         self, mcp, wired, mock_context
