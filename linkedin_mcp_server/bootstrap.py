@@ -2509,6 +2509,22 @@ async def _install_under_supervision(
         # growth: CPython can publish returncode before pipe EOF, so the loop
         # above leaves with the watcher parked between two sleeps. The tree has
         # settled by here.
+        #
+        # Before checking the final snapshot: a watcher that observed a breach
+        # in the same scheduling interval where the process exited must not be
+        # swallowed by the "installer finished first" path.  The watcher's own
+        # exception carries the breach even when the final snapshot has already
+        # shrunk (e.g. Patchright deleted its archive during successful
+        # cleanup), so we raise it here before the final snapshot can mask it.
+        if (
+            activity is not None
+            and activity.done()
+            and not activity.cancelled()
+            and _installer_bound_breached(activity)
+            and not bound_raised
+        ):
+            bound_raised = True
+            await activity
         final = await _run_in_daemon_thread(
             _installer_download_snapshot, temporary_root, extraction_paths
         )

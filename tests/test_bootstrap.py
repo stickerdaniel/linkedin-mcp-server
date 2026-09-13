@@ -2467,6 +2467,49 @@ class TestInstallerSupervisorLaunch:
 
         assert "exceeded a setup bound" in caplog.text
 
+    async def test_simultaneous_watcher_breach_and_process_exit_is_raised(
+        self, monkeypatch
+    ):
+        """A watcher that breaches while the process exits is not hidden (#837).
+
+        The watcher observes a byte-limit breach and completes with
+        ``BrowserSetupFailedError`` in the same scheduling interval where the
+        installer process exits successfully.  The final filesystem snapshot
+        can then be below the limit because Patchright removed its temporary
+        archive.  Before this fix the watcher breach was swallowed by the
+        ``"installer finished first"`` path.
+        """
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.exceptions import BrowserSetupFailedError
+
+        breach = BrowserSetupFailedError("holds 5.0 GiB, past its 4.0 GiB limit")
+        proc = _FakeProc([], 0)
+
+        async def watcher_that_immediately_breaches(
+            _callback: Callable[[], None],
+            _temporary_root: Path,
+            _extraction_paths: tuple[Path, ...],
+            _opening: tuple[tuple[str, int, int], ...],
+        ) -> None:
+            raise breach
+
+        async def delayed_lines(stream: object):
+            await asyncio.sleep(0)
+            setattr(stream, "exhausted", True)
+            if False:  # pragma: no cover - makes this an async generator
+                yield ""
+
+        monkeypatch.setattr(bootstrap, "_installer_lines", delayed_lines)
+        monkeypatch.setattr(
+            asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)
+        )
+        monkeypatch.setattr(bootstrap, "_watch_installer_activity", watcher_that_immediately_breaches)
+
+        with pytest.raises(BrowserSetupFailedError, match="5.0 GiB"):
+            await bootstrap._run_patchright_install(
+                "--no-shell", activity_callback=lambda: None
+            )
+
     async def test_bytes_written_before_the_first_poll_are_charged(self, monkeypatch):
         """Everything lands inside one poll interval and is still refused.
 
