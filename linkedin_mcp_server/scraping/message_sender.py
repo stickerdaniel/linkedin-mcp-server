@@ -1332,6 +1332,7 @@ class MessageSender:
         *,
         confirm_send: bool,
         profile_urn: str | None = None,
+        send_deadline: float | None = None,
     ) -> dict[str, Any]:
         """Compose and send a new message with explicit confirmation gating.
 
@@ -1504,6 +1505,23 @@ class MessageSender:
                 "send_unavailable",
                 "The local submit path was missing or ambiguous.",
                 recipient_selected=recipient_selected,
+            )
+
+        # An internal deadline shorter than FastMCP's ``fail_after()`` gives the
+        # caller a ``send_unconfirmed`` answer with ``retry_safe=False`` rather
+        # than a bare timeout that carries no safety signal.  See issue #889.
+        if (
+            send_deadline is not None
+            and time.monotonic() >= send_deadline
+        ):
+            return contracts.message_action_result(
+                self._page.url,
+                "send_unconfirmed",
+                "The tool deadline was reached before submission could be "
+                "started. The message was not sent, but check the conversation "
+                "before retrying to be safe.",
+                recipient_selected=recipient_selected,
+                retry_safe=False,
             )
 
         may_have_submitted = False

@@ -37,6 +37,10 @@ RATE_LIMITED_SECTION_TEXT = "[Rate limited] LinkedIn blocked this section. Try a
 # scope. The caller gets a timeout that carries no `retry_safe`, and this line
 # is then the only record that a message may already have left. Answering the
 # caller instead needs the tool to know its own deadline, which is issue #889.
+# ``SEND_MESSAGE_DEADLINE_FRACTION`` addresses this by returning
+# ``send_unconfirmed`` before FastMCP's deadline can cancel the critical
+# window; this warning covers the residual case where cancellation lands in
+# the confirmation-check tail.
 SEND_INTERRUPTED_WARNING = (
     "Message submission was interrupted while in flight. The send outcome is "
     "unknown; check the conversation before retrying, as a retry may deliver "
