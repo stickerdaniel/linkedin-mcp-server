@@ -300,6 +300,7 @@ def register_messaging_tools(
                 message,
                 confirm_send=confirm_send,
                 profile_urn=profile_urn,
+                tool_timeout=DEFAULT_TOOL_TIMEOUT_SECONDS,
             )
 
             try:

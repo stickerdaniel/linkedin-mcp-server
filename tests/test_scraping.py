@@ -7,6 +7,8 @@ from urllib.parse import parse_qs, urlparse
 import asyncio
 import logging
 
+import anyio
+
 from patchright.async_api import Error as PatchrightError
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
@@ -5729,6 +5731,52 @@ class TestSendMessage:
             owner=mock_page.evaluate_handle.return_value,
             confirmation=1,
         )
+
+    async def test_confirmation_timeout_returns_unconfirmed(self, mock_page):
+        """Internal budget expires before FastMCP's deadline; result survives.
+
+        A slow confirmation that blocks beyond the internal budget must
+        return ``send_unconfirmed`` with ``retry_safe=False`` so the caller
+        knows a retry may duplicate the message -- instead of FastMCP's bare
+        timeout which discards the result entirely (#889).
+        """
+        extractor = LinkedInExtractor(mock_page)
+        patches = self._patch_to_composer(extractor, mock_page)
+
+        block = anyio.Event()
+
+        async def _slow_confirm(*, message, target, owner, confirmation):
+            await block.wait()
+            return False
+
+        with (
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patches[7],
+            patches[8],
+            patches[9],
+            patches[10] as visible,
+        ):
+            visible.side_effect = _slow_confirm
+            result = await extractor.send_message(
+                "testuser",
+                "Hello!",
+                confirm_send=True,
+                # A 2 s tool budget gives the confirmation 5/6 of that.
+                # The Event never fires, so the budget expires first.
+                tool_timeout=2.0,
+            )
+
+        # The key contract: the tool must answer with a structured result
+        # that tells the caller the outcome is unknown and a retry is not
+        # safe, rather than letting FastMCP's deadline discard everything.
+        assert result["status"] == "send_unconfirmed"
+        assert result["sent"] is False
+        assert result["retry_safe"] is False
 
 
 class TestResolveMessageComposeBox:

@@ -243,6 +243,12 @@ _PROFILE_MESSAGE_TARGET_READY_JS = (
 _PROFILE_MESSAGE_TARGET_TIMEOUT_MS = 1_000
 _MESSAGE_SUBMIT_READY_TIMEOUT_MS = 1_000
 _MESSAGE_CLEANUP_TIMEOUT_SECONDS = 1.0
+# Send-message confirmation must finish before FastMCP's tool-level
+# ``anyio.fail_after()`` can cancel the coroutine and discard the result.
+# Using a fraction of the remaining tool budget gives the confirmation a
+# window while keeping the cancellation boundary inside the scope where the
+# result can still be returned.  See #889.
+_MESSAGE_CONFIRMATION_TIMEOUT_FRACTION = 5 / 6
 
 _MESSAGE_COMPOSER_INSPECT_JS = r"""
     const visible = element => {
@@ -3122,6 +3128,7 @@ class LinkedInExtractor:
         *,
         confirm_send: bool,
         profile_urn: str | None = None,
+        tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS,
     ) -> dict[str, Any]:
         """Compose and send a new message with explicit confirmation gating.
 
@@ -3138,6 +3145,9 @@ class LinkedInExtractor:
             confirm_send: Must be True to actually send (False does a dry run).
             profile_urn: Optional profile URN (e.g. ACoAAB...) to verify against
                 the recipient resolved from the loaded profile snapshot.
+            tool_timeout: Total tool budget in seconds.  The confirmation wait
+                uses a fraction of this so the result can be returned before
+                FastMCP's deadline discards it (#889).
         """
         refusal = contracts.refuse_an_invalid_message(linkedin_username, message)
         if refusal is not None:
@@ -3397,12 +3407,37 @@ class LinkedInExtractor:
                             recipient_selected=recipient_selected,
                         )
 
-                    confirmed = await self._message_send_confirmed(
-                        message,
-                        target=target,
-                        owner=owner,
-                        confirmation=confirmation,
+                    # The confirmation must finish before FastMCP's
+                    # ``anyio.fail_after()`` can cancel the coroutine and
+                    # discard the result.  Using a bounded sub-budget lets us
+                    # return ``send_unconfirmed`` with ``retry_safe: false``
+                    # instead of losing the answer to a bare timeout (#889).
+                    confirmation_budget = max(
+                        1.0,
+                        tool_timeout * _MESSAGE_CONFIRMATION_TIMEOUT_FRACTION,
                     )
+                    with anyio.move_on_after(
+                        confirmation_budget
+                    ) as confirm_scope:
+                        confirmed = await self._message_send_confirmed(
+                            message,
+                            target=target,
+                            owner=owner,
+                            confirmation=confirmation,
+                        )
+
+                    if confirm_scope.cancel_called:
+                        return contracts.message_action_result(
+                            self._page.url,
+                            "send_unconfirmed",
+                            "The message was submitted but the confirmation "
+                            "timed out before LinkedIn confirmed the "
+                            "message-list transition. Check the conversation "
+                            "before retrying; retrying may deliver the "
+                            "message twice.",
+                            recipient_selected=recipient_selected,
+                            retry_safe=False,
+                        )
                     if not confirmed:
                         return contracts.message_action_result(
                             self._page.url,
