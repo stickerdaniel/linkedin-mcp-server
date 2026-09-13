@@ -143,12 +143,24 @@ class TestLocalOnlyToolsAreNotPaced:
 
         assert second < 0.1
 
+    @pytest.mark.parametrize("tool", ["start_enrichment_job", "close_session"])
+    async def test_queue_and_session_tools_do_not_wait(self, paced, tool):
+        """``start_enrichment_job`` only writes the queue; ``close_session``
+        only closes the browser. Neither loads a page, so neither waits."""
+        await _timed_call(paced)
+        second = await _timed_call(paced, tool)
+
+        assert second < 0.1
+
     async def test_a_local_tool_spends_no_budget(self, paced, tmp_path):
         store = JobStore(tmp_path / "jobs")
         now = datetime.now()
 
         await _timed_call(paced, "get_enrichment_status")
         await _timed_call(paced, "get_company_cache")
+        # Writing a queue to disk and closing the browser are local too.
+        await _timed_call(paced, "start_enrichment_job")
+        await _timed_call(paced, "close_session")
         assert load_account_budget(store, now).ledger.spent(now) == 0
 
         await _timed_call(paced)
