@@ -67,6 +67,7 @@ class TestSearchPosts:
                 plan=CapturePlan(
                     CaptureMode.SEARCH_RESULTS | CaptureMode.CONTENT_SEARCH,
                     max_posts=10,
+                    apply_cap=False,
                 ),
             )
         ]
@@ -109,6 +110,7 @@ class TestSearchPosts:
                 plan=CapturePlan(
                     CaptureMode.SEARCH_RESULTS | CaptureMode.CONTENT_SEARCH,
                     max_posts=25,
+                    apply_cap=False,
                 ),
             )
         ]
@@ -147,6 +149,34 @@ class TestSearchPosts:
             "url": mock_extract.call_args.args[0],
             "sections": {},
         }
+
+    async def test_the_reference_cap_follows_max_posts(self, mock_page):
+        """The section cap is 15, ``max_posts`` allows 50: with the cap applied
+        inside the capture a 30-post search handed back 15 authors and the
+        prospect list stopped halfway. The capture returns every anchor and
+        the owner caps at ``max(max_posts, 15)``, as the paged searches do."""
+        refs: list[Reference] = [
+            {"kind": "person", "url": f"/in/author{i}/"} for i in range(40)
+        ]
+        search = _search(mock_page)
+        with patch.object(
+            search._capture,
+            "capture",
+            new_callable=AsyncMock,
+            return_value=extracted("posts", refs),
+        ) as mock_extract:
+            result = await search.search_posts("python", max_posts=30)
+
+        mock_extract.assert_awaited_once_with(
+            ANY,
+            section_name="search_results",
+            plan=CapturePlan(
+                CaptureMode.SEARCH_RESULTS | CaptureMode.CONTENT_SEARCH,
+                max_posts=30,
+                apply_cap=False,
+            ),
+        )
+        assert result["references"]["search_results"] == refs[:30]
 
     async def test_references_are_reported_under_the_section_name(self, mock_page):
         reference: Reference = {"kind": "person", "url": "/in/someone/"}

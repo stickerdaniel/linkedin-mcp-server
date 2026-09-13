@@ -10,7 +10,11 @@ from linkedin_mcp_server.scraping.capture import (
     SectionCapture,
 )
 from linkedin_mcp_server.scraping.contracts import RATE_LIMITED_SECTION_TEXT
-from linkedin_mcp_server.scraping.link_metadata import Reference
+from linkedin_mcp_server.scraping.link_metadata import (
+    _SEARCH_RESULTS_REFERENCE_CAP,
+    Reference,
+    dedupe_references,
+)
 from linkedin_mcp_server.scraping.search_urls import build_content_search_url
 
 
@@ -63,12 +67,17 @@ class PostSearch:
         # Builds before it navigates, so a recency filter LinkedIn would
         # ignore is refused rather than answered with unfiltered results.
         url = build_content_search_url(keywords, date_posted=date_posted)
+        # Uncapped: the section cap (15) is below what ``max_posts`` allows,
+        # and a post is addressable only through its author, so a capped
+        # capture cut the prospect list short. Capped here instead, as the
+        # paged searches do, so the cap grows with the request.
         extracted = await self._capture.capture(
             url,
             section_name="search_results",
             plan=CapturePlan(
                 CaptureMode.SEARCH_RESULTS | CaptureMode.CONTENT_SEARCH,
                 max_posts=max_posts,
+                apply_cap=False,
             ),
         )
 
@@ -78,7 +87,10 @@ class PostSearch:
         if extracted.text and extracted.text != RATE_LIMITED_SECTION_TEXT:
             sections["search_results"] = extracted.text
             if extracted.references:
-                references["search_results"] = extracted.references
+                references["search_results"] = dedupe_references(
+                    extracted.references,
+                    cap=max(max_posts, _SEARCH_RESULTS_REFERENCE_CAP),
+                )
         elif extracted.text == RATE_LIMITED_SECTION_TEXT:
             section_errors["search_results"] = {
                 "error_type": "rate_limit",
