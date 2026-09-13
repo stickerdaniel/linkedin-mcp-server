@@ -32,6 +32,46 @@ jobs:
       - name: Optimize uv cache for CI
         run: uv cache prune --ci
 
+  dependency-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high
+          fail-on-scopes: runtime, development, unknown
+          retry-on-snapshot-warnings: true
+          retry-on-snapshot-warnings-timeout: 120
+
+      # The action reports snapshot warnings after its retry window but does not
+      # fail on them. That can make a missing head snapshot look like an empty
+      # dependency diff, so query the same comparison and reject any warning.
+      - name: Require complete dependency snapshots
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          response="$RUNNER_TEMP/dependency-comparison"
+          gh api --include \
+            "repos/${GITHUB_REPOSITORY}/dependency-graph/compare/${BASE_SHA}...${HEAD_SHA}?per_page=100" \
+            > "$response"
+          python3 - "$response" <<'PY'
+          import sys
+          from pathlib import Path
+
+          header = "x-github-dependency-graph-snapshot-warnings:"
+          for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+              if not line:
+                  break
+              if line.lower().startswith(header) and line[len(header) :].strip():
+                  raise SystemExit("Dependency comparison returned snapshot warnings")
+          PY
+
   windows-daemon:
     name: Windows daemon (Python ${{ matrix.python-version }})
     runs-on: windows-latest
@@ -82,10 +122,17 @@ jobs:
   # check below rather than skipping it, because a skipped required check is a
   # green one.
   test:
-    needs: [windows-daemon, platform-behaviour]
+    needs: [dependency-review, windows-daemon, platform-behaviour]
     if: always()
     runs-on: ubuntu-latest
     steps:
+      # The review job is intentionally skipped for pushes to main. On pull
+      # requests it joins this existing required check instead of adding a new
+      # branch-protection context.
+      - name: Require dependency review on pull requests
+        if: github.event_name == 'pull_request'
+        run: test '${{ needs.dependency-review.result }}' = success
+
       - name: Require the Windows daemon tests
         run: test '${{ needs.windows-daemon.result }}' = success
 
