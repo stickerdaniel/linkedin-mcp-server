@@ -78,6 +78,17 @@ def _soft_rate_limit(result: dict[str, Any]) -> str | None:
     return None
 
 
+def _refuse_reserved(job_name: str) -> None:
+    """The shared budget record lives in the job store but is not a job.
+
+    Every tool that takes a job name goes through here: creating it would
+    overwrite the account's pacing state, and loading it would hand the
+    private action history back as if it were a user's results.
+    """
+    if job_name == ACCOUNT_BUDGET_JOB:
+        raise ToolError(f"{job_name!r} is a reserved internal name; choose another.")
+
+
 def _normalize(username: str) -> str:
     """Reduce a profile URL or handle to a bare username."""
     cleaned = username.strip().rstrip("/")
@@ -131,10 +142,7 @@ def register_enrichment_tools(
             Job summary: queued count, duplicates dropped, effective cap today.
         """
         try:
-            if job_name == ACCOUNT_BUDGET_JOB:
-                raise ToolError(
-                    f"{job_name!r} is a reserved internal name; choose another."
-                )
+            _refuse_reserved(job_name)
             cleaned = [_normalize(u) for u in usernames]
             cleaned = [u for u in cleaned if u]
             if not cleaned:
@@ -219,6 +227,7 @@ def register_enrichment_tools(
             Progress, the profiles gathered this bunch, and next_run_after --
             the number of seconds to wait before calling again.
         """
+        _refuse_reserved(job_name)
         try:
             job = store.load(job_name)
         except FileNotFoundError:
@@ -484,6 +493,7 @@ def register_enrichment_tools(
                     "jobs": [j for j in store.list_jobs() if j != ACCOUNT_BUDGET_JOB]
                 }
 
+            _refuse_reserved(job_name)
             job = store.load(job_name)
             now = datetime.now().astimezone()
             budget = load_account_budget(store, now)
