@@ -324,10 +324,12 @@ def test_manifest_is_canonical_portable_json():
 
 
 def test_checker_rejects_obsolete_seams_at_their_migration_stage():
-    # One stage ahead of the tree, which is the smallest override the gate
-    # accepts and the only one that can still surface an unclosed seam.
+    # The lowest stage that still holds an unclosed seam, which is the only
+    # kind of override that can surface one. Stages at or below the tree's own
+    # completed stage are closed by definition, so an override there proves
+    # nothing; raise this number as each stage lands.
     result = subprocess.run(
-        [sys.executable, str(CHECKER), "--check", "--stage", "2"],
+        [sys.executable, str(CHECKER), "--check", "--stage", "3"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -335,8 +337,8 @@ def test_checker_rejects_obsolete_seams_at_their_migration_stage():
     )
 
     assert result.returncode == 1
-    assert "obsolete at stage 2:" in result.stderr
-    assert "direct_import" in result.stderr
+    assert "obsolete at stage 3:" in result.stderr
+    assert "string_patch" in result.stderr
 
 
 def test_checkers_offer_no_fixture_update_mode():
@@ -961,8 +963,8 @@ def test_manifest_includes_extractor_access_from_nested_closure():
         (seam["line"], seam["canonical_owner"], seam["migration_stage"])
         for seam in accesses
     } == {
-        (1005, "session.ScrapingSession._scroll_seconds", 3),
-        (4303, "session.ScrapingSession._scroll_seconds", 3),
+        (917, "session.ScrapingSession._scroll_seconds", 3),
+        (4215, "session.ScrapingSession._scroll_seconds", 3),
     }
 
 
