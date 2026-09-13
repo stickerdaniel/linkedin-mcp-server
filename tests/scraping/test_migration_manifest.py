@@ -55,7 +55,6 @@ def test_manifest_matches_every_current_extractor_seam():
         "permanent_alias_import",
         "private_patch_object",
         "boundary_patch_object",
-        "public_patch_object",
         "imported_module_patch",
         "module_attribute",
         "private_facade_access",
@@ -78,6 +77,14 @@ def test_manifest_matches_every_current_extractor_seam():
         seam for seam in current["seams"] if seam["kind"] == "module_rebind_patch"
     ]
     assert "time" in migration._IMPORTED_MODULE_NAMES
+    # `public_patch_object` went the same way with the post search, which held
+    # the last six. Same reasoning: the kind leaves the required set, not the
+    # checker, so a facade delegate patched again in place of its owner is
+    # inventoried rather than unseen.
+    assert not [
+        seam for seam in current["seams"] if seam["kind"] == "public_patch_object"
+    ]
+    assert migration._WORKFLOW_OWNERS["extract_page"] == ("capture.SectionCapture", 4)
 
 
 def test_manifest_covers_production_callers_not_only_tests():
@@ -275,20 +282,24 @@ def test_shared_boundary_patches_retain_later_consumers_after_early_migration(
     } == expected_stages - {earliest_stage}
 
 
-def test_public_facade_patches_follow_each_calling_workflow():
+def test_the_last_public_facade_patch_retired_with_the_post_search():
+    """No workflow reaches its collaborator through a facade delegate now.
+
+    The six that remained were the post-search tests patching `extract_page`
+    on the facade, and they moved to `PostSearch` with the workflow. Every
+    table entry below stays for the reason each retired one does: a public
+    patch that reappears has to be dated against the workflow driving it
+    rather than fail closed as an unknown target.
+    """
     current = json.loads(MANIFEST.read_text(encoding="utf-8"))
     public = [
         seam for seam in current["seams"] if seam["kind"] == "public_patch_object"
     ]
 
-    assert {
-        seam["migration_stage"] for seam in public if seam["target"] == "extract_page"
-    } == {10}
-    # Enumerated rather than checked one target at a time, so a public patch
-    # arriving for a workflow nobody expected fails here instead of passing
-    # unnoticed.
-    assert {seam["target"] for seam in public} == {"extract_page"}
-    # `search_companies` was the last one, and the two traces that mutated it
+    assert public == []
+    assert migration._WORKFLOW_OWNERS["extract_page"] == ("capture.SectionCapture", 4)
+    assert migration._WORKFLOW_OWNERS["search_posts"] == ("posts.PostSearch", 10)
+    # `search_companies` was the last one before them, and the two traces that mutated it
     # now mutate `CompanyScraper` instead. Its table entry stays for the same
     # reason the others do.
     assert not [seam for seam in public if seam["target"] == "search_companies"]
@@ -350,7 +361,7 @@ def test_checker_rejects_obsolete_seams_at_their_migration_stage():
     # completed stage are closed by definition, so an override there proves
     # nothing; raise this number as each stage lands.
     result = subprocess.run(
-        [sys.executable, str(CHECKER), "--check", "--stage", "10"],
+        [sys.executable, str(CHECKER), "--check", "--stage", "11"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -358,15 +369,17 @@ def test_checker_rejects_obsolete_seams_at_their_migration_stage():
     )
 
     assert result.returncode == 1
-    assert "obsolete at stage 10:" in result.stderr
-    assert "public_patch_object" in result.stderr
-    # Stage 10 is the post search, and all six of its seams are one public
-    # patch of `extract_page`. Every other kind now opens at 11 or later, so
-    # these three say so rather than quietly stop proving anything: a private
-    # patch or a module attribute surfacing at this override would mean a
-    # stage-9 seam survived the job relocation.
-    assert "private_patch_object" not in result.stderr
-    assert "string_patch" not in result.stderr
+    assert "obsolete at stage 11:" in result.stderr
+    # Stage 11 is the conversation reader, and its seams reach the facade four
+    # different ways. `public_patch_object` and `module_attribute` are named
+    # too, negatively: the first retired with the post search and the second
+    # does not open before 12, so either one surfacing here would mean a
+    # closed stage left a seam behind.
+    assert "boundary_patch_object" in result.stderr
+    assert "private_patch_object" in result.stderr
+    assert "private_facade_access" in result.stderr
+    assert "string_patch" in result.stderr
+    assert "public_patch_object" not in result.stderr
     assert "module_attribute" not in result.stderr
 
 
@@ -2942,6 +2955,31 @@ def test_a_rebound_owner_name_loses_its_factory_exemption(rebinding, line):
         "def _scraper(page):\n    return page\n\n\ndef _scraper(page):\n    return page",
         "def _scraper(page):\n    return page\n\n\n_scraper = LinkedInExtractor",
         "from helpers import _scraper",
+        # Decorated: the name ends up bound to whatever came back, and this
+        # decorator returns the facade. Nothing about the `def` says so.
+        "def replace(function):\n"
+        "    return LinkedInExtractor\n"
+        "\n\n@replace\n"
+        "def _scraper(page):\n    return page",
+        # A `global` assignment rebinds the module name from inside a scope
+        # the module-level collector never enters.
+        "def _scraper(page):\n    return page\n\n\n"
+        "def poison():\n    global _scraper\n    _scraper = LinkedInExtractor",
+        # A walrus in a signature is evaluated by the scope holding the `def`,
+        # so this binds at module level while the collector reads only `poison`.
+        "def _scraper(page):\n    return page\n\n\n"
+        "def poison(value=(_scraper := LinkedInExtractor)):\n    return value",
+        # Lambda defaults are also evaluated by the containing scope; the
+        # lambda body is the only part that gets its own scope.
+        "def _scraper(page):\n    return page\n\n\n"
+        "poison = lambda value=(_scraper := LinkedInExtractor): value",
+        # The lambda can itself sit inside another definition-time expression;
+        # its defaults still run in that expression's containing scope.
+        "def _scraper(page):\n    return page\n\n\n"
+        "def poison(\n"
+        "    outer=(lambda value=(_scraper := LinkedInExtractor): value)\n"
+        "):\n"
+        "    return outer",
     ],
 )
 def test_a_module_level_factory_shadow_names_its_entry(factory):
@@ -2952,7 +2990,7 @@ def test_a_module_level_factory_shadow_names_its_entry(factory):
     with pytest.raises(
         migration.UnresolvedSeamError,
         match=r"test_person\.py:\d+ _scraper: "
-        r"owner factory is not a single module-level definition",
+        r"owner factory is not a single undecorated module-level definition",
     ):
         migration.scan_source(
             PERSON_TESTS,
@@ -2963,6 +3001,89 @@ def test_a_module_level_factory_shadow_names_its_entry(factory):
             ),
             *migration.extractor_methods(),
         )
+
+
+def test_a_nested_local_walrus_does_not_rebind_the_module_factory():
+    # The default is evaluated in `outer`, not at module level. Without a
+    # `global` declaration it shadows only that function's local name, so a
+    # sibling owner test still reaches the declared module factory.
+    seams = migration.scan_source(
+        PERSON_TESTS,
+        _owner_test(
+            "    scraper = _scraper(page)\n"
+            '    patch.object(scraper._capture, "extract_page", replacement)',
+            factory="def _scraper(page):\n    return page\n\n\n"
+            "def outer():\n"
+            "    def inner(value=(_scraper := LinkedInExtractor)):\n"
+            "        return value\n"
+            "    return inner",
+        ),
+        *migration.extractor_methods(),
+    )
+
+    assert not [seam for seam in seams if seam.kind.endswith("_patch_object")]
+
+
+def test_a_nested_default_shadows_the_factory_in_its_enclosing_function():
+    # The inner function's default runs while `test_owner` defines it. Its
+    # walrus therefore binds a local `_scraper` in `test_owner`, and the later
+    # call constructs the facade rather than the module-level owner.
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=r"test_person\.py:16 scraper\._capture: "
+        r"unresolved patch\.object target",
+    ):
+        migration.scan_source(
+            PERSON_TESTS,
+            _owner_test(
+                "    def poison(value=(_scraper := LinkedInExtractor)):\n"
+                "        return value\n"
+                "\n"
+                "    scraper = _scraper(page)\n"
+                '    patch.object(scraper._capture, "extract_page", replacement)'
+            ),
+            *migration.extractor_methods(),
+        )
+
+
+def test_a_nested_lambda_default_shadows_its_enclosing_function():
+    # Visiting the outer function's default reaches the nested lambda, whose
+    # own default is still evaluated in `test_owner`. Stopping at the lambda
+    # silently restores the owner exemption for a facade-producing call.
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=r"test_person\.py:18 scraper\._capture: "
+        r"unresolved patch\.object target",
+    ):
+        migration.scan_source(
+            PERSON_TESTS,
+            _owner_test(
+                "    def poison(\n"
+                "        outer=(lambda value=(_scraper := LinkedInExtractor): value)\n"
+                "    ):\n"
+                "        return outer\n"
+                "\n"
+                "    scraper = _scraper(page)\n"
+                '    patch.object(scraper._capture, "extract_page", replacement)'
+            ),
+            *migration.extractor_methods(),
+        )
+
+
+def test_a_global_declaration_without_a_write_keeps_the_factory():
+    # `global` controls name resolution. It does not rebind anything by
+    # itself, so the call still reaches the honored module factory.
+    seams = migration.scan_source(
+        PERSON_TESTS,
+        _owner_test(
+            "    global _scraper\n"
+            "    scraper = _scraper(page)\n"
+            '    patch.object(scraper._capture, "extract_page", replacement)'
+        ),
+        *migration.extractor_methods(),
+    )
+
+    assert not [seam for seam in seams if seam.kind.endswith("_patch_object")]
 
 
 def test_a_nested_factory_shadow_loses_the_exemption_where_it_shadows():

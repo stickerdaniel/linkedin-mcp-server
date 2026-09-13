@@ -26,7 +26,6 @@ from linkedin_mcp_server.scraping.company import CompanyScraper
 from linkedin_mcp_server.scraping.connection_actions import ConnectionActions
 from linkedin_mcp_server.scraping.content import PageContentReader
 from linkedin_mcp_server.scraping.contracts import (
-    RATE_LIMITED_SECTION_TEXT,
     ExtractedSection,
     # Re-exported, not used: the search filters that raise it moved to
     # `search_urls`, while the MCP tool wrappers still catch the class through
@@ -48,6 +47,7 @@ from linkedin_mcp_server.scraping.job_pages import JobPageReader
 from linkedin_mcp_server.scraping.jobs import JobScraper
 from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.person import PersonScraper
+from linkedin_mcp_server.scraping.posts import PostSearch
 from linkedin_mcp_server.scraping.profile_page import ProfilePageReader
 from linkedin_mcp_server.scraping.session import ScrapingSession
 from linkedin_mcp_server.scraping.link_metadata import (
@@ -55,7 +55,6 @@ from linkedin_mcp_server.scraping.link_metadata import (
     build_references,
     dedupe_references,
 )
-from linkedin_mcp_server.scraping.search_urls import build_content_search_url
 from linkedin_mcp_server.scraping.text import (
     strip_conversation_chrome,
     strip_linkedin_noise,
@@ -66,11 +65,6 @@ if TYPE_CHECKING:
     from linkedin_mcp_server.callbacks import ProgressCallback
 
 logger = logging.getLogger(__name__)
-
-# Content search is an infinite scroll with no ``&start=`` pagination, so
-# ``max_pages`` caps scroll depth instead of fetching discrete pages. One
-# nominal "page" is this many scrolls.
-_CONTENT_SCROLLS_PER_REQUESTED_PAGE = 5
 
 _MESSAGING_COMPOSE_SELECTOR = '[role="textbox"][contenteditable="true"]'
 
@@ -1076,6 +1070,7 @@ class LinkedInExtractor:
         # resolved from the facade later.
         self._job_pages = JobPageReader(self._session, self._navigator, self._content)
         self._jobs = JobScraper(self._navigator, self._capture, self._job_pages)
+        self._posts = PostSearch(self._capture)
         self._page = page
 
     @staticmethod
@@ -1803,62 +1798,12 @@ class LinkedInExtractor:
         date_posted: str | None = None,
         max_pages: int = 3,
     ) -> dict[str, Any]:
-        """Search LinkedIn posts/content and extract the results page.
-
-        Reproduces the LinkedIn "Posts" content-search tab — the surface for
-        catching informal "we're hiring" / "Buscamos ..." posts before a
-        formal job listing exists.
-
-        Args:
-            keywords: Free-text query (e.g. "Buscamos Unity", "estamos contratando").
-            date_posted: Optional recency filter, one of the keys of
-                ``search_urls.CONTENT_DATE_POSTED_MAP``. Invalid values raise
-                ``FilterValidationError`` (a ``ValueError`` subclass) rather
-                than reaching LinkedIn, which would ignore them silently and
-                return unfiltered results that look filtered.
-            max_pages: Scroll depth, expressed in result "pages" of roughly
-                ``_CONTENT_SCROLLS_PER_REQUESTED_PAGE`` scrolls each (default
-                3). Content search is an infinite scroll with no per-page URL,
-                so this caps how far the page is scrolled rather than fetching
-                discrete ``&start=`` pages.
-
-        Returns:
-            {url, sections: {search_results: text}} plus optional ``references``
-            (post authors, companies, linked jobs) and ``section_errors``.
-            Verified live: the results page carries no per-post permalink
-            anchors, so a post is addressable only through its author.
-            The LLM should parse the raw text to extract each post's author,
-            headline, body, date, and reaction counts.
-        """
-        # Builds before it navigates, so a recency filter LinkedIn would
-        # ignore is refused rather than answered with unfiltered results.
-        url = build_content_search_url(keywords, date_posted=date_posted)
-        max_scrolls = max(1, max_pages) * _CONTENT_SCROLLS_PER_REQUESTED_PAGE
-        extracted = await self.extract_page(
-            url, section_name="search_results", max_scrolls=max_scrolls
+        """Search LinkedIn posts/content and extract the results page."""
+        return await self._posts.search_posts(
+            keywords,
+            date_posted=date_posted,
+            max_pages=max_pages,
         )
-
-        sections: dict[str, str] = {}
-        references: dict[str, list[Reference]] = {}
-        section_errors: dict[str, dict[str, Any]] = {}
-        if extracted.text and extracted.text != RATE_LIMITED_SECTION_TEXT:
-            sections["search_results"] = extracted.text
-            if extracted.references:
-                references["search_results"] = extracted.references
-        elif extracted.text == RATE_LIMITED_SECTION_TEXT:
-            section_errors["search_results"] = {
-                "error_type": "rate_limit",
-                "error_message": extracted.text,
-            }
-        elif extracted.error:
-            section_errors["search_results"] = extracted.error
-
-        result: dict[str, Any] = {"url": url, "sections": sections}
-        if references:
-            result["references"] = references
-        if section_errors:
-            result["section_errors"] = section_errors
-        return result
 
     async def get_inbox(self, limit: int = 20) -> dict[str, Any]:
         """List recent conversations from the messaging inbox."""

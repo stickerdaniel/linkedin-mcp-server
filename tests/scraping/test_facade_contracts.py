@@ -18,6 +18,8 @@ from linkedin_mcp_server.core.exceptions import InvalidReferenceError
 from linkedin_mcp_server.scraping import LinkedInExtractor as PackageExtractor
 from linkedin_mcp_server.scraping import contracts, text
 from linkedin_mcp_server.scraping.capture import SectionCapture
+from linkedin_mcp_server.scraping.connection import ActionSignals
+from linkedin_mcp_server.scraping.connection_actions import ConnectionActions
 from linkedin_mcp_server.scraping.extractor import (
     ExtractedSection,
     FilterValidationError,
@@ -26,6 +28,7 @@ from linkedin_mcp_server.scraping.extractor import (
     strip_conversation_chrome,
     strip_linkedin_noise,
 )
+from linkedin_mcp_server.scraping.jobs import JobScraper
 from linkedin_mcp_server.server import create_mcp_server
 
 from .policy_scenarios import COMPATIBILITY_METHODS, TOOL_FACADE_METHODS
@@ -164,6 +167,114 @@ async def test_facade_scrape_person_forwards_its_keyword_only_arguments(mock_pag
     assert result["url"] == "https://www.linkedin.com/in/me/"
     loaded.assert_awaited_once()
     extract_page.assert_not_awaited()
+
+
+async def test_facade_connect_forwards_the_optional_note(mock_page):
+    # The owner tests call ConnectionActions directly. This pins the facade
+    # boundary, where dropping `note=note` silently turns a personalized
+    # request into an invitation without its requested note.
+    extractor = LinkedInExtractor(cast(Page, mock_page))
+    expected = {"url": "https://www.linkedin.com/in/target/", "status": "pending"}
+
+    with patch.object(
+        ConnectionActions,
+        "connect_with_person",
+        new_callable=AsyncMock,
+        return_value=expected,
+    ) as connect:
+        result = await extractor.connect_with_person("target", note="context")
+
+    assert result is expected
+    connect.assert_awaited_once_with("target", note="context")
+
+
+async def test_connection_profile_read_resolves_the_facade_delegate_late(mock_page):
+    # Composition deliberately uses a lambda rather than a captured bound
+    # method. A replacement installed after construction must still receive
+    # the main-profile read that starts the connection workflow.
+    extractor = LinkedInExtractor(cast(Page, mock_page))
+    replacement = AsyncMock(
+        return_value={
+            "url": "https://www.linkedin.com/in/target/",
+            "sections": {"main_profile": "Target profile"},
+        }
+    )
+    extractor.scrape_person = replacement  # ty: ignore[invalid-assignment]
+    self_profile = ActionSignals(False, False, True, False, False, False)
+
+    with patch.object(
+        ConnectionActions,
+        "_read_action_signals",
+        new_callable=AsyncMock,
+        return_value=self_profile,
+    ):
+        result = await extractor.connect_with_person("target")
+
+    assert result["status"] == "connect_unavailable"
+    replacement.assert_awaited_once_with("target", {"main_profile"})
+
+
+async def test_facade_search_posts_forwards_its_recency_filter(mock_page):
+    # The scroll depth is held by the `search-posts` trace, which runs the
+    # facade with `max_pages=2` and records the scrolls it buys. The recency
+    # filter is not: no scenario passes one, and replacing the forward with
+    # `None` survived the whole suite. Pinned here against the real owner,
+    # because dropping it answers a filtered request with unfiltered results
+    # under a URL that says otherwise.
+    extractor = LinkedInExtractor(cast(Page, mock_page))
+
+    with patch.object(
+        SectionCapture,
+        "extract_page",
+        new_callable=AsyncMock,
+        return_value=ExtractedSection(text="post", references=[], error=None),
+    ):
+        result = await extractor.search_posts("unity", date_posted="past-week")
+
+    assert "datePosted=%5B%22past-week%22%5D" in result["url"]
+    with pytest.raises(FilterValidationError):
+        await extractor.search_posts("unity", date_posted="last-year")
+
+
+async def test_facade_search_jobs_forwards_every_filter_in_order(mock_page):
+    # Several filters have the same type, so a positional swap is valid Python
+    # and changes the query silently. That exact mutation survived the full
+    # suite before this boundary assertion was added.
+    extractor = LinkedInExtractor(cast(Page, mock_page))
+    expected = {"url": "https://www.linkedin.com/jobs/search/", "sections": {}}
+
+    with patch.object(
+        JobScraper,
+        "search_jobs",
+        new_callable=AsyncMock,
+        return_value=expected,
+    ) as search_jobs:
+        result = await extractor.search_jobs(
+            "python",
+            "Berlin",
+            2,
+            "past-week",
+            "full-time",
+            "mid-senior",
+            "remote",
+            True,
+            "recent",
+            17.5,
+        )
+
+    assert result is expected
+    search_jobs.assert_awaited_once_with(
+        "python",
+        "Berlin",
+        2,
+        "past-week",
+        "full-time",
+        "mid-senior",
+        "remote",
+        True,
+        "recent",
+        17.5,
+    )
 
 
 async def test_facade_scrape_person_keeps_refusing_the_self_alias_by_default(mock_page):
