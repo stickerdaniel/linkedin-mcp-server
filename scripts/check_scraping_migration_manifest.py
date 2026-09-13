@@ -253,9 +253,7 @@ _WORKFLOW_OWNERS: dict[str, tuple[str, int]] = {
 # own body. Keying by file and function keeps class renames irrelevant; a
 # helper/function rename becomes an unresolved seam instead of silently
 # changing its migration stage.
-_EXPLICIT_INSTANCE_BINDINGS = {
-    ("tests/test_scraping.py", "_patch_to_composer"): ("extractor",),
-}
+_EXPLICIT_INSTANCE_BINDINGS: dict[tuple[str, str], tuple[str, ...]] = {}
 
 # Helpers in an owner's own test module that build the migrated collaborator
 # instead of the facade. Keyed by file and function so a rename becomes a
@@ -268,6 +266,7 @@ _OWNER_FACTORIES: dict[str, tuple[str, ...]] = {
     "tests/scraping/test_jobs.py": ("_scraper",),
     "tests/scraping/test_posts.py": ("_search",),
     "tests/scraping/test_conversations.py": ("_reader",),
+    "tests/scraping/test_message_sender.py": ("_sender",),
 }
 
 _EXPLICIT_CALLER_CONTEXTS: dict[tuple[str, str, str], tuple[str, ...]] = {
@@ -296,19 +295,6 @@ _EXPLICIT_CALLER_CONTEXTS: dict[tuple[str, str, str], tuple[str, ...]] = {
         "boundaries",
         "stabilize_navigation",
     ): ("_goto_with_auth_checks",),
-    # The five conversation consumers left with stage 11: the reader calls both
-    # boundaries through `ScrapingSession` rather than through a binding of its
-    # own, so only `send_message` still reaches the facade's, and only for the
-    # rate-limit check. `handle_modal_close` has no binding in
-    # `scraping.extractor` at all any more and therefore no site to key, which
-    # is why its entry is gone rather than emptied; `_BOUNDARY_OWNERS` still
-    # names it, so a patch that comes back is dated against its caller rather
-    # than failing closed as unknown.
-    (
-        "tests/scraping/policy_scenarios.py",
-        "boundaries",
-        "detect_rate_limit",
-    ): ("send_message",),
     (
         "tests/scraping/policy_scenarios.py",
         "boundaries",
@@ -329,11 +315,6 @@ _EXPLICIT_CALLER_CONTEXTS: dict[tuple[str, str, str], tuple[str, ...]] = {
         "_extract_saved_jobs_page",
         "get_saved_jobs",
     ),
-    (
-        "tests/test_scraping.py",
-        "_patch_to_composer",
-        "*",
-    ): ("send_message",),
 }
 
 _STAGE_MODULES: dict[int, tuple[str, ...]] = {

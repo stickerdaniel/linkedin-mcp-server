@@ -16,14 +16,20 @@ import anyio
 import pytest
 from patchright.async_api import async_playwright
 
-from linkedin_mcp_server.scraping.extractor import (
-    LinkedInExtractor,
+from linkedin_mcp_server.scraping.message_sender import (
+    MessageSender,
     _ProfileMessageTarget,
     _ProfileMessageTargetResolution,
 )
 from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.profile_page import ProfilePageReader
 from linkedin_mcp_server.scraping.session import ScrapingSession
+
+
+def _sender(page) -> MessageSender:
+    session = ScrapingSession(page)
+    return MessageSender(session, PageNavigator(session))
+
 
 pytestmark = [
     pytest.mark.browser_dom,
@@ -302,21 +308,21 @@ async def send(
 ) -> dict:
     await page.goto(COMPOSE_URL)
     await page.set_content(html)
-    extractor = LinkedInExtractor(page)
+    sender = _sender(page)
     with (
         patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
         patch.object(
-            extractor,
+            sender,
             "_read_profile_message_target",
             new_callable=AsyncMock,
             return_value=_ProfileMessageTargetResolution("resolved", TARGET),
         ),
         patch(
-            "linkedin_mcp_server.scraping.extractor._message_page_url_is_safe",
+            "linkedin_mcp_server.scraping.message_sender._message_page_url_is_safe",
             return_value=True,
         ),
     ):
-        return await extractor.send_message(
+        return await sender.send_message(
             "fadi-eliwi", message, confirm_send=confirm_send
         )
 
@@ -327,7 +333,7 @@ async def read_profile_target(page, html: str) -> _ProfileMessageTargetResolutio
 
     await page.route("https://www.linkedin.com/**", fulfill)
     await page.goto(f"https://www.linkedin.com{PROFILE_PATH}")
-    return await LinkedInExtractor(page)._read_profile_message_target()
+    return await _sender(page)._read_profile_message_target()
 
 
 class TestProfileMessageTargetDom:
@@ -373,11 +379,11 @@ class TestProfileMessageTargetDom:
                 '<a href="/messaging/compose/?recipient=BOB">message</a></section>'
             ),
         )
-        extractor = LinkedInExtractor(dom_page)
+        sender = _sender(dom_page)
         # The reader borrows the facade's top-card read until the message
         # sender owns it, so wiring it here is what the facade does.
         reader = ProfilePageReader(
-            ScrapingSession(dom_page), extractor._read_profile_message_target
+            ScrapingSession(dom_page), sender._read_profile_message_target
         )
 
         resolution = await read_profile_target(dom_page, html)
@@ -445,7 +451,7 @@ class TestProfileMessageTargetDom:
         )
         started = time.monotonic()
 
-        resolution = await LinkedInExtractor(dom_page)._read_profile_message_target()
+        resolution = await _sender(dom_page)._read_profile_message_target()
 
         assert resolution.status == "resolved"
         assert resolution.target is not None
@@ -518,8 +524,8 @@ class TestComposerRecipientDom:
         bob_route = "https://www.linkedin.com/messaging/thread/BOB/"
         await dom_page.goto(alice_route)
         await dom_page.set_content(compose_page(NOOP_SEND_JS))
-        extractor = LinkedInExtractor(dom_page)
-        read_state = extractor._read_message_composer_state
+        sender = _sender(dom_page)
+        read_state = sender._read_message_composer_state
         state_reads = 0
 
         async def switch_route(target):
@@ -534,18 +540,16 @@ class TestComposerRecipientDom:
         with (
             patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
             patch.object(
-                extractor,
+                sender,
                 "_read_profile_message_target",
                 new_callable=AsyncMock,
                 return_value=_ProfileMessageTargetResolution("resolved", TARGET),
             ),
             patch.object(
-                extractor, "_read_message_composer_state", side_effect=switch_route
+                sender, "_read_message_composer_state", side_effect=switch_route
             ),
         ):
-            result = await extractor.send_message(
-                "fadi-eliwi", MESSAGE, confirm_send=True
-            )
+            result = await sender.send_message("fadi-eliwi", MESSAGE, confirm_send=True)
 
         assert result["status"] == "recipient_resolution_failed"
         assert result["sent"] is False
@@ -568,8 +572,8 @@ class TestComposerRecipientDom:
                 window.__originalSend = document.getElementById('send');
             }"""
         )
-        extractor = LinkedInExtractor(dom_page)
-        resolve_owner = extractor._resolve_message_owner
+        sender = _sender(dom_page)
+        resolve_owner = sender._resolve_message_owner
 
         async def switch_route(target, *, expected_route):
             assert target == TARGET
@@ -582,16 +586,14 @@ class TestComposerRecipientDom:
         with (
             patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
             patch.object(
-                extractor,
+                sender,
                 "_read_profile_message_target",
                 new_callable=AsyncMock,
                 return_value=_ProfileMessageTargetResolution("resolved", TARGET),
             ),
-            patch.object(extractor, "_resolve_message_owner", side_effect=switch_route),
+            patch.object(sender, "_resolve_message_owner", side_effect=switch_route),
         ):
-            result = await extractor.send_message(
-                "fadi-eliwi", MESSAGE, confirm_send=True
-            )
+            result = await sender.send_message("fadi-eliwi", MESSAGE, confirm_send=True)
 
         assert result["status"] == "recipient_resolution_failed"
         assert result["sent"] is False
@@ -1036,8 +1038,8 @@ class TestSendConfirmationDom:
     ):
         await dom_page.goto(COMPOSE_URL)
         await dom_page.set_content(compose_page(NOOP_SEND_JS))
-        extractor = LinkedInExtractor(dom_page)
-        resolve_owner = extractor._resolve_message_owner
+        sender = _sender(dom_page)
+        resolve_owner = sender._resolve_message_owner
         captured = {}
 
         async def capture_owner(target, *, expected_route):
@@ -1051,27 +1053,25 @@ class TestSendConfirmationDom:
         with (
             patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
             patch.object(
-                extractor,
+                sender,
                 "_read_profile_message_target",
                 new_callable=AsyncMock,
                 return_value=_ProfileMessageTargetResolution("resolved", TARGET),
             ),
             patch(
-                "linkedin_mcp_server.scraping.extractor._message_page_url_is_safe",
+                "linkedin_mcp_server.scraping.message_sender._message_page_url_is_safe",
                 return_value=True,
             ),
+            patch.object(sender, "_resolve_message_owner", side_effect=capture_owner),
             patch.object(
-                extractor, "_resolve_message_owner", side_effect=capture_owner
-            ),
-            patch.object(
-                extractor,
+                sender,
                 "_message_send_confirmed",
                 side_effect=wait_for_confirmation,
             ),
             pytest.raises(TimeoutError),
         ):
             with anyio.fail_after(0.5):
-                await extractor.send_message("fadi-eliwi", MESSAGE, confirm_send=True)
+                await sender.send_message("fadi-eliwi", MESSAGE, confirm_send=True)
 
         cleanup_state = await dom_page.evaluate(
             """() => {

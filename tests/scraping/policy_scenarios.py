@@ -24,7 +24,6 @@ from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 from linkedin_mcp_server.callbacks import ProgressCallback
 from linkedin_mcp_server.scraping import capture as capture_module
 from linkedin_mcp_server.scraping import company as company_module
-from linkedin_mcp_server.scraping import extractor as extractor_module
 from linkedin_mcp_server.scraping import feed as feed_module
 from linkedin_mcp_server.scraping import job_pages as job_pages_module
 from linkedin_mcp_server.scraping import jobs as jobs_module
@@ -208,15 +207,13 @@ async def boundaries(
         patch.object(navigation_module, "stabilize_navigation", stabilize),
         # Every binding of each shared boundary, because the workflows that
         # reach it are split across the modules mid-relocation: generic
-        # capture, the feed and the conversation reader go through
-        # `ScrapingSession`, the job pages import the helper into `job_pages`,
-        # and `send_message` still calls the rate-limit check on the facade.
-        # Patching one side only lets the real helper loose on a scripted
-        # page. The scrolls have no facade binding left at all — the job
+        # capture, the feed, conversation reader and message sender go through
+        # `ScrapingSession`, while the job pages import the helper into
+        # `job_pages`. Patching one side only lets the real helper loose on a
+        # scripted page. The scrolls have no facade binding left at all — the job
         # reader held the last one — and neither has the modal close, whose
         # last facade caller left with the conversation reader.
         patch.object(session_module, "detect_rate_limit", rate_limit),
-        patch.object(extractor_module, "detect_rate_limit", rate_limit),
         patch.object(job_pages_module, "detect_rate_limit", rate_limit),
         patch.object(session_module, "handle_modal_close", modal),
         patch.object(job_pages_module, "handle_modal_close", modal),

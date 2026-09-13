@@ -25,15 +25,9 @@ SCRAPING_SYNTHETIC = (
     ROOT / "linkedin_mcp_server" / "scraping" / "synthetic_inventory.py"
 )
 
-# `handle_modal_close` left this table with the conversation reader, which
-# held the last facade caller of it: `scraping.extractor` has no binding of
-# that name any more, so there is no site in `boundaries` to date. The
-# rate-limit check is down to `send_message` alone for the same reason, and
-# both keep their `_BOUNDARY_OWNERS` entries so a patch that reappears is
-# dated against its caller rather than failing closed as unknown.
-_SHARED_BOUNDARY_STAGES = {
-    "detect_rate_limit": {12},
-}
+# Stage 12 moved the last shared-boundary caller off the facade. The owner
+# tables remain so any patch that reappears is dated instead of unresolved.
+_SHARED_BOUNDARY_STAGES: dict[str, set[int]] = {}
 
 
 def canonical_json(value: object) -> str:
@@ -53,17 +47,11 @@ def test_manifest_matches_every_current_extractor_seam():
     assert result.returncode == 0, result.stderr
     assert current["extractor_parent"] == ("70e50ada68b9389f8d315df6ab1e56c08f6c985b")
     assert current["seams"]
-    assert {
-        "string_patch",
-        "module_alias",
+    assert {seam["kind"] for seam in current["seams"]} == {
         "direct_import",
         "permanent_alias_import",
-        "private_patch_object",
-        "boundary_patch_object",
-        "imported_module_patch",
-        "module_attribute",
         "private_facade_access",
-    } <= {seam["kind"] for seam in current["seams"]}
+    }
     assert all(seam["canonical_owner"] for seam in current["seams"])
     assert not {
         "owner-local service",
@@ -144,15 +132,11 @@ def test_final_messaging_seams_have_only_the_approved_stage_owners():
         and seam["target"]
         not in {"LinkedInExtractor", "_navigate_to_page", "_extract_profile_urn"}
     ]
-    assert {seam["path"] for seam in dom_seams} == message_paths
-    assert all(seam["migration_stage"] == 12 for seam in dom_seams)
-    assert all(
-        seam["canonical_owner"].startswith("message_sender.") for seam in dom_seams
-    )
+    # Both DOM suites now build MessageSender directly, so owner-local imports,
+    # patches and private calls are outside the facade seam inventory.
+    assert dom_seams == []
     # The URN read moved to `profile_page.ProfilePageReader` at stage 6, and
-    # the DOM test builds that reader instead of reaching the facade for it.
-    # What it still borrows is the top-card read behind it, which is the
-    # message sender's and dated accordingly.
+    # that reader now receives the owner-local message-target read directly.
     profile_urn_reads = [
         seam for seam in current if seam["target"] == "_extract_profile_urn"
     ]
@@ -161,37 +145,11 @@ def test_final_messaging_seams_have_only_the_approved_stage_owners():
         "profile_page.ProfilePageReader",
         6,
     )
-    assert {
-        (seam["kind"], seam["canonical_owner"], seam["migration_stage"])
+    assert not [
+        seam
         for seam in current
-        if seam["path"] == "tests/test_send_message_confirmation_dom.py"
-        and seam["target"] == "_read_profile_message_target"
-    } == {
-        ("private_facade_access", "message_sender.MessageSender", 12),
-        ("private_patch_object", "message_sender.MessageSender", 12),
-    }
-
-    private_targets = {
-        seam["target"]
-        for seam in current
-        if seam["kind"] == "private_patch_object"
-        and seam["canonical_owner"] == "message_sender.MessageSender"
-    }
-    assert {
-        "_read_profile_message_target",
-        "_wait_for_message_surface",
-        "_read_message_composer_state",
-        "_focus_verified_message_editor",
-        "_write_verified_message",
-        "_wait_for_verified_submit",
-        "_submit_verified_message",
-        "_cleanup_owned_message",
-        "_resolve_message_owner",
-        "_dispose_message_owner",
-        "_prepare_message_confirmation",
-        "_message_send_confirmed",
-        "_dispose_message_confirmation",
-    } <= private_targets
+        if seam["canonical_owner"].startswith("message_sender.")
+    ]
 
     obsolete = {
         "_MESSAGING_RECIPIENT_PICKER_SELECTOR",
@@ -220,7 +178,7 @@ def test_module_boundary_patches_follow_their_callers():
         }
         for target in _SHARED_BOUNDARY_STAGES
     } == _SHARED_BOUNDARY_STAGES
-    assert all(seam["migration_stage"] is not None for seam in boundary)
+    assert boundary == []
 
     # Neither scroll has a consumer left on the facade now that the job
     # reader imports both, so the patches and the direct reads that sized
@@ -233,6 +191,7 @@ def test_module_boundary_patches_follow_their_callers():
     # builds its references from `link_metadata` directly, so neither name is
     # bound in `scraping.extractor` any more.
     retired = (
+        "detect_rate_limit",
         "scroll_to_bottom",
         "scroll_job_sidebar",
         "build_issue_diagnostics",
@@ -253,8 +212,8 @@ def test_module_boundary_patches_follow_their_callers():
     logger_patches = [
         seam for seam in imported_patches if seam["target"].split(".", 1)[0] == "logger"
     ]
-    assert stdlib
-    assert all(seam["migration_stage"] is None for seam in stdlib)
+    assert stdlib == []
+    assert {"asyncio", "time"} <= migration._IMPORTED_MODULE_NAMES
     # The last one was a `get_sidebar_profiles` test reading the facade's
     # logger, and it moved to the person owner at stage 6. Closed by
     # relocating the read rather than by dropping `logger` from
@@ -277,19 +236,30 @@ def test_a_shared_boundary_patch_is_dated_once_per_consuming_stage(monkeypatch):
     """
     key = ("tests/scraping/policy_scenarios.py", "boundaries", "detect_rate_limit")
     owners = migration._WORKFLOW_OWNERS | migration._PRIVATE_OWNERS
-    live = migration._EXPLICIT_CALLER_CONTEXTS[key]
-    restored = ("get_conversation", *live)
+    restored = ("get_conversation", "send_message")
     monkeypatch.setitem(migration._EXPLICIT_CALLER_CONTEXTS, key, restored)
+    source = (
+        POLICY_SCENARIOS.read_text(encoding="utf-8")
+        .replace(
+            "from linkedin_mcp_server.scraping import feed as feed_module\n",
+            "from linkedin_mcp_server.scraping import extractor as extractor_module\n"
+            "from linkedin_mcp_server.scraping import feed as feed_module\n",
+        )
+        .replace(
+            '        patch.object(session_module, "detect_rate_limit", rate_limit),\n',
+            '        patch.object(session_module, "detect_rate_limit", rate_limit),\n'
+            '        patch.object(extractor_module, "detect_rate_limit", rate_limit),\n',
+        )
+    )
 
     publics, privates = migration.extractor_methods()
     seams = migration.scan_source(
         POLICY_SCENARIOS,
-        POLICY_SCENARIOS.read_text(encoding="utf-8"),
+        source,
         publics,
         privates,
     )
 
-    assert live == ("send_message",)
     assert {owners[name][1] for name in restored} == {11, 12}
     assert {
         seam.migration_stage
@@ -375,10 +345,10 @@ def test_checker_rejects_obsolete_seams_at_their_migration_stage():
     # The lowest stage that still holds an unclosed seam, which is the only
     # kind of override that can surface one. Stages at or below the tree's own
     # completed stage are closed by definition, so an override there proves
-    # nothing; raise this number as each stage lands. Stage 11 closed with the
-    # conversation reader, so 12 is the lowest open one.
+    # nothing; raise this number as each stage lands. Stage 12 closed with the
+    # message sender, and the remaining facade seams close at stage 14.
     result = subprocess.run(
-        [sys.executable, str(CHECKER), "--check", "--stage", "12"],
+        [sys.executable, str(CHECKER), "--check", "--stage", "14"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -386,19 +356,13 @@ def test_checker_rejects_obsolete_seams_at_their_migration_stage():
     )
 
     assert result.returncode == 1
-    assert "obsolete at stage 12:" in result.stderr
-    # Stage 12 is the message sender, and its seams reach the facade six
-    # different ways — `module_attribute` among them, which is what separates
-    # this list from the stage-11 one it replaced. `public_patch_object` and
-    # `module_alias` are named negatively: the first retired with the post
-    # search and the second belongs to the facade's own stage 14, so either
-    # one surfacing here would mean a closed stage left a seam behind.
-    assert "boundary_patch_object" in result.stderr
-    assert "private_patch_object" in result.stderr
+    assert "obsolete at stage 14:" in result.stderr
     assert "private_facade_access" in result.stderr
-    assert "string_patch" in result.stderr
     assert "direct_import" in result.stderr
-    assert "module_attribute" in result.stderr
+    assert "boundary_patch_object" not in result.stderr
+    assert "private_patch_object" not in result.stderr
+    assert "string_patch" not in result.stderr
+    assert "module_attribute" not in result.stderr
     assert "public_patch_object" not in result.stderr
     assert "module_alias" not in result.stderr
 
@@ -1448,23 +1412,16 @@ def test_direct_private_helper_calls_and_stage_gate_are_inventoried():
         for seam in current["seams"]
         if seam["kind"] == "module_attribute" and seam["target"].startswith("_")
     ]
-    # Two files now: the profile-page owner test asserts the top-card program
-    # it borrows from the facade is the one that ran, which is the same
-    # stage-12 read the messaging tests name.
-    assert {seam["path"] for seam in private_reads} == {
-        "tests/scraping/test_profile_page.py",
-        "tests/test_scraping.py",
-    }
-    assert all(seam["migration_stage"] == 12 for seam in private_reads)
+    # Message tests now import their programs from the owner module, so no
+    # private program read remains through the facade.
+    assert private_reads == []
     direct_privates = [
         seam
         for seam in current["seams"]
         if seam["kind"] == "direct_import" and seam["target"].startswith("_")
     ]
-    # The job-id program was the stage-9 half of that pair. It moved with its
-    # owner and the DOM test imports it from `job_pages`, which is no seam at
-    # all, so messaging is what remains.
-    assert {seam["migration_stage"] for seam in direct_privates} == {12}
+    # Every private program import now comes from its owner module.
+    assert direct_privates == []
     assert not [seam for seam in current["seams"] if seam["target"] == "_JOB_IDS_JS"]
     assert migration._IMPORT_OWNERS["_JOB_IDS_JS"] == ("job_pages.JOB_IDS_JS", 9)
     # The two action-signal programs were the stage-7 half of that pair. They
@@ -1490,10 +1447,11 @@ def test_direct_private_helper_calls_and_stage_gate_are_inventoried():
         check=False,
     )
 
-    assert result.returncode == 1
-    assert (
-        "module_attribute _MESSAGING_COMPOSE_SELECTOR -> "
-        "message_sender.MESSAGE_COMPOSE_SELECTOR" in result.stderr
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert migration._MODULE_ATTRIBUTE_OWNERS["_MESSAGING_COMPOSE_SELECTOR"] == (
+        "message_sender.MESSAGE_COMPOSE_SELECTOR",
+        12,
     )
 
 
