@@ -57,12 +57,17 @@ class TestSearchPosts:
         assert "/search/results/content/" in result["url"]
         assert "origin=FACETED_SEARCH" in result["url"]
         assert result["sections"]["search_results"] == "We're hiring a Unity dev"
-        # max_pages default (3) -> 15 scrolls
+        # ``CONTENT_SEARCH`` is what makes ``max_posts`` mean anything: the
+        # plan ignores it under every other mode, so a default that forwards
+        # the count without the mode scrolls to no depth at all.
         assert mock_extract.await_args_list == [
             call(
                 result["url"],
                 section_name="search_results",
-                plan=CapturePlan(CaptureMode.SEARCH_RESULTS, max_scrolls=15),
+                plan=CapturePlan(
+                    CaptureMode.SEARCH_RESULTS | CaptureMode.CONTENT_SEARCH,
+                    max_posts=10,
+                ),
             )
         ]
 
@@ -79,14 +84,14 @@ class TestSearchPosts:
         assert "datePosted=%5B%22past-week%22%5D" in result["url"]
         assert mock_extract.call_args.args[0] == result["url"]
 
-    async def test_max_pages_buys_a_whole_page_of_scrolls_each(self, mock_page):
-        """Two nominal pages are ten scrolls, not two.
+    async def test_max_posts_reaches_the_capture_plan(self, mock_page):
+        """The count goes through untouched, with no depth alongside it.
 
-        The multiplication is the whole of what ``max_pages`` means on an
-        infinite scroll: dropping it leaves a caller asking for three pages
-        with three scrolls, which reads as a page that simply had little on
-        it. Asserted at a value that is neither the argument nor the default
-        product, so neither half of the arithmetic can go missing quietly.
+        Content search is an infinite scroll with no per-page URL, so the
+        capture counts loaded cards instead of scrolling a fixed depth. A
+        ``max_scrolls`` next to the count would re-introduce the depth budget
+        this replaced; asserted at a value that is not the default so a
+        dropped argument cannot pass as one that was forwarded.
         """
         search = _search(mock_page)
         with patch.object(
@@ -95,42 +100,15 @@ class TestSearchPosts:
             new_callable=AsyncMock,
             return_value=extracted("post"),
         ) as mock_extract:
-            await search.search_posts("python", max_pages=2)
-
-        assert mock_extract.await_args_list == [
-            call(
-                ANY,
-                section_name="search_results",
-                plan=CapturePlan(CaptureMode.SEARCH_RESULTS, max_scrolls=10),
-            )
-        ]
-
-    @pytest.mark.parametrize("max_pages", [0, -3])
-    async def test_a_nonpositive_max_pages_still_scrolls_one_page_worth(
-        self, mock_page, max_pages
-    ):
-        """The ``max(1, ...)`` floor, which is what keeps a zero readable.
-
-        Without it the tool answers a ``max_pages`` of 0 with no scrolling at
-        all and a negative one with a negative budget, and both come back as
-        an empty results page rather than as a refused argument.
-        """
-        search = _search(mock_page)
-        with patch.object(
-            search._capture,
-            "capture",
-            new_callable=AsyncMock,
-            return_value=extracted("post"),
-        ) as mock_extract:
-            await search.search_posts("python", max_pages=max_pages)
+            await search.search_posts("python", max_posts=25)
 
         assert mock_extract.await_args_list == [
             call(
                 ANY,
                 section_name="search_results",
                 plan=CapturePlan(
-                    CaptureMode.SEARCH_RESULTS,
-                    max_scrolls=posts_module._CONTENT_SCROLLS_PER_REQUESTED_PAGE,
+                    CaptureMode.SEARCH_RESULTS | CaptureMode.CONTENT_SEARCH,
+                    max_posts=25,
                 ),
             )
         ]
@@ -252,13 +230,3 @@ class TestSearchPosts:
 
         assert result["sections"] == {}
         assert result["section_errors"] == {"search_results": error}
-
-
-def test_one_requested_page_is_five_scrolls():
-    """The policy constant itself, which every scroll-depth test multiplies.
-
-    Asserted here rather than inferred from a product: the tests above would
-    all still pass with a different constant and a matching expectation, so a
-    changed scroll budget belongs in a diff that says so.
-    """
-    assert posts_module._CONTENT_SCROLLS_PER_REQUESTED_PAGE == 5

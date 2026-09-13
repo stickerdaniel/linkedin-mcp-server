@@ -95,6 +95,7 @@ class TestBusyIsNotAnAuthFailure:
         message = str(excinfo.value)
         assert "using the browser" in message
         assert "session was not changed" in message
+        assert "--daemon" in message
         # A bug report would carry diagnostics; contention is not a bug.
         assert "issue" not in message.lower()
 

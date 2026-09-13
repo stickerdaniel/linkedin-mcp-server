@@ -13,17 +13,17 @@ A Model Context Protocol (MCP) server that connects AI assistants to LinkedIn. A
 - **Messaging**: List the inbox, read a conversation by username or thread ID, search messages by keyword, and compose/send a new message with explicit confirmation (profile-based send may open a separate DM rather than reply in an existing thread)
 - **Company Profiles**: Extract comprehensive company data, including the LinkedIn company URN id (used by LinkedIn's people-search `currentCompany` URL facet)
 - **Company Employees**: List employees at a company with optional keyword filtering
-- **Company Search**: Search for companies by keyword
+- **Company Search**: Search for companies by keywords and/or facets (industry, size, hq_location, has_jobs), with multi-page pagination and structured `companies` rows (name, industry, location, tagline, followers, url), capped per page under `references`
 - **Job Details**: Retrieve job posting information
 - **Job Search**: Search for jobs with keywords and location filters
 - **Saved Jobs**: List job postings saved by the authenticated user
-- **People Search**: Search for people by keywords, location, connection degree (1st/2nd/3rd) and current company, with multi-page pagination
+- **People Search**: Search for people by keywords (Boolean search) and/or facets (location, connection degree, current/past company, title via a quoted phrase in keywords, industry, school, name, profile language), keywords optional, with multi-page pagination and structured `people` rows (name, degree, headline, location, snippet, url), capped per page under `references`
 - **Person Posts**: Get recent activity/posts from a person's profile
 - **Company Posts**: Get recent posts from a company's LinkedIn feed
 - **Home Feed**: Get recent posts from the authenticated user's LinkedIn home feed
-- **Post Search**: Search posts/content globally by keyword (the "Posts" tab) with an optional recency filter
+- **Post Search**: Search posts/content globally by keyword (the "Posts" tab) with an optional recency filter and `max_posts` (default 10)
 - **Bulk Profile Enrichment**: Queue a large list of profiles and work through it in small, human-paced bunches, resumable across days under a shared account-safety budget
-- **Company Enrichment**: Resolve and cache company firmographics (industry, size, HQ) and live open roles, cache-first with configurable TTLs, batching via company search
+- **Company Enrichment**: Resolve and cache company firmographics (industry, size, HQ) and live open roles, cache-first with configurable TTLs, batching via company search, with an optional `about` pass for deeper firmographics and a `query_company_cache` tool to filter cached companies without hitting LinkedIn
 - **Compact References**: Return typed per-section links alongside readable text without shipping full-page markdown
 
 ## Quick Start

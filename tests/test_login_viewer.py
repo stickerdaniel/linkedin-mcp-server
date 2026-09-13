@@ -15,6 +15,7 @@ from urllib.parse import unquote
 import pytest
 
 import linkedin_mcp_server.login_viewer as viewer_module
+from linkedin_mcp_server.core.exceptions import NetworkError
 from linkedin_mcp_server.login_viewer import (
     LoginViewer,
     LoginViewerError,
@@ -560,7 +561,9 @@ async def test_remote_teardown_precedes_chromium_and_preserves_failure(
 
     monkeypatch.setattr(setup, "goto_reporting_proxy_errors", launch_failed)
 
-    with pytest.raises(ValueError, match="navigation failed"):
+    # A login-page navigation that did not finish is reported as a
+    # NetworkError wrapping the original failure, never as a dead session.
+    with pytest.raises(NetworkError, match="navigation failed") as info:
         await setup._run_login(
             cast(setup.BrowserManager, Manager()),
             tmp_path / "profile",
@@ -568,6 +571,7 @@ async def test_remote_teardown_precedes_chromium_and_preserves_failure(
             0,
             viewer=cast(LoginViewer, Viewer()),
         )
+    assert isinstance(info.value.__cause__, ValueError)
 
     assert capsys.readouterr().out.count(viewer_url("token")) == 1
     assert events == [

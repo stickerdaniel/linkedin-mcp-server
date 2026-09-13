@@ -28,8 +28,17 @@ from linkedin_mcp_server.scraping.identifiers import (
 from linkedin_mcp_server.scraping.link_metadata import Reference, dedupe_references
 from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.profile_page import ProfilePageReader
-from linkedin_mcp_server.scraping.search_pages import paginate_search
-from linkedin_mcp_server.scraping.search_urls import build_people_search_url
+from linkedin_mcp_server.scraping.search_pages import paginate_search, search_rows
+from linkedin_mcp_server.scraping.search_parse import parse_people_cards
+from linkedin_mcp_server.scraping.search_urls import (
+    as_list,
+    build_people_search_url,
+    industry_ids,
+    network_tokens,
+    profile_languages,
+    require_people_criteria,
+    school_id,
+)
 from linkedin_mcp_server.scraping.session import ScrapingSession, nav_delay
 from linkedin_mcp_server.scraping.text import SIDEBAR_CHROME_EN
 
@@ -477,16 +486,25 @@ class PersonScraper:
 
     async def search_people(
         self,
-        keywords: str,
+        keywords: str | None = None,
         location: str | None = None,
         network: list[str] | None = None,
-        current_company: str | None = None,
+        current_company: str | list[str] | None = None,
         max_pages: int = 1,
+        *,
+        title: str | None = None,
+        past_company: str | list[str] | None = None,
+        industry: str | list[str] | None = None,
+        school: str | None = None,
+        first_name: str | None = None,
+        last_name: str | None = None,
+        profile_language: str | list[str] | None = None,
     ) -> dict[str, Any]:
         """Search for people and extract the results pages.
 
         Args:
             keywords: Free-text query ("software engineer", "recruiter at Google").
+                Optional when at least one other facet is given.
             location: Optional location filter, a free-text country or city name
                 ("Egypt", "United Arab Emirates", "Amsterdam"). It is resolved to
                 LinkedIn's numeric geo id via the site's own location dropdown
@@ -499,20 +517,73 @@ class PersonScraper:
                 connections. Invalid tokens raise ``ValueError``. The container
                 shape is repaired at the MCP tool boundary, so the list arrives
                 here already normalized.
-            current_company: Optional current-employer filter. LinkedIn's
-                ``currentCompany`` facet only filters on the numeric company
-                URN id (e.g. ``"1115"`` for SAP); plain company names are
-                accepted by the URL but ignored by LinkedIn and return the
-                unfiltered result set. Look up a company's URN via
-                ``get_company_profile`` -- it is exposed under
-                ``references["about"]``.
+            current_company: Optional current-employer filter, one or a list.
+                Each is a company name ("SAP"), a ``/company/<slug>`` URL, or
+                the numeric company URN id (``"1115"`` for SAP). LinkedIn's
+                ``currentCompany`` facet filters on the id only, so a name or
+                URL is resolved to it first (see
+                ``FacetResolver.resolve_company_urn``); one that does not
+                resolve raises ``FilterValidationError`` rather than silently
+                returning the unfiltered result set. The id is what
+                ``get_company_profile`` exposes under ``references["about"]``.
             max_pages: Maximum result pages to load (LinkedIn returns 10 people
                 per page). Stops early once a page adds no new people, so
                 over-requesting is harmless. Default 1 (previous behavior).
+            title: Optional current-title filter, free text
+                (``titleFreeText``). Measured live as ignored by the SDUI
+                results page; a title in ``keywords`` as a quoted phrase
+                does filter. Refused as the only criterion, since it would
+                navigate and return the unfiltered worldwide list.
+            past_company: Optional past-employer filter, same shapes and
+                resolution as ``current_company`` (``pastCompany``). Each
+                unresolved name may cost up to two navigations.
+            industry: Optional ``industry`` facet, one or a list. Each is a
+                numeric LinkedIn industry id or a name in
+                ``COMPANY_INDUSTRY_IDS`` (the ids are shared with company
+                search); an unknown name raises ``FilterValidationError``.
+            school: Optional ``schoolFilter`` facet, the numeric school id
+                only. A name raises ``FilterValidationError``: the schools
+                search page carries nothing to resolve it from.
+            first_name: Optional ``firstName`` filter.
+            last_name: Optional ``lastName`` filter.
+            profile_language: Optional ``profileLanguage`` facet, one or a
+                list of two-letter ISO 639-1 codes (``"en"``, ``"de"``).
 
         Returns:
-            {url, sections: {search_results: text}} -- pages joined by ``\\n---\\n``
+            {url, sections: {search_results: text}, people: [...],
+            result_count} -- pages joined by ``\\n---\\n``; ``people`` holds one
+            row per card parsed from each page's text
+            (``search_parse.parse_people_cards``), deduped by URL, and
+            ``result_count`` the first page's "About N results" header or None.
         """
+        # Every pure check runs before any navigation, so a typo in one facet
+        # never costs the company lookup another facet would have paid for.
+        network = network_tokens(network)
+        industries = industry_ids(industry)
+        languages = profile_languages(profile_language)
+        school_token = school_id(school)
+        current_companies = [c for c in as_list(current_company) if c]
+        past_companies = [c for c in as_list(past_company) if c]
+        require_people_criteria(
+            keywords=keywords,
+            location=location,
+            network=network,
+            current_companies=current_companies,
+            past_companies=past_companies,
+            industry_ids=industries,
+            school_id=school_token,
+            first_name=first_name,
+            last_name=last_name,
+            languages=languages,
+            title=title,
+        )
+
+        # LinkedIn ignores a name in currentCompany=/pastCompany=; resolve each
+        # to the numeric URN or fail loudly.
+        current_ids = [
+            await self._facets.resolve_company_urn(c) for c in current_companies
+        ]
+        past_ids = [await self._facets.resolve_company_urn(c) for c in past_companies]
         geo_id: str | None = None
         if location:
             # LinkedIn ignores a free-text location=; resolve it to the numeric
@@ -526,28 +597,40 @@ class PersonScraper:
                     f"LinkedIn's location dropdown."
                 )
 
-        # Builds before it navigates, and the builder refuses a filter
-        # LinkedIn would swallow, so an invalid token costs no page load.
         base_url = build_people_search_url(
             keywords,
             geo_id=geo_id,
             network=network,
-            current_company=current_company,
+            current_company_ids=current_ids,
+            past_company_ids=past_ids,
+            industry_ids=industries,
+            school_id=school_token,
+            title=title,
+            first_name=first_name,
+            last_name=last_name,
+            languages=languages,
         )
 
+        # A company resolution may have just navigated (company search, About
+        # page); the first results page gets the same spacing as every later
+        # one.
         paged = await paginate_search(
             self._capture,
             self._session,
             base_url,
             kind="person",
             max_pages=max_pages,
+            pace_first=self._facets.navigated,
         )
 
+        people, result_count = search_rows(parse_people_cards, paged.pages, "person")
         result: dict[str, Any] = {
             "url": base_url,
             "sections": {"search_results": "\n---\n".join(paged.page_texts)}
             if paged.page_texts
             else {},
+            "people": people,
+            "result_count": result_count,
         }
         if paged.page_references:
             result["references"] = {

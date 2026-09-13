@@ -8,11 +8,13 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import importlib.util
+import logging
 
 import pytest
 from patchright._impl._errors import TargetClosedError
 
 from linkedin_mcp_server.callbacks import ProgressCallback
+from linkedin_mcp_server.company_cache import CompanyCache
 from linkedin_mcp_server.core.exceptions import (
     AuthenticationError,
     InvalidReferenceError,
@@ -1516,10 +1518,12 @@ class TestSearchPeople:
 
     async def test_search_people_current_company_filter(self, mock_page):
         scraper = _scraper(mock_page)
-        with _results(scraper, extracted("Jane Doe")):
+        with _results(scraper, extracted("Jane Doe")) as capture:
             result = await scraper.search_people("engineer", current_company="1115")
 
         assert "currentCompany=%5B%221115%22%5D" in result["url"]
+        # An id needs no resolution: the one navigation is the results page.
+        assert capture.await_count == 1
 
     async def test_search_people_invalid_network_token_raises(self, mock_page):
         scraper = _scraper(mock_page)
@@ -1528,21 +1532,39 @@ class TestSearchPeople:
 
         mock_page.goto.assert_not_awaited()
 
-    async def test_search_people_rejects_plain_company_name(self, mock_page):
+    async def test_search_people_resolves_company_name(self, mock_page):
+        """A name goes through ``resolve_company_urn`` and the facet carries
+        the id it returned, never the name."""
         scraper = _scraper(mock_page)
-        with pytest.raises(ValueError, match="must be a numeric"):
-            await scraper.search_people("engineer", current_company="SAP")
+        with (
+            _results(scraper, extracted("Jane Doe")),
+            patch.object(
+                scraper._facets,
+                "resolve_company_urn",
+                new_callable=AsyncMock,
+                return_value="1115",
+            ) as resolve,
+        ):
+            result = await scraper.search_people("engineer", current_company="SAP")
 
-        mock_page.goto.assert_not_awaited()
+        resolve.assert_awaited_once_with("SAP")
+        assert "currentCompany=%5B%221115%22%5D" in result["url"]
+        assert "SAP" not in result["url"]
 
-    async def test_search_people_rejects_unicode_digit_company(self, mock_page):
-        """LinkedIn URN ids are ASCII decimal; reject Unicode digits even
-        though ``str.isdigit()`` would accept them."""
+    async def test_search_people_unicode_digit_company_is_not_a_urn(
+        self, mock_page, tmp_path
+    ):
+        """LinkedIn URN ids are ASCII decimal; Unicode digits are a name to
+        resolve (``str.isdigit()`` would have passed them through), and one
+        nothing matches raises."""
         scraper = _scraper(mock_page)
-        with pytest.raises(ValueError, match="must be a numeric"):
-            await scraper.search_people("engineer", current_company="١١١٥")
+        scraper._facets._company_cache = CompanyCache(tmp_path)
+        with _results(scraper, extracted("No results")) as nav:
+            with pytest.raises(FilterValidationError, match="Could not resolve"):
+                await scraper.search_people("engineer", current_company="١١١٥")
 
-        mock_page.goto.assert_not_awaited()
+        assert nav.await_count == 1
+        assert "results/people" not in nav.await_args_list[-1].args[0]
 
     async def test_search_people_empty_current_company_is_noop(self, mock_page):
         scraper = _scraper(mock_page)
@@ -1604,6 +1626,231 @@ class TestSearchPeople:
                 await scraper.search_people("engineer", location="Nowhereland")
 
         nav.assert_not_awaited()
+
+
+class TestSearchPeopleFacets:
+    """Facets are validated, then resolved, then searched -- in that order."""
+
+    async def test_no_criterion_raises_without_navigating(self, mock_page):
+        scraper = _scraper(mock_page)
+        with _results(scraper, extracted("Jane Doe")) as nav:
+            with pytest.raises(FilterValidationError, match="at least one of"):
+                await scraper.search_people()
+            with pytest.raises(FilterValidationError, match="at least one of"):
+                await scraper.search_people("", current_company="", industry=[])
+
+        nav.assert_not_awaited()
+
+    async def test_title_alone_is_refused(self, mock_page):
+        """LinkedIn ignores titleFreeText, so a lone title would navigate and
+        return the unfiltered worldwide list."""
+        scraper = _scraper(mock_page)
+        with _results(scraper, extracted("Jane Doe")) as nav:
+            with pytest.raises(FilterValidationError, match="title alone") as info:
+                await scraper.search_people(title="Head of Sales")
+
+        nav.assert_not_awaited()
+        assert "keywords='\"Head of Sales\"'" in str(info.value)
+
+    async def test_title_with_location_navigates(self, mock_page):
+        scraper = _scraper(mock_page)
+        with (
+            _results(scraper, extracted("Jane Doe")) as nav,
+            patch.object(
+                scraper._facets,
+                "resolve_geo_urn",
+                new_callable=AsyncMock,
+                return_value="104116203",
+            ),
+        ):
+            result = await scraper.search_people(
+                title="Head of Sales", location="Seattle"
+            )
+
+        nav.assert_awaited_once()
+        assert result["url"] == (
+            "https://www.linkedin.com/search/results/people/"
+            "?geoUrn=%5B%22104116203%22%5D&titleFreeText=Head+of+Sales"
+        )
+
+    @pytest.mark.parametrize(
+        "facet",
+        [
+            pytest.param({"industry": ["Basket Weaving"]}, id="industry"),
+            pytest.param({"school": "Stanford University"}, id="school"),
+            pytest.param({"profile_language": ["en-US"]}, id="language"),
+            pytest.param({"network": ["X"]}, id="network"),
+        ],
+    )
+    async def test_an_invalid_facet_is_refused_before_anything_resolves(
+        self, mock_page, facet
+    ):
+        """Every pure check runs first: a typo beside a company name must not
+        cost the company lookup, which is up to two navigations."""
+        scraper = _scraper(mock_page)
+        with (
+            _results(scraper, extracted("Jane Doe")) as nav,
+            patch.object(
+                scraper._facets,
+                "resolve_company_urn",
+                new_callable=AsyncMock,
+                return_value="1115",
+            ) as resolve,
+            patch.object(
+                scraper._facets,
+                "resolve_geo_urn",
+                new_callable=AsyncMock,
+                return_value="104116203",
+            ) as resolve_geo,
+        ):
+            with pytest.raises(FilterValidationError):
+                await scraper.search_people(
+                    "engineer", location="Seattle", current_company="SAP", **facet
+                )
+
+        resolve.assert_not_awaited()
+        resolve_geo.assert_not_awaited()
+        nav.assert_not_awaited()
+
+    async def test_current_company_list_is_resolved_per_element(self, mock_page):
+        scraper = _scraper(mock_page)
+        with (
+            _results(scraper, extracted("Jane Doe")),
+            patch.object(
+                scraper._facets,
+                "resolve_company_urn",
+                new_callable=AsyncMock,
+                side_effect=["1115", "1441"],
+            ) as resolve,
+        ):
+            result = await scraper.search_people(
+                "engineer", current_company=["SAP", "Google"]
+            )
+
+        assert resolve.await_args_list == [call("SAP"), call("Google")]
+        assert "currentCompany=%5B%221115%22%2C%221441%22%5D" in result["url"]
+
+    async def test_past_company_names_resolve_to_urns(self, mock_page):
+        """A string or a list; each element goes through the company
+        resolver and only ids reach ``pastCompany``."""
+        scraper = _scraper(mock_page)
+        with (
+            _results(scraper, extracted("Jane Doe")),
+            patch.object(
+                scraper._facets,
+                "resolve_company_urn",
+                new_callable=AsyncMock,
+                side_effect=lambda name: {"SAP": "1115", "1441": "1441"}[name],
+            ) as resolve,
+        ):
+            single = await scraper.search_people(past_company="SAP")
+            many = await scraper.search_people(past_company=["SAP", "1441"])
+
+        assert resolve.await_count == 3
+        assert "pastCompany=%5B%221115%22%5D" in single["url"]
+        assert "SAP" not in single["url"]
+        assert "pastCompany=%5B%221115%22%2C%221441%22%5D" in many["url"]
+        assert "currentCompany" not in many["url"]
+
+    async def test_companies_resolve_before_the_location(self, mock_page):
+        """The company lookup is the expensive hop, so it goes first: a name
+        that fails to resolve never pays for the location dropdown."""
+        scraper = _scraper(mock_page)
+        order: list[str] = []
+
+        async def resolve_company(name: str) -> str:
+            order.append(f"company:{name}")
+            return "1115"
+
+        async def resolve_geo(location: str) -> str:
+            order.append(f"geo:{location}")
+            return "104116203"
+
+        with (
+            _results(scraper, extracted("Jane Doe")),
+            patch.object(scraper._facets, "resolve_company_urn", resolve_company),
+            patch.object(scraper._facets, "resolve_geo_urn", resolve_geo),
+        ):
+            await scraper.search_people(
+                location="Seattle", current_company="SAP", past_company="Google"
+            )
+
+        assert order == ["company:SAP", "company:Google", "geo:Seattle"]
+
+    async def test_company_resolution_is_spaced_from_the_first_results_page(
+        self, mock_page
+    ):
+        """A resolution navigates; the people search that follows gets the
+        same pause as a later results page, and a search with nothing to
+        resolve gets none."""
+        scraper = _scraper(mock_page)
+
+        async def resolve(name: str) -> str:
+            scraper._facets.navigated = True
+            return "1115"
+
+        with (
+            _results(scraper, extracted("Jane Doe")),
+            patch.object(scraper._facets, "resolve_company_urn", resolve),
+            patch.object(search_pages_module, "nav_delay", return_value=7.0),
+            _identity_jitter(),
+            _sleep() as sleep,
+        ):
+            await scraper.search_people("engineer")
+            sleep.assert_not_awaited()
+            await scraper.search_people(current_company="SAP")
+
+        sleep.assert_awaited_once_with(7.0)
+
+    async def test_school_id_is_not_a_navigation(self, mock_page):
+        """An id needs no resolution, so a school alone costs no pause
+        before the first results page (unlike a company that resolved)."""
+        scraper = _scraper(mock_page)
+        with (
+            _results(scraper, extracted("Jane Doe")) as nav,
+            _sleep() as sleep,
+        ):
+            result = await scraper.search_people(school=" 1792 ")
+
+        sleep.assert_not_awaited()
+        nav.assert_awaited_once()
+        assert result["url"].endswith("?schoolFilter=%5B%221792%22%5D")
+
+    async def test_every_facet_reaches_the_url_in_recorded_order(self, mock_page):
+        """Each keyword is forwarded to the builder under its own name; a
+        swapped pair (first/last name, current/past company) shows here."""
+        scraper = _scraper(mock_page)
+        with (
+            _results(scraper, extracted("Jane Doe")),
+            patch.object(
+                scraper._facets,
+                "resolve_geo_urn",
+                new_callable=AsyncMock,
+                return_value="104116203",
+            ),
+        ):
+            result = await scraper.search_people(
+                "engineer",
+                location="Seattle",
+                network=["F"],
+                current_company="1115",
+                title="CTO",
+                past_company="1441",
+                industry="4",
+                school="1792",
+                first_name="Jane",
+                last_name="Doe",
+                profile_language="en",
+            )
+
+        assert result["url"] == (
+            "https://www.linkedin.com/search/results/people/?keywords=engineer"
+            "&geoUrn=%5B%22104116203%22%5D&network=%5B%22F%22%5D"
+            "&currentCompany=%5B%221115%22%5D&pastCompany=%5B%221441%22%5D"
+            "&industry=%5B%224%22%5D&schoolFilter=%5B%221792%22%5D"
+            "&titleFreeText=CTO&firstName=Jane&lastName=Doe"
+            "&profileLanguage=%5B%22en%22%5D"
+        )
 
 
 class TestSearchPeoplePagination:
@@ -1681,3 +1928,161 @@ class TestSearchPeoplePagination:
 
         assert result["sections"]["search_results"] == "Person 1"
         assert result["section_errors"]["search_results"]["error_type"] == "rate_limit"
+
+
+def _person_card(name: str, headline: str, location: str) -> str:
+    return f"{name} • 2nd\n\n{headline}\n\n{location}"
+
+
+def _person_ref(slug: str, name: str) -> Reference:
+    return {"kind": "person", "url": f"/in/{slug}/", "text": name}
+
+
+class TestSearchPeopleRows:
+    """``people`` rows come from ``search_parse`` per page, before the join.
+
+    The pages here are synthetic containers in the shape the parser's
+    docstring names -- a claim about the wiring, not about LinkedIn; the
+    parser's own suite holds the live fixtures.
+    """
+
+    # Ada / Bob on page 1, Bob again / Cy / Dee on page 2. Bob is the row a
+    # naive concatenation would double, and the last card of page 1, whose
+    # location would swallow the ``---`` separator and page 2's header if the
+    # pages were joined before parsing. Dee has no anchor.
+    PAGE_1 = "About 1,234 results\n\n" + "\n\n".join(
+        [
+            _person_card("Ada", "Engineer at Example", "London, United Kingdom"),
+            _person_card("Bob", "Founder", "Berlin, Germany"),
+        ]
+    )
+    PAGE_2 = "About 999 results\n\n" + "\n\n".join(
+        [
+            _person_card("Bob", "Founder", "Berlin, Germany"),
+            _person_card("Cy", "Designer", "Paris, France"),
+            _person_card("Dee", "Writer", "Rome, Italy"),
+        ]
+    )
+
+    @classmethod
+    def _pages(cls) -> list[ExtractedSection]:
+        return [
+            extracted(
+                cls.PAGE_1, [_person_ref("ada", "Ada"), _person_ref("bob", "Bob")]
+            ),
+            extracted(cls.PAGE_2, [_person_ref("bob", "Bob"), _person_ref("cy", "Cy")]),
+        ]
+
+    async def test_rows_are_parsed_per_page_and_deduped_by_url(self, mock_page):
+        scraper = _scraper(mock_page)
+        with _results(scraper, *self._pages()), _sleep():
+            result = await scraper.search_people("engineer", max_pages=2)
+
+        assert [(row["name"], row["url"]) for row in result["people"]] == [
+            ("Ada", "/in/ada/"),
+            ("Bob", "/in/bob/"),
+            ("Cy", "/in/cy/"),
+            ("Dee", None),
+        ]
+        assert result["people"][1] == {
+            "name": "Bob",
+            "degree": "2nd",
+            "headline": "Founder",
+            "location": "Berlin, Germany",
+            "snippet": None,
+            "url": "/in/bob/",
+        }
+        assert result["result_count"] == 1234
+        # The raw text keeps its shape alongside the rows.
+        assert result["sections"]["search_results"] == (
+            self.PAGE_1 + "\n---\n" + self.PAGE_2
+        )
+
+    async def test_a_parser_failure_keeps_the_raw_text(self, mock_page, caplog):
+        scraper = _scraper(mock_page)
+        with (
+            _results(scraper, self._pages()[0]),
+            patch.object(
+                person_module,
+                "parse_people_cards",
+                side_effect=RuntimeError("parser bug"),
+            ),
+            caplog.at_level(logging.WARNING),
+        ):
+            result = await scraper.search_people("engineer")
+
+        assert result["people"] == []
+        assert result["result_count"] == 1234
+        assert result["sections"]["search_results"] == self.PAGE_1
+        assert "Could not parse result cards on page 1" in caplog.text
+
+    async def test_anchors_without_rows_warn_of_an_unrecognised_layout(
+        self, mock_page, caplog
+    ):
+        """A page with profile anchors is a page of cards. Parsing none of
+        them is a layout the text parser does not know (or a locale whose
+        degree token differs), not an empty result, and must not pass as
+        one in silence."""
+        # The cards carry no ``• 2nd`` head, as a non-English page might.
+        page = "About 12 results\n\nAda\nIngenieurin\nBerlin\n\nBob\nGruender\nWien"
+        scraper = _scraper(mock_page)
+        with (
+            _results(
+                scraper,
+                extracted(page, [_person_ref("ada", "Ada"), _person_ref("bob", "Bob")]),
+            ),
+            caplog.at_level(logging.WARNING, logger="linkedin_mcp_server.scraping"),
+        ):
+            result = await scraper.search_people("engineer")
+
+        assert result["people"] == []
+        assert [r.message for r in caplog.records if r.levelno == logging.WARNING] == [
+            "Page 1: 2 references but no result rows parsed (unrecognised card "
+            "layout or locale)"
+        ]
+
+    async def test_a_page_without_anchors_or_rows_does_not_warn(
+        self, mock_page, caplog
+    ):
+        scraper = _scraper(mock_page)
+        with (
+            _results(scraper, extracted("No results found")),
+            caplog.at_level(logging.WARNING, logger="linkedin_mcp_server.scraping"),
+        ):
+            result = await scraper.search_people("engineer")
+
+        assert result["people"] == []
+        assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+
+    async def test_no_page_means_no_rows(self, mock_page):
+        scraper = _scraper(mock_page)
+        with _results(scraper, extracted(RATE_LIMITED_SECTION_TEXT)):
+            result = await scraper.search_people("engineer")
+
+        assert result["people"] == []
+        assert result["result_count"] is None
+
+    async def test_rows_pair_before_the_reference_cap(self, mock_page):
+        # Six cards naming two mutual connections each is 18 ``/in/``
+        # anchors, three past the section cap. The page is extracted
+        # uncapped so card six still finds its own anchor; the cap lands on
+        # ``references`` instead.
+        cards, refs = [], []
+        for i in range(1, 7):
+            cards.append(
+                _person_card(f"Person {i}", "Engineer", "Oslo, Norway")
+                + f"\n\nMutual {i}A & Mutual {i}B are mutual connections"
+            )
+            refs.append(_person_ref(f"person-{i}", f"Person {i}"))
+            refs.append(_person_ref(f"mutual-{i}a", f"Mutual {i}A"))
+            refs.append(_person_ref(f"mutual-{i}b", f"Mutual {i}B"))
+        scraper = _scraper(mock_page)
+        with _results(scraper, extracted("\n\n".join(cards), refs)) as capture:
+            result = await scraper.search_people("engineer")
+
+        assert capture.await_args is not None
+        assert capture.await_args.args[2].apply_cap is False
+        assert [r["url"] for r in result["people"]] == [
+            f"/in/person-{i}/" for i in range(1, 7)
+        ]
+        assert len(result["references"]["search_results"]) == 15

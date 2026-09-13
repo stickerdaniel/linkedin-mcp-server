@@ -13,11 +13,6 @@ from linkedin_mcp_server.scraping.contracts import RATE_LIMITED_SECTION_TEXT
 from linkedin_mcp_server.scraping.link_metadata import Reference
 from linkedin_mcp_server.scraping.search_urls import build_content_search_url
 
-# Content search is an infinite scroll with no ``&start=`` pagination, so
-# ``max_pages`` caps scroll depth instead of fetching discrete pages. One
-# nominal "page" is this many scrolls.
-_CONTENT_SCROLLS_PER_REQUESTED_PAGE = 5
-
 
 class PostSearch:
     """Own the one workflow whose subject is LinkedIn post content.
@@ -34,7 +29,7 @@ class PostSearch:
         self,
         keywords: str,
         date_posted: str | None = None,
-        max_pages: int = 3,
+        max_posts: int = 10,
     ) -> dict[str, Any]:
         """Search LinkedIn posts/content and extract the results page.
 
@@ -49,28 +44,32 @@ class PostSearch:
                 ``FilterValidationError`` (a ``ValueError`` subclass) rather
                 than reaching LinkedIn, which would ignore them silently and
                 return unfiltered results that look filtered.
-            max_pages: Scroll depth, expressed in result "pages" of roughly
-                ``_CONTENT_SCROLLS_PER_REQUESTED_PAGE`` scrolls each (default
-                3). Content search is an infinite scroll with no per-page URL,
-                so this caps how far the page is scrolled rather than fetching
-                discrete ``&start=`` pages.
+            max_posts: Stop scrolling once this many result cards are loaded
+                (default 10). Content search is an infinite scroll with no
+                per-page URL, so the loop counts cards rather than pages; the
+                page may hold a few more than this when a scroll batch
+                overshoots.
 
         Returns:
             {url, sections: {search_results: text}} plus optional ``references``
             (post authors, companies, linked jobs) and ``section_errors``.
             Verified live: the results page carries no per-post permalink
-            anchors, so a post is addressable only through its author.
-            The LLM should parse the raw text to extract each post's author,
-            headline, body, date, and reaction counts.
+            anchors, so a post is addressable only through its author; the
+            ``/in/`` entries in ``references["search_results"]`` make the
+            result usable as a prospect list. The LLM should parse the raw
+            text to extract each post's author, headline, body, date, and
+            reaction counts.
         """
         # Builds before it navigates, so a recency filter LinkedIn would
         # ignore is refused rather than answered with unfiltered results.
         url = build_content_search_url(keywords, date_posted=date_posted)
-        max_scrolls = max(1, max_pages) * _CONTENT_SCROLLS_PER_REQUESTED_PAGE
         extracted = await self._capture.capture(
             url,
             section_name="search_results",
-            plan=CapturePlan(CaptureMode.SEARCH_RESULTS, max_scrolls),
+            plan=CapturePlan(
+                CaptureMode.SEARCH_RESULTS | CaptureMode.CONTENT_SEARCH,
+                max_posts=max_posts,
+            ),
         )
 
         sections: dict[str, str] = {}

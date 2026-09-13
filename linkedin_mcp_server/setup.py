@@ -19,7 +19,9 @@ from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.config.schema import PROFILE_HANDOVER_WAIT_SECONDS
 from linkedin_mcp_server.core import (
     BrowserManager,
+    NetworkError,
     goto_reporting_proxy_errors,
+    redact_proxy_credentials,
     resolve_remember_me_prompt,
     wait_for_manual_login,
 )
@@ -344,10 +346,22 @@ async def _run_login(
             )
         failure: BaseException | None = None
         try:
-            # Navigate to LinkedIn login
-            await goto_reporting_proxy_errors(
-                browser.page, "https://www.linkedin.com/login"
-            )
+            try:
+                await goto_reporting_proxy_errors(
+                    browser.page, "https://www.linkedin.com/login"
+                )
+            except NetworkError:
+                raise
+            except Exception as exc:
+                # Raised before the manual wait, so the rotation in
+                # ``_login_holding_the_profile`` restores the session it just
+                # retired. A raw driver error here read as a failed login and
+                # was recorded as the auth state's last error verbatim.
+                detail = redact_proxy_credentials(f"{type(exc).__name__}: {exc}")
+                raise NetworkError(
+                    f"The LinkedIn login page did not load ({detail}). "
+                    "The saved LinkedIn session was put back unchanged."
+                ) from exc
             # Let LinkedIn finish rendering the saved-account chooser, then retry
             # the same exact click target before the normal manual-login wait.
             for _ in range(3):
