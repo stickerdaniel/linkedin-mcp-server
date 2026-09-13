@@ -54,6 +54,7 @@ from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_er
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.pacing import (
     JobStore,
+    bunch_searches_max,
     load_account_budget,
     next_bunch_delay,
     request_arrived_at,
@@ -102,7 +103,7 @@ def register_company_enrichment_tools(
     async def enrich_companies(
         company_names: list[str],
         ctx: Context,
-        bunch_searches: Annotated[int, Field(ge=1, le=20)] = 8,
+        bunch_searches: Annotated[int, Field(ge=1)] = 8,
         refresh: bool = False,
         ignore_schedule: bool = False,
         extractor: Any | None = None,
@@ -122,8 +123,9 @@ def register_company_enrichment_tools(
 
         Args:
             company_names: Company names or LinkedIn company URLs.
-            bunch_searches: Max LinkedIn searches to run this call (1-20,
-                default 8). Cache hits do not count toward it.
+            bunch_searches: Max LinkedIn searches to run this call (default 8,
+                ceiling 20 unless BUNCH_SEARCHES_MAX moves it; more is
+                clamped). Cache hits do not count toward it.
             refresh: Re-fetch even companies whose cache is still fresh.
             ignore_schedule: Run outside working hours (off by default).
 
@@ -133,6 +135,13 @@ def register_company_enrichment_tools(
         """
         if not company_names:
             raise ToolError("company_names is empty.")
+
+        ceiling = bunch_searches_max()
+        if bunch_searches > ceiling:
+            logger.info(
+                "Clamping bunch_searches=%d to the ceiling %d", bunch_searches, ceiling
+            )
+            bunch_searches = ceiling
 
         now = datetime.now().astimezone()
         budget = load_account_budget(jobs, now)
