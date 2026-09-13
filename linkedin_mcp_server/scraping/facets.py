@@ -4,10 +4,18 @@ from __future__ import annotations
 
 import re
 
+from patchright.async_api import TimeoutError as PlaywrightTimeoutError
+
 from linkedin_mcp_server.core.humanize import human_type
 from linkedin_mcp_server.scraping.capture import SectionCapture
 from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.session import ScrapingSession
+
+# The jobs-search typeahead renders its suggestions from a network round trip
+# and selecting one navigates. Both are bounded so a stalled page reads as a
+# miss rather than hanging the tool call.
+TYPEAHEAD_TIMEOUT_MS = 5000
+GEO_ID_PATTERN = re.compile(r"[?&]geoId=(\d+)")
 
 
 class FacetResolver:
@@ -71,17 +79,42 @@ class FacetResolver:
             await box.fill("")
             # Type it like a person; the dropdown resolves as we type.
             await human_type(page, location)
-            await self._session.pace(1.5)
-            suggestion = await page.query_selector(
-                ".basic-typeahead__selectable, [role=option]"
-            )
+            suggestion = await self._first_location_suggestion(box)
             if suggestion is not None:
                 await suggestion.click()
-                await self._session.pace(1.0)
-                match = re.search(r"[?&]geoId=(\d+)", page.url)
+                try:
+                    await page.wait_for_url(
+                        GEO_ID_PATTERN, timeout=TYPEAHEAD_TIMEOUT_MS
+                    )
+                except PlaywrightTimeoutError:
+                    pass
+                match = GEO_ID_PATTERN.search(page.url)
                 if match:
                     geo_id = match.group(1)
 
         # Cache the outcome (including a miss) to avoid re-driving the dropdown.
         self._geo_cache[key] = geo_id or ""
         return geo_id
+
+    async def _first_location_suggestion(self, box):
+        """Wait for the location box's own dropdown and return its top option.
+
+        The jobs page carries other ``role=option`` elements (the keyword
+        typeahead, filter menus), so a document-wide query can land on one of
+        those and either drop the geoId or navigate to the wrong region. The
+        combobox pattern names its listbox in ``aria-controls`` (or the older
+        ``aria-owns``); that scope is structural and locale-independent. With
+        neither attribute, any listbox is the one that just opened under the
+        typed text. The first match is the top suggestion, which is the one a
+        person picks.
+        """
+        listbox_id = await box.get_attribute(
+            "aria-controls"
+        ) or await box.get_attribute("aria-owns")
+        scope = f'[id="{listbox_id}"]' if listbox_id else "[role=listbox]"
+        try:
+            return await self._session.page.wait_for_selector(
+                f"{scope} [role=option]", timeout=TYPEAHEAD_TIMEOUT_MS
+            )
+        except PlaywrightTimeoutError:
+            return None
