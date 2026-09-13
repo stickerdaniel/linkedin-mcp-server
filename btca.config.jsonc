@@ -148,6 +148,13 @@
       "url": "https://github.com/agronholm/anyio",
       "branch": "master",
       "specialNotes": "Structured-concurrency layer FastMCP runs on. Its asyncio CancelScope is what shields the feed listener teardown from the tool-call deadline."
+    },
+    {
+      "type": "git",
+      "name": "githubDependencyReviewAction",
+      "url": "https://github.com/actions/dependency-review-action",
+      "branch": "main",
+      "specialNotes": "GitHub dependency graph comparison action used to block newly introduced high and critical advisories."
     }
   ]
 }

@@ -1,0 +1,45 @@
+name: Dependency Audit
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: uv audit (${{ matrix.scope }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        scope: [runtime, full]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      # The OSV advisory result is the enforced scanner contract. uv also emits
+      # best-effort PEP 792 project statuses, whose completeness it cannot prove.
+      # Keep the experimental JSON and exit-code contract fixed until a
+      # deliberate uv upgrade updates the workflow and its tests.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.12.5"
+          enable-cache: false
+
+      - name: Audit the ${{ matrix.scope }} lock
+        env:
+          AUDIT_SCOPE: ${{ matrix.scope }}
+        run: python3 scripts/run_uv_audit.py --scope "$AUDIT_SCOPE" --output-dir "audit-$AUDIT_SCOPE"
+
+      - name: Upload the ${{ matrix.scope }} audit report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: uv-audit-${{ matrix.scope }}
+          path: audit-${{ matrix.scope }}/audit-result.json
+          if-no-files-found: error
+          retention-days: 14
