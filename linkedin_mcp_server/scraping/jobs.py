@@ -30,6 +30,7 @@ from linkedin_mcp_server.scraping.job_policy import (
     SEARCH_TIMEOUT_FRACTION,
     dropped_filters_section_error,
     dropped_offset_section_error,
+    label_similar_jobs,
     lost_keywords_section_error,
     reconcile_search_references,
 )
@@ -82,7 +83,9 @@ class JobScraper:
         if extracted.text and extracted.text != RATE_LIMITED_SECTION_TEXT:
             sections["job_posting"] = extracted.text
             if extracted.references:
-                references["job_posting"] = extracted.references
+                references["job_posting"] = label_similar_jobs(
+                    extracted.references, job_id
+                )
         elif extracted.text == RATE_LIMITED_SECTION_TEXT:
             section_errors["job_posting"] = rate_limited_section_error()
         elif extracted.error:
