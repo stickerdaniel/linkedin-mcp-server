@@ -41,7 +41,19 @@ from linkedin_mcp_server.core.utils import (
     scroll_job_sidebar,
     scroll_to_bottom,
 )
+from linkedin_mcp_server.scraping import contracts
 from linkedin_mcp_server.scraping.connection import ActionSignals
+from linkedin_mcp_server.scraping.contracts import (
+    RATE_LIMITED_SECTION_TEXT,
+    ExtractedSection,
+    FilterValidationError,
+    rate_limited_section_error,
+)
+from linkedin_mcp_server.scraping.feed_payload import (
+    POST_SLUG_URL_RE,
+    build_feed_references,
+    is_feed_payload_response,
+)
 from linkedin_mcp_server.scraping.identifiers import (
     company_page_url,
     job_view_url,
@@ -52,12 +64,32 @@ from linkedin_mcp_server.scraping.identifiers import (
     normalize_person_identifier,
     person_profile_url,
 )
+from linkedin_mcp_server.scraping.job_policy import (
+    JOB_SEARCH_PATHS,
+    RESULTS_PER_LINKEDIN_PAGE,
+    SAVED_JOBS_PAGE_SIZE,
+    SAVED_JOBS_PATHS,
+    SAVED_JOBS_URL,
+    SCROLL_BUDGET_TOTAL,
+    SCROLL_DEADLINE_MAX,
+    SEARCH_TIMEOUT_FRACTION,
+    dropped_filters_section_error,
+    dropped_offset_section_error,
+    lost_keywords_section_error,
+    reconcile_search_references,
+    route,
+    same_job_search,
+)
 from linkedin_mcp_server.scraping.link_metadata import (
-    JOB_PATH_RE,
     Reference,
-    _SEARCH_RESULTS_REFERENCE_CAP,
     build_references,
     dedupe_references,
+)
+from linkedin_mcp_server.scraping.text import (
+    filter_linkedin_noise_lines,
+    strip_conversation_chrome,
+    strip_linkedin_noise,
+    truncate_linkedin_noise,
 )
 
 from .fields import COMPANY_SECTIONS, PERSON_SECTIONS
@@ -74,145 +106,6 @@ _NAV_DELAY = 2.0
 
 # Backoff before retrying a temporarily blocked page
 _RATE_LIMIT_RETRY_DELAY = 5.0
-
-# Returned as section text when a page comes back with its content gone and
-# only LinkedIn's own navigation and footer left.
-#
-# Read carefully: that condition is a *guess* that the page was throttled, not
-# an observation of one. It arrived in d8b4c62 with no cited evidence, LinkedIn
-# documents no such behaviour, and nobody here has reproduced it deliberately —
-# doing so would mean provoking a real throttle on a real account. The log line
-# hedges with "likely" for the same reason.
-#
-# The same empty shell could also be a layout change, a resource this account
-# cannot see, or a load that gave up. A session LinkedIn ended is the one
-# alternative already ruled out elsewhere: every navigation checks the URL
-# against the auth-blocker patterns first, and a redirect to /login, /authwall
-# or /checkpoint raises before extraction is reached. That check stays on URLs
-# deliberately — body text would be a per-locale guess, and this project's
-# rule is that classification never depends on text values.
-_RATE_LIMITED_MSG = "[Rate limited] LinkedIn blocked this section. Try again later or request fewer sections."
-
-
-def _reconcile_search_references(
-    references: list[Reference], ids: list[str]
-) -> list[Reference]:
-    """Align one page's references with the job ids read from its rail.
-
-    References come from the whole `<main>`, which also holds the detail pane;
-    ids come from the selected results rail. The rail therefore decides which
-    jobs exist, while the DOM references supply richer labels when available.
-    Non-job references share the search-results cap's remaining allowance.
-    """
-    ordered_ids = list(dict.fromkeys(ids))
-    kept_ids = set(ordered_ids)
-    emitted_ids: set[str] = set()
-    ancillary_left = max(0, _SEARCH_RESULTS_REFERENCE_CAP - len(ordered_ids))
-    out: list[Reference] = []
-
-    for ref in references:
-        if ref.get("kind") == "job":
-            match = JOB_PATH_RE.match(str(ref.get("url", "")))
-            if match is None:
-                continue
-            job_id = match.group(1)
-            if job_id not in kept_ids or job_id in emitted_ids:
-                continue
-            out.append(ref)
-            emitted_ids.add(job_id)
-            continue
-
-        if ancillary_left:
-            out.append(ref)
-            ancillary_left -= 1
-
-    for job_id in ordered_ids:
-        if job_id not in emitted_ids:
-            out.append({"kind": "job", "url": f"/jobs/view/{job_id}/"})
-
-    return out
-
-
-def lost_keywords_section_error(asked: str, landed: str) -> dict[str, str]:
-    """The ``section_errors`` entry for a search that is not the one asked for.
-
-    Both values are named, because the one shape this cannot rule out is
-    LinkedIn re-encoding a query rather than changing it. `parse_qs` folds
-    `%20` and `+` together, so ordinary spacing differences are already gone
-    by the time they are compared; an unencoded `C++` read back as `C` and
-    two spaces is the measured exception, and naming both sides is what makes
-    that diagnosable from the response instead of from a debugger.
-    """
-    return {
-        "error_type": "search_replaced",
-        "error_message": (
-            f"LinkedIn answered a search for {landed!r} where {asked!r} was "
-            "asked for, so the results are about something else."
-        ),
-    }
-
-
-def dropped_offset_section_error(offset: int, landed: str) -> dict[str, str]:
-    """The ``section_errors`` entry for a list that cannot be paged further.
-
-    LinkedIn dropping the offset serves the first page again, so the loop
-    stops there. Stopping quietly is also what an exhausted list does, and the
-    caller cannot tell the two apart: it reads a short list as the whole list
-    and never asks again. Being told is what lets a client decide.
-    """
-    return {
-        "error_type": "pagination_stopped",
-        "error_message": (
-            f"LinkedIn did not keep offset {offset} (landed on {landed}), "
-            "so the list stops at the results already read."
-        ),
-    }
-
-
-def dropped_filters_section_error(names: list[str], landed: str) -> dict[str, str]:
-    """The ``section_errors`` entry for filters LinkedIn did not keep.
-
-    Reported rather than raised, and the results kept: they are broader than
-    the caller asked for and still about the same keywords, so a location or
-    a work type LinkedIn dropped costs relevance rather than correctness.
-    Saying nothing is what cannot be defended, since a search for remote
-    Python in Berlin then returns Python anywhere and reads as though Berlin
-    had none.
-    """
-    return {
-        "error_type": "filters_dropped",
-        "error_message": (
-            f"LinkedIn did not keep {', '.join(names)} (landed on {landed}), "
-            "so the results are broader than the search asked for."
-        ),
-    }
-
-
-def rate_limited_section_error() -> dict[str, str]:
-    """The ``section_errors`` entry for a section that came back empty.
-
-    One shape for every caller, because the alternative is what this codebase
-    did until now: most call sites dropped the sentinel and returned the
-    section as simply absent. An agent reading an empty section with no error
-    concludes there was nothing to find and calls again, which is the opposite
-    of what a rate limit asks for. Being told is what lets a client back off.
-
-    Note this reports the *heuristic's* verdict, with the caveats on
-    ``_RATE_LIMITED_MSG`` above, and does not make it more accurate. What it
-    changes is that a wrong verdict is now visible and can be argued with,
-    where a silently missing section could not be.
-    """
-    return {
-        "error_type": "rate_limit",
-        "error_message": _RATE_LIMITED_MSG,
-    }
-
-
-# LinkedIn's offset stride in the search URL. It is NOT how many cards a
-# page renders: a live search served 11 per navigation while advertising 25
-# per page, so paging by this number skipped 13 of every 24 jobs. Only the
-# "are we past the last page" check may use it.
-_RESULTS_PER_LINKEDIN_PAGE = 25
 
 # The id is the trailing run of digits, and LinkedIn serves the same job under
 # both `/jobs/view/1967281839/` and `/jobs/view/<title>-at-<company>-1967281839/`.
@@ -260,13 +153,6 @@ _JOB_IDS_JS = (
 }"""
 )
 
-# The routes a job search may legitimately end on. `/jobs/search` is what the
-# URL builder produces; `/jobs/search-results` is where LinkedIn's redesigned
-# experience redirects it. Compared as parsed paths rather than as a prefix,
-# because `/jobs/search?keywords=x` is the same route and puts a `?` where a
-# prefix test wants the slash.
-_JOB_SEARCH_PATHS = frozenset({"/jobs/search", "/jobs/search-results"})
-
 # How long to let `page.url` catch up with a navigation the sidebar scroll
 # suppressed. The lag itself measured 6ms across ten runs, min and max alike;
 # the rest of the budget is for a redirect chain that is still hopping. Only a
@@ -294,76 +180,6 @@ _URL_SETTLE_LAG = 0.3
 # renders after it commits, and an account picker was measured 200ms behind
 # its own navigation, so a page judged on arrival is judged empty.
 _DOCUMENT_READY_TIMEOUT = 5.0
-
-
-def _route(target: str) -> tuple[str, str]:
-    """Host and path, which is what identifies a LinkedIn page.
-
-    Not the whole URL: LinkedIn appends `currentJobId` to the query of a
-    search page by itself, measured across three live searches where neither
-    the path nor the rest of the query moved. The host has to come along, or
-    a redirect that keeps the path reads as no redirect at all.
-    """
-    parsed = urlparse(target)
-    return parsed.netloc, parsed.path.rstrip("/")
-
-
-def _same_job_search(before: tuple[str, str], after: tuple[str, str]) -> bool:
-    """Whether a route change is LinkedIn moving a search to its redesign.
-
-    `/jobs/search/` 302s to `/jobs/search-results/` for accounts on the new
-    experience. The destination is the same search: it keeps the keywords,
-    honours `start`, and renders the same results, so treating the hop as a
-    page replacement ended every such search on its first page.
-
-    Only between those two, and only on one host. The point of the comparison
-    around it is that a search which ends up somewhere else is not a search,
-    and an account picker served in place of one moves the route exactly like
-    this redirect does.
-    """
-    return (
-        before[0] == after[0]
-        and before[1] in _JOB_SEARCH_PATHS
-        and after[1] in _JOB_SEARCH_PATHS
-    )
-
-
-# Scrolling is bounded per navigation and across a whole search, because
-# max_pages reaches 10 and tool_timeout_seconds defaults to 180.
-_SCROLL_DEADLINE_MAX = 12.0
-_SCROLL_BUDGET_TOTAL = 60.0
-
-# A cancelled tool returns nothing, so the search stops itself while there is
-# still time to hand back what it has. Measured: ten navigations of a Paris
-# developer search take 83s in total, 6.5s each, so this leaves the normal case
-# untouched and only catches a run that is genuinely running out.
-#
-# This predicts, it does not guarantee. Only the decision to *start* a page is
-# bounded; once started, a page runs to its own timeouts, and `goto` alone
-# allows 30s. The reserve is what covers that gap, and it has three claims on
-# it: the extraction and assembly after the last navigation, a page slower than
-# every page before it, and the browser startup inside `get_ready_extractor`,
-# which FastMCP is already timing before this budget begins. A page that
-# overruns the reserve is still cancelled and still loses every page gathered.
-# Bounding that too means handing the remaining budget down into navigation
-# and the rate-limit retry; see #754 rather than the margin. Scrolling is
-# already handed a deadline, so it takes what is left of this budget when
-# that is less than its own cap.
-#
-# The timeout arrives as an argument because `get_config()` parses `sys.argv`
-# on its first call, and a scraping path is the wrong place to discover that.
-_SEARCH_TIMEOUT_FRACTION = 0.8
-
-_SAVED_JOBS_URL = "https://www.linkedin.com/my-items/saved-jobs/"
-# Where a saved-jobs navigation may legitimately end. LinkedIn redirects the
-# first to the second and drops the query doing so, so the tool navigates to
-# one and arrives at the other.
-_SAVED_JOBS_PATHS = frozenset({"/my-items/saved-jobs", "/jobs-tracker"})
-
-# The my-items lists page in 10s, unlike job search. Verified live: ?start=10
-# returns the 11th saved job, while ?start=25 lands past the end of a two-page
-# list and yields nothing.
-_SAVED_JOBS_PAGE_SIZE = 10
 
 # Normalization maps for job search filters. Job search encodes recency as
 # ``f_TPR=r<seconds>``; content search uses named tokens, hence the separate
@@ -432,20 +248,6 @@ _DIALOG_PREMIUM_LINK_SELECTOR = (
 _DIALOG_TEXTAREA_SELECTOR = '[role="dialog"] textarea, dialog textarea'
 
 _MESSAGING_COMPOSE_SELECTOR = '[role="textbox"][contenteditable="true"]'
-
-# A submission is in flight from the moment the send is dispatched until the
-# whole path has produced a result, cleanup included, and an interruption in
-# that window cannot be reported. FastMCP runs every tool inside
-# `anyio.fail_after()`, so the deadline raises `CancelledError` past
-# `except Exception` and discards any result returned from the cancelled
-# scope. The caller gets a timeout that carries no `retry_safe`, and this line
-# is then the only record that a message may already have left. Answering the
-# caller instead needs the tool to know its own deadline, which is issue #889.
-SEND_INTERRUPTED_WARNING = (
-    "Message submission was interrupted while in flight. The send outcome is "
-    "unknown; check the conversation before retrying, as a retry may deliver "
-    "the message twice."
-)
 
 _PROFILE_MESSAGE_TARGET_JS = r"""() => {
     const visible = element => {
@@ -1673,114 +1475,6 @@ def _encode_list_facet(values: list[str]) -> str:
     return quote_plus(json.dumps(values, separators=(",", ":")))
 
 
-# Patterns that mark the start of LinkedIn page chrome (sidebar/footer).
-# Everything from the earliest match onwards is stripped.
-_NOISE_MARKERS: list[re.Pattern[str]] = [
-    # Footer nav links: "About" immediately followed by "Accessibility" or "Talent Solutions"
-    re.compile(r"^About\n+(?:Accessibility|Talent Solutions)", re.MULTILINE),
-    # Sidebar profile recommendations
-    re.compile(r"^More profiles for you$", re.MULTILINE),
-    # Sidebar premium upsell
-    re.compile(r"^Explore premium profiles$", re.MULTILINE),
-    # InMail upsell in contact info overlay
-    re.compile(r"^Get up to .+ replies when you message with InMail$", re.MULTILINE),
-    # Footer nav clusters in profile/posts pages
-    re.compile(
-        r"^(?:Careers|Privacy & Terms|Questions\?|Select language)\n+"
-        r"(?:Privacy & Terms|Questions\?|Select language|Advertising|Ad Choices|"
-        r"[A-Za-z]+ \([A-Za-z]+\))",
-        re.MULTILINE,
-    ),
-]
-
-_NOISE_LINES: list[re.Pattern[str]] = [
-    re.compile(r"^(?:Play|Pause|Playback speed|Turn fullscreen on|Fullscreen)$"),
-    re.compile(r"^(?:Show captions|Close modal window|Media player modal window)$"),
-    re.compile(r"^(?:Loaded:.*|Remaining time.*|Stream Type.*)$"),
-]
-
-
-@dataclass
-class ExtractedSection:
-    """Text and compact references extracted from a loaded LinkedIn section."""
-
-    text: str
-    references: list[Reference]
-    error: dict[str, Any] | None = None
-
-
-_FEED_RSC_MARKER = "sduiid=com.linkedin.sdui.pagers.feed.mainFeed"
-# Matches a LinkedIn post permalink in either plain or JSON-escaped form
-# (the initial /feed/ HTML embeds the RSC flight data with \u002f for slashes,
-# while paginated responses use plain slashes). Captures the slug portion so
-# we can rebuild a canonical URL regardless of the source encoding.
-_POST_SLUG_URL_RE = re.compile(
-    r"linkedin\.com(?:\\u002[fF]|/)posts(?:\\u002[fF]|/)"
-    r"(?P<slug>[A-Za-z0-9_-]+?-(?:ugcPost|activity|share)-\d+-[A-Za-z0-9_-]+)"
-)
-_FEED_DOCUMENT_URLS = {
-    "https://www.linkedin.com/feed",
-    "https://www.linkedin.com/feed/",
-}
-
-
-def _is_feed_payload_response(url: str) -> bool:
-    """True if the response URL is one that carries `postSlugUrl` fields."""
-    if _FEED_RSC_MARKER in url:
-        return True
-    return url.split("?", 1)[0] in _FEED_DOCUMENT_URLS
-
-
-def _build_feed_references(
-    raw_references: list[Any],
-    captured_urls: list[str],
-) -> list[Reference]:
-    """Compose feed references from DOM anchors + SDUI captures.
-
-    The feed page renders many anchors that are not post permalinks:
-    sidebar widgets, profile cards, employer logos, etc. Mixing them
-    into ``references["feed"]`` blurs the contract and competes with
-    SDUI permalinks for the per-section cap. We keep only the
-    ``feed_post`` slice from the DOM:
-
-    - DOM anchors → ``feed_post`` entries with ``/feed/update/<urn>/``
-      URLs (whatever ``classify_link`` recognises).
-    - SDUI captures → ``feed_post`` entries with ``/posts/<slug>`` URLs
-      for permalinks that the DOM does not surface as an anchor.
-
-    Both are deduped on exact URL string. The two shapes pointing at
-    the same underlying post will *not* collapse — ``dedupe_references``
-    matches strings, not URNs. Both are valid LinkedIn permalinks, so
-    consumers should treat ``feed_post`` as polymorphic on URL form;
-    URN-based equivalence is left to the consumer.
-    """
-    refs = [
-        ref
-        for ref in build_references(raw_references, "feed")
-        if ref["kind"] == "feed_post"
-    ]
-    existing = {r["url"] for r in refs}
-    for sdui_url in captured_urls:
-        # AGENTS.md mandates relative paths for LinkedIn references.
-        # The SDUI capture carries fully-qualified URLs like
-        # https://www.linkedin.com/posts/<slug>; strip the host so the
-        # relative-path convention holds. ``classify_link`` does not
-        # currently route ``/posts/<slug>`` paths to any kind, so we
-        # bypass it for this fallback append.
-        parsed = urlparse(sdui_url)
-        if not parsed.path.startswith("/posts/"):
-            continue
-        relative = parsed.path
-        if relative in existing:
-            continue
-        refs.append({"kind": "feed_post", "url": relative, "context": "feed"})
-        existing.add(relative)
-    # Cap kept in sync with _REFERENCE_CAPS["feed"] in link_metadata.py;
-    # changing one without the other will drop or duplicate entries
-    # silently. Matches get_feed's num_posts ceiling (Field(ge=1, le=50)).
-    return dedupe_references(refs, cap=50)
-
-
 async def _drain_listener_tasks(pending: list[asyncio.Task[None]]) -> None:
     """Bounded teardown for fire-and-forget response listener tasks.
 
@@ -1840,157 +1534,6 @@ async def _drain_listener_tasks(pending: list[asyncio.Task[None]]) -> None:
     await anyio.lowlevel.checkpoint()
 
 
-class FilterValidationError(ValueError):
-    """Invalid ``search_people`` filter input (network token / URN shape).
-
-    Subclassing ``ValueError`` keeps backward-compatible behaviour for
-    direct extractor callers (``pytest.raises(ValueError)`` matches), while
-    letting the MCP tool wrapper catch this case precisely and surface the
-    actionable message past ``mask_error_details``.
-    """
-
-
-def strip_linkedin_noise(text: str) -> str:
-    """Remove LinkedIn page chrome (footer, sidebar recommendations) from innerText.
-
-    Finds the earliest occurrence of any known noise marker and truncates there.
-    """
-    cleaned = _truncate_linkedin_noise(text)
-    return _filter_linkedin_noise_lines(cleaned)
-
-
-def _filter_linkedin_noise_lines(text: str) -> str:
-    """Remove known media/control noise lines from already-truncated content."""
-    filtered_lines = [
-        line
-        for line in text.splitlines()
-        if not any(pattern.match(line.strip()) for pattern in _NOISE_LINES)
-    ]
-    return "\n".join(filtered_lines).strip()
-
-
-def _truncate_linkedin_noise(text: str) -> str:
-    """Trim known LinkedIn chrome blocks before any per-line noise filtering."""
-    earliest = len(text)
-    for pattern in _NOISE_MARKERS:
-        match = pattern.search(text)
-        if match and match.start() < earliest:
-            earliest = match.start()
-
-    return text[:earliest].strip()
-
-
-# Messaging-page chrome around an opened conversation thread. innerText on
-# /messaging/thread/ pages carries no URL or attribute signal separating the
-# inbox sidebar from the thread, so the boundaries are matched on visible
-# strings — guarded by an explicit per-locale table (CLAUDE.md → Scraping
-# Rules). BrowserManager forces the context locale to en-US (core/browser.py),
-# so the "en" entry is the operative one; a locale without a table entry
-# passes through unstripped.
-@dataclass(frozen=True)
-class _MessagingChromeTable:
-    # Sidebar pagination control; the last line of the inbox sidebar. Pins
-    # the thread header so quoted UI text inside messages can't move the
-    # start boundary.
-    sidebar_end: str
-    # Screen-reader label on the options dropdown; appears once per sidebar
-    # entry and once in the opened thread's header. The thread's own line is
-    # the first occurrence after ``sidebar_end``.
-    thread_header_prefix: str
-    # First control of the trailing message-composer block.
-    composer_start: str
-    # Standalone controls of the composer block, matched exactly. At least
-    # one must follow a ``composer_start`` candidate to confirm it is the
-    # real composer rather than a message quoting the label. Controls whose
-    # text embeds the participant name (the Attach lines) are deliberately
-    # excluded: they would need prefix matching, and any prefix match lets
-    # quoted control text with a suffix confirm a false boundary.
-    composer_companions: tuple[str, ...]
-
-
-# How far below a composer-label candidate a companion control may sit and
-# still count as the same block. The observed block spans 6 lines; the slack
-# covers extra controls LinkedIn injects (e.g. "Press Enter to Send").
-_COMPOSER_COMPANION_WINDOW = 8
-
-_MESSAGING_CHROME_STRINGS: dict[str, _MessagingChromeTable] = {
-    "en": _MessagingChromeTable(
-        sidebar_end="Load more conversations",
-        thread_header_prefix="Open the options list in your conversation with",
-        composer_start="Maximize compose field",
-        composer_companions=(
-            "Open GIF Keyboard",
-            "Open Emoji Keyboard",
-            "Open send options",
-        ),
-    ),
-}
-
-
-def strip_conversation_chrome(text: str, locale: str = "en") -> str:
-    """Trim messaging chrome around an opened conversation thread.
-
-    A conversation page's innerText embeds the thread between three chrome
-    blocks: the messaging header, the inbox sidebar (which previews *other*
-    conversations), and the trailing message composer. Drops everything
-    through the thread-header line and everything from the composer onward.
-    Each boundary independently falls back to keeping the text when its
-    marker is absent (unknown locale, layout change), so a failed match
-    leaks chrome rather than dropping messages.
-    """
-    table = _MESSAGING_CHROME_STRINGS.get(locale)
-    if table is None:
-        return text
-
-    lines = text.splitlines()
-
-    # End boundary: the last composer-label line, accepted only when an
-    # exact companion control follows within the next few lines. The real
-    # composer block is contiguous (label + controls observed within 6
-    # lines), so a nearby companion confirms chrome, while a message that
-    # quotes the label — or control text with any suffix — falls through to
-    # the missing-marker fallback. A verbatim multi-line reproduction of the
-    # block inside a message remains indistinguishable from the block itself;
-    # that ambiguity is inherent to text-only stripping.
-    end = len(lines)
-    for i in range(len(lines) - 1, -1, -1):
-        if lines[i].strip() != table.composer_start:
-            continue
-        if any(
-            lines[j].strip() in table.composer_companions
-            for j in range(i + 1, min(i + 1 + _COMPOSER_COMPANION_WINDOW, len(lines)))
-        ):
-            end = i
-        break
-
-    # Start boundary: the sidebar's pagination line, when present, pins the
-    # real thread header as the first options line after it; quoted UI text
-    # inside messages can no longer pull the boundary into the thread. The
-    # sidebar omits the pagination control when there are few conversations —
-    # then fall back to the last options line before the composer.
-    start = 0
-    sidebar_end = next(
-        (i for i in range(end) if lines[i].strip() == table.sidebar_end), None
-    )
-    if sidebar_end is not None:
-        header = next(
-            (
-                i
-                for i in range(sidebar_end + 1, end)
-                if lines[i].strip().startswith(table.thread_header_prefix)
-            ),
-            None,
-        )
-        start = (header + 1) if header is not None else sidebar_end + 1
-    else:
-        for i in range(end - 1, -1, -1):
-            if lines[i].strip().startswith(table.thread_header_prefix):
-                start = i + 1
-                break
-
-    return "\n".join(lines[start:end]).strip()
-
-
 class LinkedInExtractor:
     """Extracts LinkedIn page content via navigate-scroll-innerText pattern."""
 
@@ -2021,35 +1564,6 @@ class LinkedInExtractor:
             if references:
                 result["references"] = {section_name: references}
         return result
-
-    @staticmethod
-    def _message_action_result(
-        url: str,
-        status: str,
-        message: str,
-        *,
-        recipient_selected: bool = False,
-        sent: bool = False,
-        retry_safe: bool = True,
-    ) -> dict[str, Any]:
-        """Build a structured response for the send_message tool.
-
-        ``sent`` is true only when the narrowly defined message-list UI
-        transition was observed after submission. It does not prove delivery
-        or that the recipient read the message. A caller keying a retry on it
-        alone can re-send a message that may already have arrived, which is
-        what ``retry_safe`` exists to say: it is false from the moment a
-        submission is attempted, and true only while nothing can have left
-        the composer.
-        """
-        return {
-            "url": url,
-            "status": status,
-            "message": message,
-            "recipient_selected": recipient_selected,
-            "sent": sent,
-            "retry_safe": retry_safe,
-        }
 
     async def _log_navigation_failure(
         self,
@@ -2562,7 +2076,7 @@ class LinkedInExtractor:
         pending_reads: list[asyncio.Task[None]] = []
 
         def _handle_response(resp: Any) -> None:
-            if not _is_feed_payload_response(resp.url):
+            if not is_feed_payload_response(resp.url):
                 return
 
             async def _read() -> None:
@@ -2573,7 +2087,7 @@ class LinkedInExtractor:
                 if not body:
                     return
                 text = body.decode("utf-8", errors="replace")
-                for match in _POST_SLUG_URL_RE.finditer(text):
+                for match in POST_SLUG_URL_RE.finditer(text):
                     post_url = f"https://www.linkedin.com/posts/{match.group('slug')}"
                     if post_url not in seen_urls:
                         seen_urls.add(post_url)
@@ -2697,16 +2211,16 @@ class LinkedInExtractor:
 
         if not raw:
             return ExtractedSection(text="", references=[])
-        truncated = _truncate_linkedin_noise(raw)
+        truncated = truncate_linkedin_noise(raw)
         if not truncated and raw.strip():
             logger.warning(
                 "Page %s returned only LinkedIn chrome (likely rate-limited)", url
             )
-            return ExtractedSection(text=_RATE_LIMITED_MSG, references=[])
-        cleaned = _filter_linkedin_noise_lines(truncated)
+            return ExtractedSection(text=RATE_LIMITED_SECTION_TEXT, references=[])
+        cleaned = filter_linkedin_noise_lines(truncated)
         return ExtractedSection(
             text=cleaned,
-            references=_build_feed_references(raw_result["references"], captured_urls),
+            references=build_feed_references(raw_result["references"], captured_urls),
         )
 
     async def extract_page(
@@ -2722,12 +2236,12 @@ class LinkedInExtractor:
         rate limit.
 
         Raises LinkedInScraperException subclasses (rate limit, auth, etc.).
-        Returns _RATE_LIMITED_MSG sentinel when soft-rate-limited after retry.
+        Returns RATE_LIMITED_SECTION_TEXT sentinel when soft-rate-limited after retry.
         Returns empty string for unexpected non-domain failures (error isolation).
         """
         try:
             result = await self._extract_page_once(url, section_name, max_scrolls)
-            if result.text != _RATE_LIMITED_MSG:
+            if result.text != RATE_LIMITED_SECTION_TEXT:
                 return result
 
             # Retry once after backoff
@@ -2903,13 +2417,13 @@ class LinkedInExtractor:
 
         if not raw:
             return ExtractedSection(text="", references=[])
-        truncated = _truncate_linkedin_noise(raw)
+        truncated = truncate_linkedin_noise(raw)
         if not truncated and raw.strip():
             logger.warning(
                 "Page %s returned only LinkedIn chrome (likely rate-limited)", url
             )
-            return ExtractedSection(text=_RATE_LIMITED_MSG, references=[])
-        cleaned = _filter_linkedin_noise_lines(truncated)
+            return ExtractedSection(text=RATE_LIMITED_SECTION_TEXT, references=[])
+        cleaned = filter_linkedin_noise_lines(truncated)
         return ExtractedSection(
             text=cleaned,
             references=build_references(raw_result["references"], section_name),
@@ -2930,7 +2444,7 @@ class LinkedInExtractor:
         """
         try:
             result = await self._extract_overlay_once(url, section_name)
-            if result.text != _RATE_LIMITED_MSG:
+            if result.text != RATE_LIMITED_SECTION_TEXT:
                 return result
 
             logger.info(
@@ -2982,14 +2496,14 @@ class LinkedInExtractor:
 
         if not raw:
             return ExtractedSection(text="", references=[])
-        truncated = _truncate_linkedin_noise(raw)
+        truncated = truncate_linkedin_noise(raw)
         if not truncated and raw.strip():
             logger.warning(
                 "Overlay %s returned only LinkedIn chrome (likely rate-limited)",
                 url,
             )
-            return ExtractedSection(text=_RATE_LIMITED_MSG, references=[])
-        cleaned = _filter_linkedin_noise_lines(truncated)
+            return ExtractedSection(text=RATE_LIMITED_SECTION_TEXT, references=[])
+        cleaned = filter_linkedin_noise_lines(truncated)
         return ExtractedSection(
             text=cleaned,
             references=build_references(raw_result["references"], section_name),
@@ -3057,7 +2571,7 @@ class LinkedInExtractor:
                             section_name=section_name,
                             max_scrolls=max_scrolls,
                         )
-                        if extracted.text == _RATE_LIMITED_MSG:
+                        if extracted.text == RATE_LIMITED_SECTION_TEXT:
                             logger.info(
                                 "Reuse path soft-rate-limited; falling back "
                                 "to extract_page for retry parity"
@@ -3078,11 +2592,11 @@ class LinkedInExtractor:
                             max_scrolls=max_scrolls,
                         )
 
-                    if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+                    if extracted.text and extracted.text != RATE_LIMITED_SECTION_TEXT:
                         sections[section_name] = extracted.text
                         if extracted.references:
                             references[section_name] = extracted.references
-                    elif extracted.text == _RATE_LIMITED_MSG:
+                    elif extracted.text == RATE_LIMITED_SECTION_TEXT:
                         section_errors[section_name] = rate_limited_section_error()
                         # Stop rather than walk the remaining sections. Each one
                         # is another navigation, and LinkedIn has just said it
@@ -4289,11 +3803,11 @@ class LinkedInExtractor:
                             url, section_name=section_name
                         )
 
-                    if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+                    if extracted.text and extracted.text != RATE_LIMITED_SECTION_TEXT:
                         sections[section_name] = extracted.text
                         if extracted.references:
                             references[section_name] = extracted.references
-                    elif extracted.text == _RATE_LIMITED_MSG:
+                    elif extracted.text == RATE_LIMITED_SECTION_TEXT:
                         section_errors[section_name] = rate_limited_section_error()
                         rate_limited = True
                     elif extracted.error:
@@ -4357,11 +3871,11 @@ class LinkedInExtractor:
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}
         section_errors: dict[str, dict[str, Any]] = {}
-        if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+        if extracted.text and extracted.text != RATE_LIMITED_SECTION_TEXT:
             sections["employees"] = extracted.text
             if extracted.references:
                 references["employees"] = extracted.references
-        elif extracted.text == _RATE_LIMITED_MSG:
+        elif extracted.text == RATE_LIMITED_SECTION_TEXT:
             section_errors["employees"] = rate_limited_section_error()
         elif extracted.error:
             section_errors["employees"] = extracted.error
@@ -4389,11 +3903,11 @@ class LinkedInExtractor:
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}
         section_errors: dict[str, dict[str, Any]] = {}
-        if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+        if extracted.text and extracted.text != RATE_LIMITED_SECTION_TEXT:
             sections["job_posting"] = extracted.text
             if extracted.references:
                 references["job_posting"] = extracted.references
-        elif extracted.text == _RATE_LIMITED_MSG:
+        elif extracted.text == RATE_LIMITED_SECTION_TEXT:
             section_errors["job_posting"] = rate_limited_section_error()
         elif extracted.error:
             section_errors["job_posting"] = extracted.error
@@ -4560,19 +4074,19 @@ class LinkedInExtractor:
         self,
         url: str,
         section_name: str,
-        scroll_deadline: float = _SCROLL_DEADLINE_MAX,
+        scroll_deadline: float = SCROLL_DEADLINE_MAX,
     ) -> ExtractedSection:
         """Extract innerText from a job search page with soft rate-limit retry.
 
         Mirrors the noise-only detection and single-retry behavior of
         ``extract_page`` / ``_extract_page_once`` so that callers get a
-        ``_RATE_LIMITED_MSG`` sentinel instead of silent empty results.
+        ``RATE_LIMITED_SECTION_TEXT`` sentinel instead of silent empty results.
         """
         try:
             result = await self._extract_search_page_once(
                 url, section_name, scroll_deadline
             )
-            if result.text != _RATE_LIMITED_MSG:
+            if result.text != RATE_LIMITED_SECTION_TEXT:
                 return result
 
             logger.info(
@@ -4584,7 +4098,7 @@ class LinkedInExtractor:
             result = await self._extract_search_page_once(
                 url, section_name, scroll_deadline / 2
             )
-            if result.text == _RATE_LIMITED_MSG:
+            if result.text == RATE_LIMITED_SECTION_TEXT:
                 logger.warning("Search page %s still rate-limited after retry", url)
             return result
 
@@ -4607,7 +4121,7 @@ class LinkedInExtractor:
         self,
         url: str,
         section_name: str,
-        scroll_deadline: float = _SCROLL_DEADLINE_MAX,
+        scroll_deadline: float = SCROLL_DEADLINE_MAX,
     ) -> ExtractedSection:
         """Single attempt to navigate, scroll sidebar, and extract innerText."""
         await self._navigate_to_page(url)
@@ -4646,7 +4160,7 @@ class LinkedInExtractor:
         # its own baseline and passes. Outside the `main_found` branch for the
         # same reason: a landing page with no `<main>` extracts to nothing, and
         # an empty section is what an exhausted search looks like.
-        before = _route(url)
+        before = route(url)
         moved = False
         navigated = False
         with self._watching_navigations() as hops:
@@ -4669,10 +4183,10 @@ class LinkedInExtractor:
             # behind when the document was replaced anyway: the scroll never
             # raised, so it reports no movement, and a reload moves no route,
             # so neither of the other two says anything happened.
-            if moved or hops or before != _route(self._page.url):
+            if moved or hops or before != route(self._page.url):
                 navigated = await self._settle_navigation(hops, origin)
 
-        after = _route(self._page.url)
+        after = route(self._page.url)
         if navigated or moved or not main_found or before != after:
             # Any of the three is enough, and none implies the others. A reload
             # keeps the address, so an account picker served in place of the
@@ -4684,7 +4198,7 @@ class LinkedInExtractor:
             # missed: an exhausted search renders no `<main>` either, which is
             # why the check has to decide it rather than the absence alone.
             await self._raise_if_auth_barrier(url)
-        if before != after and not _same_job_search(before, after):
+        if before != after and not same_job_search(before, after):
             # An expired session lands here as often as a layout change does,
             # and the two need different answers. A plain error is caught by
             # the generic handler above and returned as a section diagnostic,
@@ -4716,14 +4230,14 @@ class LinkedInExtractor:
 
         if not raw:
             return ExtractedSection(text="", references=[])
-        truncated = _truncate_linkedin_noise(raw)
+        truncated = truncate_linkedin_noise(raw)
         if not truncated and raw.strip():
             logger.warning(
                 "Search page %s returned only LinkedIn chrome (likely rate-limited)",
                 url,
             )
-            return ExtractedSection(text=_RATE_LIMITED_MSG, references=[])
-        cleaned = _filter_linkedin_noise_lines(truncated)
+            return ExtractedSection(text=RATE_LIMITED_SECTION_TEXT, references=[])
+        cleaned = filter_linkedin_noise_lines(truncated)
         return ExtractedSection(
             text=cleaned,
             references=build_references(
@@ -4856,7 +4370,7 @@ class LinkedInExtractor:
         # it, so asking for more pages returned fewer jobs than asking for
         # three. Each page now takes the per-page cap or what is left,
         # whichever is smaller, and the total is the same 60s.
-        scroll_budget_left = _SCROLL_BUDGET_TOTAL
+        scroll_budget_left = SCROLL_BUDGET_TOTAL
         self._scroll_seconds = 0.0
         # The offset follows what the pages actually rendered. LinkedIn's own
         # stride would skip every result it renders beyond it.
@@ -4866,14 +4380,14 @@ class LinkedInExtractor:
         # a constant: the real figure is 6.5s and the `goto` timeout alone is
         # 30s, so a fixed guess is wrong in both directions.
         started = time.monotonic()
-        budget = tool_timeout * _SEARCH_TIMEOUT_FRACTION
+        budget = tool_timeout * SEARCH_TIMEOUT_FRACTION
         slowest_page = 0.0
 
         for page_num in range(max_pages):
             # Stop once the offset is past the last advertised result
             if (
                 total_pages is not None
-                and offset >= total_pages * _RESULTS_PER_LINKEDIN_PAGE
+                and offset >= total_pages * RESULTS_PER_LINKEDIN_PAGE
             ):
                 logger.debug(
                     "Offset %d is past the %d advertised pages, stopping",
@@ -4913,7 +4427,7 @@ class LinkedInExtractor:
             # already told how long it may run, so it is the one part this can
             # bound without handing the budget down into navigation.
             scroll_deadline = min(
-                _SCROLL_DEADLINE_MAX,
+                SCROLL_DEADLINE_MAX,
                 scroll_budget_left,
                 max(0.0, budget - (time.monotonic() - started)),
             )
@@ -4933,7 +4447,7 @@ class LinkedInExtractor:
                 # accepted yet, because a redirect that dropped the keywords,
                 # filters or offset can render empty too. Calling that "no jobs"
                 # is a successful answer to a different search.
-                if extracted.text == _RATE_LIMITED_MSG:
+                if extracted.text == RATE_LIMITED_SECTION_TEXT:
                     section_errors["search_results"] = rate_limited_section_error()
                     break
                 if not extracted.text and extracted.error:
@@ -4961,7 +4475,7 @@ class LinkedInExtractor:
                 parsed_url = urlparse(self._page.url)
                 if (
                     parsed_url.netloc != "www.linkedin.com"
-                    or parsed_url.path.rstrip("/") not in _JOB_SEARCH_PATHS
+                    or parsed_url.path.rstrip("/") not in JOB_SEARCH_PATHS
                 ):
                     logger.debug(
                         "Unexpected page URL after extraction: %s — "
@@ -5079,7 +4593,7 @@ class LinkedInExtractor:
                 offset += len(page_ids)
                 new_ids = [jid for jid in page_ids if jid not in seen_ids]
 
-                page_refs = _reconcile_search_references(extracted.references, page_ids)
+                page_refs = reconcile_search_references(extracted.references, page_ids)
 
                 if not new_ids:
                     page_texts.append(extracted.text)
@@ -5143,7 +4657,7 @@ class LinkedInExtractor:
         with self._watching_navigations() as hops:
             try:
                 result = await self._extract_saved_jobs_page_once(url, section_name)
-                if result.text != _RATE_LIMITED_MSG:
+                if result.text != RATE_LIMITED_SECTION_TEXT:
                     return result
 
                 logger.info(
@@ -5153,7 +4667,7 @@ class LinkedInExtractor:
                 )
                 await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
                 result = await self._extract_saved_jobs_page_once(url, section_name)
-                if result.text == _RATE_LIMITED_MSG:
+                if result.text == RATE_LIMITED_SECTION_TEXT:
                     logger.warning(
                         "Saved jobs page %s still rate-limited after retry", url
                     )
@@ -5257,14 +4771,14 @@ class LinkedInExtractor:
 
         if not raw:
             return ExtractedSection(text="", references=[])
-        truncated = _truncate_linkedin_noise(raw)
+        truncated = truncate_linkedin_noise(raw)
         if not truncated and raw.strip():
             logger.warning(
                 "Saved jobs page %s returned only LinkedIn chrome (likely rate-limited)",
                 url,
             )
-            return ExtractedSection(text=_RATE_LIMITED_MSG, references=[])
-        cleaned = _filter_linkedin_noise_lines(truncated)
+            return ExtractedSection(text=RATE_LIMITED_SECTION_TEXT, references=[])
+        cleaned = filter_linkedin_noise_lines(truncated)
         return ExtractedSection(
             text=cleaned,
             references=build_references(raw_result["references"], section_name),
@@ -5311,7 +4825,7 @@ class LinkedInExtractor:
         Returns:
             {url, sections: {saved_jobs: text}, job_ids: [str]}
         """
-        base_url = _SAVED_JOBS_URL
+        base_url = SAVED_JOBS_URL
         all_job_ids: list[str] = []
         seen_ids: set[str] = set()
         page_texts: list[str] = []
@@ -5331,7 +4845,7 @@ class LinkedInExtractor:
             url = (
                 base_url
                 if page_num == 0
-                else f"{base_url}?start={page_num * _SAVED_JOBS_PAGE_SIZE}"
+                else f"{base_url}?start={page_num * SAVED_JOBS_PAGE_SIZE}"
             )
 
             try:
@@ -5343,7 +4857,7 @@ class LinkedInExtractor:
                 # page that was throttled may carry a generic error too. Then
                 # the extraction error, which names what actually failed and
                 # would be masked by the route guard below.
-                if extracted.text == _RATE_LIMITED_MSG:
+                if extracted.text == RATE_LIMITED_SECTION_TEXT:
                     section_errors["saved_jobs"] = rate_limited_section_error()
                     break
                 if extracted.error:
@@ -5365,7 +4879,7 @@ class LinkedInExtractor:
                 parsed_url = urlparse(self._page.url)
                 if (
                     parsed_url.netloc != "www.linkedin.com"
-                    or parsed_url.path.rstrip("/") not in _SAVED_JOBS_PATHS
+                    or parsed_url.path.rstrip("/") not in SAVED_JOBS_PATHS
                 ):
                     logger.debug(
                         "Unexpected page URL after saved-jobs extraction: %s "
@@ -5418,15 +4932,15 @@ class LinkedInExtractor:
                 landed_start = parse_qs(urlparse(self._page.url).query).get(
                     "start", ["0"]
                 )[0]
-                if landed_start != str(page_num * _SAVED_JOBS_PAGE_SIZE):
+                if landed_start != str(page_num * SAVED_JOBS_PAGE_SIZE):
                     logger.debug(
                         "Saved-jobs offset %d did not survive navigation "
                         "(landed on %s), stopping",
-                        page_num * _SAVED_JOBS_PAGE_SIZE,
+                        page_num * SAVED_JOBS_PAGE_SIZE,
                         self._page.url,
                     )
                     section_errors["saved_jobs"] = dropped_offset_section_error(
-                        page_num * _SAVED_JOBS_PAGE_SIZE, self._page.url
+                        page_num * SAVED_JOBS_PAGE_SIZE, self._page.url
                     )
                     break
 
@@ -5534,11 +5048,11 @@ class LinkedInExtractor:
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}
         section_errors: dict[str, dict[str, Any]] = {}
-        if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+        if extracted.text and extracted.text != RATE_LIMITED_SECTION_TEXT:
             sections["search_results"] = extracted.text
             if extracted.references:
                 references["search_results"] = extracted.references
-        elif extracted.text == _RATE_LIMITED_MSG:
+        elif extracted.text == RATE_LIMITED_SECTION_TEXT:
             section_errors["search_results"] = rate_limited_section_error()
         elif extracted.error:
             section_errors["search_results"] = extracted.error
@@ -5568,11 +5082,11 @@ class LinkedInExtractor:
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}
         section_errors: dict[str, dict[str, Any]] = {}
-        if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+        if extracted.text and extracted.text != RATE_LIMITED_SECTION_TEXT:
             sections["search_results"] = extracted.text
             if extracted.references:
                 references["search_results"] = extracted.references
-        elif extracted.text == _RATE_LIMITED_MSG:
+        elif extracted.text == RATE_LIMITED_SECTION_TEXT:
             section_errors["search_results"] = rate_limited_section_error()
         elif extracted.error:
             section_errors["search_results"] = extracted.error
@@ -5665,11 +5179,11 @@ class LinkedInExtractor:
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}
         section_errors: dict[str, dict[str, Any]] = {}
-        if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+        if extracted.text and extracted.text != RATE_LIMITED_SECTION_TEXT:
             sections["search_results"] = extracted.text
             if extracted.references:
                 references["search_results"] = extracted.references
-        elif extracted.text == _RATE_LIMITED_MSG:
+        elif extracted.text == RATE_LIMITED_SECTION_TEXT:
             section_errors["search_results"] = {
                 "error_type": "rate_limit",
                 "error_message": extracted.text,
@@ -5983,7 +5497,7 @@ class LinkedInExtractor:
             profile_urn: Optional profile URN (e.g. ACoAAB...) to verify against
                 the recipient resolved from the loaded profile snapshot.
         """
-        refusal = refuse_an_invalid_message(linkedin_username, message)
+        refusal = contracts.refuse_an_invalid_message(linkedin_username, message)
         if refusal is not None:
             return refusal
         linkedin_username = normalize_person_identifier(linkedin_username)
@@ -5999,7 +5513,7 @@ class LinkedInExtractor:
 
         resolution = await self._read_profile_message_target()
         if resolution.status == "unavailable":
-            return self._message_action_result(
+            return contracts.message_action_result(
                 profile_url,
                 "message_unavailable",
                 "LinkedIn did not expose a normal Message action for this profile. "
@@ -6008,7 +5522,7 @@ class LinkedInExtractor:
             )
         target = resolution.target
         if target is None:
-            return self._message_action_result(
+            return contracts.message_action_result(
                 profile_url,
                 "recipient_resolution_failed",
                 "LinkedIn did not expose one unambiguous recipient-specific Message "
@@ -6017,7 +5531,7 @@ class LinkedInExtractor:
 
         supplied_urn = _normalize_profile_urn(profile_urn) if profile_urn else None
         if profile_urn is not None and supplied_urn != target.profile_urn:
-            return self._message_action_result(
+            return contracts.message_action_result(
                 profile_url,
                 "recipient_resolution_failed",
                 "The supplied profile URN did not match the loaded profile.",
@@ -6030,7 +5544,7 @@ class LinkedInExtractor:
         await self._navigate_to_page(target.compose_url)
         expected_route = self._page.url
         if not _message_page_url_is_safe(expected_route, target.profile_urn):
-            return self._message_action_result(
+            return contracts.message_action_result(
                 expected_route,
                 "recipient_resolution_failed",
                 "LinkedIn opened an unexpected messaging URL.",
@@ -6038,7 +5552,7 @@ class LinkedInExtractor:
 
         await detect_rate_limit(self._page)
         if self._page.url != expected_route:
-            return self._message_action_result(
+            return contracts.message_action_result(
                 self._page.url,
                 "recipient_resolution_failed",
                 "The messaging URL changed while the composer was loading.",
@@ -6049,7 +5563,7 @@ class LinkedInExtractor:
         except PlaywrightTimeoutError:
             logger.debug("Compose page did not fully load for %s", linkedin_username)
         if self._page.url != expected_route:
-            return self._message_action_result(
+            return contracts.message_action_result(
                 self._page.url,
                 "recipient_resolution_failed",
                 "The messaging URL changed while the composer was loading.",
@@ -6057,7 +5571,7 @@ class LinkedInExtractor:
 
         message_surface = await self._wait_for_message_surface(target)
         if self._page.url != expected_route:
-            return self._message_action_result(
+            return contracts.message_action_result(
                 self._page.url,
                 "recipient_resolution_failed",
                 "The messaging URL changed while the composer was loading.",
@@ -6066,7 +5580,7 @@ class LinkedInExtractor:
             "Message surface for %s was %s", linkedin_username, message_surface
         )
         if message_surface != "composer":
-            return self._message_action_result(
+            return contracts.message_action_result(
                 self._page.url,
                 "composer_unavailable",
                 "LinkedIn did not expose one usable message composer.",
@@ -6074,7 +5588,7 @@ class LinkedInExtractor:
 
         state = await self._read_message_composer_state(target)
         if self._page.url != expected_route:
-            return self._message_action_result(
+            return contracts.message_action_result(
                 self._page.url,
                 "recipient_resolution_failed",
                 "The messaging URL changed during recipient verification.",
@@ -6085,7 +5599,7 @@ class LinkedInExtractor:
                 linkedin_username,
                 state.get("status"),
             )
-            return self._message_action_result(
+            return contracts.message_action_result(
                 self._page.url,
                 "recipient_resolution_failed",
                 "The local composer did not identify exactly the requested profile.",
@@ -6093,7 +5607,7 @@ class LinkedInExtractor:
         recipient_selected = True
 
         if not confirm_send:
-            return self._message_action_result(
+            return contracts.message_action_result(
                 self._page.url,
                 "confirmation_required",
                 "Set confirm_send=true to send the message.",
@@ -6101,7 +5615,7 @@ class LinkedInExtractor:
             )
 
         if self._page.url != expected_route:
-            return self._message_action_result(
+            return contracts.message_action_result(
                 self._page.url,
                 "recipient_resolution_failed",
                 "The messaging URL changed before text entry.",
@@ -6109,7 +5623,7 @@ class LinkedInExtractor:
             )
         state = await self._read_message_composer_state(target)
         if self._page.url != expected_route:
-            return self._message_action_result(
+            return contracts.message_action_result(
                 self._page.url,
                 "recipient_resolution_failed",
                 "The messaging URL changed before text entry.",
@@ -6118,7 +5632,7 @@ class LinkedInExtractor:
         if state.get("status") == "valid" and state.get("empty") is not True:
             # Text already in the editor belongs to whoever typed it. Clearing
             # it would trade a recipient leak for destroying their draft.
-            return self._message_action_result(
+            return contracts.message_action_result(
                 self._page.url,
                 "composer_occupied",
                 "The composer already holds a draft that would be sent along "
@@ -6126,14 +5640,14 @@ class LinkedInExtractor:
                 recipient_selected=recipient_selected,
             )
         if state.get("status") != "valid":
-            return self._message_action_result(
+            return contracts.message_action_result(
                 self._page.url,
                 "compose_interact_failed",
                 "The verified message composer changed before text entry.",
                 recipient_selected=recipient_selected,
             )
         if state.get("submitCount") != 1:
-            return self._message_action_result(
+            return contracts.message_action_result(
                 self._page.url,
                 "send_unavailable",
                 "The local submit path was missing or ambiguous.",
@@ -6146,7 +5660,7 @@ class LinkedInExtractor:
                 target, expected_route=expected_route
             )
             if owner is None:
-                return self._message_action_result(
+                return contracts.message_action_result(
                     self._page.url,
                     "recipient_resolution_failed",
                     "The verified message composer changed before text entry.",
@@ -6160,14 +5674,14 @@ class LinkedInExtractor:
                     owner=owner,
                 )
                 if not _message_page_url_is_safe(self._page.url, target.profile_urn):
-                    return self._message_action_result(
+                    return contracts.message_action_result(
                         self._page.url,
                         "recipient_resolution_failed",
                         "The messaging URL changed during text entry.",
                         recipient_selected=recipient_selected,
                     )
                 if write_result == "occupied":
-                    return self._message_action_result(
+                    return contracts.message_action_result(
                         self._page.url,
                         "composer_occupied",
                         "The composer already holds a draft that would be sent along "
@@ -6175,7 +5689,7 @@ class LinkedInExtractor:
                         recipient_selected=recipient_selected,
                     )
                 if write_result != "written":
-                    return self._message_action_result(
+                    return contracts.message_action_result(
                         self._page.url,
                         "compose_interact_failed",
                         "The verified message editor could not accept the message.",
@@ -6187,7 +5701,7 @@ class LinkedInExtractor:
                     target=target,
                     owner=owner,
                 ):
-                    return self._message_action_result(
+                    return contracts.message_action_result(
                         self._page.url,
                         "send_unavailable",
                         "The pinned submit button did not become available without "
@@ -6201,7 +5715,7 @@ class LinkedInExtractor:
                     owner=owner,
                 )
                 if confirmation is None:
-                    return self._message_action_result(
+                    return contracts.message_action_result(
                         self._page.url,
                         "recipient_resolution_failed",
                         "The verified message composer changed before submission.",
@@ -6222,7 +5736,7 @@ class LinkedInExtractor:
                         logger.debug(
                             "Message submission did not complete", exc_info=True
                         )
-                        return self._message_action_result(
+                        return contracts.message_action_result(
                             self._page.url,
                             "send_unconfirmed",
                             "The message submission was interrupted and LinkedIn did "
@@ -6234,7 +5748,7 @@ class LinkedInExtractor:
 
                     if submission != "clicked":
                         may_have_submitted = False
-                        return self._message_action_result(
+                        return contracts.message_action_result(
                             self._page.url,
                             "send_unavailable",
                             "The local submit path was missing, disabled, or ambiguous.",
@@ -6248,7 +5762,7 @@ class LinkedInExtractor:
                         confirmation=confirmation,
                     )
                     if not confirmed:
-                        return self._message_action_result(
+                        return contracts.message_action_result(
                             self._page.url,
                             "send_unconfirmed",
                             "The message was submitted but LinkedIn did not confirm "
@@ -6259,7 +5773,7 @@ class LinkedInExtractor:
                             retry_safe=False,
                         )
 
-                    return self._message_action_result(
+                    return contracts.message_action_result(
                         self._page.url,
                         "sent",
                         "Message submitted and confirmed in the conversation UI.",
@@ -6283,7 +5797,7 @@ class LinkedInExtractor:
             logger.debug(
                 "Message send failed after a possible submission", exc_info=True
             )
-            return self._message_action_result(
+            return contracts.message_action_result(
                 self._page.url,
                 "send_unconfirmed",
                 "The message may already have been submitted when the send "
@@ -6302,7 +5816,7 @@ class LinkedInExtractor:
             # Silent before explicit submission: nothing can have left yet,
             # and a warning about duplicate delivery would be false.
             if may_have_submitted:
-                logger.warning(SEND_INTERRUPTED_WARNING)
+                logger.warning(contracts.SEND_INTERRUPTED_WARNING)
             raise
 
     async def _extract_root_content(
@@ -6413,24 +5927,3 @@ class LinkedInExtractor:
             {"selectors": selectors},
         )
         return result
-
-
-def refuse_an_invalid_message(
-    linkedin_username: str, message: str
-) -> dict[str, Any] | None:
-    """Return the shared browser-free refusal for an unsafe message."""
-    reason = None
-    if not message.strip():
-        reason = "Message must contain non-whitespace characters."
-    elif any(ord(character) < 32 or ord(character) == 127 for character in message):
-        # Keep the browser-side insertion contract to plain message text.
-        # Reject every C0 control and DEL before a session is acquired so no
-        # control input can reach the contenteditable surface.
-        reason = "Message must not contain control characters or line breaks."
-    if reason is None:
-        return None
-    return LinkedInExtractor._message_action_result(
-        person_profile_url(normalize_person_identifier(linkedin_username), "/"),
-        "invalid_message",
-        reason,
-    )

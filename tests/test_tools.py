@@ -9,7 +9,11 @@ from fastmcp import FastMCP
 from fastmcp.tools import FunctionTool
 
 from linkedin_mcp_server.callbacks import MCPContextProgressCallback
-from linkedin_mcp_server.scraping.extractor import ExtractedSection, _RATE_LIMITED_MSG
+from linkedin_mcp_server.scraping.contracts import (
+    RATE_LIMITED_SECTION_TEXT,
+    SEND_INTERRUPTED_WARNING,
+)
+from linkedin_mcp_server.scraping.extractor import ExtractedSection
 
 
 async def get_tool_fn(
@@ -652,7 +656,7 @@ class TestCompanyTools:
     async def test_get_company_posts_omits_rate_limited_sentinel(self, mock_context):
         mock_extractor = MagicMock()
         mock_extractor.extract_page = AsyncMock(
-            return_value=ExtractedSection(text=_RATE_LIMITED_MSG, references=[])
+            return_value=ExtractedSection(text=RATE_LIMITED_SECTION_TEXT, references=[])
         )
 
         from linkedin_mcp_server.tools.company import register_company_tools
@@ -1141,7 +1145,6 @@ class TestMessagingTools:
         and not the status, which is why a confirmed send is parametrized
         here alongside an unconfirmed one.
         """
-        from linkedin_mcp_server.scraping.extractor import SEND_INTERRUPTED_WARNING
         from linkedin_mcp_server.tools.messaging import register_messaging_tools
 
         mock_extractor = _make_mock_extractor({})
@@ -1563,7 +1566,7 @@ class TestFeedTools:
         """Rate-limit sentinel becomes a typed section_errors entry."""
         mock_extractor = MagicMock()
         mock_extractor.extract_feed = AsyncMock(
-            return_value=ExtractedSection(text=_RATE_LIMITED_MSG, references=[])
+            return_value=ExtractedSection(text=RATE_LIMITED_SECTION_TEXT, references=[])
         )
 
         from linkedin_mcp_server.tools.feed import register_feed_tools
@@ -1575,7 +1578,10 @@ class TestFeedTools:
         result = await tool_fn(mock_context, extractor=mock_extractor)
         assert "feed" not in result["sections"]
         assert result["section_errors"]["feed"]["error_type"] == "rate_limit"
-        assert result["section_errors"]["feed"]["error_message"] == _RATE_LIMITED_MSG
+        assert (
+            result["section_errors"]["feed"]["error_message"]
+            == RATE_LIMITED_SECTION_TEXT
+        )
 
     async def test_get_feed_returns_section_errors(self, mock_context):
         mock_extractor = MagicMock()

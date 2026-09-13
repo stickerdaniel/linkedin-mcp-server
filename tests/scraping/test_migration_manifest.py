@@ -85,10 +85,8 @@ def test_manifest_covers_production_callers_not_only_tests():
     assert production == {
         "linkedin_mcp_server/dependencies.py",
         "linkedin_mcp_server/scraping/__init__.py",
-        "linkedin_mcp_server/scraping/extractor.py",
         "linkedin_mcp_server/tools/company.py",
         "linkedin_mcp_server/tools/feed.py",
-        "linkedin_mcp_server/tools/messaging.py",
         "linkedin_mcp_server/tools/person.py",
         "linkedin_mcp_server/tools/post.py",
     }
@@ -96,15 +94,13 @@ def test_manifest_covers_production_callers_not_only_tests():
         seam["target"]
         for seam in current["seams"]
         if seam["path"].startswith("linkedin_mcp_server/")
-    } == {
-        "_RATE_LIMITED_MSG",
-        "rate_limited_section_error",
-        "FilterValidationError",
-        "SEND_INTERRUPTED_WARNING",
-        "refuse_an_invalid_message",
-        "LinkedInExtractor",
-        "_message_action_result",
-    }
+    } == {"rate_limited_section_error", "FilterValidationError", "LinkedInExtractor"}
+    assert all(
+        seam["kind"] == "permanent_alias_import"
+        for seam in current["seams"]
+        if seam["path"].startswith("linkedin_mcp_server/")
+        and seam["target"] != "LinkedInExtractor"
+    )
 
 
 def test_final_messaging_seams_have_only_the_approved_stage_owners():
@@ -114,10 +110,10 @@ def test_final_messaging_seams_have_only_the_approved_stage_owners():
         for seam in current
         if seam["path"] == "linkedin_mcp_server/tools/messaging.py"
     }
-    assert browser_free == {
-        "SEND_INTERRUPTED_WARNING": ("contracts.SEND_INTERRUPTED_WARNING", 1),
-        "refuse_an_invalid_message": ("contracts.refuse_an_invalid_message", 1),
-    }
+    # The tool imports both browser-free contracts from their owner. Keeping
+    # either on the extractor facade would create a Stage 1 seam that can go
+    # stale when the facade is decomposed.
+    assert browser_free == {}
 
     message_paths = {
         "tests/test_message_recipient_dom.py",
@@ -328,8 +324,10 @@ def test_manifest_is_canonical_portable_json():
 
 
 def test_checker_rejects_obsolete_seams_at_their_migration_stage():
+    # One stage ahead of the tree, which is the smallest override the gate
+    # accepts and the only one that can still surface an unclosed seam.
     result = subprocess.run(
-        [sys.executable, str(CHECKER), "--check", "--stage", "1"],
+        [sys.executable, str(CHECKER), "--check", "--stage", "2"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -337,7 +335,7 @@ def test_checker_rejects_obsolete_seams_at_their_migration_stage():
     )
 
     assert result.returncode == 1
-    assert "obsolete at stage 1:" in result.stderr
+    assert "obsolete at stage 2:" in result.stderr
     assert "direct_import" in result.stderr
 
 
@@ -963,8 +961,8 @@ def test_manifest_includes_extractor_access_from_nested_closure():
         (seam["line"], seam["canonical_owner"], seam["migration_stage"])
         for seam in accesses
     } == {
-        (1009, "session.ScrapingSession._scroll_seconds", 3),
-        (4307, "session.ScrapingSession._scroll_seconds", 3),
+        (1005, "session.ScrapingSession._scroll_seconds", 3),
+        (4303, "session.ScrapingSession._scroll_seconds", 3),
     }
 
 
