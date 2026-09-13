@@ -22,7 +22,9 @@ from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.session import ScrapingSession
 from linkedin_mcp_server.scraping.text import (
     DETAIL_CAPTURE_EN_US,
+    JOB_POSTING_EN_US,
     DetailCaptureTextTable,
+    JobPostingTextTable,
     filter_linkedin_noise_lines,
     truncate_linkedin_noise,
 )
@@ -45,6 +47,7 @@ class CaptureMode(Flag):
     COMPANY_PEOPLE = auto()
     DETAILS = auto()
     OVERLAY = auto()
+    JOB_POSTING = auto()
 
 
 @dataclass(frozen=True)
@@ -81,11 +84,13 @@ class SectionCapture:
         navigator: PageNavigator,
         content: PageContentReader,
         detail_text: DetailCaptureTextTable = DETAIL_CAPTURE_EN_US,
+        job_posting_text: JobPostingTextTable = JOB_POSTING_EN_US,
     ):
         self._session = session
         self._navigator = navigator
         self._content = content
         self._detail_text = detail_text
+        self._job_posting_text = job_posting_text
 
     async def extract_page(
         self,
@@ -247,6 +252,20 @@ class SectionCapture:
                 except Exception as e:
                     logger.debug("Show more click failed: %s", e)
                     break
+
+        # A posting renders its header, apply controls and company boilerplate
+        # before the description panel, so a page read once `<main>` exists
+        # can come back whole except for the description. Nothing structural
+        # marks the panel as loaded; its heading is the only signal, hence the
+        # locale table. A timeout still extracts what rendered.
+        if CaptureMode.JOB_POSTING in plan.mode:
+            try:
+                await self._session.page.wait_for_function(
+                    self._job_posting_text.readiness_expression(),
+                    timeout=10000,
+                )
+            except PlaywrightTimeoutError:
+                logger.debug("Job description did not appear on %s", url)
 
         if CaptureMode.ACTIVITY in plan.mode:
             scrolls = plan.max_scrolls if plan.max_scrolls is not None else 10

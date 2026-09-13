@@ -12,7 +12,11 @@ import time
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.core.exceptions import LinkedInScraperException
 from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
-from linkedin_mcp_server.scraping.capture import CapturePlan, SectionCapture
+from linkedin_mcp_server.scraping.capture import (
+    CaptureMode,
+    CapturePlan,
+    SectionCapture,
+)
 from linkedin_mcp_server.scraping.contracts import (
     RATE_LIMITED_SECTION_TEXT,
     rate_limited_section_error,
@@ -73,7 +77,7 @@ class JobScraper:
         extracted = await self._capture.capture(
             url,
             section_name="job_posting",
-            plan=CapturePlan(),
+            plan=CapturePlan(CaptureMode.JOB_POSTING),
         )
 
         sections: dict[str, str] = {}
