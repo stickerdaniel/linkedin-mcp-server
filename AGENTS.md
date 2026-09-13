@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+- Before changing repository knowledge, invariant comments, or temporary migration artifacts, read the [knowledge policy](docs/knowledge-policy.md).
+
 ## Development Commands
 
 - Use `uv` for dependency management: `uv sync` (dev: `uv sync --group dev`)
