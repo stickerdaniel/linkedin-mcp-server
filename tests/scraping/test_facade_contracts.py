@@ -64,10 +64,11 @@ TOOL_DELEGATES = {
 # the on-disk cache or the job ledger; a tuple lists every facade method a
 # tool reaches, and none of them may reach past TOOL_FACADE_METHODS.
 ENRICHMENT_TOOL_DELEGATES: dict[str, tuple[str, ...]] = {
-    "enrich_companies": ("search_companies",),
+    "enrich_companies": ("search_companies", "scrape_company"),
     "enrich_company_deep": ("scrape_company", "extract_page"),
     "get_company_cache": (),
     "get_enrichment_status": (),
+    "query_company_cache": (),
     "run_enrichment_bunch": ("scrape_person",),
     "start_enrichment_job": (),
 }
@@ -130,10 +131,10 @@ async def test_registered_tools_and_extractor_delegates_are_counted_separately()
     tools = await create_mcp_server().list_tools()
     tool_names = {tool.name for tool in tools}
 
-    assert len(tool_names) == 25
+    assert len(tool_names) == 26
     assert tool_names == {*TOOL_DELEGATES, *ENRICHMENT_TOOL_DELEGATES, "close_session"}
     assert len(TOOL_DELEGATES) == 18
-    assert len(ENRICHMENT_TOOL_DELEGATES) == 6
+    assert len(ENRICHMENT_TOOL_DELEGATES) == 7
     assert TOOL_DELEGATES.keys().isdisjoint(ENRICHMENT_TOOL_DELEGATES)
     assert set(TOOL_DELEGATES.values()) == TOOL_FACADE_METHODS
     reached = {
@@ -288,7 +289,7 @@ def test_profile_urn_callback_does_not_retain_the_facade(mock_page):
 
 async def test_facade_search_posts_forwards_its_recency_filter(mock_page):
     # The scroll depth is held by the `search-posts` trace, which runs the
-    # facade with `max_pages=2` and records the scrolls it buys. The recency
+    # facade with `max_posts=2` and records the scrolls it buys. The recency
     # filter is not: no scenario passes one, and replacing the forward with
     # `None` survived the whole suite. Pinned here against the real owner,
     # because dropping it answers a filtered request with unfiltered results

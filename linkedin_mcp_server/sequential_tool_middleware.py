@@ -61,6 +61,7 @@ class SequentialToolExecutionMiddleware(Middleware):
             "start_enrichment_job",
             # Closes the browser; the only page it touches is the one going away.
             "close_session",
+            "query_company_cache",
         }
     )
 

@@ -70,7 +70,7 @@
       },
       "search_companies": {
         "coroutine": true,
-        "signature": "(self, keywords: 'str') -> 'dict[str, Any]'"
+        "signature": "(self, keywords: 'str | None' = None, industry: 'list[str] | None' = None, size: 'list[str] | None' = None, hq_location: 'str | None' = None, has_jobs: 'bool | None' = None, max_pages: 'int' = 1) -> 'dict[str, Any]'"
       },
       "search_conversations": {
         "coroutine": true,
@@ -82,11 +82,11 @@
       },
       "search_people": {
         "coroutine": true,
-        "signature": "(self, keywords: 'str', location: 'str | None' = None, network: 'list[str] | None' = None, current_company: 'str | None' = None, max_pages: 'int' = 1) -> 'dict[str, Any]'"
+        "signature": "(self, keywords: 'str | None' = None, location: 'str | None' = None, network: 'list[str] | None' = None, current_company: 'str | list[str] | None' = None, max_pages: 'int' = 1, *, title: 'str | None' = None, past_company: 'str | list[str] | None' = None, industry: 'str | list[str] | None' = None, school: 'str | None' = None, first_name: 'str | None' = None, last_name: 'str | None' = None, profile_language: 'str | list[str] | None' = None) -> 'dict[str, Any]'"
       },
       "search_posts": {
         "coroutine": true,
-        "signature": "(self, keywords: 'str', date_posted: 'str | None' = None, max_pages: 'int' = 3) -> 'dict[str, Any]'"
+        "signature": "(self, keywords: 'str', date_posted: 'str | None' = None, max_posts: 'int' = 10) -> 'dict[str, Any]'"
       },
       "send_message": {
         "coroutine": true,
@@ -160,9 +160,14 @@
         "input": {
           "additionalProperties": false,
           "properties": {
+            "about": {
+              "default": false,
+              "description": "Also read each resolved company's About tab (default\nFalse). One extra navigation per company.",
+              "type": "boolean"
+            },
             "bunch_searches": {
               "default": 8,
-              "description": "Max LinkedIn searches to run this call (default 8,\nceiling 20 unless BUNCH_SEARCHES_MAX moves it; more is\nclamped). Cache hits do not count toward it.",
+              "description": "Max LinkedIn navigations to run this call\n(default 8, ceiling 20 unless BUNCH_SEARCHES_MAX moves it;\nmore is clamped): searches, plus About loads when ``about``\nis on. Cache hits do not count toward it.",
               "minimum": 1,
               "type": "integer"
             },
@@ -572,6 +577,115 @@
           "type": "object"
         }
       },
+      "query_company_cache": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "founded_after": {
+              "anyOf": [
+                {
+                  "maximum": 2100,
+                  "minimum": 1000,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Founded in this year or later."
+            },
+            "founded_before": {
+              "anyOf": [
+                {
+                  "maximum": 2100,
+                  "minimum": 1000,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Founded in this year or earlier."
+            },
+            "headquarters": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Case-insensitive substring of the HQ location."
+            },
+            "hiring": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "True for companies with open roles, False for none. Needs\nopen roles fetched (enrich_company_deep)."
+            },
+            "industry": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Case-insensitive substring of the industry."
+            },
+            "limit": {
+              "default": 50,
+              "description": "Max companies to return (1-500, default 50).",
+              "maximum": 500,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "max_employees": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Upper bound on headcount, same band semantics."
+            },
+            "min_employees": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Lower bound on headcount. Matched against\nLinkedIn's band, so a 51-200 company satisfies 100."
+            }
+          },
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
       "run_enrichment_bunch": {
         "input": {
           "additionalProperties": false,
@@ -618,14 +732,80 @@
         "input": {
           "additionalProperties": false,
           "properties": {
+            "has_jobs": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "When true, only companies with live job listings."
+            },
+            "hq_location": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional headquarters filter: a country or city name\n(e.g., \"Germany\", \"Berlin\"), resolved to LinkedIn's numeric geo\nid through the site's own location dropdown. A name LinkedIn\ndoes not recognize raises an error rather than silently\nreturning worldwide results."
+            },
+            "industry": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional industry filter. Each element is a numeric\nLinkedIn industry id (always works, e.g. \"4\") or one of the\nnames this server knows, case-insensitive: Software\nDevelopment, Technology Information and Internet,\nTelecommunications, Business Consulting and Services,\nBiotechnology Research, Hospitals and Health Care,\nPharmaceutical Manufacturing, Retail, Banking, Insurance,\nFinancial Services, Real Estate, Construction, Advertising\nServices, IT Services and IT Consulting, Staffing and\nRecruiting. The name table is partial; an unknown name raises\nan error listing it, so pass the numeric id for anything else.\nA comma-separated string (\"4,43\") is also accepted, and a bare\nstring splits on every comma: a name that contains one, such\nas \"Technology, Information and Internet\", must be passed\ninside a JSON array or without its comma. The facet's URL\nparameter name and values are unverified against live\nLinkedIn; a wrong name is ignored, so cross-check results."
+            },
             "keywords": {
-              "description": "Search keywords (e.g., \"fintech\", \"anthropic\", \"electric vehicles\")",
-              "type": "string"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Search keywords (e.g., \"fintech\", \"anthropic\", \"electric vehicles\")"
+            },
+            "max_pages": {
+              "default": 1,
+              "description": "Number of result pages to load, 1-10 (default 1).\nLinkedIn returns 10 companies per page. Pagination stops early\nonce a page adds no new companies.",
+              "maximum": 10,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "size": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional headcount filter. Each element is a bucket as\nLinkedIn labels it (\"self-employed\", \"1-10\", \"11-50\",\n\"51-200\", \"201-500\", \"501-1000\", \"1001-5000\", \"5001-10000\",\n\"10001+\") or its facet letter \"A\"-\"I\" in that order.\nA comma-separated string (\"51-200,201-500\") is also accepted.\nThe facet's URL parameter name and values are unverified\nagainst live LinkedIn; a wrong name is ignored, so\ncross-check results."
             }
           },
-          "required": [
-            "keywords"
-          ],
           "type": "object"
         },
         "output": {
@@ -769,6 +949,21 @@
             "current_company": {
               "anyOf": [
                 {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional current-employer filter, one or a list.\nEach is a company name (e.g. \"SAP\"), a /company/<slug> URL, or\nthe numeric company URN id (e.g. \"1115\" for SAP). LinkedIn's\ncurrentCompany facet filters on the id only, so a name or URL\nis resolved to it first (company search, then the company's\nAbout page; cached on disk so a company already looked up\ncosts no navigation). A name that does not resolve raises an\nerror rather than silently returning the unfiltered result\nset. Pass the id directly, as exposed by get_company_profile\nunder references[\"about\"], to skip the resolution. For\ncompany-wide employee demographics (location/education/\nfunction breakdown) plus a slug-based lookup, use\nget_company_employees instead."
+            },
+            "first_name": {
+              "anyOf": [
+                {
                   "type": "string"
                 },
                 {
@@ -776,11 +971,46 @@
                 }
               ],
               "default": null,
-              "description": "Optional current-employer filter. LinkedIn's\ncurrentCompany facet only filters on the numeric company URN id\n(e.g. \"1115\" for SAP); plain company names are accepted by the\nURL but ignored by LinkedIn and return the unfiltered result\nset. Look up a company's URN via get_company_profile -- it is\nexposed under references[\"about\"]. For company-wide employee\ndemographics (location/education/function breakdown) plus a\nslug-based lookup, use get_company_employees instead."
+              "description": "Optional first-name filter (verified live)."
+            },
+            "industry": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional industry filter, one or a list. Each is\nLinkedIn's numeric industry id (e.g. \"4\") or a name this\nserver knows (e.g. \"Software Development\", \"Financial\nServices\"; same table as search_companies). An unknown name\nraises an error listing the known names. The facet's URL\nparameter name and values are unverified against live\nLinkedIn; a wrong name is ignored, so cross-check results."
             },
             "keywords": {
-              "description": "Search keywords (e.g., \"software engineer\", \"recruiter at Google\")",
-              "type": "string"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Free-text query (e.g., \"software engineer\", \"recruiter\nat Google\"). Boolean search works on free LinkedIn: AND, OR,\nNOT, quoted phrases and parentheses, e.g.\n'(\"head of sales\" OR \"VP sales\") AND NOT recruiter'."
+            },
+            "last_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional last-name filter. The facet's URL parameter\nname is unverified against live LinkedIn; a wrong name is\nignored, so cross-check results."
             },
             "location": {
               "anyOf": [
@@ -815,11 +1045,62 @@
               ],
               "default": null,
               "description": "Optional connection-degree filter. Each element is one of\n\"F\" (1st-degree), \"S\" (2nd-degree), \"O\" (3rd-degree and beyond).\nExample: [\"F\"] to only return 1st-degree connections. A single\ntoken (\"F\") or a comma-separated string (\"F,S\") is also\naccepted, for clients that cannot transmit an array."
+            },
+            "past_company": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional past-employer filter; same shapes and\nresolution as current_company. Each unresolved name may cost\nup to two navigations. The facet's URL parameter name is\nunverified against live LinkedIn; a wrong name is ignored,\nso cross-check results."
+            },
+            "profile_language": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional profile-language filter, one or a list\nof two-letter ISO 639-1 codes (e.g. \"en\", \"de\", \"fr\"). The\nfacet's URL parameter name and values are unverified against\nlive LinkedIn; a wrong name is ignored, so cross-check\nresults."
+            },
+            "school": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional school filter, the numeric school id only (a\nname raises an error: LinkedIn's schools search exposes no\nid to resolve it from). To find the id: LinkedIn people\nsearch -> All filters -> School -> pick one; the URL then\nshows schoolFilter=[\"<id>\"]. The facet's URL parameter name\nis unverified against live LinkedIn; a wrong name is\nignored, so cross-check results."
+            },
+            "title": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional current job title, free text (e.g. \"Head of\nSales\"). Measured live (2026-09-12) as silently ignored by\nLinkedIn's current results page: the results did not match\nthe title. Prefer putting the title in keywords as a quoted\nphrase, e.g. '\"VP Engineering\"', which does filter; this\nparameter is kept for a results-page variant that may still\nread it and is never merged into keywords for you. On its\nown it is refused with an error rather than returning an\nunfiltered worldwide list: combine it with another facet\n(location, current_company, ...) or use keywords."
             }
           },
-          "required": [
-            "keywords"
-          ],
           "type": "object"
         },
         "output": {
@@ -847,10 +1128,10 @@
               "description": "Search keywords (e.g., \"Buscamos Unity\", \"AI automation hiring\")",
               "type": "string"
             },
-            "max_pages": {
-              "default": 3,
-              "description": "Scroll depth as result \"pages\" of ~5 scrolls each\n(1-10, default 3). Content search is an infinite scroll, so\nthis caps how far the page is scrolled rather than fetching\ndiscrete pages.",
-              "maximum": 10,
+            "max_posts": {
+              "default": 10,
+              "description": "Stop scrolling once this many results are loaded\n(1-50, default 10). Content search is an infinite scroll, so\nresults are capped by count rather than by page.",
+              "maximum": 50,
               "minimum": 1,
               "type": "integer"
             }

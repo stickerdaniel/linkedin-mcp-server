@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from urllib.parse import quote_plus
 
 import json
@@ -63,6 +64,53 @@ CONTENT_DATE_POSTED_MAP = {
 # Valid tokens for the people-search ``network`` facet.
 # LinkedIn accepts "F" (1st-degree), "S" (2nd-degree), "O" (3rd-degree and beyond).
 NETWORK_TOKENS = ("F", "S", "O")
+# ``profileLanguage`` takes ISO 639-1 codes ("en", "de"); anything else is a typo.
+_PROFILE_LANGUAGE_RE = re.compile(r"[a-z]{2}")
+# ``school`` takes the numeric id ``schoolFilter`` filters on and nothing
+# else: the schools search page carries no ``schoolFilter`` anchor and no
+# numeric id in any ``/school/`` href (measured live 2026-09-12), so a name
+# cannot be resolved to one from here.
+_SCHOOL_ID_RE = re.compile(r"[0-9]+")
+
+# Company-search ``industryCompanyVertical`` facet: LinkedIn's numeric industry ids,
+# keyed by the industry name as the filter dropdown labels it (casefolded,
+# commas stripped, whitespace collapsed -- see ``_normalize_industry_name``).
+# ponytail: partial table; unknown names raise, pass the numeric id
+COMPANY_INDUSTRY_IDS: dict[str, str] = {
+    "software development": "4",
+    "technology information and internet": "6",
+    "telecommunications": "8",
+    "business consulting and services": "11",
+    "biotechnology research": "12",
+    "hospitals and health care": "14",
+    "pharmaceutical manufacturing": "15",
+    "retail": "27",
+    "banking": "41",
+    "insurance": "42",
+    "financial services": "43",
+    "real estate": "44",
+    "construction": "48",
+    "advertising services": "80",
+    "it services and it consulting": "96",
+    "staffing and recruiting": "104",
+}
+
+# Company-search ``companySize`` facet letters, keyed by the headcount bucket
+# as LinkedIn labels it. Callers may pass either side of the mapping. The
+# letters follow LinkedIn's ``staffCountRange`` enum, which starts at
+# self-employed.
+# TODO(live-verify): letters recalled, not measured; a dropdown probe is queued.
+COMPANY_SIZE_LETTERS: dict[str, str] = {
+    "self-employed": "A",
+    "1-10": "B",
+    "11-50": "C",
+    "51-200": "D",
+    "201-500": "E",
+    "501-1000": "F",
+    "1001-5000": "G",
+    "5001-10000": "H",
+    "10001+": "I",
+}
 
 
 def _normalize_csv(value: str, mapping: dict[str, str]) -> str:
@@ -71,14 +119,182 @@ def _normalize_csv(value: str, mapping: dict[str, str]) -> str:
     return ",".join(mapping.get(p, p) for p in parts)
 
 
-def _encode_list_facet(values: list[str]) -> str:
+def _normalize_industry_name(name: str) -> str:
+    """Casefold, drop commas and collapse whitespace for industry lookup.
+
+    LinkedIn labels one entry "Technology, Information and Internet"; a
+    client that transmits list params as a comma-separated string cannot
+    carry that comma, so the lookup ignores it on both sides.
+    """
+    return " ".join(name.replace(",", " ").casefold().split())
+
+
+def as_list(value: str | list[str] | None) -> list[str]:
+    """One value or a list of them, as a list; ``None`` is empty."""
+    if value is None:
+        return []
+    return [value] if isinstance(value, str) else list(value)
+
+
+def _encode_list_facet(values: Sequence[str]) -> str:
     """Encode a list of string values for a LinkedIn search list facet.
 
     LinkedIn's people- and content-search URLs use JSON-list encoded facets of
     the form ``["A","B"]``. This helper URL-encodes the rendered JSON so the
     final URL contains e.g. ``%5B%22F%22%5D`` for ``["F"]``.
     """
-    return quote_plus(json.dumps(values, separators=(",", ":")))
+    return quote_plus(json.dumps(list(values), separators=(",", ":")))
+
+
+def network_tokens(values: list[str] | None) -> list[str]:
+    """The ``network`` facet tokens, refused before a URL exists.
+
+    An unknown token is accepted by the URL and then dropped, which answers
+    with the unfiltered result set while the request still reads as filtered.
+    """
+    tokens = list(values or [])
+    invalid = [t for t in tokens if t not in NETWORK_TOKENS]
+    if invalid:
+        raise FilterValidationError(
+            "Invalid network token(s) "
+            f"{invalid!r}; expected any of {list(NETWORK_TOKENS)!r}"
+        )
+    return tokens
+
+
+def industry_ids(values: str | list[str] | None) -> list[str]:
+    """Numeric industry ids from ids passed verbatim or names in the table.
+
+    Shared by people search (``industry``) and company search
+    (``industryCompanyVertical``); an unknown name raises, listing the names
+    this server knows.
+    """
+    ids: list[str] = []
+    for raw in as_list(values):
+        token = raw.strip()
+        if re.fullmatch(r"[0-9]+", token):
+            ids.append(token)
+            continue
+        mapped = COMPANY_INDUSTRY_IDS.get(_normalize_industry_name(token))
+        if mapped is None:
+            raise FilterValidationError(
+                f"Unknown industry {raw!r}; pass LinkedIn's numeric industry "
+                f"id, or one of the names this server knows: "
+                f"{list(COMPANY_INDUSTRY_IDS)!r}"
+            )
+        ids.append(mapped)
+    return ids
+
+
+def company_size_letters(values: str | list[str] | None) -> list[str]:
+    """``companySize`` facet letters from letters or headcount buckets."""
+    letters: list[str] = []
+    for raw in as_list(values):
+        token = raw.strip()
+        if token.upper() in COMPANY_SIZE_LETTERS.values():
+            letters.append(token.upper())
+            continue
+        mapped = COMPANY_SIZE_LETTERS.get(token.casefold())
+        if mapped is None:
+            raise FilterValidationError(
+                f"Unknown company size {raw!r}; expected a headcount bucket "
+                f"{list(COMPANY_SIZE_LETTERS)!r} or a facet letter "
+                f"{list(COMPANY_SIZE_LETTERS.values())!r}"
+            )
+        letters.append(mapped)
+    return letters
+
+
+def profile_languages(values: str | list[str] | None) -> list[str]:
+    """Lower-cased ISO 639-1 codes for ``profileLanguage``; anything else raises."""
+    languages = [code.strip().lower() for code in as_list(values)]
+    invalid = [code for code in languages if not _PROFILE_LANGUAGE_RE.fullmatch(code)]
+    if invalid:
+        raise FilterValidationError(
+            f"Invalid profile_language {invalid!r}; expected "
+            'two-letter ISO 639-1 codes such as "en"'
+        )
+    return languages
+
+
+def school_id(value: str | None) -> str | None:
+    """The numeric ``schoolFilter`` id, or None when no school was given.
+
+    A name is refused: nothing on LinkedIn's schools search page resolves it
+    to the id (see ``_SCHOOL_ID_RE``), and the message says where to find it.
+    """
+    token = value.strip() if value else None
+    if token and not _SCHOOL_ID_RE.fullmatch(token):
+        raise FilterValidationError(
+            f"Invalid school {value!r}; pass the numeric school id. Find it "
+            "on LinkedIn: people search -> All filters -> School -> pick "
+            'one, then the URL shows schoolFilter=["<id>"].'
+        )
+    return token or None
+
+
+def require_people_criteria(
+    *,
+    keywords: str | None = None,
+    location: str | None = None,
+    network: list[str] | None = None,
+    current_companies: Sequence[str] = (),
+    past_companies: Sequence[str] = (),
+    industry_ids: Sequence[str] = (),
+    school_id: str | None = None,
+    first_name: str | None = None,
+    last_name: str | None = None,
+    languages: Sequence[str] = (),
+    title: str | None = None,
+) -> None:
+    """Refuse a people search that would navigate for the unfiltered list.
+
+    Every argument is the already-validated form (ids, not names), so this
+    runs after the pure validators and before any navigation: a search with
+    no criterion, or with a title alone, never costs a page load.
+    """
+    other_criteria = (
+        keywords,
+        location,
+        network,
+        current_companies,
+        past_companies,
+        industry_ids,
+        school_id,
+        first_name,
+        last_name,
+        languages,
+    )
+    if not any(other_criteria) and not title:
+        raise FilterValidationError(
+            "search_people needs at least one of keywords, location, network, "
+            "current_company, past_company, title, industry, school, "
+            "first_name, last_name or profile_language"
+        )
+    # LinkedIn ignores titleFreeText (measured live), so a title on its
+    # own would navigate and return the unfiltered worldwide list.
+    if title and not any(other_criteria):
+        raise FilterValidationError(
+            "search_people cannot filter by title alone: LinkedIn ignores "
+            "titleFreeText. Put the title in keywords as a quoted phrase "
+            f"(keywords='\"{title}\"'), or combine title with another "
+            "facet such as location or current_company"
+        )
+
+
+def require_company_criteria(
+    *,
+    keywords: str | None = None,
+    industry_ids: Sequence[str] = (),
+    size_letters: Sequence[str] = (),
+    hq_location: str | None = None,
+) -> None:
+    """Refuse a company search with nothing to narrow the result set."""
+    if not (keywords or industry_ids or size_letters or hq_location):
+        raise FilterValidationError(
+            "search_companies needs at least one of keywords, industry, "
+            "size or hq_location"
+        )
 
 
 def build_job_search_url(
@@ -120,61 +336,97 @@ def build_job_search_url(
 
 
 def build_people_search_url(
-    keywords: str,
+    keywords: str | None = None,
+    *,
     geo_id: str | None = None,
     network: list[str] | None = None,
-    current_company: str | None = None,
+    current_company_ids: Sequence[str] = (),
+    past_company_ids: Sequence[str] = (),
+    industry_ids: Sequence[str] = (),
+    school_id: str | None = None,
+    title: str | None = None,
+    first_name: str | None = None,
+    last_name: str | None = None,
+    languages: Sequence[str] = (),
 ) -> str:
-    """Build a LinkedIn people search URL, refusing filters LinkedIn ignores.
+    """Build a LinkedIn people search URL from already-resolved facet values.
 
-    Both refusals happen before a URL exists, so a workflow calling this can
-    never navigate on a filter LinkedIn would swallow. An unknown ``network``
-    token and a plain-text ``currentCompany`` are each accepted by the URL and
-    then dropped, which answers with the unfiltered result set while the
-    request still reads as filtered. A free-text ``location`` is swallowed
-    the same way, so the location facet takes only the numeric ``geo_id``
-    LinkedIn's own dropdown produced (``FacetResolver.resolve_geo_urn``),
-    sent as ``geoUrn``.
+    Every facet that LinkedIn filters on by id (``geoUrn``, ``currentCompany``,
+    ``pastCompany``, ``industry``, ``schoolFilter``) takes the id here: a name
+    in any of them is accepted by the URL and then dropped, which answers with
+    the unfiltered result set while the request still reads as filtered, so
+    names are resolved or refused before this is called. ``network`` tokens
+    are validated again here so the builder is safe to call on its own; the
+    check is pure and costs nothing.
     """
-    if network is not None:
-        invalid = [t for t in network if t not in NETWORK_TOKENS]
-        if invalid:
-            raise FilterValidationError(
-                "Invalid network token(s) "
-                f"{invalid!r}; expected any of {list(NETWORK_TOKENS)!r}"
-            )
+    network = network_tokens(network)
 
-    if current_company and not re.fullmatch(r"[0-9]+", current_company):
-        raise FilterValidationError(
-            f"current_company must be a numeric LinkedIn company URN id "
-            f"(e.g. '1115' for SAP); got {current_company!r}. Plain-text "
-            f"company names are silently ignored by LinkedIn. Look up the "
-            f'URN via get_company_profile -> references["about"].'
-        )
-
-    params = f"keywords={quote_plus(keywords)}"
+    params: list[str] = []
+    if keywords:
+        params.append(f"keywords={quote_plus(keywords)}")
     if geo_id:
-        params += f"&geoUrn={_encode_list_facet([geo_id])}"
+        params.append(f"geoUrn={_encode_list_facet([geo_id])}")
     if network:
-        params += f"&network={_encode_list_facet(network)}"
-    if current_company:
-        params += f"&currentCompany={_encode_list_facet([current_company])}"
+        params.append(f"network={_encode_list_facet(network)}")
+    if current_company_ids:
+        params.append(f"currentCompany={_encode_list_facet(current_company_ids)}")
+    # TODO(live-verify): facet names unconfirmed (pastCompany, industry,
+    # schoolFilter, lastName, profileLanguage). currentCompany, firstName
+    # and a keyword-less search were confirmed live on 2026-09-12.
+    if past_company_ids:
+        params.append(f"pastCompany={_encode_list_facet(past_company_ids)}")
+    if industry_ids:
+        params.append(f"industry={_encode_list_facet(industry_ids)}")
+    if school_id:
+        params.append(f"schoolFilter={_encode_list_facet([school_id])}")
+    if title:
+        # live-verified: ignored on 2026-09-12 in the SDUI variant. Kept
+        # because another results-page variant may still read it; the
+        # tool docstring steers callers to a quoted phrase in keywords.
+        params.append(f"titleFreeText={quote_plus(title)}")
+    if first_name:
+        params.append(f"firstName={quote_plus(first_name)}")
+    if last_name:
+        params.append(f"lastName={quote_plus(last_name)}")
+    if languages:
+        params.append(f"profileLanguage={_encode_list_facet(languages)}")
 
-    return f"https://www.linkedin.com/search/results/people/?{params}"
+    return "https://www.linkedin.com/search/results/people/?" + "&".join(params)
 
 
-def build_company_search_url(keywords: str) -> str:
-    """Build a LinkedIn company search URL.
+def build_company_search_url(
+    keywords: str | None = None,
+    *,
+    industry_ids: Sequence[str] = (),
+    size_letters: Sequence[str] = (),
+    geo_id: str | None = None,
+    has_jobs: bool = False,
+) -> str:
+    """Build a LinkedIn company search URL from already-resolved facet values.
 
-    One parameter today, and a function anyway: every search URL this server
-    navigates to is then written in one place, so the next caller has nothing
-    to assemble by hand and no second spelling of the host and route to keep
-    in step with the other three.
+    Facets narrow the result set on LinkedIn's side, so a shortlist built
+    from one costs a navigation per page rather than one per company. Ids and
+    letters arrive validated (``industry_ids``, ``company_size_letters``) and
+    the headquarters as the geo id its own dropdown produced.
     """
-    return (
-        "https://www.linkedin.com/search/results/companies/"
-        f"?keywords={quote_plus(keywords)}"
-    )
+    params: list[str] = []
+    if keywords:
+        params.append(f"keywords={quote_plus(keywords)}")
+    if industry_ids:
+        # ``companyIndustry`` is stripped by LinkedIn (measured live
+        # 2026-09-12); this is the name its own company-filter UI writes.
+        # TODO(live-verify): industryCompanyVertical unconfirmed
+        params.append(f"industryCompanyVertical={_encode_list_facet(industry_ids)}")
+    if size_letters:
+        params.append(f"companySize={_encode_list_facet(size_letters)}")
+    if geo_id:
+        params.append(f"companyHqGeo={_encode_list_facet([geo_id])}")
+    if has_jobs:
+        # The JSON-string form LinkedIn normalises a bare ``true`` to
+        # (measured live 2026-09-12), sent directly.
+        params.append("hasJobs=%22true%22")
+
+    return "https://www.linkedin.com/search/results/companies/?" + "&".join(params)
 
 
 def build_content_search_url(

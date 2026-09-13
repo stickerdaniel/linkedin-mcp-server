@@ -18,6 +18,7 @@ from linkedin_mcp_server.common_utils import harden_linkedin_tree, secure_mkdir
 from linkedin_mcp_server.core import (
     AuthenticationError,
     BrowserManager,
+    NetworkError,
     await_deferring_cancels,
     detect_auth_barrier_quick,
     detect_rate_limit,
@@ -189,7 +190,14 @@ async def _feed_auth_succeeds(
     *,
     allow_remember_me: bool = True,
 ) -> bool:
-    """Validate that /feed/ loads without an auth barrier."""
+    """Validate that /feed/ loads without an auth barrier.
+
+    False means a barrier was seen: the only evidence of an expired session.
+    A navigation that fails without one raises :class:`NetworkError` (or
+    :class:`ProxyConnectionError` under a proxy), so callers that turn False
+    into an ``AuthenticationError`` never do so for a page that merely did not
+    finish loading.
+    """
     try:
         await goto_reporting_proxy_errors(
             browser.page,
@@ -221,13 +229,20 @@ async def _feed_auth_succeeds(
             await _log_feed_failure_context(browser, barrier)
             return False
         return True
+    except NetworkError:
+        # Already classified: the remember-me retries above run inside this
+        # try, and the inner call has done the probing, tracing and logging
+        # below once. Letting it fall through re-probed the prompt on a page
+        # that had failed, wrote a second feed-navigation-error trace, and
+        # wrapped the message twice.
+        raise
     except Exception as exc:
         # Before anything else: a proxy fault is not a dead session. Returning
         # False here would have the caller retire a valid profile and tell the
         # user to log in again, which cannot fix an unreachable proxy. Checked
         # first because no page loaded, so there is no remember-me prompt to
-        # resolve, and it also catches a ProxyConnectionError raised by the
-        # recursive retries above, which run inside this try.
+        # resolve. The goto is already wrapped; this covers a raw driver error
+        # from the other awaits in the try.
         raise_if_proxy_error(exc)
         if allow_remember_me and await resolve_remember_me_prompt(browser.page):
             await stabilize_navigation(
@@ -256,17 +271,27 @@ async def _feed_auth_succeeds(
         # and both destinations here outlive the call -- the trace is written to
         # disk and the log is what users paste into issue reports.
         await _log_feed_failure_context(browser, detail)
-        if barrier is None:
-            # Nothing loaded and no barrier, so nothing proves the session is
-            # dead -- and with a proxy in front, the most likely cause is the
-            # proxy. Wrong credentials in particular produce no proxy error code
-            # at all: Chromium retries the 407 challenge until the navigation
-            # times out (verified against a local authenticating relay), so the
-            # marker check above cannot catch it. Reporting False would hand the
-            # caller an AuthenticationError, whose recovery moves the stored
-            # profile aside and starts a login through the same broken proxy.
-            raise_if_proxy_configured(exc)
-        return False
+        if barrier is not None:
+            return False
+        # Nothing loaded and no barrier, so nothing proves the session is
+        # dead -- and with a proxy in front, the most likely cause is the
+        # proxy. Wrong credentials in particular produce no proxy error code
+        # at all: Chromium retries the 407 challenge until the navigation
+        # times out (verified against a local authenticating relay), so the
+        # marker check above cannot catch it. Reporting False would hand the
+        # caller an AuthenticationError, whose recovery moves the stored
+        # profile aside and starts a login through the same broken proxy.
+        raise_if_proxy_configured(exc)
+        # Without a proxy the same holds: a navigation that did not finish is
+        # not evidence of expiry, only a barrier is. Measured: /feed/ rendered
+        # logged in (title, name, li_at present) and the load event still ran
+        # past 30 s, and reporting False rotated that working session into
+        # invalid-state-*. NetworkError is routed to the tool error without a
+        # rotation; AuthenticationError is what triggers one.
+        raise NetworkError(
+            f"/feed/ did not finish loading and no auth barrier was found "
+            f"({detail}). The saved LinkedIn session was not changed."
+        ) from exc
 
 
 def _launch_options() -> tuple[dict[str, Any], dict[str, int]]:

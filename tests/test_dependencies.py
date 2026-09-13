@@ -201,6 +201,48 @@ class TestGetReadyExtractor:
 
             mock_invalidate.assert_not_called()
 
+    async def test_feed_navigation_failure_does_not_rotate_the_profile(self):
+        """A /feed/ that did not finish loading is a NetworkError, not expiry.
+
+        Measured: the page had rendered logged in and the load event ran past
+        30 s; reading that as a stale session rotated a working profile into
+        invalid-state-*. The auth step now raises NetworkError for it, and that
+        must reach the tool error without a relogin.
+        """
+        err = NetworkError(
+            "/feed/ did not finish loading and no auth barrier was found "
+            "(TimeoutError: Page.goto: Timeout 30000ms exceeded.)"
+        )
+        with (
+            patch(
+                "linkedin_mcp_server.dependencies.ensure_tool_ready_or_raise",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.get_or_create_browser",
+                new_callable=AsyncMock,
+                side_effect=err,
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.handle_auth_error",
+                new_callable=AsyncMock,
+            ) as mock_handle,
+            patch(
+                "linkedin_mcp_server.dependencies.invalidate_auth_and_trigger_relogin",
+                new_callable=AsyncMock,
+            ) as mock_relogin,
+            patch(
+                "linkedin_mcp_server.dependencies.close_browser",
+                new_callable=AsyncMock,
+            ) as mock_close,
+        ):
+            with pytest.raises(ToolError, match="Network error"):
+                await get_ready_extractor(ctx=None, tool_name="test_tool")
+
+            mock_handle.assert_not_awaited()
+            mock_relogin.assert_not_awaited()
+            mock_close.assert_not_awaited()
+
     async def test_mid_scrape_auth_error_triggers_relogin(self):
         """AuthenticationError caught in tool wrapper invokes handle_auth_error."""
         from linkedin_mcp_server.tools.person import register_person_tools

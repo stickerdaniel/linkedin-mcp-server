@@ -866,7 +866,10 @@ async def _single_capture_facade_scenario(method: str) -> dict[str, Any]:
                 arguments = {"keywords": "engine"}
                 result = await extractor.search_companies(**arguments)
             elif method == "search_posts":
-                arguments = {"keywords": "mathematics", "max_pages": 2}
+                # One card before the wheel, two after: the loop reaches
+                # `max_posts` on its first round and stops.
+                page.script("evaluate:content_search_count", 1, 2)
+                arguments = {"keywords": "mathematics", "max_posts": 2}
                 result = await extractor.search_posts(**arguments)
             else:
                 raise AssertionError(method)

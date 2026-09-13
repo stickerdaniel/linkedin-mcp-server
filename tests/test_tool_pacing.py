@@ -161,6 +161,7 @@ class TestLocalOnlyToolsAreNotPaced:
         # Writing a queue to disk and closing the browser are local too.
         await _timed_call(paced, "start_enrichment_job")
         await _timed_call(paced, "close_session")
+        await _timed_call(paced, "query_company_cache")
         assert load_account_budget(store, now).ledger.spent(now) == 0
 
         await _timed_call(paced)
