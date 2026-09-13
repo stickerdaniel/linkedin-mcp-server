@@ -121,7 +121,7 @@ def build_job_search_url(
 
 def build_people_search_url(
     keywords: str,
-    location: str | None = None,
+    geo_id: str | None = None,
     network: list[str] | None = None,
     current_company: str | None = None,
 ) -> str:
@@ -131,7 +131,10 @@ def build_people_search_url(
     never navigate on a filter LinkedIn would swallow. An unknown ``network``
     token and a plain-text ``currentCompany`` are each accepted by the URL and
     then dropped, which answers with the unfiltered result set while the
-    request still reads as filtered.
+    request still reads as filtered. A free-text ``location`` is swallowed
+    the same way, so the location facet takes only the numeric ``geo_id``
+    LinkedIn's own dropdown produced (``FacetResolver.resolve_geo_urn``),
+    sent as ``geoUrn``.
     """
     if network is not None:
         invalid = [t for t in network if t not in NETWORK_TOKENS]
@@ -150,8 +153,8 @@ def build_people_search_url(
         )
 
     params = f"keywords={quote_plus(keywords)}"
-    if location:
-        params += f"&location={quote_plus(location)}"
+    if geo_id:
+        params += f"&geoUrn={_encode_list_facet([geo_id])}"
     if network:
         params += f"&network={_encode_list_facet(network)}"
     if current_company:
