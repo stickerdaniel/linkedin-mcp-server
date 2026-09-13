@@ -441,9 +441,7 @@ def load_from_env(config: AppConfig) -> AppConfig:
     return config
 
 
-def load_from_args(
-    config: AppConfig, argv: list[str] | None = None
-) -> AppConfig:
+def load_from_args(config: AppConfig, argv: list[str] | None = None) -> AppConfig:
     """Load configuration from command line arguments.
 
     ``argv`` is the argument list *without* the program name, as accepted by

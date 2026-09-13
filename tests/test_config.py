@@ -350,9 +350,7 @@ class TestLoaders:
 
         config = load_from_args(AppConfig(), argv=[])
         assert config.server.log_level == "WARNING"
-        config = load_from_args(
-            AppConfig(), argv=["--log-level", "DEBUG"]
-        )
+        config = load_from_args(AppConfig(), argv=["--log-level", "DEBUG"])
         assert config.server.log_level == "DEBUG"
 
     def test_load_from_args_explicit_argv_stays_strict(self, monkeypatch):
@@ -371,6 +369,7 @@ class TestLoaders:
 
         with pytest.raises(SystemExit):
             load_from_args(AppConfig())
+
     def test_load_from_env_headless_false(self, monkeypatch):
         monkeypatch.setenv("HEADLESS", "false")
         from linkedin_mcp_server.config.loaders import load_from_env
