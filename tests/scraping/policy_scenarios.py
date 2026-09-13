@@ -207,17 +207,18 @@ async def boundaries(
         patch.object(navigation_module, "resolve_remember_me_prompt", remember),
         patch.object(navigation_module, "stabilize_navigation", stabilize),
         # Every binding of each shared boundary, because the workflows that
-        # reach it are split across the modules mid-relocation: generic capture
-        # and the feed go through `ScrapingSession`, the job pages import the
-        # helper into `job_pages`, and the conversation and messaging
-        # workflows still call it on the facade. Patching one side only lets
-        # the real helper loose on a scripted page. The scrolls have no facade
-        # binding left at all — the job reader held the last one.
+        # reach it are split across the modules mid-relocation: generic
+        # capture, the feed and the conversation reader go through
+        # `ScrapingSession`, the job pages import the helper into `job_pages`,
+        # and `send_message` still calls the rate-limit check on the facade.
+        # Patching one side only lets the real helper loose on a scripted
+        # page. The scrolls have no facade binding left at all — the job
+        # reader held the last one — and neither has the modal close, whose
+        # last facade caller left with the conversation reader.
         patch.object(session_module, "detect_rate_limit", rate_limit),
         patch.object(extractor_module, "detect_rate_limit", rate_limit),
         patch.object(job_pages_module, "detect_rate_limit", rate_limit),
         patch.object(session_module, "handle_modal_close", modal),
-        patch.object(extractor_module, "handle_modal_close", modal),
         patch.object(job_pages_module, "handle_modal_close", modal),
         patch.object(session_module, "scroll_to_bottom", scroll_body),
         patch.object(job_pages_module, "scroll_to_bottom", scroll_body),

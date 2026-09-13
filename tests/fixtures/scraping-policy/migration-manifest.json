@@ -67,36 +67,12 @@
       "target": "LinkedInExtractor"
     },
     {
-      "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.check_rate_limit",
-      "kind": "boundary_patch_object",
-      "line": 217,
-      "migration_stage": 11,
-      "path": "tests/scraping/policy_scenarios.py",
-      "target": "detect_rate_limit"
-    },
-    {
       "canonical_owner": "message_sender.MessageSender -> session.ScrapingSession.check_rate_limit",
       "kind": "boundary_patch_object",
-      "line": 217,
+      "line": 219,
       "migration_stage": 12,
       "path": "tests/scraping/policy_scenarios.py",
       "target": "detect_rate_limit"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.dismiss_modal",
-      "kind": "boundary_patch_object",
-      "line": 220,
-      "migration_stage": 11,
-      "path": "tests/scraping/policy_scenarios.py",
-      "target": "handle_modal_close"
-    },
-    {
-      "canonical_owner": "message_sender.MessageSender -> session.ScrapingSession.dismiss_modal",
-      "kind": "boundary_patch_object",
-      "line": 220,
-      "migration_stage": 12,
-      "path": "tests/scraping/policy_scenarios.py",
-      "target": "handle_modal_close"
     },
     {
       "canonical_owner": "facade.LinkedInExtractor",
@@ -109,7 +85,7 @@
     {
       "canonical_owner": "facade.LinkedInExtractor",
       "kind": "direct_import",
-      "line": 23,
+      "line": 25,
       "migration_stage": 14,
       "path": "tests/scraping/test_facade_contracts.py",
       "target": "LinkedInExtractor"
@@ -117,7 +93,7 @@
     {
       "canonical_owner": "contracts.ExtractedSection",
       "kind": "permanent_alias_import",
-      "line": 23,
+      "line": 25,
       "migration_stage": null,
       "path": "tests/scraping/test_facade_contracts.py",
       "target": "ExtractedSection"
@@ -125,7 +101,7 @@
     {
       "canonical_owner": "contracts.FilterValidationError",
       "kind": "permanent_alias_import",
-      "line": 23,
+      "line": 25,
       "migration_stage": null,
       "path": "tests/scraping/test_facade_contracts.py",
       "target": "FilterValidationError"
@@ -133,7 +109,7 @@
     {
       "canonical_owner": "contracts.rate_limited_section_error",
       "kind": "permanent_alias_import",
-      "line": 23,
+      "line": 25,
       "migration_stage": null,
       "path": "tests/scraping/test_facade_contracts.py",
       "target": "rate_limited_section_error"
@@ -141,7 +117,7 @@
     {
       "canonical_owner": "text.strip_conversation_chrome",
       "kind": "permanent_alias_import",
-      "line": 23,
+      "line": 25,
       "migration_stage": null,
       "path": "tests/scraping/test_facade_contracts.py",
       "target": "strip_conversation_chrome"
@@ -149,7 +125,7 @@
     {
       "canonical_owner": "text.strip_linkedin_noise",
       "kind": "permanent_alias_import",
-      "line": 23,
+      "line": 25,
       "migration_stage": null,
       "path": "tests/scraping/test_facade_contracts.py",
       "target": "strip_linkedin_noise"
@@ -157,7 +133,7 @@
     {
       "canonical_owner": "facade.LinkedInExtractor._page",
       "kind": "private_facade_access",
-      "line": 85,
+      "line": 90,
       "migration_stage": 14,
       "path": "tests/scraping/test_facade_contracts.py",
       "target": "_page"
@@ -165,7 +141,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 301,
+      "line": 386,
       "migration_stage": 12,
       "path": "tests/scraping/test_facade_contracts.py",
       "target": "_read_profile_message_target"
@@ -549,7 +525,7 @@
     {
       "canonical_owner": "owner-local scraping modules",
       "kind": "module_alias",
-      "line": 22,
+      "line": 19,
       "migration_stage": 14,
       "path": "tests/test_scraping.py",
       "target": "extractor_module"
@@ -557,7 +533,7 @@
     {
       "canonical_owner": "facade.LinkedInExtractor",
       "kind": "direct_import",
-      "line": 25,
+      "line": 22,
       "migration_stage": 14,
       "path": "tests/test_scraping.py",
       "target": "LinkedInExtractor"
@@ -565,7 +541,7 @@
     {
       "canonical_owner": "message_sender.MESSAGE_COMPOSER_OWNER_JS",
       "kind": "direct_import",
-      "line": 25,
+      "line": 22,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_MESSAGE_COMPOSER_OWNER_JS"
@@ -573,7 +549,7 @@
     {
       "canonical_owner": "message_sender.MESSAGE_CONFIRMATION_DISPOSE_JS",
       "kind": "direct_import",
-      "line": 25,
+      "line": 22,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_MESSAGE_CONFIRMATION_DISPOSE_JS"
@@ -581,7 +557,7 @@
     {
       "canonical_owner": "message_sender.MESSAGE_CONFIRMATION_PREPARE_JS",
       "kind": "direct_import",
-      "line": 25,
+      "line": 22,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_MESSAGE_CONFIRMATION_PREPARE_JS"
@@ -589,7 +565,7 @@
     {
       "canonical_owner": "message_sender.MESSAGE_CONFIRMATION_READY_JS",
       "kind": "direct_import",
-      "line": 25,
+      "line": 22,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_MESSAGE_CONFIRMATION_READY_JS"
@@ -597,7 +573,7 @@
     {
       "canonical_owner": "contracts.ExtractedSection",
       "kind": "permanent_alias_import",
-      "line": 25,
+      "line": 22,
       "migration_stage": null,
       "path": "tests/test_scraping.py",
       "target": "ExtractedSection"
@@ -605,7 +581,7 @@
     {
       "canonical_owner": "message_sender.profile_urn_from_compose_url",
       "kind": "module_attribute",
-      "line": 246,
+      "line": 243,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_profile_urn_from_compose_url"
@@ -613,7 +589,7 @@
     {
       "canonical_owner": "message_sender.profile_path_from_url",
       "kind": "module_attribute",
-      "line": 264,
+      "line": 261,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_profile_path_from_url"
@@ -621,911 +597,15 @@
     {
       "canonical_owner": "message_sender.message_page_url_is_safe",
       "kind": "module_attribute",
-      "line": 325,
+      "line": 322,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_message_page_url_is_safe"
     },
     {
-      "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.check_rate_limit",
-      "kind": "string_patch",
-      "line": 360,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.dismiss_modal",
-      "kind": "string_patch",
-      "line": 364,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader",
-      "kind": "private_patch_object",
-      "line": 368,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_wait_for_main_text"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader",
-      "kind": "private_patch_object",
-      "line": 373,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_scroll_main_scrollable_region"
-    },
-    {
-      "canonical_owner": "content.PageContentReader",
-      "kind": "private_patch_object",
-      "line": 378,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_root_content"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> facade.LinkedInExtractor._content",
-      "kind": "private_facade_access",
-      "line": 379,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_content"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> text.strip_linkedin_noise",
-      "kind": "string_patch",
-      "line": 387,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> link_metadata.build_references",
-      "kind": "string_patch",
-      "line": 391,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.build_references"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader",
-      "kind": "private_patch_object",
-      "line": 395,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_conversation_thread_refs"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.check_rate_limit",
-      "kind": "string_patch",
-      "line": 413,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.dismiss_modal",
-      "kind": "string_patch",
-      "line": 417,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader",
-      "kind": "private_patch_object",
-      "line": 421,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_wait_for_main_text"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader",
-      "kind": "private_patch_object",
-      "line": 422,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_scroll_main_scrollable_region"
-    },
-    {
-      "canonical_owner": "content.PageContentReader",
-      "kind": "private_patch_object",
-      "line": 425,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_root_content"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> facade.LinkedInExtractor._content",
-      "kind": "private_facade_access",
-      "line": 426,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_content"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> text.strip_linkedin_noise",
-      "kind": "string_patch",
-      "line": 431,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader",
-      "kind": "private_patch_object",
-      "line": 435,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_conversation_thread_refs"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.check_rate_limit",
-      "kind": "string_patch",
-      "line": 465,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.dismiss_modal",
-      "kind": "string_patch",
-      "line": 469,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader",
-      "kind": "private_patch_object",
-      "line": 473,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_wait_for_main_text"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader",
-      "kind": "private_patch_object",
-      "line": 474,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_scroll_main_scrollable_region"
-    },
-    {
-      "canonical_owner": "content.PageContentReader",
-      "kind": "private_patch_object",
-      "line": 477,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_root_content"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> facade.LinkedInExtractor._content",
-      "kind": "private_facade_access",
-      "line": 478,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_content"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> text.strip_linkedin_noise",
-      "kind": "string_patch",
-      "line": 486,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> link_metadata.build_references",
-      "kind": "string_patch",
-      "line": 490,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.build_references"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader",
-      "kind": "private_patch_object",
-      "line": 494,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_conversation_thread_refs"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.check_rate_limit",
-      "kind": "string_patch",
-      "line": 518,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.dismiss_modal",
-      "kind": "string_patch",
-      "line": 522,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader",
-      "kind": "private_patch_object",
-      "line": 526,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_wait_for_main_text"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader",
-      "kind": "private_patch_object",
-      "line": 527,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_scroll_main_scrollable_region"
-    },
-    {
-      "canonical_owner": "content.PageContentReader",
-      "kind": "private_patch_object",
-      "line": 530,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_root_content"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> facade.LinkedInExtractor._content",
-      "kind": "private_facade_access",
-      "line": 531,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_content"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> text.strip_linkedin_noise",
-      "kind": "string_patch",
-      "line": 536,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> link_metadata.build_references",
-      "kind": "string_patch",
-      "line": 540,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.build_references"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.check_rate_limit",
-      "kind": "string_patch",
-      "line": 564,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.dismiss_modal",
-      "kind": "string_patch",
-      "line": 568,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader",
-      "kind": "private_patch_object",
-      "line": 572,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_wait_for_main_text"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader",
-      "kind": "private_patch_object",
-      "line": 573,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_scroll_main_scrollable_region"
-    },
-    {
-      "canonical_owner": "content.PageContentReader",
-      "kind": "private_patch_object",
-      "line": 576,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_root_content"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> facade.LinkedInExtractor._content",
-      "kind": "private_facade_access",
-      "line": 577,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_content"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> link_metadata.build_references",
-      "kind": "string_patch",
-      "line": 582,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.build_references"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.check_rate_limit",
-      "kind": "string_patch",
-      "line": 604,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.dismiss_modal",
-      "kind": "string_patch",
-      "line": 608,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader",
-      "kind": "private_patch_object",
-      "line": 612,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_wait_for_main_text"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader",
-      "kind": "private_patch_object",
-      "line": 613,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_scroll_main_scrollable_region"
-    },
-    {
-      "canonical_owner": "profile_page.ProfilePageReader",
-      "kind": "private_patch_object",
-      "line": 616,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_read_profile_display_name"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> facade.LinkedInExtractor._profile_page",
-      "kind": "private_facade_access",
-      "line": 617,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_profile_page"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader",
-      "kind": "private_patch_object",
-      "line": 622,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_resolve_conversation_thread_urls"
-    },
-    {
-      "canonical_owner": "content.PageContentReader",
-      "kind": "private_patch_object",
-      "line": 631,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_root_content"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> facade.LinkedInExtractor._content",
-      "kind": "private_facade_access",
-      "line": 632,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_content"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> text.strip_linkedin_noise",
-      "kind": "string_patch",
-      "line": 637,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> link_metadata.build_references",
-      "kind": "string_patch",
-      "line": 641,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.build_references"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.check_rate_limit",
-      "kind": "string_patch",
-      "line": 662,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.dismiss_modal",
-      "kind": "string_patch",
-      "line": 666,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader",
-      "kind": "private_patch_object",
-      "line": 670,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_wait_for_main_text"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader",
-      "kind": "private_patch_object",
-      "line": 671,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_scroll_main_scrollable_region"
-    },
-    {
-      "canonical_owner": "profile_page.ProfilePageReader",
-      "kind": "private_patch_object",
-      "line": 674,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_read_profile_display_name"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> facade.LinkedInExtractor._profile_page",
-      "kind": "private_facade_access",
-      "line": 675,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_profile_page"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader",
-      "kind": "private_patch_object",
-      "line": 680,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_resolve_conversation_thread_urls"
-    },
-    {
-      "canonical_owner": "content.PageContentReader",
-      "kind": "private_patch_object",
-      "line": 689,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_root_content"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> facade.LinkedInExtractor._content",
-      "kind": "private_facade_access",
-      "line": 690,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_content"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> text.strip_linkedin_noise",
-      "kind": "string_patch",
-      "line": 695,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> link_metadata.build_references",
-      "kind": "string_patch",
-      "line": 699,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.build_references"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.check_rate_limit",
-      "kind": "string_patch",
-      "line": 719,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.dismiss_modal",
-      "kind": "string_patch",
-      "line": 723,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
-    },
-    {
-      "canonical_owner": "profile_page.ProfilePageReader",
-      "kind": "private_patch_object",
-      "line": 727,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_read_profile_display_name"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> facade.LinkedInExtractor._profile_page",
-      "kind": "private_facade_access",
-      "line": 728,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_profile_page"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader",
-      "kind": "private_patch_object",
-      "line": 733,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_resolve_conversation_thread_urls"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.check_rate_limit",
-      "kind": "string_patch",
-      "line": 751,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.dismiss_modal",
-      "kind": "string_patch",
-      "line": 755,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
-    },
-    {
-      "canonical_owner": "profile_page.ProfilePageReader",
-      "kind": "private_patch_object",
-      "line": 759,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_read_profile_display_name"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> facade.LinkedInExtractor._profile_page",
-      "kind": "private_facade_access",
-      "line": 760,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_profile_page"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader",
-      "kind": "private_patch_object",
-      "line": 765,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_resolve_conversation_thread_urls"
-    },
-    {
-      "canonical_owner": "conversations.strip_select_conversation_prefix",
-      "kind": "private_facade_access",
-      "line": 782,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_strip_select_conversation_prefix"
-    },
-    {
-      "canonical_owner": "conversations.strip_select_conversation_prefix",
-      "kind": "private_facade_access",
-      "line": 790,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_strip_select_conversation_prefix"
-    },
-    {
-      "canonical_owner": "conversations.strip_select_conversation_prefix",
-      "kind": "private_facade_access",
-      "line": 800,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_strip_select_conversation_prefix"
-    },
-    {
-      "canonical_owner": "conversations.strip_select_conversation_prefix",
-      "kind": "private_facade_access",
-      "line": 807,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_strip_select_conversation_prefix"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.check_rate_limit",
-      "kind": "string_patch",
-      "line": 838,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.dismiss_modal",
-      "kind": "string_patch",
-      "line": 842,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader",
-      "kind": "private_patch_object",
-      "line": 846,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_wait_for_main_text"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader",
-      "kind": "private_patch_object",
-      "line": 847,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_scroll_main_scrollable_region"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader",
-      "kind": "private_patch_object",
-      "line": 850,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_conversation_thread_refs"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader",
-      "kind": "private_facade_access",
-      "line": 857,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_resolve_conversation_thread_urls"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.check_rate_limit",
-      "kind": "string_patch",
-      "line": 881,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.dismiss_modal",
-      "kind": "string_patch",
-      "line": 885,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader",
-      "kind": "private_patch_object",
-      "line": 889,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_wait_for_main_text"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader",
-      "kind": "private_patch_object",
-      "line": 890,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_scroll_main_scrollable_region"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader",
-      "kind": "private_patch_object",
-      "line": 893,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_conversation_thread_refs"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader",
-      "kind": "private_facade_access",
-      "line": 895,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_resolve_conversation_thread_urls"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.check_rate_limit",
-      "kind": "string_patch",
-      "line": 923,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.dismiss_modal",
-      "kind": "string_patch",
-      "line": 927,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader",
-      "kind": "private_patch_object",
-      "line": 931,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_wait_for_main_text"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader",
-      "kind": "private_patch_object",
-      "line": 932,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_scroll_main_scrollable_region"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader",
-      "kind": "private_patch_object",
-      "line": 935,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_conversation_thread_refs"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader",
-      "kind": "private_facade_access",
-      "line": 937,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_resolve_conversation_thread_urls"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader",
-      "kind": "private_facade_access",
-      "line": 961,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_conversation_thread_refs"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.check_rate_limit",
-      "kind": "string_patch",
-      "line": 976,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.dismiss_modal",
-      "kind": "string_patch",
-      "line": 980,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader",
-      "kind": "private_patch_object",
-      "line": 984,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_wait_for_main_text"
-    },
-    {
-      "canonical_owner": "content.PageContentReader",
-      "kind": "private_patch_object",
-      "line": 985,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_root_content"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> facade.LinkedInExtractor._content",
-      "kind": "private_facade_access",
-      "line": 986,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_content"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> text.strip_linkedin_noise",
-      "kind": "string_patch",
-      "line": 991,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> link_metadata.build_references",
-      "kind": "string_patch",
-      "line": 995,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.build_references"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader",
-      "kind": "private_patch_object",
-      "line": 999,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_conversation_thread_refs"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.check_rate_limit",
-      "kind": "string_patch",
-      "line": 1036,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> session.ScrapingSession.dismiss_modal",
-      "kind": "string_patch",
-      "line": 1040,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.handle_modal_close"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader",
-      "kind": "private_patch_object",
-      "line": 1044,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_wait_for_main_text"
-    },
-    {
-      "canonical_owner": "content.PageContentReader",
-      "kind": "private_patch_object",
-      "line": 1045,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_root_content"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> facade.LinkedInExtractor._content",
-      "kind": "private_facade_access",
-      "line": 1046,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_content"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> text.strip_linkedin_noise",
-      "kind": "string_patch",
-      "line": 1051,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader -> link_metadata.build_references",
-      "kind": "string_patch",
-      "line": 1055,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "linkedin_mcp_server.scraping.extractor.build_references"
-    },
-    {
-      "canonical_owner": "conversations.ConversationReader",
-      "kind": "private_patch_object",
-      "line": 1059,
-      "migration_stage": 11,
-      "path": "tests/test_scraping.py",
-      "target": "_extract_conversation_thread_refs"
-    },
-    {
       "canonical_owner": "message_sender.MessageSender -> session.ScrapingSession.check_rate_limit",
       "kind": "string_patch",
-      "line": 1146,
+      "line": 416,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
@@ -1533,7 +613,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 1150,
+      "line": 420,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_read_profile_message_target"
@@ -1541,7 +621,7 @@
     {
       "canonical_owner": "message_sender.ProfileMessageTargetResolution",
       "kind": "module_attribute",
-      "line": 1154,
+      "line": 424,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_ProfileMessageTargetResolution"
@@ -1549,7 +629,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 1158,
+      "line": 428,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_wait_for_message_surface"
@@ -1557,7 +637,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 1161,
+      "line": 431,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_read_message_composer_state"
@@ -1565,7 +645,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 1164,
+      "line": 434,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_focus_verified_message_editor"
@@ -1573,7 +653,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 1169,
+      "line": 439,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_submit_verified_message"
@@ -1581,7 +661,7 @@
     {
       "canonical_owner": "message_sender.MessageSender -> session.ScrapingSession.check_rate_limit",
       "kind": "string_patch",
-      "line": 1201,
+      "line": 471,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
@@ -1589,7 +669,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 1205,
+      "line": 475,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_read_profile_message_target"
@@ -1597,7 +677,7 @@
     {
       "canonical_owner": "message_sender.ProfileMessageTargetResolution",
       "kind": "module_attribute",
-      "line": 1209,
+      "line": 479,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_ProfileMessageTargetResolution"
@@ -1605,7 +685,7 @@
     {
       "canonical_owner": "message_sender.ProfileMessageTarget",
       "kind": "module_attribute",
-      "line": 1222,
+      "line": 492,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_ProfileMessageTarget"
@@ -1613,7 +693,7 @@
     {
       "canonical_owner": "message_sender.MessageSender -> session.ScrapingSession.check_rate_limit",
       "kind": "string_patch",
-      "line": 1273,
+      "line": 543,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
@@ -1621,7 +701,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 1277,
+      "line": 547,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_read_profile_message_target"
@@ -1629,7 +709,7 @@
     {
       "canonical_owner": "message_sender.ProfileMessageTargetResolution",
       "kind": "module_attribute",
-      "line": 1281,
+      "line": 551,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_ProfileMessageTargetResolution"
@@ -1637,7 +717,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 1285,
+      "line": 555,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_wait_for_message_surface"
@@ -1645,7 +725,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 1291,
+      "line": 561,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_read_message_composer_state"
@@ -1653,7 +733,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 1304,
+      "line": 574,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_write_verified_message"
@@ -1661,7 +741,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 1310,
+      "line": 580,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_submit_verified_message"
@@ -1669,7 +749,7 @@
     {
       "canonical_owner": "global imported object, unaffected by relocation",
       "kind": "imported_module_patch",
-      "line": 1316,
+      "line": 586,
       "migration_stage": null,
       "path": "tests/test_scraping.py",
       "target": "asyncio.sleep"
@@ -1677,7 +757,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 1320,
+      "line": 590,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_prepare_message_confirmation"
@@ -1685,7 +765,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 1326,
+      "line": 596,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_message_send_confirmed"
@@ -1693,7 +773,7 @@
     {
       "canonical_owner": "message_sender.MessageSender -> session.ScrapingSession.check_rate_limit",
       "kind": "string_patch",
-      "line": 1364,
+      "line": 634,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "linkedin_mcp_server.scraping.extractor.detect_rate_limit"
@@ -1701,7 +781,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 1368,
+      "line": 638,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_read_profile_message_target"
@@ -1709,7 +789,7 @@
     {
       "canonical_owner": "message_sender.ProfileMessageTargetResolution",
       "kind": "module_attribute",
-      "line": 1372,
+      "line": 642,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_ProfileMessageTargetResolution"
@@ -1717,7 +797,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 1553,
+      "line": 823,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_resolve_message_owner"
@@ -1725,7 +805,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 1699,
+      "line": 969,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_prepare_message_confirmation"
@@ -1733,7 +813,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 1705,
+      "line": 975,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_message_send_confirmed"
@@ -1741,7 +821,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 1778,
+      "line": 1048,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_wait_for_verified_submit"
@@ -1749,7 +829,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 1784,
+      "line": 1054,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_cleanup_owned_message"
@@ -1757,7 +837,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 1884,
+      "line": 1154,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_write_verified_message"
@@ -1765,7 +845,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 1890,
+      "line": 1160,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_submit_verified_message"
@@ -1773,7 +853,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 1897,
+      "line": 1167,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_prepare_message_confirmation"
@@ -1781,7 +861,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 1903,
+      "line": 1173,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_message_send_confirmed"
@@ -1789,7 +869,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 1938,
+      "line": 1208,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_message_send_confirmed"
@@ -1797,7 +877,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 2063,
+      "line": 1333,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_dispose_message_confirmation"
@@ -1805,7 +885,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 2069,
+      "line": 1339,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_dispose_message_owner"
@@ -1813,7 +893,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 2120,
+      "line": 1390,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_prepare_message_confirmation"
@@ -1821,7 +901,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_patch_object",
-      "line": 2126,
+      "line": 1396,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_message_send_confirmed"
@@ -1829,7 +909,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_facade_access",
-      "line": 2158,
+      "line": 1428,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_resolve_message_compose_box"
@@ -1837,7 +917,7 @@
     {
       "canonical_owner": "message_sender.MESSAGE_COMPOSE_SELECTOR",
       "kind": "module_attribute",
-      "line": 2161,
+      "line": 1431,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_MESSAGING_COMPOSE_SELECTOR"
@@ -1845,7 +925,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_facade_access",
-      "line": 2183,
+      "line": 1453,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_resolve_message_owner"
@@ -1853,7 +933,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_facade_access",
-      "line": 2208,
+      "line": 1478,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_resolve_message_owner"
@@ -1861,7 +941,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_facade_access",
-      "line": 2220,
+      "line": 1490,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_dispose_message_owner"
@@ -1869,7 +949,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_facade_access",
-      "line": 2230,
+      "line": 1500,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_prepare_message_confirmation"
@@ -1877,7 +957,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_facade_access",
-      "line": 2252,
+      "line": 1522,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_prepare_message_confirmation"
@@ -1885,7 +965,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_facade_access",
-      "line": 2264,
+      "line": 1534,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_message_send_confirmed"
@@ -1893,7 +973,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_facade_access",
-      "line": 2297,
+      "line": 1567,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_message_send_confirmed"
@@ -1901,7 +981,7 @@
     {
       "canonical_owner": "message_sender.MessageSender",
       "kind": "private_facade_access",
-      "line": 2311,
+      "line": 1581,
       "migration_stage": 12,
       "path": "tests/test_scraping.py",
       "target": "_dispose_message_confirmation"

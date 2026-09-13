@@ -7,7 +7,7 @@ a primary button. Every case that reaches a decision drives the real
 classifier from structural signals; no case reads a label.
 
 ``tests/test_action_signals_dom.py`` covers the other half, where the
-programs run against a real DOM in three locales. Here ``page.evaluate`` is
+programs run against a real DOM in four label sets. Here ``page.evaluate`` is
 a mock, so the JS never executes and the signals are supplied directly.
 """
 

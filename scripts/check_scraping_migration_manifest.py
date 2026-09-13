@@ -181,11 +181,15 @@ _INSTANCE_ATTRIBUTE_OWNERS = {
 # of the migration. The stage therefore comes from `_callers`, exactly as a
 # boundary patch's does.
 #
-# `_capture` carries no site of its own any more: all 19 were `scrape_person`
-# tests and retired with stage 6. The entry stays because the workflows that
-# still call `self._capture` from the facade are stages 9 to 12, and removing
-# it would turn the next such reach-through into an unresolved seam rather
-# than a dated one.
+# All three carry no site of their own any more. `_capture` emptied first: all
+# 19 were `scrape_person` tests and retired with stage 6. The last eight
+# `_content` sites and all four `_profile_page` ones were the conversation
+# tests named above, and they retired together at stage 11, which is what the
+# per-caller stage was for. Every entry stays anyway: `extract_page` is still
+# a facade delegate over `self._capture` and keeps its place to stage 14, and
+# removing an entry would turn the next such reach-through into an unresolved
+# seam rather than a dated one — including one reaching `_profile_page`, which
+# is constructor wiring alone today and has no workflow left above it.
 _FACADE_COLLABORATORS = {
     "_content": ("content.PageContentReader", "facade.LinkedInExtractor._content"),
     "_capture": ("capture.SectionCapture", "facade.LinkedInExtractor._capture"),
@@ -263,6 +267,7 @@ _OWNER_FACTORIES: dict[str, tuple[str, ...]] = {
     "tests/scraping/test_job_pages.py": ("_reader",),
     "tests/scraping/test_jobs.py": ("_scraper",),
     "tests/scraping/test_posts.py": ("_search",),
+    "tests/scraping/test_conversations.py": ("_reader",),
 }
 
 _EXPLICIT_CALLER_CONTEXTS: dict[tuple[str, str, str], tuple[str, ...]] = {
@@ -291,30 +296,19 @@ _EXPLICIT_CALLER_CONTEXTS: dict[tuple[str, str, str], tuple[str, ...]] = {
         "boundaries",
         "stabilize_navigation",
     ): ("_goto_with_auth_checks",),
+    # The five conversation consumers left with stage 11: the reader calls both
+    # boundaries through `ScrapingSession` rather than through a binding of its
+    # own, so only `send_message` still reaches the facade's, and only for the
+    # rate-limit check. `handle_modal_close` has no binding in
+    # `scraping.extractor` at all any more and therefore no site to key, which
+    # is why its entry is gone rather than emptied; `_BOUNDARY_OWNERS` still
+    # names it, so a patch that comes back is dated against its caller rather
+    # than failing closed as unknown.
     (
         "tests/scraping/policy_scenarios.py",
         "boundaries",
         "detect_rate_limit",
-    ): (
-        "_resolve_conversation_thread_urls",
-        "_open_conversation_by_username",
-        "get_inbox",
-        "get_conversation",
-        "search_conversations",
-        "send_message",
-    ),
-    (
-        "tests/scraping/policy_scenarios.py",
-        "boundaries",
-        "handle_modal_close",
-    ): (
-        "_resolve_conversation_thread_urls",
-        "_open_conversation_by_username",
-        "get_inbox",
-        "get_conversation",
-        "search_conversations",
-        "send_message",
-    ),
+    ): ("send_message",),
     (
         "tests/scraping/policy_scenarios.py",
         "boundaries",
