@@ -1,10 +1,39 @@
 """Tests for LinkedIn innerText cleanup."""
 
+import re
+
 from linkedin_mcp_server.scraping.text import (
+    DETAIL_CAPTURE_EN_US,
     strip_conversation_chrome,
     strip_linkedin_noise,
     truncate_linkedin_noise,
 )
+
+
+class TestDetailCaptureText:
+    def test_en_us_table_preserves_detail_capture_policy(self):
+        assert DETAIL_CAPTURE_EN_US.readiness_blocking_prefixes == (
+            "Load more",
+            "More profiles for you",
+            "Explore premium profiles",
+        )
+        pattern = DETAIL_CAPTURE_EN_US.expansion_button_pattern
+        assert pattern.pattern == r"^Show (more|all)\b"
+        assert pattern.flags & re.IGNORECASE
+        assert pattern.search("Show more details")
+        assert pattern.search("SHOW ALL 3 ITEMS")
+        assert not pattern.search("See all 3 items")
+        assert (
+            DETAIL_CAPTURE_EN_US.readiness_expression()
+            == """() => {
+                        const main = document.querySelector('main');
+                        if (!main) return false;
+                        const text = main.innerText.trimStart();
+                        return !text.startsWith('Load more')
+                            && !text.startsWith('More profiles for you')
+                            && !text.startsWith('Explore premium profiles');
+                    }"""
+        )
 
 
 class TestStripLinkedInNoise:

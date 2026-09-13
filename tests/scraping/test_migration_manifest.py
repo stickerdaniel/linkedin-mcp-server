@@ -1440,7 +1440,7 @@ def test_direct_private_helper_calls_and_stage_gate_are_inventoried():
     )
 
     result = subprocess.run(
-        [sys.executable, str(CHECKER), "--check", "--stage", "12"],
+        [sys.executable, str(CHECKER), "--check", "--stage", "13"],
         cwd=ROOT,
         text=True,
         capture_output=True,

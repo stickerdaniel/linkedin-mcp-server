@@ -13,7 +13,11 @@ from linkedin_mcp_server.core.exceptions import (
     InvalidReferenceError,
 )
 from linkedin_mcp_server.scraping import company as company_module
-from linkedin_mcp_server.scraping.capture import SectionCapture
+from linkedin_mcp_server.scraping.capture import (
+    CaptureMode,
+    CapturePlan,
+    SectionCapture,
+)
 from linkedin_mcp_server.scraping.company import CompanyScraper
 from linkedin_mcp_server.scraping.content import PageContentReader
 from linkedin_mcp_server.scraping.contracts import (
@@ -53,7 +57,7 @@ class TestScrapeCompany:
         with (
             patch.object(
                 scraper._capture,
-                "extract_page",
+                "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("company text"),
             ) as mock_extract,
@@ -82,7 +86,7 @@ class TestScrapeCompany:
         """
         scraper = _scraper(mock_page)
         with patch.object(
-            scraper._capture, "extract_page", new_callable=AsyncMock
+            scraper._capture, "capture", new_callable=AsyncMock
         ) as mock_extract:
             with pytest.raises(InvalidReferenceError):
                 await scraper.scrape_company("../../feed", {"about"})
@@ -96,7 +100,7 @@ class TestScrapeCompany:
         with (
             patch.object(
                 scraper._capture,
-                "extract_page",
+                "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("text"),
             ) as mock_extract,
@@ -124,7 +128,7 @@ class TestScrapeCompany:
         scraper = _scraper(mock_page)
         with patch.object(
             scraper._capture,
-            "extract_page",
+            "capture",
             new_callable=AsyncMock,
             return_value=extracted("about text"),
         ) as mock_extract:
@@ -140,7 +144,7 @@ class TestScrapeCompany:
         with (
             patch.object(
                 scraper._capture,
-                "extract_page",
+                "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("about text"),
             ) as mock_extract,
@@ -161,7 +165,7 @@ class TestScrapeCompany:
         with (
             patch.object(
                 scraper._capture,
-                "extract_page",
+                "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("text"),
             ) as mock_extract,
@@ -205,7 +209,7 @@ class TestScrapeCompany:
             patch.object(company_module, "COMPANY_SECTIONS", table),
             patch.object(
                 scraper._capture,
-                "extract_page",
+                "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("text"),
             ) as mock_extract,
@@ -216,8 +220,65 @@ class TestScrapeCompany:
         ):
             result = await scraper.scrape_company("testcorp", set(table))
 
-        assert [call.args[1] for call in mock_extract.call_args_list] == list(table)
+        assert [
+            capture_call.args[1] for capture_call in mock_extract.call_args_list
+        ] == list(table)
+        assert [
+            capture_call.args[2].mode for capture_call in mock_extract.call_args_list
+        ] == [
+            CaptureMode.STANDARD,
+            CaptureMode.STANDARD,
+            CaptureMode.STANDARD,
+            CaptureMode.ACTIVITY,
+            CaptureMode.STANDARD,
+            CaptureMode.STANDARD,
+        ]
         assert list(result["sections"]) == list(table)
+
+    async def test_custom_overlay_table_routes_through_compatibility_seam(
+        self, mock_page
+    ):
+        table = {
+            "about": ("/custom-about-overlay/", True),
+            "custom": ("/custom-standard/", False),
+        }
+        scraper = _scraper(mock_page)
+        with (
+            patch.object(company_module, "COMPANY_SECTIONS", table),
+            patch.object(
+                scraper._capture,
+                "capture",
+                new_callable=AsyncMock,
+                return_value=extracted("standard text"),
+            ) as mock_capture,
+            patch.object(
+                scraper._capture,
+                "_extract_overlay",
+                new_callable=AsyncMock,
+                return_value=extracted("overlay text"),
+            ) as mock_overlay,
+            patch(
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await scraper.scrape_company("testcorp", set(table))
+
+        mock_overlay.assert_awaited_once()
+        assert mock_overlay.call_args.args[:2] == (
+            "https://www.linkedin.com/company/testcorp/custom-about-overlay/",
+            "about",
+        )
+        assert mock_overlay.call_args.kwargs["plan"] == CapturePlan(CaptureMode.OVERLAY)
+        mock_capture.assert_awaited_once_with(
+            "https://www.linkedin.com/company/testcorp/custom-standard/",
+            "custom",
+            CapturePlan(CaptureMode.STANDARD),
+        )
+        assert result["sections"] == {
+            "about": "overlay text",
+            "custom": "standard text",
+        }
 
     async def test_the_delay_is_taken_between_sections_and_not_before_the_first(
         self, mock_page
@@ -232,7 +293,7 @@ class TestScrapeCompany:
         with (
             patch.object(
                 scraper._capture,
-                "extract_page",
+                "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("text"),
             ),
@@ -250,7 +311,7 @@ class TestScrapeCompany:
         with (
             patch.object(
                 scraper._capture,
-                "extract_page",
+                "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("about text"),
             ),
@@ -270,7 +331,7 @@ class TestScrapeCompany:
         with (
             patch.object(
                 scraper._capture,
-                "extract_page",
+                "capture",
                 new_callable=AsyncMock,
                 side_effect=[
                     extracted(RATE_LIMITED_SECTION_TEXT),
@@ -308,7 +369,7 @@ class TestScrapeCompany:
         with (
             patch.object(
                 scraper._capture,
-                "extract_page",
+                "capture",
                 new_callable=AsyncMock,
                 return_value=extracted(RATE_LIMITED_SECTION_TEXT),
             ),
@@ -396,7 +457,7 @@ class TestScrapeCompany:
         with (
             patch.object(
                 scraper._capture,
-                "extract_page",
+                "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("about text"),
             ),
@@ -421,7 +482,7 @@ class TestScrapeCompany:
         with (
             patch.object(
                 scraper._capture,
-                "extract_page",
+                "capture",
                 new_callable=AsyncMock,
                 side_effect=[failure, extracted("Posts text")],
             ),
@@ -467,7 +528,7 @@ class TestScrapeCompany:
         with (
             patch.object(
                 scraper._capture,
-                "extract_page",
+                "capture",
                 new_callable=AsyncMock,
                 side_effect=failure,
             ) as mock_extract,
@@ -501,7 +562,7 @@ class TestScrapeCompanyCallbacks:
         with (
             patch.object(
                 scraper._capture,
-                "extract_page",
+                "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("text"),
             ),
@@ -541,7 +602,7 @@ class TestGetCompanyEmployees:
         scraper = _scraper(mock_page)
         with patch.object(
             scraper._capture,
-            "extract_page",
+            "capture",
             new_callable=AsyncMock,
             return_value=extracted("employees"),
         ) as mock_extract:
@@ -550,7 +611,11 @@ class TestGetCompanyEmployees:
             )
 
         assert mock_extract.await_args_list == [
-            call("https://www.linkedin.com/company/testco/people/", "employees", None)
+            call(
+                "https://www.linkedin.com/company/testco/people/",
+                "employees",
+                CapturePlan(CaptureMode.COMPANY_PEOPLE),
+            )
         ]
         assert result["url"] == "https://www.linkedin.com/company/testco/people/"
 
@@ -558,7 +623,7 @@ class TestGetCompanyEmployees:
         scraper = _scraper(mock_page)
         with patch.object(
             scraper._capture,
-            "extract_page",
+            "capture",
             new_callable=AsyncMock,
             return_value=extracted("employees"),
         ) as mock_extract:
@@ -578,7 +643,7 @@ class TestGetCompanyEmployees:
         scraper = _scraper(mock_page)
         with patch.object(
             scraper._capture,
-            "extract_page",
+            "capture",
             new_callable=AsyncMock,
             return_value=extracted("employees"),
         ) as mock_extract:
@@ -594,7 +659,7 @@ class TestGetCompanyEmployees:
         scraper = _scraper(mock_page)
         with patch.object(
             scraper._capture,
-            "extract_page",
+            "capture",
             new_callable=AsyncMock,
             return_value=extracted("employee text"),
         ):
@@ -610,7 +675,7 @@ class TestGetCompanyEmployees:
         scraper = _scraper(mock_page)
         with patch.object(
             scraper._capture,
-            "extract_page",
+            "capture",
             new_callable=AsyncMock,
             return_value=extracted("employee text", [reference]),
         ):
@@ -621,7 +686,7 @@ class TestGetCompanyEmployees:
     async def test_a_traversal_identifier_is_refused_before_navigating(self, mock_page):
         scraper = _scraper(mock_page)
         with patch.object(
-            scraper._capture, "extract_page", new_callable=AsyncMock
+            scraper._capture, "capture", new_callable=AsyncMock
         ) as mock_extract:
             with pytest.raises(InvalidReferenceError):
                 await scraper.get_company_employees("../../feed")
@@ -635,7 +700,7 @@ class TestSearchCompanies:
         scraper = _scraper(mock_page)
         with patch.object(
             scraper._capture,
-            "extract_page",
+            "capture",
             new_callable=AsyncMock,
             return_value=extracted("Fintech Inc"),
         ) as mock_extract:
@@ -644,6 +709,7 @@ class TestSearchCompanies:
         url = mock_extract.call_args.args[0]
         assert "/search/results/companies/" in url
         assert mock_extract.call_args.args[1] == "search_results"
+        assert mock_extract.call_args.args[2].mode is CaptureMode.SEARCH_RESULTS
         assert result == {
             "url": url,
             "sections": {"search_results": "Fintech Inc"},
@@ -653,7 +719,7 @@ class TestSearchCompanies:
         scraper = _scraper(mock_page)
         with patch.object(
             scraper._capture,
-            "extract_page",
+            "capture",
             new_callable=AsyncMock,
             return_value=extracted(""),
         ):
@@ -671,7 +737,7 @@ class TestSearchCompanies:
         scraper = _scraper(mock_page)
         with patch.object(
             scraper._capture,
-            "extract_page",
+            "capture",
             new_callable=AsyncMock,
             return_value=extracted("", error=error),
         ):

@@ -1,6 +1,10 @@
 """Section config dicts controlling which LinkedIn pages are visited during scraping."""
 
+from dataclasses import dataclass
+
 import logging
+
+from linkedin_mcp_server.scraping.capture import CaptureMode, CapturePlan
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +28,64 @@ COMPANY_SECTIONS: dict[str, tuple[str, bool]] = {
     "posts": ("/posts/", False),
     "jobs": ("/jobs/", False),
 }
+
+
+@dataclass(frozen=True)
+class _SectionSpec:
+    name: str
+    suffix: str
+    plan: CapturePlan
+
+
+_PERSON_SECTION_MODES = {
+    "experience": CaptureMode.DETAILS,
+    "education": CaptureMode.DETAILS,
+    "interests": CaptureMode.DETAILS,
+    "honors": CaptureMode.DETAILS,
+    "languages": CaptureMode.DETAILS,
+    "certifications": CaptureMode.DETAILS,
+    "skills": CaptureMode.DETAILS,
+    "projects": CaptureMode.DETAILS,
+    "contact_info": CaptureMode.OVERLAY,
+    "posts": CaptureMode.ACTIVITY,
+}
+_COMPANY_SECTION_MODES = {"posts": CaptureMode.ACTIVITY}
+
+
+def _person_section_specs(
+    sections: dict[str, tuple[str, bool]],
+    max_scrolls: int | None = None,
+) -> tuple[_SectionSpec, ...]:
+    return tuple(
+        _SectionSpec(
+            name,
+            suffix,
+            CapturePlan(
+                CaptureMode.OVERLAY
+                if is_overlay
+                else _PERSON_SECTION_MODES.get(name, CaptureMode.STANDARD),
+                max_scrolls,
+            ),
+        )
+        for name, (suffix, is_overlay) in sections.items()
+    )
+
+
+def _company_section_specs(
+    sections: dict[str, tuple[str, bool]] = COMPANY_SECTIONS,
+) -> tuple[_SectionSpec, ...]:
+    return tuple(
+        _SectionSpec(
+            name,
+            suffix,
+            CapturePlan(
+                CaptureMode.OVERLAY
+                if is_overlay
+                else _COMPANY_SECTION_MODES.get(name, CaptureMode.STANDARD)
+            ),
+        )
+        for name, (suffix, is_overlay) in sections.items()
+    )
 
 
 def parse_person_sections(

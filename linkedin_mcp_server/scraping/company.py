@@ -9,12 +9,16 @@ import logging
 
 from linkedin_mcp_server.core.exceptions import LinkedInScraperException
 from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
-from linkedin_mcp_server.scraping.capture import SectionCapture
+from linkedin_mcp_server.scraping.capture import (
+    CaptureMode,
+    CapturePlan,
+    SectionCapture,
+)
 from linkedin_mcp_server.scraping.contracts import (
     RATE_LIMITED_SECTION_TEXT,
     rate_limited_section_error,
 )
-from linkedin_mcp_server.scraping.fields import COMPANY_SECTIONS
+from linkedin_mcp_server.scraping.fields import COMPANY_SECTIONS, _company_section_specs
 from linkedin_mcp_server.scraping.identifiers import (
     company_page_url,
     normalize_company_identifier,
@@ -56,9 +60,9 @@ class CompanyScraper:
         rate_limited = False
 
         requested_ordered = [
-            (name, suffix, is_overlay)
-            for name, (suffix, is_overlay) in COMPANY_SECTIONS.items()
-            if name in requested
+            spec
+            for spec in _company_section_specs(COMPANY_SECTIONS)
+            if spec.name in requested
         ]
         total = len(requested_ordered)
 
@@ -66,19 +70,22 @@ class CompanyScraper:
             await callbacks.on_start("company profile", base_url)
 
         try:
-            for i, (section_name, suffix, is_overlay) in enumerate(requested_ordered):
+            for i, spec in enumerate(requested_ordered):
                 if i > 0:
                     await self._session.delay(NAV_DELAY)
 
-                url = base_url + suffix
+                section_name = spec.name
+                url = base_url + spec.suffix
                 try:
-                    if is_overlay:
+                    if CaptureMode.OVERLAY in spec.plan.mode:
                         extracted = await self._capture._extract_overlay(
-                            url, section_name=section_name
+                            url,
+                            section_name,
+                            plan=spec.plan,
                         )
                     else:
-                        extracted = await self._capture.extract_page(
-                            url, section_name, None
+                        extracted = await self._capture.capture(
+                            url, section_name, spec.plan
                         )
 
                     if extracted.text and extracted.text != RATE_LIMITED_SECTION_TEXT:
@@ -144,7 +151,11 @@ class CompanyScraper:
         url = company_page_url(company_name, "/people/")
         if keywords:
             url += f"?keywords={quote_plus(keywords)}"
-        extracted = await self._capture.extract_page(url, "employees", None)
+        extracted = await self._capture.capture(
+            url,
+            "employees",
+            CapturePlan(CaptureMode.COMPANY_PEOPLE),
+        )
 
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}
@@ -178,7 +189,11 @@ class CompanyScraper:
             {url, sections: {search_results: text}}
         """
         url = build_company_search_url(keywords)
-        extracted = await self._capture.extract_page(url, "search_results", None)
+        extracted = await self._capture.capture(
+            url,
+            "search_results",
+            CapturePlan(CaptureMode.SEARCH_RESULTS),
+        )
 
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}

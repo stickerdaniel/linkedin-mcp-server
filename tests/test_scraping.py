@@ -171,7 +171,7 @@ class TestSingleSectionRateLimits:
         # patch would intercept nothing for it while still passing.
         with patch.object(
             SectionCapture,
-            "extract_page",
+            "capture",
             new_callable=AsyncMock,
             return_value=extracted(RATE_LIMITED_SECTION_TEXT),
         ):
@@ -204,7 +204,7 @@ class TestEveryNormalizedEntryPoint:
         # intercept nothing for those and the assertion would hold whatever
         # the code did.
         return (
-            patch.object(SectionCapture, "extract_page", new_callable=AsyncMock),
+            patch.object(SectionCapture, "capture", new_callable=AsyncMock),
             patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
         )
 

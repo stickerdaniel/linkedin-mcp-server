@@ -13,7 +13,7 @@ from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.scraping import jobs as jobs_module
-from linkedin_mcp_server.scraping.capture import SectionCapture
+from linkedin_mcp_server.scraping.capture import CapturePlan, SectionCapture
 from linkedin_mcp_server.scraping.content import PageContentReader
 from linkedin_mcp_server.scraping.contracts import (
     RATE_LIMITED_SECTION_TEXT,
@@ -72,12 +72,17 @@ class TestScrapeJob:
         scraper = _scraper(mock_page)
         with patch.object(
             scraper._capture,
-            "extract_page",
+            "capture",
             new_callable=AsyncMock,
             return_value=extracted("Job: Software Engineer"),
-        ):
+        ) as capture:
             result = await scraper.scrape_job("12345")
 
+        capture.assert_awaited_once_with(
+            "https://www.linkedin.com/jobs/view/12345/",
+            section_name="job_posting",
+            plan=CapturePlan(),
+        )
         assert result["url"] == "https://www.linkedin.com/jobs/view/12345/"
         assert "job_posting" in result["sections"]
         assert "pages_visited" not in result
@@ -87,7 +92,7 @@ class TestScrapeJob:
         scraper = _scraper(mock_page)
         with patch.object(
             scraper._capture,
-            "extract_page",
+            "capture",
             new_callable=AsyncMock,
             return_value=extracted(RATE_LIMITED_SECTION_TEXT),
         ):
@@ -102,7 +107,7 @@ class TestScrapeJob:
         scraper = _scraper(mock_page)
         with patch.object(
             scraper._capture,
-            "extract_page",
+            "capture",
             new_callable=AsyncMock,
             return_value=extracted(
                 "",

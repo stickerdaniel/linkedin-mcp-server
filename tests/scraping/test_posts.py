@@ -8,7 +8,11 @@ from unittest.mock import ANY, AsyncMock, call, patch
 import pytest
 
 from linkedin_mcp_server.scraping import posts as posts_module
-from linkedin_mcp_server.scraping.capture import SectionCapture
+from linkedin_mcp_server.scraping.capture import (
+    CaptureMode,
+    CapturePlan,
+    SectionCapture,
+)
 from linkedin_mcp_server.scraping.content import PageContentReader
 from linkedin_mcp_server.scraping.contracts import (
     RATE_LIMITED_SECTION_TEXT,
@@ -44,7 +48,7 @@ class TestSearchPosts:
         search = _search(mock_page)
         with patch.object(
             search._capture,
-            "extract_page",
+            "capture",
             new_callable=AsyncMock,
             return_value=extracted("We're hiring a Unity dev"),
         ) as mock_extract:
@@ -55,14 +59,18 @@ class TestSearchPosts:
         assert result["sections"]["search_results"] == "We're hiring a Unity dev"
         # max_pages default (3) -> 15 scrolls
         assert mock_extract.await_args_list == [
-            call(result["url"], section_name="search_results", max_scrolls=15)
+            call(
+                result["url"],
+                section_name="search_results",
+                plan=CapturePlan(CaptureMode.SEARCH_RESULTS, max_scrolls=15),
+            )
         ]
 
     async def test_the_recency_filter_reaches_the_url(self, mock_page):
         search = _search(mock_page)
         with patch.object(
             search._capture,
-            "extract_page",
+            "capture",
             new_callable=AsyncMock,
             return_value=extracted("post"),
         ) as mock_extract:
@@ -83,14 +91,18 @@ class TestSearchPosts:
         search = _search(mock_page)
         with patch.object(
             search._capture,
-            "extract_page",
+            "capture",
             new_callable=AsyncMock,
             return_value=extracted("post"),
         ) as mock_extract:
             await search.search_posts("python", max_pages=2)
 
         assert mock_extract.await_args_list == [
-            call(ANY, section_name="search_results", max_scrolls=10)
+            call(
+                ANY,
+                section_name="search_results",
+                plan=CapturePlan(CaptureMode.SEARCH_RESULTS, max_scrolls=10),
+            )
         ]
 
     @pytest.mark.parametrize("max_pages", [0, -3])
@@ -106,7 +118,7 @@ class TestSearchPosts:
         search = _search(mock_page)
         with patch.object(
             search._capture,
-            "extract_page",
+            "capture",
             new_callable=AsyncMock,
             return_value=extracted("post"),
         ) as mock_extract:
@@ -116,7 +128,10 @@ class TestSearchPosts:
             call(
                 ANY,
                 section_name="search_results",
-                max_scrolls=posts_module._CONTENT_SCROLLS_PER_REQUESTED_PAGE,
+                plan=CapturePlan(
+                    CaptureMode.SEARCH_RESULTS,
+                    max_scrolls=posts_module._CONTENT_SCROLLS_PER_REQUESTED_PAGE,
+                ),
             )
         ]
 
@@ -132,7 +147,7 @@ class TestSearchPosts:
         """
         search = _search(mock_page)
         with patch.object(
-            search._capture, "extract_page", new_callable=AsyncMock
+            search._capture, "capture", new_callable=AsyncMock
         ) as mock_extract:
             with pytest.raises(ValueError, match="Invalid date_posted"):
                 await search.search_posts("python", date_posted="last-year")
@@ -144,7 +159,7 @@ class TestSearchPosts:
         search = _search(mock_page)
         with patch.object(
             search._capture,
-            "extract_page",
+            "capture",
             new_callable=AsyncMock,
             return_value=extracted(""),
         ) as mock_extract:
@@ -160,7 +175,7 @@ class TestSearchPosts:
         search = _search(mock_page)
         with patch.object(
             search._capture,
-            "extract_page",
+            "capture",
             new_callable=AsyncMock,
             return_value=extracted("post text", [reference]),
         ):
@@ -173,7 +188,7 @@ class TestSearchPosts:
         search = _search(mock_page)
         with patch.object(
             search._capture,
-            "extract_page",
+            "capture",
             new_callable=AsyncMock,
             return_value=extracted(RATE_LIMITED_SECTION_TEXT),
         ):
@@ -206,7 +221,7 @@ class TestSearchPosts:
             patch.object(posts_module, "RATE_LIMITED_SECTION_TEXT", "[Blocked]"),
             patch.object(
                 search._capture,
-                "extract_page",
+                "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("[Blocked]"),
             ),
@@ -229,7 +244,7 @@ class TestSearchPosts:
         search = _search(mock_page)
         with patch.object(
             search._capture,
-            "extract_page",
+            "capture",
             new_callable=AsyncMock,
             return_value=extracted("", error=error),
         ):
