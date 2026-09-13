@@ -1043,7 +1043,7 @@ wheels = [
 
 [[package]]
 name = "mcp-server-linkedin"
-version = "4.24.1"
+version = "4.24.2"
 source = { editable = "." }
 dependencies = [
     { name = "anyio" },
