@@ -10,6 +10,7 @@ from linkedin_mcp_server.scraping.capture import SectionCapture
 from linkedin_mcp_server.scraping.content import PageContentReader
 from linkedin_mcp_server.scraping.facets import (
     GEO_ID_PATTERN,
+    LOCATION_BOX_SELECTOR,
     TYPEAHEAD_TIMEOUT_MS,
     FacetResolver,
 )
@@ -68,6 +69,10 @@ class TestResolveGeoUrn:
             assert goto.await_count == 1
 
         goto.assert_awaited_once_with("https://www.linkedin.com/jobs/search/?keywords=")
+        # One structural query, no text fallback: an ``aria-label`` match
+        # would be the locale's word for "location" and miss elsewhere.
+        mock_page.query_selector.assert_awaited_once_with(LOCATION_BOX_SELECTOR)
+        assert "aria-label" not in LOCATION_BOX_SELECTOR
         box.fill.assert_awaited_once_with("")
         typed.assert_awaited_once_with(mock_page, "Egypt")
         suggestion.click.assert_awaited_once()
@@ -199,3 +204,5 @@ class TestResolveGeoUrn:
             assert await resolver.resolve_geo_urn("Egypt") is None
 
         typed.assert_not_awaited()
+        # A missing box is a miss, not a cue to widen the scan to text.
+        mock_page.query_selector.assert_awaited_once_with(LOCATION_BOX_SELECTOR)

@@ -16,6 +16,7 @@ from linkedin_mcp_server.scraping.session import ScrapingSession
 # miss rather than hanging the tool call.
 TYPEAHEAD_TIMEOUT_MS = 5000
 GEO_ID_PATTERN = re.compile(r"[?&]geoId=(\d+)")
+LOCATION_BOX_SELECTOR = "input[id*='jobs-search-box-location']"
 
 
 class FacetResolver:
@@ -63,15 +64,10 @@ class FacetResolver:
         await self._navigator._goto_with_auth_checks(
             "https://www.linkedin.com/jobs/search/?keywords="
         )
-        box = None
-        for sel in (
-            "input[id*='jobs-search-box-location']",
-            "input[aria-label='City, state, or zip code']",
-            "input[aria-label*='location' i]",
-        ):
-            box = await page.query_selector(sel)
-            if box:
-                break
+        # The id is structural; an ``aria-label`` fallback would carry the
+        # locale's own words for "location", which is exactly the kind of text
+        # match that reads as a miss on a non-English profile.
+        box = await page.query_selector(LOCATION_BOX_SELECTOR)
 
         geo_id: str | None = None
         if box is not None:
