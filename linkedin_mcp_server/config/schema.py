@@ -68,6 +68,17 @@ PROFILE_HANDOVER_WAIT_SECONDS: float = 60.0
 # this attempt: the login keeps running and the next call finds what it wrote.
 AUTH_REPAIR_LOGIN_WAIT_FRACTION: float = 5 / 6
 
+# What fraction of a tool call ``send_message`` may spend inside the
+# destructive window (submission through confirmation) before returning a
+# result.  FastMCP wraps every tool call in ``anyio.fail_after()`` whose
+# deadline discards the cancelled scope's return value.  By returning
+# ``send_unconfirmed`` with ``retry_safe=False`` before that deadline the
+# caller learns that a retry may double-deliver, rather than receiving a
+# bare timeout that carries no safety signal.  ``5/6`` matches the login
+# wait fraction above and leaves the remaining sixth for the confirmation
+# check.
+SEND_MESSAGE_DEADLINE_FRACTION: float = 5 / 6
+
 # Close an idle browser and release the profile after this long with no calls.
 # A backstop only — the handoff signal does the real work — so it is deliberately
 # long: a reopen costs one more LinkedIn request. 0 disables it.

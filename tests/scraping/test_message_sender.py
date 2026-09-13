@@ -1198,6 +1198,33 @@ class TestSendMessage:
             confirmation=1,
         )
 
+    async def test_expired_deadline_returns_unconfirmed_before_submission(
+        self, mock_page
+    ):
+        """An expired internal deadline returns before the destructive window.
+
+        FastMCP wraps every tool call in ``anyio.fail_after()`` whose deadline
+        discards the cancelled scope's return value.  By returning
+        ``send_unconfirmed`` with ``retry_safe=False`` *before* that deadline
+        the caller learns that a retry may double-deliver, rather than
+        receiving a bare timeout.  See issue #889.
+        """
+        sender = _sender(mock_page)
+        patches = self._patch_to_composer(sender, mock_page)
+        # send_deadline in the past guarantees the check fires.
+        with patches[1], patches[2], patches[3], patches[4], patches[5]:
+            result = await sender.send_message(
+                "testuser",
+                "Hello!",
+                confirm_send=True,
+                send_deadline=0.0,
+            )
+
+        assert result["status"] == "send_unconfirmed"
+        assert result["sent"] is False
+        assert result["retry_safe"] is False
+        assert "deadline" in result["message"].lower()
+
 
 class TestResolveMessageComposeBox:
     async def test_requires_exactly_one_visible_editor(self, mock_page):

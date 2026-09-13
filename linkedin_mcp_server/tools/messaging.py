@@ -10,7 +10,10 @@ from typing import Annotated, Any
 from fastmcp import Context, FastMCP
 from pydantic import Field
 
-from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
+from linkedin_mcp_server.config.schema import (
+    DEFAULT_TOOL_TIMEOUT_SECONDS,
+    SEND_MESSAGE_DEADLINE_FRACTION,
+)
 from linkedin_mcp_server.core.exceptions import (
     AuthenticationError,
     LinkedInScraperException,
@@ -295,11 +298,13 @@ def register_messaging_tools(
 
             await ctx.report_progress(progress=0, total=100, message="Sending message")
 
+            send_deadline = tool_timeout * SEND_MESSAGE_DEADLINE_FRACTION
             result = await extractor.send_message(
                 linkedin_username,
                 message,
                 confirm_send=confirm_send,
                 profile_urn=profile_urn,
+                send_deadline=send_deadline,
             )
 
             try:

@@ -248,6 +248,7 @@ class LinkedInExtractor:
         *,
         confirm_send: bool,
         profile_urn: str | None = None,
+        send_deadline: float | None = None,
     ) -> dict[str, Any]:
         """Compose and send a new message with explicit confirmation gating."""
         return await self._message_sender.send_message(
@@ -255,4 +256,5 @@ class LinkedInExtractor:
             message,
             confirm_send=confirm_send,
             profile_urn=profile_urn,
+            send_deadline=send_deadline,
         )
