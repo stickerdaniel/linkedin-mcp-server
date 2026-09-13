@@ -1400,6 +1400,37 @@ class TestEnrichCompanyDeep:
         extractor.scrape_company.assert_not_awaited()
         extractor.extract_page.assert_not_awaited()
 
+    async def test_a_company_url_shares_the_cache_key_with_enrich_companies(
+        self, mcp, wired, mock_context, monkeypatch
+    ):
+        """enrich_companies keys a URL input by its slug; the deep tool and the
+        cache reader must look under the same key, or the record one wrote is
+        invisible to the other and the About tab is loaded again."""
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tools.company_enrichment.step_delay", lambda **k: 0
+        )
+        cache, _ = wired
+        url = "https://www.linkedin.com/company/copado/"
+        bunch = await get_tool_fn(mcp, "enrich_companies")
+        seed = _search_extractor(["copado"])
+        await bunch([url], mock_context, about=True, extractor=seed)
+        seed.search_companies.assert_not_awaited()
+        assert cache.get("copado").has_firmographics()
+
+        extractor = self._deep_extractor()
+        deep = await get_tool_fn(mcp, "enrich_company_deep")
+        out = await deep(url, mock_context, include_jobs=False, extractor=extractor)
+        assert out["status"] == "cache_fresh"
+        extractor.scrape_company.assert_not_awaited()
+
+        # And what the deep tool records lands under that same key.
+        out = await deep(url, mock_context, extractor=extractor)
+        assert out["status"] == "fetched"
+        assert cache.get("copado").has_jobs()
+        assert cache.list_keys() == ["copado"]
+        read = await get_tool_fn(mcp, "get_company_cache")
+        assert (await read(url))["status"] == "cached"
+
     async def test_a_raised_rate_limit_still_costs_the_page_load(
         self, mcp, wired, mock_context
     ):

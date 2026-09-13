@@ -649,10 +649,14 @@ def register_company_enrichment_tools(
             The company's cached-and-updated record, with per-half freshness.
         """
         now = datetime.now().astimezone()
-        rec = cache.get(company)
+        # One key for every cache access, the same one enrich_companies uses:
+        # a URL keyed raw is a different record from its slug, so what one
+        # tool wrote the other never finds.
+        slug = _slug(company)
+        rec = cache.get(slug)
 
-        want_firmographics = refresh or cache.needs_firmographics(company, now)
-        want_jobs = include_jobs and (refresh or cache.needs_jobs(company, now))
+        want_firmographics = refresh or cache.needs_firmographics(slug, now)
+        want_jobs = include_jobs and (refresh or cache.needs_jobs(slug, now))
         if not want_firmographics and not want_jobs:
             return {
                 "company": company,
@@ -673,7 +677,6 @@ def register_company_enrichment_tools(
         extractor = extractor or await get_ready_extractor(
             ctx, tool_name="enrich_company_deep"
         )
-        slug = _slug(company)
         urn = rec.company_urn if rec else ""
         # Why the jobs half was not recorded, when it was wanted and the load
         # came back unusable; the caller must not read that as a refresh.
@@ -684,7 +687,7 @@ def register_company_enrichment_tools(
             # URN, which the open-roles lookup below is keyed on.
             if want_firmographics:
                 try:
-                    urn = await _load_about(extractor, company, slug, now, urn)
+                    urn = await _load_about(extractor, slug, slug, now, urn)
                 finally:
                     # Charged whether About loaded, was rate-limited,
                     # auth-walled or crashed: the navigation happened either
@@ -726,7 +729,7 @@ def register_company_enrichment_tools(
                 else:
                     parsed = parse_job_search(text)
                     cache.record_jobs(
-                        company,
+                        slug,
                         now,
                         count=parsed.count,
                         sample=parsed.sample,
@@ -738,7 +741,7 @@ def register_company_enrichment_tools(
             return {
                 "company": company,
                 "next_run_after_seconds": 3600,
-                **_firmographics_view(cache.get(company) or rec, "cache"),
+                **_firmographics_view(cache.get(slug) or rec, "cache"),
                 # After the view: an uncached company's view carries its own
                 # "unknown" status, and the rate limit is the answer here.
                 "status": "rate_limited",
@@ -757,12 +760,12 @@ def register_company_enrichment_tools(
                 "company": company,
                 "status": "rate_limited",
                 "next_run_after_seconds": 3600,
-                **_firmographics_view(cache.get(company) or rec, "cache"),
+                **_firmographics_view(cache.get(slug) or rec, "cache"),
             }
         out = {
             "company": company,
             "status": "jobs_failed" if jobs_failure else "fetched",
-            **_firmographics_view(cache.get(company), "company_page"),
+            **_firmographics_view(cache.get(slug), "company_page"),
         }
         if jobs_failure:
             out["jobs_note"] = (
@@ -791,7 +794,7 @@ def register_company_enrichment_tools(
         """
         if company is None:
             return {"cached_companies": cache.list_keys()}
-        rec = cache.get(company)
+        rec = cache.get(_slug(company))
         if rec is None:
             return {"company": company, "status": "not_cached"}
         now = datetime.now().astimezone()
