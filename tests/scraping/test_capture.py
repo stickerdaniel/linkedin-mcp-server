@@ -7,6 +7,8 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import ast
+import re
+
 import pytest
 
 from linkedin_mcp_server.core.exceptions import AuthenticationError
@@ -24,6 +26,7 @@ from linkedin_mcp_server.scraping.contracts import (
 )
 from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.session import ScrapingSession
+from linkedin_mcp_server.scraping.text import DetailCaptureTextTable
 
 
 def _capture(page) -> SectionCapture:
@@ -453,6 +456,55 @@ class TestActivityFeedExtraction:
         _, kwargs = mock_scroll.call_args
         assert kwargs["pause_time"] == 0.5
         assert kwargs["max_scrolls"] == 5
+
+    async def test_details_page_consumes_injected_text_policy(self, mock_page):
+        mock_page.evaluate = AsyncMock(
+            return_value={"source": "root", "text": "Experience", "references": []}
+        )
+        mock_page.wait_for_function = AsyncMock()
+        expansion = MagicMock()
+        expansion.count = AsyncMock(return_value=0)
+        expansion.filter = MagicMock(return_value=expansion)
+        mock_page.locator = MagicMock(return_value=expansion)
+        detail_text = DetailCaptureTextTable(
+            readiness_blocking_prefixes=("Mutated placeholder",),
+            expansion_button_pattern=re.compile(r"^Expand entries$"),
+        )
+        session = ScrapingSession(mock_page)
+        capture = SectionCapture(
+            session,
+            PageNavigator(session),
+            PageContentReader(session),
+            detail_text,
+        )
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.session.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            await capture._capture_once(
+                "https://www.linkedin.com/in/ada/details/experience/",
+                section_name="experience",
+                plan=CapturePlan(CaptureMode.DETAILS),
+            )
+
+        wait_args = mock_page.wait_for_function.await_args
+        assert wait_args is not None
+        assert "text.startsWith('Mutated placeholder')" in wait_args.args[0]
+        expansion.filter.assert_called_once_with(
+            has_text=detail_text.expansion_button_pattern
+        )
 
     async def test_max_scrolls_override_passed_to_scroll_to_bottom(self, mock_page):
         """Custom max_scrolls on a detail page overrides the default of 5."""
@@ -1155,6 +1207,44 @@ class TestCapturePlans:
         plan = CapturePlan(CaptureMode.DETAILS, max_scrolls=3)
         with pytest.raises(FrozenInstanceError):
             setattr(plan, "max_scrolls", 4)
+
+
+_DETAIL_CAPTURE_POLICY_LITERALS = {
+    "Load more",
+    "More profiles for you",
+    "Explore premium profiles",
+    r"^Show (more|all)\b",
+}
+
+
+def _detail_capture_policy_literals(source: str) -> set[str]:
+    return {
+        node.value
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and node.value in _DETAIL_CAPTURE_POLICY_LITERALS
+    }
+
+
+def test_capture_module_has_no_en_us_detail_text_policy_literals():
+    capture_source = Path("linkedin_mcp_server/scraping/capture.py").read_text(
+        encoding="utf-8"
+    )
+    assert _detail_capture_policy_literals(capture_source) == set()
+
+
+def test_detail_text_policy_ast_guard_rejects_reintroduced_literals():
+    mutation = """
+import re
+
+READINESS = "Load more"
+BUTTON = re.compile(r"^Show (more|all)\\b")
+"""
+    assert _detail_capture_policy_literals(mutation) == {
+        "Load more",
+        r"^Show (more|all)\b",
+    }
 
 
 def _generic_capture_domain_path_literals(source: str) -> set[str]:

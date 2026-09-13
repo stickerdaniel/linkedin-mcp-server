@@ -7,7 +7,6 @@ from enum import Flag, auto
 from urllib.parse import urlparse
 
 import logging
-import re
 
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
@@ -22,6 +21,8 @@ from linkedin_mcp_server.scraping.link_metadata import build_references
 from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.session import ScrapingSession
 from linkedin_mcp_server.scraping.text import (
+    DETAIL_CAPTURE_EN_US,
+    DetailCaptureTextTable,
     filter_linkedin_noise_lines,
     truncate_linkedin_noise,
 )
@@ -79,10 +80,12 @@ class SectionCapture:
         session: ScrapingSession,
         navigator: PageNavigator,
         content: PageContentReader,
+        detail_text: DetailCaptureTextTable = DETAIL_CAPTURE_EN_US,
     ):
         self._session = session
         self._navigator = navigator
         self._content = content
+        self._detail_text = detail_text
 
     async def extract_page(
         self,
@@ -216,14 +219,7 @@ class SectionCapture:
         if CaptureMode.DETAILS in plan.mode:
             try:
                 await self._session.page.wait_for_function(
-                    """() => {
-                        const main = document.querySelector('main');
-                        if (!main) return false;
-                        const text = main.innerText.trimStart();
-                        return !text.startsWith('Load more')
-                            && !text.startsWith('More profiles for you')
-                            && !text.startsWith('Explore premium profiles');
-                    }""",
+                    self._detail_text.readiness_expression(),
                     timeout=10000,
                 )
             except PlaywrightTimeoutError:
@@ -233,7 +229,7 @@ class SectionCapture:
             max_clicks = plan.max_scrolls if plan.max_scrolls is not None else 5
             for i in range(max_clicks):
                 button = self._session.page.locator("main button").filter(
-                    has_text=re.compile(r"^Show (more|all)\b", re.IGNORECASE)
+                    has_text=self._detail_text.expansion_button_pattern
                 )
                 try:
                     if await button.count() == 0:

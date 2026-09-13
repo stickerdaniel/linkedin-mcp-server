@@ -6,6 +6,49 @@ from dataclasses import dataclass
 
 import re
 
+
+@dataclass(frozen=True)
+class DetailCaptureTextTable:
+    """Visible-text policy for hydrating and expanding profile details."""
+
+    readiness_blocking_prefixes: tuple[str, ...]
+    expansion_button_pattern: re.Pattern[str]
+
+    def readiness_expression(self) -> str:
+        """Build the historical readiness predicate without changing its bytes."""
+        conditions = "\n                            && ".join(
+            f"!text.startsWith({prefix!r})"
+            for prefix in self.readiness_blocking_prefixes
+        )
+        return (
+            "() => {\n"
+            "                        const main = document.querySelector('main');\n"
+            "                        if (!main) return false;\n"
+            "                        const text = main.innerText.trimStart();\n"
+            f"                        return {conditions};\n"
+            "                    }"
+        )
+
+
+_DETAIL_CAPTURE_TEXT: dict[str, DetailCaptureTextTable] = {
+    "en-US": DetailCaptureTextTable(
+        readiness_blocking_prefixes=(
+            "Load more",
+            "More profiles for you",
+            "Explore premium profiles",
+        ),
+        expansion_button_pattern=re.compile(
+            r"^Show (more|all)\b",
+            re.IGNORECASE,
+        ),
+    ),
+}
+
+# BrowserManager forces the browser context to en-US (core/browser.py), so the
+# capture owner receives this exact entry. Unsupported locales are deliberately
+# not inferred from language prefixes or detected from page text.
+DETAIL_CAPTURE_EN_US = _DETAIL_CAPTURE_TEXT["en-US"]
+
 # Patterns that mark the start of LinkedIn page chrome (sidebar/footer).
 # Everything from the earliest match onwards is stripped.
 _NOISE_MARKERS: list[re.Pattern[str]] = [
