@@ -1612,8 +1612,8 @@ class TestSearchPeoplePagination:
             result = await scraper.search_people("engineer", max_pages=10)
 
         assert fetch.await_count == 2
-        # The repeated page is kept -- it is real text, just not new people.
-        assert result["sections"]["search_results"] == "Person 1\n---\nPerson 1"
+        # The re-served page is dropped, so the text and the parsed rows agree.
+        assert result["sections"]["search_results"] == "Person 1"
         assert [r["url"] for r in result["references"]["search_results"]] == [
             "/in/person1/"
         ]

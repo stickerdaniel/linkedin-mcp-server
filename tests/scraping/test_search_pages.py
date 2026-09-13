@@ -152,13 +152,25 @@ class TestPaginateSearch:
             gathered = await self._walk(capture, max_pages=10)
 
         assert fetch.await_count == 2
-        # The repeated page is kept -- it is real text, just not new people.
-        assert gathered.page_texts == ["Person 1", "Person 1"]
-        assert [r["url"] for r in gathered.page_references] == [
-            "/in/person1/",
-            "/in/person1/",
-        ]
+        # The re-served page is dropped: joining it would hand the caller the
+        # same people twice and make the parsed rows disagree with the text.
+        assert gathered.page_texts == ["Person 1"]
+        assert [r["url"] for r in gathered.page_references] == ["/in/person1/"]
         assert gathered.section_errors == {}
+
+    async def test_a_first_page_without_people_is_still_returned(self, mock_page):
+        """Only a re-served *later* page is dropped; an empty first page is
+        the whole answer and its raw text is what the caller gets to read."""
+        capture = _capture(mock_page)
+        with patch.object(
+            capture,
+            "capture",
+            new_callable=AsyncMock,
+            side_effect=[extracted("No results")],
+        ):
+            gathered = await self._walk(capture, max_pages=3)
+
+        assert gathered.page_texts == ["No results"]
 
     async def test_only_references_of_the_walked_kind_count_as_new(self, mock_page):
         """A page of nothing but company/job anchors is the end of the
@@ -183,7 +195,7 @@ class TestPaginateSearch:
             gathered = await self._walk(capture, max_pages=10)
 
         assert fetch.await_count == 2
-        assert gathered.page_texts == ["Person 1", "Sidebar"]
+        assert gathered.page_texts == ["Person 1"]
 
     async def test_kind_selects_which_anchors_keep_the_walk_going(self, mock_page):
         capture = _capture(mock_page)

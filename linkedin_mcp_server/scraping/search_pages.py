@@ -74,15 +74,20 @@ async def paginate_search(
                 gathered.section_errors["search_results"] = extracted.error
             break
 
-        gathered.page_texts.append(extracted.text)
-        if extracted.references:
-            gathered.page_references.extend(extracted.references)
-
         new_urls = {
             ref["url"] for ref in extracted.references if ref["kind"] == kind
         } - seen_urls
-        if not new_urls:
+        if not new_urls and page_num > 1:
+            # A later page with nothing new is the last page served again;
+            # keeping its text would join the same people twice. The first
+            # page is kept regardless so an empty result still shows its text.
             logger.debug("No new %s references on page %d, stopping", kind, page_num)
+            break
+
+        gathered.page_texts.append(extracted.text)
+        if extracted.references:
+            gathered.page_references.extend(extracted.references)
+        if not new_urls:
             break
         seen_urls |= new_urls
 
