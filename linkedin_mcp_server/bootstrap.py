@@ -544,6 +544,33 @@ def _has_install_for(configured: Path, prefix: str, revision: str) -> bool:
     return (configured / f"{prefix}{revision}" / "INSTALLATION_COMPLETE").is_file()
 
 
+def _detect_installed_browser_on_disk() -> Path | None:
+    """Scan the browsers directory for a valid full Chrome for Testing install.
+
+    When install metadata is missing or written by a manual ``patchright
+    install`` invocation, ``_metadata_shape_ok`` returns ``None`` and
+    ``browser_ready`` fails even though the binary is present on disk.
+    This fallback scans ``PLAYWRIGHT_BROWSERS_PATH`` for a directory
+    matching ``chromium-<revision>/INSTALLATION_COMPLETE`` and returns the
+    browsers path when found.  ``None`` means nothing was found.  Pure: no
+    mutation.
+    """
+    configured = Path(
+        os.environ.get("PLAYWRIGHT_BROWSERS_PATH", str(browsers_path()))
+    )
+    if not configured.is_dir():
+        return None
+    targets = _patchright_install_targets()
+    if targets is None:
+        return None
+    revision = targets.get(_FULL_DIR_PREFIX)
+    if revision is None:
+        return None
+    if _has_install_for(configured, _FULL_DIR_PREFIX, revision):
+        return configured
+    return None
+
+
 def _uses_custom_chrome() -> bool:
     """Return whether an operator-supplied Chrome/Chromium executable is set.
 
@@ -981,9 +1008,17 @@ def browser_ready() -> bool:
     shell-only install, the launch fails, only the metadata is invalidated, and
     the next setup installs the shell again.
 
+    When install metadata is missing or was written by a manual ``patchright
+    install`` invocation, ``_metadata_shape_ok`` returns ``None``.  The
+    fallback ``_detect_installed_browser_on_disk`` scans the browsers
+    directory directly for the ``INSTALLATION_COMPLETE`` marker so that a
+    manually-installed browser is recognised.  See issue #909.
+
     Pure: no mutation.
     """
     configured = _metadata_shape_ok()
+    if configured is None:
+        configured = _detect_installed_browser_on_disk()
     if configured is None:
         return False
     targets = _patchright_install_targets()

@@ -605,6 +605,23 @@ class TestBrowserReady:
         _write_metadata(install_metadata_path(), bdir, version=2)
         assert browser_ready() is False
 
+    def test_ready_when_metadata_missing_but_browser_installed(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        """A manually-installed browser is detected without server metadata.
+
+        ``patchright install chromium`` writes ``INSTALLATION_COMPLETE`` but
+        not the server's ``browser-install.json``.  The fallback
+        ``_detect_installed_browser_on_disk`` scans the browsers directory
+        directly.  See issue #909.
+        """
+        _patch_targets_and_version(monkeypatch)
+        bdir = browsers_path()
+        _materialize_install(bdir, ["chromium-1217"])
+        # No metadata written — simulates a manual install.
+        assert install_metadata_path().exists() is False
+        assert browser_ready() is True
+
 
 def _fill(directory: Path, num_bytes: int) -> None:
     """Give *directory* a payload file of a known size."""
