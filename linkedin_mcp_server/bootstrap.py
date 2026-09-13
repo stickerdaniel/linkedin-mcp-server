@@ -1967,8 +1967,16 @@ async def _watch_installer_activity(
     so a poll that cannot run at all refuses the install too. Otherwise the one
     bound that can stop a still-running installer disappears with the thread it
     could not start, and the tree grows until the process ends on its own.
+
+    **Stale-cache cleanup (#822).** Before downloading, Patchright acquires its
+    registry lock and removes every stale Chromium revision from the shared
+    browsers path.  That work does not touch any path this install is
+    accountable for, so the per-poll snapshot does not change.  To prevent a
+    false inactivity timeout we record the browsers directory's mtime at the
+    start of each poll and treat any change as activity.
     """
     previous = opening
+    browsers_mtime = _browsers_path_mtime()
     try:
         while True:
             await asyncio.sleep(_INSTALLER_ACTIVITY_POLL_SECONDS)
@@ -1976,9 +1984,14 @@ async def _watch_installer_activity(
                 _installer_download_snapshot, temporary_root, extraction_paths
             )
             _refuse_oversized_install(current)
-            if current != previous:
+            # A snapshot change or a browsers-path mtime change both count as
+            # activity.  The mtime catches stale-cache removals that never
+            # touch the scanned paths.
+            current_mtime = _browsers_path_mtime()
+            if current != previous or current_mtime != browsers_mtime:
                 callback()
                 previous = current
+                browsers_mtime = current_mtime
     except BrowserSetupFailedError:
         raise
     except Exception as unmeasurable:
@@ -1986,6 +1999,20 @@ async def _watch_installer_activity(
             "Patchright Chromium browser setup can no longer be measured "
             "against its size limit"
         ) from unmeasurable
+
+
+def _browsers_path_mtime() -> float:
+    """Return the mtime of the browsers directory, or 0 if unreadable.
+
+    Patchright's stale-cache deletion changes this directory's mtime even
+    though none of the scanned extraction paths change.
+    """
+    try:
+        environment = _installer_environment(Path(os.devnull))
+        path = _configured_browsers_path(environment)
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
 
 
 @dataclass(frozen=True, slots=True)

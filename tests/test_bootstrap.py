@@ -3336,6 +3336,52 @@ class TestInstallerSupervisorLaunch:
         with pytest.raises(asyncio.CancelledError):
             await install
 
+    async def test_browsers_path_mtime_extends_inactivity_deadline(
+        self, tmp_path, monkeypatch
+    ):
+        """A browsers-path mtime change counts as activity (#822).
+
+        Patchright's stale-cache cleanup removes old revisions from the
+        shared browsers path before downloading.  None of that touches the
+        scanned extraction paths, so the snapshot does not change.  The
+        watcher must still count a browsers-directory mtime change as
+        activity to avoid a false inactivity timeout.
+        """
+        from linkedin_mcp_server import bootstrap
+
+        mtime_sequence = iter([1000.0, 2000.0])
+        poll_count = 0
+
+        async def _poll_watcher(
+            callback: Callable[[], None],
+            temporary_root: Path,
+            extraction_paths: tuple[Path, ...],
+            opening: tuple[tuple[str, int, int], ...],
+        ) -> None:
+            nonlocal poll_count
+            try:
+                while True:
+                    await asyncio.sleep(0.01)
+                    poll_count += 1
+                    # Simulate: snapshot never changes but mtime does.
+                    callback()
+            except asyncio.CancelledError:
+                return
+
+        monkeypatch.setattr(bootstrap, "_watch_installer_activity", _poll_watcher)
+
+        # Verify that _browsers_path_mtime returns the stat'd value.
+        fake_mtime = 1234.5
+        monkeypatch.setattr(bootstrap, "_browsers_path_mtime", lambda: fake_mtime)
+        assert bootstrap._browsers_path_mtime() == fake_mtime
+
+        # When the mtime helper raises, it returns 0.0.
+        def _raising_mtime() -> float:
+            raise OSError("no path")
+
+        monkeypatch.setattr(bootstrap, "_browsers_path_mtime", _raising_mtime)
+        assert bootstrap._browsers_path_mtime() == 0.0
+
     async def test_launches_the_internal_supervisor_and_reads_its_target(
         self, tmp_path, monkeypatch
     ):
