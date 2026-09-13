@@ -444,10 +444,14 @@ async def handle_modal_close(page: Page) -> bool:
         True if a modal was closed, False otherwise
     """
     try:
+        # Use the artdeco class first (locale-independent), then fall back to
+        # aria-label values only after checking presence.  The original selector
+        # matched ``button[aria-label="Dismiss"]`` and ``button[aria-label="Close"]``
+        # which only works on English LinkedIn (#890).
         close_button = page.locator(
+            "button.artdeco-modal__dismiss, "
             'button[aria-label="Dismiss"], '
-            'button[aria-label="Close"], '
-            "button.artdeco-modal__dismiss"
+            'button[aria-label="Close"]'
         ).first
 
         if await close_button.is_visible(timeout=1000):

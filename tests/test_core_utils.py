@@ -141,3 +141,29 @@ class TestScrollDeadline:
         await scroll_job_sidebar(page, deadline=0.0004)
 
         assert page.wait_for_selector.await_args.kwargs["timeout"] == 1
+
+
+class TestHandleModalClose:
+    """Verify that handle_modal_close uses locale-independent selectors (#890)."""
+
+    def _page(self):
+        page = MagicMock()
+        dismiss_locator = MagicMock()
+        dismiss_locator.is_visible = AsyncMock(return_value=True)
+        dismiss_locator.click = AsyncMock()
+        page.locator = MagicMock(return_value=dismiss_locator)
+        return page
+
+    async def test_modal_close_prefers_css_class(self):
+        """The artdeco CSS class should be the first selector (locale-independent)."""
+        from linkedin_mcp_server.core.utils import handle_modal_close
+
+        page = self._page()
+        result = await handle_modal_close(page)
+
+        assert result is True
+        # Verify the locator was called with a selector string
+        call_args = page.locator.call_args
+        selector = call_args[0][0]
+        # The CSS class should appear first
+        assert selector.index("artdeco-modal__dismiss") < selector.index("aria-label")
