@@ -2860,10 +2860,17 @@ def test_a_conditionally_rebound_alias_names_its_call_site(statement, line):
         _scan_synthetic(_reach_through(statement))
 
 
-def _owner_test(body: str) -> str:
+def _owner_test(
+    body: str, *, factory: str = "def _scraper(page):\n    return page"
+) -> str:
+    # The factory has to be here. The exemption is granted against the
+    # definition the module actually holds, so a fragment that only calls
+    # `_scraper` describes a file whose entry in `_OWNER_FACTORIES` names
+    # nothing, which is its own refusal.
     return (
         "\nfrom unittest.mock import patch\n"
         "\nfrom linkedin_mcp_server.scraping.extractor import LinkedInExtractor\n"
+        f"\n\n{factory}\n"
         "\n\nasync def test_owner(page, replacement):\n"
         f"{body}\n"
     )
@@ -2889,10 +2896,10 @@ def test_an_owner_factory_binding_exempts_only_its_own_wiring():
 @pytest.mark.parametrize(
     ("rebinding", "line"),
     [
-        ("    for scraper in (LinkedInExtractor(page),):\n        pass", 11),
-        ("    with LinkedInExtractor(page) as scraper:\n        pass", 11),
-        ("    try:\n        pass\n    except Exception as scraper:\n        pass", 13),
-        ("    scraper, other = LinkedInExtractor(page), None", 10),
+        ("    for scraper in (LinkedInExtractor(page),):\n        pass", 15),
+        ("    with LinkedInExtractor(page) as scraper:\n        pass", 15),
+        ("    try:\n        pass\n    except Exception as scraper:\n        pass", 17),
+        ("    scraper, other = LinkedInExtractor(page), None", 14),
     ],
 )
 def test_a_rebound_owner_name_loses_its_factory_exemption(rebinding, line):
@@ -2917,6 +2924,129 @@ def test_a_rebound_owner_name_loses_its_factory_exemption(rebinding, line):
             ),
             *migration.extractor_methods(),
         )
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        "def _scraper(page):\n    return page\n\n\ndef _scraper(page):\n    return page",
+        "def _scraper(page):\n    return page\n\n\n_scraper = LinkedInExtractor",
+        "from helpers import _scraper",
+    ],
+)
+def test_a_module_level_factory_shadow_names_its_entry(factory):
+    # The exemption was granted on the spelling, so whichever `_scraper` a
+    # call reaches carried it, including one the module rebound to the facade
+    # itself. Which binding a call site reaches is a question about execution
+    # order, and a reader that cannot answer it has to refuse rather than pick.
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=r"test_person\.py:\d+ _scraper: "
+        r"owner factory is not a single module-level definition",
+    ):
+        migration.scan_source(
+            PERSON_TESTS,
+            _owner_test(
+                "    scraper = _scraper(page)\n"
+                '    patch.object(scraper._capture, "extract_page", replacement)',
+                factory=factory,
+            ),
+            *migration.extractor_methods(),
+        )
+
+
+def test_a_nested_factory_shadow_loses_the_exemption_where_it_shadows():
+    # A `def _scraper` inside one test is invisible at module level, so the
+    # module check cannot see it and the frame chain has to. Measured against
+    # the pre-fix checker on the real file: both patches passed with exit 0,
+    # which is the inventory losing a facade reach-through in silence.
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=r"test_person\.py:16 scraper\._capture: "
+        r"unresolved patch\.object target",
+    ):
+        migration.scan_source(
+            PERSON_TESTS,
+            _owner_test(
+                "    def _scraper(page):\n"
+                "        return LinkedInExtractor(page)\n"
+                "\n"
+                "    scraper = _scraper(page)\n"
+                '    patch.object(scraper._capture, "extract_page", replacement)'
+            ),
+            *migration.extractor_methods(),
+        )
+
+
+def test_a_sibling_test_keeps_the_exemption_a_nested_shadow_loses():
+    # The narrowing is per scope, not per file. A shadow in one test may not
+    # cost the other 44 call sites their exemption, or the fix trades one
+    # silent pass for a refusal that blocks every later stage.
+    seams = migration.scan_source(
+        PERSON_TESTS,
+        _owner_test(
+            "    def _scraper(page):\n"
+            "        return LinkedInExtractor(page)\n"
+            "\n"
+            "    scraper = _scraper(page)\n"
+            "\n"
+            "\n"
+            "async def test_sibling(page, replacement):\n"
+            "    scraper = _scraper(page)\n"
+            '    patch.object(scraper._capture, "extract_page", replacement)'
+        ),
+        *migration.extractor_methods(),
+    )
+
+    assert not [seam for seam in seams if seam.kind.endswith("_patch_object")]
+
+
+def test_a_class_branch_copy_keeps_both_factory_views():
+    frame = migration._ScopeFrame(
+        kind="class",
+        module_names=set(),
+        class_names=set(),
+        instance_names=set(),
+        closure_module_names=set(),
+        closure_class_names=set(),
+        closure_instance_names=set(),
+        owner_factories=frozenset({"current_factory"}),
+        closure_owner_factories=frozenset({"enclosing_factory"}),
+    )
+
+    copied = migration.Scanner._copy_frame(frame)
+
+    assert copied.owner_factories == frozenset({"current_factory"})
+    assert copied.closure_owner_factories == frozenset({"enclosing_factory"})
+
+
+@pytest.mark.parametrize(
+    "branch",
+    [
+        "    if os.environ.get('FLAG'):\n{test}\n    else:\n        pass\n",
+        "    try:\n{test}\n    except Exception:\n        pass\n",
+    ],
+    ids=["if", "try"],
+)
+def test_a_class_branch_keeps_the_factory_its_class_body_shadows(branch):
+    test = (
+        "        async def test_owner(self, page, replacement):\n"
+        "            scraper = _scraper(page)\n"
+        "            patch.object("
+        'scraper._capture, "extract_page", replacement)'
+    )
+    seams = migration.scan_source(
+        PERSON_TESTS,
+        "\nimport os\n"
+        "from unittest.mock import patch\n"
+        "\nfrom linkedin_mcp_server.scraping.extractor import LinkedInExtractor\n"
+        "\n\ndef _scraper(page):\n    return page\n"
+        "\n\nclass TestOwner:\n"
+        "    _scraper = object()\n" + branch.format(test=test),
+        *migration.extractor_methods(),
+    )
+
+    assert not [seam for seam in seams if seam.kind.endswith("_patch_object")]
 
 
 def test_a_foreign_collaborator_of_its_own_stays_out_of_the_inventory():
