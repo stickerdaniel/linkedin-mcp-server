@@ -1,7 +1,7 @@
 # .pre-commit-config.yaml
 repos:
 -   repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.1.0
+    rev: v6.0.0
     hooks:
     -   id: trailing-whitespace
     -   id: end-of-file-fixer
@@ -12,11 +12,12 @@ repos:
 
 -   repo: https://github.com/astral-sh/ruff-pre-commit
     # Ruff version.
-    rev: v0.9.10
+    rev: v0.16.7
     hooks:
     -   id: ruff
         args: [--fix]
     -   id: ruff-format
+        types_or: [python, pyi, jupyter]
 
 -   repo: local
     hooks:
