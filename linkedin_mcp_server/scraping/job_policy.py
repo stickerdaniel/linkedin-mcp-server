@@ -173,8 +173,8 @@ SCROLL_BUDGET_TOTAL = 60.0
 # already handed a deadline, so it takes what is left of this budget when
 # that is less than its own cap.
 #
-# The timeout arrives as an argument because `get_config()` parses `sys.argv`
-# on its first call, and a scraping path is the wrong place to discover that.
+# The timeout arrives as an argument so this budget matches the timeout the
+# server registered for the tool, including directly constructed servers.
 SEARCH_TIMEOUT_FRACTION = 0.8
 
 SAVED_JOBS_URL = "https://www.linkedin.com/my-items/saved-jobs/"

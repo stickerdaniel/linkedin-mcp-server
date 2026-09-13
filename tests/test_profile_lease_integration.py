@@ -101,8 +101,6 @@ class TestBusyIsNotAnAuthFailure:
     async def test_middleware_reports_busy_without_triggering_relogin(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # argparse otherwise reads pytest's own command line.
-        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
         monkeypatch.setenv("BROWSER_WAIT", "0.5")
 
         holder = _hold_profile(tmp_path, 30)
@@ -285,7 +283,6 @@ class TestIdleOwnerHandsOver:
 
         from linkedin_mcp_server.drivers import browser as browser_module
 
-        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
         monkeypatch.setattr(browser_module, "_HANDOFF_POLL_INTERVAL_SECONDS", 0.05)
 
         lease = get_profile_lease(tmp_path / "profile")
@@ -345,8 +342,6 @@ class TestPollerDoesNotInterruptWork:
     ) -> None:
         from linkedin_mcp_server.drivers import browser as browser_module
 
-        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
-
         lease = get_profile_lease(tmp_path / "profile")
         assert lease.try_acquire()
         lease.mark_browser_open()
@@ -403,7 +398,6 @@ class TestPollerDoesNotInterruptWork:
         from linkedin_mcp_server.config import reset_config
         from linkedin_mcp_server.drivers import browser as browser_module
 
-        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
         monkeypatch.setenv("BROWSER_MIN_HOLD", "0")
         reset_config()
 
@@ -490,7 +484,6 @@ class TestPollerDoesNotInterruptWork:
         from linkedin_mcp_server.config import reset_config
         from linkedin_mcp_server.drivers import browser as browser_module
 
-        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
         monkeypatch.setenv("BROWSER_MIN_HOLD", "0")
         reset_config()
 
@@ -591,7 +584,6 @@ class TestMinimumHoldWindow:
     ) -> None:
         from linkedin_mcp_server.drivers import browser as browser_module
 
-        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
         monkeypatch.setenv("BROWSER_MIN_HOLD", "300")
 
         lease = get_profile_lease(tmp_path / "profile")
@@ -662,7 +654,6 @@ class TestTheHandoffAsksTheLeaseTheBrowserHolds:
         from linkedin_mcp_server.config import reset_config
         from linkedin_mcp_server.drivers import browser as browser_module
 
-        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
         monkeypatch.setenv("BROWSER_MIN_HOLD", "0")
         reset_config()
 
@@ -700,7 +691,6 @@ class TestTheHandoffAsksTheLeaseTheBrowserHolds:
         from linkedin_mcp_server.config import reset_config
         from linkedin_mcp_server.drivers import browser as browser_module
 
-        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
         monkeypatch.setenv("BROWSER_MIN_HOLD", "60")
         reset_config()
 
@@ -749,7 +739,6 @@ class TestFailedLoginStillRestores:
     ) -> None:
         from linkedin_mcp_server import setup as setup_module
 
-        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
         profile = tmp_path / "profile"
         profile.mkdir(parents=True)
         (profile / "Default").mkdir()
@@ -973,9 +962,8 @@ class TestALateLoginDoesNotUndoAnEarlierOne:
         from linkedin_mcp_server.config import set_config
         from linkedin_mcp_server.config.schema import AppConfig
 
-        # Installed rather than loaded: `_login_holding_the_profile` calls
-        # get_config(), which parses sys.argv, and under pytest that is pytest's
-        # own command line.
+        # Installed because `_login_holding_the_profile` reads the process-global
+        # config and this test needs a known value there.
         set_config(AppConfig())
 
         opened: list[bool] = []
@@ -1267,8 +1255,8 @@ class TestEveryLaunchPathStartsAGuardian:
         from linkedin_mcp_server.config import set_config
         from linkedin_mcp_server.config.schema import AppConfig
 
-        # Read for the launch options this stubs past; without it the loader
-        # parses pytest's own argv and the test dies in the argument parser.
+        # The launch options this test stubs past still read process-global
+        # config, so install known defaults rather than inherit another test's.
         set_config(AppConfig())
 
         lease = get_profile_lease(isolate_profile_dir)

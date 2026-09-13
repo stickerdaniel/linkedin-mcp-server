@@ -291,16 +291,21 @@ class TestExposedBindWarning:
 
 
 class TestConfigSingleton:
-    def test_get_config_returns_same_instance(self, monkeypatch):
-        # Mock sys.argv to prevent argparse from parsing pytest's arguments
-        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
+    def test_get_config_ignores_host_process_arguments(self, monkeypatch):
+        monkeypatch.setattr("sys.argv", ["host-process", "--foreign-option"])
+        from linkedin_mcp_server.config import get_config, reset_config
+
+        reset_config()
+        config = get_config()
+
+        assert config.server.transport == "stdio"
+
+    def test_get_config_returns_same_instance(self):
         from linkedin_mcp_server.config import get_config
 
         assert get_config() is get_config()
 
-    def test_reset_config_clears_singleton(self, monkeypatch):
-        # Mock sys.argv to prevent argparse from parsing pytest's arguments
-        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
+    def test_reset_config_clears_singleton(self):
         from linkedin_mcp_server.config import get_config, reset_config
 
         first = get_config()
@@ -333,13 +338,10 @@ class TestUserAgentRefusal:
         assert load_from_env(AppConfig()).browser.user_agent is None
 
     def test_cli_user_agent_refuses_to_start(self, monkeypatch):
-        monkeypatch.setattr(
-            "sys.argv", ["linkedin-mcp-server", "--user-agent", "CustomAgent/1.0"]
-        )
         from linkedin_mcp_server.config.loaders import load_from_args
 
         with pytest.raises(ConfigurationError, match="--user-agent"):
-            load_from_args(AppConfig())
+            load_from_args(AppConfig(), ["--user-agent", "CustomAgent/1.0"])
 
 
 class TestLoaders:
@@ -477,27 +479,39 @@ class TestLoaders:
         with pytest.raises(ConfigurationError, match="Invalid TOOL_TIMEOUT"):
             load_from_env(AppConfig())
 
-    def test_load_from_args_tool_timeout(self, monkeypatch):
-        monkeypatch.setattr(
-            "sys.argv", ["linkedin-mcp-server", "--tool-timeout", "7.5"]
-        )
+    def test_load_from_args_tool_timeout(self):
         from linkedin_mcp_server.config.loaders import load_from_args
 
-        config = load_from_args(AppConfig())
+        config = load_from_args(AppConfig(), ["--tool-timeout", "7.5"])
         assert config.server.tool_timeout_seconds == 7.5
 
-    def test_claim_profile_root_defaults_off(self, monkeypatch):
+    def test_explicit_args_override_environment(self, monkeypatch):
+        monkeypatch.setenv("LOG_LEVEL", "INFO")
+        from linkedin_mcp_server.config import load_config
+
+        config = load_config(["--log-level", "DEBUG"])
+
+        assert config.server.log_level == "DEBUG"
+
+    def test_unknown_explicit_arg_exits_with_status_two(self):
+        from linkedin_mcp_server.config import load_config
+
+        with pytest.raises(SystemExit) as exc_info:
+            load_config(["--foreign-option"])
+
+        assert exc_info.value.code == 2
+
+    def test_claim_profile_root_defaults_off(self):
         """Taking over an occupied directory is never the default."""
-        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
         from linkedin_mcp_server.config.loaders import load_from_args
 
-        assert load_from_args(AppConfig()).server.claim_profile_root is False
+        assert load_from_args(AppConfig(), []).server.claim_profile_root is False
 
-    def test_claim_profile_root_is_reachable_from_the_command_line(self, monkeypatch):
-        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server", "--claim-profile-root"])
+    def test_claim_profile_root_is_reachable_from_the_command_line(self):
         from linkedin_mcp_server.config.loaders import load_from_args
 
-        assert load_from_args(AppConfig()).server.claim_profile_root is True
+        config = load_from_args(AppConfig(), ["--claim-profile-root"])
+        assert config.server.claim_profile_root is True
 
     def test_claim_profile_root_is_not_part_of_the_owner_fingerprint(self):
         """It decides whether a marker may be written, not what the browser is.
@@ -512,13 +526,10 @@ class TestLoaders:
 
     @pytest.mark.parametrize("bad_value", ["0", "-1", "abc", "nan", "inf"])
     def test_load_from_args_invalid_tool_timeout(self, monkeypatch, bad_value):
-        monkeypatch.setattr(
-            "sys.argv", ["linkedin-mcp-server", "--tool-timeout", bad_value]
-        )
         from linkedin_mcp_server.config.loaders import load_from_args
 
         with pytest.raises(SystemExit):
-            load_from_args(AppConfig())
+            load_from_args(AppConfig(), ["--tool-timeout", bad_value])
 
     def test_load_from_env_login_timeout(self, monkeypatch):
         monkeypatch.setenv("LOGIN_TIMEOUT", "600")
@@ -576,30 +587,21 @@ class TestLoaders:
             load_from_env(AppConfig())
 
     def test_load_from_args_login_timeout(self, monkeypatch):
-        monkeypatch.setattr(
-            "sys.argv", ["linkedin-mcp-server", "--login-timeout", "900"]
-        )
         from linkedin_mcp_server.config.loaders import load_from_args
 
-        config = load_from_args(AppConfig())
+        config = load_from_args(AppConfig(), ["--login-timeout", "900"])
         assert config.browser.login_timeout_seconds == 900.0
 
     def test_load_from_args_login_inline_wait(self, monkeypatch):
-        monkeypatch.setattr(
-            "sys.argv", ["linkedin-mcp-server", "--login-inline-wait", "12"]
-        )
         from linkedin_mcp_server.config.loaders import load_from_args
 
-        config = load_from_args(AppConfig())
+        config = load_from_args(AppConfig(), ["--login-inline-wait", "12"])
         assert config.browser.login_inline_wait_seconds == 12.0
 
     def test_load_from_args_login_inline_wait_zero(self, monkeypatch):
-        monkeypatch.setattr(
-            "sys.argv", ["linkedin-mcp-server", "--login-inline-wait", "0"]
-        )
         from linkedin_mcp_server.config.loaders import load_from_args
 
-        config = load_from_args(AppConfig())
+        config = load_from_args(AppConfig(), ["--login-inline-wait", "0"])
         assert config.browser.login_inline_wait_seconds == 0.0
 
     def test_login_inline_wait_clamped_at_validate(self, monkeypatch):
@@ -667,10 +669,9 @@ class TestLoaders:
         ],
     )
     def test_load_from_args_profile_sharing(self, monkeypatch, flag, attribute):
-        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server", flag, "8"])
         from linkedin_mcp_server.config.loaders import load_from_args
 
-        config = load_from_args(AppConfig())
+        config = load_from_args(AppConfig(), [flag, "8"])
         assert getattr(config.browser, attribute) == 8.0
 
     def test_profile_sharing_clamped_at_validate_not_in_the_loader(self, monkeypatch):
@@ -705,41 +706,36 @@ class TestLoaders:
         assert BrowserConfig().auto_import_from_browser is None
 
     def test_load_from_args_no_auto_import(self, monkeypatch):
-        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server", "--no-auto-import"])
         from linkedin_mcp_server.config.loaders import load_from_args
 
-        config = load_from_args(AppConfig())
+        config = load_from_args(AppConfig(), ["--no-auto-import"])
         assert config.browser.auto_import_from_browser is False
 
     def test_load_from_args_auto_import(self, monkeypatch):
-        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server", "--auto-import"])
         from linkedin_mcp_server.config.loaders import load_from_args
 
-        config = load_from_args(AppConfig())
+        config = load_from_args(AppConfig(), ["--auto-import"])
         assert config.browser.auto_import_from_browser is True
 
     def test_args_no_auto_import_overrides_env_true(self, monkeypatch):
         monkeypatch.setenv("AUTO_IMPORT_FROM_BROWSER", "true")
-        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server", "--no-auto-import"])
         from linkedin_mcp_server.config import load_config
 
-        config = load_config()
+        config = load_config(["--no-auto-import"])
         assert config.browser.auto_import_from_browser is False
 
     def test_absent_args_keep_env_false(self, monkeypatch):
         monkeypatch.setenv("AUTO_IMPORT_FROM_BROWSER", "false")
-        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
         from linkedin_mcp_server.config import load_config
 
-        config = load_config()
+        config = load_config([])
         assert config.browser.auto_import_from_browser is False
 
     def test_absent_args_and_env_keep_none(self, monkeypatch):
         monkeypatch.delenv("AUTO_IMPORT_FROM_BROWSER", raising=False)
-        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
         from linkedin_mcp_server.config import load_config
 
-        config = load_config()
+        config = load_config([])
         assert config.browser.auto_import_from_browser is None
 
     def test_eager_full_chromium_default_is_false(self):
@@ -757,41 +753,31 @@ class TestLoaders:
         assert config.browser.eager_full_chromium is expected
 
     def test_load_from_args_eager_full_chromium(self, monkeypatch):
-        monkeypatch.setattr(
-            "sys.argv", ["linkedin-mcp-server", "--eager-full-chromium"]
-        )
         from linkedin_mcp_server.config.loaders import load_from_args
 
-        config = load_from_args(AppConfig())
+        config = load_from_args(AppConfig(), ["--eager-full-chromium"])
         assert config.browser.eager_full_chromium is True
 
     def test_load_from_args_no_eager_full_chromium(self, monkeypatch):
-        monkeypatch.setattr(
-            "sys.argv", ["linkedin-mcp-server", "--no-eager-full-chromium"]
-        )
         from linkedin_mcp_server.config.loaders import load_from_args
 
         config = AppConfig()
         config.browser.eager_full_chromium = True
-        config = load_from_args(config)
+        config = load_from_args(config, ["--no-eager-full-chromium"])
         assert config.browser.eager_full_chromium is False
 
     def test_no_eager_flag_overrides_env_true(self, monkeypatch):
         monkeypatch.setenv("EAGER_FULL_CHROMIUM", "true")
-        monkeypatch.setattr(
-            "sys.argv", ["linkedin-mcp-server", "--no-eager-full-chromium"]
-        )
         from linkedin_mcp_server.config import load_config
 
-        config = load_config()
+        config = load_config(["--no-eager-full-chromium"])
         assert config.browser.eager_full_chromium is False
 
     def test_eager_full_chromium_absent_keeps_default(self, monkeypatch):
         monkeypatch.delenv("EAGER_FULL_CHROMIUM", raising=False)
-        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
         from linkedin_mcp_server.config import load_config
 
-        config = load_config()
+        config = load_config([])
         assert config.browser.eager_full_chromium is False
 
     def test_daemon_enabled_default_is_false(self):
@@ -811,37 +797,33 @@ class TestLoaders:
         assert config.server.daemon_enabled is expected
 
     def test_load_from_args_daemon(self, monkeypatch):
-        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server", "--daemon"])
         from linkedin_mcp_server.config.loaders import load_from_args
 
-        config = load_from_args(AppConfig())
+        config = load_from_args(AppConfig(), ["--daemon"])
         assert config.server.daemon_enabled is True
 
     def test_load_from_args_no_daemon(self, monkeypatch):
-        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server", "--no-daemon"])
         from linkedin_mcp_server.config.loaders import load_from_args
 
         config = AppConfig()
         config.server.daemon_enabled = True
-        config = load_from_args(config)
+        config = load_from_args(config, ["--no-daemon"])
         assert config.server.daemon_enabled is False
 
     def test_no_daemon_flag_overrides_env_true(self, monkeypatch):
         # The way out for someone whose environment enables the daemon and who
         # needs one process back on its own browser.
         monkeypatch.setenv("DAEMON_ENABLED", "true")
-        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server", "--no-daemon"])
         from linkedin_mcp_server.config import load_config
 
-        config = load_config()
+        config = load_config(["--no-daemon"])
         assert config.server.daemon_enabled is False
 
     def test_daemon_enabled_absent_keeps_default(self, monkeypatch):
         monkeypatch.delenv("DAEMON_ENABLED", raising=False)
-        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
         from linkedin_mcp_server.config import load_config
 
-        config = load_config()
+        config = load_config([])
         assert config.server.daemon_enabled is False
 
     def test_load_from_env_port(self, monkeypatch):
@@ -888,26 +870,20 @@ class TestLoaders:
         assert config.browser.installer_temp_dir == "/custom/installer/temp"
 
     def test_load_from_args_installer_temp_dir(self, monkeypatch):
-        monkeypatch.setattr(
-            "sys.argv",
-            ["linkedin-mcp-server", "--installer-temp-dir", "/custom/installer/temp"],
-        )
         from linkedin_mcp_server.config.loaders import load_from_args
 
-        config = load_from_args(AppConfig())
+        config = load_from_args(
+            AppConfig(), ["--installer-temp-dir", "/custom/installer/temp"]
+        )
         assert config.browser.installer_temp_dir == "/custom/installer/temp"
 
     def test_load_from_args_installer_temp_dir_overrides_env(self, monkeypatch):
         monkeypatch.setenv("INSTALLER_TEMP_DIR", "/env/installer/temp")
-        monkeypatch.setattr(
-            "sys.argv",
-            ["linkedin-mcp-server", "--installer-temp-dir", "/cli/installer/temp"],
-        )
         from linkedin_mcp_server.config.loaders import load_from_args, load_from_env
 
         config = load_from_env(AppConfig())
         assert config.browser.installer_temp_dir == "/env/installer/temp"
-        config = load_from_args(config)
+        config = load_from_args(config, ["--installer-temp-dir", "/cli/installer/temp"])
         assert config.browser.installer_temp_dir == "/cli/installer/temp"
 
     def test_load_from_env_import_from_browser(self, monkeypatch):
@@ -918,30 +894,21 @@ class TestLoaders:
         assert config.server.import_from_browser == "brave"
 
     def test_load_from_args_import_from_browser_value(self, monkeypatch):
-        monkeypatch.setattr(
-            "sys.argv", ["linkedin-mcp-server", "--import-from-browser", "chrome"]
-        )
         from linkedin_mcp_server.config.loaders import load_from_args
 
-        config = load_from_args(AppConfig())
+        config = load_from_args(AppConfig(), ["--import-from-browser", "chrome"])
         assert config.server.import_from_browser == "chrome"
 
     def test_load_from_args_import_from_browser_bare_flag_is_auto(self, monkeypatch):
-        monkeypatch.setattr(
-            "sys.argv", ["linkedin-mcp-server", "--import-from-browser"]
-        )
         from linkedin_mcp_server.config.loaders import load_from_args
 
-        config = load_from_args(AppConfig())
+        config = load_from_args(AppConfig(), ["--import-from-browser"])
         assert config.server.import_from_browser == "auto"
 
     def test_load_from_args_import_from_browser_empty_is_auto(self, monkeypatch):
-        monkeypatch.setattr(
-            "sys.argv", ["linkedin-mcp-server", "--import-from-browser="]
-        )
         from linkedin_mcp_server.config.loaders import load_from_args
 
-        config = load_from_args(AppConfig())
+        config = load_from_args(AppConfig(), ["--import-from-browser="])
         assert config.server.import_from_browser == "auto"
 
 
@@ -1111,10 +1078,11 @@ class TestProxyLoaders:
         assert config.browser.proxy_password == self.SECRET
 
     def test_load_from_args_proxy_flags(self, monkeypatch):
-        monkeypatch.setattr(
-            "sys.argv",
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        config = load_from_args(
+            AppConfig(),
             [
-                "linkedin-mcp-server",
                 "--proxy-server",
                 "http://cli.example:3128",
                 "--proxy-username",
@@ -1123,34 +1091,28 @@ class TestProxyLoaders:
                 ".internal",
             ],
         )
-        from linkedin_mcp_server.config.loaders import load_from_args
-
-        config = load_from_args(AppConfig())
         assert config.browser.proxy_server == "http://cli.example:3128"
         assert config.browser.proxy_username == "cliuser"
         assert config.browser.proxy_bypass == ".internal"
 
     def test_args_override_env(self, monkeypatch):
         monkeypatch.setenv("PROXY_SERVER", "http://env.example:7000")
-        monkeypatch.setattr(
-            "sys.argv", ["linkedin-mcp-server", "--proxy-server", "http://cli:3128"]
-        )
         from linkedin_mcp_server.config.loaders import load_from_args, load_from_env
 
-        config = load_from_args(load_from_env(AppConfig()))
+        config = load_from_args(
+            load_from_env(AppConfig()), ["--proxy-server", "http://cli:3128"]
+        )
         assert config.browser.proxy_server == "http://cli:3128"
 
     def test_cli_rejects_embedded_credentials(self, monkeypatch, capsys):
         # There is no --proxy-password flag because argv is world-readable;
         # accepting a credential URL here would hand that exposure back.
-        monkeypatch.setattr(
-            "sys.argv",
-            ["linkedin-mcp-server", "--proxy-server", f"http://u:{self.SECRET}@h:8080"],
-        )
         from linkedin_mcp_server.config.loaders import load_from_args
 
         with pytest.raises(SystemExit):
-            load_from_args(AppConfig())
+            load_from_args(
+                AppConfig(), ["--proxy-server", f"http://u:{self.SECRET}@h:8080"]
+            )
         assert self.SECRET not in capsys.readouterr().err
 
 
@@ -1321,13 +1283,10 @@ class TestProxyEncodedUserinfo:
         assert "user%3Apass" not in str(excinfo.value)
 
     def test_cli_rejects_it(self, monkeypatch, capsys):
-        monkeypatch.setattr(
-            "sys.argv", ["linkedin-mcp-server", "--proxy-server", self.ENCODED]
-        )
         from linkedin_mcp_server.config.loaders import load_from_args
 
         with pytest.raises(SystemExit):
-            load_from_args(AppConfig())
+            load_from_args(AppConfig(), ["--proxy-server", self.ENCODED])
         assert "user%3Apass" not in capsys.readouterr().err
 
     def test_an_ordinary_address_is_unaffected(self):

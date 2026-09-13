@@ -235,10 +235,9 @@ class FrontendAuthRepairMiddleware(Middleware):
         Taken as an argument rather than read from the configuration singleton,
         because the two can disagree. ``create_mcp_server`` is handed the budget
         every tool it registers gets, and a server built directly rather than by
-        ``cli_main`` may never have loaded a configuration at all: measured at
-        ``tool_timeout=1.2`` with none loaded, this budgeted itself 149.8 seconds
-        of a 1.2-second call, because the unloaded singleton falls back to
-        parsing ``sys.argv``.
+        ``cli_main`` may never have installed a configuration at all: measured
+        at ``tool_timeout=1.2`` with none installed, this budgeted itself 149.8
+        seconds of a 1.2-second call from the singleton's default.
         """
         self._tool_timeout = tool_timeout
 

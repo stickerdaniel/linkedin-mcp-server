@@ -43,8 +43,7 @@ def _backend(attachment: Attachment, tmp_path: Path) -> DaemonProxyBackend:
     """The state object the proxy layer is built from.
 
     The election's inputs travel with the answer, so a later change can find a
-    replacement without reading a configuration singleton whose first read parses
-    `sys.argv`.
+    replacement without substituting defaults from a configuration singleton.
     """
     profile = tmp_path / "profile"
     return DaemonProxyBackend(

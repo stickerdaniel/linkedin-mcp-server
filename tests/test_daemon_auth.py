@@ -191,9 +191,8 @@ class TestTheFrontendActsOnTheMarker:
     def _a_real_config(self):
         """The replay reads its deadline from the configuration.
 
-        Built rather than left to the default, because ``get_config`` parses
-        ``sys.argv`` when nothing has been set, which under pytest is pytest's
-        own command line.
+        Installed explicitly so the replay deadline cannot depend on config
+        left behind by another test.
         """
         from linkedin_mcp_server.config import set_config
         from linkedin_mcp_server.config.schema import AppConfig
@@ -488,8 +487,8 @@ class TestTheRepairRunsForReal:
     def _short_budget(self, monkeypatch):
         """Scale the inline wait down, keeping the shape of the real timings.
 
-        Built rather than read: ``get_config`` parses ``sys.argv``, which under
-        pytest is pytest's own command line.
+        Installed explicitly so the shortened budget cannot depend on config
+        left behind by another test.
         """
         from linkedin_mcp_server.config import set_config
         from linkedin_mcp_server.config.schema import AppConfig

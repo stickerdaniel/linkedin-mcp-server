@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NoReturn
 
@@ -18,7 +19,8 @@ from linkedin_mcp_server.exceptions import (
     ProfileRootRefusedError,
 )
 from linkedin_mcp_server.authentication import clear_auth_state
-from linkedin_mcp_server.config import get_config
+from linkedin_mcp_server.config import get_config, set_config
+from linkedin_mcp_server.config.loaders import load_config
 from linkedin_mcp_server.config.schema import AppConfig, ConfigurationError
 from linkedin_mcp_server.drivers.browser import (
     experimental_persist_derived_runtime,
@@ -370,9 +372,8 @@ def _obtain_shared_owner(config: AppConfig) -> "DaemonProxyBackend | None":
         # already matched and reached.
         #
         # The election's own inputs travel with it, because they are what finding
-        # a *replacement* would take and nothing downstream has them: the proxy
-        # layer receives no configuration, and reading the singleton there would
-        # parse whatever `sys.argv` holds.
+        # a *replacement* would take. Reading process-global state downstream
+        # would hide that dependency instead of carrying the verified inputs.
         return DaemonProxyBackend(
             attachment=attachment,
             auth_root=auth_root,
@@ -442,10 +443,11 @@ def _preflight_login_viewer(config: AppConfig) -> None:
         raise ConfigurationError(str(exc)) from exc
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> None:
     """Main application entry point."""
     try:
-        config = get_config()
+        config = load_config(sys.argv[1:] if argv is None else argv)
+        set_config(config)
         _preflight_login_viewer(config)
     except ConfigurationError as e:
         # A bad setting used to leave the loader as an exception nothing
@@ -481,10 +483,8 @@ def main() -> None:
         # nested auth root, and claiming that one would protect the wrong
         # directory while looking like protection.
         #
-        # Read off the config already in hand rather than through
-        # `get_source_profile_dir()`. That helper reaches for the global config,
-        # which lazily parses `sys.argv`, and reaching for it a second time here
-        # would re-parse whatever argv happens to hold.
+        # Read off the validated config already in hand rather than reaching
+        # through `get_source_profile_dir()` to process-global state.
         ensure_profile_claim(
             Path(config.browser.user_data_dir),
             claim_anyway=config.server.claim_profile_root,
