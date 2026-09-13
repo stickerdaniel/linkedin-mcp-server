@@ -147,6 +147,10 @@ class EnvironmentKeys:
     EAGER_FULL_CHROMIUM = "EAGER_FULL_CHROMIUM"
     DAEMON_ENABLED = "DAEMON_ENABLED"
     INSTALLER_TEMP_DIR = "INSTALLER_TEMP_DIR"
+    # Company-cache TTLs, in days. Firmographics move on the order of years, so
+    # a long default is safe; open roles are the volatile signal, so a short one.
+    COMPANY_FIRMOGRAPHICS_TTL_DAYS = "COMPANY_FIRMOGRAPHICS_TTL_DAYS"
+    COMPANY_JOBS_TTL_DAYS = "COMPANY_JOBS_TTL_DAYS"
 
 
 # What ``manifest.json`` fills from ``user_config``, and the exact string each
