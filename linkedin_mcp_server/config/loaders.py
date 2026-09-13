@@ -441,8 +441,13 @@ def load_from_env(config: AppConfig) -> AppConfig:
     return config
 
 
-def load_from_args(config: AppConfig) -> AppConfig:
-    """Load configuration from command line arguments."""
+def load_from_args(config: AppConfig, *, argv: list[str] | None = None) -> AppConfig:
+    """Load configuration from command line arguments.
+
+    *argv* overrides ``sys.argv[1:]`` when provided.  Tests and library callers
+    pass an explicit (possibly empty) list so that pytest flags, CI wrappers, or
+    IDE arguments do not leak into the server's own parser.
+    """
     parser = argparse.ArgumentParser(
         description="LinkedIn MCP Server - A Model Context Protocol server for LinkedIn integration"
     )
@@ -755,7 +760,7 @@ def load_from_args(config: AppConfig) -> AppConfig:
         help="Give every stdio client its own browser (default; overrides DAEMON_ENABLED=true).",
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     # Update configuration with parsed arguments
     if args.no_headless:
@@ -867,7 +872,7 @@ def load_from_args(config: AppConfig) -> AppConfig:
     return config
 
 
-def load_config() -> AppConfig:
+def load_config(*, argv: list[str] | None = None) -> AppConfig:
     """
     Load configuration with clear precedence order.
 
@@ -875,6 +880,10 @@ def load_config() -> AppConfig:
     1. Command line arguments (highest priority)
     2. Environment variables
     3. Defaults (lowest priority)
+
+    *argv* is forwarded to :func:`load_from_args`.  See its docstring for
+    why callers should pass an explicit list rather than letting the parser
+    fall back to ``sys.argv``.
 
     Returns:
         Fully configured application settings
@@ -890,7 +899,7 @@ def load_config() -> AppConfig:
     config = load_from_env(config)
 
     # Override with command line arguments (highest priority)
-    config = load_from_args(config)
+    config = load_from_args(config, argv=argv)
 
     # Validate final configuration
     config.validate()

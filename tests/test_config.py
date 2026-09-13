@@ -1334,3 +1334,43 @@ class TestProxyEncodedUserinfo:
         config = BrowserConfig(proxy_server="http://gate.example:7000")
         config.validate()
         assert config.proxy_server == "http://gate.example:7000"
+
+
+class TestArgvIsolation:
+    """load_from_args must not parse live sys.argv (#929)."""
+
+    def test_empty_argv_does_not_touch_sys_argv(self, monkeypatch):
+        """Passing argv=[] ignores whatever pytest left in sys.argv."""
+        monkeypatch.setattr(
+            "sys.argv",
+            ["linkedin-mcp-server", "-k", "test_something", "--cov", "src"],
+        )
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        # With argv=[], argparse sees no arguments and succeeds.
+        config = load_from_args(AppConfig(), argv=[])
+        # No SystemExit — the pytest flags are ignored.
+
+    def test_explicit_argv_is_used(self, monkeypatch):
+        """An explicit argv list is parsed instead of sys.argv."""
+        monkeypatch.setattr(
+            "sys.argv",
+            ["linkedin-mcp-server", "--no-headless"],
+        )
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        config = load_from_args(AppConfig(), argv=["--timeout", "9999"])
+        assert config.browser.default_timeout == 9999
+        # The sys.argv --no-headless is NOT applied.
+        assert config.browser.headless is True
+
+    def test_none_argv_uses_sys_argv(self, monkeypatch):
+        """The default (None) preserves the original sys.argv behaviour."""
+        monkeypatch.setattr(
+            "sys.argv",
+            ["linkedin-mcp-server", "--no-headless"],
+        )
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        config = load_from_args(AppConfig())
+        assert config.browser.headless is False
