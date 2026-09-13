@@ -812,6 +812,21 @@ class TestRepeatingOnlyWhatIsSafe:
         # And the replacement was still adopted, for the next call.
         assert backend.attachment.descriptor.instance_id != failed
 
+    async def test_a_mutating_call_emits_toolerror_when_owner_departs(
+        self, _recovering
+    ):
+        """A ToolError with a do-not-retry hint is raised, not a masked error (#891)."""
+        from fastmcp.exceptions import ToolError
+
+        backend, failed = _recovering
+        with pytest.raises(ToolError, match="do not retry automatically"):
+            await self._run(
+                backend,
+                self._context(read_only=False),
+                nothing_was_sent=False,
+                instance_id=failed,
+            )
+
     async def test_a_mutating_call_is_repeated_when_nothing_was_sent(self, _recovering):
         # The only reason the dispatch question is worth asking. Without it every
         # write tool would keep failing across an upgrade.
