@@ -12,11 +12,7 @@ from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.core.exceptions import LinkedInScraperException
 from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
-from linkedin_mcp_server.scraping.capture import (
-    CaptureMode,
-    CapturePlan,
-    SectionCapture,
-)
+from linkedin_mcp_server.scraping.capture import CaptureMode, SectionCapture
 from linkedin_mcp_server.scraping.contracts import (
     RATE_LIMITED_SECTION_TEXT,
     FilterValidationError,
@@ -28,9 +24,10 @@ from linkedin_mcp_server.scraping.identifiers import (
     normalize_person_identifier,
     person_profile_url,
 )
-from linkedin_mcp_server.scraping.link_metadata import Reference
+from linkedin_mcp_server.scraping.link_metadata import Reference, dedupe_references
 from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.profile_page import ProfilePageReader
+from linkedin_mcp_server.scraping.search_pages import paginate_search
 from linkedin_mcp_server.scraping.search_urls import build_people_search_url
 from linkedin_mcp_server.scraping.session import NAV_DELAY, ScrapingSession
 from linkedin_mcp_server.scraping.text import SIDEBAR_CHROME_EN
@@ -476,8 +473,9 @@ class PersonScraper:
         location: str | None = None,
         network: list[str] | None = None,
         current_company: str | None = None,
+        max_pages: int = 1,
     ) -> dict[str, Any]:
-        """Search for people and extract the results page.
+        """Search for people and extract the results pages.
 
         Args:
             keywords: Free-text query ("software engineer", "recruiter at Google").
@@ -500,9 +498,12 @@ class PersonScraper:
                 unfiltered result set. Look up a company's URN via
                 ``get_company_profile`` -- it is exposed under
                 ``references["about"]``.
+            max_pages: Maximum result pages to load (LinkedIn returns 10 people
+                per page). Stops early once a page adds no new people, so
+                over-requesting is harmless. Default 1 (previous behavior).
 
         Returns:
-            {url, sections: {name: text}}
+            {url, sections: {search_results: text}} -- pages joined by ``\\n---\\n``
         """
         geo_id: str | None = None
         if location:
@@ -519,36 +520,31 @@ class PersonScraper:
 
         # Builds before it navigates, and the builder refuses a filter
         # LinkedIn would swallow, so an invalid token costs no page load.
-        url = build_people_search_url(
+        base_url = build_people_search_url(
             keywords,
             geo_id=geo_id,
             network=network,
             current_company=current_company,
         )
-        extracted = await self._capture.capture(
-            url,
-            section_name="search_results",
-            plan=CapturePlan(CaptureMode.SEARCH_RESULTS),
+
+        paged = await paginate_search(
+            self._capture,
+            self._session,
+            base_url,
+            kind="person",
+            max_pages=max_pages,
         )
 
-        sections: dict[str, str] = {}
-        references: dict[str, list[Reference]] = {}
-        section_errors: dict[str, dict[str, Any]] = {}
-        if extracted.text and extracted.text != RATE_LIMITED_SECTION_TEXT:
-            sections["search_results"] = extracted.text
-            if extracted.references:
-                references["search_results"] = extracted.references
-        elif extracted.text == RATE_LIMITED_SECTION_TEXT:
-            section_errors["search_results"] = rate_limited_section_error()
-        elif extracted.error:
-            section_errors["search_results"] = extracted.error
-
         result: dict[str, Any] = {
-            "url": url,
-            "sections": sections,
+            "url": base_url,
+            "sections": {"search_results": "\n---\n".join(paged.page_texts)}
+            if paged.page_texts
+            else {},
         }
-        if references:
-            result["references"] = references
-        if section_errors:
-            result["section_errors"] = section_errors
+        if paged.page_references:
+            result["references"] = {
+                "search_results": dedupe_references(paged.page_references)
+            }
+        if paged.section_errors:
+            result["section_errors"] = paged.section_errors
         return result

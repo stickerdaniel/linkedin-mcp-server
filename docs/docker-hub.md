@@ -17,7 +17,7 @@ A Model Context Protocol (MCP) server that connects AI assistants to LinkedIn. A
 - **Job Details**: Retrieve job posting information
 - **Job Search**: Search for jobs with keywords and location filters
 - **Saved Jobs**: List job postings saved by the authenticated user
-- **People Search**: Search for people by keywords and location
+- **People Search**: Search for people by keywords, location, connection degree (1st/2nd/3rd) and current company, with multi-page pagination
 - **Person Posts**: Get recent activity/posts from a person's profile
 - **Company Posts**: Get recent posts from a company's LinkedIn feed
 - **Home Feed**: Get recent posts from the authenticated user's LinkedIn home feed

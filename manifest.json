@@ -93,7 +93,7 @@
     },
     {
       "name": "search_people",
-      "description": "Search for people on LinkedIn by keywords, location, connection degree (1st/2nd/3rd), and current company"
+      "description": "Search for people on LinkedIn by keywords, location, connection degree (1st/2nd/3rd), and current company, paginating up to max_pages result pages (10 people per page)"
     },
     {
       "name": "get_inbox",
