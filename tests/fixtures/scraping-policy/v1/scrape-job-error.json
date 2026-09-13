@@ -73,6 +73,14 @@
       "kind": "boundary.modal"
     },
     {
+      "arg": null,
+      "call": "scrape_job",
+      "kind": "wait_for_function",
+      "operation": "job_description_ready",
+      "program_digest": "787d6bbc05c8",
+      "timeout_ms": 10000
+    },
+    {
       "actual_scrolls": 2,
       "call": "scrape_job",
       "kind": "boundary.scroll_body",

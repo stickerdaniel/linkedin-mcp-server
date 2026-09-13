@@ -13,7 +13,11 @@ from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.scraping import jobs as jobs_module
-from linkedin_mcp_server.scraping.capture import CapturePlan, SectionCapture
+from linkedin_mcp_server.scraping.capture import (
+    CaptureMode,
+    CapturePlan,
+    SectionCapture,
+)
 from linkedin_mcp_server.scraping.content import PageContentReader
 from linkedin_mcp_server.scraping.contracts import (
     RATE_LIMITED_SECTION_TEXT,
@@ -81,7 +85,7 @@ class TestScrapeJob:
         capture.assert_awaited_once_with(
             "https://www.linkedin.com/jobs/view/12345/",
             section_name="job_posting",
-            plan=CapturePlan(),
+            plan=CapturePlan(CaptureMode.JOB_POSTING),
         )
         assert result["url"] == "https://www.linkedin.com/jobs/view/12345/"
         assert "job_posting" in result["sections"]
