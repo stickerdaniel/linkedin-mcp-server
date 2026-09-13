@@ -273,6 +273,35 @@ class TestEnrichCompanies:
         assert out["stopped_because"] == "daily_budget_spent"
         assert out["fetched"] == 0
 
+    async def test_a_company_url_is_recorded_without_a_search(
+        self, mcp, wired, mock_context
+    ):
+        """The docstring accepts a URL, and a URL already says what a search
+        would find: the slug. Searching it anyway spent a navigation and,
+        matched against the URL's own words, came back with no confident
+        match for a company the caller had named exactly."""
+        cache, jobs = wired
+        extractor = MagicMock()
+        extractor.search_companies = AsyncMock(return_value={"sections": {}})
+
+        fn = await get_tool_fn(mcp, "enrich_companies")
+        out = await fn(
+            ["https://www.linkedin.com/company/copado/"],
+            mock_context,
+            extractor=extractor,
+        )
+
+        extractor.search_companies.assert_not_awaited()
+        assert out["fetched"] == 0
+        assert out["results"]["copado"]["linkedin_url"] == (
+            "https://www.linkedin.com/company/copado"
+        )
+        assert cache.get("copado").linkedin_url == (
+            "https://www.linkedin.com/company/copado"
+        )
+        now = datetime.now().astimezone()
+        assert jobs.load(ACCOUNT_BUDGET_JOB).ledger.spent(now) == 0
+
     async def test_bunch_searches_is_clamped_to_the_configured_ceiling(
         self, mcp, wired, mock_context, monkeypatch, caplog
     ):

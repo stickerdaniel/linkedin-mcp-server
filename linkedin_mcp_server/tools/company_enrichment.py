@@ -77,6 +77,7 @@ from linkedin_mcp_server.scraping.company_parse import (
     parse_search_results,
 )
 from linkedin_mcp_server.scraping.contracts import RATE_LIMITED_SECTION_TEXT
+from linkedin_mcp_server.scraping.identifiers import company_page_url
 from linkedin_mcp_server.tools.enrichment import (
     RETRY_AFTER_QUEUED_OUT,
     _browser_gone,
@@ -215,7 +216,8 @@ def register_company_enrichment_tools(
         outstanding and nothing is charged).
 
         Args:
-            company_names: Company names or LinkedIn company URLs.
+            company_names: Company names or LinkedIn company URLs. A URL
+                needs no search; it is worked on, and reported, as its slug.
             bunch_searches: Max LinkedIn navigations to run this call
                 (default 8, ceiling 20 unless BUNCH_SEARCHES_MAX moves it;
                 more is clamped): searches, plus About loads when ``about``
@@ -259,6 +261,18 @@ def register_company_enrichment_tools(
         for name in company_names:
             if not name.strip():
                 continue
+            if "/company/" in name:
+                # A URL already says what a search would find: the slug.
+                # Searched anyway it cost a navigation and, matched against
+                # the URL's own words, came back with no confident match. Work
+                # on the slug so the cache, the About load and the result
+                # share one key, and seed the URL a search would have cached.
+                name = _slug(name)
+                rec = cache.get(name)
+                if rec is None or not rec.linkedin_url:
+                    cache.record_firmographics(
+                        name, now, source="search", linkedin_url=company_page_url(name)
+                    )
             rec = cache.get(name)
             if not refresh and _resolved(rec):
                 served[name] = _firmographics_view(rec, "cache")
