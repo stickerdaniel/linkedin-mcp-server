@@ -9,6 +9,7 @@ from datetime import date, datetime, timedelta
 import pytest
 
 from linkedin_mcp_server.config.loaders import EnvironmentKeys
+from linkedin_mcp_server.limits import env_float
 from linkedin_mcp_server.pacing import (
     ACCOUNT_BUDGET_JOB,
     DEFAULT_TOOL_CALL_GAP,
@@ -358,6 +359,17 @@ class TestConfigurableLimits:
 
     def _warned(self, caplog, key):
         return any(key in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.parametrize("raw", ["nan", "inf", "-inf"])
+    def test_a_non_finite_float_falls_back_with_a_warning(
+        self, monkeypatch, caplog, raw
+    ):
+        """``float("nan")`` parses and compares below nothing, so it would
+        sail past the minimum check; ``inf`` would make a pause never end."""
+        monkeypatch.setenv(EnvironmentKeys.NAV_DELAY_SECONDS, raw)
+        with caplog.at_level(logging.WARNING):
+            assert env_float(EnvironmentKeys.NAV_DELAY_SECONDS, 2.0) == 2.0
+        assert self._warned(caplog, EnvironmentKeys.NAV_DELAY_SECONDS)
 
     # DAILY_ACTIONS_MAX
 
