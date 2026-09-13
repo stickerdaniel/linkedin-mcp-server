@@ -677,8 +677,11 @@ belongs behind something that provides it.
 
 ## Pacing limits
 
-Every pacing limit is an environment variable, read once per process (so per
-profile). Unset means the default; an unusable value falls back to the default
+Every pacing limit is an environment variable, read by the process that runs
+the tool. The budget they bound is not per profile, though: the ledger lives in
+`~/.linkedin-mcp/jobs`, so every profile under one home directory draws on the
+same daily cap, and two processes with different `DAILY_ACTIONS_MAX` share one
+ledger. Unset means the default; an unusable value falls back to the default
 with a warning. None is a hard ceiling any more: the defaults are the
 deliberate ceiling, and raising `DAILY_ACTIONS_MAX` raises detection exposure
 in step. Published limits for comparable tools are far lower than most people
