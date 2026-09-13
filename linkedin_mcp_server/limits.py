@@ -1,9 +1,12 @@
 """Operator-tunable limits, read from the environment at call time.
 
 Every pacing number the server used to hard-code is a default here, and each
-one has an environment variable that replaces it per process, which is per
-profile since a process owns one ``USER_DATA_DIR``. Reading at call time
-rather than import keeps tests and the daemon free of import-order surprises.
+one has an environment variable that replaces it per process. That is not per
+profile: the ledger these limits bound sits in ``JobStore``'s default root under
+the home directory, not under ``USER_DATA_DIR``, so every profile of one user
+shares a single daily cap whatever each process was configured with. Reading at
+call time rather than import keeps tests and the daemon free of import-order
+surprises.
 
 An unusable value falls back to the default with a warning rather than to
 zero: a typo must not be the way pacing is turned off.
@@ -12,6 +15,7 @@ zero: a typo must not be the way pacing is turned off.
 from __future__ import annotations
 
 import logging
+import math
 import os
 
 logger = logging.getLogger(__name__)
@@ -32,6 +36,11 @@ def env_float(key: str, default: float, *, minimum: float = 0.0) -> float:
         value = float(raw)
     except ValueError:
         logger.warning("Ignoring non-numeric %s=%r; using %s", key, raw, default)
+        return default
+    # float() accepts "nan" and "inf"; nan compares below nothing, so it would
+    # pass the minimum check, and inf would be a pause that never ends.
+    if not math.isfinite(value):
+        logger.warning("Ignoring non-finite %s=%r; using %s", key, raw, default)
         return default
     if value < minimum:
         logger.warning("Ignoring %s=%r below %s; using %s", key, raw, minimum, default)
