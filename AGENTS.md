@@ -150,6 +150,15 @@ Optional additional keys:
 
 ## Tests
 
+- **Run the suite once, at the end of a session — never after each change.**
+  Parts of it drive a real LinkedIn session (the daemon, profile-lease and
+  browser integration tests open the profile under `~/.linkedin-mcp/`), so
+  every full run spends the account's rate budget. Measured: a session that
+  ran the suite after each of a dozen commits got the account throttled.
+  Mid-flight, verify with `uv run ruff check .`, `uv run ruff format --check
+  .`, `uv run ty check`, the two `--check` scripts under `scripts/`, and at
+  most the single test module that pins the change. Subagents follow the
+  same rule: one full run per session, by whoever finishes last.
 - **A test that cannot fail is not a test.** Before committing one, mutate
   the code it covers and watch it fail. A test that survives the mutation
   asserts something every implementation satisfies (a count that holds
