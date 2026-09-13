@@ -238,9 +238,8 @@ def create_mcp_server(
         # from the configuration singleton. The two agree for a server `cli_main`
         # built, which loaded that configuration first, and need not for one
         # constructed directly: measured at `tool_timeout=1.2` with no
-        # configuration loaded, the repair budgeted itself 149.8 seconds of a
-        # 1.2-second call, and the first read of an unloaded singleton parses
-        # whatever `sys.argv` happens to hold.
+        # configuration installed, the repair budgeted itself 149.8 seconds of a
+        # 1.2-second call from the singleton's default.
         mcp.add_middleware(FrontendAuthRepairMiddleware(tool_timeout=tool_timeout))
         # After the repair, which keeps that one outermost. The order decides how
         # the two compose: a call and the replay a sign-in triggers each get

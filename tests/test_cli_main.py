@@ -29,12 +29,70 @@ def _make_config(
 def _patch_main_dependencies(
     monkeypatch: pytest.MonkeyPatch, config: AppConfig
 ) -> None:
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.load_config", lambda _argv: config
+    )
     monkeypatch.setattr("linkedin_mcp_server.cli_main.get_config", lambda: config)
     monkeypatch.setattr(
         "linkedin_mcp_server.cli_main.configure_logging", lambda **_kwargs: None
     )
     monkeypatch.setattr("linkedin_mcp_server.cli_main.get_version", lambda: "4.0.0")
     monkeypatch.setattr("linkedin_mcp_server.cli_main.set_headless", lambda _x: None)
+
+
+@pytest.mark.parametrize(
+    ("argv", "process_argv", "expected"),
+    [
+        (None, ["linkedin-mcp-server", "--log-level", "INFO"], ["--log-level", "INFO"]),
+        (["--log-level", "DEBUG"], ["host", "--foreign"], ["--log-level", "DEBUG"]),
+    ],
+)
+def test_main_loads_and_installs_cli_config_first(
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str] | None,
+    process_argv: list[str],
+    expected: list[str],
+) -> None:
+    from linkedin_mcp_server.config import get_config, reset_config
+    from linkedin_mcp_server.config import set_config as install_config
+
+    config = _make_config(
+        is_interactive=False, transport="stdio", transport_explicitly_set=False
+    )
+    _patch_main_dependencies(monkeypatch, config)
+    reset_config()
+    monkeypatch.setattr("sys.argv", process_argv)
+    events: list[str] = []
+
+    def load_config(received: object) -> AppConfig:
+        assert received == expected
+        events.append("load")
+        return config
+
+    def set_config(loaded: AppConfig) -> None:
+        events.append("set")
+        install_config(loaded)
+
+    def preflight(loaded: AppConfig) -> None:
+        assert loaded is config
+        assert get_config() is config
+        events.append("preflight")
+
+    monkeypatch.setattr(cli_main, "load_config", load_config)
+    monkeypatch.setattr(cli_main, "set_config", set_config)
+    monkeypatch.setattr(cli_main, "_preflight_login_viewer", preflight)
+    monkeypatch.setattr(cli_main, "configure_browser_environment", lambda: None)
+    monkeypatch.setattr(
+        cli_main, "ensure_profile_claim", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(cli_main, "create_mcp_server", lambda **_kwargs: MagicMock())
+
+    if argv is None:
+        cli_main.main()
+    else:
+        cli_main.main(argv)
+
+    assert events == ["load", "set", "preflight"]
 
 
 def test_main_non_interactive_stdio_has_no_human_stdout(
@@ -49,7 +107,7 @@ def test_main_non_interactive_stdio_has_no_human_stdout(
         "linkedin_mcp_server.cli_main.create_mcp_server", lambda **_kwargs: mcp
     )
 
-    cli_main.main()
+    cli_main.main([])
 
     mcp.run.assert_called_once_with(transport="stdio")
     captured = capsys.readouterr()
@@ -72,7 +130,7 @@ def test_main_interactive_prompts_when_transport_not_explicit(
         "linkedin_mcp_server.cli_main.create_mcp_server", lambda **_kwargs: mcp
     )
 
-    cli_main.main()
+    cli_main.main([])
 
     choose_transport.assert_called_once_with()
     captured = capsys.readouterr()
@@ -111,7 +169,7 @@ def test_choosing_http_at_the_prompt_warns_about_an_exposed_bind(
     )
 
     with caplog.at_level(logging.WARNING):
-        cli_main.main()
+        cli_main.main([])
 
     assert config.server.transport == "streamable-http"
     assert "no authentication" in caplog.text
@@ -135,7 +193,7 @@ def test_choosing_stdio_at_the_prompt_leaves_no_listener_recorded(
     )
 
     with caplog.at_level(logging.WARNING):
-        cli_main.main()
+        cli_main.main([])
 
     assert config.server.transport == "stdio"
     assert "no authentication" not in caplog.text
@@ -158,7 +216,7 @@ def test_main_explicit_transport_skips_prompt(
         "linkedin_mcp_server.cli_main.create_mcp_server", lambda **_kwargs: mcp
     )
 
-    cli_main.main()
+    cli_main.main([])
 
     choose_transport.assert_not_called()
     captured = capsys.readouterr()
@@ -183,7 +241,7 @@ def test_main_streamable_http_passes_host_port_path(
         "linkedin_mcp_server.cli_main.create_mcp_server", lambda **_kwargs: mcp
     )
 
-    cli_main.main()
+    cli_main.main([])
 
     mcp.run.assert_called_once_with(
         transport="streamable-http",
@@ -220,7 +278,7 @@ def test_main_streamable_http_enables_host_and_origin_validation(
         "linkedin_mcp_server.cli_main.create_mcp_server", lambda **_kwargs: mcp
     )
 
-    cli_main.main()
+    cli_main.main([])
 
     assert mcp.run.call_args.kwargs["host_origin_protection"] is True
     assert "allowed_hosts" not in mcp.run.call_args.kwargs
@@ -244,7 +302,7 @@ def test_main_passes_configured_tool_timeout_to_factory(
 
     monkeypatch.setattr("linkedin_mcp_server.cli_main.create_mcp_server", fake_create)
 
-    cli_main.main()
+    cli_main.main([])
 
     assert captured["tool_timeout"] == 42.0
 
@@ -278,7 +336,7 @@ def test_main_non_interactive_no_auth_still_starts_server(
         "linkedin_mcp_server.cli_main.create_mcp_server", lambda **_kwargs: mcp
     )
 
-    cli_main.main()
+    cli_main.main([])
 
     mcp.run.assert_called_once_with(transport="stdio")
     captured = capsys.readouterr()
@@ -609,7 +667,7 @@ def test_main_dispatches_import_before_login(monkeypatch, tmp_path):
     monkeypatch.setattr("linkedin_mcp_server.cli_main.get_profile_and_exit", fake_login)
 
     with pytest.raises(SystemExit) as exit_info:
-        cli_main.main()
+        cli_main.main([])
 
     assert exit_info.value.code == 0
     # Install gate ran, import dispatched, login never reached.
@@ -650,7 +708,7 @@ class TestTheProfileRootIsClaimedBeforeAnythingTouchesIt:
         )
 
         with pytest.raises(SystemExit):
-            cli_main.main()
+            cli_main.main([])
 
         assert calls == ["claim", "logout"]
 
@@ -675,7 +733,7 @@ class TestTheProfileRootIsClaimedBeforeAnythingTouchesIt:
         )
 
         with pytest.raises(SystemExit) as exit_info:
-            cli_main.main()
+            cli_main.main([])
 
         assert exit_info.value.code == 1
         assert "that directory is not ours" in capsys.readouterr().out
@@ -704,6 +762,9 @@ class TestTheProfileRootIsClaimedBeforeAnythingTouchesIt:
         config.server.logout = True
         # Deliberately not `_patch_main_dependencies`: it stubs
         # `configure_logging`, which is the very thing that runs first.
+        monkeypatch.setattr(
+            "linkedin_mcp_server.cli_main.load_config", lambda _argv: config
+        )
         monkeypatch.setattr("linkedin_mcp_server.cli_main.get_config", lambda: config)
         monkeypatch.setattr("linkedin_mcp_server.cli_main.get_version", lambda: "4.0.0")
         monkeypatch.setattr(
@@ -718,7 +779,7 @@ class TestTheProfileRootIsClaimedBeforeAnythingTouchesIt:
         )
 
         with pytest.raises(SystemExit) as exit_info:
-            cli_main.main()
+            cli_main.main([])
 
         assert exit_info.value.code == 0, "the claim refused a genuinely empty root"
         assert claim_path(target).exists()
@@ -746,7 +807,7 @@ class TestTheProfileRootIsClaimedBeforeAnythingTouchesIt:
         )
 
         with pytest.raises(SystemExit):
-            cli_main.main()
+            cli_main.main([])
 
         assert seen == [True]
 
@@ -919,7 +980,7 @@ class TestForwardingToASharedOwner:
             lambda **kwargs: built.update(kwargs) or MagicMock(),
         )
 
-        cli_main.main()
+        cli_main.main([])
 
         assert built["role"] is ServerRole.PROXY
         assert built["proxy_backend"].attachment is attachment
@@ -940,7 +1001,7 @@ class TestForwardingToASharedOwner:
             lambda **kwargs: built.update(kwargs) or MagicMock(),
         )
 
-        cli_main.main()
+        cli_main.main([])
 
         assert set(built) == {"tool_timeout"}
 
@@ -978,7 +1039,7 @@ class TestForwardingToASharedOwner:
             lambda **_kwargs: MagicMock(),
         )
 
-        cli_main.main()
+        cli_main.main([])
 
         assert called == [], "an HTTP server must not elect a daemon"
 
@@ -993,10 +1054,10 @@ class TestConfigurationErrorAtStartup:
     """
 
     def _raise(self, monkeypatch: pytest.MonkeyPatch, message: str) -> None:
-        def boom() -> AppConfig:
+        def boom(_argv: object) -> AppConfig:
             raise ConfigurationError(message)
 
-        monkeypatch.setattr("linkedin_mcp_server.cli_main.get_config", boom)
+        monkeypatch.setattr("linkedin_mcp_server.cli_main.load_config", boom)
 
     def test_it_exits_with_the_message_and_no_traceback(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -1004,7 +1065,7 @@ class TestConfigurationErrorAtStartup:
         self._raise(monkeypatch, "proxy_server needs a host and an explicit port")
 
         with pytest.raises(SystemExit) as exit_info:
-            cli_main.main()
+            cli_main.main([])
 
         assert exit_info.value.code == 1
         captured = capsys.readouterr()
@@ -1033,7 +1094,7 @@ class TestConfigurationErrorAtStartup:
         monkeypatch.setattr(config, "validate", boom)
 
         with pytest.raises(SystemExit) as exit_info:
-            cli_main.main()
+            cli_main.main([])
 
         assert exit_info.value.code == 1
         captured = capsys.readouterr()
@@ -1048,6 +1109,6 @@ class TestConfigurationErrorAtStartup:
         self._raise(monkeypatch, "PORT must be an integer")
 
         with pytest.raises(SystemExit):
-            cli_main.main()
+            cli_main.main([])
 
         assert capsys.readouterr().out == ""

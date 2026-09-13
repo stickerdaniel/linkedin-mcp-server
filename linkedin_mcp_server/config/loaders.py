@@ -9,6 +9,7 @@ import logging
 import math
 import os
 import sys
+from collections.abc import Sequence
 from typing import Literal, cast
 from urllib.parse import unquote, urlsplit
 
@@ -441,7 +442,7 @@ def load_from_env(config: AppConfig) -> AppConfig:
     return config
 
 
-def load_from_args(config: AppConfig) -> AppConfig:
+def load_from_args(config: AppConfig, argv: Sequence[str]) -> AppConfig:
     """Load configuration from command line arguments."""
     parser = argparse.ArgumentParser(
         description="LinkedIn MCP Server - A Model Context Protocol server for LinkedIn integration"
@@ -755,7 +756,7 @@ def load_from_args(config: AppConfig) -> AppConfig:
         help="Give every stdio client its own browser (default; overrides DAEMON_ENABLED=true).",
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     # Update configuration with parsed arguments
     if args.no_headless:
@@ -867,14 +868,13 @@ def load_from_args(config: AppConfig) -> AppConfig:
     return config
 
 
-def load_config() -> AppConfig:
+def load_config(argv: Sequence[str] | None = None) -> AppConfig:
     """
     Load configuration with clear precedence order.
 
-    Configuration is loaded in the following priority order:
-    1. Command line arguments (highest priority)
-    2. Environment variables
-    3. Defaults (lowest priority)
+    Explicit command line arguments have highest priority, followed by
+    environment variables and defaults. Without *argv*, only environment
+    variables and defaults are loaded.
 
     Returns:
         Fully configured application settings
@@ -889,8 +889,9 @@ def load_config() -> AppConfig:
     # Override with environment variables
     config = load_from_env(config)
 
-    # Override with command line arguments (highest priority)
-    config = load_from_args(config)
+    # Override with explicit command line arguments (highest priority)
+    if argv is not None:
+        config = load_from_args(config, argv)
 
     # Validate final configuration
     config.validate()

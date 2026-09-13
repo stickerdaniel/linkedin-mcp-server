@@ -152,9 +152,9 @@ async def _describe(tmp_path: Path, *, headless: bool) -> dict:
     the setup no longer installs. Every default-mode case then skips itself
     while the shipped configuration is fine.
 
-    ``BrowserConfig()`` rather than ``get_config()``: the global parses
-    ``sys.argv`` and aborts under pytest, and the defaults are what the gate is
-    about anyway.
+    ``BrowserConfig()`` rather than ``get_config()`` keeps the measurement
+    independent of process-global test state, and the defaults are what the gate
+    is about anyway.
 
     **Only the launch is allowed to turn into a skip.** A browser that cannot
     start is a missing dependency; a browser that starts and then fails to

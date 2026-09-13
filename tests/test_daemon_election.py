@@ -5204,9 +5204,7 @@ class TestVersionSkew:
 
         config = _config(_profile(tmp_path))
         # The owner installs its handed-over configuration before it serves, and
-        # the lifespan depends on that: `get_config()` would otherwise parse this
-        # process's command line, which under pytest means argparse exits and
-        # startup fails. Found by writing this test without it.
+        # the lifespan depends on those exact settings rather than defaults.
         #
         # Set through monkeypatch rather than `set_config`, which is a module
         # global that would then leak into every test that ran afterwards.

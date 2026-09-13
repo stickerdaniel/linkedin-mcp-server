@@ -25,15 +25,12 @@ def _browser_config() -> BrowserConfig:
     in the message; it keeps the original error from being replaced by whatever
     went wrong while reporting it.
 
-    ``SystemExit`` is caught alongside ``Exception`` deliberately: loading the
-    configuration parses the command line, and argparse exits the process on a
-    bad argument. Reporting a proxy failure must not be able to do that.
     """
     try:
         from linkedin_mcp_server.config import get_config
 
         return get_config().browser
-    except (Exception, SystemExit):
+    except Exception:
         return BrowserConfig()
 
 

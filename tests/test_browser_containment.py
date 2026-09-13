@@ -66,8 +66,8 @@ def _manager(profile: Path) -> BrowserManager:
     here, because a gate that assembles its own launch measures a browser nobody
     ships -- and in particular it would leave out ``channel="chromium"``, which
     is what stops Playwright resolving the headless shell that ``--no-shell``
-    never installed. ``BrowserConfig()`` rather than ``get_config()``: the
-    global parses ``sys.argv`` and aborts under pytest.
+    never installed. ``BrowserConfig()`` rather than ``get_config()`` keeps the
+    measurement independent of process-global test state.
     """
     launch_options, viewport = build_launch_options(BrowserConfig())
     return BrowserManager(

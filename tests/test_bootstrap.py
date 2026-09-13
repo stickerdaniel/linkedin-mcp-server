@@ -9555,8 +9555,8 @@ class TestTheAutoImportInheritsTheGuard:
         from linkedin_mcp_server.config import set_config
         from linkedin_mcp_server.config.schema import AppConfig
 
-        # Installed rather than loaded: the import path calls get_config(), which
-        # parses sys.argv, and under pytest that is pytest's own command line.
+        # Installed because the import path reads process-global config and this
+        # test needs auto-import enabled there.
         config = AppConfig()
         config.browser.auto_import_from_browser = True
         set_config(config)
@@ -9607,8 +9607,8 @@ class TestTheAutomaticPathCarriesWhatItObserved:
         from linkedin_mcp_server.config import set_config
         from linkedin_mcp_server.config.schema import AppConfig
 
-        # Installed rather than loaded: the gate calls get_config(), which parses
-        # sys.argv, and under pytest that is pytest's own command line.
+        # Installed because the gate reads process-global config and this test
+        # needs the isolated profile path there.
         config = AppConfig()
         config.browser.user_data_dir = str(isolate_profile_dir)
         set_config(config)

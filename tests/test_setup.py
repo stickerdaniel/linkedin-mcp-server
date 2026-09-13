@@ -571,8 +571,8 @@ class TestTheExplicitCommandsStayUnguarded:
         from linkedin_mcp_server.config import set_config
         from linkedin_mcp_server.config.schema import AppConfig
 
-        # Installed rather than loaded: the handler calls get_config(), which
-        # parses sys.argv, and under pytest that is pytest's own command line.
+        # Installed because the handler reads process-global config and this
+        # test needs the import selector below to be present there.
         config = AppConfig()
         config.server.import_from_browser = "auto"
         set_config(config)

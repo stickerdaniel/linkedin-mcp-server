@@ -98,10 +98,8 @@ class TestRedaction:
         assert redact_proxy_credentials("untouched") == "untouched"
 
     def test_reporting_survives_an_unreadable_config(self, monkeypatch):
-        # Loading the config parses argv, and argparse exits the process on bad
-        # arguments. Reporting a proxy failure must not be able to kill the run.
         def explode():
-            raise SystemExit(2)
+            raise RuntimeError("config unavailable")
 
         monkeypatch.setattr("linkedin_mcp_server.config.get_config", explode)
         converted = as_proxy_error(Exception("net::ERR_PROXY_CONNECTION_FAILED"))

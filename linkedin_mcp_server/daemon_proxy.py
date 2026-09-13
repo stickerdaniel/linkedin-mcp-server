@@ -398,9 +398,8 @@ class DaemonProxyBackend:
     ``Attachment`` and a timeout, and ``create_mcp_server`` has no configuration
     parameter at all, so the proxy layer could not have elected a replacement
     even if it had wanted to. Reaching for ``get_config()`` there instead would
-    walk into the argv sensitivity ``daemon_auth`` already documents: an unloaded
-    singleton parses whatever ``sys.argv`` happens to hold, which for a directly
-    constructed server is pytest's command line.
+    supply defaults for a directly constructed server, not the exact inputs that
+    elected the owner being replaced.
 
     Not frozen, unlike the ``Attachment`` it holds. The attachment is a proved
     fact about one owner and must not be edited; which attachment is current is
