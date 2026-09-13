@@ -197,6 +197,12 @@ class BrowserConfig:
     # Temporary directory parent used during browser installation bootstrap.
     # Defaults to system tempdir (tempfile.gettempdir()) when None.
     installer_temp_dir: str | None = None
+    # Abort images, fonts and media before they leave the browser. On by
+    # default: a LinkedIn page fires on the order of a hundred subrequests and
+    # almost none of them carry text, so the ones this drops cost nothing a
+    # scrape returns and are the bulk of what earns an HTTP 429. Off restores
+    # the full asset set for anyone who needs the page as a human sees it.
+    block_subresources: bool = True
 
     def validate(self) -> None:
         """Validate browser configuration values."""

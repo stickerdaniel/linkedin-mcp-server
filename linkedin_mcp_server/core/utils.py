@@ -164,6 +164,12 @@ async def detect_rate_limit(page: Page) -> None:
         pass
 
 
+#: Unchanged-height rounds tolerated before `scroll_to_bottom` calls it the
+#: bottom. One is not evidence: a lazy batch that has not arrived within the
+#: jittered pause looks exactly like the end of the page.
+_SCROLL_STALE_ROUNDS = 2
+
+
 async def scroll_to_bottom(
     page: Page, pause_time: float = 1.0, max_scrolls: int = 10
 ) -> None:
@@ -174,6 +180,7 @@ async def scroll_to_bottom(
         pause_time: Time to pause between scrolls (seconds)
         max_scrolls: Maximum number of scroll attempts
     """
+    stale_rounds = 0
     for i in range(max_scrolls):
         previous_height = await page.evaluate("document.body.scrollHeight")
         await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
@@ -183,8 +190,19 @@ async def scroll_to_bottom(
 
         new_height = await page.evaluate("document.body.scrollHeight")
         if new_height == previous_height:
-            logger.debug("Reached bottom after %d scrolls", i + 1)
-            break
+            # One unchanged round is not the bottom, it is a batch that has
+            # not landed yet, and the jittered pause can be as short as half
+            # `pause_time`. Blocking images made this likelier rather than
+            # created it: without their boxes the document is shorter, so the
+            # scroll reaches the true bottom in fewer rounds and asks the
+            # question earlier. The feed loop already tolerates three; two is
+            # the same idea at this loop's smaller scale.
+            stale_rounds += 1
+            if stale_rounds >= _SCROLL_STALE_ROUNDS:
+                logger.debug("Reached bottom after %d scrolls", i + 1)
+                break
+        else:
+            stale_rounds = 0
 
 
 async def scroll_job_sidebar(

@@ -645,6 +645,11 @@ def _fake_playwright(
         def __init__(self):
             self.pages = [_Page()]
 
+        async def route(self, pattern, handler):
+            # What is routed on it belongs to test_subresource_blocking; here
+            # it only has to exist, because every launch installs one.
+            return None
+
         async def close(self):
             return None
 

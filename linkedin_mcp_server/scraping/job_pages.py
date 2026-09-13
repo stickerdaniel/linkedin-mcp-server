@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import asyncio
 import logging
 import re
 import time
@@ -27,7 +26,6 @@ from linkedin_mcp_server.core.utils import (
     scroll_to_bottom,
 )
 from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
-from linkedin_mcp_server.scraping.capture import RATE_LIMIT_RETRY_DELAY
 from linkedin_mcp_server.scraping.content import PageContentReader
 from linkedin_mcp_server.scraping.contracts import (
     RATE_LIMITED_SECTION_TEXT,
@@ -206,9 +204,11 @@ class JobPageReader:
     ) -> JobPageCapture:
         """Extract innerText from a job search page with soft rate-limit retry.
 
-        Mirrors the noise-only detection and single-retry behavior of
+        Mirrors the noise-only detection and budgeted-retry behavior of
         ``SectionCapture`` so that callers get a ``RATE_LIMITED_SECTION_TEXT``
-        sentinel instead of silent empty results.
+        sentinel instead of silent empty results. The retry is taken from the
+        scrape's budget rather than granted per page, so a throttled search
+        stops re-fetching instead of doubling its request volume.
 
         One charge for both attempts, and it survives an attempt that raises:
         the scroll below books what it spent in a ``finally``, and the error
@@ -224,12 +224,8 @@ class JobPageReader:
             if result.text != RATE_LIMITED_SECTION_TEXT:
                 return self._captured(result, charge.seconds)
 
-            logger.info(
-                "Retrying search page %s after %.0fs backoff",
-                url,
-                RATE_LIMIT_RETRY_DELAY,
-            )
-            await asyncio.sleep(RATE_LIMIT_RETRY_DELAY)
+            if not await self._session.claim_soft_retry(url):
+                return self._captured(result, charge.seconds)
             result = await self._extract_search_page_once(
                 url, section_name, scroll_deadline / 2, charge=charge
             )
@@ -421,12 +417,8 @@ class JobPageReader:
                 if result.text != RATE_LIMITED_SECTION_TEXT:
                     return self._captured(result)
 
-                logger.info(
-                    "Retrying saved jobs page %s after %.0fs backoff",
-                    url,
-                    RATE_LIMIT_RETRY_DELAY,
-                )
-                await asyncio.sleep(RATE_LIMIT_RETRY_DELAY)
+                if not await self._session.claim_soft_retry(url):
+                    return self._captured(result)
                 result = await self._extract_saved_jobs_page_once(url, section_name)
                 if result.text == RATE_LIMITED_SECTION_TEXT:
                     logger.warning(
