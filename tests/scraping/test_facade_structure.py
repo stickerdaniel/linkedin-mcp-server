@@ -276,21 +276,49 @@ def _assert_scraping_dependencies(sources: dict[Path, str]) -> None:
 def _assert_no_private_facade_accesses(sources: dict[Path, str]) -> None:
     for path, source in sources.items():
         tree = ast.parse(source, filename=str(path))
+        facade_classes = {"LinkedInExtractor"}
         facade_names = {"extractor"}
         for node in ast.walk(tree):
-            if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            if _resolved_import_module(path, node) != "linkedin_mcp_server.scraping":
+                continue
+            facade_classes.update(
+                alias.asname or alias.name
+                for alias in node.names
+                if alias.name == "LinkedInExtractor"
+            )
+
+        assignments = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.Assign, ast.AnnAssign))
+        ]
+        changed = True
+        while changed:
+            changed = False
+            for node in assignments:
                 value = node.value
+                targets = (
+                    node.targets if isinstance(node, ast.Assign) else [node.target]
+                )
+                names = {
+                    target.id for target in targets if isinstance(target, ast.Name)
+                }
+                if isinstance(value, ast.Name) and value.id in facade_classes:
+                    additions = names - facade_classes
+                    facade_classes.update(additions)
+                    changed |= bool(additions)
                 if (
                     isinstance(value, ast.Call)
                     and isinstance(value.func, ast.Name)
-                    and value.func.id == "LinkedInExtractor"
-                ):
-                    targets = (
-                        node.targets if isinstance(node, ast.Assign) else [node.target]
-                    )
-                    facade_names.update(
-                        target.id for target in targets if isinstance(target, ast.Name)
-                    )
+                    and value.func.id in facade_classes
+                ) or (isinstance(value, ast.Name) and value.id in facade_names):
+                    additions = names - facade_names
+                    facade_names.update(additions)
+                    changed |= bool(additions)
+
+        facade_names.update(facade_classes)
         for node in ast.walk(tree):
             if (
                 isinstance(node, ast.Attribute)
@@ -307,7 +335,7 @@ def _assert_no_private_facade_accesses(sources: dict[Path, str]) -> None:
                 and node.func.attr in {"object", "setattr"}
                 and len(node.args) > 1
                 and isinstance(node.args[0], ast.Name)
-                and node.args[0].id in facade_names | {"LinkedInExtractor"}
+                and node.args[0].id in facade_names
                 and isinstance(node.args[1], ast.Constant)
                 and isinstance(node.args[1].value, str)
                 and node.args[1].value.startswith("_")
@@ -353,6 +381,7 @@ def _facade_package_imports(
 
 
 def _assert_no_obsolete_extractor_seams(sources: dict[Path, str]) -> None:
+    extractor_module = "linkedin_mcp_server.scraping.extractor"
     for path, source in sources.items():
         tree = ast.parse(source, filename=str(path))
         if path not in FACADE_PACKAGE_IMPORTERS:
@@ -361,18 +390,23 @@ def _assert_no_obsolete_extractor_seams(sources: dict[Path, str]) -> None:
                 f"{path}:{imports[0].lineno}: unauthorized scraping facade import"
             )
         for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module == (
-                "linkedin_mcp_server.scraping.extractor"
-            ):
+            if isinstance(node, ast.Import):
+                assert all(alias.name != extractor_module for alias in node.names)
+            if isinstance(node, ast.ImportFrom):
+                imported_from = _resolved_import_module(path, node)
                 names = {alias.name for alias in node.names}
-                assert path == Path("tests/scraping/test_facade_contracts.py")
-                assert names <= set(PERMANENT_ALIASES)
-            if isinstance(node, ast.ImportFrom) and node.module == (
-                "linkedin_mcp_server.scraping"
-            ):
-                names = {alias.name for alias in node.names}
-                if "LinkedInExtractor" in names:
-                    assert path in FACADE_PACKAGE_IMPORTERS
+                if imported_from == extractor_module:
+                    package_export = path == Path(
+                        "linkedin_mcp_server/scraping/__init__.py"
+                    ) and names == {"LinkedInExtractor"}
+                    permanent_aliases = path == Path(
+                        "tests/scraping/test_facade_contracts.py"
+                    ) and names <= set(PERMANENT_ALIASES)
+                    assert package_export or permanent_aliases
+                if imported_from == "linkedin_mcp_server.scraping":
+                    assert "extractor" not in names
+                    if "LinkedInExtractor" in names:
+                        assert path in FACADE_PACKAGE_IMPORTERS
             if isinstance(node, ast.Call) and node.args:
                 function = node.func
                 is_patch = isinstance(function, ast.Name) and function.id == "patch"
@@ -537,6 +571,21 @@ def test_dependency_guards_reject_cycles_layers_and_reverse_imports(path, additi
             "from linkedin_mcp_server.scraping.extractor import LinkedInExtractor\n",
         ),
         (
+            Path("tests/test_tools.py"),
+            "import linkedin_mcp_server.scraping.extractor as extractor_module\n"
+            "patch.object(extractor_module, '_drain_listener_tasks', fake)\n",
+        ),
+        (
+            Path("tests/test_tools.py"),
+            "import linkedin_mcp_server.scraping.extractor as extractor_module\n"
+            "monkeypatch.setattr("
+            "extractor_module, '_drain_listener_tasks', fake, raising=False)\n",
+        ),
+        (
+            Path("linkedin_mcp_server/server.py"),
+            "from linkedin_mcp_server.scraping import extractor as extractor_module\n",
+        ),
+        (
             Path("linkedin_mcp_server/server.py"),
             "import linkedin_mcp_server.scraping\n",
         ),
@@ -613,6 +662,9 @@ def test_non_facade_scraping_imports_and_unrelated_scopes_are_allowed():
     [
         "extractor = LinkedInExtractor(page)\nextractor._content\n",
         "patch.object(LinkedInExtractor, '_content', replacement)\n",
+        "from linkedin_mcp_server.scraping import LinkedInExtractor as Facade\n"
+        "subject = Facade(page)\n"
+        "patch.object(subject, '_content', fake)\n",
     ],
 )
 def test_private_facade_access_guard_rejects_mutations(addition):
