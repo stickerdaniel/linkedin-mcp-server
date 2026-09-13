@@ -1685,7 +1685,6 @@ def test_unresolvable_replacement_targets_name_their_call_site(statement, messag
         "helper.setattr(**arguments)",
         "helper.setattr()",
         "self.helper.setattr(*arguments)",
-        "helpers[0].setattr(*arguments)",
     ],
 )
 def test_a_foreign_setattr_receiver_keeps_its_dynamic_shape(statement):
@@ -1788,24 +1787,39 @@ def test_unpairable_destructuring_without_authority_stays_non_authoritative():
     assert _scan_synthetic(source) == []
 
 
-def test_destructuring_preserves_subscript_receiver_authority():
-    _assert_authoritative_receiver(
-        "slots[0], other = monkeypatch, helper", receiver="slots[0]"
-    )
+@pytest.mark.parametrize(
+    "statements",
+    [
+        "slots[0] = monkeypatch\n    slots[0] = helper",
+        "slots[0] = monkeypatch\n    alias = slots",
+        "slots[0] = monkeypatch\n    slots = value",
+        "slots[0], slots[1] = helper, monkeypatch",
+    ],
+)
+def test_subscript_receivers_fail_closed_without_textual_authority(statements):
+    receiver = "alias[0]" if "alias = slots" in statements else "slots[0]"
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=rf"{re.escape(receiver)}\.setattr\(\*arguments\): "
+        r"unresolved setattr arguments",
+    ):
+        _scan_synthetic(_receiver_flow(statements, receiver=receiver))
 
 
-def test_starred_destructuring_preserves_possible_subscript_authority():
-    _assert_authoritative_receiver(
-        "slots[0], *slots[1] = (monkeypatch, helper)", receiver="slots[0]"
-    )
+def test_subscript_receiver_in_a_closure_fails_closed():
+    source = """
+async def test_outer(monkeypatch, helper, arguments, slots):
+    slots[0] = helper
 
+    async def test_inner():
+        slots[0].setattr(*arguments)
+"""
 
-def test_exact_destructuring_keeps_unrelated_subscript_non_authoritative():
-    source = _receiver_flow(
-        "slots[0], slots[1] = helper, monkeypatch", receiver="slots[0]"
-    )
-
-    assert _scan_synthetic(source) == []
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=r"slots\[0\]\.setattr\(\*arguments\): unresolved setattr arguments",
+    ):
+        _scan_synthetic(source)
 
 
 def test_a_context_alias_does_not_leak_into_a_sibling_scope():
@@ -2092,8 +2106,8 @@ def test_finally_ignores_definitely_retired_else_and_handler_states(suite):
     assert _scan_synthetic(_receiver_flow(statements)) == []
 
 
-def test_trystar_keeps_later_authoritative_group_handlers_reachable():
-    _assert_authoritative_receiver(
+def test_trystar_consumes_a_known_lone_exception_at_the_first_match():
+    source = _receiver_flow(
         "patch = helper\n"
         "    try:\n"
         "        raise RuntimeError\n"
@@ -2104,6 +2118,82 @@ def test_trystar_keeps_later_authoritative_group_handlers_reachable():
         "    finally:\n"
         "        patch.setattr(*arguments)"
     )
+
+    assert _scan_synthetic(source) == []
+
+
+def test_trystar_keeps_group_member_matching_unknown():
+    _assert_authoritative_receiver(
+        "patch = helper\n"
+        "    try:\n"
+        '        raise ExceptionGroup("group", [RuntimeError()])\n'
+        "    except* RuntimeError:\n"
+        "        patch = helper\n"
+        "    except* Exception:\n"
+        "        patch = monkeypatch\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+
+def test_trystar_does_not_match_members_from_the_group_class_identity():
+    _assert_authoritative_receiver(
+        "patch = helper\n"
+        "    try:\n"
+        '        raise BaseExceptionGroup("group", [RuntimeError()])\n'
+        "    except* BaseExceptionGroup:\n"
+        "        patch = helper\n"
+        "    except* BaseException:\n"
+        "        patch = monkeypatch\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+
+def test_trystar_routes_only_remaining_lone_exceptions_to_later_handlers():
+    source = _receiver_flow(
+        "patch = helper\n"
+        "    try:\n"
+        "        raise RuntimeError\n"
+        "    except* TypeError:\n"
+        "        patch = monkeypatch\n"
+        "    except* RuntimeError:\n"
+        "        patch = helper\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+    assert _scan_synthetic(source) == []
+
+
+def test_trystar_unknown_groups_retain_handled_and_unmatched_paths():
+    _assert_authoritative_receiver(
+        "patch = helper\n"
+        "    try:\n"
+        "        raise error\n"
+        "    except* RuntimeError:\n"
+        "        patch = helper\n"
+        "    except* Exception:\n"
+        "        patch = monkeypatch\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+
+def test_trystar_base_exception_consumes_unknown_ordinary_exceptions():
+    source = _receiver_flow(
+        "patch = helper\n"
+        "    try:\n"
+        "        raise error\n"
+        "    except* BaseException:\n"
+        "        patch = helper\n"
+        "    except* Exception:\n"
+        "        patch = monkeypatch\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+    assert _scan_synthetic(source) == []
 
 
 def test_trystar_without_any_authoritative_path_stays_non_authoritative():
@@ -2198,6 +2288,88 @@ def test_matching_handlers_consume_a_known_raise_before_finally(handler):
     assert _scan_synthetic(source) == []
 
 
+def test_builtin_exception_keyword_call_retains_its_type_error_prefix():
+    source = _receiver_flow(
+        "patch = monkeypatch\n"
+        "    try:\n"
+        '        raise RuntimeError(message="failure")\n'
+        "    except TypeError:\n"
+        "        patch = helper\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+    assert _scan_synthetic(source) == []
+
+
+def test_bound_parameter_in_exception_call_creates_no_impossible_prefix():
+    source = _receiver_flow(
+        "patch = monkeypatch\n"
+        "    try:\n"
+        "        raise RuntimeError(arguments)\n"
+        "    except RuntimeError:\n"
+        "        patch = helper\n"
+        "    except TypeError:\n"
+        "        patch = monkeypatch\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+    assert _scan_synthetic(source) == []
+
+
+@pytest.mark.parametrize(
+    "binding",
+    [
+        "message = arguments",
+        "import types as message",
+        "message = helper\n    message = arguments",
+    ],
+)
+def test_safe_name_bindings_survive_sequential_assignment_and_import(binding):
+    source = _receiver_flow(
+        f"patch = monkeypatch\n    {binding}\n"
+        "    try:\n"
+        "        raise RuntimeError(message)\n"
+        "    except RuntimeError:\n"
+        "        patch = helper\n"
+        "    except (NameError, TypeError):\n"
+        "        patch = monkeypatch\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+    assert _scan_synthetic(source) == []
+
+
+def test_deleted_safe_name_restores_the_evaluation_prefix():
+    _assert_authoritative_receiver(
+        "patch = monkeypatch\n"
+        "    message = arguments\n"
+        "    del message\n"
+        "    try:\n"
+        "        raise RuntimeError(message)\n"
+        "    except RuntimeError:\n"
+        "        patch = helper\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+
+def test_safe_name_branch_merges_by_intersection():
+    _assert_authoritative_receiver(
+        "patch = monkeypatch\n"
+        "    if flag:\n"
+        "        message = arguments\n"
+        "    try:\n"
+        "        raise RuntimeError(message)\n"
+        "    except RuntimeError:\n"
+        "        patch = helper\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+
 def test_an_unmatched_known_raise_still_reaches_finally():
     _assert_authoritative_receiver(
         "patch = monkeypatch\n"
@@ -2279,8 +2451,8 @@ def test_a_bare_handler_consumes_an_unknown_exception_kind():
     assert _scan_synthetic(source) == []
 
 
-def test_named_catch_all_retains_an_unknown_exception_identity():
-    _assert_authoritative_receiver(
+def test_unshadowed_base_exception_consumes_an_unknown_ordinary_exception():
+    source = _receiver_flow(
         "patch = monkeypatch\n"
         "    try:\n"
         "        raise error\n"
@@ -2289,6 +2461,8 @@ def test_named_catch_all_retains_an_unknown_exception_identity():
         "    finally:\n"
         "        patch.setattr(*arguments)"
     )
+
+    assert _scan_synthetic(source) == []
 
 
 @pytest.mark.parametrize(
@@ -2314,21 +2488,52 @@ def test_uncertain_exception_spelling_does_not_consume_known_raise(
     )
 
 
-def test_explicit_unshadowed_builtins_qualification_consumes_known_raise():
+def test_class_local_exception_shadow_prevents_builtin_matching():
     source = """
-import builtins
-
 async def test_shape(monkeypatch, helper, arguments):
+    class Scope:
+        patch = monkeypatch
+        Exception = Sibling
+        try:
+            raise RuntimeError
+        except Exception:
+            patch = helper
+        finally:
+            patch.setattr(*arguments)
+"""
+
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=r"patch\.setattr\(\*arguments\): unresolved setattr arguments",
+    ):
+        _scan_synthetic(source)
+
+
+@pytest.mark.parametrize(
+    "import_statement",
+    [
+        "import builtins as bi",
+        "if flag:\n        import builtins as bi",
+    ],
+)
+def test_qualified_builtin_exception_identities_stay_unknown(import_statement):
+    source = f"""
+async def test_shape(monkeypatch, helper, arguments, flag):
     patch = monkeypatch
+    {import_statement}
     try:
-        raise builtins.RuntimeError
-    except builtins.Exception:
+        raise RuntimeError
+    except bi.Exception:
         patch = helper
     finally:
         patch.setattr(*arguments)
 """
 
-    assert _scan_synthetic(source) == []
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=r"patch\.setattr\(\*arguments\): unresolved setattr arguments",
+    ):
+        _scan_synthetic(source)
 
 
 def test_a_loop_retains_the_zero_iteration_receiver_path():
