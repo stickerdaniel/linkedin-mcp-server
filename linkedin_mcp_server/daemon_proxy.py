@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import mcp.types as mt
+from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
 
@@ -680,11 +681,24 @@ class FrontendOwnerRecoveryMiddleware(Middleware):
                 # already sent the connection request or the message, and asking
                 # costs one retry while guessing wrong sends it twice. The user
                 # knows which happened; this process does not.
+                #
+                # Raised as ToolError so mask_error_details keeps the wording:
+                # OwnerUnreachableError is a plain Exception and would otherwise
+                # reach the client as a masked generic tool error, which an
+                # autonomous client retries — the second delivery this refusal
+                # exists to prevent (#891).
                 logger.info(
                     "Attached to a replacement owner; not repeating a call that "
                     "could change something"
                 )
-                raise
+                tool_name = getattr(context.message, "name", None) or "this tool"
+                raise ToolError(
+                    f"The shared browser owner became unreachable after "
+                    f"'{tool_name}' was already dispatched. The action may "
+                    f"already have taken effect on LinkedIn (for example a "
+                    f"sent message or connection request). Do not retry "
+                    f"blindly — check the outcome first."
+                ) from failure
 
             logger.info("Attached to a replacement owner; running the call again")
             return await call_next(context)
