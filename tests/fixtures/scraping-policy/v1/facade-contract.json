@@ -162,8 +162,7 @@
           "properties": {
             "bunch_searches": {
               "default": 8,
-              "description": "Max LinkedIn searches to run this call (1-20,\ndefault 8). Cache hits do not count toward it.",
-              "maximum": 20,
+              "description": "Max LinkedIn searches to run this call (default 8,\nceiling 20 unless BUNCH_SEARCHES_MAX moves it; more is\nclamped). Cache hits do not count toward it.",
               "minimum": 1,
               "type": "integer"
             },

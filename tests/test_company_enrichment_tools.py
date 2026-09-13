@@ -6,6 +6,7 @@ and that a rate limit never loses progress.
 """
 
 import asyncio
+import logging
 import time
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
@@ -14,6 +15,7 @@ import pytest
 from fastmcp import FastMCP
 
 from linkedin_mcp_server.company_cache import CompanyCache
+from linkedin_mcp_server.config.loaders import EnvironmentKeys
 from linkedin_mcp_server.core.exceptions import RateLimitError
 from linkedin_mcp_server.pacing import (
     ACCOUNT_BUDGET_JOB,
@@ -184,6 +186,42 @@ class TestEnrichCompanies:
 
         assert out["stopped_because"] == "daily_budget_spent"
         assert out["fetched"] == 0
+
+    async def test_bunch_searches_is_clamped_to_the_configured_ceiling(
+        self, mcp, wired, mock_context, monkeypatch, caplog
+    ):
+        """``BUNCH_SEARCHES_MAX`` has to reach the tool, as ``BUNCH_SIZE_MAX``
+        reaches run_enrichment_bunch; a ceiling only the docs know is none."""
+        monkeypatch.setenv(EnvironmentKeys.BUNCH_SEARCHES_MAX, "2")
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tools.company_enrichment.step_delay", lambda **k: 0
+        )
+        extractor = MagicMock()
+        extractor.search_companies = AsyncMock(
+            side_effect=lambda n: {
+                "sections": {"search_results": "x"},
+                "references": {
+                    "search_results": [
+                        {"url": f"https://www.linkedin.com/company/{n}", "text": n}
+                    ]
+                },
+            }
+        )
+
+        fn = await get_tool_fn(mcp, "enrich_companies")
+        with caplog.at_level(logging.INFO):
+            out = await fn(
+                ["a", "b", "c", "d"],
+                mock_context,
+                bunch_searches=5,
+                extractor=extractor,
+            )
+
+        assert out["fetched"] == 2
+        assert extractor.search_companies.await_count == 2
+        assert any(
+            "Clamping bunch_searches=5" in r.getMessage() for r in caplog.records
+        )
 
     async def test_rate_limit_saves_progress(self, mcp, wired, mock_context):
         _, jobs = wired
