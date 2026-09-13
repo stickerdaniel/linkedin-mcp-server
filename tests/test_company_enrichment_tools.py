@@ -186,6 +186,7 @@ class TestEnrichCompanies:
         assert out["fetched"] == 0
 
     async def test_rate_limit_saves_progress(self, mcp, wired, mock_context):
+        _, jobs = wired
         extractor = MagicMock()
         extractor.search_companies = AsyncMock(side_effect=RateLimitError("slow down"))
 
@@ -194,6 +195,11 @@ class TestEnrichCompanies:
 
         assert out["stopped_because"] == "rate_limited"
         assert out["next_run_after_seconds"] >= 3600
+        # The throttled search was still a request LinkedIn saw. The middleware
+        # leaves the recording to this tool, so an unrecorded 429 is a page
+        # load the daily cap never learns about.
+        now = datetime.now().astimezone()
+        assert jobs.load(ACCOUNT_BUDGET_JOB).ledger.spent(now) == 1
 
     async def test_no_confident_match_does_not_serve_a_different_company(
         self, mcp, wired, mock_context, monkeypatch
@@ -351,6 +357,20 @@ class TestEnrichCompanyDeep:
         assert out["status"] == "cache_fresh"
         extractor.scrape_company.assert_not_awaited()
         extractor.extract_page.assert_not_awaited()
+
+    async def test_a_raised_rate_limit_still_costs_the_page_load(
+        self, mcp, wired, mock_context
+    ):
+        _, jobs = wired
+        extractor = self._deep_extractor()
+        extractor.scrape_company = AsyncMock(side_effect=RateLimitError("HTTP 429"))
+
+        fn = await get_tool_fn(mcp, "enrich_company_deep")
+        out = await fn("Acme", mock_context, extractor=extractor)
+
+        assert out["next_run_after_seconds"] == 3600
+        now = datetime.now().astimezone()
+        assert jobs.load(ACCOUNT_BUDGET_JOB).ledger.spent(now) == 1
 
     async def test_a_rate_limited_jobs_page_is_not_cached_as_fresh(
         self, mcp, wired, mock_context

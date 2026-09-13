@@ -398,6 +398,11 @@ def register_enrichment_tools(
                     "Auth expired" if is_auth else "Rate limited",
                     e,
                 )
+                if not is_auth and not isinstance(e, _EmptyPage):
+                    # A hard 429 was still a load LinkedIn counted, and the
+                    # middleware leaves recording to this tool. A first empty
+                    # page stays uncharged on purpose (see the strike above).
+                    budget.ledger.record(now)
                 store.save(job)
                 store.save(budget)
                 return _status(

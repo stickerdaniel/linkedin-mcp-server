@@ -253,6 +253,8 @@ class TestRunBunch:
         assert out["next_run_after_seconds"] >= 3600
         assert store.load("j").pending == ["a", "b"]
         assert store.load("j").failed == {}
+        # Unread, but requested: the throttled load counts against the cap.
+        assert out["account_spent_last_24h"] == 1
 
     async def test_a_session_expiry_keeps_the_profile_queued(
         self, mcp, store, mock_context

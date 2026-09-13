@@ -242,6 +242,10 @@ def register_company_enrichment_tools(
                 result = await extractor.search_companies(name)
             except RateLimitError as e:
                 logger.warning("Rate limited during company enrichment: %s", e)
+                # The throttled request still reached LinkedIn, and the
+                # middleware leaves recording to this tool: skip it and the
+                # 429 is a load the cap never sees.
+                budget.ledger.record(now)
                 jobs.save(budget)
                 return _paced_return(
                     served,
@@ -445,6 +449,7 @@ def register_company_enrichment_tools(
                     )
                 budget.ledger.record(now)
         except RateLimitError:
+            budget.ledger.record(now)  # the throttled load still happened
             jobs.save(budget)
             return {
                 "company": company,
