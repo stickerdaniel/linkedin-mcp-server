@@ -16,7 +16,7 @@ import sys
 import pytest
 
 from linkedin_mcp_server.core.exceptions import AuthenticationError
-from linkedin_mcp_server.scraping.extractor import LinkedInExtractor
+from linkedin_mcp_server.scraping.company import CompanyScraper
 from linkedin_mcp_server.scraping.fields import COMPANY_SECTIONS, PERSON_SECTIONS
 from linkedin_mcp_server.scraping.person import PersonScraper
 
@@ -248,7 +248,7 @@ async def test_scrape_job_traces_keep_success_and_error_results_separate():
 
 
 async def test_facade_trace_detects_section_text_corruption():
-    original = LinkedInExtractor.search_companies
+    original = CompanyScraper.search_companies
 
     @wraps(original)
     async def corrupt_sections(self: Any, *args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -256,7 +256,7 @@ async def test_facade_trace_detects_section_text_corruption():
         result["sections"] = {name: "corrupted text" for name in result["sections"]}
         return result
 
-    with patch.object(LinkedInExtractor, "search_companies", corrupt_sections):
+    with patch.object(CompanyScraper, "search_companies", corrupt_sections):
         mutated = await build_policy_traces()
 
     assert "corrupted text" in policy_trace_diff(mutated)
@@ -282,7 +282,7 @@ async def test_facade_trace_detects_lost_references():
 
 
 async def test_facade_trace_detects_optional_key_drift():
-    original = LinkedInExtractor.search_companies
+    original = CompanyScraper.search_companies
 
     @wraps(original)
     async def add_optional_key(self: Any, *args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -290,7 +290,7 @@ async def test_facade_trace_detects_optional_key_drift():
         result["section_errors"] = {}
         return result
 
-    with patch.object(LinkedInExtractor, "search_companies", add_optional_key):
+    with patch.object(CompanyScraper, "search_companies", add_optional_key):
         mutated = await build_policy_traces()
 
     assert '+    "section_errors": {}' in policy_trace_diff(mutated)

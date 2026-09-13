@@ -169,19 +169,21 @@ _INSTANCE_ATTRIBUTE_OWNERS = {
 # *call site* drives, never with a flat per-attribute maximum: the moment
 # `scrape_company` owns its own reader, a `_content` stub inside a
 # `scrape_company` test intercepts nothing, while a `get_inbox` test reaching
-# the same attribute is still live. Measured over every reach-through in the
-# tree at stage 6: the 14 `_content` sites split across `scrape_company` (8),
+# the same attribute is still live. That is not a hypothetical any more — the
+# one stage-8 `_content` site was exactly such a `scrape_company` stub and
+# retired with the company owner. Measured over every reach-through in the
+# tree at stage 8: the 13 remaining `_content` sites split across
 # `_extract_search_page` and `search_jobs` (9) and `get_inbox`,
 # `get_conversation`, `search_conversations` (11), and the four
 # `_profile_page` sites all drive `get_conversation` (11). A single pin at 11
-# left the one stage-8 and the four stage-9 reach-throughs unflagged for three
-# and two stages; a pin at the facade's own stage 14 would leave every one of
-# them unflagged for the rest of the migration. The stage therefore comes from
-# `_callers`, exactly as a boundary patch's does.
+# left the four stage-9 reach-throughs unflagged for two stages; a pin at the
+# facade's own stage 14 would leave every one of them unflagged for the rest
+# of the migration. The stage therefore comes from `_callers`, exactly as a
+# boundary patch's does.
 #
 # `_capture` carries no site of its own any more: all 19 were `scrape_person`
 # tests and retired with stage 6. The entry stays because the workflows that
-# still call `self._capture` from the facade are stages 8 to 12, and removing
+# still call `self._capture` from the facade are stages 9 to 12, and removing
 # it would turn the next such reach-through into an unresolved seam rather
 # than a dated one.
 _FACADE_COLLABORATORS = {
@@ -257,6 +259,7 @@ _EXPLICIT_INSTANCE_BINDINGS = {
 # has to fail in: it only ever narrows the refusal, never the inventory.
 _OWNER_FACTORIES: dict[str, tuple[str, ...]] = {
     "tests/scraping/test_person.py": ("_scraper",),
+    "tests/scraping/test_company.py": ("_scraper",),
 }
 
 _EXPLICIT_CALLER_CONTEXTS: dict[tuple[str, str, str], tuple[str, ...]] = {
@@ -325,10 +328,9 @@ _EXPLICIT_CALLER_CONTEXTS: dict[tuple[str, str, str], tuple[str, ...]] = {
     ): ("_extract_search_page_once",),
     (
         "tests/scraping/policy_scenarios.py",
-        "boundaries",
+        "_diagnostics_bindings",
         "build_issue_diagnostics",
     ): (
-        "scrape_company",
         "_extract_search_page",
         "search_jobs",
         "_extract_saved_jobs_page",

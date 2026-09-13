@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from difflib import unified_diff
 from pathlib import Path
 from typing import Any, cast
@@ -23,6 +23,7 @@ from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.callbacks import ProgressCallback
 from linkedin_mcp_server.scraping import capture as capture_module
+from linkedin_mcp_server.scraping import company as company_module
 from linkedin_mcp_server.scraping import extractor as extractor_module
 from linkedin_mcp_server.scraping import feed as feed_module
 from linkedin_mcp_server.scraping import navigation as navigation_module
@@ -105,6 +106,28 @@ class TraceCallbacks(ProgressCallback):
         self.recorder.record(
             "callback.complete", operation=scraper_type, result_url=result["url"]
         )
+
+
+@contextmanager
+def _diagnostics_bindings(diagnostics: Any) -> Iterator[None]:
+    """Bind the issue-report boundary in every module that imports it.
+
+    A separate context manager rather than five more items in `boundaries`,
+    which sat on exactly 20 and is the whole of CPython's static block budget:
+    the twenty-first raised `SyntaxError: too many statically nested blocks` at
+    import, before any test ran. Each module holds its own name for the
+    function, so patching fewer than all of them lets the real one write an
+    issue report for a scripted page.
+    """
+
+    with (
+        patch.object(capture_module, "build_issue_diagnostics", diagnostics),
+        patch.object(feed_module, "build_issue_diagnostics", diagnostics),
+        patch.object(person_module, "build_issue_diagnostics", diagnostics),
+        patch.object(company_module, "build_issue_diagnostics", diagnostics),
+        patch.object(extractor_module, "build_issue_diagnostics", diagnostics),
+    ):
+        yield
 
 
 @asynccontextmanager
@@ -194,10 +217,7 @@ async def boundaries(
         patch.object(extractor_module, "scroll_to_bottom", scroll_body),
         patch.object(session_module, "scroll_job_sidebar", scroll_sidebar),
         patch.object(extractor_module, "scroll_job_sidebar", scroll_sidebar),
-        patch.object(capture_module, "build_issue_diagnostics", diagnostics),
-        patch.object(feed_module, "build_issue_diagnostics", diagnostics),
-        patch.object(person_module, "build_issue_diagnostics", diagnostics),
-        patch.object(extractor_module, "build_issue_diagnostics", diagnostics),
+        _diagnostics_bindings(diagnostics),
         # `staticmethod`, or the class attribute would bind `self` in front of
         # the pending list and the replacement would never match the call.
         patch.object(
