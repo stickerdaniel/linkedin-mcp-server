@@ -38,6 +38,12 @@ This MCP server is **free** and **open source**, supported by [**Unipile**](http
 [![Docker](https://img.shields.io/badge/Docker-Universal_MCP-008fe2?style=for-the-badge&logo=docker&logoColor=008fe2)](#-docker-setup)
 [![Development](https://img.shields.io/badge/Development-Local-ffdc53?style=for-the-badge&logo=python&logoColor=ffdc53)](#-local-setup-develop--contribute)
 
+> [!IMPORTANT]
+> Local Python installations require ARM64 (Apple silicon) on macOS and 64-bit Windows.
+> `cryptography` 49 and later no longer publish Intel macOS or 32-bit Windows wheels.
+> The "Universal" labels describe client and setup compatibility, not CPU architecture.
+> Docker images remain supported on Linux AMD64 and ARM64.
+
 | Tool | Description |
 |------|-------------|
 | `get_person_profile` | Get profile info with explicit section selection (experience, education, interests, honors, languages, certifications, skills, projects, contact_info, posts) |
