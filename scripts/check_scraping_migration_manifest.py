@@ -787,6 +787,73 @@ class _ClosureCell:
 class _DeferredFunction:
     node: ast.FunctionDef | ast.AsyncFunctionDef
     cell: _ClosureCell
+    exception_shadowed: set[str]
+    builtins_aliases: set[str]
+
+
+class _BuiltinsAliasCollector(ast.NodeVisitor):
+    """Find scope-local names that can only denote the builtins module."""
+
+    def __init__(self) -> None:
+        self.candidates: set[str] = set()
+        self.invalid: set[str] = set()
+
+    def visit_Name(self, node: ast.Name) -> Any:
+        if isinstance(node.ctx, (ast.Store, ast.Del)):
+            self.invalid.add(node.id)
+
+    def visit_Import(self, node: ast.Import) -> Any:
+        for alias in node.names:
+            name = alias.asname or alias.name.split(".", 1)[0]
+            if alias.name == "builtins":
+                self.candidates.add(name)
+            else:
+                self.invalid.add(name)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> Any:
+        self.invalid.update(alias.asname or alias.name for alias in node.names)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> Any:
+        self.invalid.add(node.name)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> Any:
+        self.invalid.add(node.name)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> Any:
+        self.invalid.add(node.name)
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> Any:
+        if node.name:
+            self.invalid.add(node.name)
+        self.generic_visit(node)
+
+    def visit_MatchAs(self, node: ast.MatchAs) -> Any:
+        if node.name:
+            self.invalid.add(node.name)
+        self.generic_visit(node)
+
+    def visit_MatchStar(self, node: ast.MatchStar) -> Any:
+        if node.name:
+            self.invalid.add(node.name)
+
+    def visit_MatchMapping(self, node: ast.MatchMapping) -> Any:
+        if node.rest:
+            self.invalid.add(node.rest)
+        self.generic_visit(node)
+
+    def visit_Lambda(self, node: ast.Lambda) -> Any:
+        return None
+
+    @property
+    def aliases(self) -> set[str]:
+        return self.candidates - self.invalid
+
+
+def _trusted_builtins_aliases(statements: list[ast.stmt]) -> set[str]:
+    collector = _BuiltinsAliasCollector()
+    for statement in statements:
+        collector.visit(statement)
+    return collector.aliases
 
 
 def _mentions_monkeypatch(expression: ast.expr) -> bool:
@@ -797,28 +864,25 @@ def _mentions_monkeypatch(expression: ast.expr) -> bool:
     )
 
 
-def _exception_type_name(expression: ast.expr) -> str | None:
-    if isinstance(expression, ast.Name):
-        return expression.id
-    if isinstance(expression, ast.Attribute):
-        return expression.attr
-    return None
-
-
-def _non_raising_binding_value(value: ast.expr) -> bool:
-    if isinstance(value, (ast.Name, ast.Constant)):
+def _non_raising_binding_value(value: ast.expr, safe_names: set[str]) -> bool:
+    if isinstance(value, ast.Constant):
         return True
+    if isinstance(value, ast.Name):
+        return value.id in safe_names
     if isinstance(value, (ast.Tuple, ast.List)):
         return all(
-            not isinstance(item, ast.Starred) and _non_raising_binding_value(item)
+            not isinstance(item, ast.Starred)
+            and _non_raising_binding_value(item, safe_names)
             for item in value.elts
         )
     return False
 
 
-def _non_raising_assignment(target: ast.expr, value: ast.expr) -> bool:
+def _non_raising_assignment(
+    target: ast.expr, value: ast.expr, safe_names: set[str]
+) -> bool:
     if isinstance(target, ast.Name):
-        return _non_raising_binding_value(value)
+        return _non_raising_binding_value(value, safe_names)
     if not (
         isinstance(target, (ast.Tuple, ast.List))
         and isinstance(value, (ast.Tuple, ast.List))
@@ -828,70 +892,28 @@ def _non_raising_assignment(target: ast.expr, value: ast.expr) -> bool:
     ):
         return False
     return all(
-        _non_raising_assignment(target_item, value_item)
+        _non_raising_assignment(target_item, value_item, safe_names)
         for target_item, value_item in zip(target.elts, value.elts, strict=True)
     )
 
 
-def _may_raise_implicitly(statement: ast.stmt) -> bool:
+def _may_raise_implicitly(statement: ast.stmt, safe_names: set[str]) -> bool:
     if isinstance(statement, (ast.Raise, ast.Pass, ast.Break, ast.Continue)):
         return False
     if isinstance(statement, ast.Assign):
         return not all(
-            _non_raising_assignment(target, statement.value)
+            _non_raising_assignment(target, statement.value, safe_names)
             for target in statement.targets
         )
     if isinstance(statement, ast.AnnAssign):
         return not (
             isinstance(statement.target, ast.Name)
-            and (statement.value is None or _non_raising_binding_value(statement.value))
+            and (
+                statement.value is None
+                or _non_raising_binding_value(statement.value, safe_names)
+            )
         )
     return True
-
-
-def _handler_match(handler: ast.ExceptHandler, kind: str | None) -> bool | None:
-    """Return whether one bounded exception kind reaches ``handler``.
-
-    ``None`` means both outcomes remain possible. Explicit built-in raises can be
-    compared through Python's real exception hierarchy; project-local exception
-    classes stay conservative unless the spelling matches. A bare handler and
-    ``BaseException`` cover every raisable value, while ``Exception`` deliberately
-    leaves the non-``Exception`` branch of an unknown kind alive.
-    """
-
-    if handler.type is None:
-        return True
-    candidates = (
-        handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
-    )
-    answers: list[bool | None] = []
-    for candidate in candidates:
-        candidate_name = _exception_type_name(candidate)
-        if candidate_name == "BaseException":
-            answers.append(True)
-            continue
-        if kind is None or candidate_name is None:
-            answers.append(None)
-            continue
-        if candidate_name == kind:
-            answers.append(True)
-            continue
-        raised_type = getattr(builtins, kind, None)
-        handled_type = getattr(builtins, candidate_name, None)
-        if (
-            isinstance(raised_type, type)
-            and issubclass(raised_type, BaseException)
-            and isinstance(handled_type, type)
-            and issubclass(handled_type, BaseException)
-        ):
-            answers.append(issubclass(raised_type, handled_type))
-        else:
-            answers.append(False if raised_type is not None else None)
-    if any(answer is True for answer in answers):
-        return True
-    if all(answer is False for answer in answers):
-        return False
-    return None
 
 
 class _MonkeyPatchCallCollector(ast.NodeVisitor):
@@ -914,12 +936,75 @@ class _MonkeyPatchCallCollector(ast.NodeVisitor):
         self.cells = [_ClosureCell(set(self.closure_aliases))]
         self.deferred: list[_DeferredFunction] = []
         self.deferred_ids: set[int] = set()
+        self.exception_shadowed = [set[str]()]
+        self.builtins_aliases = [set[str]()]
+        self.safe_names = [set[str]()]
 
     @staticmethod
     def _key(expression: ast.expr) -> str:
-        if isinstance(expression, (ast.Name, ast.Attribute)):
+        if isinstance(expression, (ast.Name, ast.Attribute, ast.Subscript)):
             return ast.unparse(expression)
         return ""
+
+    def _exception_identity(self, expression: ast.expr) -> str | None:
+        """Return a built-in exception name only when its identity is lexical fact."""
+
+        if isinstance(expression, ast.Name):
+            name = expression.id
+            if name in self.exception_shadowed[-1]:
+                return None
+        elif (
+            isinstance(expression, ast.Attribute)
+            and isinstance(expression.value, ast.Name)
+            and expression.value.id in self.builtins_aliases[-1]
+        ):
+            name = expression.attr
+        else:
+            return None
+        value = getattr(builtins, name, None)
+        if isinstance(value, type) and issubclass(value, BaseException):
+            return name
+        return None
+
+    def _raised_identity(self, node: ast.Raise) -> str | None:
+        if node.exc is None:
+            return None
+        expression = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+        return self._exception_identity(expression)
+
+    def _non_raising_raise_expression(self, expression: ast.expr) -> bool:
+        if self._exception_identity(expression) is not None:
+            return True
+        if not isinstance(expression, ast.Call):
+            return isinstance(expression, ast.Constant)
+        if self._exception_identity(expression.func) is None:
+            return False
+        return (
+            not any(keyword.arg is None for keyword in expression.keywords)
+            and all(isinstance(argument, ast.Constant) for argument in expression.args)
+            and all(
+                isinstance(keyword.value, ast.Constant)
+                for keyword in expression.keywords
+            )
+        )
+
+    def _handler_match(
+        self, handler: ast.ExceptHandler, kind: str | None
+    ) -> bool | None:
+        if handler.type is None:
+            return True
+        candidates = (
+            handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
+        )
+        identities = [self._exception_identity(candidate) for candidate in candidates]
+        known_identities = [identity for identity in identities if identity is not None]
+        if kind is None or len(known_identities) != len(identities):
+            return None
+        raised_type = getattr(builtins, kind)
+        return any(
+            issubclass(raised_type, getattr(builtins, identity))
+            for identity in known_identities
+        )
 
     @staticmethod
     def _targets(target: ast.expr) -> set[str]:
@@ -1004,7 +1089,7 @@ class _MonkeyPatchCallCollector(ast.NodeVisitor):
                 break
             prefix = self._state()
             flowed = self.visit(statement)
-            if _may_raise_implicitly(statement):
+            if _may_raise_implicitly(statement, self.safe_names[-1]):
                 result.exceptional.append(_ExceptionalState(prefix, None))
             if not isinstance(flowed, _FlowResult):
                 continue
@@ -1049,7 +1134,14 @@ class _MonkeyPatchCallCollector(ast.NodeVisitor):
         self._visit_function_expressions(node)
         if id(node) not in self.deferred_ids:
             self.deferred_ids.add(id(node))
-            self.deferred.append(_DeferredFunction(node, self.cells[-1]))
+            self.deferred.append(
+                _DeferredFunction(
+                    node,
+                    self.cells[-1],
+                    set(self.exception_shadowed[-1]),
+                    set(self.builtins_aliases[-1]),
+                )
+            )
         self._unbind({node.name})
 
     def _evaluate_function(self, item: _DeferredFunction) -> None:
@@ -1077,10 +1169,20 @@ class _MonkeyPatchCallCollector(ast.NodeVisitor):
         cell = _ClosureCell(set(inherited))
         self.cells.append(cell)
         self.scope_kinds.append("function")
+        local_bindings = local_bindings | parameters
+        local_builtins_aliases = _trusted_builtins_aliases(node.body)
+        self.exception_shadowed.append(item.exception_shadowed | local_bindings)
+        self.builtins_aliases.append(
+            (item.builtins_aliases - local_bindings) | local_builtins_aliases
+        )
+        self.safe_names.append(set(parameters))
         flow = self._visit_suite(node.body)
         endings = [*flow.normal, *flow.breaks, *flow.continues, *flow.returns]
         if endings:
             cell.aliases = set(self._merge(endings)[1])
+        self.safe_names.pop()
+        self.builtins_aliases.pop()
+        self.exception_shadowed.pop()
         self.scope_kinds.pop()
         self.cells.pop()
         self._restore(previous)
@@ -1096,6 +1198,9 @@ class _MonkeyPatchCallCollector(ast.NodeVisitor):
                 self._evaluate_function(item)
 
     def visit_Module(self, node: ast.Module) -> Any:
+        collector = _scope_collector(self.path, node.body)
+        self.exception_shadowed[-1] = set(collector.bindings)
+        self.builtins_aliases[-1] = _trusted_builtins_aliases(node.body)
         flow = self._visit_suite(node.body)
         endings = list(flow.normal)
         if endings:
@@ -1184,11 +1289,15 @@ class _MonkeyPatchCallCollector(ast.NodeVisitor):
             handler_inputs: list[_ExceptionalState] = []
             still_unmatched: list[_ExceptionalState] = []
             for exceptional in unmatched:
-                match = _handler_match(handler, exceptional.kind)
+                match = self._handler_match(handler, exceptional.kind)
                 if match is not False:
                     handler_inputs.append(exceptional)
-                if match is not True:
+                if isinstance(node, ast.TryStar) or match is not True:
                     still_unmatched.append(exceptional)
+            # ``except*`` handlers split an exception group instead of selecting
+            # one exclusive branch. Keep every original group path available to
+            # later handlers and to ``finally``; the AST does not prove which
+            # subgroups were consumed.
             unmatched = still_unmatched
             if not handler_inputs:
                 continue
@@ -1312,13 +1421,19 @@ class _MonkeyPatchCallCollector(ast.NodeVisitor):
         return _FlowResult(continues=[self._state()])
 
     def visit_Raise(self, node: ast.Raise) -> Any:
+        prefix = self._state()
+        may_fail_before_raise = (
+            node.exc is not None and not self._non_raising_raise_expression(node.exc)
+        )
         if node.exc is not None:
             self.visit(node.exc)
         if node.cause is not None:
+            may_fail_before_raise = True
             self.visit(node.cause)
-        return _FlowResult(
-            exceptional=[_ExceptionalState(self._state(), _raised_exception_name(node))]
-        )
+        exceptional = [_ExceptionalState(self._state(), self._raised_identity(node))]
+        if may_fail_before_raise:
+            exceptional.insert(0, _ExceptionalState(prefix, None))
+        return _FlowResult(exceptional=exceptional)
 
     def visit_Return(self, node: ast.Return) -> Any:
         if node.value is not None:

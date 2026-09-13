@@ -1788,6 +1788,26 @@ def test_unpairable_destructuring_without_authority_stays_non_authoritative():
     assert _scan_synthetic(source) == []
 
 
+def test_destructuring_preserves_subscript_receiver_authority():
+    _assert_authoritative_receiver(
+        "slots[0], other = monkeypatch, helper", receiver="slots[0]"
+    )
+
+
+def test_starred_destructuring_preserves_possible_subscript_authority():
+    _assert_authoritative_receiver(
+        "slots[0], *slots[1] = (monkeypatch, helper)", receiver="slots[0]"
+    )
+
+
+def test_exact_destructuring_keeps_unrelated_subscript_non_authoritative():
+    source = _receiver_flow(
+        "slots[0], slots[1] = helper, monkeypatch", receiver="slots[0]"
+    )
+
+    assert _scan_synthetic(source) == []
+
+
 def test_a_context_alias_does_not_leak_into_a_sibling_scope():
     source = """
 import pytest
@@ -2072,6 +2092,52 @@ def test_finally_ignores_definitely_retired_else_and_handler_states(suite):
     assert _scan_synthetic(_receiver_flow(statements)) == []
 
 
+def test_trystar_keeps_later_authoritative_group_handlers_reachable():
+    _assert_authoritative_receiver(
+        "patch = helper\n"
+        "    try:\n"
+        "        raise RuntimeError\n"
+        "    except* RuntimeError:\n"
+        "        patch = helper\n"
+        "    except* Exception:\n"
+        "        patch = monkeypatch\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+
+def test_trystar_without_any_authoritative_path_stays_non_authoritative():
+    source = _receiver_flow(
+        "patch = helper\n"
+        "    try:\n"
+        "        raise RuntimeError\n"
+        "    except* RuntimeError:\n"
+        "        patch = helper\n"
+        "    except* Exception:\n"
+        "        patch = helper\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+    assert _scan_synthetic(source) == []
+
+
+def test_ordinary_try_handlers_remain_exclusive_after_a_known_match():
+    source = _receiver_flow(
+        "patch = helper\n"
+        "    try:\n"
+        "        raise RuntimeError\n"
+        "    except RuntimeError:\n"
+        "        patch = helper\n"
+        "    except Exception:\n"
+        "        patch = monkeypatch\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+    assert _scan_synthetic(source) == []
+
+
 def test_a_handled_raise_that_completes_does_not_poison_finally():
     # Greptile's reproducer: retaining the original RuntimeError beside the
     # handler result makes finally merge an impossible authoritative state. The
@@ -2088,6 +2154,32 @@ def test_a_handled_raise_that_completes_does_not_poison_finally():
     )
 
     assert _scan_synthetic(source) == []
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "result = local_before_assignment\n"
+        "local_before_assignment = helper\n"
+        "patch = helper",
+        "result = operation()\npatch = helper",
+        "result = consume(local_before_assignment)\n"
+        "local_before_assignment = helper\n"
+        "patch = helper",
+        "left, right = value\npatch = helper",
+        "raise RuntimeError(local_before_assignment)\nlocal_before_assignment = helper",
+    ],
+)
+def test_expression_evaluation_prefixes_still_reach_finally(operation):
+    _assert_authoritative_receiver(
+        "patch = monkeypatch\n"
+        "    try:\n"
+        f"        {operation.replace(chr(10), chr(10) + '        ')}\n"
+        "    except RuntimeError:\n"
+        "        patch = helper\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
 
 
 @pytest.mark.parametrize("handler", ["RuntimeError", "Exception", "BaseException", ""])
@@ -2173,18 +2265,68 @@ def test_an_unknown_exception_keeps_the_non_exception_branch_alive():
     )
 
 
-@pytest.mark.parametrize("handler", ["BaseException", ""])
-def test_catch_all_handlers_consume_unknown_exception_kinds(handler):
-    clause = f"except {handler}:" if handler else "except:"
+def test_a_bare_handler_consumes_an_unknown_exception_kind():
     source = _receiver_flow(
         "patch = monkeypatch\n"
         "    try:\n"
         "        raise error\n"
-        f"    {clause}\n"
+        "    except:\n"
         "        patch = helper\n"
         "    finally:\n"
         "        patch.setattr(*arguments)"
     )
+
+    assert _scan_synthetic(source) == []
+
+
+def test_named_catch_all_retains_an_unknown_exception_identity():
+    _assert_authoritative_receiver(
+        "patch = monkeypatch\n"
+        "    try:\n"
+        "        raise error\n"
+        "    except BaseException:\n"
+        "        patch = helper\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+
+@pytest.mark.parametrize(
+    "declaration, handler",
+    [
+        ("Exception = custom_exception", "Exception"),
+        ("", "errors.Exception"),
+    ],
+)
+def test_uncertain_exception_spelling_does_not_consume_known_raise(
+    declaration, handler
+):
+    prefix = "patch = monkeypatch\n"
+    if declaration:
+        prefix += f"    {declaration}\n"
+    _assert_authoritative_receiver(
+        prefix + "    try:\n"
+        "        raise RuntimeError\n"
+        f"    except {handler}:\n"
+        "        patch = helper\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+
+def test_explicit_unshadowed_builtins_qualification_consumes_known_raise():
+    source = """
+import builtins
+
+async def test_shape(monkeypatch, helper, arguments):
+    patch = monkeypatch
+    try:
+        raise builtins.RuntimeError
+    except builtins.Exception:
+        patch = helper
+    finally:
+        patch.setattr(*arguments)
+"""
 
     assert _scan_synthetic(source) == []
 
