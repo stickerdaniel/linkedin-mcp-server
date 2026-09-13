@@ -75,6 +75,13 @@
     },
     {
       "type": "git",
+      "name": "pyyaml",
+      "url": "https://github.com/yaml/pyyaml",
+      "branch": "main",
+      "specialNotes": "YAML parser used by the Ruff toolchain contract test."
+    },
+    {
+      "type": "git",
       "name": "patchright",
       "url": "https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python",
       "branch": "main"

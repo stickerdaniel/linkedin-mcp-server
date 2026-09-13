@@ -72,14 +72,23 @@ exclude = ["assets*", "docs*", "tests*"]
 [tool.setuptools.package-data]
 linkedin_mcp_server = ["py.typed"]
 
+[tool.ruff.lint]
+# Preserve Ruff's pre-0.16 default rule set instead of adopting new rules implicitly.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.format]
+# Ruff 0.16 added Markdown formatting; keep the formatter's previous file scope.
+exclude = ["*.md"]
+
 [dependency-groups]
 dev = [
     "aiohttp>=3.12.13",
-    "pre-commit>=4.2.0",
+    "pre-commit>=4.6.2",
     "pytest>=8.3.5",
     "pytest-asyncio>=1.0.0",
     "pytest-cov>=6.1.1",
     "pytest-xdist>=3.8.0",
-    "ruff>=0.11.11",
+    "pyyaml>=6.0.3",
+    "ruff==0.16.7",
     "ty>=0.0.1a12",
 ]
