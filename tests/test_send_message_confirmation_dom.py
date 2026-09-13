@@ -21,6 +21,7 @@ from linkedin_mcp_server.scraping.extractor import (
     _ProfileMessageTarget,
     _ProfileMessageTargetResolution,
 )
+from linkedin_mcp_server.scraping.navigation import PageNavigator
 
 pytestmark = [
     pytest.mark.browser_dom,
@@ -301,7 +302,7 @@ async def send(
     await page.set_content(html)
     extractor = LinkedInExtractor(page)
     with (
-        patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+        patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
         patch.object(
             extractor,
             "_read_profile_message_target",
@@ -524,7 +525,7 @@ class TestComposerRecipientDom:
             return await read_state(target)
 
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
             patch.object(
                 extractor,
                 "_read_profile_message_target",
@@ -572,7 +573,7 @@ class TestComposerRecipientDom:
             return await resolve_owner(target, expected_route=expected_route)
 
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
             patch.object(
                 extractor,
                 "_read_profile_message_target",
@@ -1041,7 +1042,7 @@ class TestSendConfirmationDom:
             await anyio.sleep_forever()
 
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
             patch.object(
                 extractor,
                 "_read_profile_message_target",
