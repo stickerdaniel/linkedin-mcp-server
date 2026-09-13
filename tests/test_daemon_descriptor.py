@@ -911,7 +911,7 @@ class TestStateLocation:
             ".mcp-server-linkedin-v2",
         )
 
-        def refuse(_path: Path) -> None:
+        def refuse(_path: Path, **_kwargs: object) -> None:
             raise PrivateStateError("unsafe home")
 
         monkeypatch.setattr(windows_acl, "verify_children_cannot_be_replaced", refuse)
@@ -921,6 +921,54 @@ class TestStateLocation:
 
         assert not (tmp_path / ".mcp-server-linkedin").exists()
         assert not (tmp_path / ".mcp-server-linkedin-v2").exists()
+
+    def test_windows_accepts_an_inherited_dacl_after_ancestry_check(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """UNC/network profile homes inherit a safe but unprotected DACL (#821).
+
+        ``verify_children_cannot_be_replaced`` with ``require_protected=True``
+        rejects the inherited DACL.  The fallback walks the ancestry chain
+        instead and accepts a profile whose inherited entries are all safe.
+        """
+        from linkedin_mcp_server import windows_acl
+
+        monkeypatch.setattr(daemon_descriptor_module, "_WINDOWS", True)
+        monkeypatch.setattr(
+            daemon_descriptor_module,
+            "_APPLICATION_STATE_DIR",
+            ".mcp-server-linkedin-v2",
+        )
+        monkeypatch.setattr(
+            daemon_descriptor_module, "_pin_windows_account_home", lambda _path: None
+        )
+        _stub_windows_hardening(monkeypatch)
+
+        call_count = 0
+
+        def require_protected_then_relaxed(
+            _path: Path, *, require_protected: bool = True
+        ) -> None:
+            nonlocal call_count
+            call_count += 1
+            if require_protected:
+                raise PrivateStateError(
+                    f"{_path} still inherits permissions that can change"
+                )
+            # require_protected=False accepts inherited DACLs
+
+        monkeypatch.setattr(
+            windows_acl,
+            "verify_children_cannot_be_replaced",
+            require_protected_then_relaxed,
+        )
+        monkeypatch.setattr(
+            windows_acl, "verify_ancestry_cannot_be_replaced", lambda _path: None
+        )
+
+        prepare_daemon_state(tmp_path / "auth")
+
+        assert call_count == 2, "first call with protect, second without"
 
     def test_windows_refuses_legacy_state_before_creating_the_new_namespace(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

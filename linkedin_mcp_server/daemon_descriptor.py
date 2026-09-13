@@ -669,7 +669,23 @@ def prepare_daemon_state(auth_root: Path) -> Path:
 
         if os.name == "nt":
             _pin_windows_account_home(home)
-        verify_children_cannot_be_replaced(home)
+        # Local profiles created by Windows have an explicit non-inherited ACL,
+        # which ``require_protected=True`` accepts directly.  Redirected or
+        # UNC profile homes (e.g. ``\\fileserver\profiles\alice``) commonly
+        # inherit a user-only DACL from an administrator-controlled parent —
+        # safe, but not protected.  Fall back to walking the ancestry chain
+        # rather than refusing the account entirely (#821).
+        try:
+            verify_children_cannot_be_replaced(home)
+        except PrivateStateError:
+            from linkedin_mcp_server.windows_acl import (
+                verify_ancestry_cannot_be_replaced,
+            )
+
+            verify_children_cannot_be_replaced(
+                home, require_protected=False
+            )
+            verify_ancestry_cannot_be_replaced(home)
         legacy_exists = _legacy_windows_tombstone_exists(home)
         application_root = home / _APPLICATION_STATE_DIR
         harden_directory_entry(application_root)
