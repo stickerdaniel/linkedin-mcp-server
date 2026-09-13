@@ -28,6 +28,21 @@ class TestNormalize:
             "Salesforce"
         )
 
+    def test_a_legal_token_is_only_a_suffix_when_it_trails(self):
+        """ "Global Payments" keeps its "global": stripping the token mid-name
+        made it collide with "Payments" and served the wrong search hit."""
+        assert normalize_company_name("Global Payments") != normalize_company_name(
+            "Payments"
+        )
+        assert normalize_company_name("Global Payments") == "global payments"
+        assert normalize_company_name("Acme Inc.") == normalize_company_name("Acme")
+
+    def test_stacked_suffixes_are_peeled_from_the_end(self):
+        assert normalize_company_name("Acme Holdings Group Inc.") == "acme"
+
+    def test_a_name_that_is_only_a_suffix_keeps_itself(self):
+        assert normalize_company_name("Group") == "group"
+
     def test_drops_dash_descriptor(self):
         assert normalize_company_name("Redtag – Salesforce implementation") == "redtag"
 
