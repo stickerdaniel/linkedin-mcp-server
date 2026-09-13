@@ -159,10 +159,10 @@ _INSTANCE_ATTRIBUTE_OWNERS = {
     "_scroll_seconds": ("facade.LinkedInExtractor._scroll_seconds", 14),
 }
 
-# `_content` and `_capture` are the facade's own wiring rather than a
-# collaborator a test could build for itself: reaching one is how a workflow
-# still living on the facade gets its reader stubbed. Each entry names the
-# collaborator the reach-through lands on and the facade binding the
+# `_content`, `_capture` and `_profile_page` are the facade's own wiring rather
+# than a collaborator a test could build for itself: reaching one is how a
+# workflow still living on the facade gets its reader stubbed. Each entry names
+# the collaborator the reach-through lands on and the facade binding the
 # reach-through itself consumes.
 #
 # Both the reach-through and the patch it carries expire with the workflow the
@@ -170,17 +170,27 @@ _INSTANCE_ATTRIBUTE_OWNERS = {
 # `scrape_company` owns its own reader, a `_content` stub inside a
 # `scrape_company` test intercepts nothing, while a `get_inbox` test reaching
 # the same attribute is still live. Measured over every reach-through in the
-# tree: all 19 `_capture` sites drive `scrape_person` (6), and the 14 `_content`
-# sites split across `scrape_company` (8), `_extract_search_page` and
-# `search_jobs` (9) and `get_inbox`, `get_conversation`,
-# `search_conversations` (11). A single pin at 11 left the one stage-8 and the
-# four stage-9 reach-throughs unflagged for three and two stages; a pin at the
-# facade's own stage 14 would leave every one of them unflagged for the rest of
-# the migration. The stage therefore comes from `_callers`, exactly as a
-# boundary patch's does.
+# tree at stage 6: the 14 `_content` sites split across `scrape_company` (8),
+# `_extract_search_page` and `search_jobs` (9) and `get_inbox`,
+# `get_conversation`, `search_conversations` (11), and the four
+# `_profile_page` sites all drive `get_conversation` (11). A single pin at 11
+# left the one stage-8 and the four stage-9 reach-throughs unflagged for three
+# and two stages; a pin at the facade's own stage 14 would leave every one of
+# them unflagged for the rest of the migration. The stage therefore comes from
+# `_callers`, exactly as a boundary patch's does.
+#
+# `_capture` carries no site of its own any more: all 19 were `scrape_person`
+# tests and retired with stage 6. The entry stays because the workflows that
+# still call `self._capture` from the facade are stages 8 to 12, and removing
+# it would turn the next such reach-through into an unresolved seam rather
+# than a dated one.
 _FACADE_COLLABORATORS = {
     "_content": ("content.PageContentReader", "facade.LinkedInExtractor._content"),
     "_capture": ("capture.SectionCapture", "facade.LinkedInExtractor._capture"),
+    "_profile_page": (
+        "profile_page.ProfilePageReader",
+        "facade.LinkedInExtractor._profile_page",
+    ),
 }
 
 _MODULE_ATTRIBUTE_OWNERS = {
@@ -241,22 +251,15 @@ _EXPLICIT_INSTANCE_BINDINGS = {
     ("tests/test_scraping.py", "_patch_to_composer"): ("extractor",),
 }
 
+# Helpers in an owner's own test module that build the migrated collaborator
+# instead of the facade. Keyed by file and function so a rename becomes a
+# refusal rather than a silent exemption, which is the direction this table
+# has to fail in: it only ever narrows the refusal, never the inventory.
+_OWNER_FACTORIES: dict[str, tuple[str, ...]] = {
+    "tests/scraping/test_person.py": ("_scraper",),
+}
+
 _EXPLICIT_CALLER_CONTEXTS: dict[tuple[str, str, str], tuple[str, ...]] = {
-    (
-        "tests/test_scraping.py",
-        "_calls",
-        "extract_page",
-    ): (
-        "scrape_person",
-        "connect_with_person",
-        "get_sidebar_profiles",
-        "_open_conversation_by_username",
-        "send_message",
-        "scrape_company",
-        "get_company_employees",
-        "scrape_job",
-        "get_conversation",
-    ),
     (
         "tests/scraping/policy_scenarios.py",
         "boundaries",
@@ -287,7 +290,6 @@ _EXPLICIT_CALLER_CONTEXTS: dict[tuple[str, str, str], tuple[str, ...]] = {
         "boundaries",
         "detect_rate_limit",
     ): (
-        "get_sidebar_profiles",
         "_extract_search_page_once",
         "_extract_saved_jobs_page_once",
         "_resolve_conversation_thread_urls",
@@ -302,7 +304,6 @@ _EXPLICIT_CALLER_CONTEXTS: dict[tuple[str, str, str], tuple[str, ...]] = {
         "boundaries",
         "handle_modal_close",
     ): (
-        "get_sidebar_profiles",
         "_extract_search_page_once",
         "_extract_saved_jobs_page_once",
         "_resolve_conversation_thread_urls",
@@ -327,7 +328,6 @@ _EXPLICIT_CALLER_CONTEXTS: dict[tuple[str, str, str], tuple[str, ...]] = {
         "boundaries",
         "build_issue_diagnostics",
     ): (
-        "scrape_person",
         "scrape_company",
         "_extract_search_page",
         "search_jobs",
@@ -659,6 +659,110 @@ class _ScopeFrame:
     # order of its own.
     collaborator_aliases: dict[int, str] = field(default_factory=dict)
     ambiguous_aliases: set[int] = field(default_factory=set)
+    owner_names: set[str] = field(default_factory=set)
+    closure_owner_names: set[str] = field(default_factory=set)
+
+
+def _owner_factory_bindings(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    factories: tuple[str, ...],
+) -> set[str]:
+    """Collect local names bound to a migrated owner rather than the facade.
+
+    A relocated owner wires itself the way the facade does, so its instance
+    carries the same attribute names — `_capture`, `_session`,
+    `_profile_page`. Without this, the wiring signal in
+    `_reaches_the_extractor` reads `scraper._capture` in an owner test as a
+    facade reach-through nobody declared and refuses a patch that never goes
+    near the facade.
+    """
+
+    if not factories:
+        return set()
+    bindings: set[str] = set()
+    for statement in node.body:
+        for item in (statement, *_walk_scope(statement)):
+            if not isinstance(item, (ast.Assign, ast.AnnAssign)):
+                continue
+            value = item.value
+            if not (
+                isinstance(value, ast.Call)
+                and isinstance(value.func, ast.Name)
+                and value.func.id in factories
+            ):
+                continue
+            targets = item.targets if isinstance(item, ast.Assign) else [item.target]
+            bindings.update(
+                target.id for target in targets if isinstance(target, ast.Name)
+            )
+    return bindings
+
+
+class _NonFactoryBindingCollector(_LocalBindingCollector):
+    """Collect a scope's bindings except the ones an owner factory assigns."""
+
+    def __init__(self, path: Path | None, factories: tuple[str, ...]) -> None:
+        super().__init__(path)
+        self.factories = factories
+
+    def _binds_an_owner(self, value: ast.expr | None) -> bool:
+        return (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id in self.factories
+        )
+
+    def visit_Assign(self, node: ast.Assign) -> Any:
+        if not self._binds_an_owner(node.value):
+            self.generic_visit(node)
+            return
+        self.visit(node.value)
+        for target in node.targets:
+            if not isinstance(target, ast.Name):
+                self.visit(target)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> Any:
+        if not self._binds_an_owner(node.value):
+            self.generic_visit(node)
+            return
+        if node.value is not None:
+            self.visit(node.value)
+        if not isinstance(node.target, ast.Name):
+            self.visit(node.target)
+
+
+def _rebound_owner_names(
+    path: Path,
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    factories: tuple[str, ...],
+) -> set[str]:
+    """Collect names the scope also binds through anything but a factory call.
+
+    `_owner_factory_bindings` reads assignment targets and never takes a name
+    back, so a name the factory binds once and a `for`, a `with`, an `except`
+    or an unpack binds again keeps the owner exemption for every use of it.
+    None of those forms is a facade binding either, so `_extractor_bindings`
+    never saw them and the wiring signal in `_reaches_the_extractor` was the
+    only guard left standing over `scraper._capture`.
+
+    Whether the rebinding runs is not asked, the way `_function_shadowed_names`
+    does not ask: a name bound both ways fits no single answer, and the
+    exemption only ever narrows a refusal, so it is the side that gives way.
+    Parameters, `global` and `nonlocal` names count as other forms too — each
+    one says the name is not this scope's to answer for.
+    """
+
+    if not factories:
+        return set()
+    collector = _NonFactoryBindingCollector(path, factories)
+    for statement in node.body:
+        collector.visit(statement)
+    return (
+        collector.bindings
+        | collector.globals
+        | collector.nonlocals
+        | _argument_names(node.args)
+    )
 
 
 def _extractor_bindings(
@@ -2436,6 +2540,12 @@ class Scanner(ast.NodeVisitor):
         aliases, ambiguous_aliases = _collaborator_aliases(
             self.path, node, instance_names | class_names
         )
+        factories = _OWNER_FACTORIES.get(self.relative_path, ())
+        owner_names = parent.closure_owner_names - _function_shadowed_names(
+            self.path, node
+        )
+        owner_names.update(_owner_factory_bindings(node, factories))
+        owner_names.difference_update(_rebound_owner_names(self.path, node, factories))
         self.functions.append(node)
         self.frames.append(
             _ScopeFrame(
@@ -2448,6 +2558,8 @@ class Scanner(ast.NodeVisitor):
                 closure_instance_names=set(instance_names),
                 collaborator_aliases=aliases,
                 ambiguous_aliases=ambiguous_aliases,
+                owner_names=owner_names,
+                closure_owner_names=set(owner_names),
             )
         )
         for statement in node.body:
@@ -2604,6 +2716,8 @@ class Scanner(ast.NodeVisitor):
             ambiguous_names=set(frame.ambiguous_names),
             collaborator_aliases=dict(frame.collaborator_aliases),
             ambiguous_aliases=set(frame.ambiguous_aliases),
+            owner_names=set(frame.owner_names),
+            closure_owner_names=set(frame.closure_owner_names),
         )
 
     def _visit_class_suite(self, statements: list[ast.stmt]) -> None:
@@ -2719,6 +2833,8 @@ class Scanner(ast.NodeVisitor):
             closure_module_names=set(parent.closure_module_names),
             closure_class_names=set(parent.closure_class_names),
             closure_instance_names=set(parent.closure_instance_names),
+            owner_names=set(parent.closure_owner_names),
+            closure_owner_names=set(parent.closure_owner_names),
         )
         self.frames.append(frame)
         self._visit_class_suite(node.body)
@@ -2746,9 +2862,12 @@ class Scanner(ast.NodeVisitor):
         )
         local_bindings = collector.bindings - collector.globals - collector.nonlocals
         instance_names = parent.closure_instance_names - local_bindings - parameters
+        owner_names = parent.closure_owner_names - local_bindings - parameters
         self.frames.append(
             _ScopeFrame(
                 kind="function",
+                owner_names=owner_names,
+                closure_owner_names=set(owner_names),
                 module_names=module_names,
                 class_names=class_names,
                 instance_names=instance_names,
@@ -2779,6 +2898,7 @@ class Scanner(ast.NodeVisitor):
         module_names = set(parent.closure_module_names)
         class_names = set(parent.closure_class_names)
         instance_names = set(parent.closure_instance_names)
+        owner_names = set(parent.closure_owner_names)
         frame = _ScopeFrame(
             kind="comprehension",
             module_names=module_names,
@@ -2787,6 +2907,8 @@ class Scanner(ast.NodeVisitor):
             closure_module_names=module_names,
             closure_class_names=class_names,
             closure_instance_names=instance_names,
+            owner_names=owner_names,
+            closure_owner_names=owner_names,
         )
         self.frames.append(frame)
         for generator in (first, *remaining):
@@ -2797,6 +2919,7 @@ class Scanner(ast.NodeVisitor):
             frame.module_names.difference_update(targets)
             frame.class_names.difference_update(targets)
             frame.instance_names.difference_update(targets)
+            frame.owner_names.difference_update(targets)
             for condition in generator.ifs:
                 self.visit(condition)
         for value in values:
@@ -3420,6 +3543,17 @@ class Scanner(ast.NodeVisitor):
         the expression. Measured over every site that falls through today:
         neither fires on any of the 137, and between them they catch the
         chained, ``getattr``-routed and ``self``-rooted reach-throughs.
+
+        The wiring signal has one exception, and it is not optional: a
+        relocated owner wires itself exactly as the facade does, so an owner
+        test's ``scraper._capture`` carries a wiring name while naming no
+        facade at all. Names bound through ``_OWNER_FACTORIES`` are therefore
+        excluded from that signal — from that signal only, and only as the
+        immediate receiver, so ``self._capture`` and every unreducible shape
+        still refuse. A name the scope also binds some other way loses the
+        exemption in ``_rebound_owner_names``: ``for``, ``with`` and
+        ``except`` targets are no facade binding either, so this signal is the
+        only one that ever sees them.
         """
 
         frame = self.frames[-1]
@@ -3430,9 +3564,18 @@ class Scanner(ast.NodeVisitor):
             | frame.ambiguous_names
         )
         wiring = set(_FACADE_COLLABORATORS) | set(_INSTANCE_ATTRIBUTE_OWNERS)
+
+        def names_the_facades_wiring(item: ast.AST) -> bool:
+            if not isinstance(item, ast.Attribute) or item.attr not in wiring:
+                return False
+            receiver = item.value
+            return not (
+                isinstance(receiver, ast.Name) and receiver.id in frame.owner_names
+            )
+
         return any(
             (isinstance(item, ast.Name) and item.id in known)
-            or (isinstance(item, ast.Attribute) and item.attr in wiring)
+            or names_the_facades_wiring(item)
             for item in ast.walk(target)
         )
 

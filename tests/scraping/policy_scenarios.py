@@ -26,6 +26,7 @@ from linkedin_mcp_server.scraping import capture as capture_module
 from linkedin_mcp_server.scraping import extractor as extractor_module
 from linkedin_mcp_server.scraping import feed as feed_module
 from linkedin_mcp_server.scraping import navigation as navigation_module
+from linkedin_mcp_server.scraping import person as person_module
 from linkedin_mcp_server.scraping import session as session_module
 from linkedin_mcp_server.scraping.extractor import LinkedInExtractor
 from linkedin_mcp_server.scraping.fields import COMPANY_SECTIONS, PERSON_SECTIONS
@@ -195,6 +196,7 @@ async def boundaries(
         patch.object(extractor_module, "scroll_job_sidebar", scroll_sidebar),
         patch.object(capture_module, "build_issue_diagnostics", diagnostics),
         patch.object(feed_module, "build_issue_diagnostics", diagnostics),
+        patch.object(person_module, "build_issue_diagnostics", diagnostics),
         patch.object(extractor_module, "build_issue_diagnostics", diagnostics),
         # `staticmethod`, or the class attribute would bind `self` in front of
         # the pending list and the replacement would never match the call.

@@ -20,16 +20,17 @@ from scripts import check_scraping_migration_manifest as migration  # noqa: E402
 MANIFEST = ROOT / "tests" / "fixtures" / "scraping-policy" / "migration-manifest.json"
 CHECKER = ROOT / "scripts" / "check_scraping_migration_manifest.py"
 POLICY_SCENARIOS = ROOT / "tests" / "scraping" / "policy_scenarios.py"
+PERSON_TESTS = ROOT / "tests" / "scraping" / "test_person.py"
 SCRAPING_SYNTHETIC = (
     ROOT / "linkedin_mcp_server" / "scraping" / "synthetic_inventory.py"
 )
 
 _SHARED_BOUNDARY_STAGES = {
-    "detect_rate_limit": {6, 9, 11, 12},
-    "handle_modal_close": {6, 9, 11, 12},
+    "detect_rate_limit": {9, 11, 12},
+    "handle_modal_close": {9, 11, 12},
     "scroll_to_bottom": {9},
     "scroll_job_sidebar": {9},
-    "build_issue_diagnostics": {6, 8, 9},
+    "build_issue_diagnostics": {8, 9},
 }
 
 
@@ -132,16 +133,27 @@ def test_final_messaging_seams_have_only_the_approved_stage_owners():
     assert all(
         seam["canonical_owner"].startswith("message_sender.") for seam in dom_seams
     )
+    # The URN read moved to `profile_page.ProfilePageReader` at stage 6, and
+    # the DOM test builds that reader instead of reaching the facade for it.
+    # What it still borrows is the top-card read behind it, which is the
+    # message sender's and dated accordingly.
     profile_urn_reads = [
-        seam
-        for seam in current
-        if seam["path"] == "tests/test_send_message_confirmation_dom.py"
-        and seam["target"] == "_extract_profile_urn"
+        seam for seam in current if seam["target"] == "_extract_profile_urn"
     ]
+    assert profile_urn_reads == []
+    assert migration._PRIVATE_OWNERS["_extract_profile_urn"] == (
+        "profile_page.ProfilePageReader",
+        6,
+    )
     assert {
         (seam["kind"], seam["canonical_owner"], seam["migration_stage"])
-        for seam in profile_urn_reads
-    } == {("private_facade_access", "profile_page.ProfilePageReader", 6)}
+        for seam in current
+        if seam["path"] == "tests/test_send_message_confirmation_dom.py"
+        and seam["target"] == "_read_profile_message_target"
+    } == {
+        ("private_facade_access", "message_sender.MessageSender", 12),
+        ("private_patch_object", "message_sender.MessageSender", 12),
+    }
 
     private_targets = {
         seam["target"]
@@ -225,10 +237,13 @@ def test_module_boundary_patches_follow_their_callers():
     ]
     assert stdlib
     assert all(seam["migration_stage"] is None for seam in stdlib)
-    assert {seam["migration_stage"] for seam in logger_patches} == {6}
-    assert all(
-        "person.PersonScraper" in seam["canonical_owner"] for seam in logger_patches
-    )
+    # The last one was a `get_sidebar_profiles` test reading the facade's
+    # logger, and it moved to the person owner at stage 6. Closed by
+    # relocating the read rather than by dropping `logger` from
+    # `_CONTEXTUAL_MODULE_NAMES`: the next such patch has to be inventoried
+    # against the workflow that drives it, not fail closed as unknown.
+    assert logger_patches == []
+    assert "logger" in migration._CONTEXTUAL_MODULE_NAMES
 
 
 @pytest.mark.parametrize(
@@ -272,10 +287,10 @@ def test_public_facade_patches_follow_each_calling_workflow():
 
     assert {
         seam["migration_stage"] for seam in public if seam["target"] == "extract_page"
-    } == {6, 7, 8, 9, 10, 11, 12}
+    } == {8, 9, 10}
     assert {
         seam["migration_stage"] for seam in public if seam["target"] == "scrape_person"
-    } == {6, 7}
+    } == {7}
     assert {
         seam["migration_stage"]
         for seam in public
@@ -324,7 +339,7 @@ def test_checker_rejects_obsolete_seams_at_their_migration_stage():
     # completed stage are closed by definition, so an override there proves
     # nothing; raise this number as each stage lands.
     result = subprocess.run(
-        [sys.executable, str(CHECKER), "--check", "--stage", "6"],
+        [sys.executable, str(CHECKER), "--check", "--stage", "7"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -332,14 +347,16 @@ def test_checker_rejects_obsolete_seams_at_their_migration_stage():
     )
 
     assert result.returncode == 1
-    assert "obsolete at stage 6:" in result.stderr
+    assert "obsolete at stage 7:" in result.stderr
     assert "public_patch_object" in result.stderr
-    assert "string_patch" in result.stderr
+    assert "private_patch_object" in result.stderr
     # Every direct read of an extractor module attribute aimed at the feed
     # drain moved with the test that held it, so no override below stage 9 can
     # surface one. A feed test still reaching back through the facade module
-    # would show up here.
+    # would show up here. The same now holds for `string_patch`: the person
+    # workflow held the last one below stage 8.
     assert "module_attribute" not in result.stderr
+    assert "string_patch" not in result.stderr
 
 
 def test_checkers_offer_no_fixture_update_mode():
@@ -965,7 +982,7 @@ def test_manifest_includes_extractor_access_from_nested_closure():
         for seam in accesses
     } == {
         (590, "facade.LinkedInExtractor._scroll_seconds", 14),
-        (3702, "facade.LinkedInExtractor._scroll_seconds", 14),
+        (3123, "facade.LinkedInExtractor._scroll_seconds", 14),
     }
 
 
@@ -1382,7 +1399,13 @@ def test_direct_private_helper_calls_and_stage_gate_are_inventoried():
         for seam in current["seams"]
         if seam["kind"] == "module_attribute" and seam["target"].startswith("_")
     ]
-    assert {seam["path"] for seam in private_reads} == {"tests/test_scraping.py"}
+    # Two files now: the profile-page owner test asserts the top-card program
+    # it borrows from the facade is the one that ran, which is the same
+    # stage-12 read the messaging tests name.
+    assert {seam["path"] for seam in private_reads} == {
+        "tests/scraping/test_profile_page.py",
+        "tests/test_scraping.py",
+    }
     assert all(seam["migration_stage"] == 12 for seam in private_reads)
     direct_privates = [
         seam
@@ -2815,6 +2838,65 @@ def test_a_conditionally_rebound_alias_names_its_call_site(statement, line):
         r"ambiguous collaborator alias after conditional control flow",
     ):
         _scan_synthetic(_reach_through(statement))
+
+
+def _owner_test(body: str) -> str:
+    return (
+        "\nfrom unittest.mock import patch\n"
+        "\nfrom linkedin_mcp_server.scraping.extractor import LinkedInExtractor\n"
+        "\n\nasync def test_owner(page, replacement):\n"
+        f"{body}\n"
+    )
+
+
+def test_an_owner_factory_binding_exempts_only_its_own_wiring():
+    # `_scraper` builds the migrated owner, whose instance carries the same
+    # `_capture` the facade wires, so the wiring signal has to let this one
+    # through. Every remaining stage is written this way, and a refusal here
+    # would block all of them.
+    seams = migration.scan_source(
+        PERSON_TESTS,
+        _owner_test(
+            "    scraper = _scraper(page)\n"
+            '    patch.object(scraper._capture, "extract_page", replacement)'
+        ),
+        *migration.extractor_methods(),
+    )
+
+    assert not [seam for seam in seams if seam.kind.endswith("_patch_object")]
+
+
+@pytest.mark.parametrize(
+    ("rebinding", "line"),
+    [
+        ("    for scraper in (LinkedInExtractor(page),):\n        pass", 11),
+        ("    with LinkedInExtractor(page) as scraper:\n        pass", 11),
+        ("    try:\n        pass\n    except Exception as scraper:\n        pass", 13),
+        ("    scraper, other = LinkedInExtractor(page), None", 10),
+    ],
+)
+def test_a_rebound_owner_name_loses_its_factory_exemption(rebinding, line):
+    # The exemption answers for a name the factory alone binds. A `for`, a
+    # `with`, an `except` or an unpack binds it again without ever being a
+    # facade binding, so the name signal never sees those shapes and the
+    # wiring signal is the only guard over `scraper._capture`. Left exempt,
+    # a stage-8 test comparing owner and facade through one loop variable
+    # would take its facade reach-through out of the inventory entirely, and
+    # stage 12 would retire nothing for it.
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=rf"test_person\.py:{line} scraper\._capture: "
+        r"unresolved patch\.object target",
+    ):
+        migration.scan_source(
+            PERSON_TESTS,
+            _owner_test(
+                "    scraper = _scraper(page)\n"
+                f"{rebinding}\n"
+                '    patch.object(scraper._capture, "extract_page", replacement)'
+            ),
+            *migration.extractor_methods(),
+        )
 
 
 def test_a_foreign_collaborator_of_its_own_stays_out_of_the_inventory():
