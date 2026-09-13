@@ -1110,15 +1110,15 @@
       "canonical_owner": "content.PageContentReader",
       "kind": "private_patch_object",
       "line": 629,
-      "migration_stage": 11,
+      "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_root_content"
     },
     {
-      "canonical_owner": "facade.LinkedInExtractor._content",
+      "canonical_owner": "job_pages.JobPageReader -> facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
       "line": 630,
-      "migration_stage": 11,
+      "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_content"
     },
@@ -1331,7 +1331,7 @@
       "target": "_extract_overlay"
     },
     {
-      "canonical_owner": "facade.LinkedInExtractor._capture",
+      "canonical_owner": "person.PersonScraper -> facade.LinkedInExtractor._capture",
       "kind": "private_facade_access",
       "line": 921,
       "migration_stage": 6,
@@ -1363,7 +1363,7 @@
       "target": "_extract_overlay"
     },
     {
-      "canonical_owner": "facade.LinkedInExtractor._capture",
+      "canonical_owner": "person.PersonScraper -> facade.LinkedInExtractor._capture",
       "kind": "private_facade_access",
       "line": 948,
       "migration_stage": 6,
@@ -1395,7 +1395,7 @@
       "target": "_extract_overlay"
     },
     {
-      "canonical_owner": "facade.LinkedInExtractor._capture",
+      "canonical_owner": "person.PersonScraper -> facade.LinkedInExtractor._capture",
       "kind": "private_facade_access",
       "line": 983,
       "migration_stage": 6,
@@ -1435,7 +1435,7 @@
       "target": "_extract_overlay"
     },
     {
-      "canonical_owner": "facade.LinkedInExtractor._capture",
+      "canonical_owner": "person.PersonScraper -> facade.LinkedInExtractor._capture",
       "kind": "private_facade_access",
       "line": 1029,
       "migration_stage": 6,
@@ -1499,7 +1499,7 @@
       "target": "_extract_overlay"
     },
     {
-      "canonical_owner": "facade.LinkedInExtractor._capture",
+      "canonical_owner": "person.PersonScraper -> facade.LinkedInExtractor._capture",
       "kind": "private_facade_access",
       "line": 1109,
       "migration_stage": 6,
@@ -1531,7 +1531,7 @@
       "target": "_extract_overlay"
     },
     {
-      "canonical_owner": "facade.LinkedInExtractor._capture",
+      "canonical_owner": "person.PersonScraper -> facade.LinkedInExtractor._capture",
       "kind": "private_facade_access",
       "line": 1153,
       "migration_stage": 6,
@@ -1563,7 +1563,7 @@
       "target": "_extract_overlay"
     },
     {
-      "canonical_owner": "facade.LinkedInExtractor._capture",
+      "canonical_owner": "person.PersonScraper -> facade.LinkedInExtractor._capture",
       "kind": "private_facade_access",
       "line": 1195,
       "migration_stage": 6,
@@ -1595,7 +1595,7 @@
       "target": "_extract_overlay"
     },
     {
-      "canonical_owner": "facade.LinkedInExtractor._capture",
+      "canonical_owner": "person.PersonScraper -> facade.LinkedInExtractor._capture",
       "kind": "private_facade_access",
       "line": 1221,
       "migration_stage": 6,
@@ -1627,7 +1627,7 @@
       "target": "_extract_overlay"
     },
     {
-      "canonical_owner": "facade.LinkedInExtractor._capture",
+      "canonical_owner": "person.PersonScraper -> facade.LinkedInExtractor._capture",
       "kind": "private_facade_access",
       "line": 1247,
       "migration_stage": 6,
@@ -1659,7 +1659,7 @@
       "target": "_extract_overlay"
     },
     {
-      "canonical_owner": "facade.LinkedInExtractor._capture",
+      "canonical_owner": "person.PersonScraper -> facade.LinkedInExtractor._capture",
       "kind": "private_facade_access",
       "line": 1273,
       "migration_stage": 6,
@@ -1691,7 +1691,7 @@
       "target": "_extract_overlay"
     },
     {
-      "canonical_owner": "facade.LinkedInExtractor._capture",
+      "canonical_owner": "person.PersonScraper -> facade.LinkedInExtractor._capture",
       "kind": "private_facade_access",
       "line": 1299,
       "migration_stage": 6,
@@ -2299,7 +2299,7 @@
       "target": "_extract_overlay"
     },
     {
-      "canonical_owner": "facade.LinkedInExtractor._capture",
+      "canonical_owner": "person.PersonScraper -> facade.LinkedInExtractor._capture",
       "kind": "private_facade_access",
       "line": 2292,
       "migration_stage": 6,
@@ -2339,7 +2339,7 @@
       "target": "_extract_overlay"
     },
     {
-      "canonical_owner": "facade.LinkedInExtractor._capture",
+      "canonical_owner": "person.PersonScraper -> facade.LinkedInExtractor._capture",
       "kind": "private_facade_access",
       "line": 2333,
       "migration_stage": 6,
@@ -2371,7 +2371,7 @@
       "target": "_extract_overlay"
     },
     {
-      "canonical_owner": "facade.LinkedInExtractor._capture",
+      "canonical_owner": "person.PersonScraper -> facade.LinkedInExtractor._capture",
       "kind": "private_facade_access",
       "line": 2378,
       "migration_stage": 6,
@@ -2427,7 +2427,7 @@
       "target": "_extract_overlay"
     },
     {
-      "canonical_owner": "facade.LinkedInExtractor._capture",
+      "canonical_owner": "person.PersonScraper -> facade.LinkedInExtractor._capture",
       "kind": "private_facade_access",
       "line": 2442,
       "migration_stage": 6,
@@ -2510,15 +2510,15 @@
       "canonical_owner": "content.PageContentReader",
       "kind": "private_patch_object",
       "line": 2582,
-      "migration_stage": 11,
+      "migration_stage": 8,
       "path": "tests/test_scraping.py",
       "target": "_extract_root_content"
     },
     {
-      "canonical_owner": "facade.LinkedInExtractor._content",
+      "canonical_owner": "company.CompanyScraper -> facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
       "line": 2583,
-      "migration_stage": 11,
+      "migration_stage": 8,
       "path": "tests/test_scraping.py",
       "target": "_content"
     },
@@ -2678,15 +2678,15 @@
       "canonical_owner": "content.PageContentReader",
       "kind": "private_patch_object",
       "line": 2860,
-      "migration_stage": 11,
+      "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_root_content"
     },
     {
-      "canonical_owner": "facade.LinkedInExtractor._content",
+      "canonical_owner": "jobs.JobScraper -> facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
       "line": 2861,
-      "migration_stage": 11,
+      "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_content"
     },
@@ -2830,15 +2830,15 @@
       "canonical_owner": "content.PageContentReader",
       "kind": "private_patch_object",
       "line": 3113,
-      "migration_stage": 11,
+      "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_root_content"
     },
     {
-      "canonical_owner": "facade.LinkedInExtractor._content",
+      "canonical_owner": "jobs.JobScraper -> facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
       "line": 3114,
-      "migration_stage": 11,
+      "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_content"
     },
@@ -3878,15 +3878,15 @@
       "canonical_owner": "content.PageContentReader",
       "kind": "private_patch_object",
       "line": 4547,
-      "migration_stage": 11,
+      "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_extract_root_content"
     },
     {
-      "canonical_owner": "facade.LinkedInExtractor._content",
+      "canonical_owner": "job_pages.JobPageReader -> facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
       "line": 4548,
-      "migration_stage": 11,
+      "migration_stage": 9,
       "path": "tests/test_scraping.py",
       "target": "_content"
     },
@@ -4531,7 +4531,7 @@
       "target": "_extract_overlay"
     },
     {
-      "canonical_owner": "facade.LinkedInExtractor._capture",
+      "canonical_owner": "person.PersonScraper -> facade.LinkedInExtractor._capture",
       "kind": "private_facade_access",
       "line": 5506,
       "migration_stage": 6,
@@ -4595,7 +4595,7 @@
       "target": "_extract_loaded_section"
     },
     {
-      "canonical_owner": "facade.LinkedInExtractor._capture",
+      "canonical_owner": "person.PersonScraper -> facade.LinkedInExtractor._capture",
       "kind": "private_facade_access",
       "line": 5618,
       "migration_stage": 6,
@@ -4635,7 +4635,7 @@
       "target": "_extract_loaded_section"
     },
     {
-      "canonical_owner": "facade.LinkedInExtractor._capture",
+      "canonical_owner": "person.PersonScraper -> facade.LinkedInExtractor._capture",
       "kind": "private_facade_access",
       "line": 5655,
       "migration_stage": 6,
@@ -4659,7 +4659,7 @@
       "target": "_extract_loaded_section"
     },
     {
-      "canonical_owner": "facade.LinkedInExtractor._capture",
+      "canonical_owner": "person.PersonScraper -> facade.LinkedInExtractor._capture",
       "kind": "private_facade_access",
       "line": 5677,
       "migration_stage": 6,
@@ -4939,7 +4939,7 @@
       "target": "_extract_root_content"
     },
     {
-      "canonical_owner": "facade.LinkedInExtractor._content",
+      "canonical_owner": "conversations.ConversationReader -> facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
       "line": 6254,
       "migration_stage": 11,
@@ -5011,7 +5011,7 @@
       "target": "_extract_root_content"
     },
     {
-      "canonical_owner": "facade.LinkedInExtractor._content",
+      "canonical_owner": "conversations.ConversationReader -> facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
       "line": 6301,
       "migration_stage": 11,
@@ -5075,7 +5075,7 @@
       "target": "_extract_root_content"
     },
     {
-      "canonical_owner": "facade.LinkedInExtractor._content",
+      "canonical_owner": "conversations.ConversationReader -> facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
       "line": 6353,
       "migration_stage": 11,
@@ -5147,7 +5147,7 @@
       "target": "_extract_root_content"
     },
     {
-      "canonical_owner": "facade.LinkedInExtractor._content",
+      "canonical_owner": "conversations.ConversationReader -> facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
       "line": 6406,
       "migration_stage": 11,
@@ -5211,7 +5211,7 @@
       "target": "_extract_root_content"
     },
     {
-      "canonical_owner": "facade.LinkedInExtractor._content",
+      "canonical_owner": "conversations.ConversationReader -> facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
       "line": 6452,
       "migration_stage": 11,
@@ -5283,7 +5283,7 @@
       "target": "_extract_root_content"
     },
     {
-      "canonical_owner": "facade.LinkedInExtractor._content",
+      "canonical_owner": "conversations.ConversationReader -> facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
       "line": 6507,
       "migration_stage": 11,
@@ -5363,7 +5363,7 @@
       "target": "_extract_root_content"
     },
     {
-      "canonical_owner": "facade.LinkedInExtractor._content",
+      "canonical_owner": "conversations.ConversationReader -> facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
       "line": 6565,
       "migration_stage": 11,
@@ -5667,7 +5667,7 @@
       "target": "_extract_root_content"
     },
     {
-      "canonical_owner": "facade.LinkedInExtractor._content",
+      "canonical_owner": "conversations.ConversationReader -> facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
       "line": 6861,
       "migration_stage": 11,
@@ -5731,7 +5731,7 @@
       "target": "_extract_root_content"
     },
     {
-      "canonical_owner": "facade.LinkedInExtractor._content",
+      "canonical_owner": "conversations.ConversationReader -> facade.LinkedInExtractor._content",
       "kind": "private_facade_access",
       "line": 6921,
       "migration_stage": 11,

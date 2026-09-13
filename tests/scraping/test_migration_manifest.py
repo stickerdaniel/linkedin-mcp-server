@@ -6,6 +6,7 @@ from pathlib import Path
 
 import json
 import logging
+import re
 import subprocess
 import sys
 
@@ -1500,6 +1501,11 @@ async def test_reach_through(page, replacement):
         patch.object(extractor._content, "_extract_root_content", replacement),
     ):
         await extractor.scrape_person("ada")
+
+async def test_company_reach_through(page, replacement):
+    extractor = LinkedInExtractor(page)
+    with patch.object(extractor._content, "_extract_root_content", replacement):
+        await extractor.scrape_company("acme")
 """
     )
 
@@ -1509,22 +1515,39 @@ async def test_reach_through(page, replacement):
         if seam.kind.endswith("_patch_object")
     ] == [
         ("private_patch_object", "_extract_overlay", "capture.SectionCapture", 6),
-        ("public_patch_object", "extract_page", "capture.SectionCapture dependency", 6),
+        # `extract_page` is not a dependency of `SectionCapture`, it *is*
+        # `SectionCapture`, so the owner names the workflow consuming it the
+        # way every other public entry does.
+        ("public_patch_object", "extract_page", "person.PersonScraper dependency", 6),
         (
             "private_patch_object",
             "_extract_root_content",
             "content.PageContentReader",
-            11,
+            6,
+        ),
+        (
+            "private_patch_object",
+            "_extract_root_content",
+            "content.PageContentReader",
+            8,
         ),
     ]
-    # The reach-through itself stays on the record next to the patch it
-    # carries, and both expire with the last workflow that still asks the
-    # facade for the collaborator.
-    assert {
-        (seam.target, seam.migration_stage)
+    # The reach-through stays on the record next to the patch it carries, and
+    # both expire with the workflow this call site drives. The same `_content`
+    # attribute therefore closes at 6 in the first test and at 8 in the second:
+    # once `scrape_person` owns its own reader, the stub in that test
+    # intercepts nothing while the `scrape_company` one is still live. A flat
+    # per-attribute maximum answered 11 for both.
+    assert [
+        (seam.target, seam.canonical_owner, seam.migration_stage)
         for seam in seams
         if seam.kind == "private_facade_access"
-    } == {("_capture", 6), ("_content", 11)}
+    ] == [
+        ("_capture", "person.PersonScraper -> facade.LinkedInExtractor._capture", 6),
+        ("_capture", "person.PersonScraper -> facade.LinkedInExtractor._capture", 6),
+        ("_content", "person.PersonScraper -> facade.LinkedInExtractor._content", 6),
+        ("_content", "company.CompanyScraper -> facade.LinkedInExtractor._content", 8),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1554,6 +1577,1279 @@ async def test_typo(page):
         migration.UnresolvedSeamError, match=rf"synthetic_inventory\.py:7 .*{message}"
     ):
         _scan_synthetic(source)
+
+
+def _reach_through(statement: str) -> str:
+    """A workflow test whose single statement is the shape under test."""
+
+    return f"""
+from unittest.mock import patch
+from linkedin_mcp_server.scraping.extractor import LinkedInExtractor
+
+async def test_shape(page, replacement, monkeypatch, arguments, pair, thing, flag):
+    extractor = LinkedInExtractor(page)
+    {statement}
+    await extractor.scrape_person("ada")
+"""
+
+
+@pytest.mark.parametrize(
+    ("statement", "message"),
+    [
+        (
+            'patch.object(self.extractor._capture, "made_up", replacement)',
+            r"self\.extractor\._capture: unresolved patch\.object target",
+        ),
+        (
+            'patch.object(extractor._capture._reader, "made_up", replacement)',
+            r"extractor\._capture\._reader: unresolved patch\.object target",
+        ),
+        (
+            'patch.object(getattr(extractor, "_capture"), "made_up", replacement)',
+            r"getattr\(extractor, '_capture'\): unresolved patch\.object target",
+        ),
+        (
+            "patch.object(*arguments)",
+            r"patch\.object\(\*arguments\): unresolved patch\.object arguments",
+        ),
+        (
+            "patch.object(extractor._capture)",
+            r"patch\.object\(extractor\._capture\): "
+            r"unresolved patch\.object arguments",
+        ),
+        (
+            "patch.object(*pair, replacement)",
+            r"\*pair: dynamic patch\.object attribute",
+        ),
+        (
+            'monkeypatch.setattr(extractor._capture._reader, "made_up", replacement)',
+            r"extractor\._capture\._reader: unresolved setattr target",
+        ),
+        (
+            "extractor._capture._reader.made_up = replacement",
+            r"extractor\._capture\._reader: unresolved attribute assignment target",
+        ),
+        (
+            "extractor._capture._reader.made_up: object = replacement",
+            r"extractor\._capture\._reader: unresolved attribute assignment target",
+        ),
+        (
+            "monkeypatch.setattr()",
+            r"monkeypatch\.setattr\(\): unresolved setattr arguments",
+        ),
+        (
+            "monkeypatch.setattr(*arguments)",
+            r"monkeypatch\.setattr\(\*arguments\): unresolved setattr arguments",
+        ),
+        (
+            "monkeypatch.setattr(**arguments)",
+            r"monkeypatch\.setattr\(\*\*arguments\): unresolved setattr arguments",
+        ),
+        (
+            "setattr(*arguments)",
+            r"setattr\(\*arguments\): unresolved setattr arguments",
+        ),
+        (
+            "setattr(**arguments)",
+            r"setattr\(\*\*arguments\): unresolved setattr arguments",
+        ),
+        (
+            "monkeypatch.setattr(extractor._capture)",
+            r"extractor\._capture: unresolved setattr target",
+        ),
+        (
+            "monkeypatch.setattr(target=extractor._capture, value=replacement)",
+            r"extractor\._capture: unresolved setattr target",
+        ),
+    ],
+)
+def test_unresolvable_replacement_targets_name_their_call_site(statement, message):
+    # Each of these replaces a name on something the reader cannot reduce to a
+    # collaborator, or hides both ends of the replacement behind a shape it
+    # cannot take apart, so nothing proves the patch intercepts the
+    # implementation. A chain of `if ...: return` blocks that simply ends
+    # answers "not a seam" to exactly that, which is indistinguishable from a
+    # foreign object. The `setattr` arity gates were the last two such chains:
+    # both the keyword form and a call short of its member name walked past
+    # them without a word.
+    with pytest.raises(
+        migration.UnresolvedSeamError, match=rf"synthetic_inventory\.py:7 .*{message}"
+    ):
+        _scan_synthetic(_reach_through(statement))
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "helper.setattr(*arguments)",
+        "helper.setattr(**arguments)",
+        "helper.setattr()",
+        "self.helper.setattr(*arguments)",
+    ],
+)
+def test_a_foreign_setattr_receiver_keeps_its_dynamic_shape(statement):
+    # `setattr` is an ordinary method name and the tree holds about 1873 calls
+    # to one. Refusing every dynamic shape ahead of any scoping fails the
+    # checker on a receiver that cannot reach the extractor at all, and this
+    # guard gates every remaining stage of the decomposition. Nothing is
+    # recorded either, because nothing was resolved.
+    seams = _scan_synthetic(_reach_through(statement))
+
+    assert not [seam for seam in seams if seam.kind.endswith("_patch_object")]
+
+
+def _fixture_alias(binding: str, call: str) -> str:
+    """A workflow test that patches through a fixture under another name."""
+
+    return f"""
+import pytest
+from linkedin_mcp_server.scraping.extractor import LinkedInExtractor
+
+async def test_shape(page, arguments{binding}):
+    extractor = LinkedInExtractor(page)
+    {call}
+    await extractor.scrape_person("ada")
+"""
+
+
+@pytest.mark.parametrize(
+    ("binding", "call", "line", "receiver"),
+    [
+        ("", "monkeypatch.setattr(*arguments)", 7, "monkeypatch"),
+        (
+            "",
+            "with pytest.MonkeyPatch.context() as patching:\n"
+            "        patching.setattr(*arguments)",
+            8,
+            "patching",
+        ),
+        (
+            ", patcher: pytest.MonkeyPatch",
+            "patcher.setattr(*arguments)",
+            7,
+            "patcher",
+        ),
+        ("", "mp = monkeypatch\n    mp.setattr(*arguments)", 8, "mp"),
+        (
+            "",
+            "self.patcher = pytest.MonkeyPatch()\n    self.patcher.setattr(*arguments)",
+            8,
+            "self.patcher",
+        ),
+    ],
+)
+def test_an_unreadable_setattr_through_the_fixture_names_its_call_site(
+    binding, call, line, receiver
+):
+    # The fixture is the one receiver whose `setattr` routinely lands on the
+    # extractor, and it is routinely bound to another name: a private context
+    # manager, an annotated parameter, a plain alias. Testing the receiver
+    # against the literal `monkeypatch` would skip exactly those, so the live
+    # bindings at each call site are resolved first.
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=rf"synthetic_inventory\.py:{line} "
+        rf"{re.escape(receiver)}\.setattr\(\*arguments\): "
+        r"unresolved setattr arguments",
+    ):
+        _scan_synthetic(_fixture_alias(binding, call))
+
+
+@pytest.mark.parametrize(
+    "binding",
+    [
+        "patch, other = monkeypatch, helper",
+        "[patch, other] = [monkeypatch, helper]",
+        "(first, [patch, other]) = (value, [monkeypatch, helper])",
+        "other, patch = helper, monkeypatch",
+    ],
+)
+def test_destructuring_preserves_the_corresponding_patcher_authority(binding):
+    # Mutating assignment handling back to one authority bit for the whole RHS
+    # either drops `patch` or blesses its unrelated sibling. The call is the
+    # observable authority check, not merely a count of names visited.
+    _assert_authoritative_receiver(binding)
+
+
+def test_exact_destructuring_keeps_an_unrelated_target_non_authoritative():
+    source = _receiver_flow("patch, other = helper, monkeypatch", receiver="patch")
+
+    assert _scan_synthetic(source) == []
+
+
+def test_unpairable_starred_destructuring_keeps_possible_authority():
+    _assert_authoritative_receiver("patch, *other = (monkeypatch, helper)")
+
+
+def test_unpairable_destructuring_without_authority_stays_non_authoritative():
+    source = _receiver_flow("patch, *other = (helper, value)")
+
+    assert _scan_synthetic(source) == []
+
+
+@pytest.mark.parametrize(
+    "statements",
+    [
+        "slots[0] = monkeypatch\n    slots[0] = helper",
+        "slots[0] = monkeypatch\n    alias = slots",
+        "slots[0] = monkeypatch\n    slots = value",
+        "slots[0], slots[1] = helper, monkeypatch",
+    ],
+)
+def test_subscript_receivers_fail_closed_without_textual_authority(statements):
+    receiver = "alias[0]" if "alias = slots" in statements else "slots[0]"
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=rf"{re.escape(receiver)}\.setattr\(\*arguments\): "
+        r"unresolved setattr arguments",
+    ):
+        _scan_synthetic(_receiver_flow(statements, receiver=receiver))
+
+
+def test_subscript_receiver_in_a_closure_fails_closed():
+    source = """
+async def test_outer(monkeypatch, helper, arguments, slots):
+    slots[0] = helper
+
+    async def test_inner():
+        slots[0].setattr(*arguments)
+"""
+
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=r"slots\[0\]\.setattr\(\*arguments\): unresolved setattr arguments",
+    ):
+        _scan_synthetic(source)
+
+
+def test_a_context_alias_does_not_leak_into_a_sibling_scope():
+    source = """
+import pytest
+
+async def test_first():
+    with pytest.MonkeyPatch.context() as patch:
+        pass
+
+async def test_second(arguments):
+    patch.setattr(*arguments)
+"""
+
+    assert _scan_synthetic(source) == []
+
+
+def test_a_rebound_monkeypatch_alias_loses_receiver_authority():
+    source = """
+async def test_shape(monkeypatch, helper, arguments):
+    patch = monkeypatch
+    patch = helper
+    patch.setattr(*arguments)
+"""
+
+    assert _scan_synthetic(source) == []
+
+
+def test_a_nested_scope_can_shadow_an_outer_monkeypatch_alias():
+    source = """
+async def test_outer(monkeypatch, helper, arguments):
+    patch = monkeypatch
+
+    async def test_inner(patch=helper):
+        patch.setattr(*arguments)
+"""
+
+    assert _scan_synthetic(source) == []
+
+
+def test_a_nested_scope_inherits_a_live_monkeypatch_alias():
+    source = """
+async def test_outer(monkeypatch, arguments):
+    patch = monkeypatch
+
+    async def test_inner():
+        patch.setattr(*arguments)
+"""
+
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=r"patch\.setattr\(\*arguments\): unresolved setattr arguments",
+    ):
+        _scan_synthetic(source)
+
+
+@pytest.mark.parametrize(
+    "nested",
+    [
+        "async def inner():\n        patch.setattr(*arguments)",
+        "class Holder:\n        def method(self):\n            patch.setattr(*arguments)",
+    ],
+)
+def test_nested_bodies_use_authority_assigned_after_their_definition(nested):
+    source = f"""
+async def outer(monkeypatch, helper, arguments):
+    patch = helper
+
+    {nested}
+
+    patch = monkeypatch
+"""
+
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=r"patch\.setattr\(\*arguments\): unresolved setattr arguments",
+    ):
+        _scan_synthetic(source)
+
+
+@pytest.mark.parametrize(
+    "nested",
+    [
+        "async def inner():\n        patch.setattr(*arguments)",
+        "class Holder:\n        def method(self):\n            patch.setattr(*arguments)",
+    ],
+)
+def test_nested_bodies_drop_authority_retired_after_their_definition(nested):
+    source = f"""
+async def outer(monkeypatch, helper, arguments):
+    patch = monkeypatch
+
+    {nested}
+
+    patch = helper
+"""
+
+    assert _scan_synthetic(source) == []
+
+
+def test_a_live_context_alias_remains_authoritative():
+    source = """
+import pytest
+
+async def test_shape(arguments):
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(*arguments)
+"""
+
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=r"patch\.setattr\(\*arguments\): unresolved setattr arguments",
+    ):
+        _scan_synthetic(source)
+
+
+def test_rebinding_receiver_does_not_hide_extractor_reachability():
+    source = _reach_through(
+        "patch = monkeypatch\n"
+        "    patch = helper\n"
+        '    patch.setattr(extractor._capture, "made_up", replacement)'
+    )
+
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=r"_capture\.made_up: unknown capture\.SectionCapture patch",
+    ):
+        _scan_synthetic(source)
+
+
+@pytest.mark.parametrize("receiver", ["monkeypatch", "helper"])
+def test_a_readable_setattr_target_survives_a_later_star(receiver):
+    source = _reach_through(f"{receiver}.setattr(extractor, *arguments)")
+
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=r"synthetic_inventory\.py:7 extractor: unresolved setattr target",
+    ):
+        _scan_synthetic(source)
+
+
+def _receiver_flow(statements: str, receiver: str = "patch") -> str:
+    return f"""
+async def test_shape(monkeypatch, helper, arguments, flag, value):
+    {statements}
+    {receiver}.setattr(*arguments)
+"""
+
+
+def _assert_authoritative_receiver(statements: str, receiver: str = "patch") -> None:
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=rf"{re.escape(receiver)}\.setattr\(\*arguments\): "
+        r"unresolved setattr arguments",
+    ):
+        _scan_synthetic(_receiver_flow(statements, receiver))
+
+
+@pytest.mark.parametrize(
+    "branches",
+    [
+        "if flag:\n        patch = monkeypatch\n    else:\n        patch = helper",
+        "if flag:\n        patch = helper\n    else:\n        patch = monkeypatch",
+    ],
+)
+def test_if_branches_merge_receiver_authority_in_either_order(branches):
+    _assert_authoritative_receiver(f"patch = helper\n    {branches}")
+
+
+@pytest.mark.parametrize(
+    "branches",
+    [
+        "if flag:\n        patch = monkeypatch\n    else:\n        copy = patch",
+        "if flag:\n        copy = patch\n    else:\n        patch = monkeypatch",
+    ],
+)
+def test_if_branches_do_not_share_impossible_alias_states(branches):
+    source = _receiver_flow(
+        f"patch = helper\n    copy = helper\n    {branches}", "copy"
+    )
+
+    assert _scan_synthetic(source) == []
+
+
+@pytest.mark.parametrize(
+    "statements",
+    [
+        "patch = helper\n"
+        "    try:\n"
+        "        patch = monkeypatch\n"
+        "    except Exception:\n"
+        "        patch = helper\n"
+        "    else:\n"
+        "        pass\n"
+        "    finally:\n"
+        "        pass",
+        "patch = helper\n"
+        "    try:\n"
+        "        patch = helper\n"
+        "        value()\n"
+        "    except Exception:\n"
+        "        patch = monkeypatch\n"
+        "    else:\n"
+        "        patch = helper\n"
+        "    finally:\n"
+        "        pass",
+    ],
+)
+def test_try_paths_merge_receiver_authority(statements):
+    _assert_authoritative_receiver(statements)
+
+
+def test_try_finally_rebinding_retires_receiver_authority_on_every_path():
+    source = _receiver_flow(
+        "patch = monkeypatch\n"
+        "    try:\n"
+        "        patch = monkeypatch\n"
+        "    except Exception:\n"
+        "        patch = monkeypatch\n"
+        "    else:\n"
+        "        patch = monkeypatch\n"
+        "    finally:\n"
+        "        patch = helper"
+    )
+
+    assert _scan_synthetic(source) == []
+
+
+@pytest.mark.parametrize("suite", ["else", "handler"])
+def test_finally_sees_authority_before_else_and_handler_raises(suite):
+    if suite == "else":
+        statements = (
+            "patch = helper\n"
+            "    try:\n"
+            "        pass\n"
+            "    except Exception:\n"
+            "        pass\n"
+            "    else:\n"
+            "        patch = monkeypatch\n"
+            "        raise RuntimeError\n"
+            "    finally:\n"
+            "        patch.setattr(*arguments)"
+        )
+    else:
+        statements = (
+            "patch = helper\n"
+            "    try:\n"
+            "        raise RuntimeError\n"
+            "    except RuntimeError:\n"
+            "        patch = monkeypatch\n"
+            "        raise ValueError\n"
+            "    finally:\n"
+            "        patch.setattr(*arguments)"
+        )
+    _assert_authoritative_receiver(statements)
+
+
+@pytest.mark.parametrize("suite", ["else", "handler"])
+def test_finally_ignores_definitely_retired_else_and_handler_states(suite):
+    if suite == "else":
+        statements = (
+            "patch = helper\n"
+            "    try:\n"
+            "        pass\n"
+            "    except Exception:\n"
+            "        pass\n"
+            "    else:\n"
+            "        patch = helper\n"
+            "        raise RuntimeError\n"
+            "    finally:\n"
+            "        patch.setattr(*arguments)"
+        )
+    else:
+        statements = (
+            "patch = helper\n"
+            "    try:\n"
+            "        raise RuntimeError\n"
+            "    except RuntimeError:\n"
+            "        patch = helper\n"
+            "        raise ValueError\n"
+            "    finally:\n"
+            "        patch.setattr(*arguments)"
+        )
+    assert _scan_synthetic(_receiver_flow(statements)) == []
+
+
+def test_trystar_consumes_a_known_lone_exception_at_the_first_match():
+    source = _receiver_flow(
+        "patch = helper\n"
+        "    try:\n"
+        "        raise RuntimeError\n"
+        "    except* RuntimeError:\n"
+        "        patch = helper\n"
+        "    except* Exception:\n"
+        "        patch = monkeypatch\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+    assert _scan_synthetic(source) == []
+
+
+def test_trystar_keeps_group_member_matching_unknown():
+    _assert_authoritative_receiver(
+        "patch = helper\n"
+        "    try:\n"
+        '        raise ExceptionGroup("group", [RuntimeError()])\n'
+        "    except* RuntimeError:\n"
+        "        patch = helper\n"
+        "    except* Exception:\n"
+        "        patch = monkeypatch\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+
+def test_trystar_does_not_match_members_from_the_group_class_identity():
+    _assert_authoritative_receiver(
+        "patch = helper\n"
+        "    try:\n"
+        '        raise BaseExceptionGroup("group", [RuntimeError()])\n'
+        "    except* BaseExceptionGroup:\n"
+        "        patch = helper\n"
+        "    except* BaseException:\n"
+        "        patch = monkeypatch\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+
+def test_trystar_routes_only_remaining_lone_exceptions_to_later_handlers():
+    source = _receiver_flow(
+        "patch = helper\n"
+        "    try:\n"
+        "        raise RuntimeError\n"
+        "    except* TypeError:\n"
+        "        patch = monkeypatch\n"
+        "    except* RuntimeError:\n"
+        "        patch = helper\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+    assert _scan_synthetic(source) == []
+
+
+def test_trystar_unknown_groups_retain_handled_and_unmatched_paths():
+    _assert_authoritative_receiver(
+        "patch = helper\n"
+        "    try:\n"
+        "        raise error\n"
+        "    except* RuntimeError:\n"
+        "        patch = helper\n"
+        "    except* Exception:\n"
+        "        patch = monkeypatch\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+
+def test_trystar_base_exception_consumes_unknown_ordinary_exceptions():
+    source = _receiver_flow(
+        "patch = helper\n"
+        "    try:\n"
+        "        raise error\n"
+        "    except* BaseException:\n"
+        "        patch = helper\n"
+        "    except* Exception:\n"
+        "        patch = monkeypatch\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+    assert _scan_synthetic(source) == []
+
+
+def test_trystar_without_any_authoritative_path_stays_non_authoritative():
+    source = _receiver_flow(
+        "patch = helper\n"
+        "    try:\n"
+        "        raise RuntimeError\n"
+        "    except* RuntimeError:\n"
+        "        patch = helper\n"
+        "    except* Exception:\n"
+        "        patch = helper\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+    assert _scan_synthetic(source) == []
+
+
+def test_ordinary_try_handlers_remain_exclusive_after_a_known_match():
+    source = _receiver_flow(
+        "patch = helper\n"
+        "    try:\n"
+        "        raise RuntimeError\n"
+        "    except RuntimeError:\n"
+        "        patch = helper\n"
+        "    except Exception:\n"
+        "        patch = monkeypatch\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+    assert _scan_synthetic(source) == []
+
+
+def test_a_handled_raise_that_completes_does_not_poison_finally():
+    # Greptile's reproducer: retaining the original RuntimeError beside the
+    # handler result makes finally merge an impossible authoritative state. The
+    # mutation that seeds `result.exceptional` directly from the try body makes
+    # this fail again.
+    source = _receiver_flow(
+        "patch = monkeypatch\n"
+        "    try:\n"
+        "        raise RuntimeError\n"
+        "    except RuntimeError:\n"
+        "        patch = helper\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+    assert _scan_synthetic(source) == []
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "result = local_before_assignment\n"
+        "local_before_assignment = helper\n"
+        "patch = helper",
+        "result = operation()\npatch = helper",
+        "result = consume(local_before_assignment)\n"
+        "local_before_assignment = helper\n"
+        "patch = helper",
+        "left, right = value\npatch = helper",
+        "raise RuntimeError(local_before_assignment)\nlocal_before_assignment = helper",
+    ],
+)
+def test_expression_evaluation_prefixes_still_reach_finally(operation):
+    _assert_authoritative_receiver(
+        "patch = monkeypatch\n"
+        "    try:\n"
+        f"        {operation.replace(chr(10), chr(10) + '        ')}\n"
+        "    except RuntimeError:\n"
+        "        patch = helper\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+
+@pytest.mark.parametrize("handler", ["RuntimeError", "Exception", "BaseException", ""])
+def test_matching_handlers_consume_a_known_raise_before_finally(handler):
+    clause = f"except {handler}:" if handler else "except:"
+    source = _receiver_flow(
+        "patch = monkeypatch\n"
+        "    try:\n"
+        "        raise RuntimeError\n"
+        f"    {clause}\n"
+        "        patch = helper\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+    assert _scan_synthetic(source) == []
+
+
+def test_builtin_exception_keyword_call_retains_its_type_error_prefix():
+    source = _receiver_flow(
+        "patch = monkeypatch\n"
+        "    try:\n"
+        '        raise RuntimeError(message="failure")\n'
+        "    except TypeError:\n"
+        "        patch = helper\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+    assert _scan_synthetic(source) == []
+
+
+def test_bound_parameter_in_exception_call_creates_no_impossible_prefix():
+    source = _receiver_flow(
+        "patch = monkeypatch\n"
+        "    try:\n"
+        "        raise RuntimeError(arguments)\n"
+        "    except RuntimeError:\n"
+        "        patch = helper\n"
+        "    except TypeError:\n"
+        "        patch = monkeypatch\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+    assert _scan_synthetic(source) == []
+
+
+@pytest.mark.parametrize(
+    "binding",
+    [
+        "message = arguments",
+        "import types as message",
+        "message = helper\n    message = arguments",
+    ],
+)
+def test_safe_name_bindings_survive_sequential_assignment_and_import(binding):
+    source = _receiver_flow(
+        f"patch = monkeypatch\n    {binding}\n"
+        "    try:\n"
+        "        raise RuntimeError(message)\n"
+        "    except RuntimeError:\n"
+        "        patch = helper\n"
+        "    except (NameError, TypeError):\n"
+        "        patch = monkeypatch\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+    assert _scan_synthetic(source) == []
+
+
+def test_deleted_safe_name_restores_the_evaluation_prefix():
+    _assert_authoritative_receiver(
+        "patch = monkeypatch\n"
+        "    message = arguments\n"
+        "    del message\n"
+        "    try:\n"
+        "        raise RuntimeError(message)\n"
+        "    except RuntimeError:\n"
+        "        patch = helper\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+
+def test_safe_name_branch_merges_by_intersection():
+    _assert_authoritative_receiver(
+        "patch = monkeypatch\n"
+        "    if flag:\n"
+        "        message = arguments\n"
+        "    try:\n"
+        "        raise RuntimeError(message)\n"
+        "    except RuntimeError:\n"
+        "        patch = helper\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+
+def test_an_unmatched_known_raise_still_reaches_finally():
+    _assert_authoritative_receiver(
+        "patch = monkeypatch\n"
+        "    try:\n"
+        "        raise ValueError\n"
+        "    except TypeError:\n"
+        "        patch = helper\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+
+def test_a_bare_reraise_from_a_handler_still_reaches_finally():
+    _assert_authoritative_receiver(
+        "patch = helper\n"
+        "    try:\n"
+        "        raise RuntimeError\n"
+        "    except RuntimeError:\n"
+        "        patch = monkeypatch\n"
+        "        raise\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+
+def test_a_later_matching_handler_receives_the_known_raise():
+    _assert_authoritative_receiver(
+        "patch = helper\n"
+        "    try:\n"
+        "        raise ValueError\n"
+        "    except TypeError:\n"
+        "        patch = helper\n"
+        "    except Exception:\n"
+        "        patch = monkeypatch\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+
+def test_a_nonmatching_handler_prefix_does_not_survive_a_later_match():
+    source = _receiver_flow(
+        "patch = monkeypatch\n"
+        "    try:\n"
+        "        raise ValueError\n"
+        "    except TypeError:\n"
+        "        patch = monkeypatch\n"
+        "    except Exception:\n"
+        "        patch = helper\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+    assert _scan_synthetic(source) == []
+
+
+def test_an_unknown_exception_keeps_the_non_exception_branch_alive():
+    _assert_authoritative_receiver(
+        "patch = monkeypatch\n"
+        "    try:\n"
+        "        raise error\n"
+        "    except Exception:\n"
+        "        patch = helper\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+
+def test_a_bare_handler_consumes_an_unknown_exception_kind():
+    source = _receiver_flow(
+        "patch = monkeypatch\n"
+        "    try:\n"
+        "        raise error\n"
+        "    except:\n"
+        "        patch = helper\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+    assert _scan_synthetic(source) == []
+
+
+def test_unshadowed_base_exception_consumes_an_unknown_ordinary_exception():
+    source = _receiver_flow(
+        "patch = monkeypatch\n"
+        "    try:\n"
+        "        raise error\n"
+        "    except BaseException:\n"
+        "        patch = helper\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+    assert _scan_synthetic(source) == []
+
+
+@pytest.mark.parametrize(
+    "declaration, handler",
+    [
+        ("Exception = custom_exception", "Exception"),
+        ("", "errors.Exception"),
+    ],
+)
+def test_uncertain_exception_spelling_does_not_consume_known_raise(
+    declaration, handler
+):
+    prefix = "patch = monkeypatch\n"
+    if declaration:
+        prefix += f"    {declaration}\n"
+    _assert_authoritative_receiver(
+        prefix + "    try:\n"
+        "        raise RuntimeError\n"
+        f"    except {handler}:\n"
+        "        patch = helper\n"
+        "    finally:\n"
+        "        patch.setattr(*arguments)"
+    )
+
+
+def test_class_local_exception_shadow_prevents_builtin_matching():
+    source = """
+async def test_shape(monkeypatch, helper, arguments):
+    class Scope:
+        patch = monkeypatch
+        Exception = Sibling
+        try:
+            raise RuntimeError
+        except Exception:
+            patch = helper
+        finally:
+            patch.setattr(*arguments)
+"""
+
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=r"patch\.setattr\(\*arguments\): unresolved setattr arguments",
+    ):
+        _scan_synthetic(source)
+
+
+@pytest.mark.parametrize(
+    "import_statement",
+    [
+        "import builtins as bi",
+        "if flag:\n        import builtins as bi",
+    ],
+)
+def test_qualified_builtin_exception_identities_stay_unknown(import_statement):
+    source = f"""
+async def test_shape(monkeypatch, helper, arguments, flag):
+    patch = monkeypatch
+    {import_statement}
+    try:
+        raise RuntimeError
+    except bi.Exception:
+        patch = helper
+    finally:
+        patch.setattr(*arguments)
+"""
+
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=r"patch\.setattr\(\*arguments\): unresolved setattr arguments",
+    ):
+        _scan_synthetic(source)
+
+
+def test_a_loop_retains_the_zero_iteration_receiver_path():
+    _assert_authoritative_receiver(
+        "patch = monkeypatch\n    for item in value:\n        patch = helper"
+    )
+
+
+def test_a_loop_revisits_calls_before_a_later_authority_assignment():
+    source = """
+async def test_shape(monkeypatch, helper, arguments, value):
+    patch = helper
+    for item in value:
+        patch.setattr(*arguments)
+        patch = monkeypatch
+"""
+
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=r"patch\.setattr\(\*arguments\): unresolved setattr arguments",
+    ):
+        _scan_synthetic(source)
+
+
+def test_a_loop_else_rebinding_retires_receiver_authority_without_a_break():
+    source = _receiver_flow(
+        "patch = monkeypatch\n"
+        "    for item in value:\n"
+        "        patch = helper\n"
+        "    else:\n"
+        "        patch = helper"
+    )
+
+    assert _scan_synthetic(source) == []
+
+
+@pytest.mark.parametrize("transfer", ["break", "continue"])
+def test_loop_transfers_keep_their_exact_authoritative_source(transfer):
+    _assert_authoritative_receiver(
+        "patch = helper\n"
+        "    for item in value:\n"
+        "        if flag:\n"
+        "            patch = monkeypatch\n"
+        f"            {transfer}\n"
+        "            patch = helper\n"
+        "        patch = helper"
+    )
+
+
+@pytest.mark.parametrize("transfer", ["break", "continue"])
+def test_loop_transfers_keep_definitely_retired_source_states(transfer):
+    source = _receiver_flow(
+        "patch = helper\n"
+        "    for item in value:\n"
+        "        if flag:\n"
+        "            patch = monkeypatch\n"
+        "            patch = helper\n"
+        f"            {transfer}\n"
+        "            patch = monkeypatch\n"
+        "        patch = helper"
+    )
+
+    assert _scan_synthetic(source) == []
+
+
+@pytest.mark.parametrize(
+    "cases",
+    [
+        "case True:\n            patch = monkeypatch\n"
+        "        case False:\n            patch = helper",
+        "case True:\n            patch = helper\n"
+        "        case False:\n            patch = monkeypatch",
+    ],
+)
+def test_match_cases_merge_receiver_authority_in_either_order(cases):
+    _assert_authoritative_receiver(f"patch = helper\n    match flag:\n        {cases}")
+
+
+@pytest.mark.parametrize("catch_all", ["_", "ignored"])
+def test_exhaustive_match_rebinding_retires_receiver_authority(catch_all):
+    source = _receiver_flow(
+        "patch = monkeypatch\n"
+        "    match flag:\n"
+        "        case True:\n"
+        "            patch = helper\n"
+        f"        case {catch_all}:\n"
+        "            patch = helper"
+    )
+
+    assert _scan_synthetic(source) == []
+
+
+def test_a_conditional_receiver_merge_reaches_a_nested_closure():
+    source = """
+async def test_outer(monkeypatch, helper, arguments, flag):
+    patch = helper
+    if flag:
+        patch = monkeypatch
+
+    async def test_inner():
+        patch.setattr(*arguments)
+"""
+
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=r"patch\.setattr\(\*arguments\): unresolved setattr arguments",
+    ):
+        _scan_synthetic(source)
+
+
+def test_a_class_local_receiver_does_not_become_a_method_closure():
+    source = """
+import pytest
+
+class Scope:
+    patch = pytest.MonkeyPatch()
+
+    def method(self, arguments):
+        patch.setattr(*arguments)
+"""
+
+    assert _scan_synthetic(source) == []
+
+
+def test_a_method_still_closes_over_an_enclosing_function_receiver():
+    source = """
+async def test_outer(monkeypatch, arguments):
+    patch = monkeypatch
+
+    class Scope:
+        patch = object()
+
+        def method(self):
+            patch.setattr(*arguments)
+"""
+
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=r"patch\.setattr\(\*arguments\): unresolved setattr arguments",
+    ):
+        _scan_synthetic(source)
+
+
+@pytest.mark.parametrize(
+    ("statement", "line"),
+    [
+        ('cap = extractor._capture\n    patch.object(cap, "{name}", replacement)', 8),
+        ('patch.object(cap := extractor._capture, "{name}", replacement)', 7),
+        (
+            '(cap := extractor._capture)\n    patch.object(cap, "{name}", replacement)',
+            8,
+        ),
+        (
+            "patch.object(target=extractor._capture, "
+            'attribute="{name}", new=replacement)',
+            7,
+        ),
+        ('monkeypatch.setattr(extractor._capture, "{name}", replacement)', 7),
+        (
+            "monkeypatch.setattr(target=extractor._capture, "
+            'name="{name}", value=replacement)',
+            7,
+        ),
+        ('setattr(extractor._capture, "{name}", replacement)', 7),
+        ("extractor._capture.{name} = replacement", 7),
+        ("extractor._capture.{name}: object = replacement", 7),
+    ],
+)
+def test_every_reach_through_shape_lands_on_the_collaborator(statement, line):
+    # An alias, a walrus, both keyword forms, all three `setattr` spellings and
+    # an assignment with or without an annotation reach the same collaborator
+    # as `patch.object(extractor._capture, ...)`. A shape that produced no seam
+    # also produced no error, so a name that has never existed on
+    # `SectionCapture` read as a passing test.
+    seams = _scan_synthetic(_reach_through(statement.format(name="_extract_overlay")))
+
+    assert [
+        (seam.kind, seam.target, seam.canonical_owner, seam.migration_stage)
+        for seam in seams
+        if seam.kind.endswith("_patch_object")
+    ] == [("private_patch_object", "_extract_overlay", "capture.SectionCapture", 6)]
+
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=rf"synthetic_inventory\.py:{line} _capture\.made_up: "
+        r"unknown capture\.SectionCapture patch",
+    ):
+        _scan_synthetic(_reach_through(statement.format(name="made_up")))
+
+
+def test_an_annotation_without_a_value_replaces_nothing():
+    # `owner.name: T` declares a type and assigns nothing, so there is no
+    # replacement to record and no member to validate. Reading it as a patch
+    # would refuse a name the file never claims exists, while the reach-through
+    # above it stays on the record either way.
+    seams = _scan_synthetic(_reach_through("extractor._capture.made_up: object"))
+
+    assert not [seam for seam in seams if seam.kind.endswith("_patch_object")]
+    assert [seam.target for seam in seams if seam.kind == "private_facade_access"] == [
+        "_capture"
+    ]
+
+
+@pytest.mark.parametrize(
+    "rebinding",
+    [
+        "cap = thing",
+        "cap, pair = thing",
+        "cap += thing",
+        "(cap := thing)",
+        "for cap in thing:\n        pass",
+        "with thing as cap:\n        pass",
+    ],
+)
+def test_a_rebound_alias_stops_naming_the_collaborator(rebinding):
+    # `cap` holds the reach-through only until the next binding, whichever
+    # spelling makes it. A map collected over the whole function keeps
+    # answering `_capture` for every later use, which books a patch on a
+    # foreign object as a `SectionCapture` seam and refuses an unknown member
+    # of it by name. That is the safer direction of the two, and still wrong:
+    # one false failure here blocks every stage behind it.
+    seams = _scan_synthetic(
+        _reach_through(
+            "cap = extractor._capture\n"
+            f"    {rebinding}\n"
+            '    patch.object(cap, "_extract_overlay", replacement)'
+        )
+    )
+
+    assert not [seam for seam in seams if seam.kind.endswith("_patch_object")]
+
+
+def test_an_alias_bound_after_a_foreign_one_still_resolves():
+    # The retirement has to follow the order the statements are written in
+    # rather than switch the alias off, or the shape that motivated the alias
+    # stops resolving along with the stale answer.
+    seams = _scan_synthetic(
+        _reach_through(
+            "cap = thing\n"
+            "    cap = extractor._capture\n"
+            '    patch.object(cap, "_extract_overlay", replacement)'
+        )
+    )
+
+    assert [
+        (seam.kind, seam.target, seam.canonical_owner, seam.migration_stage)
+        for seam in seams
+        if seam.kind.endswith("_patch_object")
+    ] == [("private_patch_object", "_extract_overlay", "capture.SectionCapture", 6)]
+
+
+@pytest.mark.parametrize(
+    ("statement", "line"),
+    [
+        (
+            "cap = extractor._capture\n"
+            "    if flag:\n"
+            "        cap = thing\n"
+            '    patch.object(cap, "_extract_overlay", replacement)',
+            10,
+        ),
+        (
+            "for item in thing:\n"
+            '        patch.object(cap, "_extract_overlay", replacement)\n'
+            "        cap = extractor._capture",
+            8,
+        ),
+    ],
+)
+def test_a_conditionally_rebound_alias_names_its_call_site(statement, line):
+    # No single answer fits a name that held the collaborator down one path and
+    # something else down another, and a loop body is the same question asked
+    # about its own previous iteration. Keeping the stale answer or dropping it
+    # both invent one, so the call site is named instead, the way every other
+    # ambiguous binding in this scanner is.
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=rf"synthetic_inventory\.py:{line} cap: "
+        r"ambiguous collaborator alias after conditional control flow",
+    ):
+        _scan_synthetic(_reach_through(statement))
+
+
+def test_a_foreign_collaborator_of_its_own_stays_out_of_the_inventory():
+    # The refusal has to stop at objects the reader knows nothing about, or it
+    # refuses the migration's own target state: `tests/scraping/test_feed.py`
+    # builds a `FeedScraper` and stubs `_extract_feed_body` on it, which is the
+    # identical shape and is exactly what stage 5 produced. Nothing in the
+    # expression names the extractor, so there is no reach-through to record.
+    seams = _scan_synthetic(
+        _reach_through('patch.object(thing, "_extract_overlay", replacement)')
+    )
+
+    assert not [seam for seam in seams if seam.kind.endswith("_patch_object")]
+
+
+def test_a_renamed_collaborator_class_names_its_call_site(monkeypatch):
+    # A rename used to reach `collaborator_methods`' bare `AssertionError`,
+    # which leaves the scan with a traceback and no location instead of a
+    # diagnostic naming the patch that can no longer be resolved.
+    monkeypatch.setitem(
+        migration._FACADE_COLLABORATORS,
+        "_capture",
+        ("capture.RenamedSectionCapture", "facade.LinkedInExtractor._capture"),
+    )
+
+    with pytest.raises(
+        migration.UnresolvedSeamError,
+        match=r"synthetic_inventory\.py:7 _capture\._extract_overlay: "
+        r"RenamedSectionCapture not found in scraping/capture\.py",
+    ):
+        _scan_synthetic(
+            _reach_through(
+                'patch.object(extractor._capture, "_extract_overlay", replacement)'
+            )
+        )
 
 
 @pytest.mark.parametrize(

@@ -10,6 +10,7 @@ from typing import Any
 
 import argparse
 import ast
+import builtins
 import json
 import sys
 
@@ -149,34 +150,37 @@ _IMPORT_OWNERS = {
     ),
 }
 
-# `_content` and `_capture` are the facade's own wiring rather than a
-# collaborator a test could build for itself: reaching them is how a workflow
-# still living on the facade gets its capture stubbed, so the seam closes with
-# the last workflow that still asks the facade for it, not with the module that
-# owns the class and not with the facade. Measured over every reach-through in
-# the tree: all 19 `_capture` sites sit in `scrape_person` tests, which move at
-# stage 6, and the 14 `_content` sites spread over `scrape_company` (8),
-# `_extract_search_page`, `search_jobs`, `_extract_saved_jobs_page` (9) and
-# `get_inbox`, `get_conversation`, `search_conversations` (11). Pinning either
-# at the facade's own stage 14 would leave a stale reach-through unflagged for
-# the rest of the migration. `_session` and `_navigator` carry no such consumer
-# and stay pinned to their own stage.
+# Facade wiring a test reaches but never owns. These carry no consumer of their
+# own, so each one closes with the module that owns it.
 _INSTANCE_ATTRIBUTE_OWNERS = {
     "_page": ("facade.LinkedInExtractor._page", 14),
     "_session": ("session.ScrapingSession", 3),
     "_navigator": ("navigation.PageNavigator", 3),
-    "_content": ("facade.LinkedInExtractor._content", 11),
-    "_capture": ("facade.LinkedInExtractor._capture", 6),
     "_scroll_seconds": ("facade.LinkedInExtractor._scroll_seconds", 14),
 }
 
-# The collaborator behind each of those two attributes. A patch routed through
-# the attribute lands on the collaborator's own method, so the seam records the
-# collaborator as its owner while the stage stays the attribute's: what expires
-# is the reach-through, not the method.
+# `_content` and `_capture` are the facade's own wiring rather than a
+# collaborator a test could build for itself: reaching one is how a workflow
+# still living on the facade gets its reader stubbed. Each entry names the
+# collaborator the reach-through lands on and the facade binding the
+# reach-through itself consumes.
+#
+# Both the reach-through and the patch it carries expire with the workflow the
+# *call site* drives, never with a flat per-attribute maximum: the moment
+# `scrape_company` owns its own reader, a `_content` stub inside a
+# `scrape_company` test intercepts nothing, while a `get_inbox` test reaching
+# the same attribute is still live. Measured over every reach-through in the
+# tree: all 19 `_capture` sites drive `scrape_person` (6), and the 14 `_content`
+# sites split across `scrape_company` (8), `_extract_search_page` and
+# `search_jobs` (9) and `get_inbox`, `get_conversation`,
+# `search_conversations` (11). A single pin at 11 left the one stage-8 and the
+# four stage-9 reach-throughs unflagged for three and two stages; a pin at the
+# facade's own stage 14 would leave every one of them unflagged for the rest of
+# the migration. The stage therefore comes from `_callers`, exactly as a
+# boundary patch's does.
 _FACADE_COLLABORATORS = {
-    "_content": "content.PageContentReader",
-    "_capture": "capture.SectionCapture",
+    "_content": ("content.PageContentReader", "facade.LinkedInExtractor._content"),
+    "_capture": ("capture.SectionCapture", "facade.LinkedInExtractor._capture"),
 }
 
 _MODULE_ATTRIBUTE_OWNERS = {
@@ -531,6 +535,27 @@ def _argument_names(arguments: ast.arguments) -> set[str]:
     return names
 
 
+def _signature_expressions(arguments: ast.arguments) -> list[ast.expr]:
+    """Read the expressions a signature evaluates in its enclosing scope."""
+
+    annotated = [
+        *arguments.posonlyargs,
+        *arguments.args,
+        *arguments.kwonlyargs,
+        *([arguments.vararg] if arguments.vararg else []),
+        *([arguments.kwarg] if arguments.kwarg else []),
+    ]
+    return [
+        *(
+            argument.annotation
+            for argument in annotated
+            if argument.annotation is not None
+        ),
+        *arguments.defaults,
+        *(default for default in arguments.kw_defaults if default is not None),
+    ]
+
+
 def _scope_collector(path: Path, statements: list[ast.stmt]) -> _LocalBindingCollector:
     collector = _LocalBindingCollector(path)
     for statement in statements:
@@ -628,6 +653,12 @@ class _ScopeFrame:
     closure_class_names: set[str]
     closure_instance_names: set[str]
     ambiguous_names: set[str] = field(default_factory=set)
+    # Keyed by the identity of the ``ast.Name`` that uses the alias, not by the
+    # name: one local can hold the collaborator over part of a function and
+    # something else over the rest, and the scanner reaches those uses in an
+    # order of its own.
+    collaborator_aliases: dict[int, str] = field(default_factory=dict)
+    ambiguous_aliases: set[int] = field(default_factory=set)
 
 
 def _extractor_bindings(
@@ -667,6 +698,1154 @@ def _extractor_bindings(
                 target.id for target in targets if isinstance(target, ast.Name)
             )
     return bindings
+
+
+def _patch_object_arguments(node: ast.Call) -> tuple[ast.expr | None, ast.expr | None]:
+    """Read ``patch.object``'s target and attribute across its call shapes.
+
+    ``mock`` accepts both by keyword, and an arity gate counting positional
+    arguments alone answers "not a patch" to the keyword form, to ``*args`` and
+    to a call missing its attribute. Returning ``None`` for either end tells the
+    caller to refuse rather than to skip.
+    """
+
+    if any(keyword.arg is None for keyword in node.keywords):
+        return (None, None)
+    keywords = {keyword.arg: keyword.value for keyword in node.keywords}
+    target = node.args[0] if node.args else keywords.get("target")
+    attribute = node.args[1] if len(node.args) > 1 else keywords.get("attribute")
+    return (target, attribute)
+
+
+def _setattr_arguments(node: ast.Call) -> tuple[ast.expr | None, ast.expr | None]:
+    """Read ``setattr``'s target and member name across its call shapes.
+
+    ``monkeypatch.setattr`` names ``target``, ``name`` and ``value``, so a gate
+    counting positional arguments answers "not a patch" to the keyword form,
+    exactly the defect ``_patch_object_arguments`` exists to close. Returning
+    ``None`` for the target tells the caller to refuse rather than to skip; a
+    missing name is left to the caller because the two-argument
+    ``setattr("dotted.path", value)`` form carries its member inside the
+    target and never has one. A star after a readable first argument can hide
+    the member and value, but it cannot hide which object receives the patch.
+    """
+
+    if any(keyword.arg is None for keyword in node.keywords):
+        return (None, None)
+    keywords = {keyword.arg: keyword.value for keyword in node.keywords}
+    first = node.args[0] if node.args else None
+    target = first if first is not None and not isinstance(first, ast.Starred) else None
+    if not node.args:
+        target = keywords.get("target")
+    second = node.args[1] if len(node.args) > 1 else None
+    name = (
+        second if second is not None and not isinstance(second, ast.Starred) else None
+    )
+    if len(node.args) < 2:
+        name = keywords.get("name")
+    return (target, name)
+
+
+# The fixture's own name, and the class a private context is opened from. A
+# binding reading from either holds the same object, which is the authority the
+# use-site collector follows.
+_MONKEYPATCH_NAMES = frozenset({"monkeypatch", "MonkeyPatch"})
+
+
+_MonkeyPatchState = tuple[set[str], set[str], set[str]]
+
+
+@dataclass(slots=True)
+class _ExceptionalState:
+    state: _MonkeyPatchState
+    # ``None`` is an exception whose runtime kind cannot be bounded from the AST.
+    kind: str | None
+    is_group: bool
+
+
+@dataclass(slots=True)
+class _FlowResult:
+    normal: list[_MonkeyPatchState] = field(default_factory=list)
+    breaks: list[_MonkeyPatchState] = field(default_factory=list)
+    continues: list[_MonkeyPatchState] = field(default_factory=list)
+    returns: list[_MonkeyPatchState] = field(default_factory=list)
+    exceptional: list[_ExceptionalState] = field(default_factory=list)
+
+    def extend(self, other: _FlowResult) -> None:
+        self.normal.extend(other.normal)
+        self.breaks.extend(other.breaks)
+        self.continues.extend(other.continues)
+        self.returns.extend(other.returns)
+        self.exceptional.extend(other.exceptional)
+
+
+@dataclass(slots=True)
+class _ClosureCell:
+    aliases: set[str]
+
+
+@dataclass(slots=True)
+class _DeferredFunction:
+    node: ast.FunctionDef | ast.AsyncFunctionDef
+    cell: _ClosureCell
+    exception_shadowed: set[str]
+
+
+def _mentions_monkeypatch(expression: ast.expr) -> bool:
+    return any(
+        (isinstance(item, ast.Name) and item.id in _MONKEYPATCH_NAMES)
+        or (isinstance(item, ast.Attribute) and item.attr in _MONKEYPATCH_NAMES)
+        for item in ast.walk(expression)
+    )
+
+
+def _non_raising_binding_value(value: ast.expr, safe_names: set[str]) -> bool:
+    if isinstance(value, ast.Constant):
+        return True
+    if isinstance(value, ast.Name):
+        return value.id in safe_names
+    if isinstance(value, (ast.Tuple, ast.List)):
+        return all(
+            not isinstance(item, ast.Starred)
+            and _non_raising_binding_value(item, safe_names)
+            for item in value.elts
+        )
+    return False
+
+
+def _non_raising_assignment(
+    target: ast.expr, value: ast.expr, safe_names: set[str]
+) -> bool:
+    if isinstance(target, ast.Name):
+        return _non_raising_binding_value(value, safe_names)
+    if not (
+        isinstance(target, (ast.Tuple, ast.List))
+        and isinstance(value, (ast.Tuple, ast.List))
+        and len(target.elts) == len(value.elts)
+        and not any(isinstance(item, ast.Starred) for item in target.elts)
+        and not any(isinstance(item, ast.Starred) for item in value.elts)
+    ):
+        return False
+    return all(
+        _non_raising_assignment(target_item, value_item, safe_names)
+        for target_item, value_item in zip(target.elts, value.elts, strict=True)
+    )
+
+
+def _may_raise_implicitly(statement: ast.stmt, safe_names: set[str]) -> bool:
+    if isinstance(statement, (ast.Raise, ast.Pass, ast.Break, ast.Continue)):
+        return False
+    if isinstance(statement, ast.Assign):
+        return not all(
+            _non_raising_assignment(target, statement.value, safe_names)
+            for target in statement.targets
+        )
+    if isinstance(statement, ast.AnnAssign):
+        return not (
+            isinstance(statement.target, ast.Name)
+            and (
+                statement.value is None
+                or _non_raising_binding_value(statement.value, safe_names)
+            )
+        )
+    return True
+
+
+class _MonkeyPatchCallCollector(ast.NodeVisitor):
+    """Locate unreadable ``setattr`` calls on a live pytest patcher binding.
+
+    Receiver authority follows lexical scopes and reachable control-flow paths.
+    Branches start from the same incoming state and merge by union, so one live
+    path retains fail-closed authority while rebinding on every path retires it.
+    The closure state is merged alongside the current scope without turning a
+    class local into a method closure. Calls with readable targets do not need
+    this evidence: extractor reachability scopes those independently.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.calls: set[int] = set()
+        self.aliases = {"monkeypatch"}
+        self.closure_aliases = set(self.aliases)
+        self.scope_kinds = ["module"]
+        self.cells = [_ClosureCell(set(self.closure_aliases))]
+        self.deferred: list[_DeferredFunction] = []
+        self.deferred_ids: set[int] = set()
+        self.exception_shadowed = [set[str]()]
+        self.safe_names = set[str]()
+
+    @staticmethod
+    def _key(expression: ast.expr) -> str:
+        if isinstance(expression, (ast.Name, ast.Attribute)):
+            return ast.unparse(expression)
+        return ""
+
+    def _exception_identity(self, expression: ast.expr) -> str | None:
+        """Return a built-in exception name only when its identity is lexical fact."""
+
+        if not isinstance(expression, ast.Name):
+            return None
+        name = expression.id
+        if name in self.exception_shadowed[-1]:
+            return None
+        value = getattr(builtins, name, None)
+        if isinstance(value, type) and issubclass(value, BaseException):
+            return name
+        return None
+
+    def _raised_identity(self, node: ast.Raise) -> str | None:
+        if node.exc is None:
+            return None
+        expression = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+        return self._exception_identity(expression)
+
+    def _raise_argument_is_safe(self, expression: ast.expr) -> bool:
+        if isinstance(expression, ast.Constant):
+            return True
+        if isinstance(expression, ast.Name):
+            return expression.id in self.safe_names
+        if isinstance(expression, (ast.Tuple, ast.List)):
+            return all(
+                not isinstance(item, ast.Starred) and self._raise_argument_is_safe(item)
+                for item in expression.elts
+            )
+        if not isinstance(expression, ast.Call):
+            return False
+        return (
+            self._exception_identity(expression.func) is not None
+            and not expression.keywords
+            and all(
+                not isinstance(argument, ast.Starred)
+                and self._raise_argument_is_safe(argument)
+                for argument in expression.args
+            )
+        )
+
+    def _raise_evaluation_is_safe(self, expression: ast.expr) -> bool:
+        if self._exception_identity(expression) is not None:
+            return True
+        if not isinstance(expression, ast.Call):
+            return isinstance(expression, ast.Constant)
+        if self._exception_identity(expression.func) is None:
+            return False
+        return all(
+            not isinstance(argument, ast.Starred)
+            and self._raise_argument_is_safe(argument)
+            for argument in expression.args
+        ) and all(
+            keyword.arg is not None and self._raise_argument_is_safe(keyword.value)
+            for keyword in expression.keywords
+        )
+
+    def _raised_states(
+        self, node: ast.Raise, prefix: _MonkeyPatchState
+    ) -> list[_ExceptionalState]:
+        kind = self._raised_identity(node)
+        is_group = kind in {"BaseExceptionGroup", "ExceptionGroup"}
+        if not isinstance(node.exc, ast.Call) or kind is None:
+            return [_ExceptionalState(self._state(), kind, is_group)]
+        if node.exc.keywords:
+            if any(keyword.arg is None for keyword in node.exc.keywords):
+                return [
+                    _ExceptionalState(prefix, None, False),
+                    _ExceptionalState(prefix, None, True),
+                ]
+            return [_ExceptionalState(prefix, "TypeError", False)]
+        return [_ExceptionalState(self._state(), kind, is_group)]
+
+    def _handler_match(
+        self, handler: ast.ExceptHandler, kind: str | None
+    ) -> bool | None:
+        if handler.type is None:
+            return True
+        candidates = (
+            handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
+        )
+        identities = [self._exception_identity(candidate) for candidate in candidates]
+        known_identities = [identity for identity in identities if identity is not None]
+        if len(known_identities) != len(identities):
+            return None
+        if "BaseException" in known_identities:
+            return True
+        if kind is None:
+            return None
+        raised_type = getattr(builtins, kind)
+        return any(
+            issubclass(raised_type, getattr(builtins, identity))
+            for identity in known_identities
+        )
+
+    def _handler_is_base_exception(self, handler: ast.ExceptHandler) -> bool:
+        candidates = (
+            handler.type.elts
+            if isinstance(handler.type, ast.Tuple)
+            else [handler.type]
+            if handler.type is not None
+            else []
+        )
+        return any(
+            self._exception_identity(candidate) == "BaseException"
+            for candidate in candidates
+        )
+
+    @staticmethod
+    def _targets(target: ast.expr) -> set[str]:
+        if isinstance(target, (ast.Tuple, ast.List)):
+            return set().union(
+                *(_MonkeyPatchCallCollector._targets(item) for item in target.elts)
+            )
+        if isinstance(target, ast.Starred):
+            return _MonkeyPatchCallCollector._targets(target.value)
+        name = _MonkeyPatchCallCollector._key(target)
+        return {name} if name else set()
+
+    def _is_authority(self, expression: ast.expr) -> bool:
+        return any(
+            (isinstance(item, ast.expr) and self._key(item) in self.aliases)
+            or (isinstance(item, ast.Name) and item.id == "MonkeyPatch")
+            or (isinstance(item, ast.Attribute) and item.attr == "MonkeyPatch")
+            for item in ast.walk(expression)
+        )
+
+    def _bind(self, target: ast.expr, authority: bool) -> None:
+        names = self._targets(target)
+        self.aliases.difference_update(names)
+        if authority:
+            self.aliases.update(names)
+        if self.scope_kinds[-1] != "class":
+            self.closure_aliases.difference_update(names)
+            self.closure_aliases.update(self.aliases & names)
+
+    def _bind_assignment(self, target: ast.expr, value: ast.expr) -> None:
+        """Pair destructuring targets with their corresponding RHS values.
+
+        Exact tuple/list shapes retain element-level authority. Stars, arity
+        mismatches, and opaque RHS values cannot be paired, so every target that
+        could receive the authoritative value remains possible rather than
+        silently losing it. The exact case is what keeps unrelated siblings
+        definitely non-authoritative.
+        """
+
+        if isinstance(target, (ast.Tuple, ast.List)) and isinstance(
+            value, (ast.Tuple, ast.List)
+        ):
+            pairable = (
+                len(target.elts) == len(value.elts)
+                and not any(isinstance(item, ast.Starred) for item in target.elts)
+                and not any(isinstance(item, ast.Starred) for item in value.elts)
+            )
+            if pairable:
+                for target_item, value_item in zip(
+                    target.elts, value.elts, strict=True
+                ):
+                    self._bind_assignment(target_item, value_item)
+                return
+        self._bind(target, self._is_authority(value))
+
+    def _unbind(self, names: set[str]) -> None:
+        self.aliases.difference_update(names)
+        if self.scope_kinds[-1] != "class":
+            self.closure_aliases.difference_update(names)
+
+    def _state(self) -> _MonkeyPatchState:
+        return (set(self.aliases), set(self.closure_aliases), set(self.safe_names))
+
+    def _restore(self, state: _MonkeyPatchState) -> None:
+        self.aliases = set(state[0])
+        self.closure_aliases = set(state[1])
+        self.safe_names = set(state[2])
+
+    @staticmethod
+    def _merge(states: list[_MonkeyPatchState]) -> _MonkeyPatchState:
+        return (
+            set().union(*(state[0] for state in states)),
+            set().union(*(state[1] for state in states)),
+            set.intersection(*(state[2] for state in states)),
+        )
+
+    def _visit_suite(self, statements: list[ast.stmt]) -> _FlowResult:
+        result = _FlowResult()
+        active = True
+        for statement in statements:
+            if not active:
+                break
+            prefix = self._state()
+            flowed = self.visit(statement)
+            if _may_raise_implicitly(statement, self.safe_names):
+                result.exceptional.extend(
+                    (
+                        _ExceptionalState(prefix, None, False),
+                        _ExceptionalState(prefix, None, True),
+                    )
+                )
+            if not isinstance(flowed, _FlowResult):
+                continue
+            result.breaks.extend(flowed.breaks)
+            result.continues.extend(flowed.continues)
+            result.returns.extend(flowed.returns)
+            result.exceptional.extend(flowed.exceptional)
+            if flowed.normal:
+                self._restore(self._merge(flowed.normal))
+            else:
+                active = False
+        if active:
+            result.normal.append(self._state())
+        return result
+
+    def _visit_branches(
+        self,
+        initial: _MonkeyPatchState,
+        suites: list[list[ast.stmt]],
+        *,
+        include_initial: bool = False,
+    ) -> _FlowResult:
+        result = _FlowResult(normal=[initial] if include_initial else [])
+        for suite in suites:
+            self._restore(initial)
+            result.extend(self._visit_suite(suite))
+        if result.normal:
+            self._restore(self._merge(result.normal))
+        return result
+
+    def _visit_function_expressions(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef
+    ) -> None:
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for expression in _signature_expressions(node.args):
+            self.visit(expression)
+        if node.returns is not None:
+            self.visit(node.returns)
+
+    def _defer_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        self._visit_function_expressions(node)
+        if id(node) not in self.deferred_ids:
+            self.deferred_ids.add(id(node))
+            self.deferred.append(
+                _DeferredFunction(
+                    node,
+                    self.cells[-1],
+                    set(self.exception_shadowed[-1]),
+                )
+            )
+        self._unbind({node.name})
+
+    def _evaluate_function(self, item: _DeferredFunction) -> None:
+        node = item.node
+        collector = _scope_collector(self.path, node.body)
+        parameters = _argument_names(node.args)
+        local_bindings = collector.bindings - collector.globals - collector.nonlocals
+        inherited = item.cell.aliases - local_bindings - parameters
+        for argument in [
+            *node.args.posonlyargs,
+            *node.args.args,
+            *node.args.kwonlyargs,
+            *([node.args.vararg] if node.args.vararg else []),
+            *([node.args.kwarg] if node.args.kwarg else []),
+        ]:
+            if argument.arg == "monkeypatch" or (
+                argument.annotation is not None
+                and _mentions_monkeypatch(argument.annotation)
+            ):
+                inherited.add(argument.arg)
+
+        previous = self._state()
+        self.aliases = set(inherited)
+        self.closure_aliases = set(inherited)
+        cell = _ClosureCell(set(inherited))
+        self.cells.append(cell)
+        self.scope_kinds.append("function")
+        local_bindings = local_bindings | parameters
+        self.exception_shadowed.append(item.exception_shadowed | local_bindings)
+        self.safe_names = set(parameters)
+        flow = self._visit_suite(node.body)
+        endings = [*flow.normal, *flow.breaks, *flow.continues, *flow.returns]
+        if endings:
+            cell.aliases = set(self._merge(endings)[1])
+        self.exception_shadowed.pop()
+        self.scope_kinds.pop()
+        self.cells.pop()
+        self._restore(previous)
+        self._drain_deferred(cell)
+
+    def _drain_deferred(self, cell: _ClosureCell) -> None:
+        while True:
+            pending = [item for item in self.deferred if item.cell is cell]
+            if not pending:
+                return
+            self.deferred = [item for item in self.deferred if item.cell is not cell]
+            for item in pending:
+                self._evaluate_function(item)
+
+    def visit_Module(self, node: ast.Module) -> Any:
+        collector = _scope_collector(self.path, node.body)
+        self.exception_shadowed[-1] = set(collector.bindings)
+        flow = self._visit_suite(node.body)
+        endings = list(flow.normal)
+        if endings:
+            self.cells[-1].aliases = set(self._merge(endings)[1])
+        self._drain_deferred(self.cells[-1])
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> Any:
+        self._defer_function(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> Any:
+        self._defer_function(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> Any:
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for base in node.bases:
+            self.visit(base)
+        previous = self._state()
+        self.aliases = set(self.closure_aliases)
+        collector = _scope_collector(self.path, node.body)
+        self.exception_shadowed.append(self.exception_shadowed[-1] | collector.bindings)
+        self.scope_kinds.append("class")
+        self._visit_suite(node.body)
+        self.scope_kinds.pop()
+        self.exception_shadowed.pop()
+        self._restore(previous)
+        self._unbind({node.name})
+
+    @staticmethod
+    def _bound_names(target: ast.expr) -> set[str]:
+        if isinstance(target, ast.Name):
+            return {target.id}
+        if isinstance(target, (ast.Tuple, ast.List)):
+            return set().union(
+                *(_MonkeyPatchCallCollector._bound_names(item) for item in target.elts)
+            )
+        if isinstance(target, ast.Starred):
+            return _MonkeyPatchCallCollector._bound_names(target.value)
+        return set()
+
+    def _update_safe_assignment(self, target: ast.expr, value: ast.expr) -> None:
+        names = self._bound_names(target)
+        safe = _non_raising_assignment(target, value, self.safe_names)
+        self.safe_names.difference_update(names)
+        if safe:
+            self.safe_names.update(names)
+
+    def visit_Assign(self, node: ast.Assign) -> Any:
+        self.visit(node.value)
+        for target in node.targets:
+            self._bind_assignment(target, node.value)
+            self._update_safe_assignment(target, node.value)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> Any:
+        if node.value is not None:
+            self.visit(node.value)
+        self._bind(
+            node.target,
+            _mentions_monkeypatch(node.annotation)
+            or (node.value is not None and self._is_authority(node.value)),
+        )
+        names = self._bound_names(node.target)
+        safe = node.value is not None and _non_raising_assignment(
+            node.target, node.value, self.safe_names
+        )
+        self.safe_names.difference_update(names)
+        if safe:
+            self.safe_names.update(names)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> Any:
+        self.visit(node.value)
+        self._bind(node.target, False)
+        self.safe_names.difference_update(self._bound_names(node.target))
+
+    def visit_Delete(self, node: ast.Delete) -> Any:
+        for target in node.targets:
+            self._bind(target, False)
+            self.safe_names.difference_update(self._bound_names(target))
+
+    def visit_Import(self, node: ast.Import) -> Any:
+        names = {alias.asname or alias.name.split(".", 1)[0] for alias in node.names}
+        self._unbind(names)
+        self.safe_names.update(names)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> Any:
+        names = {alias.asname or alias.name for alias in node.names}
+        self._unbind(names)
+        self.safe_names.update(names)
+
+    def visit_If(self, node: ast.If) -> Any:
+        self.visit(node.test)
+        initial = self._state()
+        return self._visit_branches(
+            initial,
+            [node.body, node.orelse],
+            include_initial=not node.orelse,
+        )
+
+    def _visit_try(self, node: ast.Try | ast.TryStar) -> _FlowResult:
+        initial = self._state()
+        self._restore(initial)
+        body = self._visit_suite(node.body)
+        result = _FlowResult(
+            breaks=list(body.breaks),
+            continues=list(body.continues),
+            returns=list(body.returns),
+        )
+
+        if body.normal:
+            self._restore(self._merge(body.normal))
+            result.extend(self._visit_suite(node.orelse))
+
+        # Route each exceptional path through handlers in source order. A known
+        # matching kind is consumed and therefore cannot also enter ``finally``
+        # as the original exception. Unknown relationships branch conservatively:
+        # the handler may run, while the still-unmatched branch reaches the next
+        # handler (or finally).
+        unmatched = list(body.exceptional)
+        for handler in node.handlers:
+            handler_inputs: list[_ExceptionalState] = []
+            still_unmatched: list[_ExceptionalState] = []
+            for exceptional in unmatched:
+                match = self._handler_match(handler, exceptional.kind)
+                if isinstance(node, ast.TryStar) and exceptional.is_group:
+                    # A named group says nothing about its members. Only an
+                    # unshadowed BaseException proves that every member is taken.
+                    if match is True and self._handler_is_base_exception(handler):
+                        handler_inputs.append(exceptional)
+                    else:
+                        handler_inputs.append(exceptional)
+                        still_unmatched.append(exceptional)
+                else:
+                    if match is not False:
+                        handler_inputs.append(exceptional)
+                    if match is not True:
+                        still_unmatched.append(exceptional)
+            unmatched = still_unmatched
+            if not handler_inputs:
+                continue
+
+            self._restore(self._merge([item.state for item in handler_inputs]))
+            if handler.type is not None:
+                self.visit(handler.type)
+            if handler.name is not None:
+                self._bind(ast.Name(id=handler.name, ctx=ast.Store()), False)
+            handled = self._visit_suite(handler.body)
+            for states in (
+                handled.normal,
+                handled.breaks,
+                handled.continues,
+                handled.returns,
+            ):
+                for index, state in enumerate(states):
+                    self._restore(state)
+                    if handler.name is not None:
+                        self._unbind({handler.name})
+                    states[index] = self._state()
+            for exceptional in handled.exceptional:
+                self._restore(exceptional.state)
+                if handler.name is not None:
+                    self._unbind({handler.name})
+                exceptional.state = self._state()
+            result.extend(handled)
+        result.exceptional.extend(unmatched)
+
+        if not node.finalbody:
+            if result.normal:
+                self._restore(self._merge(result.normal))
+            return result
+
+        finished = _FlowResult()
+        for states, continuation in (
+            (result.normal, "normal"),
+            (result.breaks, "break"),
+            (result.continues, "continue"),
+            (result.returns, "return"),
+        ):
+            if not states:
+                continue
+            self._restore(self._merge(states))
+            final = self._visit_suite(node.finalbody)
+            finished.breaks.extend(final.breaks)
+            finished.continues.extend(final.continues)
+            finished.returns.extend(final.returns)
+            finished.exceptional.extend(final.exceptional)
+            if continuation == "normal":
+                finished.normal.extend(final.normal)
+            elif continuation == "break":
+                finished.breaks.extend(final.normal)
+            elif continuation == "continue":
+                finished.continues.extend(final.normal)
+            else:
+                finished.returns.extend(final.normal)
+
+        if result.exceptional:
+            self._restore(
+                self._merge([exceptional.state for exceptional in result.exceptional])
+            )
+            final = self._visit_suite(node.finalbody)
+            finished.breaks.extend(final.breaks)
+            finished.continues.extend(final.continues)
+            finished.returns.extend(final.returns)
+            finished.exceptional.extend(final.exceptional)
+            kinds = {
+                (exceptional.kind, exceptional.is_group)
+                for exceptional in result.exceptional
+            }
+            for state in final.normal:
+                finished.exceptional.extend(
+                    _ExceptionalState(state, kind, is_group) for kind, is_group in kinds
+                )
+        if finished.normal:
+            self._restore(self._merge(finished.normal))
+        return finished
+
+    def visit_Try(self, node: ast.Try) -> Any:
+        return self._visit_try(node)
+
+    def visit_TryStar(self, node: ast.TryStar) -> Any:
+        return self._visit_try(node)
+
+    def _visit_loop(
+        self,
+        node: ast.For | ast.AsyncFor | ast.While,
+        initial: _MonkeyPatchState,
+    ) -> _FlowResult:
+        head = initial
+        body = _FlowResult()
+        while True:
+            self._restore(head)
+            if isinstance(node, ast.While):
+                self.visit(node.test)
+            else:
+                self._bind(node.target, False)
+            body = self._visit_suite(node.body)
+            widened = self._merge([initial, *body.normal, *body.continues])
+            if widened == head:
+                break
+            head = widened
+
+        self._restore(head)
+        if isinstance(node, ast.While):
+            self.visit(node.test)
+        no_break = self._visit_suite(node.orelse)
+        normal = [*no_break.normal, *body.breaks]
+        if normal:
+            self._restore(self._merge(normal))
+        return _FlowResult(
+            normal=normal,
+            breaks=no_break.breaks,
+            continues=no_break.continues,
+            returns=[*body.returns, *no_break.returns],
+            exceptional=[*body.exceptional, *no_break.exceptional],
+        )
+
+    def visit_Break(self, node: ast.Break) -> Any:
+        return _FlowResult(breaks=[self._state()])
+
+    def visit_Continue(self, node: ast.Continue) -> Any:
+        return _FlowResult(continues=[self._state()])
+
+    def visit_Raise(self, node: ast.Raise) -> Any:
+        prefix = self._state()
+        may_fail_before_raise = (
+            node.exc is not None and not self._raise_evaluation_is_safe(node.exc)
+        )
+        if node.exc is not None:
+            self.visit(node.exc)
+        if node.cause is not None:
+            may_fail_before_raise = True
+            self.visit(node.cause)
+        exceptional = self._raised_states(node, prefix)
+        if may_fail_before_raise:
+            exceptional[0:0] = (
+                _ExceptionalState(prefix, None, False),
+                _ExceptionalState(prefix, None, True),
+            )
+        return _FlowResult(exceptional=exceptional)
+
+    def visit_Return(self, node: ast.Return) -> Any:
+        if node.value is not None:
+            self.visit(node.value)
+        return _FlowResult(returns=[self._state()])
+
+    def _visit_for(self, node: ast.For | ast.AsyncFor) -> _FlowResult:
+        self.visit(node.iter)
+        return self._visit_loop(node, self._state())
+
+    def visit_For(self, node: ast.For) -> Any:
+        return self._visit_for(node)
+
+    def visit_AsyncFor(self, node: ast.AsyncFor) -> Any:
+        return self._visit_for(node)
+
+    def visit_While(self, node: ast.While) -> Any:
+        return self._visit_loop(node, self._state())
+
+    @staticmethod
+    def _match_names(pattern: ast.pattern) -> set[str]:
+        names: set[str] = set()
+        for item in ast.walk(pattern):
+            if isinstance(item, ast.MatchAs) and item.name is not None:
+                names.add(item.name)
+            elif isinstance(item, ast.MatchStar) and item.name is not None:
+                names.add(item.name)
+            elif isinstance(item, ast.MatchMapping) and item.rest is not None:
+                names.add(item.rest)
+        return names
+
+    @classmethod
+    def _is_irrefutable(cls, pattern: ast.pattern) -> bool:
+        if isinstance(pattern, ast.MatchAs):
+            return pattern.pattern is None or cls._is_irrefutable(pattern.pattern)
+        if isinstance(pattern, ast.MatchOr):
+            return any(cls._is_irrefutable(item) for item in pattern.patterns)
+        return False
+
+    @classmethod
+    def _is_catch_all(cls, case: ast.match_case) -> bool:
+        return case.guard is None and cls._is_irrefutable(case.pattern)
+
+    def visit_Match(self, node: ast.Match) -> Any:
+        self.visit(node.subject)
+        initial = self._state()
+        authority = self._is_authority(node.subject)
+        result = _FlowResult()
+        for case in node.cases:
+            self._restore(initial)
+            for name in self._match_names(case.pattern):
+                self._bind(ast.Name(id=name, ctx=ast.Store()), authority)
+            if case.guard is not None:
+                self.visit(case.guard)
+            result.extend(self._visit_suite(case.body))
+        if not node.cases or not self._is_catch_all(node.cases[-1]):
+            result.normal.append(initial)
+        if result.normal:
+            self._restore(self._merge(result.normal))
+        return result
+
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> Any:
+        self.visit(node.value)
+        self._bind(node.target, self._is_authority(node.value))
+
+    def _visit_with(self, node: ast.With | ast.AsyncWith) -> _FlowResult:
+        for item in node.items:
+            self.visit(item.context_expr)
+            if item.optional_vars is not None:
+                self._bind(item.optional_vars, self._is_authority(item.context_expr))
+        return self._visit_suite(node.body)
+
+    def visit_With(self, node: ast.With) -> Any:
+        return self._visit_with(node)
+
+    def visit_AsyncWith(self, node: ast.AsyncWith) -> Any:
+        return self._visit_with(node)
+
+    def visit_Call(self, node: ast.Call) -> Any:
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "setattr"
+            and self._is_authority(node.func.value)
+        ):
+            self.calls.add(id(node))
+        self.generic_visit(node)
+
+
+def _monkeypatch_calls(path: Path, tree: ast.Module) -> set[int]:
+    collector = _MonkeyPatchCallCollector(path)
+    collector.visit(tree)
+    return collector.calls
+
+
+class _CollaboratorAliasCollector:
+    """Answer each use of a local name bound to a facade collaborator.
+
+    ``cap = extractor._capture`` followed by ``patch.object(cap, ...)`` is the
+    same reach-through written over two statements, and without the alias the
+    patch lands on a bare local the reader cannot place. Read in source order
+    with the branch merging the class suites already use, because a map
+    collected over the whole body at once keeps answering ``_capture`` for a
+    ``cap`` that a later statement rebound. That error runs the other way from
+    the fail-open holes: it reports a foreign object as a collaborator seam, or
+    refuses it as an unknown one, and a false failure here blocks every later
+    stage. Where a rebinding depends on a branch no single answer fits, so the
+    name becomes ambiguous rather than keeping the stale one.
+    """
+
+    def __init__(self, path: Path, facade_names: set[str]) -> None:
+        self.path = path
+        self.facade_names = facade_names
+        self.aliases: dict[str, str] = {}
+        self.ambiguous: set[str] = set()
+        self.resolved: dict[int, str] = {}
+        self.unresolved: set[int] = set()
+
+    def _state(self) -> tuple[dict[str, str], set[str]]:
+        return (dict(self.aliases), set(self.ambiguous))
+
+    def _restore(self, state: tuple[dict[str, str], set[str]]) -> None:
+        self.aliases = dict(state[0])
+        self.ambiguous = set(state[1])
+
+    def _merge(self, states: list[tuple[dict[str, str], set[str]]]) -> None:
+        names = set().union(*(set(state[0]) | state[1] for state in states))
+        self.aliases = {}
+        self.ambiguous = set()
+        for name in names:
+            answers = {state[0].get(name) for state in states}
+            answer = next(iter(answers))
+            if (
+                len(answers) == 1
+                and answer is not None
+                and not any(name in state[1] for state in states)
+            ):
+                self.aliases[name] = answer
+            else:
+                self.ambiguous.add(name)
+
+    def _forget(self, names: set[str]) -> None:
+        for name in names:
+            self.aliases.pop(name, None)
+            self.ambiguous.discard(name)
+
+    def _bind_target(self, target: ast.expr) -> None:
+        self._forget(
+            {
+                item.id
+                for item in ast.walk(target)
+                if isinstance(item, ast.Name) and isinstance(item.ctx, ast.Store)
+            }
+        )
+
+    def _collaborator_attribute(self, value: ast.expr | None) -> str | None:
+        # A walrus names the same object it evaluates to, so the binding it
+        # makes on the way past does not change what the outer name receives.
+        while isinstance(value, ast.NamedExpr):
+            value = value.value
+        if (
+            isinstance(value, ast.Attribute)
+            and isinstance(value.value, ast.Name)
+            and value.value.id in self.facade_names
+            and value.attr in _FACADE_COLLABORATORS
+        ):
+            return value.attr
+        return None
+
+    def _assign(self, name: str, value: ast.expr | None) -> None:
+        attribute = self._collaborator_attribute(value)
+        if attribute is None:
+            self._forget({name})
+            return
+        self.ambiguous.discard(name)
+        self.aliases[name] = attribute
+
+    @staticmethod
+    def _nested_scope_names(node: ast.AST) -> set[str]:
+        """Name what an expression binds in a scope of its own."""
+
+        names: set[str] = set()
+        for item in ast.walk(node):
+            if isinstance(item, ast.Lambda):
+                names.update(_argument_names(item.args))
+            elif isinstance(
+                item, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)
+            ):
+                for generator in item.generators:
+                    names.update(
+                        target.id
+                        for target in ast.walk(generator.target)
+                        if isinstance(target, ast.Name)
+                    )
+        return names
+
+    def _record(self, node: ast.AST | None) -> None:
+        """Answer every name read inside one expression from the state so far.
+
+        The last answer wins, so a second reading of a loop body overwrites the
+        first rather than leaving both on the record.
+        """
+
+        if node is None:
+            return
+        shadowed = self._nested_scope_names(node)
+        for item in ast.walk(node):
+            if not (isinstance(item, ast.Name) and isinstance(item.ctx, ast.Load)):
+                continue
+            alias = None if item.id in shadowed else self.aliases.get(item.id)
+            if alias is not None:
+                self.resolved[id(item)] = alias
+                self.unresolved.discard(id(item))
+                continue
+            self.resolved.pop(id(item), None)
+            if item.id in self.ambiguous and item.id not in shadowed:
+                self.unresolved.add(id(item))
+            else:
+                self.unresolved.discard(id(item))
+        for item in ast.walk(node):
+            if isinstance(item, ast.NamedExpr) and isinstance(item.target, ast.Name):
+                self._assign(item.target.id, item.value)
+
+    def _bind(self, statement: ast.stmt) -> None:
+        collector = _LocalBindingCollector(self.path)
+        collector.visit(statement)
+        # A walrus binds while the statement's own expressions are read, so
+        # `_record` has already answered it; forgetting it again here would
+        # retire the alias it just made.
+        walrus = {
+            item.target.id
+            for item in ast.walk(statement)
+            if isinstance(item, ast.NamedExpr) and isinstance(item.target, ast.Name)
+        }
+        self._forget(
+            (collector.bindings | collector.globals | collector.nonlocals) - walrus
+        )
+        if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+            return
+        targets = (
+            statement.targets
+            if isinstance(statement, ast.Assign)
+            else [statement.target]
+        )
+        for target in targets:
+            if isinstance(target, ast.Name):
+                self._assign(target.id, statement.value)
+
+    def visit_body(self, statements: list[ast.stmt]) -> None:
+        for statement in statements:
+            self.visit(statement)
+
+    def visit(self, statement: ast.stmt) -> None:
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            self._visit_function(statement)
+        elif isinstance(statement, ast.ClassDef):
+            self._visit_class(statement)
+        elif isinstance(statement, ast.If):
+            self._visit_if(statement)
+        elif isinstance(statement, (ast.Try, ast.TryStar)):
+            self._visit_try(statement)
+        elif isinstance(statement, (ast.For, ast.AsyncFor, ast.While)):
+            self._visit_loop(statement)
+        elif isinstance(statement, ast.Match):
+            self._visit_match(statement)
+        elif isinstance(statement, (ast.With, ast.AsyncWith)):
+            self._visit_with(statement)
+        else:
+            self._record(statement)
+            self._bind(statement)
+
+    def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        for expression in (
+            *node.decorator_list,
+            *_signature_expressions(node.args),
+            node.returns,
+        ):
+            self._record(expression)
+        # A closure is read against the bindings its definition saw, the same
+        # snapshot the scanner's own frames take.
+        state = self._state()
+        self._forget(_function_shadowed_names(self.path, node))
+        self.visit_body(node.body)
+        self._restore(state)
+        self._forget({node.name})
+
+    def _visit_class(self, node: ast.ClassDef) -> None:
+        for expression in (
+            *node.decorator_list,
+            *node.bases,
+            *(keyword.value for keyword in node.keywords),
+        ):
+            self._record(expression)
+        state = self._state()
+        self.visit_body(node.body)
+        self._restore(state)
+        self._forget({node.name})
+
+    def _visit_if(self, node: ast.If) -> None:
+        self._record(node.test)
+        if isinstance(node.test, ast.Constant) and isinstance(node.test.value, bool):
+            self.visit_body(node.body if node.test.value else node.orelse)
+            return
+        before = self._state()
+        states: list[tuple[dict[str, str], set[str]]] = []
+        for statements in (node.body, node.orelse):
+            self._restore(before)
+            self.visit_body(statements)
+            states.append(self._state())
+        self._merge(states)
+
+    def _visit_handler(self, handler: ast.ExceptHandler) -> None:
+        self._record(handler.type)
+        if handler.name:
+            self._forget({handler.name})
+        self.visit_body(handler.body)
+        if handler.name:
+            self._forget({handler.name})
+
+    def _visit_try(self, node: ast.Try | ast.TryStar) -> None:
+        outcome, handler_index = _static_try_outcome(node)
+        before = self._state()
+        if outcome == "normal":
+            self.visit_body(node.body)
+            self.visit_body(node.orelse)
+        elif outcome == "handler" and handler_index is not None:
+            self.visit_body(node.body)
+            self._visit_handler(node.handlers[handler_index])
+        else:
+            states: list[tuple[dict[str, str], set[str]]] = []
+            self.visit_body(node.body)
+            self.visit_body(node.orelse)
+            states.append(self._state())
+            for handler in node.handlers:
+                self._restore(before)
+                self._visit_handler(handler)
+                states.append(self._state())
+            self._merge(states)
+        self.visit_body(node.finalbody)
+
+    def _visit_loop(self, node: ast.For | ast.AsyncFor | ast.While) -> None:
+        # The body may run zero times or many, so its second reading starts
+        # from the entry state merged with whatever one iteration leaves. A
+        # single replay reaches the fixed point: a name the two readings
+        # disagree on is already ambiguous, and ambiguity is the top here.
+        if isinstance(node, ast.While):
+            self._record(node.test)
+        else:
+            self._record(node.iter)
+            self._bind_target(node.target)
+        entry = self._state()
+        self.visit_body(node.body)
+        self._merge([self._state(), entry])
+        replayed = self._state()
+        self.visit_body(node.body)
+        self._merge([self._state(), replayed])
+        self.visit_body(node.orelse)
+
+    def _visit_match(self, node: ast.Match) -> None:
+        self._record(node.subject)
+        before = self._state()
+        # No case has to match, so falling through is one of the outcomes.
+        states = [before]
+        for case in node.cases:
+            self._restore(before)
+            self._forget(_pattern_names(case.pattern))
+            self._record(case.guard)
+            self.visit_body(case.body)
+            states.append(self._state())
+        self._merge(states)
+
+    def _visit_with(self, node: ast.With | ast.AsyncWith) -> None:
+        for item in node.items:
+            self._record(item.context_expr)
+            if item.optional_vars is not None:
+                self._bind_target(item.optional_vars)
+        self.visit_body(node.body)
+
+
+def _collaborator_aliases(
+    path: Path,
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    facade_names: set[str],
+) -> tuple[dict[int, str], set[int]]:
+    """Resolve every use of a local name bound to a facade collaborator."""
+
+    collector = _CollaboratorAliasCollector(path, facade_names)
+    collector.visit_body(node.body)
+    return (collector.resolved, collector.unresolved)
 
 
 class _CalledMethodCollector(ast.NodeVisitor):
@@ -1079,7 +2258,14 @@ _COLLABORATOR_METHODS: dict[tuple[Path, str], frozenset[str]] = {}
 
 
 def collaborator_methods(owner: str, package: Path = PACKAGE) -> frozenset[str]:
-    """Read the method names of a facade collaborator named ``module.Class``."""
+    """Read the method names of a facade collaborator named ``module.Class``.
+
+    Only the class body is read, so a member reached through a base class or
+    produced by a decorator is not here and its patch is refused. That is the
+    acceptable direction: a loud refusal names the site and asks for the table
+    to be widened, while accepting an unknown name would let a patch that
+    intercepts nothing through.
+    """
 
     cached = _COLLABORATOR_METHODS.get((package, owner))
     if cached is not None:
@@ -1097,7 +2283,10 @@ def collaborator_methods(owner: str, package: Path = PACKAGE) -> frozenset[str]:
             )
             _COLLABORATOR_METHODS[package, owner] = methods
             return methods
-    raise AssertionError(f"{class_name} not found in scraping/{module}.py")
+    raise UnresolvedSeamError(
+        f"{class_name} not found in scraping/{module}.py: "
+        "rename the entry in _FACADE_COLLABORATORS"
+    )
 
 
 class Scanner(ast.NodeVisitor):
@@ -1108,12 +2297,14 @@ class Scanner(ast.NodeVisitor):
         class_names: set[str],
         facade_publics: frozenset[str],
         facade_privates: frozenset[str],
+        monkeypatch_calls: set[int],
     ):
         self.path = path
         self.root_module_names = module_names
         self.root_class_names = class_names
         self.facade_publics = facade_publics
         self.facade_privates = facade_privates
+        self.monkeypatch_calls = monkeypatch_calls
         self.functions: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
         self.frames = [
             _ScopeFrame(
@@ -1242,6 +2433,9 @@ class Scanner(ast.NodeVisitor):
             _EXPLICIT_INSTANCE_BINDINGS.get((self.relative_path, node.name), ())
         )
         instance_names.difference_update(collector.globals)
+        aliases, ambiguous_aliases = _collaborator_aliases(
+            self.path, node, instance_names | class_names
+        )
         self.functions.append(node)
         self.frames.append(
             _ScopeFrame(
@@ -1252,6 +2446,8 @@ class Scanner(ast.NodeVisitor):
                 closure_module_names=set(module_names),
                 closure_class_names=set(class_names),
                 closure_instance_names=set(instance_names),
+                collaborator_aliases=aliases,
+                ambiguous_aliases=ambiguous_aliases,
             )
         )
         for statement in node.body:
@@ -1406,6 +2602,8 @@ class Scanner(ast.NodeVisitor):
             closure_class_names=set(frame.closure_class_names),
             closure_instance_names=set(frame.closure_instance_names),
             ambiguous_names=set(frame.ambiguous_names),
+            collaborator_aliases=dict(frame.collaborator_aliases),
+            ambiguous_aliases=set(frame.ambiguous_aliases),
         )
 
     def _visit_class_suite(self, statements: list[ast.stmt]) -> None:
@@ -1801,6 +2999,10 @@ class Scanner(ast.NodeVisitor):
     def _direct_facade_attribute(self, node: ast.Attribute, name: str) -> None:
         if not name.startswith("_"):
             return
+        collaborator = _FACADE_COLLABORATORS.get(name)
+        if collaborator is not None:
+            self._add_contextual("private_facade_access", node, name, collaborator[1])
+            return
         owner_stage = (
             _PRIVATE_OWNERS.get(name)
             or _WORKFLOW_OWNERS.get(name)
@@ -1869,11 +3071,138 @@ class Scanner(ast.NodeVisitor):
             and function.attr == "object"
             and isinstance(function.value, ast.Name)
             and function.value.id == "patch"
-            and len(node.args) >= 2
         ):
-            self._suppress_module_attributes(node.args[0])
-            self._patch_object(node, node.args[0], node.args[1])
+            target, attribute = _patch_object_arguments(node)
+            if target is None or attribute is None:
+                # An arity or keyword shape the reader cannot take apart hides
+                # both ends of the patch. Skipping it on a failed arity gate is
+                # indistinguishable from a patch that intercepts nothing, so
+                # the call names itself instead.
+                self._error(
+                    node, ast.unparse(node), "unresolved patch.object arguments"
+                )
+            else:
+                self._suppress_module_attributes(target)
+                self._patch_object(node, target, attribute)
+
+        if (isinstance(function, ast.Name) and function.id == "setattr") or (
+            isinstance(function, ast.Attribute) and function.attr == "setattr"
+        ):
+            self._setattr_call(node)
         self.generic_visit(node)
+
+    def _setattr_call(self, node: ast.Call) -> None:
+        """Inventory ``setattr`` and ``monkeypatch.setattr`` replacements.
+
+        The method name is matched on its own rather than against a receiver
+        named ``monkeypatch``, because the fixture is routinely bound to
+        another name and a receiver test would skip exactly the sites this
+        exists to see. Everything it resolves to is a foreign object unless the
+        target reaches the extractor, so the breadth costs nothing. It costs
+        something only where there is no target left to scope, which is what
+        ``_refuse_unreadable_setattr`` answers for.
+        """
+
+        target, name = _setattr_arguments(node)
+        if target is None:
+            self._refuse_unreadable_setattr(node)
+            return
+        if (
+            isinstance(target, ast.Constant)
+            and isinstance(target.value, str)
+            and target.value.startswith(EXTRACTOR_MODULE + ".")
+        ):
+            # A dotted import string holds the member name itself, so this
+            # resolves whether or not the call passed a separate one.
+            self._string_patch(node, target.value)
+            return
+        if not (isinstance(name, ast.Constant) and isinstance(name.value, str)):
+            self._refuse_unresolved_target(node, target, "setattr")
+            return
+        self._suppress_module_attributes(target)
+        self._replacement(node, target, name.value, "setattr")
+
+    def _refuse_unreadable_setattr(self, node: ast.Call) -> None:
+        """Refuse a ``setattr`` whose call shape hides both of its ends.
+
+        There is no target to scope against the extractor, and a skip reads the
+        same as a patch that intercepts nothing, so the refusal has to be loud
+        where the call could plausibly land on the extractor. Every other
+        refusal here is narrowed by ``_reaches_the_extractor``; a blanket one
+        answers the same way for a foreign ``helper.setattr(*arguments)``
+        anywhere in the tree, and one false failure blocks every later stage.
+
+        The receiver is the only signal the shape leaves. A bare name is the
+        builtin, which takes any object including the extractor, so it stays
+        loud. A method belongs to whatever the receiver holds, and only a
+        pytest fixture patches the extractor through one. That is the trade-off
+        against the docstring above: matching the method name alone is what
+        keeps an aliased fixture inventoried, and it is free only while a
+        readable target does the scoping. With the target gone the receiver has
+        to answer instead, so the use-site collector proves that its binding is
+        still authoritative in this lexical scope.
+        """
+
+        function = node.func
+        if isinstance(function, ast.Attribute) and any(
+            isinstance(item, ast.Subscript) for item in ast.walk(function.value)
+        ):
+            self._error(node, ast.unparse(node), "unresolved setattr arguments")
+            return
+        if (
+            isinstance(function, ast.Attribute)
+            and id(node) not in self.monkeypatch_calls
+        ):
+            return
+        self._error(node, ast.unparse(node), "unresolved setattr arguments")
+
+    def visit_Assign(self, node: ast.Assign) -> Any:
+        for target in node.targets:
+            if isinstance(target, ast.Attribute):
+                self._assigned_replacement(node, target)
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> Any:
+        # `owner.name: T = replacement` replaces the member exactly as the
+        # unannotated form does, and skipping it left the member name
+        # uninventoried while the reach-through above it was recorded. The
+        # annotation-only `owner.name: T` binds nothing, so it replaces
+        # nothing and must not be read as a patch.
+        if node.value is not None and isinstance(node.target, ast.Attribute):
+            self._assigned_replacement(node, node.target)
+        self.generic_visit(node)
+
+    def _assigned_replacement(
+        self, node: ast.Assign | ast.AnnAssign, target: ast.Attribute
+    ) -> None:
+        """Inventory ``owner.name = replacement`` one level below the facade.
+
+        An attribute assigned on the facade itself is already on the record
+        through ``visit_Attribute``, which sees the replaced name directly. One
+        level deeper that attribute is the reach-through and never the replaced
+        member, so the collaborator's own name goes unchecked unless it is
+        resolved here.
+        """
+
+        owner = target.value
+        if isinstance(owner, ast.Name) and (
+            owner.id in self.frames[-1].instance_names
+            or owner.id in self.class_names
+            or owner.id in self.module_names
+        ):
+            return
+        if self._ambiguous_collaborator_alias(owner):
+            self._error(
+                node,
+                ast.unparse(owner),
+                "ambiguous collaborator alias after conditional control flow",
+            )
+            return
+        collaborator = self._collaborator_reach(owner)
+        if collaborator is not None:
+            self._collaborator_patch(node, collaborator, target.attr)
+            return
+        self._refuse_unresolved_target(node, owner, "attribute assignment")
 
     def _string_patch(self, node: ast.Call, value: str) -> None:
         target = value.removeprefix(EXTRACTOR_MODULE + ".")
@@ -1915,7 +3244,15 @@ class Scanner(ast.NodeVisitor):
         ):
             self._error(node, ast.unparse(target), "dynamic patch.object attribute")
             return
-        name = attribute.value
+        self._replacement(node, target, attribute.value, "patch.object")
+
+    def _replacement(
+        self, node: ast.expr | ast.stmt, target: ast.expr, name: str, form: str
+    ) -> None:
+        # A walrus names the same object it evaluates to, so the binding is
+        # irrelevant to what the patch reaches.
+        while isinstance(target, ast.NamedExpr):
+            target = target.value
         if (
             isinstance(target, ast.Name)
             and target.id in self.frames[-1].ambiguous_names
@@ -1924,6 +3261,13 @@ class Scanner(ast.NodeVisitor):
                 node,
                 target.id,
                 "ambiguous extractor binding after conditional class control flow",
+            )
+            return
+        if self._ambiguous_collaborator_alias(target):
+            self._error(
+                node,
+                ast.unparse(target),
+                "ambiguous collaborator alias after conditional control flow",
             )
             return
         bindings = self.frames[-1].instance_names
@@ -2026,29 +3370,112 @@ class Scanner(ast.NodeVisitor):
             )
             return
 
+        collaborator = self._collaborator_reach(target)
+        if collaborator is not None:
+            self._collaborator_patch(node, collaborator, name)
+            return
+
+        self._refuse_unresolved_target(node, target, form)
+
+    def _collaborator_reach(self, target: ast.expr) -> str | None:
+        """Name the facade attribute a replacement target reaches through."""
+
         if (
             isinstance(target, ast.Attribute)
             and isinstance(target.value, ast.Name)
-            and (target.value.id in bindings or target.value.id in self.class_names)
+            and (
+                target.value.id in self.frames[-1].instance_names
+                or target.value.id in self.class_names
+            )
         ):
-            self._collaborator_patch(node, target.attr, name)
-            return
+            return target.attr
+        if isinstance(target, ast.Name):
+            for frame in reversed(self.frames):
+                alias = frame.collaborator_aliases.get(id(target))
+                if alias is not None:
+                    return alias
+        return None
 
-    def _collaborator_patch(self, node: ast.Call, attribute: str, name: str) -> None:
-        owner = _FACADE_COLLABORATORS.get(attribute)
-        owner_stage = _INSTANCE_ATTRIBUTE_OWNERS.get(attribute)
+    def _ambiguous_collaborator_alias(self, target: ast.expr) -> bool:
+        """Answer whether a local's collaborator binding depends on a branch.
+
+        A name that held the collaborator down one path and something else down
+        another fits no single answer, so resolving it either way would invent
+        one. Only a name already bound to a collaborator somewhere reaches this,
+        which is why the refusal needs no further scoping.
+        """
+
+        if not isinstance(target, ast.Name):
+            return False
+        return any(id(target) in frame.ambiguous_aliases for frame in self.frames)
+
+    def _reaches_the_extractor(self, target: ast.expr) -> bool:
+        """Answer whether an unreduced target still names the extractor.
+
+        A refusal has to be narrower than "could not resolve", or every
+        ``patch.object`` in the tree that replaces a member of some foreign
+        object becomes an error. Two signals survive a shape the reader cannot
+        reduce: a name it already knows is the extractor module, the facade
+        class or a facade instance, and a facade wiring attribute anywhere in
+        the expression. Measured over every site that falls through today:
+        neither fires on any of the 137, and between them they catch the
+        chained, ``getattr``-routed and ``self``-rooted reach-throughs.
+        """
+
+        frame = self.frames[-1]
+        known = (
+            frame.module_names
+            | frame.class_names
+            | frame.instance_names
+            | frame.ambiguous_names
+        )
+        wiring = set(_FACADE_COLLABORATORS) | set(_INSTANCE_ATTRIBUTE_OWNERS)
+        return any(
+            (isinstance(item, ast.Name) and item.id in known)
+            or (isinstance(item, ast.Attribute) and item.attr in wiring)
+            for item in ast.walk(target)
+        )
+
+    def _refuse_unresolved_target(
+        self, node: ast.expr | ast.stmt, target: ast.expr, form: str
+    ) -> None:
+        if not self._reaches_the_extractor(target):
+            return
+        self._error(node, ast.unparse(target), f"unresolved {form} target")
+
+    def _collaborator_patch(
+        self, node: ast.expr | ast.stmt, attribute: str, name: str
+    ) -> None:
+        collaborator = _FACADE_COLLABORATORS.get(attribute)
         patch_target = f"{attribute}.{name}"
-        if owner is None or owner_stage is None:
+        if collaborator is None:
             self._error(node, patch_target, "unknown facade collaborator patch")
             return
-        if name not in collaborator_methods(owner):
+        owner, _ = collaborator
+        try:
+            methods = collaborator_methods(owner)
+        except UnresolvedSeamError as error:
+            self._error(node, patch_target, str(error))
+            return
+        if name not in methods:
             self._error(node, patch_target, f"unknown {owner} patch")
             return
-        _, stage = owner_stage
-        if name.startswith("_"):
-            self._add("private_patch_object", node, name, owner, stage)
+        callers = self._callers(name)
+        if not callers:
+            self._error(node, patch_target, "collaborator patch has no caller workflow")
             return
-        self._add("public_patch_object", node, name, f"{owner} dependency", stage)
+        for caller_owner, stage in callers:
+            if name.startswith("_"):
+                # A private member is owned where it is defined, so the owner
+                # stays the collaborator and only the stage follows the caller.
+                self._add("private_patch_object", node, name, owner, stage)
+                continue
+            # A public member *is* the collaborator rather than a dependency of
+            # it, so the owner names the workflow consuming it, matching every
+            # other `public_patch_object` entry.
+            self._add(
+                "public_patch_object", node, name, f"{caller_owner} dependency", stage
+            )
 
 
 def scan_source(
@@ -2071,6 +3498,7 @@ def scan_source(
         class_names,
         facade_publics,
         facade_privates,
+        _monkeypatch_calls(path, tree),
     )
     scanner.visit(tree)
     if scanner.errors:
