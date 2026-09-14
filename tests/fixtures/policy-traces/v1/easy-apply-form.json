@@ -1,0 +1,112 @@
+{
+  "call": {
+    "arguments": {
+      "job_id": "123"
+    },
+    "method": "get_easy_apply_form"
+  },
+  "events": [
+    {
+      "call": "get_easy_apply_form",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add"
+    },
+    {
+      "call": "get_easy_apply_form",
+      "extra": {
+        "target_url": "https://www.linkedin.com/jobs/view/123/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto"
+    },
+    {
+      "call": "get_easy_apply_form",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/jobs/view/123/",
+      "requested_url": "https://www.linkedin.com/jobs/view/123/",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "get_easy_apply_form",
+      "description": "goto https://www.linkedin.com/jobs/view/123/",
+      "kind": "boundary.stabilize",
+      "result": null
+    },
+    {
+      "call": "get_easy_apply_form",
+      "extra": {
+        "target_url": "https://www.linkedin.com/jobs/view/123/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto"
+    },
+    {
+      "call": "get_easy_apply_form",
+      "kind": "boundary.auth_quick",
+      "result": null
+    },
+    {
+      "call": "get_easy_apply_form",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove"
+    },
+    {
+      "call": "get_easy_apply_form",
+      "kind": "boundary.rate_limit"
+    },
+    {
+      "arg": {
+        "appliedPattern": "^(?:Application submitted|Applied \\d+ ?[a-z]+ ago)$",
+        "applyPath": "/jobs/view/123/apply",
+        "closedLines": [
+          "No longer accepting applications",
+          "Not currently accepting applications"
+        ],
+        "descriptionHeadings": [
+          "About the job"
+        ],
+        "easyApplyLabel": "Easy Apply",
+        "externalLabel": "Apply",
+        "redirectPath": "/safety/go"
+      },
+      "call": "get_easy_apply_form",
+      "kind": "wait_for_function",
+      "operation": "job_apply_ready",
+      "program_digest": "2cae90d1455d",
+      "timeout_ms": 10000.0
+    },
+    {
+      "arg": {
+        "appliedPattern": "^(?:Application submitted|Applied \\d+ ?[a-z]+ ago)$",
+        "applyPath": "/jobs/view/123/apply",
+        "closedLines": [
+          "No longer accepting applications",
+          "Not currently accepting applications"
+        ],
+        "descriptionHeadings": [
+          "About the job"
+        ],
+        "easyApplyLabel": "Easy Apply",
+        "externalLabel": "Apply",
+        "redirectPath": "/safety/go"
+      },
+      "call": "get_easy_apply_form",
+      "kind": "evaluate",
+      "operation": "job_apply_signals",
+      "program_digest": "9e18c2d516fe"
+    }
+  ],
+  "result": {
+    "apply": {
+      "type": "closed"
+    },
+    "url": "https://www.linkedin.com/jobs/view/123/"
+  },
+  "scenario": "get_easy_apply_form__closed",
+  "schema_version": 1
+}

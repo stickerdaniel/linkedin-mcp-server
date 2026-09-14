@@ -36,6 +36,10 @@
         "coroutine": true,
         "signature": "(self, linkedin_username: 'str | None' = None, thread_id: 'str | None' = None, index: 'int' = 0) -> 'dict[str, Any]'"
       },
+      "get_easy_apply_form": {
+        "coroutine": true,
+        "signature": "(self, job_id: 'str') -> 'dict[str, Any]'"
+      },
       "get_inbox": {
         "coroutine": true,
         "signature": "(self, limit: 'int' = 20) -> 'dict[str, Any]'"
@@ -103,6 +107,7 @@
       "extract_page",
       "get_company_employees",
       "get_conversation",
+      "get_easy_apply_form",
       "get_inbox",
       "get_job_apply_url",
       "get_my_profile",
@@ -291,6 +296,25 @@
               "description": "LinkedIn messaging thread ID"
             }
           },
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "get_easy_apply_form": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "job_id": {
+              "description": "LinkedIn job ID (e.g., \"4252026496\", \"3856789012\")",
+              "type": "string"
+            }
+          },
+          "required": [
+            "job_id"
+          ],
           "type": "object"
         },
         "output": {

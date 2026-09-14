@@ -8,7 +8,9 @@ diagnostics that decide what a page *means* stay with the workflow.
 
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import dataclass
+from typing import Any
 
 import asyncio
 import logging
@@ -34,6 +36,7 @@ from linkedin_mcp_server.linkedin.contracts import (
     ExtractedSection,
 )
 from linkedin_mcp_server.linkedin.job_policy import (
+    EASY_APPLY_DRAFT_LEFT,
     SAFETY_REDIRECT_PATH,
     SCROLL_DEADLINE_MAX,
     ApplyType,
@@ -222,6 +225,135 @@ APPLY_READY_JS = (
 
 # How long the apply control gets to render.
 _APPLY_READY_TIMEOUT = 10.0
+_APPLY_POLL = 0.25
+
+# The Easy Apply dialog renders inside an open shadow root, which
+# `querySelectorAll` from the document never enters, so the programs below walk
+# the open roots first. Playwright locators pierce them on their own. The dialog
+# is told apart from others by an Easy Apply control inside it, and every button
+# by a LinkedIn data attribute rather than by its localized label.
+_EASY_APPLY_DIALOG_JS = r"""
+    const roots = [document];
+    for (let i = 0; i < roots.length; i++) {
+        for (const el of roots[i].querySelectorAll('*')) {
+            if (el.shadowRoot) roots.push(el.shadowRoot);
+        }
+    }
+    const marker = '[data-easy-apply-next-button], '
+        + '[data-live-test-easy-apply-submit-button], [id*="easyApplyFormElement"]';
+    let dialog = null;
+    for (const root of roots) {
+        dialog = [...root.querySelectorAll('[role="dialog"]')]
+            .find((candidate) => candidate.querySelector(marker));
+        if (dialog) break;
+    }
+"""
+
+EASY_APPLY_OPEN_JS = (
+    "() => {" + _EASY_APPLY_DIALOG_JS + "    return Boolean(dialog);\n}"
+)
+EASY_APPLY_CLOSED_JS = "() => !(" + EASY_APPLY_OPEN_JS + ")()"
+
+# One step of the open dialog. Radios and checkboxes are grouped into one field
+# per question; every other control is its own field. Footer controls (follow
+# the company) are not questions, and a file input is read although hidden
+# behind its upload button. `signature` changes when the step does.
+EASY_APPLY_STEP_JS = (
+    "(maxOptions) => {"
+    + _EASY_APPLY_DIALOG_JS
+    + r"""
+    if (!dialog) return null;
+    const form = dialog.querySelector('form') || dialog;
+    const footer = form.querySelector('footer');
+    const shown = (el) => Boolean(
+        el.offsetWidth || el.offsetHeight || el.getClientRects().length
+    );
+    // Labels repeat their text in an aria-hidden copy.
+    const text = (el) => {
+        if (!el) return '';
+        const copy = el.cloneNode(true);
+        copy.querySelectorAll('[aria-hidden="true"]').forEach((node) => node.remove());
+        return (copy.textContent || '').replace(/\s+/g, ' ').trim();
+    };
+    const byId = (id) => form.querySelector(`[id="${CSS.escape(id)}"]`);
+    const labelOf = (el) =>
+        (el.id && text(form.querySelector(`label[for="${CSS.escape(el.id)}"]`)))
+        || text(el.closest('label'))
+        || (el.getAttribute('aria-label') || '').trim();
+    const isChoice = (el) => el.type === 'radio' || el.type === 'checkbox';
+    const controls = [...form.querySelectorAll('input, select, textarea')].filter(
+        (el) => !(footer && footer.contains(el))
+            && el.type !== 'hidden'
+            && (el.type === 'file' || shown(el))
+    );
+    const groups = new Map();
+    for (const el of controls) {
+        const key = isChoice(el)
+            ? (el.closest('fieldset, [data-test-form-element]') || el)
+            : el;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(el);
+    }
+    const fields = [];
+    for (const [key, group] of groups) {
+        const first = group[0];
+        const fieldset = first.closest('fieldset');
+        const field = {
+            label: text(fieldset && fieldset.querySelector('legend'))
+                || (group.length === 1 ? labelOf(first) : '')
+                || (key === first ? '' : text(key).slice(0, 300)),
+            type: first.tagName === 'SELECT' ? 'select'
+                : first.tagName === 'TEXTAREA' ? 'textarea'
+                : first.getAttribute('role') === 'combobox' ? 'typeahead'
+                : first.type || 'text',
+            required: group.some(
+                (el) => el.required || el.getAttribute('aria-required') === 'true'
+            ) || Boolean(fieldset && fieldset.getAttribute('aria-required') === 'true'),
+        };
+        if (first.tagName === 'SELECT') {
+            const options = [...first.options].map((option) => option.text.trim());
+            field.options = options.slice(0, maxOptions);
+            if (options.length > maxOptions) field.options_total = options.length;
+            const picked = first.options[first.selectedIndex];
+            if (picked) field.value = picked.text.trim();
+        } else if (isChoice(first)) {
+            field.options = group.map(labelOf);
+            field.selected = group.filter((el) => el.checked).map(labelOf);
+        } else if (first.type !== 'file' && first.value) {
+            field.value = first.value;
+        }
+        if (first.maxLength > 0) field.max_length = first.maxLength;
+        const errors = group
+            .flatMap((el) => (el.getAttribute('aria-describedby') || '').split(/\s+/))
+            .filter(Boolean)
+            .map((id) => text(byId(id)))
+            .filter(Boolean);
+        if (errors.length) field.error = [...new Set(errors)].join(' ');
+        fields.push(field);
+    }
+    const heading = dialog.querySelector('h3');
+    const progress = dialog.querySelector('progress');
+    const value = progress && progress.getAttribute('value');
+    return {
+        heading: text(heading),
+        progress: value === null ? null : Number(value),
+        fields,
+        next: Boolean(dialog.querySelector('[data-easy-apply-next-button]')),
+        signature: [text(heading), value, ...controls.map((el) => el.id || el.type)]
+            .join('\n'),
+    };
+}"""
+)
+
+EASY_APPLY_NEXT_SELECTOR = "[data-easy-apply-next-button]"
+EASY_APPLY_DISCARD_SELECTOR = '[data-control-name="discard_application_confirm_btn"]'
+
+_EASY_APPLY_OPEN_TIMEOUT = 10.0
+_EASY_APPLY_STEP_TIMEOUT = 8.0
+_EASY_APPLY_DISCARD_TIMEOUT = 5.0
+_EASY_APPLY_MAX_STEPS = 8
+# A country list runs to 250 options; the prefilled value is still reported.
+_EASY_APPLY_MAX_OPTIONS = 50
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,6 +362,32 @@ class JobApplyRead:
 
     type: ApplyType
     url: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class EasyApplyFormRead:
+    """A posting's apply type and, for Easy Apply, the form steps read.
+
+    `complete` is False when steps after the last one were not read, and
+    `discarded` is False when the dialog could not be closed, which may leave a
+    saved draft on LinkedIn.
+    """
+
+    type: ApplyType
+    steps: tuple[dict[str, Any], ...] = ()
+    complete: bool = False
+    discarded: bool = True
+
+
+def _public_step(step: dict[str, Any]) -> dict[str, Any]:
+    """One read step as returned to the caller, without the walk's bookkeeping."""
+    public: dict[str, Any] = {}
+    if step["heading"]:
+        public["heading"] = step["heading"]
+    if step["progress"] is not None:
+        public["progress"] = step["progress"]
+    public["fields"] = step["fields"]
+    return public
 
 
 @dataclass(frozen=True, slots=True)
@@ -322,6 +480,126 @@ class JobPageReader:
         a stranger's link, or any redirect behind it, send a request from this
         host to whatever the host can reach.
         """
+        kind, link = await self._read_apply_type(url, job_id, text)
+        if kind == "external" and link is not None:
+            return JobApplyRead("external", employer_apply_url(link))
+        return JobApplyRead(kind)
+
+    async def read_easy_apply_form(
+        self, url: str, job_id: str, text: JobApplyTextTable
+    ) -> EasyApplyFormRead:
+        """Read an Easy Apply form step by step without answering it.
+
+        Any posting that is not Easy Apply answers with its type alone. Next is
+        clicked while LinkedIn accepts a step on its prefilled values, and the
+        first step it refuses ends the read. Nothing is typed, because LinkedIn
+        saves Easy Apply answers and prefills them into later applications.
+        The dialog is then closed and the draft it offers to save discarded.
+        """
+        kind, _ = await self._read_apply_type(url, job_id, text)
+        if kind != "easy_apply":
+            return EasyApplyFormRead(kind)
+
+        steps: list[dict[str, Any]] = []
+        try:
+            complete = await self._walk_easy_apply(job_id, steps)
+        except Exception as e:
+            if not await self._discard_easy_apply():
+                raise RuntimeError(EASY_APPLY_DRAFT_LEFT) from e
+            raise
+        discarded = await self._discard_easy_apply()
+        return EasyApplyFormRead("easy_apply", tuple(steps), complete, discarded)
+
+    async def _walk_easy_apply(self, job_id: str, steps: list[dict[str, Any]]) -> bool:
+        """Open the dialog and read its steps into ``steps``; True when all were read."""
+        page = self._session.page
+        await page.locator(f'main a[href*="/jobs/view/{job_id}/apply"]').first.click(
+            timeout=5000
+        )
+        try:
+            await page.wait_for_function(
+                EASY_APPLY_OPEN_JS, timeout=_EASY_APPLY_OPEN_TIMEOUT * 1000
+            )
+        except PlaywrightTimeoutError:
+            raise RuntimeError("The Easy Apply dialog did not open") from None
+
+        step = await self._read_easy_apply_step(None)
+        while True:
+            steps.append(_public_step(step))
+            if not step["next"]:
+                return True
+            if len(steps) >= _EASY_APPLY_MAX_STEPS:
+                return False
+            # The only control ever clicked in the dialog. Found by its
+            # attribute: a one-step form holds Submit in the same footer slot.
+            await page.locator(EASY_APPLY_NEXT_SELECTOR).click(timeout=5000)
+            after = await self._read_easy_apply_step(step)
+            if after["signature"] == step["signature"]:
+                # Refused: the same step, now carrying LinkedIn's errors.
+                steps[-1] = _public_step(after)
+                return False
+            step = after
+
+    async def _read_easy_apply_step(
+        self, previous: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        """The step the dialog settles on after ``previous``.
+
+        Settled means two reads in a row agree, and they differ from
+        ``previous`` or carry an error. A step that does neither by the
+        deadline is returned as it stands.
+        """
+        page = self._session.page
+        deadline = self._session.monotonic() + _EASY_APPLY_STEP_TIMEOUT
+        last: dict[str, Any] | None = None
+        while True:
+            step = await page.evaluate(EASY_APPLY_STEP_JS, _EASY_APPLY_MAX_OPTIONS)
+            if step is None:
+                raise RuntimeError("The Easy Apply dialog closed while it was read")
+            moved = previous is None or step["signature"] != previous["signature"]
+            refused = any("error" in field for field in step["fields"])
+            if (
+                last is not None
+                and last["signature"] == step["signature"]
+                and (moved or refused)
+            ):
+                return step
+            if self._session.monotonic() >= deadline:
+                return step
+            last = step
+            await self._session.delay(_APPLY_POLL)
+
+    async def _discard_easy_apply(self) -> bool:
+        """Close the Easy Apply dialog and discard its draft; True once it is gone.
+
+        Escape rather than the dialog's close button, which other dialogs carry
+        too. LinkedIn answers with "Save this application?", and only its
+        Discard, found by attribute, is clicked.
+        """
+        page = self._session.page
+        try:
+            if not await page.evaluate(EASY_APPLY_OPEN_JS):
+                return True
+            await page.keyboard.press("Escape")
+            with suppress(PlaywrightTimeoutError):
+                await page.locator(EASY_APPLY_DISCARD_SELECTOR).first.click(
+                    timeout=_EASY_APPLY_DISCARD_TIMEOUT * 1000
+                )
+            await page.wait_for_function(
+                EASY_APPLY_CLOSED_JS, timeout=_EASY_APPLY_DISCARD_TIMEOUT * 1000
+            )
+            return True
+        except Exception as e:
+            logger.warning("Could not discard the Easy Apply dialog (%s)", e)
+            return False
+
+    async def _read_apply_type(
+        self, url: str, job_id: str, text: JobApplyTextTable
+    ) -> tuple[ApplyType, str | None]:
+        """Open the posting and read its apply type, without clicking anything.
+
+        An external posting comes with its Apply link's href.
+        """
         await self._navigator._navigate_to_page(url)
         await self._session.check_rate_limit()
         page = self._session.page
@@ -345,19 +623,17 @@ class JobPageReader:
         # Both states before any control, so a posting in either never reads
         # as open.
         if signals and signals["applied"]:
-            return JobApplyRead("applied")
+            return "applied", None
         if signals and signals["closed"]:
-            return JobApplyRead("closed")
+            return "closed", None
         if signals and signals["easy_apply"]:
-            return JobApplyRead("easy_apply")
+            return "easy_apply", None
         if signals and signals["external_link"]:
-            return JobApplyRead(
-                "external", employer_apply_url(signals["external_link"])
-            )
+            return "external", signals["external_link"]
         # A barrier served in place of the posting renders none of the above
         # either, and it needs the relogin path rather than a type.
         await self._navigator._raise_if_auth_barrier(url)
-        return JobApplyRead("unknown")
+        return "unknown", None
 
     async def _extract_job_ids(self, *, scoped: bool = False) -> list[str]:
         """Extract unique job IDs from job card links on the current page.

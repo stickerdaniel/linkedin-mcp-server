@@ -88,6 +88,10 @@
       "description": "Read how a job posting takes applications and its employer application link"
     },
     {
+      "name": "get_easy_apply_form",
+      "description": "Read the questions of a job posting's Easy Apply form without typing, submitting or keeping a draft"
+    },
+    {
       "name": "search_jobs",
       "description": "Search for jobs with filters like keywords and location"
     },
