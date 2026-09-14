@@ -265,6 +265,41 @@
     "_meta": {
       "fastmcp": {
         "tags": [
+          "job"
+        ]
+      }
+    },
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Read the questions of a job posting's Easy Apply form, without answering them.\n\nOpens Easy Apply and reads each step: every field's label, type, whether\nit is required, its options, character limit and prefilled value. Next\nis clicked only while LinkedIn accepts a step on its prefilled values,\nso the first step that needs input ends the read. Nothing is typed,\nReview and Submit are never clicked, and the dialog is closed with its\ndraft discarded.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "job_id": {
+          "description": "LinkedIn job ID (e.g., \"4252026496\", \"3856789012\")",
+          "type": "string"
+        }
+      },
+      "required": [
+        "job_id"
+      ],
+      "type": "object"
+    },
+    "name": "get_easy_apply_form",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Get Easy Apply Form"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
           "feed"
         ]
       }

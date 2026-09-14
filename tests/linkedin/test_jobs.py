@@ -24,6 +24,7 @@ from linkedin_mcp_server.linkedin.contracts import (
     ExtractedSection,
 )
 from linkedin_mcp_server.linkedin.job_pages import (
+    EasyApplyFormRead,
     JobApplyRead,
     JobPageCapture,
     JobPageReader,
@@ -289,6 +290,64 @@ class TestGetJobApplyUrl:
         with self._reading(reader, side_effect=AuthenticationError("expired")):
             with pytest.raises(AuthenticationError):
                 await reader.get_job_apply_url("12345")
+
+
+class TestGetEasyApplyForm:
+    URL = "https://www.linkedin.com/jobs/view/12345/"
+    STEP = {
+        "heading": "Contact info",
+        "progress": 0,
+        "fields": [{"label": "First name", "type": "text", "required": True}],
+    }
+
+    @staticmethod
+    def _reading(reader, **kwargs):
+        return patch.object(
+            reader._pages, "read_easy_apply_form", new_callable=AsyncMock, **kwargs
+        )
+
+    async def test_an_easy_apply_posting_answers_with_its_steps(self, mock_page):
+        reader = _reader(mock_page)
+        read = EasyApplyFormRead("easy_apply", (self.STEP,), complete=False)
+        with self._reading(reader, return_value=read) as read_form:
+            result = await reader.get_easy_apply_form("12345")
+
+        read_form.assert_awaited_once_with(self.URL, "12345", JOB_APPLY_EN_US)
+        assert result == {
+            "url": self.URL,
+            "apply": {"type": "easy_apply"},
+            "form": {"steps": [self.STEP], "complete": False},
+        }
+
+    async def test_any_other_posting_carries_its_type_alone(self, mock_page):
+        reader = _reader(mock_page)
+        with self._reading(reader, return_value=EasyApplyFormRead("closed")):
+            result = await reader.get_easy_apply_form("12345")
+
+        assert result == {"url": self.URL, "apply": {"type": "closed"}}
+
+    async def test_a_draft_left_behind_is_reported_beside_the_form(self, mock_page):
+        reader = _reader(mock_page)
+        read = EasyApplyFormRead("easy_apply", (self.STEP,), True, discarded=False)
+        with self._reading(reader, return_value=read):
+            result = await reader.get_easy_apply_form("12345")
+
+        assert result["form"]["steps"] == [self.STEP]
+        assert result["section_errors"]["form"]["error_type"] == "easy_apply_draft_left"
+
+    async def test_a_failed_read_is_a_section_error_and_no_form(self, mock_page):
+        reader = _reader(mock_page)
+        with self._reading(reader, side_effect=RuntimeError("dialog did not open")):
+            result = await reader.get_easy_apply_form("12345")
+
+        assert "form" not in result and "apply" not in result
+        assert "form" in result["section_errors"]
+
+    async def test_an_expired_session_reaches_the_relogin_path(self, mock_page):
+        reader = _reader(mock_page)
+        with self._reading(reader, side_effect=AuthenticationError("expired")):
+            with pytest.raises(AuthenticationError):
+                await reader.get_easy_apply_form("12345")
 
 
 class TestSearchJobs:

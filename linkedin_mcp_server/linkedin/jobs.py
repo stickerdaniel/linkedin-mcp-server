@@ -36,6 +36,7 @@ from linkedin_mcp_server.linkedin.job_policy import (
     apply_link_missing_section_error,
     dropped_filters_section_error,
     dropped_offset_section_error,
+    easy_apply_draft_section_error,
     label_similar_jobs,
     lost_keywords_section_error,
     missing_description_section_error,
@@ -177,6 +178,42 @@ class JobReader:
             apply["url"] = read.url
         elif read.type == "external":
             result["section_errors"] = {"apply": apply_link_missing_section_error()}
+        return result
+
+    async def get_easy_apply_form(self, job_id: str) -> dict[str, Any]:
+        """Read the questions of a posting's Easy Apply form.
+
+        Returns:
+            {url, apply: {type}, form?: {steps, complete}}, with form present
+            for Easy Apply postings only, or {url, section_errors} when the
+            form could not be read. A draft left undiscarded is a section
+            error beside the form.
+        """
+        job_id = normalize_job_id(job_id)
+        url = job_view_url(job_id, "/")
+        try:
+            read = await self._pages.read_easy_apply_form(url, job_id, self._apply_text)
+        except LinkedInOperationError:
+            raise
+        except Exception as e:
+            logger.warning("Failed to read the Easy Apply form of %s: %s", url, e)
+            return {
+                "url": url,
+                "section_errors": {
+                    "form": build_issue_diagnostics(
+                        e,
+                        context="get_easy_apply_form",
+                        target_url=url,
+                        section_name="form",
+                    )
+                },
+            }
+
+        result: dict[str, Any] = {"url": url, "apply": {"type": read.type}}
+        if read.type == "easy_apply":
+            result["form"] = {"steps": list(read.steps), "complete": read.complete}
+        if not read.discarded:
+            result["section_errors"] = {"form": easy_apply_draft_section_error()}
         return result
 
     async def search_jobs(
