@@ -4642,10 +4642,10 @@ class TestRealOwner:
     @pytest.mark.skipif(
         os.name == "nt"
         and sys.implementation.name == "cpython"
-        and sys.version_info[:3] == (3, 12, 4),
+        and sys.version_info[:2] == (3, 12),
         reason=(
-            "CPython 3.12.4 intermittently access-violates under this "
-            "daemon-thread I/O stress"
+            "CPython 3.12 intermittently access-violates under this "
+            "daemon-thread I/O stress (measured on 3.12.4 and 3.12.10)"
         ),
     )
     def test_many_clients_starting_at_once_elect_exactly_one_owner(
