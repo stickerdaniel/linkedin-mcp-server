@@ -114,7 +114,7 @@ def register_job_tools(
             total ({count, exact}) is the result count LinkedIn advertises,
             with exact false for a lower bound such as "1,000+".
             promoted_job_ids is the subset of job_ids LinkedIn marks as
-            promoted, present whenever that could be read.
+            promoted, present only when every page could be read.
             A search with no matches returns empty job_ids and a
             section_errors entry of type no_matching_jobs, rather than the
             unrelated recommendations LinkedIn shows in its place.
