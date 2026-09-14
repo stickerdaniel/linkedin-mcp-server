@@ -758,11 +758,20 @@ def _make_browser_manager(tmp_path) -> tuple[BrowserManager, MagicMock]:
 
 
 def _cleared_names(context: MagicMock) -> set[str]:
-    """Return the cookie names cleared, asserting no call wiped the whole jar."""
+    """Return the cookie names cleared.
+
+    Asserts every clear is scoped by name and to LinkedIn domains, so an import
+    never wipes the whole jar or another site's cookie of the same name.
+    """
     names: set[str] = set()
     for call in context.clear_cookies.await_args_list:
         assert not call.args
-        assert set(call.kwargs) == {"name"}
+        assert set(call.kwargs) == {"name", "domain"}
+        domain = call.kwargs["domain"]
+        for linkedin in (".linkedin.com", ".www.linkedin.com", "www.linkedin.com"):
+            assert domain.search(linkedin)
+        for other in (".example.com", ".notlinkedin.com", ".linkedin.com.evil.test"):
+            assert not domain.search(other)
         names.add(call.kwargs["name"])
     return names
 
