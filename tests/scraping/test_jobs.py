@@ -2053,6 +2053,54 @@ class TestSearchJobs:
         assert result["sections"]["search_results"] == "Page 1"
         assert "promoted_job_ids" not in result
 
+    async def test_a_failed_promoted_read_on_a_later_page_drops_the_key(
+        self, mock_page
+    ):
+        """A list covering only the pages that answered reads as complete.
+
+        The failed page's jobs would then pass for jobs nobody promoted.
+        """
+        scraper = _scraper(mock_page)
+        with (
+            patch.object(
+                scraper._pages,
+                "_extract_search_page",
+                side_effect=self._navigating(
+                    mock_page, [extracted("Page 1"), extracted("Page 2")]
+                ),
+            ),
+            patch.object(
+                scraper._pages,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                side_effect=[["111"], ["222"]],
+            ),
+            patch.object(
+                scraper._pages,
+                "_extract_promoted_job_ids",
+                new_callable=AsyncMock,
+                side_effect=[
+                    ["111"],
+                    PatchrightError("Execution context was destroyed"),
+                ],
+            ) as mock_promoted,
+            patch.object(
+                scraper._pages,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await scraper.search_jobs("python", max_pages=2)
+
+        assert result["job_ids"] == ["111", "222"]
+        assert mock_promoted.await_count == 2
+        assert "promoted_job_ids" not in result
+
     async def test_a_login_redirect_raises_an_auth_error(self, mock_page):
         """A login wall reached mid-search is an expired session.
 

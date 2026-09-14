@@ -162,9 +162,10 @@ class JobScraper:
         total_pages_queried = False
         total: dict[str, Any] | None = None
         promoted_ids: list[str] = []
-        # Whether any page answered, so an empty list means none were
-        # promoted rather than that nobody could tell.
-        promoted_read = False
+        # False once a page that added ids could not be read. The list would
+        # then cover only some of `job_ids`, and a caller takes a job missing
+        # from it as not promoted.
+        promoted_complete = True
 
         # The search-wide scroll budget is spent as it goes rather than
         # divided up front, because dividing it charges every navigation for
@@ -436,7 +437,7 @@ class JobScraper:
                     break
 
                 # Best effort, like the page count: a read that fails costs the
-                # flag and never the page.
+                # key and never the page.
                 try:
                     promoted = set(
                         await self._pages._extract_promoted_job_ids(
@@ -447,8 +448,8 @@ class JobScraper:
                     raise
                 except Exception as e:
                     logger.debug("Could not read promoted jobs: %s", e)
+                    promoted_complete = False
                 else:
-                    promoted_read = True
                     promoted_ids.extend(jid for jid in new_ids if jid in promoted)
 
                 for jid in new_ids:
@@ -480,7 +481,9 @@ class JobScraper:
         }
         if total is not None:
             result["total"] = total
-        if promoted_read:
+        # Each page adds its ids only after its promoted read, so ids with no
+        # failed read mean every page that contributed was read.
+        if all_job_ids and promoted_complete:
             result["promoted_job_ids"] = promoted_ids
         if page_references:
             result["references"] = {
