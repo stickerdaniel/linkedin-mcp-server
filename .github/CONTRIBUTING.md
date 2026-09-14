@@ -66,6 +66,7 @@ Every tool that reads LinkedIn returns `{"url": str, "sections": {name: raw_text
 - `total` and `promoted_job_ids`: returned by `search_jobs`. `total` is `{count, exact}`, the result count LinkedIn advertises. `promoted_job_ids` is the promoted subset of `job_ids`.
 - `apply`: returned by `get_job_apply_url` instead of `sections`. `{type, url?}`, where `type` is `easy_apply`, `external`, `applied`, `closed` or `unknown`.
 - `apply` beside `sections`: added by `get_job_details` when the posting shows it was applied to or has closed. `{type}`, where `type` is `applied` or `closed`.
+- `apply` and `form`: returned by `get_easy_apply_form` instead of `sections`. `form` is present for Easy Apply postings only: `{steps: [{heading?, progress?, fields}], complete}`.
 
 ## Adding a section
 

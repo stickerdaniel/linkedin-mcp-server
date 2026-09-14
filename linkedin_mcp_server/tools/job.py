@@ -129,6 +129,65 @@ def register_job_tools(
 
     @mcp.tool(
         timeout=tool_timeout,
+        title="Get Easy Apply Form",
+        annotations={
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": True,
+        },
+        tags={"job"},
+    )
+    async def get_easy_apply_form(
+        job_id: str,
+        ctx: Context,
+    ) -> dict[str, Any]:
+        """
+        Read the questions of a job posting's Easy Apply form, without answering them.
+
+        Opens Easy Apply and reads each step: every field's label, type, whether
+        it is required, its options, character limit and prefilled value. Next
+        is clicked only while LinkedIn accepts a step on its prefilled values,
+        so the first step that needs input ends the read. Nothing is typed,
+        Review and Submit are never clicked, and the dialog is closed with its
+        draft discarded.
+
+        Args:
+            job_id: LinkedIn job ID (e.g., "4252026496", "3856789012")
+            ctx: FastMCP context for progress reporting
+
+        Returns:
+            Dict with url and apply: {type} (easy_apply, external, applied,
+            closed or unknown). Easy Apply postings add form: {steps, complete},
+            each step {heading?, progress?, fields}. complete is false when
+            steps after the last one were not read; the fields LinkedIn refused
+            on that step carry its error. section_errors reports a form that
+            could not be read or a draft that could not be discarded.
+        """
+        try:
+            extractor = await get_ready_extractor(ctx, tool_name="get_easy_apply_form")
+            logger.info("Reading Easy Apply form: %s", job_id)
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Opening job posting"
+            )
+
+            result = await extractor.get_easy_apply_form(job_id)
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_easy_apply_form")
+        except Exception as e:
+            raise_tool_error(e, "get_easy_apply_form")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
         title="Search Jobs",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"job", "search"},
