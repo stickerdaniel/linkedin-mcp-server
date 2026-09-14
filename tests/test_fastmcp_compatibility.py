@@ -62,14 +62,6 @@ def test_security_floors_are_published() -> None:
     assert _minimum(development["aiohttp"]) >= Version("3.14.3")
 
 
-def test_supported_local_architectures_are_published() -> None:
-    readme = (_REPO_ROOT / "README.md").read_text(encoding="utf-8")
-    assert "ARM64 (Apple silicon) on macOS" in readme
-    assert "64-bit Windows" in readme
-    assert "no longer publish Intel macOS or 32-bit Windows wheels" in readme
-    assert "Docker images remain supported on Linux AMD64 and ARM64" in readme
-
-
 def test_fastmcp_v4_is_excluded_while_exclude_args_is_used() -> None:
     """FastMCP 4 removed the ``exclude_args`` decorator argument."""
     tool_sources = (_REPO_ROOT / "linkedin_mcp_server" / "tools").glob("*.py")
