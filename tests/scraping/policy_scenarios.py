@@ -839,7 +839,12 @@ async def _single_capture_facade_scenario(method: str) -> dict[str, Any]:
     name = f"{method}__baseline"
     recorder = TraceRecorder(name, _COMMON_ALLOWED)
     clock = FakeClock(recorder)
-    page = _page(recorder).script("evaluate:root_content", _root("Result content"))
+    # A posting is only whole with its description heading; the other
+    # facades accept any text.
+    text = (
+        "About the job\nResult content" if method == "scrape_job" else "Result content"
+    )
+    page = _page(recorder).script("evaluate:root_content", _root(text))
     extractor = _extractor(page)
     arguments: dict[str, Any]
     async with boundaries(recorder, clock):

@@ -1,4 +1,4 @@
-"""Routing, paging and reporting policy for the job list workflows."""
+"""Routing, paging and reporting policy for the job workflows."""
 
 from __future__ import annotations
 
@@ -155,6 +155,23 @@ def dropped_filters_section_error(names: list[str], landed: str) -> dict[str, st
             'keywords instead, as in "remote python developer in France".'
         )
     return {"error_type": "filters_dropped", "error_message": message}
+
+
+def missing_description_section_error() -> dict[str, str]:
+    """The ``section_errors`` entry for a posting read without its description.
+
+    Reported rather than raised, and the text kept: the header, apply controls
+    and company details are still that posting. Without it a caller cannot tell
+    a description that had not rendered from a posting that has none, and a job
+    judged on its header alone reads as a poor fit rather than an unread one.
+    """
+    return {
+        "error_type": "description_missing",
+        "error_message": (
+            "The posting was read without its description, so the text holds "
+            "only its header and company details. Calling again may return it."
+        ),
+    }
 
 
 # LinkedIn's offset stride in the search URL. It is NOT how many cards a

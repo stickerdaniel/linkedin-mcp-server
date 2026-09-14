@@ -36,6 +36,7 @@ from linkedin_mcp_server.scraping.job_policy import (
     dropped_offset_section_error,
     label_similar_jobs,
     lost_keywords_section_error,
+    missing_description_section_error,
     no_matching_jobs_section_error,
     reconcile_search_references,
 )
@@ -43,7 +44,11 @@ from linkedin_mcp_server.scraping.link_metadata import Reference, dedupe_referen
 from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.search_urls import build_job_search_url
 from linkedin_mcp_server.scraping.session import NAV_DELAY
-from linkedin_mcp_server.scraping.text import JOB_SEARCH_EN_US, JobSearchTextTable
+from linkedin_mcp_server.scraping.text import (
+    JOB_POSTING_EN_US,
+    JOB_SEARCH_EN_US,
+    JobSearchTextTable,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +99,8 @@ class JobScraper:
                 references["job_posting"] = label_similar_jobs(
                     extracted.references, job_id
                 )
+            if not JOB_POSTING_EN_US.has_description(extracted.text):
+                section_errors["job_posting"] = missing_description_section_error()
         elif extracted.text == RATE_LIMITED_SECTION_TEXT:
             section_errors["job_posting"] = rate_limited_section_error()
         elif extracted.error:

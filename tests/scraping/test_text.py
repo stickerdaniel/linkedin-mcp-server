@@ -100,6 +100,12 @@ class TestJobPostingText:
         table = JobPostingTextTable(description_headings=("À propos de l'offre",))
         assert '["À propos de l\'offre"]' in table.readiness_expression()
 
+    def test_has_description_needs_the_heading_as_a_whole_line(self):
+        assert JOB_POSTING_EN_US.has_description("Engineer\n  About the job  \nBuild")
+        assert not JOB_POSTING_EN_US.has_description("Read About the job below")
+        assert not JOB_POSTING_EN_US.has_description("Engineer\nAcme\nApply")
+        assert not JOB_POSTING_EN_US.has_description("")
+
 
 class TestStripLinkedInNoise:
     def test_strips_footer(self):

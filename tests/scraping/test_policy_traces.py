@@ -190,7 +190,9 @@ async def test_scrape_job_traces_keep_success_and_error_results_separate():
     successful_job = traces["scrape-job.json"]["result"]
     failed_job = traces["scrape-job-error.json"]["result"]
 
-    assert successful_job["sections"] == {"job_posting": "Result content"}
+    assert successful_job["sections"] == {
+        "job_posting": "About the job\nResult content"
+    }
     assert successful_job["section_names"] == ["job_posting"]
     assert "section_errors" not in successful_job
     assert failed_job["sections"] == {}

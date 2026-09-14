@@ -49,6 +49,9 @@ def register_job_tools(
             The LLM should parse the raw text to extract job details. Jobs in
             the posting's "More jobs" list are references with context
             "similar job"; their ids work with get_job_details.
+            section_errors.job_posting.error_type "description_missing" means
+            the posting was read without its "About the job" description;
+            calling again may return it.
         """
         try:
             job_id = normalize_job_id(job_id)
