@@ -129,14 +129,22 @@ def dropped_filters_section_error(names: list[str], landed: str) -> dict[str, st
     Saying nothing is what cannot be defended, since a search for remote
     Python in Berlin then returns Python anywhere and reads as though Berlin
     had none.
+
+    The redesigned route keeps only the keywords, `f_TPR` and `start`, and
+    reads a location and a work type from the words of the query instead, so
+    there the message says where they go. Measured: "remote forward deployed
+    engineer in France" returned remote postings in France.
     """
-    return {
-        "error_type": "filters_dropped",
-        "error_message": (
-            f"LinkedIn did not keep {', '.join(names)} (landed on {landed}), "
-            "so the results are broader than the search asked for."
-        ),
-    }
+    message = (
+        f"LinkedIn did not keep {', '.join(names)} (landed on {landed}), "
+        "so the results are broader than the search asked for."
+    )
+    if route(landed)[1] == "/jobs/search-results":
+        message += (
+            " Its redesigned search reads location and work type from the "
+            'keywords instead, as in "remote python developer in France".'
+        )
+    return {"error_type": "filters_dropped", "error_message": message}
 
 
 # LinkedIn's offset stride in the search URL. It is NOT how many cards a
