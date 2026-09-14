@@ -974,6 +974,13 @@ class BrowserManager:
                 logger.warning("No li_at cookie found in %s", path)
                 return False
 
+            # A pre-import visit leaves anonymous JSESSIONID/bscookie/timezone on
+            # .www.linkedin.com. The normalized imports land on .linkedin.com, so
+            # both copies get sent and LinkedIn answers /feed/ with HTTP 400.
+            # Clear only the names being imported; other cookies stay.
+            for name in {c["name"] for c in cookies}:
+                await self._context.clear_cookies(name=name)
+
             await self._context.add_cookies(
                 cookies  # ty: ignore[invalid-argument-type]
             )
