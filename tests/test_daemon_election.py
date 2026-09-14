@@ -1551,6 +1551,27 @@ def _run_frontend(profile: Path) -> dict[str, object]:
     return json.loads(result.stdout.strip().splitlines()[-1])
 
 
+def _reap_frontends(frontends: list[subprocess.Popen[str]]) -> None:
+    """Kill direct frontends together, then reap them without reading pipes."""
+    for frontend in frontends:
+        if frontend.poll() is None:
+            frontend.kill()
+    for frontend in frontends:
+        frontend.wait(timeout=30)
+        # A timed-out Windows communicate() leaves its pipe readers alive. Closing
+        # their buffered streams can wait on those readers without a bound.
+        stdout_thread = getattr(frontend, "stdout_thread", None)
+        if frontend.stdout is not None and (
+            stdout_thread is None or not stdout_thread.is_alive()
+        ):
+            frontend.stdout.close()
+        stderr_thread = getattr(frontend, "stderr_thread", None)
+        if frontend.stderr is not None and (
+            stderr_thread is None or not stderr_thread.is_alive()
+        ):
+            frontend.stderr.close()
+
+
 def _windows_alive(pid: int) -> bool:
     """Query a Windows owner without signaling or terminating it."""
     win32api = importlib.import_module("win32api")
@@ -4604,11 +4625,24 @@ class TestRealOwner:
     ):
         popen = subprocess.Popen
         running: list[subprocess.Popen[str]] = []
+        waited: list[subprocess.Popen[str]] = []
 
         def spawn(*args: Any, **kwargs: Any) -> subprocess.Popen[str]:
             if failure == "spawn" and len(running) == 2:
                 raise OSError("frontend spawn failed")
             child = popen(*args, **kwargs)
+            original_wait = child.wait
+
+            def wait(timeout: float | None = None) -> int:
+                returncode = original_wait(timeout=timeout)
+                waited.append(child)
+                return returncode
+
+            def communicate(*args: Any, **kwargs: Any) -> tuple[str, str]:
+                pytest.fail("abnormal frontend cleanup called communicate()")
+
+            monkeypatch.setattr(child, "wait", wait)
+            monkeypatch.setattr(child, "communicate", communicate)
             running.append(child)
             return child
 
@@ -4628,16 +4662,110 @@ class TestRealOwner:
                 )
 
             assert len(running) == (2 if failure == "spawn" else 8)
+            assert waited == running
             for child in running:
                 assert child.returncode is not None, "frontend was not collected"
                 assert child.stdout is not None and child.stdout.closed
                 assert child.stderr is not None and child.stderr.closed
             assert not (real_state_root.parent / "launch-barrier" / "go").exists()
         finally:
-            for child in running:
-                if child.poll() is None:
-                    child.kill()
-                child.communicate(timeout=30)
+            _reap_frontends(running)
+
+    def test_timed_out_communicate_preserves_owner_cleanup(
+        self, real_state_root: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        popen = subprocess.Popen
+        stop = _stop
+        running: list[subprocess.Popen[str]] = []
+        stopped: list[object] = []
+
+        class LiveReader:
+            alive = True
+
+            def is_alive(self) -> bool:
+                return self.alive
+
+        class GuardedStream:
+            def __init__(self, stream: Any, reader: LiveReader):
+                self.stream = stream
+                self.reader = reader
+                self.close_calls = 0
+
+            @property
+            def closed(self) -> bool:
+                return self.stream.closed
+
+            def close(self) -> None:
+                assert not self.reader.is_alive(), "closed under a live pipe reader"
+                self.close_calls += 1
+                self.stream.close()
+
+        readers: list[LiveReader] = []
+        streams: list[GuardedStream] = []
+
+        def spawn(*args: Any, **kwargs: Any) -> subprocess.Popen[str]:
+            child = popen(*args, **kwargs)
+            running.append(child)
+            if len(running) != 1:
+                return child
+
+            assert child.stdout is not None
+            assert child.stderr is not None
+            stdout_reader = LiveReader()
+            stderr_reader = LiveReader()
+            stdout = GuardedStream(child.stdout, stdout_reader)
+            stderr = GuardedStream(child.stderr, stderr_reader)
+            child.stdout = cast(Any, stdout)
+            child.stderr = cast(Any, stderr)
+            monkeypatch.setattr(child, "stdout_thread", stdout_reader, raising=False)
+            monkeypatch.setattr(child, "stderr_thread", stderr_reader, raising=False)
+            readers.extend((stdout_reader, stderr_reader))
+            streams.extend((stdout, stderr))
+
+            def communicate(
+                input: str | None = None, timeout: float | None = None
+            ) -> tuple[str, str]:
+                assert input is None
+                assert timeout is not None
+                deadline = time.monotonic() + 30
+                while time.monotonic() < deadline:
+                    if (
+                        daemon_descriptor_module.read(real_state_root.parent)
+                        is not None
+                    ):
+                        break
+                    time.sleep(0.01)
+                else:
+                    pytest.fail(
+                        "the owner was not published before communicate timed out"
+                    )
+                raise subprocess.TimeoutExpired(child.args, timeout)
+
+            monkeypatch.setattr(child, "communicate", communicate)
+            return child
+
+        def track_stop(pid: object) -> None:
+            stopped.append(pid)
+            stop(pid)
+
+        monkeypatch.setattr(subprocess, "Popen", spawn)
+        monkeypatch.setattr(sys.modules[__name__], "_stop", track_stop)
+        try:
+            with pytest.raises(subprocess.TimeoutExpired):
+                self.test_many_clients_starting_at_once_elect_exactly_one_owner(
+                    real_state_root
+                )
+
+            assert len(running) == 8
+            assert all(child.returncode is not None for child in running)
+            assert all(stream.close_calls == 0 for stream in streams)
+            assert stopped, "the published owner was not cleaned up"
+        finally:
+            for reader in readers:
+                reader.alive = False
+            _reap_frontends(running)
+            for pid in stopped:
+                stop(pid)
 
     @pytest.mark.skipif(
         os.name == "nt"
@@ -4718,11 +4846,7 @@ class TestRealOwner:
             # And none of them kept the lock they may have taken on the way.
             assert not any(r["frontend_holds_lock"] for r in results)
         finally:
-            for frontend in running:
-                if frontend.poll() is None:
-                    frontend.kill()
-            for frontend in running:
-                frontend.communicate(timeout=30)
+            _reap_frontends(running)
             for pid in owners:
                 _stop(pid)
             with contextlib.suppress(Exception):
