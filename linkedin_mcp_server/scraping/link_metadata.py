@@ -324,9 +324,9 @@ def classify_link(href: str) -> tuple[ReferenceKind, str] | None:
         return "job", f"/jobs/view/{match.group(1)}/"
 
     # A job card that opens inside a search links to the search with the job
-    # selected rather than to the job. The "More jobs" cards on a posting are
-    # built this way, measured on 2026-09-13, and every one of them was dropped.
-    # ASCII digits for the same reason as `JOB_PATH_RE`.
+    # selected rather than to the job, as the "More jobs" cards on a posting
+    # do. Without this every one of them was dropped. ASCII digits for the
+    # same reason as `JOB_PATH_RE`.
     if path.rstrip("/") in {"/jobs/search", "/jobs/search-results"}:
         job_id = (parse_qs(parsed.query).get("currentJobId") or [""])[0]
         if re.fullmatch(r"[0-9]+", job_id):
