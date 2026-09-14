@@ -58,6 +58,7 @@ An MCP server that connects AI assistants like Claude to LinkedIn through your o
 | `get_saved_jobs` | List the job postings you have saved on LinkedIn. |
 | `search_people` | Search by keyword, location, connection degree or company. |
 | `get_job_details` | Read the details of a LinkedIn job posting by its job ID. |
+| `get_job_apply_url` | Read how a posting takes applications and the employer's link. Clicks Apply, which LinkedIn counts as an apply click. |
 | `get_feed` | Read recent home-feed posts, with links in `references`. |
 | `search_posts` | Search posts by keyword with optional recency filters; `references` contains unordered candidate post links. |
 | `close_session` | Close the active browser session and release its resources. |

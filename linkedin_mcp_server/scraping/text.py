@@ -94,6 +94,42 @@ _JOB_POSTING_TEXT: dict[str, JobPostingTextTable] = {
 # and is reported as missing its description.
 JOB_POSTING_EN_US = _JOB_POSTING_TEXT["en-US"]
 
+
+@dataclass(frozen=True)
+class JobApplyTextTable:
+    """Visible-text policy for reading how a job posting takes applications."""
+
+    # The whole visible text of the button that sends the applicant to the
+    # employer's site. It has no href and no attribute naming it, unlike Easy
+    # Apply, an anchor into the posting's own `/apply/` route that needs no
+    # entry here.
+    external_apply_label: str
+    # The heading that opens the description. Posting-state lines are read
+    # above it only, so the same words in the description or on the "More
+    # jobs" cards below it cannot pass for this posting's state.
+    description_heading: str
+    # Whole lines a posting shows once it stops taking applications.
+    closed_lines: tuple[str, ...]
+    # The line a posting shows once this account has applied. Anchored at both
+    # ends, because titles such as "Applied AI Engineer" open with the word.
+    applied_pattern: re.Pattern[str]
+
+
+_JOB_APPLY_TEXT: dict[str, JobApplyTextTable] = {
+    "en-US": JobApplyTextTable(
+        external_apply_label="Apply",
+        description_heading="About the job",
+        closed_lines=("No longer accepting applications",),
+        applied_pattern=re.compile(r"^Applied \d+ \w+ ago$"),
+    ),
+}
+
+# Same locale contract as `DETAIL_CAPTURE_EN_US`. The label and the heading were
+# measured on 2026-09-14 against an external and an Easy Apply posting. The
+# closed and applied lines were not, for want of such a posting: one showing
+# other words reads as `unknown` rather than as open.
+JOB_APPLY_EN_US = _JOB_APPLY_TEXT["en-US"]
+
 # Patterns that mark the start of LinkedIn page chrome (sidebar/footer).
 # Everything from the earliest match onwards is stripped.
 _NOISE_MARKERS: list[re.Pattern[str]] = [

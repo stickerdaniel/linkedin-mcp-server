@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from urllib.parse import urlparse
+from typing import Literal
+from urllib.parse import parse_qs, urlparse
 
 from linkedin_mcp_server.scraping.link_metadata import (
     JOB_PATH_RE,
@@ -251,3 +252,46 @@ SAVED_JOBS_PATHS = frozenset({"/my-items/saved-jobs", "/jobs-tracker"})
 # returns the 11th saved job, while ?start=25 lands past the end of a two-page
 # list and yields nothing.
 SAVED_JOBS_PAGE_SIZE = 10
+
+ApplyType = Literal["easy_apply", "external", "applied", "closed", "unknown"]
+
+# LinkedIn's interstitial for links that leave the site, with the destination in
+# its `url` parameter. Measured on 2026-09-14: an external posting's Apply opens
+# a "Share your profile?" dialog whose Continue link is
+# `/safety/go/?url=https%3A%2F%2Fgrnh.se%2F...`.
+SAFETY_REDIRECT_PATH = "/safety/go"
+
+
+def employer_apply_url(href: str) -> str | None:
+    """The employer's address an apply link leads to, or None.
+
+    The interstitial answers with its destination, and any other address off
+    LinkedIn answers as itself. A LinkedIn page that is not the interstitial is
+    not the employer's site, so it answers None rather than passing for one.
+    """
+    parsed = urlparse(href)
+    host = parsed.hostname
+    if parsed.scheme not in ("http", "https") or not host:
+        return None
+    if host != "linkedin.com" and not host.endswith(".linkedin.com"):
+        return href
+    if parsed.path.rstrip("/") != SAFETY_REDIRECT_PATH:
+        return None
+    destination = parse_qs(parsed.query).get("url", [""])[0]
+    return employer_apply_url(destination) if destination else None
+
+
+def apply_link_missing_section_error() -> dict[str, str]:
+    """The ``section_errors`` entry for an external Apply that led nowhere.
+
+    The posting is still external, which is worth keeping, but a type with no
+    link and nothing beside it reads as a posting that has none. Being told is
+    what lets a caller open the posting itself.
+    """
+    return {
+        "error_type": "apply_link_missing",
+        "error_message": (
+            "Apply was clicked but LinkedIn opened neither its dialog nor a tab, "
+            "so the employer's link could not be read."
+        ),
+    }

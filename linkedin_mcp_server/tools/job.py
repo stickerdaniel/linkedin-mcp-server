@@ -80,6 +80,65 @@ def register_job_tools(
 
     @mcp.tool(
         timeout=tool_timeout,
+        title="Get Job Apply URL",
+        annotations={
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": True,
+        },
+        tags={"job", "scraping"},
+        exclude_args=["extractor"],
+    )
+    async def get_job_apply_url(
+        job_id: str,
+        ctx: Context,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        Get how a job posting takes applications, and the employer's application link.
+
+        For a posting that applies off LinkedIn this clicks Apply, which LinkedIn
+        counts as an apply click on the posting and may later ask about. Call it
+        when preparing an application, not while browsing. It never submits an
+        application and never shares the profile with the job poster.
+
+        Args:
+            job_id: LinkedIn job ID (e.g., "4252026496", "3856789012")
+            ctx: FastMCP context for progress reporting
+
+        Returns:
+            Dict with url and apply: {type, url?}. type is easy_apply,
+            external, applied, closed or unknown. url is the employer's
+            application page, after its redirects, for external postings.
+            A posting that could not be read returns section_errors instead.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="get_job_apply_url"
+            )
+            logger.info("Reading apply link: %s", job_id)
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Opening job posting"
+            )
+
+            result = await extractor.get_job_apply_url(job_id)
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_job_apply_url")
+        except Exception as e:
+            raise_tool_error(e, "get_job_apply_url")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
         title="Search Jobs",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"job", "search"},

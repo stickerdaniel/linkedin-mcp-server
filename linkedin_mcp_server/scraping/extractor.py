@@ -157,6 +157,10 @@ class LinkedInExtractor:
         """Scrape a single job posting."""
         return await self._jobs.scrape_job(job_id)
 
+    async def get_job_apply_url(self, job_id: str) -> dict[str, Any]:
+        """Read how a job posting takes applications and the employer's link."""
+        return await self._jobs.get_job_apply_url(job_id)
+
     async def search_jobs(
         self,
         keywords: str,

@@ -8,6 +8,7 @@ diagnostics that decide what a page *means* stay with the workflow.
 
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import dataclass
 
 import asyncio
@@ -15,6 +16,7 @@ import logging
 import re
 import time
 
+from patchright.async_api import Page
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.core.exceptions import LinkedInScraperException
@@ -34,7 +36,10 @@ from linkedin_mcp_server.scraping.contracts import (
     ExtractedSection,
 )
 from linkedin_mcp_server.scraping.job_policy import (
+    SAFETY_REDIRECT_PATH,
     SCROLL_DEADLINE_MAX,
+    ApplyType,
+    employer_apply_url,
     route,
     same_job_search,
 )
@@ -42,6 +47,7 @@ from linkedin_mcp_server.scraping.link_metadata import build_references
 from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.session import ScrapingSession
 from linkedin_mcp_server.scraping.text import (
+    JobApplyTextTable,
     filter_linkedin_noise_lines,
     truncate_linkedin_noise,
 )
@@ -130,6 +136,74 @@ PROMOTED_JOB_IDS_JS = (
 }"""
 )
 
+# This posting's apply control and state, once they render. Easy Apply is found
+# by its URL, an anchor into the posting's own `/apply/` route that the "More
+# jobs" cards, each linking its own posting, cannot match. The external button
+# and the state lines are text from the locale table, and the state lines are
+# read above the description only. Measured on 2026-09-14: Easy Apply is an
+# `<a href=".../jobs/view/<id>/apply/?openSDUIApplyFlow=true">`, the external
+# control a `<button>` with no href whose text is the label.
+APPLY_SIGNALS_JS = r"""(opts) => {
+    const {applyPath, externalLabel, descriptionHeading, closedLines, appliedPattern} = opts;
+    const main = document.querySelector('main');
+    if (!main) return null;
+    const pathOf = (anchor) => {
+        try {
+            return new URL(anchor.href).pathname.replace(/\/+$/, '');
+        } catch (error) {
+            return '';
+        }
+    };
+    const lines = (main.innerText || '').split('\n').map((line) => line.trim());
+    const end = lines.indexOf(descriptionHeading);
+    const top = end === -1 ? [] : lines.slice(0, end);
+    const applied = new RegExp(appliedPattern);
+    return {
+        easy_apply: [...main.querySelectorAll('a[href]')]
+            .some((anchor) => pathOf(anchor) === applyPath),
+        external: [...main.querySelectorAll('button')]
+            .some((button) => (button.innerText || '').trim() === externalLabel),
+        applied: top.some((line) => applied.test(line)),
+        closed: top.some((line) => closedLines.includes(line)),
+    };
+}"""
+
+APPLY_READY_JS = (
+    "(opts) => {\n    const signals = (" + APPLY_SIGNALS_JS + ")(opts);\n"
+    "    return Boolean(signals && Object.values(signals).some(Boolean));\n}"
+)
+
+# The link to the employer's site a dialog offers after Apply. Only inside a
+# dialog, because the description's own outbound links pass through the same
+# interstitial.
+DIALOG_REDIRECT_JS = r"""(redirectPath) => {
+    for (const dialog of document.querySelectorAll('dialog, [role="dialog"]')) {
+        for (const anchor of dialog.querySelectorAll('a[href]')) {
+            try {
+                const url = new URL(anchor.href);
+                if (url.pathname.replace(/\/+$/, '') === redirectPath) return url.href;
+            } catch (error) {}
+        }
+    }
+    return null;
+}"""
+
+# How long the apply control gets to render, and how long an external Apply gets
+# to answer with its dialog or a tab. The employer's page gets what `goto` gets
+# everywhere else.
+_APPLY_READY_TIMEOUT = 10.0
+_APPLY_ANSWER_TIMEOUT = 10.0
+_APPLY_POLL = 0.25
+_EMPLOYER_LOAD_TIMEOUT = 30.0
+
+
+@dataclass(frozen=True, slots=True)
+class JobApplyRead:
+    """How one posting takes applications, and where the employer's form is."""
+
+    type: ApplyType
+    url: str | None = None
+
 
 @dataclass(frozen=True, slots=True)
 class JobPageCapture:
@@ -206,6 +280,112 @@ class JobPageReader:
             landed_url=self._session.page.url,
             scroll_seconds=scroll_seconds,
         )
+
+    async def read_apply_link(
+        self, url: str, job_id: str, text: JobApplyTextTable
+    ) -> JobApplyRead:
+        """Read how a posting takes applications, following an external Apply.
+
+        Applied, closed and Easy Apply postings are answered without a click.
+        An external posting's Apply is clicked, which LinkedIn counts as an
+        apply click on the posting, and answers with a "Share your profile?"
+        dialog or a tab. Continue is never clicked: the dialog says it shares
+        the full profile with the job poster, and its link already names the
+        destination. The employer's address is then loaded in this page to
+        follow its redirects, and the page is left there.
+        """
+        await self._navigator._navigate_to_page(url)
+        await self._session.check_rate_limit()
+        page = self._session.page
+        opts = {
+            "applyPath": f"/jobs/view/{job_id}/apply",
+            "externalLabel": text.external_apply_label,
+            "descriptionHeading": text.description_heading,
+            "closedLines": list(text.closed_lines),
+            "appliedPattern": text.applied_pattern.pattern,
+        }
+        try:
+            await page.wait_for_function(
+                APPLY_READY_JS, arg=opts, timeout=_APPLY_READY_TIMEOUT * 1000
+            )
+        except PlaywrightTimeoutError:
+            logger.debug("No apply control or posting state rendered on %s", url)
+
+        signals = await page.evaluate(APPLY_SIGNALS_JS, opts)
+        # Both states before any control, so a posting in either is never
+        # clicked.
+        if signals and signals["applied"]:
+            return JobApplyRead("applied")
+        if signals and signals["closed"]:
+            return JobApplyRead("closed")
+        if signals and signals["easy_apply"]:
+            return JobApplyRead("easy_apply")
+        if not signals or not signals["external"]:
+            # A barrier served in place of the posting renders none of the
+            # above either, and it needs the relogin path rather than a type.
+            await self._navigator._raise_if_auth_barrier(url)
+            return JobApplyRead("unknown")
+
+        destination = await self._click_external_apply(text.external_apply_label)
+        if destination is None:
+            return JobApplyRead("external")
+        return JobApplyRead("external", await self._follow_to_employer(destination))
+
+    async def _click_external_apply(self, label: str) -> str | None:
+        """Click the external Apply and read the employer's address it reveals.
+
+        Whichever answers: a dialog carrying the interstitial link, or a tab
+        LinkedIn opens, whose first address is read and which is closed
+        without waiting for it to load.
+        """
+        page = self._session.page
+        opened: list[Page] = []
+
+        def record(tab: Page) -> None:
+            opened.append(tab)
+
+        page.context.on("page", record)
+        try:
+            button = page.locator("main button").filter(
+                has_text=re.compile(rf"^\s*{re.escape(label)}\s*$")
+            )
+            await button.first.click(timeout=5000)
+            deadline = self._session.monotonic() + _APPLY_ANSWER_TIMEOUT
+            while self._session.monotonic() < deadline:
+                if opened:
+                    if opened[0].url not in ("", "about:blank"):
+                        return employer_apply_url(opened[0].url)
+                else:
+                    href = await page.evaluate(DIALOG_REDIRECT_JS, SAFETY_REDIRECT_PATH)
+                    if isinstance(href, str):
+                        return employer_apply_url(href)
+                await self._session.delay(_APPLY_POLL)
+            return None
+        finally:
+            page.context.remove_listener("page", record)
+            for tab in opened:
+                with suppress(Exception):
+                    await tab.close()
+
+    async def _follow_to_employer(self, destination: str) -> str:
+        """The address the employer's link settles on, loaded in this page.
+
+        Short links are common, Greenhouse's `grnh.se` among them, and name the
+        hiring system only once they redirect. A load that fails or stops short
+        answers with where it got, or with the link itself when that is not an
+        employer's address.
+        """
+        page = self._session.page
+        try:
+            await page.goto(
+                destination, wait_until="load", timeout=_EMPLOYER_LOAD_TIMEOUT * 1000
+            )
+        except Exception as e:
+            # The type alone: a driver error can quote a configured proxy URL.
+            logger.debug(
+                "%s did not finish loading (%s)", destination, type(e).__name__
+            )
+        return employer_apply_url(page.url) or destination
 
     async def _extract_job_ids(self, *, scoped: bool = False) -> list[str]:
         """Extract unique job IDs from job card links on the current page.
