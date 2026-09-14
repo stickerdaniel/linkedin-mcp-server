@@ -78,6 +78,11 @@ _UNUSABLE = re.compile(r"[\s/\\?#]|[\x00-\x1f\x7f]")
 # spent a page load on a 404 that this module exists to avoid.
 _IDENTIFIER = re.compile(r"^[\w-]+$")
 
+# A company slug also takes a period, because organizations claim their domain as
+# one (`/company/beamy.io/`, `/company/booking.com/`). A slug that is only `.` or
+# `..` is still refused, by the dot-segment rule.
+_COMPANY_SLUG = re.compile(r"^[\w.-]+$")
+
 # Characters that have to be judged in the argument itself, before it becomes a
 # URL, because the parse below does not see them the way a browser does.
 #
@@ -185,10 +190,10 @@ def _usable(value: str) -> str | None:
     return None if _UNUSABLE.search(value) else value
 
 
-def _identifier(value: str) -> str | None:
+def _identifier(value: str, pattern: re.Pattern[str] = _IDENTIFIER) -> str | None:
     """A public identifier or page slug, which is narrower than a usable id."""
     usable = _usable(value)
-    return usable if usable is not None and _IDENTIFIER.match(usable) else None
+    return usable if usable is not None and pattern.match(usable) else None
 
 
 def _linkedin_segments(value: str, *, want: str) -> list[str] | None:
@@ -285,13 +290,15 @@ def _linkedin_segments(value: str, *, want: str) -> list[str] | None:
     return segments
 
 
-def _parse_linkedin_url(value: str, *, want: str) -> tuple[str, str | None] | None:
+def _parse_linkedin_url(
+    value: str, *, want: str, pattern: re.Pattern[str] = _IDENTIFIER
+) -> tuple[str, str | None] | None:
     """``(route, reference)`` for a LinkedIn address, or ``None`` if it is not one."""
     segments = _linkedin_segments(value, want=want)
     if segments is None:
         return None
     route = segments[0].lower() if segments else ""
-    return route, _identifier(segments[1]) if len(segments) > 1 else None
+    return route, _identifier(segments[1], pattern) if len(segments) > 1 else None
 
 
 def _id_after_route(value: str, route: tuple[str, ...], *, want: str) -> str | None:
@@ -363,7 +370,7 @@ def normalize_company_identifier(value: str) -> str:
             "Missing company_name (the /company/ slug of the organization)."
         )
 
-    parsed = _parse_linkedin_url(value, want="/company/ slug")
+    parsed = _parse_linkedin_url(value, want="/company/ slug", pattern=_COMPANY_SLUG)
     if parsed is not None:
         route, reference = parsed
         if route not in _ORGANIZATION_ROUTES or reference is None:
@@ -373,7 +380,7 @@ def normalize_company_identifier(value: str) -> str:
             )
         return reference
 
-    reference = _identifier(value)
+    reference = _identifier(value, _COMPANY_SLUG)
     if reference is None:
         raise InvalidReferenceError(
             "That is not a LinkedIn company slug. Pass the part after /company/ "
