@@ -84,6 +84,10 @@
       "description": "Retrieve specific job posting details using LinkedIn job IDs"
     },
     {
+      "name": "get_job_apply_url",
+      "description": "Read how a job posting takes applications and its employer application link (clicks Apply, which LinkedIn counts as an apply click)"
+    },
+    {
       "name": "search_jobs",
       "description": "Search for jobs with filters like keywords and location"
     },
