@@ -4305,6 +4305,17 @@ class TestAtomicStartupCommit:
             )
 
 
+_WINDOWS_312_STRESS = pytest.mark.skipif(
+    os.name == "nt"
+    and sys.implementation.name == "cpython"
+    and sys.version_info[:2] == (3, 12),
+    reason=(
+        "CPython 3.12 intermittently access-violates under this "
+        "daemon-thread I/O stress (measured on 3.12.4 and 3.12.10)"
+    ),
+)
+
+
 @pytest.mark.slow
 class TestRealOwner:
     """The whole thing, with a real detached process on the other end.
@@ -4598,6 +4609,10 @@ class TestRealOwner:
                 _stop(published.pid)
                 pytest.fail(f"barrier timeout still elected owner {published.pid}")
 
+    # Drives the same eight-frontend stress by direct call, so the marker on
+    # that method does not reach it; the collection step then hung on a pipe a
+    # dead frontend never released (Windows, 3.12.10).
+    @_WINDOWS_312_STRESS
     @pytest.mark.parametrize("failure", ["spawn", "barrier"])
     def test_launch_barrier_failure_collects_started_frontends(
         self, real_state_root: Path, monkeypatch: pytest.MonkeyPatch, failure: str
@@ -4639,15 +4654,7 @@ class TestRealOwner:
                     child.kill()
                 child.communicate(timeout=30)
 
-    @pytest.mark.skipif(
-        os.name == "nt"
-        and sys.implementation.name == "cpython"
-        and sys.version_info[:2] == (3, 12),
-        reason=(
-            "CPython 3.12 intermittently access-violates under this "
-            "daemon-thread I/O stress (measured on 3.12.4 and 3.12.10)"
-        ),
-    )
+    @_WINDOWS_312_STRESS
     def test_many_clients_starting_at_once_elect_exactly_one_owner(
         self, real_state_root: Path
     ):
