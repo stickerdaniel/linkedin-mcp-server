@@ -99,8 +99,7 @@ JOB_IDS_JS = (
 # card is the largest element around a job link that holds no other job, found
 # by counting ids and not by class, so the classic `<li>` and the redesigned
 # card are both found. Only the label is text, and it comes from the locale
-# table. Measured on 2026-09-13 against four saved search pages, classic and
-# redesigned: every card's flag matched its visible "Promoted" line.
+# table.
 PROMOTED_JOB_IDS_JS = (
     r"""(opts) => {
     const {selector, label} = opts;
