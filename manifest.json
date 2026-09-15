@@ -93,7 +93,11 @@
     },
     {
       "name": "get_saved_posts",
-      "description": "List posts and articles saved by the authenticated LinkedIn user, with permalinks"
+      "description": "List posts and articles saved by the authenticated LinkedIn user as structured items; enrich re-reads detail pages for full text, images and links"
+    },
+    {
+      "name": "read_post",
+      "description": "Read one LinkedIn post or article in full from its URN or permalink, with image URLs and external links"
     },
     {
       "name": "search_people",

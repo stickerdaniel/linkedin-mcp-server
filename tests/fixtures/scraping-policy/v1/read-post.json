@@ -1,0 +1,94 @@
+{
+  "call": {
+    "arguments": {
+      "urn": "urn:li:activity:1"
+    },
+    "method": "read_post"
+  },
+  "events": [
+    {
+      "call": "read_post",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add"
+    },
+    {
+      "call": "read_post",
+      "extra": {
+        "target_url": "https://www.linkedin.com/feed/update/urn:li:activity:1/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto"
+    },
+    {
+      "call": "read_post",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/feed/update/urn:li:activity:1/",
+      "requested_url": "https://www.linkedin.com/feed/update/urn:li:activity:1/",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "read_post",
+      "description": "goto https://www.linkedin.com/feed/update/urn:li:activity:1/",
+      "kind": "boundary.stabilize",
+      "result": null
+    },
+    {
+      "call": "read_post",
+      "extra": {
+        "target_url": "https://www.linkedin.com/feed/update/urn:li:activity:1/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto"
+    },
+    {
+      "call": "read_post",
+      "kind": "boundary.auth_quick",
+      "result": null
+    },
+    {
+      "call": "read_post",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove"
+    },
+    {
+      "call": "read_post",
+      "kind": "boundary.rate_limit"
+    },
+    {
+      "call": "read_post",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "selector": "main",
+      "state": "visible",
+      "timeout_ms": null
+    },
+    {
+      "call": "read_post",
+      "dismissed": false,
+      "kind": "boundary.modal"
+    },
+    {
+      "call": "read_post",
+      "kind": "evaluate",
+      "operation": "post_detail",
+      "program_digest": "2e6994494c40"
+    }
+  ],
+  "result": {
+    "images": [
+      "https://media.licdn.com/dms/image/v2/feedshare-shrink_800/x"
+    ],
+    "links": [
+      "https://lnkd.in/abc"
+    ],
+    "text": "Full body of the post",
+    "url": "https://www.linkedin.com/feed/update/urn:li:activity:1/"
+  },
+  "scenario": "read_post__permalink",
+  "schema_version": 1
+}

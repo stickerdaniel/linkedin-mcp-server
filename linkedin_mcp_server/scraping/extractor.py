@@ -188,9 +188,18 @@ class LinkedInExtractor:
         """List the authenticated user's saved job postings."""
         return await self._jobs.get_saved_jobs(max_pages)
 
-    async def get_saved_posts(self, num_posts: int = 10) -> dict[str, Any]:
+    async def get_saved_posts(
+        self,
+        num_posts: int = 10,
+        enrich: str = "none",
+        callbacks: ProgressCallback | None = None,
+    ) -> dict[str, Any]:
         """List the authenticated user's saved posts and articles."""
-        return await self._posts.get_saved_posts(num_posts)
+        return await self._posts.get_saved_posts(num_posts, enrich, callbacks)
+
+    async def read_post(self, urn: str) -> dict[str, Any]:
+        """Read one post or article in full from its permalink page."""
+        return await self._posts.read_post(urn)
 
     async def search_people(
         self,

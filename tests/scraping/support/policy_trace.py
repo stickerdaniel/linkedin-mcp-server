@@ -597,6 +597,8 @@ def semantic_program_id(program: str) -> str:
     checks = (
         ("performance.timeOrigin", "document_origin"),
         ("MAX_HEADING_CONTAINERS", "root_content"),
+        ('span[aria-hidden="true"]', "saved_items"),
+        ("images: Array.from(", "post_detail"),
         ("SIDEBAR_SECTIONS", "sidebar_profiles"),
         ("showAllUrls", "sidebar_profiles"),
         ("hasInvite", "connection_action_signals"),

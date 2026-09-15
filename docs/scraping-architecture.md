@@ -35,7 +35,7 @@ a page-owning collaborator.
 | `message_sender` | `MessageSender` | `page-owning` |
 | `navigation` | `PageNavigator`, `WaitUntil` | `page-owning` |
 | `person` | `PersonScraper` | `page-owning` |
-| `posts` | `PostSearch`, `SAVED_POSTS_URL` | `page-owning` |
+| `posts` | `EnrichLevel`, `LINKEDIN_BASE_URL`, `PostSearch`, `SAVED_POSTS_URL` | `page-owning` |
 | `profile_page` | `MessageTarget`, `MessageTargetResolution`, `ProfilePageReader`, `ReadMessageTarget` | `page-owning` |
 | `search_urls` | `CONTENT_DATE_POSTED_MAP`, `EXPERIENCE_LEVEL_MAP`, `JOB_DATE_POSTED_MAP`, `JOB_TYPE_MAP`, `NETWORK_TOKENS`, `SORT_BY_MAP`, `WORK_TYPE_MAP`, `build_company_search_url()`, `build_content_search_url()`, `build_job_search_url()`, `build_people_search_url()` | `browser-free` |
 | `session` | `NAV_DELAY`, `ScrapingSession` | `page-owning` |
@@ -83,6 +83,7 @@ a page-owning collaborator.
 - `get_saved_jobs`
 - `get_saved_posts`
 - `get_sidebar_profiles`
+- `read_post`
 - `scrape_company`
 - `scrape_job`
 - `scrape_person`

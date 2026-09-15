@@ -7,6 +7,11 @@ from unittest.mock import ANY, AsyncMock, call, patch
 
 import pytest
 
+from linkedin_mcp_server.callbacks import ProgressCallback
+from linkedin_mcp_server.core.exceptions import (
+    InvalidReferenceError,
+    RateLimitError,
+)
 from linkedin_mcp_server.scraping import posts as posts_module
 from linkedin_mcp_server.scraping.capture import (
     CaptureMode,
@@ -17,6 +22,7 @@ from linkedin_mcp_server.scraping.content import PageContentReader
 from linkedin_mcp_server.scraping.contracts import (
     RATE_LIMITED_SECTION_TEXT,
     ExtractedSection,
+    FilterValidationError,
     rate_limited_section_error,
 )
 from linkedin_mcp_server.scraping.link_metadata import Reference
@@ -278,22 +284,62 @@ def test_saved_posts_scroll_budget_is_explicit():
     assert posts_module._MAX_SAVED_POSTS_STALE == 3
 
 
+def _raw_item(
+    activity: str = "123",
+    *,
+    text: str = "Saved item",
+    author: str = "Ada Lovelace",
+    preview: str = "",
+    truncated: bool = False,
+    href: str | None = None,
+) -> dict[str, Any]:
+    """One card as the saved-items program reports it."""
+    return {
+        "href": href
+        or (
+            f"https://www.linkedin.com/feed/update/urn:li:activity:{activity}"
+            "?updateEntityUrn=x"
+        ),
+        "text": text,
+        "author": author,
+        "preview": preview,
+        "truncated": truncated,
+    }
+
+
 def _script_saved_posts_page(
-    page, *, counts, raw_text, raw_references=None
+    page, *, counts, items=None, page_text="saved items", detail=None
 ) -> list[str]:
-    """Script the evaluate programs the saved-posts scroll loop alternates.
+    """Script the evaluate programs the saved-posts workflows alternate.
 
     The anchor-count program answers with the scripted counts in order (the
     last one held, like a list that stopped growing). ``window.scrollBy``
-    has no return value by definition. The root-content program answers
-    with the scripted innerText and raw anchors. The recorded program
-    markers are returned so a test can count scrolls without re-describing
-    the dispatch.
+    has no return value by definition. The saved-items program answers with
+    the scripted cards and page innerText, and the post-detail program with
+    one scripted detail payload per call (the last one held), or raises the
+    scripted exception. The recorded program markers are returned so a test
+    can count scrolls and detail reads without re-describing the dispatch.
     """
     remaining = list(counts)
+    remaining_detail = list(detail or [])
     programs: list[str] = []
 
     async def dispatch(script, arg=None):
+        if "const seen = new Set()" in script:
+            programs.append("items")
+            return {"text": page_text, "items": list(items or [])}
+        if "img[src]" in script:
+            programs.append("detail")
+            if not remaining_detail:
+                raise AssertionError("unscripted post-detail read")
+            payload = (
+                remaining_detail.pop(0)
+                if len(remaining_detail) > 1
+                else remaining_detail[0]
+            )
+            if isinstance(payload, Exception):
+                raise payload
+            return payload
         if '"/feed/update/"' in script:
             programs.append("count")
             if len(remaining) > 1:
@@ -302,12 +348,18 @@ def _script_saved_posts_page(
         if "window.scrollBy" in script:
             programs.append("scroll")
             return None
-        if arg is not None and "selectors" in arg:
-            return {"text": raw_text, "references": raw_references or []}
         raise AssertionError(f"unexpected evaluate: {script[:80]!r}")
 
     page.evaluate = AsyncMock(side_effect=dispatch)
     return programs
+
+
+def _detail(text="Full body", images=None, links=None) -> dict[str, Any]:
+    return {
+        "text": text,
+        "images": images if images is not None else [],
+        "links": links if links is not None else [],
+    }
 
 
 def _suppress_delay():
@@ -334,13 +386,13 @@ class TestGetSavedPosts:
         search = _search(mock_page)
         with _suppress_delay():
             programs = _script_saved_posts_page(
-                mock_page, counts=[1, 2, 2, 5], raw_text="saved item"
+                mock_page, counts=[1, 2, 2, 5], items=[_raw_item()]
             )
             result = await search.get_saved_posts(5)
 
         assert programs.count("scroll") == 2
         assert result["url"].endswith("my-items/saved-posts/")
-        assert result["sections"]["saved_posts"] == "saved item"
+        assert result["saved_posts"][0]["text"] == "Saved item"
 
     async def test_stale_scrolls_stop_below_the_request(self, mock_page):
         """A list that never grows ends after the stale budget, not at the ceiling.
@@ -352,86 +404,134 @@ class TestGetSavedPosts:
         search = _search(mock_page)
         with _suppress_delay():
             programs = _script_saved_posts_page(
-                mock_page, counts=[2, 2, 2, 2], raw_text="saved item"
+                mock_page, counts=[2, 2, 2, 2], items=[_raw_item()]
             )
             await search.get_saved_posts(5)
 
         scrolls = programs.count("scroll")
         assert scrolls == posts_module._MAX_SAVED_POSTS_STALE
 
-    async def test_references_keep_only_post_and_article_permalinks(self, mock_page):
-        """Author and company anchors ride along in the DOM and are filtered.
+    async def test_each_card_becomes_one_addressable_item(self, mock_page):
+        """The permalink is the item's identity, and the URN comes off it.
 
-        The page offers every anchor the cards carry; what callers want is
-        the saved items' permalinks. Authors stay reachable through the
-        section text, exactly like the home feed's reference filter.
+        A consumer reaches the full post through ``read_post``, which takes
+        exactly these two fields; an item without them is unreadable.
         """
-        raw_references = [
-            {
-                "href": "https://www.linkedin.com/feed/update/urn:li:activity:123?updateEntityUrn=x",
-                "text": "A saved post",
-                "heading": "",
-            },
-            {
-                "href": "https://www.linkedin.com/pulse/some-article/",
-                "text": "Some article",
-                "heading": "",
-            },
-            {
-                "href": "https://www.linkedin.com/in/somebody/",
-                "text": "Somebody",
-                "heading": "",
-            },
-        ]
         search = _search(mock_page)
         with _suppress_delay():
             _script_saved_posts_page(
                 mock_page,
-                counts=[3],
-                raw_text="saved items",
-                raw_references=raw_references,
+                counts=[2],
+                items=[
+                    _raw_item("111", text="A post", truncated=True),
+                    _raw_item(href="https://www.linkedin.com/pulse/some-article/"),
+                ],
             )
-            result = await search.get_saved_posts(1)
+            result = await search.get_saved_posts(2)
 
-        assert result["references"] == {
-            "saved_posts": [
-                {
-                    "kind": "feed_post",
-                    "url": "/feed/update/urn:li:activity:123/",
-                    "text": "A saved post",
-                    "context": "saved posts",
-                },
-                {
-                    "kind": "article",
-                    "url": "/pulse/some-article/",
-                    "text": "Some article",
-                    "context": "saved posts",
-                },
-            ]
-        }
+        assert result["saved_posts"] == [
+            {
+                "kind": "feed_post",
+                "permalink": "/feed/update/urn:li:activity:111/",
+                "urn": "urn:li:activity:111",
+                "author": "Ada Lovelace",
+                "text": "A post",
+                "truncated": True,
+            },
+            {
+                "kind": "article",
+                "permalink": "/pulse/some-article/",
+                "author": "Ada Lovelace",
+                "text": "Saved item",
+                "truncated": False,
+            },
+        ]
+
+    async def test_a_card_that_is_not_a_saved_item_is_dropped(self, mock_page):
+        """Author and company anchors ride along in the DOM of this list.
+
+        They are not saved items, and an item keyed by an author's profile
+        would send ``read_post`` to a profile page.
+        """
+        search = _search(mock_page)
+        with _suppress_delay():
+            _script_saved_posts_page(
+                mock_page,
+                counts=[2],
+                items=[
+                    _raw_item("111"),
+                    _raw_item(href="https://www.linkedin.com/in/somebody/"),
+                ],
+            )
+            result = await search.get_saved_posts(2)
+
+        assert [item["permalink"] for item in result["saved_posts"]] == [
+            "/feed/update/urn:li:activity:111/"
+        ]
+
+    async def test_a_preview_reports_its_domain_only_when_it_has_one(self, mock_page):
+        """``preview.domain`` is the "content lives elsewhere" signal.
+
+        A link-preview card ends in its source domain, but LinkedIn's own
+        article shares end in a localized sentence instead. Reading that
+        sentence as a domain would send a consumer chasing a URL that does
+        not exist, so only a hostname-shaped last line counts.
+        """
+        search = _search(mock_page)
+        with _suppress_delay():
+            _script_saved_posts_page(
+                mock_page,
+                counts=[2],
+                items=[
+                    _raw_item("1", preview="Brownfield Agentic\naddyo.substack.com"),
+                    _raw_item(
+                        "2", preview="AI is an amplifier\nAda auf LinkedIn • 4 Min."
+                    ),
+                ],
+            )
+            result = await search.get_saved_posts(2)
+
+        assert [item["preview"] for item in result["saved_posts"]] == [
+            {"domain": "addyo.substack.com", "title": "Brownfield Agentic"},
+            {"title": "AI is an amplifier Ada auf LinkedIn • 4 Min."},
+        ]
 
     async def test_a_page_of_chrome_only_is_a_rate_limit(self, mock_page):
-        """The truncation branch decides the rate-limit entry, not the text.
+        """An empty list and a blocked page must not read the same.
 
-        A page that is nothing but LinkedIn chrome truncates to empty, and
-        the section must be an error rather than an empty list that reads
-        as "nothing saved".
+        No items plus a page that truncates to nothing is LinkedIn refusing
+        the read; reporting it as ``saved_posts: []`` would read as "nothing
+        saved" and send the caller away satisfied.
         """
         search = _search(mock_page)
         with (
             _suppress_delay(),
             patch.object(posts_module, "truncate_linkedin_noise", lambda *_: ""),
         ):
-            _script_saved_posts_page(mock_page, counts=[1], raw_text="chrome")
+            _script_saved_posts_page(
+                mock_page, counts=[1], items=[], page_text="chrome"
+            )
             result = await search.get_saved_posts(1)
 
-        assert result["sections"] == {}
+        assert result["saved_posts"] == []
         assert result["section_errors"] == {
             "saved_posts": {
                 "error_type": "rate_limit",
                 "error_message": RATE_LIMITED_SECTION_TEXT,
             }
         }
+
+    async def test_an_empty_list_is_not_an_error(self, mock_page):
+        """Nothing saved is an answer, not a failure."""
+        search = _search(mock_page)
+        with _suppress_delay():
+            _script_saved_posts_page(
+                mock_page, counts=[0, 0, 0, 0], items=[], page_text="Saved items"
+            )
+            result = await search.get_saved_posts(1)
+
+        assert result["saved_posts"] == []
+        assert "section_errors" not in result
 
     async def test_a_browser_failure_is_diagnosed_into_the_section_error(
         self, mock_page
@@ -453,5 +553,222 @@ class TestGetSavedPosts:
             mock_page.evaluate = AsyncMock(side_effect=RuntimeError("boom"))
             result = await search.get_saved_posts(1)
 
-        assert result["sections"] == {}
+        assert result["saved_posts"] == []
         assert result["section_errors"] == {"saved_posts": {"error_type": "diagnosed"}}
+
+    async def test_an_unknown_enrich_level_is_refused(self, mock_page):
+        """Silently reading the listing only would read as "nothing was cut"."""
+        search = _search(mock_page)
+        with pytest.raises(FilterValidationError, match="enrich"):
+            await search.get_saved_posts(1, enrich="everything")
+
+
+class TestSavedPostEnrichment:
+    async def test_truncated_level_re_reads_only_the_cut_items(self, mock_page):
+        """One navigation per cut item, and none for the rest.
+
+        The level exists to bound the cost: re-reading an item whose text
+        was already whole buys nothing but seconds. A loop ignoring the flag
+        would read both cards here, so the detail count catches it.
+        """
+        search = _search(mock_page)
+        with _suppress_delay():
+            programs = _script_saved_posts_page(
+                mock_page,
+                counts=[2],
+                items=[
+                    _raw_item("1", text="Cut …", truncated=True),
+                    _raw_item("2", text="Whole", truncated=False),
+                ],
+                detail=[_detail("The whole body")],
+            )
+            result = await search.get_saved_posts(2, enrich="truncated")
+
+        assert programs.count("detail") == 1
+        first, second = result["saved_posts"]
+        assert (first["text"], first["truncated"]) == ("The whole body", False)
+        assert (second["text"], second["truncated"]) == ("Whole", False)
+        assert "images" not in second
+
+    async def test_all_level_re_reads_every_item(self, mock_page):
+        """The only level that reports images for an uncut item."""
+        search = _search(mock_page)
+        with _suppress_delay():
+            programs = _script_saved_posts_page(
+                mock_page,
+                counts=[2],
+                items=[_raw_item("1"), _raw_item("2")],
+                detail=[_detail("The whole body")],
+            )
+            result = await search.get_saved_posts(2, enrich="all")
+
+        assert programs.count("detail") == 2
+        assert all(item["text"] == "The whole body" for item in result["saved_posts"])
+
+    async def test_media_and_external_links_are_separated_from_page_chrome(
+        self, mock_page
+    ):
+        """A post's own media, and the URLs it points at — nothing else.
+
+        Avatars sit on the same CDN as the post's images and every comment
+        adds one, so an unfiltered list is mostly faces; LinkedIn's own
+        anchors are navigation, not something the post links to.
+        """
+        search = _search(mock_page)
+        with _suppress_delay():
+            _script_saved_posts_page(
+                mock_page,
+                counts=[1],
+                items=[_raw_item("1", truncated=True)],
+                detail=[
+                    _detail(
+                        images=[
+                            "https://media.licdn.com/dms/image/v2/feedshare-shrink_800/x",
+                            "https://media.licdn.com/dms/image/v2/profile-displayphoto-scale_100_100/y",
+                            "https://media.licdn.com/dms/image/v2/comment-image-shrink_8192_480/z",
+                            "https://static.licdn.com/aero-v1/sc/h/icon",
+                            "data:image/gif;base64,R0lGOD",
+                        ],
+                        links=[
+                            "https://lnkd.in/abc",
+                            "https://www.linkedin.com/in/ada-lovelace/",
+                            "https://lnkd.in/abc",
+                        ],
+                    )
+                ],
+            )
+            result = await search.get_saved_posts(1, enrich="truncated")
+
+        item = result["saved_posts"][0]
+        assert item["images"] == [
+            "https://media.licdn.com/dms/image/v2/feedshare-shrink_800/x"
+        ]
+        assert item["links"] == ["https://lnkd.in/abc"]
+
+    async def test_one_unreadable_item_does_not_end_the_batch(self, mock_page):
+        """A dead permalink is that item's problem and nothing else's."""
+        search = _search(mock_page)
+        with (
+            _suppress_delay(),
+            patch.object(
+                posts_module,
+                "build_issue_diagnostics",
+                return_value={"error_type": "diagnosed"},
+            ),
+        ):
+            programs = _script_saved_posts_page(
+                mock_page,
+                counts=[2],
+                items=[_raw_item("1"), _raw_item("2")],
+                detail=[RuntimeError("gone"), _detail("The whole body")],
+            )
+            result = await search.get_saved_posts(2, enrich="all")
+
+        assert programs.count("detail") == 2
+        first, second = result["saved_posts"]
+        assert first["error"] == {"error_type": "diagnosed"}
+        assert first["text"] == "Saved item"
+        assert second["text"] == "The whole body"
+
+    async def test_a_rate_limit_stops_the_loop_and_keeps_what_was_read(self, mock_page):
+        """Walking the rest of the list into the same wall helps nobody.
+
+        The items already enriched are still worth returning, so the limit
+        is reported beside them rather than thrown over them.
+        """
+        search = _search(mock_page)
+        with _suppress_delay():
+            programs = _script_saved_posts_page(
+                mock_page,
+                counts=[3],
+                items=[_raw_item("1"), _raw_item("2"), _raw_item("3")],
+                detail=[
+                    _detail("The whole body"),
+                    RateLimitError(RATE_LIMITED_SECTION_TEXT),
+                ],
+            )
+            result = await search.get_saved_posts(3, enrich="all")
+
+        assert programs.count("detail") == 2
+        assert result["saved_posts"][0]["text"] == "The whole body"
+        assert result["saved_posts"][1]["text"] == "Saved item"
+        assert result["section_errors"]["saved_posts"]["error_type"] == "rate_limit"
+
+    async def test_progress_is_reported_once_per_enriched_item(self, mock_page):
+        """Enrichment is minutes of navigations; a silent tool looks hung."""
+        reported: list[tuple[str, int]] = []
+
+        class Recording(ProgressCallback):
+            async def on_progress(self, message: str, percent: int) -> None:
+                reported.append((message, percent))
+
+        search = _search(mock_page)
+        with _suppress_delay():
+            _script_saved_posts_page(
+                mock_page,
+                counts=[2],
+                items=[_raw_item("1"), _raw_item("2")],
+                detail=[_detail("The whole body")],
+            )
+            await search.get_saved_posts(2, enrich="all", callbacks=Recording())
+
+        assert reported == [
+            ("Reading saved post 1/2", 50),
+            ("Reading saved post 2/2", 100),
+        ]
+
+
+class TestReadPost:
+    @pytest.mark.parametrize(
+        "reference",
+        [
+            "urn:li:activity:111",
+            "/feed/update/urn:li:activity:111/",
+            "https://www.linkedin.com/feed/update/urn:li:activity:111?updateEntityUrn=x",
+        ],
+    )
+    async def test_every_accepted_reference_reaches_one_permalink(
+        self, mock_page, reference
+    ):
+        """A URN, a path and a full URL name the same post.
+
+        ``get_saved_posts`` hands back both a ``urn`` and a ``permalink``,
+        and ``get_feed`` hands back URLs; refusing any of them would make
+        the caller rebuild an address the server already knows.
+        """
+        search = _search(mock_page)
+        with _suppress_delay():
+            _script_saved_posts_page(
+                mock_page, counts=[1], detail=[_detail("The whole body")]
+            )
+            result = await search.read_post(reference)
+
+        assert result["url"] == (
+            "https://www.linkedin.com/feed/update/urn:li:activity:111/"
+        )
+        assert result["text"] == "The whole body"
+        mock_page.goto.assert_awaited()
+
+    @pytest.mark.parametrize(
+        "reference", ["", "ada-lovelace", "/in/ada-lovelace/", "https://example.com/x"]
+    )
+    async def test_an_unusable_reference_is_refused_before_navigating(
+        self, mock_page, reference
+    ):
+        """Nothing is broken; the argument is wrong and the message says so."""
+        search = _search(mock_page)
+        with pytest.raises(InvalidReferenceError):
+            await search.read_post(reference)
+
+        mock_page.goto.assert_not_awaited()
+
+    async def test_a_detail_page_of_chrome_only_is_a_rate_limit(self, mock_page):
+        """The caller asked for one post; an empty body is not that post."""
+        search = _search(mock_page)
+        with (
+            _suppress_delay(),
+            patch.object(posts_module, "truncate_linkedin_noise", lambda *_: ""),
+        ):
+            _script_saved_posts_page(mock_page, counts=[1], detail=[_detail("chrome")])
+            with pytest.raises(RateLimitError):
+                await search.read_post("urn:li:activity:111")
