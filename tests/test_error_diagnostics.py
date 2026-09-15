@@ -129,6 +129,16 @@ def test_build_issue_diagnostics_omits_missing_server_log_from_gist(
         "linkedin_mcp_server.error_diagnostics._find_existing_issues",
         lambda payload: [],
     )
+    # The gist command lists server.log only if the process-wide trace dir has
+    # one. That dir is global state another test on the same xdist worker can
+    # set, so pin it off here to keep this "log is absent" case deterministic.
+    monkeypatch.setattr(
+        "linkedin_mcp_server.error_diagnostics.mark_trace_for_retention",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.error_diagnostics.get_trace_dir", lambda: None
+    )
 
     diagnostics = build_issue_diagnostics(
         RuntimeError("boom"),

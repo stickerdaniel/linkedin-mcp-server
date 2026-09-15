@@ -56,10 +56,16 @@ An MCP server that connects AI assistants like Claude to LinkedIn through your o
 | `get_company_employees` | List employees at a company from the /people/ page, with optional keyword filter |
 | `search_jobs` | Search for jobs with keywords and location filters |
 | `get_saved_jobs` | List job postings saved by the authenticated user |
-| `search_people` | Search for people by keywords, location, connection degree (1st/2nd/3rd), and current company |
+| `search_people` | Search for people by keywords, location, connection degree (1st/2nd/3rd), and current company, with `max_pages` pagination (1-10, 10 people per page) |
 | `get_job_details` | Get detailed information about a specific job posting |
 | `get_feed` | Get recent posts from the authenticated user's home feed |
 | `search_posts` | Search posts/content globally by keyword (the "Posts" tab) with an optional recency filter (past-24h/past-week/past-month) |
+| `start_enrichment_job` | Queue a resumable bulk profile-enrichment job from a list of usernames or profile URLs |
+| `run_enrichment_bunch` | Visit the next few profiles in a job, paced with randomized delays, a rolling 24h action budget and working hours; returns when to call it again |
+| `get_enrichment_status` | Progress and collected results for an enrichment job, or list all jobs |
+| `enrich_companies` | Firmographics for a list of companies, cache-first and paced; one company-search reveals ~10 companies at once, all cached. Cache TTLs are set in days via `COMPANY_FIRMOGRAPHICS_TTL_DAYS` (default 90) and `COMPANY_JOBS_TTL_DAYS` (default 14) |
+| `enrich_company_deep` | Deep firmographics plus live open roles for one company (About + Jobs tabs); cache-first, open roles on the shorter jobs TTL |
+| `get_company_cache` | Read a cached company record (with per-half freshness), or list everything cached |
 | `close_session` | Close browser session and clean up resources |
 
 <br/>
@@ -257,6 +263,16 @@ while a container is running.
 </details>
 
 <details>
+<summary>Rate limiting (HTTP 429)</summary>
+
+- LinkedIn answers a burst of page loads with HTTP 429. It arrives as a failed navigation rather than a readable status, so the symptom is a tool call that reports being refused, or a session that suddenly cannot open pages it opened a minute ago.
+- The server spaces consecutive tool calls apart by `TOOL_CALL_GAP_SECONDS` (default 5, jittered ±20%; `0` disables). Raise it if you scrape steadily — published limits for comparable tools are far lower than most people expect, on the order of one action a minute.
+- Images, fonts and media are not fetched (`BLOCK_SUBRESOURCES`, on by default), which cuts each page from 100+ requests to the handful that carry text. Set it falsy only if you need those resources; expect 429s sooner if you do.
+- When a limit is hit the server backs off before reporting, and honours LinkedIn's `Retry-After` when one is sent. Wait it out rather than retrying immediately — a retry is one more request into a live limit.
+
+</details>
+
+<details>
 <summary>Told to run <code>--login</code> on the host when you already did</summary>
 
 - If tool calls answer "No valid LinkedIn session is available in Docker" on a machine that is *not* a container, the runtime was misdetected. This happened on Linux hosts running a Docker daemon for unrelated services. Set `LINKEDIN_MCP_CONTAINER=false` to override the detection; `true` forces the opposite.
@@ -322,6 +338,16 @@ On startup, the MCP Bundle starts preparing the shared Patchright Chromium brows
 - *Entire tool calls timing out* (e.g. multi-section profiles, cold-start Chromium, slow containers): increase the per-tool execution timeout: `--tool-timeout 300` or `TOOL_TIMEOUT=300` (seconds, default 180).
 - *First tool call with no session*: if a locally logged-in browser has a live LinkedIn session, the server auto-imports it (see `AUTO_IMPORT_FROM_BROWSER` / `--auto-import`) instead of forcing a manual login. On macOS the keychain may prompt once for Safe Storage access. If no importable browser session exists, it falls back to opening a login window and waits up to `LOGIN_INLINE_WAIT` seconds (default 25, max 45; `--login-inline-wait`) so a quick sign-in resolves in one call. If the wait elapses, the tool returns a pending signal and the model retries in about 30 seconds. Neither the auto-import nor the inline wait applies under Docker or when the server is bound to a non-loopback HTTP host. Create the session on the host with `--login`, or use the explicit Docker `--login --login-viewer` command.
 - Users on slow connections may need higher values for either.
+
+</details>
+
+<details>
+<summary>Rate limiting (HTTP 429)</summary>
+
+- LinkedIn answers a burst of page loads with HTTP 429. It arrives as a failed navigation rather than a readable status, so the symptom is a tool call that reports being refused, or a session that suddenly cannot open pages it opened a minute ago.
+- The server spaces consecutive tool calls apart by `TOOL_CALL_GAP_SECONDS` (default 5, jittered ±20%; `0` disables). Raise it if you scrape steadily — published limits for comparable tools are far lower than most people expect, on the order of one action a minute.
+- Images, fonts and media are not fetched (`BLOCK_SUBRESOURCES`, on by default), which cuts each page from 100+ requests to the handful that carry text. Set it falsy only if you need those resources; expect 429s sooner if you do.
+- When a limit is hit the server backs off before reporting, and honours LinkedIn's `Retry-After` when one is sent. Wait it out rather than retrying immediately — a retry is one more request into a live limit.
 
 </details>
 
@@ -600,6 +626,16 @@ belongs behind something that provides it.
 </details>
 
 <details>
+<summary>Rate limiting (HTTP 429)</summary>
+
+- LinkedIn answers a burst of page loads with HTTP 429. It arrives as a failed navigation rather than a readable status, so the symptom is a tool call that reports being refused, or a session that suddenly cannot open pages it opened a minute ago.
+- The server spaces consecutive tool calls apart by `TOOL_CALL_GAP_SECONDS` (default 5, jittered ±20%; `0` disables). Raise it if you scrape steadily — published limits for comparable tools are far lower than most people expect, on the order of one action a minute.
+- Images, fonts and media are not fetched (`BLOCK_SUBRESOURCES`, on by default), which cuts each page from 100+ requests to the handful that carry text. Set it falsy only if you need those resources; expect 429s sooner if you do.
+- When a limit is hit the server backs off before reporting, and honours LinkedIn's `Retry-After` when one is sent. Wait it out rather than retrying immediately — a retry is one more request into a live limit.
+
+</details>
+
+<details>
 <summary>Told to run <code>--login</code> on the host when you already did</summary>
 
 - If tool calls answer "No valid LinkedIn session is available in Docker" on a machine that is *not* a container, the runtime was misdetected. This happened on Linux hosts running a Docker daemon for unrelated services. Set `LINKEDIN_MCP_CONTAINER=false` to override the detection; `true` forces the opposite.
@@ -839,6 +875,16 @@ uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --por
 - *Entire tool calls timing out* (e.g. multi-section profiles, cold-start Chromium, slow containers): increase the per-tool execution timeout: `--tool-timeout 300` or `TOOL_TIMEOUT=300` (seconds, default 180).
 - *First tool call with no session*: if a locally logged-in browser has a live LinkedIn session, the server auto-imports it (see `AUTO_IMPORT_FROM_BROWSER` / `--auto-import`) instead of forcing a manual login. On macOS the keychain may prompt once for Safe Storage access. If no importable browser session exists, it falls back to opening a login window and waits up to `LOGIN_INLINE_WAIT` seconds (default 25, max 45; `--login-inline-wait`) so a quick sign-in resolves in one call. If the wait elapses, the tool returns a pending signal and the model retries in about 30 seconds. Neither the auto-import nor the inline wait applies under Docker or when the server is bound to a non-loopback HTTP host. Create the session on the host with `--login`, or use the explicit Docker `--login --login-viewer` command.
 - Users on slow connections may need higher values for either.
+
+</details>
+
+<details>
+<summary>Rate limiting (HTTP 429)</summary>
+
+- LinkedIn answers a burst of page loads with HTTP 429. It arrives as a failed navigation rather than a readable status, so the symptom is a tool call that reports being refused, or a session that suddenly cannot open pages it opened a minute ago.
+- The server spaces consecutive tool calls apart by `TOOL_CALL_GAP_SECONDS` (default 5, jittered ±20%; `0` disables). Raise it if you scrape steadily — published limits for comparable tools are far lower than most people expect, on the order of one action a minute.
+- Images, fonts and media are not fetched (`BLOCK_SUBRESOURCES`, on by default), which cuts each page from 100+ requests to the handful that carry text. Set it falsy only if you need those resources; expect 429s sooner if you do.
+- When a limit is hit the server backs off before reporting, and honours LinkedIn's `Retry-After` when one is sent. Wait it out rather than retrying immediately — a retry is one more request into a live limit.
 
 </details>
 

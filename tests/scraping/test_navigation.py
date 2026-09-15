@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from patchright.async_api import Error as PatchrightError
 
@@ -11,9 +11,14 @@ import pytest
 from linkedin_mcp_server.core.exceptions import (
     AuthenticationError,
     ProxyConnectionError,
+    RateLimitError,
 )
 from linkedin_mcp_server.scraping import session as session_module
 from linkedin_mcp_server.scraping.navigation import PageNavigator
+from linkedin_mcp_server.scraping.rate_limit import (
+    RATE_LIMIT_BACKOFF_DELAY,
+    RETRY_AFTER_CEILING,
+)
 from linkedin_mcp_server.scraping.session import ScrapingSession
 from .support.navigation import navigate
 
@@ -729,3 +734,373 @@ class TestNavigationFailureCrossesTheToolBoundaryClean:
         # The raw error must not survive as a cause either: the handlers
         # downstream print the whole chain.
         assert excinfo.value.__cause__ is None
+
+
+def _no_prompt_no_barrier():
+    """The ordinary failure path: nothing to resolve, nothing to re-authenticate."""
+    return (
+        patch(
+            "linkedin_mcp_server.scraping.navigation.resolve_remember_me_prompt",
+            new_callable=AsyncMock,
+            return_value=False,
+        ),
+        patch(
+            "linkedin_mcp_server.scraping.navigation.detect_auth_barrier",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+    )
+
+
+class TestHumanizeAfterNavigation:
+    async def test_a_landed_page_gets_cursor_entropy_before_it_is_read(self, mock_page):
+        """After the load and before the auth check, so a frozen cursor is
+        never what the next read sees."""
+        navigator = PageNavigator(ScrapingSession(mock_page))
+        order: list[str] = []
+
+        async def humanize(page):
+            assert page is mock_page
+            order.append("humanize")
+
+        async def barrier(page):
+            order.append("barrier")
+            return None
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.navigation.humanize_after_nav",
+                new=humanize,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.navigation.detect_auth_barrier_quick",
+                new=barrier,
+            ),
+        ):
+            await navigator._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+        assert order == ["humanize", "barrier"]
+
+    async def test_a_failed_navigation_is_not_humanized(self, mock_page):
+        navigator = PageNavigator(ScrapingSession(mock_page))
+        mock_page.goto = AsyncMock(side_effect=Exception("net::ERR_ABORTED"))
+        prompt, barrier = _no_prompt_no_barrier()
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.navigation.humanize_after_nav",
+                new_callable=AsyncMock,
+            ) as humanize,
+            prompt,
+            barrier,
+            pytest.raises(Exception, match="ERR_ABORTED"),
+        ):
+            await navigator._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+        humanize.assert_not_awaited()
+
+
+def _show_the_interstitial(page, status: int) -> None:
+    """Leave Chromium's own error page in the tab, the way a refusal does.
+
+    The classifier reads the status off this body, so a test that only makes
+    `goto` raise is describing a refusal with no status attached -- which is
+    every 4xx and 5xx, not a rate limit.
+    """
+    page.evaluate = AsyncMock(
+        return_value=(
+            f"This page isn't working If the problem continues, "
+            f"contact the site owner. HTTP ERROR {status} Reload"
+        )
+    )
+
+
+def _refused(page, url: str) -> None:
+    """Make `goto` raise the way Chromium does for a status it will not commit."""
+    page.goto = AsyncMock(
+        side_effect=PatchrightError(
+            f"Page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at {url}"
+        )
+    )
+
+
+def _recording_sleep(slept: list[float]):
+    return patch(
+        "linkedin_mcp_server.scraping.session.asyncio.sleep",
+        new_callable=AsyncMock,
+        side_effect=lambda delay: slept.append(delay),
+    )
+
+
+def _identity_jitter():
+    return patch(
+        "linkedin_mcp_server.scraping.session.jitter",
+        side_effect=lambda base, *a, **kw: base,
+    )
+
+
+class TestHttp429Navigation:
+    """A 429 that never becomes a page the loaded-page detector could read."""
+
+    async def test_navigation_failure_is_classified_as_rate_limit(self, mock_page):
+        """The live shape: Chromium refuses the 429 and `goto` raises."""
+        url = "https://www.linkedin.com/messaging/thread/2-abc/"
+        _refused(mock_page, url)
+        _show_the_interstitial(mock_page, 429)
+        navigator = PageNavigator(ScrapingSession(mock_page))
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+            pytest.raises(RateLimitError) as raised,
+        ):
+            await navigator._goto_with_auth_checks(url)
+
+        # No `Retry-After` is readable on this path, so the default stands.
+        assert raised.value.suggested_wait_time == 300
+        assert "HTTP 429" in str(raised.value)
+        # The driver's own text is not carried into anything that logs it.
+        assert raised.value.__cause__ is None
+        # Classified, not retried: a retry here is one more request into a
+        # limit that is still live.
+        assert mock_page.goto.await_count == 1
+        assert navigator._session.rate_limit.rate_limit_hits == 1
+
+    async def test_a_refusal_that_is_not_a_429_is_not_a_rate_limit(self, mock_page):
+        """The whole reason the interstitial is read.
+
+        Chromium raises the same net error for every status the navigation
+        stack refuses. Classifying on the token alone told someone who
+        mistyped a username to wait five minutes, and skipped the not-found
+        branch in `error_handler` on the way.
+        """
+        url = "https://www.linkedin.com/in/nosuchuser/"
+        _refused(mock_page, url)
+        _show_the_interstitial(mock_page, 404)
+        navigator = PageNavigator(ScrapingSession(mock_page))
+        slept: list[float] = []
+        prompt, barrier = _no_prompt_no_barrier()
+
+        # Before the fix this raised `RateLimitError`; the navigation error
+        # itself is what the section reader downstream absorbs and reports.
+        with (
+            _recording_sleep(slept),
+            prompt,
+            barrier,
+            pytest.raises(PatchrightError, match="ERR_HTTP_RESPONSE_CODE_FAILURE"),
+        ):
+            await navigator._goto_with_auth_checks(url)
+
+        # And it does not pay the rate-limit backoff on the way out.
+        assert not slept
+        assert navigator._session.rate_limit.rate_limit_hits == 0
+
+    async def test_a_429_elsewhere_on_the_page_is_not_the_status(self, mock_page):
+        """The word boundary: a 429 inside a longer number is not a status."""
+        url = "https://www.linkedin.com/in/testuser/"
+        _refused(mock_page, url)
+        mock_page.evaluate = AsyncMock(
+            return_value="This page isn't working HTTP ERROR 404 ref 14290"
+        )
+        navigator = PageNavigator(ScrapingSession(mock_page))
+        prompt, barrier = _no_prompt_no_barrier()
+
+        with (
+            prompt,
+            barrier,
+            pytest.raises(PatchrightError, match="ERR_HTTP_RESPONSE_CODE_FAILURE"),
+        ):
+            await navigator._goto_with_auth_checks(url)
+
+    async def test_an_unreadable_body_is_not_a_rate_limit(self, mock_page):
+        """Fails closed: no evidence is not evidence of a limit."""
+        url = "https://www.linkedin.com/in/testuser/"
+        _refused(mock_page, url)
+        mock_page.evaluate = AsyncMock(side_effect=PatchrightError("no document"))
+        navigator = PageNavigator(ScrapingSession(mock_page))
+        prompt, barrier = _no_prompt_no_barrier()
+
+        with (
+            prompt,
+            barrier,
+            pytest.raises(PatchrightError, match="ERR_HTTP_RESPONSE_CODE_FAILURE"),
+        ):
+            await navigator._goto_with_auth_checks(url)
+
+    async def test_the_interstitial_alone_is_not_a_rate_limit(self, mock_page):
+        """Both halves of the signal, or neither: a 429 on the page behind a
+        different net error is a page that happens to say 429."""
+        url = "https://www.linkedin.com/in/testuser/"
+        mock_page.goto = AsyncMock(
+            side_effect=PatchrightError("Page.goto: net::ERR_ABORTED at " + url)
+        )
+        _show_the_interstitial(mock_page, 429)
+        navigator = PageNavigator(ScrapingSession(mock_page))
+        prompt, barrier = _no_prompt_no_barrier()
+
+        with prompt, barrier, pytest.raises(PatchrightError, match="ERR_ABORTED"):
+            await navigator._goto_with_auth_checks(url)
+
+    async def test_navigation_failure_backs_off_with_jitter(self, mock_page):
+        url = "https://www.linkedin.com/messaging/thread/2-abc/"
+        _refused(mock_page, url)
+        _show_the_interstitial(mock_page, 429)
+        slept: list[float] = []
+        navigator = PageNavigator(ScrapingSession(mock_page))
+
+        with _recording_sleep(slept), pytest.raises(RateLimitError):
+            await navigator._goto_with_auth_checks(url)
+
+        base = RATE_LIMIT_BACKOFF_DELAY
+        assert len(slept) == 1
+        assert base * 0.5 <= slept[0] <= base * 1.5
+
+    async def test_second_rate_limit_of_a_scrape_backs_off_longer(self, mock_page):
+        url = "https://www.linkedin.com/in/testuser/"
+        _refused(mock_page, url)
+        _show_the_interstitial(mock_page, 429)
+        slept: list[float] = []
+        navigator = PageNavigator(ScrapingSession(mock_page))
+
+        with _identity_jitter(), _recording_sleep(slept):
+            for _ in range(2):
+                with pytest.raises(RateLimitError):
+                    await navigator._goto_with_auth_checks(url)
+
+        base = RATE_LIMIT_BACKOFF_DELAY
+        assert slept == [base, base * 2]
+        assert navigator._session.rate_limit.rate_limit_hits == 2
+
+    async def test_the_backoff_is_capped_after_the_jitter(self, mock_page):
+        """Jittering the cap first let a 30s maximum sleep 45s."""
+        url = "https://www.linkedin.com/in/testuser/"
+        _refused(mock_page, url)
+        _show_the_interstitial(mock_page, 429)
+        slept: list[float] = []
+        navigator = PageNavigator(ScrapingSession(mock_page))
+        # Hits already spent push the exponent to the doubling cap.
+        navigator._session.rate_limit.rate_limit_hits = 8
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.session.jitter",
+                side_effect=lambda base, *a, **kw: base * 1.5,
+            ),
+            _recording_sleep(slept),
+            pytest.raises(RateLimitError),
+        ):
+            await navigator._goto_with_auth_checks(url)
+
+        assert slept == [30.0]
+
+    async def test_committed_429_honors_retry_after(self, mock_page):
+        """The other shape: Chromium commits the 429 and `goto` returns it."""
+        response = MagicMock()
+        response.status = 429
+        response.headers = {"retry-after": "120"}
+        mock_page.goto = AsyncMock(return_value=response)
+        navigator = PageNavigator(ScrapingSession(mock_page))
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
+                new_callable=AsyncMock,
+            ) as sleep,
+            pytest.raises(RateLimitError) as raised,
+        ):
+            await navigator._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+        assert raised.value.suggested_wait_time == 120
+        assert "120s" in str(raised.value)
+        # The backoff is the local pause, never the header: nothing here
+        # sleeps for `Retry-After`.
+        sleep.assert_awaited_once()
+        assert all(call.args[0] < 120 for call in sleep.await_args_list)
+
+    async def test_committed_429_without_retry_after_keeps_the_default_wait(
+        self, mock_page
+    ):
+        response = MagicMock()
+        response.status = 429
+        response.headers = {}
+        mock_page.goto = AsyncMock(return_value=response)
+        navigator = PageNavigator(ScrapingSession(mock_page))
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+            pytest.raises(RateLimitError) as raised,
+        ):
+            await navigator._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+        assert raised.value.suggested_wait_time == 300
+
+    async def test_committed_429_relays_a_capped_retry_after(self, mock_page):
+        response = MagicMock()
+        response.status = 429
+        response.headers = {"retry-after": "86400"}
+        mock_page.goto = AsyncMock(return_value=response)
+        navigator = PageNavigator(ScrapingSession(mock_page))
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+            pytest.raises(RateLimitError) as raised,
+        ):
+            await navigator._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+        assert raised.value.suggested_wait_time == RETRY_AFTER_CEILING
+
+    async def test_committed_200_is_not_a_rate_limit(self, mock_page):
+        response = MagicMock()
+        response.status = 200
+        response.headers = {}
+        mock_page.goto = AsyncMock(return_value=response)
+        navigator = PageNavigator(ScrapingSession(mock_page))
+
+        with patch(
+            "linkedin_mcp_server.scraping.navigation.detect_auth_barrier_quick",
+            new_callable=AsyncMock,
+            return_value=None,
+        ) as barrier:
+            await navigator._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+        barrier.assert_awaited_once()
+        assert navigator._session.rate_limit.rate_limit_hits == 0
+
+    async def test_a_driver_that_returns_no_response_is_not_a_rate_limit(
+        self, mock_page
+    ):
+        """`goto` may hand back nothing at all (a scripted page double does);
+        no response is no status."""
+        mock_page.goto = AsyncMock(return_value=None)
+        navigator = PageNavigator(ScrapingSession(mock_page))
+
+        with patch(
+            "linkedin_mcp_server.scraping.navigation.detect_auth_barrier_quick",
+            new_callable=AsyncMock,
+            return_value=None,
+        ):
+            await navigator._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+        assert navigator._session.rate_limit.rate_limit_hits == 0
