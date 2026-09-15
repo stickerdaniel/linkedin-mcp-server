@@ -35,7 +35,7 @@ a page-owning collaborator.
 | `message_sender` | `MessageSender` | `page-owning` |
 | `navigation` | `PageNavigator`, `WaitUntil` | `page-owning` |
 | `person` | `PersonScraper` | `page-owning` |
-| `posts` | `PostSearch` | `browser-free` |
+| `posts` | `EnrichLevel`, `LINKEDIN_BASE_URL`, `PostSearch`, `SAVED_POSTS_URL` | `page-owning` |
 | `profile_page` | `MessageTarget`, `MessageTargetResolution`, `ProfilePageReader`, `ReadMessageTarget` | `page-owning` |
 | `search_urls` | `CONTENT_DATE_POSTED_MAP`, `EXPERIENCE_LEVEL_MAP`, `JOB_DATE_POSTED_MAP`, `JOB_TYPE_MAP`, `NETWORK_TOKENS`, `SORT_BY_MAP`, `WORK_TYPE_MAP`, `build_company_search_url()`, `build_content_search_url()`, `build_job_search_url()`, `build_people_search_url()` | `browser-free` |
 | `session` | `NAV_DELAY`, `ScrapingSession` | `page-owning` |
@@ -63,7 +63,7 @@ a page-owning collaborator.
 - `message_sender` -> `contracts`, `identifiers`, `navigation`, `session`
 - `navigation` -> `session`
 - `person` -> `capture`, `contracts`, `fields`, `identifiers`, `link_metadata`, `navigation`, `profile_page`, `search_urls`, `session`, `text`
-- `posts` -> `capture`, `contracts`, `link_metadata`, `search_urls`
+- `posts` -> `capture`, `content`, `contracts`, `link_metadata`, `navigation`, `search_urls`, `session`, `text`
 - `profile_page` -> `session`
 - `search_urls` -> `contracts`
 - `session` -> _(none)_
@@ -81,7 +81,9 @@ a page-owning collaborator.
 - `get_my_profile`
 - `get_page_text`
 - `get_saved_jobs`
+- `get_saved_posts`
 - `get_sidebar_profiles`
+- `read_post`
 - `scrape_company`
 - `scrape_job`
 - `scrape_person`

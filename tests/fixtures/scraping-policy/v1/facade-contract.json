@@ -52,9 +52,17 @@
         "coroutine": true,
         "signature": "(self, max_pages: 'int' = 3) -> 'dict[str, Any]'"
       },
+      "get_saved_posts": {
+        "coroutine": true,
+        "signature": "(self, num_posts: 'int' = 10, enrich: 'str' = 'none', callbacks: 'ProgressCallback | None' = None) -> 'dict[str, Any]'"
+      },
       "get_sidebar_profiles": {
         "coroutine": true,
         "signature": "(self, username: 'str') -> 'dict[str, Any]'"
+      },
+      "read_post": {
+        "coroutine": true,
+        "signature": "(self, urn: 'str') -> 'dict[str, Any]'"
       },
       "scrape_company": {
         "coroutine": true,
@@ -102,7 +110,9 @@
       "get_inbox",
       "get_my_profile",
       "get_saved_jobs",
+      "get_saved_posts",
       "get_sidebar_profiles",
+      "read_post",
       "scrape_company",
       "scrape_job",
       "scrape_person",
@@ -438,6 +448,35 @@
           "type": "object"
         }
       },
+      "get_saved_posts": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "enrich": {
+              "default": "none",
+              "description": "Detail-page re-read level: none, truncated, or all",
+              "enum": [
+                "none",
+                "truncated",
+                "all"
+              ],
+              "type": "string"
+            },
+            "num_posts": {
+              "default": 10,
+              "description": "How many saved items to scroll to (1-50, default 10)",
+              "maximum": 50,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
       "get_sidebar_profiles": {
         "input": {
           "additionalProperties": false,
@@ -449,6 +488,26 @@
           },
           "required": [
             "linkedin_username"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "read_post": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "urn": {
+              "description": "Activity URN, permalink path, or full LinkedIn post URL",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "urn"
           ],
           "type": "object"
         },

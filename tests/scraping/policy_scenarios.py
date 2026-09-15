@@ -832,6 +832,107 @@ async def _invalid_message_scenario(message: str, label: str) -> dict[str, Any]:
     )
 
 
+def _saved_item(activity: str, *, truncated: bool, preview: str = "") -> dict[str, Any]:
+    return {
+        "href": (
+            f"https://www.linkedin.com/feed/update/urn:li:activity:{activity}"
+            "?updateEntityUrn=urn%3Ali%3Afs_updateV2"
+        ),
+        "text": f"Saved item {activity}",
+        "author": "Ada Lovelace",
+        "preview": preview,
+        "truncated": truncated,
+    }
+
+
+async def _saved_posts_scenario() -> dict[str, Any]:
+    name = "get_saved_posts__scroll_stop"
+    recorder = TraceRecorder(name, _COMMON_ALLOWED)
+    clock = FakeClock(recorder)
+    # One anchor below the request triggers a scroll; the re-count reaches it,
+    # so the loop stops on the count the way the live page does.
+    page = _page(recorder).script("evaluate:saved_item_count", 1, 1, 3)
+    page.script("evaluate:saved_items_scroll", None)
+    page.script(
+        "evaluate:saved_items",
+        {
+            "text": "Saved posts content",
+            "items": [
+                _saved_item("1", truncated=True, preview="A study\nexample.com"),
+                _saved_item("2", truncated=False),
+            ],
+        },
+    )
+    extractor = _extractor(page)
+    arguments: dict[str, Any] = {"num_posts": 3}
+    async with boundaries(recorder, clock):
+        with recorder.context("get_saved_posts", "saved_posts"):
+            result = await extractor.get_saved_posts(num_posts=3)
+    page.assert_clean()
+    return recorder.trace({"method": "get_saved_posts", "arguments": arguments}, result)
+
+
+async def _saved_posts_enrich_scenario() -> dict[str, Any]:
+    name = "get_saved_posts__enrich_truncated"
+    recorder = TraceRecorder(name, _COMMON_ALLOWED)
+    clock = FakeClock(recorder)
+    page = _page(recorder).script("evaluate:saved_item_count", 2)
+    page.script(
+        "evaluate:saved_items",
+        {
+            "text": "Saved posts content",
+            "items": [
+                _saved_item("1", truncated=True),
+                _saved_item("2", truncated=False),
+            ],
+        },
+    )
+    # Only the cut item is re-read, so exactly one detail navigation and one
+    # detail read belong in this trace.
+    page.script(
+        "evaluate:post_detail",
+        {
+            "text": "Full body of the saved post",
+            "images": [
+                "https://media.licdn.com/dms/image/v2/feedshare-shrink_800/x",
+                "https://media.licdn.com/dms/image/v2/profile-displayphoto/y",
+            ],
+            "links": [
+                "https://example.com/paper",
+                "https://www.linkedin.com/in/ada-lovelace/",
+            ],
+        },
+    )
+    extractor = _extractor(page)
+    arguments: dict[str, Any] = {"num_posts": 2, "enrich": "truncated"}
+    async with boundaries(recorder, clock):
+        with recorder.context("get_saved_posts", "saved_posts"):
+            result = await extractor.get_saved_posts(num_posts=2, enrich="truncated")
+    page.assert_clean()
+    return recorder.trace({"method": "get_saved_posts", "arguments": arguments}, result)
+
+
+async def _read_post_scenario() -> dict[str, Any]:
+    name = "read_post__permalink"
+    recorder = TraceRecorder(name, _COMMON_ALLOWED)
+    clock = FakeClock(recorder)
+    page = _page(recorder).script(
+        "evaluate:post_detail",
+        {
+            "text": "Full body of the post",
+            "images": ["https://media.licdn.com/dms/image/v2/feedshare-shrink_800/x"],
+            "links": ["https://lnkd.in/abc"],
+        },
+    )
+    extractor = _extractor(page)
+    arguments = {"urn": "urn:li:activity:1"}
+    async with boundaries(recorder, clock):
+        with recorder.context("read_post"):
+            result = await extractor.read_post(**arguments)
+    page.assert_clean()
+    return recorder.trace({"method": "read_post", "arguments": arguments}, result)
+
+
 async def _single_capture_facade_scenario(method: str) -> dict[str, Any]:
     name = f"{method}__baseline"
     recorder = TraceRecorder(name, _COMMON_ALLOWED)
@@ -1026,7 +1127,9 @@ TOOL_FACADE_METHODS = {
     "get_inbox",
     "get_my_profile",
     "get_saved_jobs",
+    "get_saved_posts",
     "get_sidebar_profiles",
+    "read_post",
     "scrape_company",
     "scrape_job",
     "scrape_person",
@@ -1066,6 +1169,9 @@ async def build_policy_traces() -> dict[str, dict[str, Any]]:
         ),
         "job-search-metadata-upgrade.json": await _job_search_upgrade_scenario(),
         "saved-jobs.json": await _saved_jobs_scenario(),
+        "saved-posts.json": await _saved_posts_scenario(),
+        "saved-posts-enriched.json": await _saved_posts_enrich_scenario(),
+        "read-post.json": await _read_post_scenario(),
         "feed-stale.json": await _feed_stale_scenario(),
         "feed-response-success.json": await _feed_response_scenario(body_failure=False),
         "feed-response-failure.json": await _feed_response_scenario(body_failure=True),

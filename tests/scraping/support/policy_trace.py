@@ -597,6 +597,8 @@ def semantic_program_id(program: str) -> str:
     checks = (
         ("performance.timeOrigin", "document_origin"),
         ("MAX_HEADING_CONTAINERS", "root_content"),
+        ('span[aria-hidden="true"]', "saved_items"),
+        ("images: Array.from(", "post_detail"),
         ("SIDEBAR_SECTIONS", "sidebar_profiles"),
         ("showAllUrls", "sidebar_profiles"),
         ("hasInvite", "connection_action_signals"),
@@ -630,6 +632,8 @@ def semantic_program_id(program: str) -> str:
         ("text.startsWith('Load more')", "profile_details_ready"),
         ("premium/", "premium_dialog_text"),
         ('main a[href*="/in/"]', "sidebar_expanded_profiles"),
+        ('a[href*="/feed/update/"]', "saved_item_count"),
+        ("window.scrollBy", "saved_items_scroll"),
     )
     for marker, operation in checks:
         if marker in compact:

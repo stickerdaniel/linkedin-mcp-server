@@ -34,6 +34,8 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.scrape_job = AsyncMock(return_value=scrape_result)
     mock.search_jobs = AsyncMock(return_value=scrape_result)
     mock.get_saved_jobs = AsyncMock(return_value=scrape_result)
+    mock.get_saved_posts = AsyncMock(return_value=scrape_result)
+    mock.read_post = AsyncMock(return_value=scrape_result)
     mock.search_people = AsyncMock(return_value=scrape_result)
     mock.get_sidebar_profiles = AsyncMock(return_value=scrape_result)
     mock.get_inbox = AsyncMock(return_value=scrape_result)
@@ -1622,6 +1624,99 @@ class TestPostTools:
         with pytest.raises(ValidationError, match="max_pages"):
             await mcp.call_tool("search_posts", {"keywords": "python", "max_pages": 0})
 
+    async def test_get_saved_posts_success(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/my-items/saved-posts/",
+            "saved_posts": [
+                {
+                    "kind": "feed_post",
+                    "permalink": "/feed/update/urn:li:activity:111/",
+                    "urn": "urn:li:activity:111",
+                    "text": "Saved post 1",
+                    "truncated": True,
+                }
+            ],
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_saved_posts")
+        result = await tool_fn(mock_context, num_posts=15, extractor=mock_extractor)
+        assert result["saved_posts"][0]["permalink"] == (
+            "/feed/update/urn:li:activity:111/"
+        )
+        call = mock_extractor.get_saved_posts.await_args.kwargs
+        assert (call["num_posts"], call["enrich"]) == (15, "none")
+
+    async def test_get_saved_posts_passes_the_enrich_level_through(self, mock_context):
+        """The level decides how many detail pages the owner re-reads.
+
+        A tool that dropped the argument would still answer with a listing,
+        which is exactly the failure this catches: enrichment silently not
+        happening reads as "nothing was truncated".
+        """
+        mock_extractor = _make_mock_extractor({"url": "x", "saved_posts": []})
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_saved_posts")
+        await tool_fn(mock_context, enrich="all", extractor=mock_extractor)
+
+        assert mock_extractor.get_saved_posts.await_args.kwargs["enrich"] == "all"
+
+    async def test_get_saved_posts_rejects_an_unknown_enrich_level(self, mock_context):
+        """An unknown level is refused before a browser is touched."""
+        from fastmcp.exceptions import ValidationError
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        with pytest.raises(ValidationError, match="enrich"):
+            await mcp.call_tool("get_saved_posts", {"enrich": "everything"})
+
+    async def test_get_saved_posts_rejects_zero_num_posts(self, mock_context):
+        """Verify num_posts=0 is rejected by Field(ge=1) validation."""
+        from fastmcp.exceptions import ValidationError
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        with pytest.raises(ValidationError, match="num_posts"):
+            await mcp.call_tool("get_saved_posts", {"num_posts": 0})
+
+    async def test_read_post_forwards_the_reference(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/feed/update/urn:li:activity:111/",
+            "text": "Full body",
+            "images": ["https://media.licdn.com/dms/image/v2/feedshare-shrink_800/x"],
+            "links": ["https://example.com/paper"],
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "read_post")
+        result = await tool_fn(
+            mock_context, urn="urn:li:activity:111", extractor=mock_extractor
+        )
+
+        assert result["text"] == "Full body"
+        mock_extractor.read_post.assert_awaited_once_with(urn="urn:li:activity:111")
+
 
 class TestToolTimeouts:
     async def test_all_tools_have_global_timeout(self):
@@ -1646,6 +1741,7 @@ class TestToolTimeouts:
             "send_message",
             "get_feed",
             "search_posts",
+            "get_saved_posts",
             "close_session",
         )
 
@@ -1679,6 +1775,7 @@ class TestToolTimeouts:
             "send_message",
             "get_feed",
             "search_posts",
+            "get_saved_posts",
             "close_session",
         )
 

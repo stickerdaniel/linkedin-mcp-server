@@ -64,7 +64,7 @@ class LinkedInExtractor:
         )
         job_pages = JobPageReader(session, navigator, content)
         self._jobs = JobScraper(navigator, capture, job_pages)
-        self._posts = PostSearch(capture)
+        self._posts = PostSearch(session, navigator, content, capture)
         self._conversations = ConversationReader(
             session, navigator, content, profile_page
         )
@@ -187,6 +187,19 @@ class LinkedInExtractor:
     async def get_saved_jobs(self, max_pages: int = 3) -> dict[str, Any]:
         """List the authenticated user's saved job postings."""
         return await self._jobs.get_saved_jobs(max_pages)
+
+    async def get_saved_posts(
+        self,
+        num_posts: int = 10,
+        enrich: str = "none",
+        callbacks: ProgressCallback | None = None,
+    ) -> dict[str, Any]:
+        """List the authenticated user's saved posts and articles."""
+        return await self._posts.get_saved_posts(num_posts, enrich, callbacks)
+
+    async def read_post(self, urn: str) -> dict[str, Any]:
+        """Read one post or article in full from its permalink page."""
+        return await self._posts.read_post(urn)
 
     async def search_people(
         self,

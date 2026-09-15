@@ -5066,7 +5066,7 @@ class TestRealOwner:
             # in a `register_*` call.
             assert "get_person_profile" in names
             assert "close_session" in names
-            assert len(names) == 19, sorted(names)
+            assert len(names) == 21, sorted(names)
         finally:
             _stop(result.get("pid"))
 

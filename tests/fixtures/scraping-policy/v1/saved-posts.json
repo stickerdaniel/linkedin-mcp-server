@@ -1,0 +1,155 @@
+{
+  "call": {
+    "arguments": {
+      "num_posts": 3
+    },
+    "method": "get_saved_posts"
+  },
+  "events": [
+    {
+      "call": "get_saved_posts",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "section": "saved_posts"
+    },
+    {
+      "call": "get_saved_posts",
+      "extra": {
+        "target_url": "https://www.linkedin.com/my-items/saved-posts/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "section": "saved_posts"
+    },
+    {
+      "call": "get_saved_posts",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/my-items/saved-posts/",
+      "requested_url": "https://www.linkedin.com/my-items/saved-posts/",
+      "section": "saved_posts",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "get_saved_posts",
+      "description": "goto https://www.linkedin.com/my-items/saved-posts/",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "saved_posts"
+    },
+    {
+      "call": "get_saved_posts",
+      "extra": {
+        "target_url": "https://www.linkedin.com/my-items/saved-posts/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "section": "saved_posts"
+    },
+    {
+      "call": "get_saved_posts",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "section": "saved_posts"
+    },
+    {
+      "call": "get_saved_posts",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "section": "saved_posts"
+    },
+    {
+      "call": "get_saved_posts",
+      "kind": "boundary.rate_limit",
+      "section": "saved_posts"
+    },
+    {
+      "call": "get_saved_posts",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "section": "saved_posts",
+      "selector": "main",
+      "state": "visible",
+      "timeout_ms": null
+    },
+    {
+      "call": "get_saved_posts",
+      "dismissed": false,
+      "kind": "boundary.modal",
+      "section": "saved_posts"
+    },
+    {
+      "call": "get_saved_posts",
+      "kind": "evaluate",
+      "operation": "saved_item_count",
+      "program_digest": "d113323f2ff1",
+      "section": "saved_posts"
+    },
+    {
+      "call": "get_saved_posts",
+      "kind": "evaluate",
+      "operation": "saved_items_scroll",
+      "program_digest": "6b4a37519220",
+      "section": "saved_posts"
+    },
+    {
+      "call": "get_saved_posts",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 1.0,
+      "section": "saved_posts"
+    },
+    {
+      "call": "get_saved_posts",
+      "kind": "evaluate",
+      "operation": "saved_item_count",
+      "program_digest": "d113323f2ff1",
+      "section": "saved_posts"
+    },
+    {
+      "call": "get_saved_posts",
+      "kind": "evaluate",
+      "operation": "saved_item_count",
+      "program_digest": "d113323f2ff1",
+      "section": "saved_posts"
+    },
+    {
+      "call": "get_saved_posts",
+      "kind": "evaluate",
+      "operation": "saved_items",
+      "program_digest": "78ecb5ea9188",
+      "section": "saved_posts"
+    }
+  ],
+  "result": {
+    "saved_posts": [
+      {
+        "author": "Ada Lovelace",
+        "kind": "feed_post",
+        "permalink": "/feed/update/urn:li:activity:1/",
+        "preview": {
+          "domain": "example.com",
+          "title": "A study"
+        },
+        "text": "Saved item 1",
+        "truncated": true,
+        "urn": "urn:li:activity:1"
+      },
+      {
+        "author": "Ada Lovelace",
+        "kind": "feed_post",
+        "permalink": "/feed/update/urn:li:activity:2/",
+        "text": "Saved item 2",
+        "truncated": false,
+        "urn": "urn:li:activity:2"
+      }
+    ],
+    "url": "https://www.linkedin.com/my-items/saved-posts/"
+  },
+  "scenario": "get_saved_posts__scroll_stop",
+  "schema_version": 1
+}

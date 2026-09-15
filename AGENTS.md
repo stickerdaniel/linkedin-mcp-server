@@ -138,7 +138,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Tool Return Format
 
-All scraping tools return: `{url, sections: {name: raw_text}}`.
+Scraping tools return `{url, sections: {name: raw_text}}`, with two
+item-shaped exceptions that carry no `sections` at all: `get_saved_posts`
+returns `{url, saved_posts: [{kind, permalink, urn?, author?, preview?, text,
+truncated, images?, links?, error?}]}` and `read_post` returns `{url, text,
+images, links}`. Both still report a page-level failure under
+`section_errors["saved_posts"]`.
 
 Optional additional keys:
 
@@ -147,6 +152,7 @@ Optional additional keys:
 - `unknown_sections: [name, ...]`
 - `job_ids: [id, ...]` (search_jobs and get_saved_jobs)
 - `references["feed"]` (get_feed only) — every entry is `kind: "feed_post"`; non-post anchors (sidebar profiles, employer logos) are filtered. URLs may carry either `/feed/update/<urn>/` (DOM-anchor-derived) or `/posts/<slug>` (SDUI-derived) form; both are valid LinkedIn permalinks. Cap is 50 entries, matching `get_feed`'s `num_posts` ceiling.
+- `saved_posts` items (get_saved_posts only) — `kind` is `feed_post` or `article`; `urn` exists only for `/feed/update/` items; `preview.domain` is present only when the link-preview card's last line is hostname-shaped, and its presence is the "this post points at content hosted elsewhere" signal; `truncated` describes the `text` currently in the item, so enrichment sets it false. `images` and `links` appear only on an enriched item, and `error` marks an item whose re-read failed.
 
 ## Tests
 

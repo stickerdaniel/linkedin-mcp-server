@@ -1,0 +1,213 @@
+{
+  "call": {
+    "arguments": {
+      "enrich": "truncated",
+      "num_posts": 2
+    },
+    "method": "get_saved_posts"
+  },
+  "events": [
+    {
+      "call": "get_saved_posts",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "section": "saved_posts"
+    },
+    {
+      "call": "get_saved_posts",
+      "extra": {
+        "target_url": "https://www.linkedin.com/my-items/saved-posts/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "section": "saved_posts"
+    },
+    {
+      "call": "get_saved_posts",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/my-items/saved-posts/",
+      "requested_url": "https://www.linkedin.com/my-items/saved-posts/",
+      "section": "saved_posts",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "get_saved_posts",
+      "description": "goto https://www.linkedin.com/my-items/saved-posts/",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "saved_posts"
+    },
+    {
+      "call": "get_saved_posts",
+      "extra": {
+        "target_url": "https://www.linkedin.com/my-items/saved-posts/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "section": "saved_posts"
+    },
+    {
+      "call": "get_saved_posts",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "section": "saved_posts"
+    },
+    {
+      "call": "get_saved_posts",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "section": "saved_posts"
+    },
+    {
+      "call": "get_saved_posts",
+      "kind": "boundary.rate_limit",
+      "section": "saved_posts"
+    },
+    {
+      "call": "get_saved_posts",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "section": "saved_posts",
+      "selector": "main",
+      "state": "visible",
+      "timeout_ms": null
+    },
+    {
+      "call": "get_saved_posts",
+      "dismissed": false,
+      "kind": "boundary.modal",
+      "section": "saved_posts"
+    },
+    {
+      "call": "get_saved_posts",
+      "kind": "evaluate",
+      "operation": "saved_item_count",
+      "program_digest": "d113323f2ff1",
+      "section": "saved_posts"
+    },
+    {
+      "call": "get_saved_posts",
+      "kind": "evaluate",
+      "operation": "saved_items",
+      "program_digest": "78ecb5ea9188",
+      "section": "saved_posts"
+    },
+    {
+      "call": "get_saved_posts",
+      "callback_id": "callback-2",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "section": "saved_posts"
+    },
+    {
+      "call": "get_saved_posts",
+      "extra": {
+        "target_url": "https://www.linkedin.com/feed/update/urn:li:activity:1/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "section": "saved_posts"
+    },
+    {
+      "call": "get_saved_posts",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/feed/update/urn:li:activity:1/",
+      "requested_url": "https://www.linkedin.com/feed/update/urn:li:activity:1/",
+      "section": "saved_posts",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "get_saved_posts",
+      "description": "goto https://www.linkedin.com/feed/update/urn:li:activity:1/",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "saved_posts"
+    },
+    {
+      "call": "get_saved_posts",
+      "extra": {
+        "target_url": "https://www.linkedin.com/feed/update/urn:li:activity:1/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "section": "saved_posts"
+    },
+    {
+      "call": "get_saved_posts",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "section": "saved_posts"
+    },
+    {
+      "call": "get_saved_posts",
+      "callback_id": "callback-2",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "section": "saved_posts"
+    },
+    {
+      "call": "get_saved_posts",
+      "kind": "boundary.rate_limit",
+      "section": "saved_posts"
+    },
+    {
+      "call": "get_saved_posts",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "section": "saved_posts",
+      "selector": "main",
+      "state": "visible",
+      "timeout_ms": null
+    },
+    {
+      "call": "get_saved_posts",
+      "dismissed": false,
+      "kind": "boundary.modal",
+      "section": "saved_posts"
+    },
+    {
+      "call": "get_saved_posts",
+      "kind": "evaluate",
+      "operation": "post_detail",
+      "program_digest": "2e6994494c40",
+      "section": "saved_posts"
+    }
+  ],
+  "result": {
+    "saved_posts": [
+      {
+        "author": "Ada Lovelace",
+        "images": [
+          "https://media.licdn.com/dms/image/v2/feedshare-shrink_800/x"
+        ],
+        "kind": "feed_post",
+        "links": [
+          "https://example.com/paper"
+        ],
+        "permalink": "/feed/update/urn:li:activity:1/",
+        "text": "Full body of the saved post",
+        "truncated": false,
+        "urn": "urn:li:activity:1"
+      },
+      {
+        "author": "Ada Lovelace",
+        "kind": "feed_post",
+        "permalink": "/feed/update/urn:li:activity:2/",
+        "text": "Saved item 2",
+        "truncated": false,
+        "urn": "urn:li:activity:2"
+      }
+    ],
+    "url": "https://www.linkedin.com/my-items/saved-posts/"
+  },
+  "scenario": "get_saved_posts__enrich_truncated",
+  "schema_version": 1
+}
