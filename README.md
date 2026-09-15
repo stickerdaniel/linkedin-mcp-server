@@ -11,7 +11,7 @@
 
 An MCP server that connects AI assistants like Claude to LinkedIn through your own logged-in browser session. Look up profiles and companies, send messages, manage your inbox, or search for jobs. All browser actions run locally on your machine.
 
->This is an independent open-source project, not affiliated with, authorized by, endorsed by, or sponsored by LinkedIn or Microsoft. LinkedIn is a trademark of LinkedIn Corporation and is used here only to identify the service this software interacts with.
+> This is an independent open-source project, not affiliated with, authorized by, endorsed by, or sponsored by LinkedIn or Microsoft. LinkedIn is a trademark of LinkedIn Corporation and is used here only to identify the service this software interacts with.
 
 <br/>
 <details open>
@@ -353,7 +353,6 @@ codex plugin add linkedin-mcp-server@linkedin-mcp-server
 
 <details>
 <summary><strong>I know what I'm doing</strong></summary>
-  
 **Prerequisites:** Make sure [Docker](https://www.docker.com/get-started/) is installed and running.
 
 ### Authentication
@@ -636,7 +635,7 @@ belongs behind something that provides it.
 <a href="https://www.swiftproxy.net/?ref=stickerdaniel">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/872f4efb-f329-4f3c-b864-cd1fac7a331b" />
-    <img src="https://github.com/user-attachments/assets/c413a236-a49f-4480-8dcc-b67de3093920"  alt="Swiftproxy logo" width="240">
+    <img src="https://github.com/user-attachments/assets/c413a236-a49f-4480-8dcc-b67de3093920" alt="Swiftproxy logo" width="240">
   </picture>
 </a>
 
@@ -648,7 +647,7 @@ Use code <strong>PROXY90</strong> for 10% off <a href="https://www.swiftproxy.ne
 <a href="https://www.rapidproxy.io/?ref=linkedin">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/47680db7-360f-4128-9e66-73f784c0fa85" />
-    <img src="https://github.com/user-attachments/assets/3daa30e1-ead1-4884-8388-b3024c026ba9"  alt="RapidProxy logo" width="240">
+    <img src="https://github.com/user-attachments/assets/3daa30e1-ead1-4884-8388-b3024c026ba9" alt="RapidProxy logo" width="240">
   </picture>
 </a>
 
