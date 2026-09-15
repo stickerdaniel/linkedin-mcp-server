@@ -31,12 +31,14 @@ from linkedin_mcp_server.scraping.job_policy import (
     dropped_filters_section_error,
     dropped_offset_section_error,
     lost_keywords_section_error,
+    no_matching_jobs_section_error,
     reconcile_search_references,
 )
 from linkedin_mcp_server.scraping.link_metadata import Reference, dedupe_references
 from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.search_urls import build_job_search_url
 from linkedin_mcp_server.scraping.session import NAV_DELAY
+from linkedin_mcp_server.scraping.text import JOB_SEARCH_EN_US, JobSearchTextTable
 
 logger = logging.getLogger(__name__)
 
@@ -57,10 +59,12 @@ class JobScraper:
         navigator: PageNavigator,
         capture: SectionCapture,
         pages: JobPageReader,
+        search_text: JobSearchTextTable = JOB_SEARCH_EN_US,
     ):
         self._navigator = navigator
         self._capture = capture
         self._pages = pages
+        self._search_text = search_text
 
     async def scrape_job(self, job_id: str) -> dict[str, Any]:
         """Scrape a single job posting.
@@ -153,6 +157,12 @@ class JobScraper:
         filters_warning: dict[str, str] | None = None
         total_pages: int | None = None
         total_pages_queried = False
+        total: dict[str, Any] | None = None
+        promoted_ids: list[str] = []
+        # False once a page that added ids could not be read. The list would
+        # then cover only some of `job_ids`, and a caller takes a job missing
+        # from it as not promoted.
+        promoted_complete = True
 
         # The search-wide scroll budget is spent as it goes rather than
         # divided up front, because dividing it charges every navigation for
@@ -362,6 +372,28 @@ class JobScraper:
                     # search. Do not read ids from a DOM that supplied no text.
                     break
 
+                if self._search_text.shows_no_match(extracted.text):
+                    # LinkedIn's substitute for zero results keeps the route
+                    # and the query, so every check above passes, and its
+                    # cards are real job links. Read as a result page it
+                    # returned unrelated postings as `job_ids`, and a second
+                    # page served the same ones again. After a page of real
+                    # results it only means the list has ended.
+                    logger.debug(
+                        "Search page %d shows recommendations, not results",
+                        page_num + 1,
+                    )
+                    if not all_job_ids:
+                        section_errors["search_results"] = (
+                            no_matching_jobs_section_error(keywords)
+                        )
+                    break
+
+                if page_num == 0:
+                    count = self._search_text.result_count(extracted.text)
+                    if count is not None:
+                        total = {"count": count[0], "exact": count[1]}
+
                 # Read total pages from pagination state (once only, best-effort)
                 if not total_pages_queried:
                     total_pages_queried = True
@@ -398,6 +430,22 @@ class JobScraper:
                     logger.debug("No new job IDs on page %d, stopping", page_num + 1)
                     break
 
+                # Best effort, like the page count: a read that fails costs the
+                # key and never the page.
+                try:
+                    promoted = set(
+                        await self._pages._extract_promoted_job_ids(
+                            self._search_text.promoted_label
+                        )
+                    )
+                except LinkedInScraperException:
+                    raise
+                except Exception as e:
+                    logger.debug("Could not read promoted jobs: %s", e)
+                    promoted_complete = False
+                else:
+                    promoted_ids.extend(jid for jid in new_ids if jid in promoted)
+
                 for jid in new_ids:
                     seen_ids.add(jid)
                     all_job_ids.append(jid)
@@ -425,6 +473,12 @@ class JobScraper:
             else {},
             "job_ids": all_job_ids,
         }
+        if total is not None:
+            result["total"] = total
+        # Each page adds its ids only after its promoted read, so ids with no
+        # failed read mean every page that contributed was read.
+        if all_job_ids and promoted_complete:
+            result["promoted_job_ids"] = promoted_ids
         if page_references:
             result["references"] = {
                 "search_results": dedupe_references(page_references)

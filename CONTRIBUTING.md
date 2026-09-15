@@ -60,6 +60,8 @@ for section_name, (suffix, is_overlay) in PERSON_SECTIONS.items():
 {"url": str, "sections": {name: raw_text}, "unknown_sections": [name, ...]}
 # search_jobs and get_saved_jobs also return:
 {"url": str, "sections": {name: raw_text}, "job_ids": [id, ...]}
+# search_jobs may add the advertised result count and the promoted subset:
+{..., "total": {"count": int, "exact": bool}, "promoted_job_ids": [id, ...]}
 ```
 
 `sections` remains the main readable payload. `references` is a compact supplement for entity/article traversal. LinkedIn references are emitted as relative paths to minimize token use.
