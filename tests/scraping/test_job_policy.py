@@ -1,6 +1,7 @@
 """Tests for the routing and reference policy of the job list workflows."""
 
 from linkedin_mcp_server.scraping.job_policy import (
+    label_similar_jobs,
     reconcile_search_references,
     route,
     same_job_search,
@@ -20,6 +21,28 @@ def job(job_id: str, text: str | None = None) -> Reference:
 
 def company(name: str) -> Reference:
     return {"kind": "company", "url": f"/company/{name}/"}
+
+
+class TestLabelSimilarJobs:
+    def test_other_jobs_on_a_posting_are_similar_jobs(self):
+        own: Reference = {**job("100", "Easy Apply"), "context": "job posting"}
+        other: Reference = {"kind": "job", "url": "/jobs/view/200/"}
+        employer: Reference = {**company("acme"), "context": "job posting"}
+
+        labelled = label_similar_jobs([employer, own, other], "100")
+
+        assert labelled == [
+            employer,
+            own,
+            {"kind": "job", "url": "/jobs/view/200/", "context": "similar job"},
+        ]
+
+    def test_the_input_references_are_not_modified(self):
+        other: Reference = {**job("200"), "context": "job posting"}
+
+        label_similar_jobs([other], "100")
+
+        assert other["context"] == "job posting"
 
 
 class TestReconcileSearchReferences:

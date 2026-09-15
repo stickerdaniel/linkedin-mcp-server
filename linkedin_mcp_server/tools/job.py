@@ -45,7 +45,9 @@ def register_job_tools(
 
         Returns:
             Dict with url, sections (name -> raw text), and optional references.
-            The LLM should parse the raw text to extract job details.
+            The LLM should parse the raw text to extract job details. Jobs in
+            the posting's "More jobs" list are references with context
+            "similar job"; their ids work with get_job_details.
         """
         try:
             extractor = extractor or await get_ready_extractor(
