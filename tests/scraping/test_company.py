@@ -6,6 +6,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
+from patchright._impl._errors import TargetClosedError
 
 from linkedin_mcp_server.callbacks import ProgressCallback
 from linkedin_mcp_server.core.exceptions import (
@@ -37,6 +38,14 @@ def _scraper(page) -> CompanyScraper:
     return CompanyScraper(
         session,
         SectionCapture(session, navigator, PageContentReader(session)),
+    )
+
+
+def _no_jitter():
+    """Pin the session's jitter to identity so a pace of N sleeps exactly N."""
+    return patch(
+        "linkedin_mcp_server.scraping.session.jitter",
+        side_effect=lambda base, spread=0.5: base,
     )
 
 
@@ -287,7 +296,8 @@ class TestScrapeCompany:
 
         The duration is asserted as well as the count: a delay of the wrong
         length paces the walk wrongly against LinkedIn while every
-        count-only assertion stays green.
+        count-only assertion stays green. Jitter is pinned to identity so
+        the length is the configured one.
         """
         scraper = _scraper(mock_page)
         with (
@@ -301,6 +311,7 @@ class TestScrapeCompany:
                 "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ) as mock_sleep,
+            _no_jitter(),
         ):
             await scraper.scrape_company("testcorp", {"about", "posts", "jobs"})
 
@@ -547,6 +558,25 @@ class TestScrapeCompany:
         cb.on_progress.assert_not_awaited()
         cb.on_complete.assert_not_awaited()
 
+    async def test_a_closed_target_is_reraised_rather_than_filed_as_a_section_error(
+        self, mock_page
+    ):
+        scraper = _scraper(mock_page)
+        with (
+            patch.object(
+                scraper._capture,
+                "capture",
+                new_callable=AsyncMock,
+                side_effect=TargetClosedError("closed"),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+            pytest.raises(TargetClosedError),
+        ):
+            await scraper.scrape_company("testcorp", {"about"})
+
 
 class TestScrapeCompanyCallbacks:
     """Test that scrape_company invokes callbacks at each stage."""
@@ -593,6 +623,26 @@ class TestScrapeCompanyCallbacks:
         cb.on_complete.assert_awaited_once()
         assert cb.on_complete.call_args[0][0] == "company profile"
         cb.on_error.assert_not_awaited()
+
+    async def test_a_closed_target_reaches_on_error(self, mock_page):
+        scraper = _scraper(mock_page)
+        callbacks = AsyncMock()
+        closed = TargetClosedError("closed")
+        with (
+            patch.object(
+                scraper._capture,
+                "capture",
+                new_callable=AsyncMock,
+                side_effect=closed,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+            pytest.raises(TargetClosedError),
+        ):
+            await scraper.scrape_company("testcorp", {"about"}, callbacks=callbacks)
+        callbacks.on_error.assert_awaited_once_with(closed)
 
 
 class TestGetCompanyEmployees:

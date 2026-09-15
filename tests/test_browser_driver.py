@@ -155,6 +155,43 @@ async def test_same_runtime_uses_source_profile(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_dead_cached_browser_is_recreated(tmp_path, caplog):
+    """Measured: Chromium exited mid-call and the cached singleton was handed to
+    three more tool calls over fifteen minutes."""
+    _write_source_state(tmp_path, runtime_id="macos-arm64-host")
+    first = _make_mock_browser()
+    second = _make_mock_browser()
+
+    with (
+        patch(
+            "linkedin_mcp_server.drivers.browser.get_runtime_id",
+            return_value="macos-arm64-host",
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.BrowserManager",
+            side_effect=[first, second],
+        ) as ctor,
+        patch(
+            "linkedin_mcp_server.drivers.browser.detect_auth_barrier_quick",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        caplog.at_level(logging.WARNING, logger="linkedin_mcp_server.drivers.browser"),
+    ):
+        assert await get_or_create_browser() is first
+        assert await get_or_create_browser() is first
+        ctor.assert_called_once()
+
+        first.context.browser.is_connected.return_value = False
+        result = await get_or_create_browser()
+
+    assert result is second
+    assert ctor.call_count == 2
+    first.close.assert_awaited_once()
+    assert "Browser died out from under the session; recreating" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_same_runtime_clicks_remember_me_during_feed_validation(tmp_path):
     _write_source_state(tmp_path, runtime_id="macos-arm64-host")
     source_browser = _make_mock_browser()
@@ -878,15 +915,13 @@ async def test_concurrent_get_or_create_creates_single_browser(monkeypatch):
     """Two concurrent callers (a tool call and a background caller resuming at
     startup) must not both launch a browser against the same profile."""
     import asyncio
-    from typing import Any, cast
-
     from linkedin_mcp_server.drivers import browser as browser_module
 
     # Clean starting state regardless of test order; auto-restored at teardown.
     monkeypatch.setattr(browser_module, "_browser", None)
 
     calls = {"n": 0}
-    sentinel = cast(Any, object())
+    sentinel = _make_mock_browser()
 
     async def fake_create():
         calls["n"] += 1

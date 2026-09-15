@@ -594,7 +594,7 @@ async def get_or_create_browser(
     if headless is not None:
         _headless = headless
 
-    if _browser is not None:
+    if _browser is not None and _is_connected(_browser):
         return _browser
 
     # Double-checked: only one concurrent caller may create the singleton. The
@@ -602,8 +602,25 @@ async def get_or_create_browser(
     # which clears _browser before it has finished tearing Chromium down.
     async with _browser_create_lock, _browser_lifecycle_lock:
         if _browser is not None:
-            return _browser
+            if _is_connected(_browser):
+                return _browser
+            # Measured: Chromium exited cleanly mid-call and the cached singleton
+            # was handed to three more tool calls over fifteen minutes, each
+            # failing every section against a page that no longer existed.
+            logger.warning("Browser died out from under the session; recreating")
+            await _run_deferring_cancels(_close_browser_locked())
         return await _create_browser()
+
+
+def _is_connected(browser: BrowserManager) -> bool:
+    """Whether the Chromium behind the cached singleton is still attached.
+
+    Patchright flips ``is_connected()`` the moment the browser process goes,
+    whether it exited, crashed or was killed; a closed page alone would also
+    cover a tab closed by hand, but that is not what took the session down.
+    """
+    chromium = browser.context.browser
+    return chromium is None or chromium.is_connected()
 
 
 async def _create_browser() -> BrowserManager:
