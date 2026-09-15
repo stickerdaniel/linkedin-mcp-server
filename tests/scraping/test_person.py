@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import importlib.util
 
@@ -25,7 +25,9 @@ from linkedin_mcp_server.scraping.content import PageContentReader
 from linkedin_mcp_server.scraping.contracts import (
     RATE_LIMITED_SECTION_TEXT,
     ExtractedSection,
+    FilterValidationError,
 )
+from linkedin_mcp_server.scraping.facets import FacetResolver
 from linkedin_mcp_server.scraping.link_metadata import Reference
 from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.person import PersonScraper
@@ -52,6 +54,7 @@ def _scraper(page, *, message_target: Any = None) -> PersonScraper:
         navigator,
         capture,
         ProfilePageReader(session, read_message_target),
+        FacetResolver(session, navigator, capture),
     )
 
 
@@ -716,6 +719,39 @@ class TestScrapePersonSectionOutcomes:
         assert result["sections"]["main_profile"] == "Profile text"
         assert result["section_errors"]["posts"]["error_type"] == "rate_limit"
 
+    async def test_sections_are_paced_through_the_jittered_navigation_delay(
+        self, mock_page
+    ):
+        """One pause per gap, at ``NAV_DELAY`` jittered by the session, never
+        a fixed sleep."""
+        scraper = _scraper(mock_page)
+        with (
+            patch.object(
+                scraper._capture,
+                "capture",
+                new_callable=AsyncMock,
+                return_value=extracted("text"),
+            ),
+            patch.object(
+                scraper._capture,
+                "_extract_overlay",
+                new_callable=AsyncMock,
+                return_value=extracted(""),
+            ),
+            patch.object(person_module, "NAV_DELAY", 7.0),
+            patch(
+                "linkedin_mcp_server.scraping.session.jitter",
+                side_effect=lambda base, *a, **kw: base + 0.5,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
+                new_callable=AsyncMock,
+            ) as sleep,
+        ):
+            await scraper.scrape_person("testuser", {"experience", "posts"})
+
+        assert sleep.await_args_list == [call(7.5), call(7.5)]
+
 
 class TestScrapePersonCallbacks:
     """Test that scrape_person invokes callbacks at each stage."""
@@ -1071,6 +1107,54 @@ class TestGetSidebarProfiles:
         assert result["sidebar_profiles"]["explore_premium_profiles"] == ["/in/carol/"]
         assert result["sidebar_profiles"]["people_you_may_know"] == ["/in/dave/"]
 
+    async def test_show_all_pages_are_paced_through_the_jittered_delay(self, mock_page):
+        """The first Show all follows the profile page unpaced; each later
+        one waits ``NAV_DELAY``, jittered by the session."""
+        sidebar_js_result = {
+            "sections": {
+                "more_profiles_for_you": ["/in/alice/"],
+                "people_you_may_know": ["/in/dave/"],
+            },
+            "showAllUrls": {
+                "more_profiles_for_you": "https://www.linkedin.com/search/results/people/?keywords=a",
+                "people_you_may_know": "https://www.linkedin.com/search/results/people/?keywords=b",
+            },
+        }
+        mock_page.evaluate = AsyncMock(
+            side_effect=[sidebar_js_result, ["/in/eve/"], ["/in/frank/"]]
+        )
+        mock_page.url = "https://www.linkedin.com/in/testuser/"
+
+        scraper = _scraper(mock_page)
+        with (
+            patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.session.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch.object(person_module, "NAV_DELAY", 7.0),
+            patch(
+                "linkedin_mcp_server.scraping.session.jitter",
+                side_effect=lambda base, *a, **kw: base + 0.5,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
+                new_callable=AsyncMock,
+            ) as sleep,
+        ):
+            result = await scraper.get_sidebar_profiles("testuser")
+
+        assert sleep.await_args_list == [call(7.5)]
+        assert result["sidebar_profiles"]["people_you_may_know"] == [
+            "/in/dave/",
+            "/in/frank/",
+        ]
+
     @pytest.mark.parametrize(
         ("error_type", "message"),
         [
@@ -1414,11 +1498,21 @@ class TestSearchPeople:
 
     async def test_search_people_combines_all_filters(self, mock_page):
         scraper = _scraper(mock_page)
-        with patch.object(
-            scraper._capture,
-            "capture",
-            new_callable=AsyncMock,
-            return_value=extracted("Jane Doe"),
+        with (
+            patch.object(
+                scraper._capture,
+                "capture",
+                new_callable=AsyncMock,
+                return_value=extracted("Jane Doe"),
+            ),
+            # location is resolved to a numeric geo id via the site dropdown;
+            # stub the resolver so this stays a pure URL-building test.
+            patch.object(
+                scraper._facets,
+                "resolve_geo_urn",
+                new_callable=AsyncMock,
+                return_value="104116203",
+            ) as resolve,
         ):
             result = await scraper.search_people(
                 "engineer",
@@ -1427,7 +1521,31 @@ class TestSearchPeople:
                 current_company="1115",
             )
 
+        resolve.assert_awaited_once_with("Seattle")
         assert "keywords=engineer" in result["url"]
-        assert "location=Seattle" in result["url"]
+        # location becomes a resolved geoUrn facet, not a free-text location=.
+        assert "geoUrn=%5B%22104116203%22%5D" in result["url"]
+        assert "location=Seattle" not in result["url"]
         assert "network=%5B%22F%22%5D" in result["url"]
         assert "currentCompany=%5B%221115%22%5D" in result["url"]
+
+    async def test_search_people_unresolvable_location_raises(self, mock_page):
+        scraper = _scraper(mock_page)
+        with (
+            patch.object(
+                scraper._capture,
+                "capture",
+                new_callable=AsyncMock,
+                return_value=extracted("Jane Doe"),
+            ) as nav,
+            patch.object(
+                scraper._facets,
+                "resolve_geo_urn",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+        ):
+            with pytest.raises(FilterValidationError, match="Could not resolve"):
+                await scraper.search_people("engineer", location="Nowhereland")
+
+        nav.assert_not_awaited()

@@ -40,6 +40,14 @@ def _scraper(page) -> CompanyScraper:
     )
 
 
+def _no_jitter():
+    """Pin the session's jitter to identity so a pace of N sleeps exactly N."""
+    return patch(
+        "linkedin_mcp_server.scraping.session.jitter",
+        side_effect=lambda base, spread=0.5: base,
+    )
+
+
 def extracted(
     text: str,
     references: list[Reference] | None = None,
@@ -287,7 +295,8 @@ class TestScrapeCompany:
 
         The duration is asserted as well as the count: a delay of the wrong
         length paces the walk wrongly against LinkedIn while every
-        count-only assertion stays green.
+        count-only assertion stays green. Jitter is pinned to identity so
+        the length is the configured one.
         """
         scraper = _scraper(mock_page)
         with (
@@ -301,6 +310,7 @@ class TestScrapeCompany:
                 "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ) as mock_sleep,
+            _no_jitter(),
         ):
             await scraper.scrape_company("testcorp", {"about", "posts", "jobs"})
 
