@@ -1,6 +1,6 @@
 {
   "name": "linkedin-mcp-server",
-  "version": "4.24.2",
+  "version": "4.24.3",
   "description": "Research LinkedIn through a local, browser-backed MCP server.",
   "author": {
     "name": "Daniel Sticker",
