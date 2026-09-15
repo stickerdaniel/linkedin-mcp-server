@@ -943,9 +943,11 @@ class BrowserManager:
     ) -> bool:
         """Import the portable LinkedIn bridge cookie subset.
 
-        Fresh browser-side cookies are preserved. The imported subset is the
-        smallest known set that can reconstruct a usable authenticated page in
-        a fresh profile.
+        The imported subset is the smallest known set that can reconstruct a
+        usable authenticated page in a fresh profile. Each imported name is
+        cleared on LinkedIn domains before the add, so an anonymous value left
+        by an earlier navigation cannot be sent alongside the import. Cookies
+        outside that name set are left untouched.
         """
         if not self._context:
             logger.warning("Cannot import cookies: no browser context")
