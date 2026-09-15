@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-import asyncio
 import logging
 import time
 
@@ -36,7 +35,7 @@ from linkedin_mcp_server.scraping.job_policy import (
 from linkedin_mcp_server.scraping.link_metadata import Reference, dedupe_references
 from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.search_urls import build_job_search_url
-from linkedin_mcp_server.scraping.session import NAV_DELAY
+from linkedin_mcp_server.scraping.session import NAV_DELAY, ScrapingSession
 
 logger = logging.getLogger(__name__)
 
@@ -54,10 +53,12 @@ class JobScraper:
 
     def __init__(
         self,
+        session: ScrapingSession,
         navigator: PageNavigator,
         capture: SectionCapture,
         pages: JobPageReader,
     ):
+        self._session = session
         self._navigator = navigator
         self._capture = capture
         self._pages = pages
@@ -199,7 +200,7 @@ class JobScraper:
                 break
 
             if page_num > 0:
-                await asyncio.sleep(NAV_DELAY)
+                await self._session.pace(NAV_DELAY)
 
             # Started after the delay, because the prediction above adds
             # `NAV_DELAY` to `slowest_page` itself. Timing from before the
@@ -471,7 +472,7 @@ class JobScraper:
                 break
 
             if page_num > 0:
-                await asyncio.sleep(NAV_DELAY)
+                await self._session.pace(NAV_DELAY)
 
             url = (
                 base_url

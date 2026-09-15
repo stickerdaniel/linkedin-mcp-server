@@ -15,6 +15,7 @@ from linkedin_mcp_server.core.auth import (
     resolve_remember_me_prompt,
 )
 from linkedin_mcp_server.core.exceptions import AuthenticationError
+from linkedin_mcp_server.core.humanize import humanize_after_nav
 from linkedin_mcp_server.core.proxy_errors import (
     raise_if_proxy_error,
     redact_proxy_credentials,
@@ -176,6 +177,9 @@ class PageNavigator:
             try:
                 await page.goto(url, wait_until=wait_until, timeout=30000)
                 await stabilize_navigation(f"goto {url}", logger)
+                # A little cursor entropy after each load: a frozen mouse across
+                # navigations is a cheap bot tell. Best-effort, never fatal.
+                await humanize_after_nav(page)
                 await record_page_trace(
                     page,
                     "extractor-after-goto",

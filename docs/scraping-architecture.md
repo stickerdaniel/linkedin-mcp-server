@@ -18,12 +18,14 @@ a page-owning collaborator.
 | `__init__` | _(no public definitions)_ | `browser-free` |
 | `capture` | `CaptureMode`, `CapturePlan`, `RATE_LIMIT_RETRY_DELAY`, `SectionCapture`, `capture_plan_for_url()` | `page-owning` |
 | `company` | `CompanyScraper` | `browser-free` |
+| `company_parse` | `ParsedJobs`, `parse_about()`, `parse_job_search()`, `parse_search_results()` | `browser-free` |
 | `connection` | `ActionSignals`, `ConnectionState`, `detect_connection_state()` | `browser-free` |
 | `connection_actions` | `ACTION_SIGNALS_JS`, `CLICK_INCOMING_ACCEPT_JS`, `ConnectionActions`, `OPEN_MORE_BUTTON_JS`, `ReadMainProfile` | `page-owning` |
 | `content` | `PageContentReader` | `page-owning` |
 | `contracts` | `ExtractedSection`, `FilterValidationError`, `RATE_LIMITED_SECTION_TEXT`, `SEND_INTERRUPTED_WARNING`, `message_action_result()`, `rate_limited_section_error()`, `refuse_an_invalid_message()` | `browser-free` |
 | `conversations` | `ConversationReader`, `strip_select_conversation_prefix()` | `page-owning` |
 | `extractor` | `LinkedInExtractor` | `page-owning` |
+| `facets` | `FacetResolver`, `GEO_ID_PATTERN`, `LOCATION_BOX_SELECTOR`, `TYPEAHEAD_TIMEOUT_MS` | `page-owning` |
 | `feed` | `FeedScraper` | `page-owning` |
 | `feed_payload` | `POST_SLUG_URL_RE`, `build_feed_references()`, `is_feed_payload_response()` | `browser-free` |
 | `fields` | `COMPANY_SECTIONS`, `PERSON_SECTIONS`, `parse_company_sections()`, `parse_person_sections()` | `browser-free` |
@@ -37,6 +39,7 @@ a page-owning collaborator.
 | `person` | `PersonScraper` | `page-owning` |
 | `posts` | `PostSearch` | `browser-free` |
 | `profile_page` | `MessageTarget`, `MessageTargetResolution`, `ProfilePageReader`, `ReadMessageTarget` | `page-owning` |
+| `search_pages` | `SearchPages`, `paginate_search()` | `browser-free` |
 | `search_urls` | `CONTENT_DATE_POSTED_MAP`, `EXPERIENCE_LEVEL_MAP`, `JOB_DATE_POSTED_MAP`, `JOB_TYPE_MAP`, `NETWORK_TOKENS`, `SORT_BY_MAP`, `WORK_TYPE_MAP`, `build_company_search_url()`, `build_content_search_url()`, `build_job_search_url()`, `build_people_search_url()` | `browser-free` |
 | `session` | `NAV_DELAY`, `ScrapingSession` | `page-owning` |
 | `text` | `DETAIL_CAPTURE_EN_US`, `DetailCaptureTextTable`, `SIDEBAR_CHROME_EN`, `SidebarChromeTable`, `filter_linkedin_noise_lines()`, `strip_conversation_chrome()`, `strip_linkedin_noise()`, `truncate_linkedin_noise()` | `browser-free` |
@@ -46,12 +49,14 @@ a page-owning collaborator.
 - `__init__` -> `extractor`, `fields`
 - `capture` -> `content`, `contracts`, `link_metadata`, `navigation`, `session`, `text`
 - `company` -> `capture`, `contracts`, `fields`, `identifiers`, `link_metadata`, `search_urls`, `session`
+- `company_parse` -> _(none)_
 - `connection` -> _(none)_
 - `connection_actions` -> `connection`, `identifiers`, `navigation`, `session`
 - `content` -> `session`, `text`
 - `contracts` -> `identifiers`, `link_metadata`
 - `conversations` -> `content`, `identifiers`, `link_metadata`, `navigation`, `profile_page`, `session`, `text`
-- `extractor` -> `capture`, `company`, `connection_actions`, `content`, `contracts`, `conversations`, `feed`, `job_pages`, `jobs`, `message_sender`, `navigation`, `person`, `posts`, `profile_page`, `session`, `text`
+- `extractor` -> `capture`, `company`, `connection_actions`, `content`, `contracts`, `conversations`, `facets`, `feed`, `job_pages`, `jobs`, `message_sender`, `navigation`, `person`, `posts`, `profile_page`, `session`, `text`
+- `facets` -> `capture`, `navigation`, `session`
 - `feed` -> `content`, `contracts`, `feed_payload`, `navigation`, `session`, `text`
 - `feed_payload` -> `link_metadata`
 - `fields` -> `capture`
@@ -62,9 +67,10 @@ a page-owning collaborator.
 - `link_metadata` -> _(none)_
 - `message_sender` -> `contracts`, `identifiers`, `navigation`, `session`
 - `navigation` -> `session`
-- `person` -> `capture`, `contracts`, `fields`, `identifiers`, `link_metadata`, `navigation`, `profile_page`, `search_urls`, `session`, `text`
+- `person` -> `capture`, `contracts`, `facets`, `fields`, `identifiers`, `link_metadata`, `navigation`, `profile_page`, `search_pages`, `search_urls`, `session`, `text`
 - `posts` -> `capture`, `contracts`, `link_metadata`, `search_urls`
 - `profile_page` -> `session`
+- `search_pages` -> `capture`, `contracts`, `link_metadata`, `session`
 - `search_urls` -> `contracts`
 - `session` -> _(none)_
 - `text` -> _(none)_
