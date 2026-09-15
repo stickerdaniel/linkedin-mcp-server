@@ -24,7 +24,9 @@ An MCP server that connects AI assistants like Claude to LinkedIn through your o
   </picture>
 </a>
 
-> This MCP server is supported by [**Unipile**](https://golink.onl/unipile-link). Unipile is the fully managed cloud option for developers: a hosted LinkedIn API for Classic, Sales Navigator, and Recruiter that handles auth, sessions, and infrastructure for you. [Try Unipile free for 7 days →](https://golink.onl/unipile-free-trial)
+> This MCP server is supported by [**Unipile**](https://golink.onl/unipile-link). Unipile is the fully managed cloud option for developers: a hosted LinkedIn API for Classic, Sales Navigator, and Recruiter that handles auth, sessions, and infrastructure for you.
+
+[Try Unipile free for 7 days →](https://golink.onl/unipile-free-trial)
 </details>
 
 ---
@@ -882,6 +884,6 @@ Use in accordance with [LinkedIn's User Agreement](https://www.linkedin.com/lega
 
 This project is licensed under the Apache 2.0 license.
 
-Building on it is welcome! Apache-2.0 attaches conditions to that, set out in the [license](https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/LICENSE). For attribution see the [`NOTICE`](https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/NOTICE) file.
+Building on this project is welcome! See the [license](https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/LICENSE) for terms and the [`NOTICE`](https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/NOTICE) for attribution.
 
 <br>
