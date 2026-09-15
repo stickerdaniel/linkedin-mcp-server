@@ -757,6 +757,25 @@ def _make_browser_manager(tmp_path) -> tuple[BrowserManager, MagicMock]:
     return browser, context
 
 
+def _cleared_names(context: MagicMock) -> set[str]:
+    """Return the cookie names cleared.
+
+    Asserts every clear is scoped by name and to LinkedIn domains, so an import
+    never wipes the whole jar or another site's cookie of the same name.
+    """
+    names: set[str] = set()
+    for call in context.clear_cookies.await_args_list:
+        assert not call.args
+        assert set(call.kwargs) == {"name", "domain"}
+        domain = call.kwargs["domain"]
+        for linkedin in (".linkedin.com", ".www.linkedin.com", "www.linkedin.com"):
+            assert domain.search(linkedin)
+        for other in (".example.com", ".notlinkedin.com", ".linkedin.com.evil.test"):
+            assert not domain.search(other)
+        names.add(call.kwargs["name"])
+    return names
+
+
 @pytest.mark.asyncio
 async def test_import_cookies_imports_bridge_subset_only(tmp_path):
     browser, context = _make_browser_manager(tmp_path)
@@ -775,10 +794,53 @@ async def test_import_cookies_imports_bridge_subset_only(tmp_path):
     imported = await browser.import_cookies(cookie_path)
 
     assert imported is True
-    context.clear_cookies.assert_not_awaited()
+    assert _cleared_names(context) == {
+        "li_at",
+        "JSESSIONID",
+        "bcookie",
+        "bscookie",
+        "lidc",
+    }
     context.add_cookies.assert_awaited_once_with(
         [cookies[0], cookies[1], cookies[2], cookies[3], cookies[4]]
     )
+
+
+@pytest.mark.asyncio
+async def test_import_cookies_clears_colliding_names_before_adding(tmp_path):
+    """A pre-import /feed/ visit leaves anonymous JSESSIONID on .www.linkedin.com.
+
+    The normalized import lands on .linkedin.com, so unless the name is cleared
+    first both copies are sent and LinkedIn answers /feed/ with HTTP 400.
+    """
+    browser, context = _make_browser_manager(tmp_path)
+    order: list[str] = []
+
+    async def record_clear(**kwargs):
+        order.append(f"clear:{kwargs['name']}")
+
+    async def record_add(cookies):
+        order.append("add")
+
+    context.clear_cookies.side_effect = record_clear
+    context.add_cookies.side_effect = record_add
+    cookie_path = tmp_path / "cookies.json"
+    cookie_path.write_text(
+        json.dumps(
+            [
+                _make_cookie("li_at"),
+                _make_cookie("JSESSIONID", domain=".www.linkedin.com"),
+            ]
+        )
+    )
+
+    imported = await browser.import_cookies(cookie_path)
+
+    assert imported is True
+    assert order[-1] == "add"
+    assert sorted(order[:-1]) == ["clear:JSESSIONID", "clear:li_at"]
+    added = context.add_cookies.await_args.args[0]
+    assert {c["domain"] for c in added} == {".linkedin.com"}
 
 
 @pytest.mark.asyncio
@@ -840,7 +902,8 @@ async def test_import_cookies_preserves_existing_cookies(tmp_path):
     imported = await browser.import_cookies(cookie_path)
 
     assert imported is True
-    context.clear_cookies.assert_not_awaited()
+    # Only the imported names are replaced; nothing wipes the whole jar.
+    assert _cleared_names(context) == {"li_at", "JSESSIONID"}
     context.add_cookies.assert_awaited_once()
 
 

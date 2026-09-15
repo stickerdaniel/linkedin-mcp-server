@@ -5,6 +5,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from collections.abc import Coroutine, Mapping
 from typing import Any, TypeVar
@@ -882,6 +883,9 @@ class BrowserManager:
             logger.exception("Failed to export storage state to %s", storage_path)
             return False
 
+    # LinkedIn sets the same cookie names on .linkedin.com and .www.linkedin.com.
+    _LINKEDIN_COOKIE_DOMAIN = re.compile(r"(^|\.)linkedin\.com$")
+
     _BRIDGE_COOKIE_PRESETS = {
         "bridge_core": frozenset(
             {
@@ -939,9 +943,11 @@ class BrowserManager:
     ) -> bool:
         """Import the portable LinkedIn bridge cookie subset.
 
-        Fresh browser-side cookies are preserved. The imported subset is the
-        smallest known set that can reconstruct a usable authenticated page in
-        a fresh profile.
+        The imported subset is the smallest known set that can reconstruct a
+        usable authenticated page in a fresh profile. Each imported name is
+        cleared on LinkedIn domains before the add, so an anonymous value left
+        by an earlier navigation cannot be sent alongside the import. Cookies
+        outside that name set are left untouched.
         """
         if not self._context:
             logger.warning("Cannot import cookies: no browser context")
@@ -973,6 +979,16 @@ class BrowserManager:
             if not has_li_at:
                 logger.warning("No li_at cookie found in %s", path)
                 return False
+
+            # A pre-import visit leaves anonymous JSESSIONID/bscookie/timezone on
+            # .www.linkedin.com. The normalized imports land on .linkedin.com, so
+            # both copies get sent and LinkedIn answers /feed/ with HTTP 400.
+            # Clear only the names being imported, and only on LinkedIn domains,
+            # so another site's cookie of the same name in the profile is kept.
+            for name in {c["name"] for c in cookies}:
+                await self._context.clear_cookies(
+                    name=name, domain=self._LINKEDIN_COOKIE_DOMAIN
+                )
 
             await self._context.add_cookies(
                 cookies  # ty: ignore[invalid-argument-type]
