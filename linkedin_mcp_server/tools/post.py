@@ -1,11 +1,13 @@
 """
-LinkedIn post/content search tool.
+LinkedIn post tools: global content search and the saved-items list.
 
-Performs LinkedIn's global content search (the "Posts" results tab) using
-innerText extraction, so informal "we're hiring" / "Buscamos ..." posts can
-be found before a formal job listing is published. Mirrors search_people:
-build a /search/results/content/ URL, scroll to load results, and return the
-raw innerText for the LLM to parse, plus post-permalink references.
+search_posts performs LinkedIn's global content search (the "Posts" results
+tab) using innerText extraction, so informal "we're hiring" / "Buscamos ..."
+posts can be found before a formal job listing is published.
+get_saved_posts lists the authenticated user's saved posts and articles
+from /my-items/saved-posts/, scrolling until enough item anchors are
+present — a URL-pattern count signal, because ?start= offsets are a no-op
+on this surface and text-based counting would not survive a non-English UI.
 """
 
 import logging
@@ -114,3 +116,61 @@ def register_post_tools(
                 raise_tool_error(relogin_exc, "search_posts")
         except Exception as e:
             raise_tool_error(e, "search_posts")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Get Saved Posts",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"post", "saved"},
+        exclude_args=["extractor"],
+    )
+    async def get_saved_posts(
+        ctx: Context,
+        num_posts: Annotated[int, Field(ge=1, le=50)] = 10,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        List the authenticated user's saved posts and articles.
+
+        Reads /my-items/saved-posts/ and scrolls until at least num_posts
+        saved-item anchors are present (1-50, default 10). Post references
+        use /feed/update/<urn>/ permalinks; saved articles appear as
+        /pulse/<slug>/ links, both in references["saved_posts"]. Author and
+        company links are filtered out, like get_feed.
+
+        Truncated post bodies are not auto-expanded; the full text of any
+        item is reachable through its reference permalink.
+
+        Args:
+            ctx: FastMCP context for progress reporting
+            num_posts: How many saved items to scroll to (1-50, default 10)
+
+        Returns:
+            Dict with url, sections (saved_posts -> raw text), and optional
+            references (saved_posts -> post/article permalinks) and
+            section_errors. The LLM should parse sections["saved_posts"] for
+            each item's body.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="get_saved_posts"
+            )
+            logger.info("Fetching saved posts (num_posts=%d)", num_posts)
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Starting saved posts"
+            )
+
+            result = await extractor.get_saved_posts(num_posts=num_posts)
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_saved_posts")
+        except Exception as e:
+            raise_tool_error(e, "get_saved_posts")  # NoReturn

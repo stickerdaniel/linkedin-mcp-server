@@ -29,7 +29,10 @@ def _search(page) -> PostSearch:
     """Wire the post-search owner the way the facade does."""
     session = ScrapingSession(page)
     navigator = PageNavigator(session)
-    return PostSearch(SectionCapture(session, navigator, PageContentReader(session)))
+    content = PageContentReader(session)
+    return PostSearch(
+        session, navigator, content, SectionCapture(session, navigator, content)
+    )
 
 
 def extracted(
@@ -262,3 +265,193 @@ def test_one_requested_page_is_five_scrolls():
     changed scroll budget belongs in a diff that says so.
     """
     assert posts_module._CONTENT_SCROLLS_PER_REQUESTED_PAGE == 5
+
+
+def test_saved_posts_scroll_budget_is_explicit():
+    """The two numbers that decide how far the saved-items list is walked.
+
+    Same reason as the content-search constant: the behavioural tests above
+    and below would pass under any pair of constants, so a changed budget
+    belongs in a diff that says so.
+    """
+    assert posts_module._MAX_SAVED_POSTS_SCROLLS == 12
+    assert posts_module._MAX_SAVED_POSTS_STALE == 3
+
+
+def _script_saved_posts_page(
+    page, *, counts, raw_text, raw_references=None
+) -> list[str]:
+    """Script the evaluate programs the saved-posts scroll loop alternates.
+
+    The anchor-count program answers with the scripted counts in order (the
+    last one held, like a list that stopped growing). ``window.scrollBy``
+    has no return value by definition. The root-content program answers
+    with the scripted innerText and raw anchors. The recorded program
+    markers are returned so a test can count scrolls without re-describing
+    the dispatch.
+    """
+    remaining = list(counts)
+    programs: list[str] = []
+
+    async def dispatch(script, arg=None):
+        if '"/feed/update/"' in script:
+            programs.append("count")
+            if len(remaining) > 1:
+                return remaining.pop(0)
+            return remaining[0]
+        if "window.scrollBy" in script:
+            programs.append("scroll")
+            return None
+        if arg is not None and "selectors" in arg:
+            return {"text": raw_text, "references": raw_references or []}
+        raise AssertionError(f"unexpected evaluate: {script[:80]!r}")
+
+    page.evaluate = AsyncMock(side_effect=dispatch)
+    return programs
+
+
+def _suppress_delay():
+    """Cut the one-second boundary the way the fixture page cuts the browser.
+
+    The session is a frozen slots dataclass, so the class carries the patch —
+    an instance assignment is refused before the test starts.
+    """
+    return patch.object(ScrapingSession, "delay", AsyncMock())
+
+
+class TestGetSavedPosts:
+    async def test_scrolling_stops_once_enough_item_anchors_are_counted(
+        self, mock_page
+    ):
+        """The count is the only locale-independent signal on this page.
+
+        Two scrolls for a list that reaches the request on the third count:
+        each round re-counts after the scroll, and the round that finally
+        reaches ``num_posts`` scrolls no further. Deleting the
+        ``count >= num_posts`` break would run on to the stale budget here,
+        so the asserted scroll total catches it.
+        """
+        search = _search(mock_page)
+        with _suppress_delay():
+            programs = _script_saved_posts_page(
+                mock_page, counts=[1, 2, 2, 5], raw_text="saved item"
+            )
+            result = await search.get_saved_posts(5)
+
+        assert programs.count("scroll") == 2
+        assert result["url"].endswith("my-items/saved-posts/")
+        assert result["sections"]["saved_posts"] == "saved item"
+
+    async def test_stale_scrolls_stop_below_the_request(self, mock_page):
+        """A list that never grows ends after the stale budget, not at the ceiling.
+
+        ``_MAX_SAVED_POSTS_STALE`` identical counts in a row mean the list
+        has ended; keeping going to ``_MAX_SAVED_POSTS_SCROLLS`` would read
+        the last page of a finished list nine times.
+        """
+        search = _search(mock_page)
+        with _suppress_delay():
+            programs = _script_saved_posts_page(
+                mock_page, counts=[2, 2, 2, 2], raw_text="saved item"
+            )
+            await search.get_saved_posts(5)
+
+        scrolls = programs.count("scroll")
+        assert scrolls == posts_module._MAX_SAVED_POSTS_STALE
+
+    async def test_references_keep_only_post_and_article_permalinks(self, mock_page):
+        """Author and company anchors ride along in the DOM and are filtered.
+
+        The page offers every anchor the cards carry; what callers want is
+        the saved items' permalinks. Authors stay reachable through the
+        section text, exactly like the home feed's reference filter.
+        """
+        raw_references = [
+            {
+                "href": "https://www.linkedin.com/feed/update/urn:li:activity:123?updateEntityUrn=x",
+                "text": "A saved post",
+                "heading": "",
+            },
+            {
+                "href": "https://www.linkedin.com/pulse/some-article/",
+                "text": "Some article",
+                "heading": "",
+            },
+            {
+                "href": "https://www.linkedin.com/in/somebody/",
+                "text": "Somebody",
+                "heading": "",
+            },
+        ]
+        search = _search(mock_page)
+        with _suppress_delay():
+            _script_saved_posts_page(
+                mock_page,
+                counts=[3],
+                raw_text="saved items",
+                raw_references=raw_references,
+            )
+            result = await search.get_saved_posts(1)
+
+        assert result["references"] == {
+            "saved_posts": [
+                {
+                    "kind": "feed_post",
+                    "url": "/feed/update/urn:li:activity:123/",
+                    "text": "A saved post",
+                    "context": "saved posts",
+                },
+                {
+                    "kind": "article",
+                    "url": "/pulse/some-article/",
+                    "text": "Some article",
+                    "context": "saved posts",
+                },
+            ]
+        }
+
+    async def test_a_page_of_chrome_only_is_a_rate_limit(self, mock_page):
+        """The truncation branch decides the rate-limit entry, not the text.
+
+        A page that is nothing but LinkedIn chrome truncates to empty, and
+        the section must be an error rather than an empty list that reads
+        as "nothing saved".
+        """
+        search = _search(mock_page)
+        with (
+            _suppress_delay(),
+            patch.object(posts_module, "truncate_linkedin_noise", lambda *_: ""),
+        ):
+            _script_saved_posts_page(mock_page, counts=[1], raw_text="chrome")
+            result = await search.get_saved_posts(1)
+
+        assert result["sections"] == {}
+        assert result["section_errors"] == {
+            "saved_posts": {
+                "error_type": "rate_limit",
+                "error_message": RATE_LIMITED_SECTION_TEXT,
+            }
+        }
+
+    async def test_a_browser_failure_is_diagnosed_into_the_section_error(
+        self, mock_page
+    ):
+        """Browsers fail; the report goes to the section, not the exception channel.
+
+        The tool shape promised `section_errors` for precisely this, and an
+        exception instead would close over the one case the shape exists for.
+        """
+        search = _search(mock_page)
+        with (
+            _suppress_delay(),
+            patch.object(
+                posts_module,
+                "build_issue_diagnostics",
+                return_value={"error_type": "diagnosed"},
+            ),
+        ):
+            mock_page.evaluate = AsyncMock(side_effect=RuntimeError("boom"))
+            result = await search.get_saved_posts(1)
+
+        assert result["sections"] == {}
+        assert result["section_errors"] == {"saved_posts": {"error_type": "diagnosed"}}

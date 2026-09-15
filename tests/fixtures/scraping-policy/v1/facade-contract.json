@@ -52,6 +52,10 @@
         "coroutine": true,
         "signature": "(self, max_pages: 'int' = 3) -> 'dict[str, Any]'"
       },
+      "get_saved_posts": {
+        "coroutine": true,
+        "signature": "(self, num_posts: 'int' = 10) -> 'dict[str, Any]'"
+      },
       "get_sidebar_profiles": {
         "coroutine": true,
         "signature": "(self, username: 'str') -> 'dict[str, Any]'"
@@ -102,6 +106,7 @@
       "get_inbox",
       "get_my_profile",
       "get_saved_jobs",
+      "get_saved_posts",
       "get_sidebar_profiles",
       "scrape_company",
       "scrape_job",
@@ -427,6 +432,25 @@
               "default": 3,
               "description": "Maximum number of saved-jobs pages to load (1-10, default 3)",
               "maximum": 10,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "get_saved_posts": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "num_posts": {
+              "default": 10,
+              "description": "How many saved items to scroll to (1-50, default 10)",
+              "maximum": 50,
               "minimum": 1,
               "type": "integer"
             }

@@ -832,6 +832,27 @@ async def _invalid_message_scenario(message: str, label: str) -> dict[str, Any]:
     )
 
 
+async def _saved_posts_scenario() -> dict[str, Any]:
+    name = "get_saved_posts__scroll_stop"
+    recorder = TraceRecorder(name, _COMMON_ALLOWED)
+    clock = FakeClock(recorder)
+    page = _page(recorder).script("evaluate:root_content", _root("Saved posts content"))
+    # One anchor below the request triggers a scroll; the re-count reaches it,
+    # so the loop stops on the count the way the live page does.
+    page.script("evaluate:saved_item_count", 1, 1, 3)
+    page.script("evaluate:saved_items_scroll", None)
+    extractor = _extractor(page)
+    arguments = {"num_posts": 3}
+    async with boundaries(recorder, clock):
+        with recorder.context("get_saved_posts", "saved_posts"):
+            result = await extractor.get_saved_posts(**arguments)
+    page.assert_clean()
+    return recorder.trace(
+        {"method": "get_saved_posts", "arguments": arguments},
+        _complete_mapping_result(result, section_names=list(result["sections"])),
+    )
+
+
 async def _single_capture_facade_scenario(method: str) -> dict[str, Any]:
     name = f"{method}__baseline"
     recorder = TraceRecorder(name, _COMMON_ALLOWED)
@@ -1026,6 +1047,7 @@ TOOL_FACADE_METHODS = {
     "get_inbox",
     "get_my_profile",
     "get_saved_jobs",
+    "get_saved_posts",
     "get_sidebar_profiles",
     "scrape_company",
     "scrape_job",
@@ -1066,6 +1088,7 @@ async def build_policy_traces() -> dict[str, dict[str, Any]]:
         ),
         "job-search-metadata-upgrade.json": await _job_search_upgrade_scenario(),
         "saved-jobs.json": await _saved_jobs_scenario(),
+        "saved-posts.json": await _saved_posts_scenario(),
         "feed-stale.json": await _feed_stale_scenario(),
         "feed-response-success.json": await _feed_response_scenario(body_failure=False),
         "feed-response-failure.json": await _feed_response_scenario(body_failure=True),

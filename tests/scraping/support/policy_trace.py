@@ -630,6 +630,8 @@ def semantic_program_id(program: str) -> str:
         ("text.startsWith('Load more')", "profile_details_ready"),
         ("premium/", "premium_dialog_text"),
         ('main a[href*="/in/"]', "sidebar_expanded_profiles"),
+        ('a[href*="/feed/update/"]', "saved_item_count"),
+        ("window.scrollBy", "saved_items_scroll"),
     )
     for marker, operation in checks:
         if marker in compact:
