@@ -24,7 +24,7 @@ An MCP server that connects AI assistants like Claude to LinkedIn through your o
   </picture>
 </a>
 
-> This MCP server is supported by [**Unipile**](https://golink.onl/unipile-link). Unipile is the fully managed cloud option for developers: a hosted LinkedIn API for Classic, Sales Navigator, and Recruiter that handles auth, sessions, and infrastructure for you. [Try it free for 7 days →](https://golink.onl/unipile-free-trial)
+> This MCP server is supported by [**Unipile**](https://golink.onl/unipile-link). Unipile is the fully managed cloud option for developers: a hosted LinkedIn API for Classic, Sales Navigator, and Recruiter that handles auth, sessions, and infrastructure for you. [Try Unipile free for 7 days →](https://golink.onl/unipile-free-trial)
 </details>
 
 ---
@@ -651,7 +651,7 @@ Use code <strong>PROXY90</strong> for 10% off <a href="https://www.swiftproxy.ne
   </picture>
 </a>
 
-> RapidProxy provides residential proxies for LinkedIn automation and browser workflows. 90M+ residential IPs worldwide with sticky sessions, geo-targeting, and high-concurrency support. Residential proxies start at $0.55/GB with non-expiring traffic.
+> RapidProxy offers 90M+ residential IPs worldwide for LinkedIn automation and browser workflows, with sticky sessions, geo-targeting, and high-concurrency support. Plans start at $0.55/GB with non-expiring traffic.
 
 Use code <strong>RAPID10</strong> for 10% off <a href="https://www.rapidproxy.io/?ref=linkedin">Try RapidProxy for free →</a>
 <br/>
