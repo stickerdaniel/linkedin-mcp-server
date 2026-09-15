@@ -12,10 +12,17 @@ from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.scraping import job_pages as job_pages_module
 from linkedin_mcp_server.scraping.content import PageContentReader
-from linkedin_mcp_server.scraping.contracts import ExtractedSection
+from linkedin_mcp_server.scraping.contracts import (
+    RATE_LIMITED_SECTION_TEXT,
+    ExtractedSection,
+)
 from linkedin_mcp_server.scraping.job_pages import JobPageReader, _ScrollCharge
 from linkedin_mcp_server.scraping.link_metadata import Reference
 from linkedin_mcp_server.scraping.navigation import PageNavigator
+from linkedin_mcp_server.scraping.rate_limit import (
+    RATE_LIMIT_RETRY_BUDGET,
+    RATE_LIMIT_RETRY_DELAY,
+)
 from linkedin_mcp_server.scraping.session import ScrapingSession
 from scraping.support.navigation import navigate
 
@@ -25,6 +32,27 @@ def _reader(page) -> JobPageReader:
     session = ScrapingSession(page)
     navigator = PageNavigator(session)
     return JobPageReader(session, navigator, PageContentReader(session))
+
+
+def _identity_jitter():
+    """Neutralise the session's pause jitter so a backoff is readable.
+
+    The jitter itself is asserted where the session owns it; here it would
+    only hide whether the delay doubled.
+    """
+    return patch(
+        "linkedin_mcp_server.scraping.session.jitter",
+        side_effect=lambda base, *a, **kw: base,
+    )
+
+
+# Only LinkedIn chrome, which is what a soft rate limit leaves on the page.
+NOISE_ONLY = "More profiles for you\n\nAbout\nAccessibility\nTalent Solutions"
+
+
+def _read(text: str) -> dict:
+    """One root read, as the content reader hands it back."""
+    return {"source": "root", "text": text, "references": []}
 
 
 def extracted(
@@ -1001,16 +1029,7 @@ class TestExtractSearchPage:
         # then real text: one retry and no more. Driven through the content
         # reader rather than `page.evaluate`, which the document-identity
         # read shares.
-        reads = [
-            {
-                "source": "root",
-                "text": (
-                    "More profiles for you\n\nAbout\nAccessibility\nTalent Solutions"
-                ),
-                "references": [],
-            },
-            {"source": "root", "text": "Python Developer", "references": []},
-        ]
+        reads = [_read(NOISE_ONLY), _read("Python Developer")]
         deadlines: list[float | None] = []
 
         async def scroll(page, **kwargs):
@@ -1022,8 +1041,10 @@ class TestExtractSearchPage:
         with (
             patch.object(job_pages_module, "time", clock),
             patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
-            patch.object(
-                job_pages_module.asyncio, "sleep", new_callable=AsyncMock
+            _identity_jitter(),
+            patch(
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
+                new_callable=AsyncMock,
             ) as backoff,
             patch(
                 "linkedin_mcp_server.scraping.job_pages.detect_rate_limit",
@@ -1051,10 +1072,137 @@ class TestExtractSearchPage:
                 scroll_deadline=8.0,
             )
 
-        assert backoff.await_count == 1
+        backoff.assert_awaited_once_with(RATE_LIMIT_RETRY_DELAY)
         assert deadlines == [8.0, 4.0]
         assert capture.scroll_seconds == 4.0
         assert capture.section.text == "Python Developer"
+
+    async def test_a_second_throttled_page_waits_twice_as_long(self, mock_page):
+        """The retry budget is the scrape's, so its backoff escalates across pages.
+
+        Each page used to hold its own single retry at a fixed delay, so a
+        search being throttled re-fetched every page after the same short
+        pause. One reader now spends one budget: the second page's retry waits
+        twice what the first one did.
+        """
+        mock_page.url = "https://www.linkedin.com/jobs/search/?keywords=test"
+        reads = [
+            _read(NOISE_ONLY),
+            _read("Python Developer"),
+            _read(NOISE_ONLY),
+            _read("Data Engineer"),
+        ]
+        slept: list[float] = []
+
+        async def record(delay: float) -> None:
+            slept.append(delay)
+
+        reader = _reader(mock_page)
+        with (
+            patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
+            _identity_jitter(),
+            patch(
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
+                side_effect=record,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.job_pages.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.job_pages.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.job_pages.scroll_job_sidebar",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch.object(
+                PageContentReader,
+                "_extract_root_content",
+                new_callable=AsyncMock,
+                side_effect=reads,
+            ),
+        ):
+            texts = [
+                (
+                    await reader._extract_search_page(
+                        f"https://www.linkedin.com/jobs/search/?keywords=test&start={start}",
+                        section_name="search_results",
+                    )
+                ).section.text
+                for start in (0, 25)
+            ]
+
+        assert texts == ["Python Developer", "Data Engineer"]
+        assert slept == [RATE_LIMIT_RETRY_DELAY, RATE_LIMIT_RETRY_DELAY * 2]
+
+    async def test_a_spent_budget_reports_the_throttled_page_without_a_retry(
+        self, mock_page, monkeypatch
+    ):
+        """With nothing left to spend, the page is reported as it was read.
+
+        Nothing is slept and nothing is re-navigated, and the one scroll that
+        did run is still charged to the capture.
+        """
+        monkeypatch.setenv("RATE_LIMIT_RETRY_BUDGET", "0")
+
+        class Clock:
+            def __init__(self) -> None:
+                self.now = 0.0
+
+            def monotonic(self) -> float:
+                return self.now
+
+        clock = Clock()
+        mock_page.url = "https://www.linkedin.com/jobs/search/?keywords=test"
+
+        async def scroll(page, **kwargs):
+            clock.now += 2.0
+            return False
+
+        reader = _reader(mock_page)
+        with (
+            patch.object(job_pages_module, "time", clock),
+            patch.object(
+                PageNavigator, "_navigate_to_page", new_callable=AsyncMock
+            ) as navigate_to,
+            patch(
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
+                new_callable=AsyncMock,
+            ) as backoff,
+            patch(
+                "linkedin_mcp_server.scraping.job_pages.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.job_pages.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.job_pages.scroll_job_sidebar",
+                side_effect=scroll,
+            ),
+            patch.object(
+                PageContentReader,
+                "_extract_root_content",
+                new_callable=AsyncMock,
+                return_value=_read(NOISE_ONLY),
+            ),
+        ):
+            capture = await reader._extract_search_page(
+                "https://www.linkedin.com/jobs/search/?keywords=test",
+                section_name="search_results",
+                scroll_deadline=8.0,
+            )
+
+        assert capture.section.text == RATE_LIMITED_SECTION_TEXT
+        assert capture.scroll_seconds == 2.0
+        navigate_to.assert_awaited_once()
+        backoff.assert_not_awaited()
 
     async def test_a_failed_read_still_charges_the_scroll_it_paid_for(self, mock_page):
         """An attempt that raises after scrolling is charged all the same.
@@ -1307,6 +1455,69 @@ class TestExtractSavedJobsPage:
         navigate_to.assert_awaited_once_with("https://www.linkedin.com/jobs-tracker/")
         scroll.assert_awaited_once_with(mock_page, pause_time=0.5, max_scrolls=5)
         mock_page.click.assert_not_called()
+
+    async def test_a_throttled_list_is_read_again_from_the_scrape_budget(
+        self, mock_page
+    ):
+        """The list page retries through the budget the search pages spend.
+
+        It used to hold an unconditional single retry of its own at a fixed
+        delay; a throttled scrape now pays for this re-fetch like any other,
+        and stops once the scrape's allowance is gone. Three throttled lists
+        get the budget's retries between them, not one each.
+        """
+        mock_page.url = "https://www.linkedin.com/jobs-tracker/"
+        slept: list[float] = []
+
+        async def record(delay: float) -> None:
+            slept.append(delay)
+
+        reader = _reader(mock_page)
+        with (
+            patch.object(
+                PageNavigator, "_navigate_to_page", new_callable=AsyncMock
+            ) as navigate_to,
+            _identity_jitter(),
+            patch(
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
+                side_effect=record,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.job_pages.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.job_pages.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.job_pages.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                reader._content,
+                "_extract_root_content",
+                new_callable=AsyncMock,
+                return_value=_read(NOISE_ONLY),
+            ),
+        ):
+            texts = [
+                (
+                    await reader._extract_saved_jobs_page(
+                        f"https://www.linkedin.com/jobs-tracker/?start={start}",
+                        section_name="saved_jobs",
+                    )
+                ).section.text
+                for start in (0, 10, 20)
+            ]
+
+        assert texts == [RATE_LIMITED_SECTION_TEXT] * 3
+        # Three pages plus the scrape-wide budget, not three plus three.
+        assert navigate_to.await_count == 3 + RATE_LIMIT_RETRY_BUDGET
+        assert slept == [
+            RATE_LIMIT_RETRY_DELAY * 2**used for used in range(RATE_LIMIT_RETRY_BUDGET)
+        ]
 
     async def test_a_saved_page_caps_its_own_references_at_twelve(self, mock_page):
         """The list page carries the section default, unlike the search rail.

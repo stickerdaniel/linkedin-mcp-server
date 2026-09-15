@@ -44,11 +44,11 @@ PUBLIC_SIGNATURES = {
     "scrape_company": "(self, company_name: 'str', requested: 'set[str]', callbacks: 'ProgressCallback | None' = None) -> 'dict[str, Any]'",
     "scrape_job": "(self, job_id: 'str') -> 'dict[str, Any]'",
     "scrape_person": "(self, username: 'str', requested: 'set[str]', callbacks: 'ProgressCallback | None' = None, max_scrolls: 'int | None' = None, *, main_profile_already_loaded: 'bool' = False, allow_self_alias: 'bool' = False) -> 'dict[str, Any]'",
-    "search_companies": "(self, keywords: 'str') -> 'dict[str, Any]'",
+    "search_companies": "(self, keywords: 'str | None' = None, industry: 'list[str] | None' = None, size: 'list[str] | None' = None, hq_location: 'str | None' = None, has_jobs: 'bool | None' = None, max_pages: 'int' = 1) -> 'dict[str, Any]'",
     "search_conversations": "(self, keywords: 'str', limit: 'int' = 20) -> 'dict[str, Any]'",
     "search_jobs": "(self, keywords: 'str', location: 'str | None' = None, max_pages: 'int' = 3, date_posted: 'str | None' = None, job_type: 'str | None' = None, experience_level: 'str | None' = None, work_type: 'str | None' = None, easy_apply: 'bool' = False, sort_by: 'str | None' = None, tool_timeout: 'float' = 180.0) -> 'dict[str, Any]'",
-    "search_people": "(self, keywords: 'str', location: 'str | None' = None, network: 'list[str] | None' = None, current_company: 'str | None' = None) -> 'dict[str, Any]'",
-    "search_posts": "(self, keywords: 'str', date_posted: 'str | None' = None, max_pages: 'int' = 3) -> 'dict[str, Any]'",
+    "search_people": "(self, keywords: 'str | None' = None, location: 'str | None' = None, network: 'list[str] | None' = None, current_company: 'str | list[str] | None' = None, max_pages: 'int' = 1, *, title: 'str | None' = None, past_company: 'str | list[str] | None' = None, industry: 'str | list[str] | None' = None, school: 'str | None' = None, first_name: 'str | None' = None, last_name: 'str | None' = None, profile_language: 'str | list[str] | None' = None) -> 'dict[str, Any]'",
+    "search_posts": "(self, keywords: 'str', date_posted: 'str | None' = None, max_posts: 'int' = 10) -> 'dict[str, Any]'",
     "send_message": "(self, linkedin_username: 'str', message: 'str', *, confirm_send: 'bool', profile_urn: 'str | None' = None) -> 'dict[str, Any]'",
 }
 
@@ -90,11 +90,11 @@ DELEGATE_CALLS = {
     "scrape_company": "self._company.scrape_company(company_name, requested, callbacks)",
     "scrape_job": "self._jobs.scrape_job(job_id)",
     "scrape_person": "self._person.scrape_person(username, requested, callbacks, max_scrolls, main_profile_already_loaded=main_profile_already_loaded, allow_self_alias=allow_self_alias)",
-    "search_companies": "self._company.search_companies(keywords)",
+    "search_companies": "self._company.search_companies(keywords, industry=industry, size=size, hq_location=hq_location, has_jobs=has_jobs, max_pages=max_pages)",
     "search_conversations": "self._conversations.search_conversations(keywords, limit)",
     "search_jobs": "self._jobs.search_jobs(keywords, location, max_pages, date_posted, job_type, experience_level, work_type, easy_apply, sort_by, tool_timeout)",
-    "search_people": "self._person.search_people(keywords, location=location, network=network, current_company=current_company)",
-    "search_posts": "self._posts.search_posts(keywords, date_posted=date_posted, max_pages=max_pages)",
+    "search_people": "self._person.search_people(keywords, location=location, network=network, current_company=current_company, max_pages=max_pages, title=title, past_company=past_company, industry=industry, school=school, first_name=first_name, last_name=last_name, profile_language=profile_language)",
+    "search_posts": "self._posts.search_posts(keywords, date_posted=date_posted, max_posts=max_posts)",
     "send_message": "self._message_sender.send_message(linkedin_username, message, confirm_send=confirm_send, profile_urn=profile_urn)",
 }
 

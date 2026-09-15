@@ -8,29 +8,38 @@ from urllib.parse import urlparse
 import logging
 import re
 
+from patchright._impl._errors import TargetClosedError
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.core.exceptions import LinkedInScraperException
 from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
-from linkedin_mcp_server.scraping.capture import (
-    CaptureMode,
-    CapturePlan,
-    SectionCapture,
-)
+from linkedin_mcp_server.scraping.capture import CaptureMode, SectionCapture
 from linkedin_mcp_server.scraping.contracts import (
     RATE_LIMITED_SECTION_TEXT,
+    FilterValidationError,
     rate_limited_section_error,
 )
+from linkedin_mcp_server.scraping.facets import FacetResolver
 from linkedin_mcp_server.scraping.fields import PERSON_SECTIONS, _person_section_specs
 from linkedin_mcp_server.scraping.identifiers import (
     normalize_person_identifier,
     person_profile_url,
 )
-from linkedin_mcp_server.scraping.link_metadata import Reference
+from linkedin_mcp_server.scraping.link_metadata import Reference, dedupe_references
 from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.profile_page import ProfilePageReader
-from linkedin_mcp_server.scraping.search_urls import build_people_search_url
-from linkedin_mcp_server.scraping.session import NAV_DELAY, ScrapingSession
+from linkedin_mcp_server.scraping.search_pages import paginate_search, search_rows
+from linkedin_mcp_server.scraping.search_parse import parse_people_cards
+from linkedin_mcp_server.scraping.search_urls import (
+    as_list,
+    build_people_search_url,
+    industry_ids,
+    network_tokens,
+    profile_languages,
+    require_people_criteria,
+    school_id,
+)
+from linkedin_mcp_server.scraping.session import ScrapingSession, nav_delay
 from linkedin_mcp_server.scraping.text import SIDEBAR_CHROME_EN
 
 if TYPE_CHECKING:
@@ -187,11 +196,13 @@ class PersonScraper:
         navigator: PageNavigator,
         capture: SectionCapture,
         profile_page: ProfilePageReader,
+        facets: FacetResolver,
     ):
         self._session = session
         self._navigator = navigator
         self._capture = capture
         self._profile_page = profile_page
+        self._facets = facets
 
     async def scrape_person(
         self,
@@ -239,7 +250,7 @@ class PersonScraper:
         try:
             for i, spec in enumerate(requested_ordered):
                 if i > 0:
-                    await self._session.delay(NAV_DELAY)
+                    await self._session.pace(nav_delay())
 
                 section_name = spec.name
                 url = base_url + spec.suffix
@@ -306,6 +317,11 @@ class PersonScraper:
                         profile_urn = await self._profile_page._extract_profile_urn()
                 except LinkedInScraperException:
                     raise
+                except TargetClosedError:
+                    # A closed target is not a property of the section; every
+                    # later section would fail identically, so it is the call
+                    # that has to fail, not the section.
+                    raise
                 except Exception as e:
                     logger.warning("Error scraping section %s: %s", section_name, e)
                     section_errors[section_name] = build_issue_diagnostics(
@@ -325,7 +341,9 @@ class PersonScraper:
 
                 if rate_limited:
                     break
-        except LinkedInScraperException as e:
+        except (LinkedInScraperException, TargetClosedError) as e:
+            # The closed target is re-raised past the section loop above, so
+            # it reaches the caller only through this handler.
             if callbacks:
                 await callbacks.on_error(e)
             raise
@@ -416,7 +434,7 @@ class PersonScraper:
                 continue
 
             if not first_show_all:
-                await self._session.delay(NAV_DELAY)
+                await self._session.pace(nav_delay())
             first_show_all = False
 
             try:
@@ -468,65 +486,156 @@ class PersonScraper:
 
     async def search_people(
         self,
-        keywords: str,
+        keywords: str | None = None,
         location: str | None = None,
         network: list[str] | None = None,
-        current_company: str | None = None,
+        current_company: str | list[str] | None = None,
+        max_pages: int = 1,
+        *,
+        title: str | None = None,
+        past_company: str | list[str] | None = None,
+        industry: str | list[str] | None = None,
+        school: str | None = None,
+        first_name: str | None = None,
+        last_name: str | None = None,
+        profile_language: str | list[str] | None = None,
     ) -> dict[str, Any]:
-        """Search for people and extract the results page.
+        """Search for people and extract the results pages.
 
         Args:
             keywords: Free-text query ("software engineer", "recruiter at Google").
-            location: Optional location filter ("New York", "Remote").
+                Optional when at least one other facet is given.
+            location: Optional location filter, a free-text country or city name
+                ("Egypt", "United Arab Emirates", "Amsterdam"). It is resolved to
+                LinkedIn's numeric geo id via the site's own location dropdown
+                (see ``FacetResolver.resolve_geo_urn``); a name the dropdown
+                does not recognize raises ``FilterValidationError`` rather than
+                silently returning worldwide results.
             network: Optional connection-degree filter. Each element is one of
                 ``"F"`` (1st-degree), ``"S"`` (2nd-degree), ``"O"`` (3rd-degree
                 and beyond). Example: ``["F"]`` to only return 1st-degree
                 connections. Invalid tokens raise ``ValueError``. The container
                 shape is repaired at the MCP tool boundary, so the list arrives
                 here already normalized.
-            current_company: Optional current-employer filter. LinkedIn's
-                ``currentCompany`` facet only filters on the numeric company
-                URN id (e.g. ``"1115"`` for SAP); plain company names are
-                accepted by the URL but ignored by LinkedIn and return the
-                unfiltered result set. Look up a company's URN via
-                ``get_company_profile`` -- it is exposed under
-                ``references["about"]``.
+            current_company: Optional current-employer filter, one or a list.
+                Each is a company name ("SAP"), a ``/company/<slug>`` URL, or
+                the numeric company URN id (``"1115"`` for SAP). LinkedIn's
+                ``currentCompany`` facet filters on the id only, so a name or
+                URL is resolved to it first (see
+                ``FacetResolver.resolve_company_urn``); one that does not
+                resolve raises ``FilterValidationError`` rather than silently
+                returning the unfiltered result set. The id is what
+                ``get_company_profile`` exposes under ``references["about"]``.
+            max_pages: Maximum result pages to load (LinkedIn returns 10 people
+                per page). Stops early once a page adds no new people, so
+                over-requesting is harmless. Default 1 (previous behavior).
+            title: Optional current-title filter, free text
+                (``titleFreeText``). Measured live as ignored by the SDUI
+                results page; a title in ``keywords`` as a quoted phrase
+                does filter. Refused as the only criterion, since it would
+                navigate and return the unfiltered worldwide list.
+            past_company: Optional past-employer filter, same shapes and
+                resolution as ``current_company`` (``pastCompany``). Each
+                unresolved name may cost up to two navigations.
+            industry: Optional ``industry`` facet, one or a list. Each is a
+                numeric LinkedIn industry id or a name in
+                ``COMPANY_INDUSTRY_IDS`` (the ids are shared with company
+                search); an unknown name raises ``FilterValidationError``.
+            school: Optional ``schoolFilter`` facet, the numeric school id
+                only. A name raises ``FilterValidationError``: the schools
+                search page carries nothing to resolve it from.
+            first_name: Optional ``firstName`` filter.
+            last_name: Optional ``lastName`` filter.
+            profile_language: Optional ``profileLanguage`` facet, one or a
+                list of two-letter ISO 639-1 codes (``"en"``, ``"de"``).
 
         Returns:
-            {url, sections: {name: text}}
+            {url, sections: {search_results: text}, people: [...],
+            result_count} -- pages joined by ``\\n---\\n``; ``people`` holds one
+            row per card parsed from each page's text
+            (``search_parse.parse_people_cards``), deduped by URL, and
+            ``result_count`` the first page's "About N results" header or None.
         """
-        # Builds before it navigates, and the builder refuses a filter
-        # LinkedIn would swallow, so an invalid token costs no page load.
-        url = build_people_search_url(
-            keywords,
+        # Every pure check runs before any navigation, so a typo in one facet
+        # never costs the company lookup another facet would have paid for.
+        network = network_tokens(network)
+        industries = industry_ids(industry)
+        languages = profile_languages(profile_language)
+        school_token = school_id(school)
+        current_companies = [c for c in as_list(current_company) if c]
+        past_companies = [c for c in as_list(past_company) if c]
+        require_people_criteria(
+            keywords=keywords,
             location=location,
             network=network,
-            current_company=current_company,
-        )
-        extracted = await self._capture.capture(
-            url,
-            section_name="search_results",
-            plan=CapturePlan(CaptureMode.SEARCH_RESULTS),
+            current_companies=current_companies,
+            past_companies=past_companies,
+            industry_ids=industries,
+            school_id=school_token,
+            first_name=first_name,
+            last_name=last_name,
+            languages=languages,
+            title=title,
         )
 
-        sections: dict[str, str] = {}
-        references: dict[str, list[Reference]] = {}
-        section_errors: dict[str, dict[str, Any]] = {}
-        if extracted.text and extracted.text != RATE_LIMITED_SECTION_TEXT:
-            sections["search_results"] = extracted.text
-            if extracted.references:
-                references["search_results"] = extracted.references
-        elif extracted.text == RATE_LIMITED_SECTION_TEXT:
-            section_errors["search_results"] = rate_limited_section_error()
-        elif extracted.error:
-            section_errors["search_results"] = extracted.error
+        # LinkedIn ignores a name in currentCompany=/pastCompany=; resolve each
+        # to the numeric URN or fail loudly.
+        current_ids = [
+            await self._facets.resolve_company_urn(c) for c in current_companies
+        ]
+        past_ids = [await self._facets.resolve_company_urn(c) for c in past_companies]
+        geo_id: str | None = None
+        if location:
+            # LinkedIn ignores a free-text location=; resolve it to the numeric
+            # geoUrn its own dropdown produces, or fail loudly rather than
+            # silently returning an unfiltered (worldwide) result set.
+            geo_id = await self._facets.resolve_geo_urn(location)
+            if not geo_id:
+                raise FilterValidationError(
+                    f"Could not resolve location {location!r} to a LinkedIn "
+                    f"region. Use a country or city name as it appears in "
+                    f"LinkedIn's location dropdown."
+                )
 
+        base_url = build_people_search_url(
+            keywords,
+            geo_id=geo_id,
+            network=network,
+            current_company_ids=current_ids,
+            past_company_ids=past_ids,
+            industry_ids=industries,
+            school_id=school_token,
+            title=title,
+            first_name=first_name,
+            last_name=last_name,
+            languages=languages,
+        )
+
+        # A company resolution may have just navigated (company search, About
+        # page); the first results page gets the same spacing as every later
+        # one.
+        paged = await paginate_search(
+            self._capture,
+            self._session,
+            base_url,
+            kind="person",
+            max_pages=max_pages,
+            pace_first=self._facets.navigated,
+        )
+
+        people, result_count = search_rows(parse_people_cards, paged.pages, "person")
         result: dict[str, Any] = {
-            "url": url,
-            "sections": sections,
+            "url": base_url,
+            "sections": {"search_results": "\n---\n".join(paged.page_texts)}
+            if paged.page_texts
+            else {},
+            "people": people,
+            "result_count": result_count,
         }
-        if references:
-            result["references"] = references
-        if section_errors:
-            result["section_errors"] = section_errors
+        if paged.page_references:
+            result["references"] = {
+                "search_results": dedupe_references(paged.page_references)
+            }
+        if paged.section_errors:
+            result["section_errors"] = paged.section_errors
         return result

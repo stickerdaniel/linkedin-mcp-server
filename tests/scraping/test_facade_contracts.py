@@ -60,6 +60,18 @@ TOOL_DELEGATES = {
     "search_posts": "search_posts",
     "send_message": "send_message",
 }
+# Enrichment tools compose several facade calls, or none when they only read
+# the on-disk cache or the job ledger; a tuple lists every facade method a
+# tool reaches, and none of them may reach past TOOL_FACADE_METHODS.
+ENRICHMENT_TOOL_DELEGATES: dict[str, tuple[str, ...]] = {
+    "enrich_companies": ("search_companies", "scrape_company"),
+    "enrich_company_deep": ("scrape_company", "extract_page"),
+    "get_company_cache": (),
+    "get_enrichment_status": (),
+    "query_company_cache": (),
+    "run_enrichment_bunch": ("scrape_person",),
+    "start_enrichment_job": (),
+}
 
 
 async def test_constructor_export_and_dependency_use_the_same_facade(monkeypatch):
@@ -119,11 +131,18 @@ async def test_registered_tools_and_extractor_delegates_are_counted_separately()
     tools = await create_mcp_server().list_tools()
     tool_names = {tool.name for tool in tools}
 
-    assert len(tool_names) == 19
-    assert tool_names == {*TOOL_DELEGATES, "close_session"}
+    assert len(tool_names) == 26
+    assert tool_names == {*TOOL_DELEGATES, *ENRICHMENT_TOOL_DELEGATES, "close_session"}
     assert len(TOOL_DELEGATES) == 18
+    assert len(ENRICHMENT_TOOL_DELEGATES) == 7
+    assert TOOL_DELEGATES.keys().isdisjoint(ENRICHMENT_TOOL_DELEGATES)
     assert set(TOOL_DELEGATES.values()) == TOOL_FACADE_METHODS
+    reached = {
+        method for methods in ENRICHMENT_TOOL_DELEGATES.values() for method in methods
+    }
+    assert reached <= TOOL_FACADE_METHODS
     assert "close_session" not in TOOL_DELEGATES
+    assert "close_session" not in ENRICHMENT_TOOL_DELEGATES
 
 
 async def test_company_posts_delegate_matches_registered_tool_consumer():
@@ -270,7 +289,7 @@ def test_profile_urn_callback_does_not_retain_the_facade(mock_page):
 
 async def test_facade_search_posts_forwards_its_recency_filter(mock_page):
     # The scroll depth is held by the `search-posts` trace, which runs the
-    # facade with `max_pages=2` and records the scrolls it buys. The recency
+    # facade with `max_posts=2` and records the scrolls it buys. The recency
     # filter is not: no scenario passes one, and replacing the forward with
     # `None` survived the whole suite. Pinned here against the real owner,
     # because dropping it answers a filtered request with unfiltered results

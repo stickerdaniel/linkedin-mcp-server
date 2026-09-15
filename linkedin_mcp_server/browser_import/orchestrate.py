@@ -360,7 +360,10 @@ async def _import_first_accepted(
             return True
 
         # Cookie was present but LinkedIn rejected it (revoked/remote logout).
-        # Drop the partial artifacts and try the next-freshest browser.
+        # Drop the partial artifacts and try the next-freshest browser. A
+        # /feed/ that did not load raises NetworkError instead and is left to
+        # propagate: the next candidate would meet the same network, and the
+        # caller's finally restores the retired session.
         reset_source_profile(user_data_dir)
         logger.info(
             "%s/%s had an li_at but LinkedIn rejected the session; trying the "

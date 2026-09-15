@@ -24,6 +24,7 @@ from linkedin_mcp_server.common_utils import (
 )
 
 from linkedin_mcp_server.browser_downgrade import refuse_a_downgrade
+from linkedin_mcp_server.browser_launch import block_heavy_subresources
 from linkedin_mcp_server.exceptions import (
     BrowserDowngradeError,
     BrowserShutdownUnconfirmedError,
@@ -92,6 +93,7 @@ class BrowserManager:
         headless: bool = True,
         slow_mo: int = 0,
         viewport: dict[str, int] | None = None,
+        block_subresources: bool = True,
         **launch_options: Any,
     ):
         # ``launch_options`` is spread straight into the context options, so a
@@ -129,6 +131,11 @@ class BrowserManager:
         # measured contradiction: an outer window of 805 pixels standing on a
         # screen the same browser reported as 720 tall.
         self.viewport = viewport
+        # Named rather than left in ``launch_options``, which is spread into
+        # the context options: Patchright knows no such argument, and the
+        # builder puts it there because that dict is what both launch paths
+        # already forward.
+        self.block_subresources = block_subresources
         self.launch_options = launch_options
         self._process_marker, self._process_environment = new_browser_process_marker()
 
@@ -354,6 +361,36 @@ class BrowserManager:
         self._is_authenticated = False
         self._containment = None
 
+    def _announce_a_disconnect(self, context: BrowserContext) -> None:
+        """Have the browser's exit written down, whether or not it was asked for.
+
+        Nothing else here sees that exit. ``close()`` logs what *it* did, and a
+        Chromium that leaves on its own mid-scrape surfaces only later, as a
+        protocol error on whatever call came next. That is what happened when
+        a browser exited cleanly at 00:48 with no line to say so.
+
+        A warning only for an exit nobody asked for. ``close()`` takes the
+        handle before its first await, so during a teardown ``self._context``
+        is already something else and the same event reads as expected.
+        """
+        # ``None`` outside a normal browser, which ``open_hidden_page`` already
+        # refuses; nothing to listen to then.
+        browser = getattr(context, "browser", None)
+        if browser is None:
+            return
+
+        def announce(_browser: object) -> None:
+            if self._context is not context:
+                logger.debug("Browser disconnected during close")
+                return
+            logger.warning(
+                "Browser disconnected while in use (headless=%s, user_data_dir=%s)",
+                self.headless,
+                self.user_data_dir,
+            )
+
+        browser.on("disconnected", announce)
+
     async def start(self) -> None:
         """Start Patchright and launch persistent browser context."""
         if self._context is not None:
@@ -529,6 +566,7 @@ class BrowserManager:
             # that group before page setup or authentication can fail and before
             # the Node driver can exit and reparent it.
             remember_detached_process_groups(self._process_marker)
+            self._announce_a_disconnect(self._context)
             logger.info(
                 "Persistent browser launched (headless=%s, user_data_dir=%s)",
                 self.headless,
@@ -541,6 +579,12 @@ class BrowserManager:
                     "windowless page needs a browser that survives losing its "
                     "last window, which is measured only on macOS."
                 )
+
+            if self.block_subresources:
+                # Before any page is handed out, so the first navigation is
+                # already covered.
+                await block_heavy_subresources(self._context)
+                logger.debug("Images, fonts and media are aborted on this context")
 
             startup = (
                 self._context.pages[0]

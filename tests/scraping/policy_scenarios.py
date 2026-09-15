@@ -190,6 +190,16 @@ async def boundaries(
             "context": values.get("context"),
         }
 
+    def jitter(base: float, spread: float = 0.5) -> float:
+        # Identity, so every paced sleep records its base length: the real
+        # jitter draws from an unseeded RNG and no two runs would agree.
+        return base
+
+    async def humanize(_page: Any) -> None:
+        # The cursor entropy after each load is random in hop count, position
+        # and pause; recording it would make every navigation trace differ.
+        return None
+
     with (
         patch.object(navigation_module, "record_page_trace", trace),
         patch.object(navigation_module, "detect_auth_barrier_quick", auth_quick),
@@ -220,6 +230,8 @@ async def boundaries(
             "_drain_listener_tasks",
             staticmethod(drain),
         ),
+        patch.object(session_module, "jitter", jitter),
+        patch.object(navigation_module, "humanize_after_nav", humanize),
         patch.object(session_module.asyncio, "sleep", clock.sleep),
         patch.object(session_module.time, "monotonic", clock.monotonic),
     ):
@@ -854,7 +866,10 @@ async def _single_capture_facade_scenario(method: str) -> dict[str, Any]:
                 arguments = {"keywords": "engine"}
                 result = await extractor.search_companies(**arguments)
             elif method == "search_posts":
-                arguments = {"keywords": "mathematics", "max_pages": 2}
+                # One card before the wheel, two after: the loop reaches
+                # `max_posts` on its first round and stops.
+                page.script("evaluate:content_search_count", 1, 2)
+                arguments = {"keywords": "mathematics", "max_posts": 2}
                 result = await extractor.search_posts(**arguments)
             else:
                 raise AssertionError(method)

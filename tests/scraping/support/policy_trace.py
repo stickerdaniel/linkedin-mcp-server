@@ -626,6 +626,9 @@ def semantic_program_id(program: str) -> str:
         ("main.innerText.length > 200", "main_text_200"),
         ("main.innerText.length > 100", "main_text_100"),
         ("minimumLength", "main_text_minimum"),
+        # Ahead of the profile-anchor markers: the card counter also selects
+        # `a[href*="/in/"]` and would otherwise read as the people-page probe.
+        ("""closest('li, article, [role="article"]')""", "content_search_count"),
         ('a[href*="/in/"]', "company_people_ready"),
         ("text.startsWith('Load more')", "profile_details_ready"),
         ("premium/", "premium_dialog_text"),

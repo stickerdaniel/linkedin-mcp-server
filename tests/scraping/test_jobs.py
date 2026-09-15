@@ -33,9 +33,23 @@ def _scraper(page) -> JobScraper:
     navigator = PageNavigator(session)
     content = PageContentReader(session)
     return JobScraper(
+        session,
         navigator,
         SectionCapture(session, navigator, content),
         JobPageReader(session, navigator, content),
+    )
+
+
+def _identity_jitter():
+    """Neutralise the session's pause jitter so a clock prediction is exact.
+
+    The jitter itself is asserted where the session owns it; here a random
+    delay would move the fake clock by an amount the arithmetic below cannot
+    name.
+    """
+    return patch(
+        "linkedin_mcp_server.scraping.session.jitter",
+        side_effect=lambda base, *a, **kw: base,
     )
 
 
@@ -175,7 +189,7 @@ class TestSearchJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -212,7 +226,7 @@ class TestSearchJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -259,7 +273,7 @@ class TestSearchJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -437,7 +451,7 @@ class TestSearchJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -474,7 +488,7 @@ class TestSearchJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -521,7 +535,7 @@ class TestSearchJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -609,7 +623,7 @@ class TestSearchJobs:
                 return_value=False,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -651,7 +665,7 @@ class TestSearchJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -694,7 +708,7 @@ class TestSearchJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -746,7 +760,7 @@ class TestSearchJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -791,7 +805,7 @@ class TestSearchJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -841,7 +855,7 @@ class TestSearchJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -887,7 +901,7 @@ class TestSearchJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -934,7 +948,7 @@ class TestSearchJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -983,7 +997,7 @@ class TestSearchJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -1062,7 +1076,7 @@ class TestSearchJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -1114,7 +1128,7 @@ class TestSearchJobs:
                 return_value=1,
             ) as mock_total_pages,
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -1178,7 +1192,7 @@ class TestSearchJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 side_effect=sleep,
             ),
         ):
@@ -1236,7 +1250,7 @@ class TestSearchJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 side_effect=sleep,
             ),
         ):
@@ -1285,6 +1299,7 @@ class TestSearchJobs:
         pages = [[str(100 + p * 10 + i) for i in range(10)] for p in range(10)]
 
         with (
+            _identity_jitter(),
             patch.object(jobs_module, "time", clock),
             patch.object(scraper._pages, "_extract_search_page", side_effect=read_page),
             patch.object(
@@ -1300,7 +1315,7 @@ class TestSearchJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 side_effect=sleep,
             ),
         ):
@@ -1345,6 +1360,7 @@ class TestSearchJobs:
         pages = [[str(100 + p * 10 + i) for i in range(10)] for p in range(10)]
 
         with (
+            _identity_jitter(),
             patch.object(jobs_module, "time", clock),
             patch.object(scraper._pages, "_extract_search_page", side_effect=read_page),
             patch.object(
@@ -1360,7 +1376,7 @@ class TestSearchJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 side_effect=sleep,
             ),
         ):
@@ -1395,7 +1411,7 @@ class TestSearchJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -1427,7 +1443,7 @@ class TestSearchJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -1475,7 +1491,7 @@ class TestSearchJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -1508,7 +1524,7 @@ class TestSearchJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -1551,7 +1567,7 @@ class TestSearchJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -1592,7 +1608,7 @@ class TestSearchJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -1646,7 +1662,7 @@ class TestSearchJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -1685,7 +1701,7 @@ class TestSearchJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -1736,7 +1752,7 @@ class TestSearchJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -1787,7 +1803,7 @@ class TestSearchJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -1822,7 +1838,7 @@ class TestSearchJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -1853,7 +1869,7 @@ class TestSearchJobs:
                 return_value=["100"],
             ) as mock_ids,
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -1888,7 +1904,7 @@ class TestSearchJobs:
                 return_value=["100"],
             ) as mock_ids,
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -1935,7 +1951,7 @@ class TestSearchJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -2003,7 +2019,7 @@ class TestGetSavedJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -2043,7 +2059,7 @@ class TestGetSavedJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -2084,7 +2100,7 @@ class TestGetSavedJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -2119,7 +2135,7 @@ class TestGetSavedJobs:
                 return_value=2,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -2156,7 +2172,7 @@ class TestGetSavedJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -2168,6 +2184,54 @@ class TestGetSavedJobs:
             "https://www.linkedin.com/my-items/saved-jobs/?start=10",
             "https://www.linkedin.com/my-items/saved-jobs/?start=20",
         ]
+
+    async def test_pages_after_the_first_are_paced_by_the_session(
+        self, mock_page, monkeypatch
+    ):
+        """Every page but the first waits the navigation delay, jittered.
+
+        The pause goes through the session rather than a bare sleep, so it
+        reads the operator's `NAV_DELAY_SECONDS` and carries the same jitter
+        as every other pause: a fixed period between list pages is a signal
+        the list walk has no reason to give.
+        """
+        monkeypatch.setenv("NAV_DELAY_SECONDS", "0.75")
+        scraper = _scraper(mock_page)
+        id_pages = iter([["100"], ["200"], ["300"]])
+        navigate = self._navigating(mock_page, [extracted("page text")] * 3)
+        slept: list[float] = []
+
+        async def record(delay: float) -> None:
+            slept.append(delay)
+
+        with (
+            patch.object(
+                scraper._pages, "_extract_saved_jobs_page", side_effect=navigate
+            ),
+            patch.object(
+                scraper._pages,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                side_effect=lambda **kw: next(id_pages),
+            ),
+            patch.object(
+                scraper._pages,
+                "_get_total_list_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.jitter",
+                side_effect=lambda base, *a, **kw: base * 1.5,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
+                side_effect=record,
+            ),
+        ):
+            await scraper.get_saved_jobs(max_pages=3)
+
+        assert slept == [0.75 * 1.5, 0.75 * 1.5]
 
     async def test_early_stop_no_new_ids(self, mock_page):
         scraper = _scraper(mock_page)
@@ -2191,7 +2255,7 @@ class TestGetSavedJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -2306,7 +2370,7 @@ class TestGetSavedJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -2333,7 +2397,7 @@ class TestGetSavedJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -2375,7 +2439,7 @@ class TestGetSavedJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -2413,7 +2477,7 @@ class TestGetSavedJobs:
                 return_value=2,
             ) as mock_total_pages,
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -2454,7 +2518,7 @@ class TestGetSavedJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -2496,7 +2560,7 @@ class TestGetSavedJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -2534,7 +2598,7 @@ class TestGetSavedJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -2575,7 +2639,7 @@ class TestGetSavedJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -2629,7 +2693,7 @@ class TestGetSavedJobs:
                 side_effect=count_pages_and_drift,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -2689,7 +2753,7 @@ class TestGetSavedJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -2744,7 +2808,7 @@ class TestGetSavedJobs:
                 return_value=None,
             ),
             patch(
-                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):

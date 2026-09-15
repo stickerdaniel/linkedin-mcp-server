@@ -103,6 +103,8 @@
     }
   ],
   "result": {
+    "people": [],
+    "result_count": null,
     "section_names": [
       "search_results"
     ],

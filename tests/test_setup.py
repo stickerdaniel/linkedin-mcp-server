@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from linkedin_mcp_server.config.schema import AppConfig
+from linkedin_mcp_server.core.exceptions import NetworkError
 from linkedin_mcp_server.session_state import portable_cookie_path
 from linkedin_mcp_server.setup import interactive_login
 
@@ -367,6 +368,41 @@ async def test_interactive_login_restores_the_session_when_login_fails(
 
     assert await interactive_login(tmp_path / "profile") is False
 
+    restore.assert_called_once_with(retired, tmp_path / "profile")
+
+
+@pytest.mark.asyncio
+async def test_interactive_login_reports_a_login_page_that_did_not_load(
+    monkeypatch, tmp_path
+):
+    """A /login that times out is a network failure, not a failed login.
+
+    It is raised before the manual wait, so the rotation restores the session
+    it retired, and the error names that: the bootstrap records it as the
+    auth state's last error, where a raw driver timeout read as expiry.
+    """
+    retired = tmp_path / "invalid-state-x"
+    restore = MagicMock(return_value=True)
+    browser = _make_browser(export_cookies=True)
+    browser.page.goto = AsyncMock(
+        side_effect=Exception("Page.goto: Timeout 30000ms exceeded.")
+    )
+    wait_mock = AsyncMock()
+
+    _patch_login_deps(
+        monkeypatch,
+        browser_factory=lambda **kwargs: _BrowserContextManager(browser),
+        rotate_source_profile=MagicMock(return_value=retired),
+    )
+    monkeypatch.setattr("linkedin_mcp_server.setup.wait_for_manual_login", wait_mock)
+    monkeypatch.setattr("linkedin_mcp_server.setup.restore_source_profile", restore)
+
+    with pytest.raises(NetworkError, match="login page did not load") as excinfo:
+        await interactive_login(tmp_path / "profile")
+
+    assert "Timeout 30000ms" in str(excinfo.value)
+    assert "put back unchanged" in str(excinfo.value)
+    wait_mock.assert_not_awaited()
     restore.assert_called_once_with(retired, tmp_path / "profile")
 
 

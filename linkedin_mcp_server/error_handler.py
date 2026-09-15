@@ -10,6 +10,8 @@ import logging
 from typing import NoReturn
 
 from fastmcp.exceptions import ToolError
+from patchright._impl._errors import TargetClosedError
+from patchright.async_api import Error as PlaywrightError
 
 from linkedin_mcp_server.core.proxy_errors import (
     redact_proxy_credentials,
@@ -280,6 +282,20 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
             str(exception),
             context=context,
         )
+
+    # No issue diagnostics: the browser died and the next call relaunches it
+    # (drivers/browser.py liveness check), so the client needs the retry, not a
+    # bug report. Matched by message as well as by class because a closed
+    # target surfaces as either.
+    elif isinstance(exception, TargetClosedError) or (
+        isinstance(exception, PlaywrightError)
+        and "Target page, context or browser has been closed" in str(exception)
+    ):
+        logger.warning("Browser closed%s: %s", ctx, exception)
+        raise ToolError(
+            "The browser closed during this call; it is relaunched on the next one. "
+            "Retry the call."
+        ) from exception
 
     else:
         # The catch-all for exceptions nothing else classified, so a raw driver

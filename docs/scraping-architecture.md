@@ -16,14 +16,16 @@ a page-owning collaborator.
 | Module | Canonical public owners | Source classification |
 | --- | --- | --- |
 | `__init__` | _(no public definitions)_ | `browser-free` |
-| `capture` | `CaptureMode`, `CapturePlan`, `RATE_LIMIT_RETRY_DELAY`, `SectionCapture`, `capture_plan_for_url()` | `page-owning` |
+| `capture` | `CONTENT_SEARCH_COUNT_JS`, `CONTENT_SEARCH_MAX_SCROLLS`, `CONTENT_SEARCH_SCROLL_BUDGET`, `CaptureMode`, `CapturePlan`, `SectionCapture`, `capture_plan_for_url()` | `page-owning` |
 | `company` | `CompanyScraper` | `browser-free` |
+| `company_parse` | `ParsedJobs`, `has_about_labels()`, `parse_about()`, `parse_job_search()`, `parse_search_results()` | `browser-free` |
 | `connection` | `ActionSignals`, `ConnectionState`, `detect_connection_state()` | `browser-free` |
 | `connection_actions` | `ACTION_SIGNALS_JS`, `CLICK_INCOMING_ACCEPT_JS`, `ConnectionActions`, `OPEN_MORE_BUTTON_JS`, `ReadMainProfile` | `page-owning` |
 | `content` | `PageContentReader` | `page-owning` |
 | `contracts` | `ExtractedSection`, `FilterValidationError`, `RATE_LIMITED_SECTION_TEXT`, `SEND_INTERRUPTED_WARNING`, `message_action_result()`, `rate_limited_section_error()`, `refuse_an_invalid_message()` | `browser-free` |
 | `conversations` | `ConversationReader`, `strip_select_conversation_prefix()` | `page-owning` |
 | `extractor` | `LinkedInExtractor` | `page-owning` |
+| `facets` | `FacetResolver`, `GEO_ID_PATTERN`, `LOCATION_BOX_SELECTOR`, `TYPEAHEAD_TIMEOUT_MS` | `page-owning` |
 | `feed` | `FeedScraper` | `page-owning` |
 | `feed_payload` | `POST_SLUG_URL_RE`, `build_feed_references()`, `is_feed_payload_response()` | `browser-free` |
 | `fields` | `COMPANY_SECTIONS`, `PERSON_SECTIONS`, `parse_company_sections()`, `parse_person_sections()` | `browser-free` |
@@ -37,36 +39,44 @@ a page-owning collaborator.
 | `person` | `PersonScraper` | `page-owning` |
 | `posts` | `PostSearch` | `browser-free` |
 | `profile_page` | `MessageTarget`, `MessageTargetResolution`, `ProfilePageReader`, `ReadMessageTarget` | `page-owning` |
-| `search_urls` | `CONTENT_DATE_POSTED_MAP`, `EXPERIENCE_LEVEL_MAP`, `JOB_DATE_POSTED_MAP`, `JOB_TYPE_MAP`, `NETWORK_TOKENS`, `SORT_BY_MAP`, `WORK_TYPE_MAP`, `build_company_search_url()`, `build_content_search_url()`, `build_job_search_url()`, `build_people_search_url()` | `browser-free` |
-| `session` | `NAV_DELAY`, `ScrapingSession` | `page-owning` |
+| `rate_limit` | `HTTP_STATUS_NAV_FAILURE`, `HTTP_STATUS_ON_INTERSTITIAL`, `HTTP_TOO_MANY_REQUESTS`, `RATE_LIMIT_BACKOFF_DELAY`, `RATE_LIMIT_BACKOFF_MAX`, `RATE_LIMIT_BACKOFF_MAX_DOUBLINGS`, `RATE_LIMIT_RETRY_BUDGET`, `RATE_LIMIT_RETRY_DELAY`, `RETRY_AFTER_CEILING`, `RateLimitBudget`, `rate_limit_backoff_delay()`, `rate_limit_backoff_max()`, `rate_limit_backoff_max_doublings()`, `rate_limit_retry_budget()`, `rate_limit_retry_delay()`, `retry_after_ceiling()`, `retry_after_seconds()` | `browser-free` |
+| `search_pages` | `SearchPages`, `paginate_search()`, `search_rows()` | `browser-free` |
+| `search_parse` | `parse_company_cards()`, `parse_count()`, `parse_people_cards()`, `parse_result_count()` | `browser-free` |
+| `search_urls` | `COMPANY_INDUSTRY_IDS`, `COMPANY_SIZE_LETTERS`, `CONTENT_DATE_POSTED_MAP`, `EXPERIENCE_LEVEL_MAP`, `JOB_DATE_POSTED_MAP`, `JOB_TYPE_MAP`, `NETWORK_TOKENS`, `SORT_BY_MAP`, `WORK_TYPE_MAP`, `as_list()`, `build_company_search_url()`, `build_content_search_url()`, `build_job_search_url()`, `build_people_search_url()`, `company_size_letters()`, `industry_ids()`, `network_tokens()`, `profile_languages()`, `require_company_criteria()`, `require_people_criteria()`, `school_id()` | `browser-free` |
+| `session` | `NAV_DELAY`, `ScrapingSession`, `nav_delay()` | `page-owning` |
 | `text` | `DETAIL_CAPTURE_EN_US`, `DetailCaptureTextTable`, `SIDEBAR_CHROME_EN`, `SidebarChromeTable`, `filter_linkedin_noise_lines()`, `strip_conversation_chrome()`, `strip_linkedin_noise()`, `truncate_linkedin_noise()` | `browser-free` |
 
 ## Internal import graph
 
 - `__init__` -> `extractor`, `fields`
 - `capture` -> `content`, `contracts`, `link_metadata`, `navigation`, `session`, `text`
-- `company` -> `capture`, `contracts`, `fields`, `identifiers`, `link_metadata`, `search_urls`, `session`
+- `company` -> `capture`, `contracts`, `facets`, `fields`, `identifiers`, `link_metadata`, `search_pages`, `search_parse`, `search_urls`, `session`
+- `company_parse` -> `search_parse`
 - `connection` -> _(none)_
 - `connection_actions` -> `connection`, `identifiers`, `navigation`, `session`
 - `content` -> `session`, `text`
 - `contracts` -> `identifiers`, `link_metadata`
 - `conversations` -> `content`, `identifiers`, `link_metadata`, `navigation`, `profile_page`, `session`, `text`
-- `extractor` -> `capture`, `company`, `connection_actions`, `content`, `contracts`, `conversations`, `feed`, `job_pages`, `jobs`, `message_sender`, `navigation`, `person`, `posts`, `profile_page`, `session`, `text`
+- `extractor` -> `capture`, `company`, `connection_actions`, `content`, `contracts`, `conversations`, `facets`, `feed`, `job_pages`, `jobs`, `message_sender`, `navigation`, `person`, `posts`, `profile_page`, `session`, `text`
+- `facets` -> `capture`, `company_parse`, `contracts`, `identifiers`, `link_metadata`, `navigation`, `session`
 - `feed` -> `content`, `contracts`, `feed_payload`, `navigation`, `session`, `text`
 - `feed_payload` -> `link_metadata`
 - `fields` -> `capture`
 - `identifiers` -> _(none)_
-- `job_pages` -> `capture`, `content`, `contracts`, `job_policy`, `link_metadata`, `navigation`, `session`, `text`
+- `job_pages` -> `content`, `contracts`, `job_policy`, `link_metadata`, `navigation`, `session`, `text`
 - `job_policy` -> `link_metadata`
 - `jobs` -> `capture`, `contracts`, `identifiers`, `job_pages`, `job_policy`, `link_metadata`, `navigation`, `search_urls`, `session`
 - `link_metadata` -> _(none)_
 - `message_sender` -> `contracts`, `identifiers`, `navigation`, `session`
-- `navigation` -> `session`
-- `person` -> `capture`, `contracts`, `fields`, `identifiers`, `link_metadata`, `navigation`, `profile_page`, `search_urls`, `session`, `text`
+- `navigation` -> `rate_limit`, `session`
+- `person` -> `capture`, `contracts`, `facets`, `fields`, `identifiers`, `link_metadata`, `navigation`, `profile_page`, `search_pages`, `search_parse`, `search_urls`, `session`, `text`
 - `posts` -> `capture`, `contracts`, `link_metadata`, `search_urls`
 - `profile_page` -> `session`
+- `rate_limit` -> _(none)_
+- `search_pages` -> `capture`, `contracts`, `link_metadata`, `search_parse`, `session`
+- `search_parse` -> _(none)_
 - `search_urls` -> `contracts`
-- `session` -> _(none)_
+- `session` -> `rate_limit`
 - `text` -> _(none)_
 
 ## `LinkedInExtractor` public coroutine surface
