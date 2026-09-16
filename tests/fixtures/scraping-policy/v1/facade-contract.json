@@ -82,7 +82,7 @@
       },
       "search_people": {
         "coroutine": true,
-        "signature": "(self, keywords: 'str', location: 'str | None' = None, network: 'list[str] | None' = None, current_company: 'str | None' = None) -> 'dict[str, Any]'"
+        "signature": "(self, keywords: 'str', location: 'str | None' = None, network: 'list[str] | None' = None, current_company: 'str | None' = None, max_pages: 'int' = 1) -> 'dict[str, Any]'"
       },
       "search_posts": {
         "coroutine": true,
@@ -149,6 +149,98 @@
           "required": [
             "linkedin_username"
           ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "enrich_companies": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "bunch_searches": {
+              "default": 8,
+              "description": "Max LinkedIn searches to run this call (1-20,\ndefault 8). Cache hits do not count toward it.",
+              "maximum": 20,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "company_names": {
+              "description": "Company names or LinkedIn company URLs.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "ignore_schedule": {
+              "default": false,
+              "description": "Run outside working hours (off by default).",
+              "type": "boolean"
+            },
+            "refresh": {
+              "default": false,
+              "description": "Re-fetch even companies whose cache is still fresh.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "company_names"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "enrich_company_deep": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "company": {
+              "description": "Company name, slug, or LinkedIn company URL.",
+              "type": "string"
+            },
+            "include_jobs": {
+              "default": true,
+              "description": "Also read the Jobs tab (default True). Open roles\ncarry a shorter 14-day TTL, so they refresh more often.",
+              "type": "boolean"
+            },
+            "refresh": {
+              "default": false,
+              "description": "Re-fetch both halves even if cached and fresh.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "company"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "get_company_cache": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "company": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Company name/slug/URL to read. Omit to list all keys."
+            }
+          },
           "type": "object"
         },
         "output": {
@@ -270,6 +362,30 @@
               ],
               "default": null,
               "description": "LinkedIn messaging thread ID"
+            }
+          },
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "get_enrichment_status": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "job_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Job to report on. Omit to list every known job."
             }
           },
           "type": "object"
@@ -457,6 +573,49 @@
           "type": "object"
         }
       },
+      "run_enrichment_bunch": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "bunch_size": {
+              "default": 5,
+              "description": "Profiles to visit in this call (1-25, default 5).\nLarger bunches are denser activity; the default keeps a call\ninside the tool timeout with randomized gaps between loads.",
+              "maximum": 25,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "ignore_schedule": {
+              "default": false,
+              "description": "Run outside working hours. Off by default --\nactivity at 03:00 local is one of the cheaper signals to\nnotice. Use only for a one-off catch-up.",
+              "type": "boolean"
+            },
+            "job_name": {
+              "description": "The job created by start_enrichment_job.",
+              "type": "string"
+            },
+            "sections": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Comma-separated extra profile sections, as in\nget_person_profile. Each extra section is another page load\nand counts separately against the budget, so leave this unset\nunless the main profile really is not enough."
+            }
+          },
+          "required": [
+            "job_name"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
       "search_companies": {
         "input": {
           "additionalProperties": false,
@@ -635,7 +794,14 @@
                 }
               ],
               "default": null,
-              "description": "Optional location filter (e.g., \"New York\", \"Remote\")"
+              "description": "Optional location filter: a country or city name\n(e.g., \"Egypt\", \"United Arab Emirates\", \"Amsterdam\"). It is\nresolved to LinkedIn's numeric geo id through the site's own\nlocation dropdown, so free-text names actually filter. A name\nLinkedIn's dropdown does not recognize raises an error rather\nthan silently returning worldwide results."
+            },
+            "max_pages": {
+              "default": 1,
+              "description": "Number of result pages to load, 1-10 (default 1).\nLinkedIn returns 10 people per page, so max_pages=10 yields up\nto 100. Pagination stops early once a page adds no new people.\nRaise this when you need more than a top-10 sample -- e.g.\nenumerating 1st-degree connections in a region with\nnetwork=[\"F\"].",
+              "maximum": 10,
+              "minimum": 1,
+              "type": "integer"
             },
             "network": {
               "anyOf": [
@@ -734,6 +900,50 @@
             "linkedin_username",
             "message",
             "confirm_send"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "start_enrichment_job": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "daily_cap": {
+              "default": 100,
+              "description": "Profile views allowed per rolling 24 hours (1-150,\ndefault 100). This is a behavioral budget, not a LinkedIn API\nlimit -- LinkedIn publishes no official number.",
+              "maximum": 150,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "job_name": {
+              "description": "Short identifier, e.g. \"egypt-gulf\". Reused to resume.",
+              "type": "string"
+            },
+            "replace_existing": {
+              "default": false,
+              "description": "Overwrite an existing job of the same name\ninstead of appending new usernames to it.",
+              "type": "boolean"
+            },
+            "usernames": {
+              "description": "LinkedIn usernames or profile URLs. Deduplicated;\nalready-completed people are skipped when a job is resumed.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "warmup": {
+              "default": true,
+              "description": "Ramp the cap over four weeks (10/day in week 1, 20 in\nweek 2, 50 in week 3, full cap after). Leave on unless this\naccount already runs automation at volume.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "job_name",
+            "usernames"
           ],
           "type": "object"
         },
