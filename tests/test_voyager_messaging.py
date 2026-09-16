@@ -578,3 +578,33 @@ class TestRetryCannotSkipValidation:
         assert result["count"] == PAGE_SIZE
         assert reader.discoveries == 2, "must rediscover exactly once"
         assert "nextCursor:PAGE2" in reader.fetched[1]
+
+
+class TestResultShapeMatchesTheRepositoryContract:
+    """AGENTS.md: all scraping tools return {url, sections: {name: raw_text}}."""
+
+    async def test_the_page_carries_url_and_sections(self):
+        reader = _Reader([_payload(_rows(2), None)])
+        result = await reader.get_conversations()
+        assert result["url"] == "https://www.linkedin.com/messaging/"
+        assert set(result["sections"]) == {"conversations"}
+        assert isinstance(result["sections"]["conversations"], str)
+
+    async def test_the_text_carries_what_a_reader_needs(self):
+        me_p = f"urn:li:msg_messagingParticipant:urn:li:fsd_profile:{ME}"
+        them_p = "urn:li:msg_messagingParticipant:urn:li:fsd_profile:ACoAthem"
+        conv = _conversation(
+            "c1", last_activity=1_700_000_000_000, participants=[me_p, them_p]
+        )
+        included = [
+            _participant(me_p, "Taylor", "Medford"),
+            _participant(them_p, "Dana", "Scully"),
+            _message("c1", them_p, "are you around this week", 1_700_000_000_000),
+        ]
+        reader = _Reader([_payload([conv], None, included=included)])
+        text = (await reader.get_conversations())["sections"]["conversations"]
+        assert "Dana Scully" in text
+        assert "Taylor Medford" not in text, "the mailbox owner is not a participant"
+        assert "are you around this week" in text
+        assert "awaiting your reply" in text
+        assert "2023-11-14T22:13+00:00" in text

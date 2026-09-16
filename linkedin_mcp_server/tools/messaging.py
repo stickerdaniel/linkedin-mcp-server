@@ -127,8 +127,10 @@ def register_messaging_tools(
                 with an empty page that would read as "you have none".
 
         Returns:
-            Dict with conversations, count, page_size, next_cursor, at_end and
-            zero_reason.
+            Dict with url and sections (the standard scraping-tool shape), plus
+            conversations, count, page_size, next_cursor, at_end and
+            zero_reason. `conversations` is the structured answer; `sections`
+            carries the same page as readable text for generic consumers.
 
             **at_end is measured, not inferred**: True means the server returned
             FEWER than page_size, so there is no more. False means a full page,

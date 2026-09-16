@@ -547,6 +547,37 @@ class VoyagerMessagingReader:
             return "parse-failure: included entities present, zero Conversations"
         return "control-empty: session or endpoint returned nothing at all"
 
+    @staticmethod
+    def render_page_text(conversations: list[dict[str, Any]]) -> str:
+        """Render a page as readable text.
+
+        Exists to satisfy the repository contract that every scraping tool
+        returns `{url, sections: {name: raw_text}}`, so a generic consumer can
+        treat this tool like the others. The structured `conversations` list is
+        the richer answer and is returned alongside it, not instead of it.
+        """
+        lines: list[str] = ["Conversations"]
+        for conversation in conversations:
+            who = ", ".join(conversation.get("participants") or []) or (
+                conversation.get("title") or "Unknown"
+            )
+            when = conversation.get("last_activity_iso") or ""
+            unread = conversation.get("unread_count") or 0
+            flag = f" [{unread} unread]" if unread else ""
+            lines.append(f"{who} - {when}{flag}".rstrip(" -").rstrip())
+
+            headlines = conversation.get("headlines") or []
+            if headlines:
+                lines.append(f"    {headlines[0]}")
+
+            text = (conversation.get("last_message_text") or "").replace("\n", " ")
+            if text.strip():
+                speaker = "You: " if conversation.get("last_message_from_me") else ""
+                lines.append(f"    {speaker}{text.strip()[:200]}")
+            if conversation.get("awaiting_my_reply"):
+                lines.append("    >> awaiting your reply")
+        return "\n".join(lines)
+
     async def _page_url(self, cursor: str | None, category: str | None) -> str:
         """Discover, validate and assemble the URL for one page.
 
@@ -677,6 +708,11 @@ class VoyagerMessagingReader:
                 )
 
         return {
+            # `url` and `sections` keep this tool's result shape consistent with
+            # every other scraping tool, per AGENTS.md. `conversations` is the
+            # structured answer and is the one worth reading.
+            "url": MESSAGING_URL,
+            "sections": {"conversations": self.render_page_text(conversations)},
             "conversations": conversations,
             "count": len(conversations),
             "page_size": PAGE_SIZE,
