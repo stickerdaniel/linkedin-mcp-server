@@ -616,3 +616,32 @@ class TestExhaustionIsNeverClaimedWithoutEvidence:
         assert result["count"] == 1
         assert result["exhausted"] is False
         assert result["exhaustion_basis"] == "empty-page-unproven"
+
+    async def test_escalation_never_overfetches_past_the_limit(self):
+        """The escalation re-introduced the very loss the page cap prevents:
+        requesting 25 when the caller wanted 10 advances the cursor past rows
+        the final slice discards, and a resuming caller never sees them."""
+        rows = [
+            _conversation(f"c{i}", last_activity=100 - i, participants=[])
+            for i in range(25)
+        ]
+        reader = _Reader([_payload(rows, "NEXT")])
+        reader.paging_state = "single-page"
+        result = await reader.get_all_conversations(limit=10, page_size=5)
+
+        for url in reader.fetched:
+            asked = int(url.split("count:")[1].split(",")[0].split(")")[0])
+            assert asked <= 10, f"asked {asked} while the caller wanted 10: {url}"
+        assert result["count"] <= 10
+
+    async def test_escalation_still_happens_when_there_is_headroom(self):
+        """Capping must not disable it: with room to grow, it still escalates."""
+        rows = [
+            _conversation(f"c{i}", last_activity=100 - i, participants=[])
+            for i in range(5)
+        ]
+        reader = _Reader([_payload(rows, None)])
+        reader.paging_state = "single-page"
+        await reader.get_all_conversations(limit=200, page_size=5)
+        assert len(reader.fetched) == 2
+        assert "count:25" in reader.fetched[1]

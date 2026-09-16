@@ -598,12 +598,20 @@ class VoyagerMessagingReader:
             # Filters are the exception: they narrow what is KEPT, so the number
             # of rows needed to find `limit` matches is unbounded and the page
             # stays full.
-            if escalated:
-                request_size = MAX_PAGE_SIZE
-            elif filters_active:
-                request_size = page_size
+            # Never ask for more than the caller still wants, escalation
+            # included. Overfetching advances the cursor past rows that the
+            # final slice then discards, and those rows are unreachable when a
+            # caller resumes -- the same silent loss the plain page size was
+            # already capped to avoid.
+            #
+            # Filters are the exception, as everywhere here: they narrow what is
+            # KEPT, so the rows needed to find `limit` matches are unbounded and
+            # the cursor legitimately advances past non-matching rows.
+            ceiling = MAX_PAGE_SIZE if escalated else page_size
+            if filters_active:
+                request_size = ceiling
             else:
-                request_size = max(1, min(page_size, limit - len(collected)))
+                request_size = max(1, min(ceiling, limit - len(collected)))
             url = _COUNT_RE.sub(lambda _: f"count:{request_size}", url)
 
             payload = await self._fetch(url)
@@ -681,7 +689,12 @@ class VoyagerMessagingReader:
                     # be proven but it CAN be disproven, and that costs one
                     # request. Often it settles the question outright, because
                     # asking for 25 and receiving 5 turns this into a short page.
-                    if not escalated and request_size < MAX_PAGE_SIZE:
+                    headroom = (
+                        MAX_PAGE_SIZE
+                        if filters_active
+                        else min(MAX_PAGE_SIZE, limit - len(collected))
+                    )
+                    if not escalated and request_size < headroom:
                         escalated = True
                         continue
                     exhaustion_basis = "full-page-no-cursor"
