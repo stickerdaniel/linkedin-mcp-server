@@ -452,7 +452,6 @@ class VoyagerMessagingReader:
             url = _set_cursor(url, cursor.strip())
 
         page_size = max(1, min(page_size, MAX_PAGE_SIZE))
-        url = _COUNT_RE.sub(f"count:{page_size}", url)
 
         if category:
             category = category.strip().upper()
@@ -473,6 +472,8 @@ class VoyagerMessagingReader:
                 datetime.now(tz=timezone.utc).timestamp() - quiet_for_days * 86400
             ) * 1000
 
+        filters_active = bool(quiet_for_days is not None or awaiting_reply_only)
+
         collected: dict[str, dict[str, Any]] = {}
         raw_rows = 0
         scanned = 0
@@ -488,6 +489,21 @@ class VoyagerMessagingReader:
         # behind every recent one. `scanned` is reported so a caller can tell a
         # filtered-empty page from an empty mailbox.
         while pages < max_pages and len(collected) < limit:
+            # Ask for no more than the caller still wants. Fetching a full page
+            # and slicing to `limit` afterwards would DISCARD the overflow while
+            # the cursor advanced past it, so those conversations could not be
+            # recovered by resuming from `next_cursor` -- silent data loss
+            # wearing the costume of an honoured limit.
+            #
+            # Filters are the exception: they narrow what is KEPT, so the number
+            # of rows needed to find `limit` matches is unbounded and the page
+            # stays full.
+            if filters_active:
+                request_size = page_size
+            else:
+                request_size = max(1, min(page_size, limit - len(collected)))
+            url = _COUNT_RE.sub(lambda _: f"count:{request_size}", url)
+
             payload = await self._fetch(url)
             pages += 1
 

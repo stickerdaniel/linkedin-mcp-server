@@ -17,8 +17,12 @@ exhausted, nothing clicked. The DOM path saw 16–17.
 ## Why it can never go upstream
 
 The upstream author refuses Voyager **on principle** — the only two mentions of it in the package are
-instructions not to use it (`message_sender.py`, `tools/messaging.py`). This is a permanent fork of
-those two files plus one new module. Rebase on upstream tags rather than re-patching.
+instructions not to use it — those two mentions live in `message_sender.py` and `tools/messaging.py`,
+which is where upstream states the policy, not where this fork changes anything.
+
+**The divergence is three files:** `scraping/voyager_messaging.py` (new and standalone), plus
+additive changes to `scraping/extractor.py` and `tools/messaging.py`. **`get_inbox` is untouched**,
+so a rebase starts and usually ends in those three. Rebase on upstream tags rather than re-patching.
 
 ## What changed
 

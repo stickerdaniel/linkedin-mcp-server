@@ -382,3 +382,27 @@ class TestReviewRegressions:
         with pytest.raises(LinkedInScraperException) as excinfo:
             await reader._fetch(QUERY_URL)
         assert not isinstance(excinfo.value, (AuthenticationError, RateLimitError))
+
+    async def test_limit_never_discards_rows_the_cursor_has_passed(self):
+        """The loop used to fetch a full page, keep `limit`, and advance the
+        cursor past the rest -- so the overflow was unreachable on resume. The
+        page request is now bounded by what is still wanted."""
+        rows = [
+            _conversation(f"c{i}", last_activity=100 - i, participants=[])
+            for i in range(25)
+        ]
+        reader = _Reader([_payload(rows, "NEXT")])
+        result = await reader.get_all_conversations(limit=10, page_size=25)
+        assert "count:10" in reader.fetched[0], "must request only what it wants"
+        assert result["count"] == 10
+
+    async def test_filtered_walks_still_request_full_pages(self):
+        """Filters narrow what is KEPT, so the rows needed to find `limit`
+        matches are unbounded and shrinking the page would stall the walk."""
+        rows = [
+            _conversation(f"c{i}", last_activity=100 - i, participants=[])
+            for i in range(25)
+        ]
+        reader = _Reader([_payload(rows, None)])
+        await reader.get_all_conversations(limit=5, page_size=25, quiet_for_days=365)
+        assert "count:25" in reader.fetched[0], "filtered walk keeps full pages"
