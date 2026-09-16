@@ -67,6 +67,7 @@ _COMMON_ALLOWED = {
     "listener.remove",
     "locator.click",
     "locator.count",
+    "locator.by_role",
     "locator.create",
     "locator.derive",
     "locator.is_visible",
@@ -949,6 +950,95 @@ async def _sidebar_scenario() -> dict[str, Any]:
     )
 
 
+async def _all_conversations_scenario() -> dict[str, Any]:
+    """Record what `get_all_conversations` does to the page.
+
+    The point of the trace is the side-effect profile, not the payload: this
+    tool's whole claim is that it reads the mailbox WITHOUT clicking
+    conversation rows, and therefore without marking anything read. The events
+    below are that claim in machine-checkable form. One click is recorded, on
+    the paging control, and no conversation row is ever touched.
+    """
+    name = "get_all_conversations__baseline"
+    recorder = TraceRecorder(name, _COMMON_ALLOWED)
+    clock = FakeClock(recorder)
+    page = _page(recorder)
+
+    base = (
+        "https://www.linkedin.com/voyager/api/voyagerMessagingGraphQL/graphql"
+        "?queryId=messengerConversations.deadbeef&variables="
+        "(query:(predicateUnions:List((conversationCategoryPredicate:"
+        "(category:PRIMARY_INBOX)))),count:20,"
+        "mailboxUrn:urn:li:fsd_profile:ACoAAme"
+    )
+    page_load_url = f"{base})"
+    cursored_url = f"{base},nextCursor:SEED)"
+
+    # The sidebar mounts, then the paging control is found by role and clicked
+    # once. Clicking it is what makes LinkedIn issue the cursor-bearing query
+    # that discovery needs; no row is clicked.
+    page.script("wait_for_selector:conversation_rows", None)
+    page.script("evaluate:scroll_main_region", True)
+    page.declare_role("button", "Load more conversations", "load-more")
+    page.declare_derived("load-more", "first", "load-more-first")
+    page.script("load-more.count", 1)
+
+    def _click_emits_the_paging_query() -> None:
+        """Clicking the control is what makes LinkedIn issue both queries.
+
+        Scripted as a callable so the emission happens at the moment of the
+        click, which is the real ordering: discovery cannot observe a request
+        that has not been made yet.
+        """
+        page.emit("request", _ScriptedRequest(page_load_url))
+        page.emit("request", _ScriptedRequest(cursored_url))
+
+    page.script("load-more-first.click", _click_emits_the_paging_query)
+
+    conversation = {
+        "$type": "com.linkedin.messenger.Conversation",
+        "entityUrn": "urn:li:msg_conversation:1",
+        "conversationUrl": "/messaging/thread/2-abc/",
+        "lastActivityAt": 1_700_000_000_000,
+        "unreadCount": 0,
+        "categories": ["INBOX"],
+        "*conversationParticipants": [],
+    }
+    payload = {
+        "data": {
+            "data": {
+                "messengerConversationsByCategoryQuery": {
+                    "metadata": {},
+                    "*elements": ["urn:li:msg_conversation:1"],
+                }
+            }
+        },
+        "included": [conversation],
+    }
+    page.script(
+        "evaluate:voyager_conversations_fetch",
+        {"body": json.dumps(payload)},
+    )
+
+    extractor = _extractor(page)
+    async with boundaries(recorder, clock):
+        with recorder.context("get_all_conversations", "conversation"):
+            arguments = {"limit": 10}
+            result = await extractor.get_all_conversations(limit=10)
+    page.assert_clean()
+    return recorder.trace(
+        {"method": "get_all_conversations", "arguments": arguments},
+        result,
+    )
+
+
+class _ScriptedRequest:
+    """The one Request attribute discovery reads."""
+
+    def __init__(self, url: str):
+        self.url = url
+
+
 async def _conversation_scenario(method: str) -> dict[str, Any]:
     name = f"{method}__baseline"
     recorder = TraceRecorder(name, _COMMON_ALLOWED)
@@ -1111,6 +1201,7 @@ async def build_policy_traces() -> dict[str, dict[str, Any]]:
         "search-posts.json": await _single_capture_facade_scenario("search_posts"),
         "inbox.json": await _conversation_scenario("get_inbox"),
         "conversation.json": await _conversation_scenario("get_conversation"),
+        "all-conversations.json": await _all_conversations_scenario(),
         "search-conversations.json": await _conversation_scenario(
             "search_conversations"
         ),

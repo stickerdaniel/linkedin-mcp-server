@@ -180,17 +180,31 @@ class VoyagerMessagingReader:
         )
 
     async def _scroll_conversation_list(self) -> None:
-        """Scroll the sidebar to its bottom, where the paging control mounts."""
+        """Scroll the sidebar to its bottom, where the paging control mounts.
+
+        Deliberately the same shape as `conversations._scroll_main_scrollable_region`:
+        same `isScrollable` predicate, same largest-region choice. Two different
+        programs doing one job would be two things to keep in step.
+        """
         await self._session.page.evaluate(
             """() => {
                 const main = document.querySelector('main');
-                if (!main) return;
-                const scrollable = [main, ...main.querySelectorAll('*')].filter(el => {
-                    const s = getComputedStyle(el);
-                    return (s.overflowY === 'auto' || s.overflowY === 'scroll')
-                        && el.scrollHeight > el.clientHeight + 20;
-                });
-                scrollable.forEach(el => { el.scrollTop = el.scrollHeight; });
+                if (!main) return false;
+
+                const isScrollable = element => {
+                    const style = window.getComputedStyle(element);
+                    return (
+                        (style.overflowY === 'auto' || style.overflowY === 'scroll') &&
+                        element.scrollHeight > element.clientHeight + 20
+                    );
+                };
+
+                const candidates = [main, ...main.querySelectorAll('*')].filter(isScrollable);
+                const target = candidates.sort(
+                    (left, right) => right.scrollHeight - left.scrollHeight
+                )[0] || main;
+                target.scrollTop = target.scrollHeight;
+                return true;
             }"""
         )
 
