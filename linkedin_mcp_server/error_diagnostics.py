@@ -1,4 +1,4 @@
-"""Issue-ready diagnostics for scraper failures."""
+"""Local evidence notes for scraper failures."""
 
 from __future__ import annotations
 
@@ -30,8 +30,18 @@ from linkedin_mcp_server.session_state import (
 )
 
 ISSUE_URL = "https://github.com/stickerdaniel/linkedin-mcp-server/issues/new/choose"
+PACKET_SKILL_URL = (
+    "https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/"
+    ".agents/skills/issue-packet/SKILL.md"
+)
 ISSUE_TITLE_PREFIX = "[BUG]"
 ISSUE_SEARCH_API = "https://api.github.com/search/issues"
+PACKET_GUIDANCE = (
+    "Packet: use these local notes as evidence. Follow the packet skill "
+    f"({PACKET_SKILL_URL}) or the current issue form ({ISSUE_URL}) to prepare "
+    "a redacted report. Search open and closed issues, then show the final "
+    "issue or comment to the human and ask for an explicit yes before posting."
+)
 
 
 def build_issue_diagnostics(
@@ -41,7 +51,7 @@ def build_issue_diagnostics(
     target_url: str | None = None,
     section_name: str | None = None,
 ) -> dict[str, Any]:
-    """Write an issue-ready report and return MCP-safe diagnostics."""
+    """Write local evidence notes and return MCP-safe diagnostic locations."""
     timestamp = utcnow_iso()
     source_profile_dir = _safe_source_profile_dir()
     current_runtime_id = get_runtime_id()
@@ -55,7 +65,6 @@ def build_issue_diagnostics(
         issue_dir
         / f"{timestamp.replace(':', '').replace('-', '')}-{slugify_fragment(context) or 'issue'}.md"
     )
-    gist_command = _build_gist_command(issue_dir, issue_path, log_path)
 
     runtime_details = {
         "hostname": socket.gethostname(),
@@ -72,7 +81,7 @@ def build_issue_diagnostics(
         "runtime_state": asdict(runtime_state) if runtime_state else None,
         "trace_dir": str(trace_dir) if trace_dir else None,
         "log_path": str(log_path) if log_path and log_path.exists() else None,
-        "suggested_gist_command": gist_command,
+        "suggested_gist_command": None,
     }
     payload: dict[str, Any] = {
         "created_at": timestamp,
@@ -102,138 +111,89 @@ def build_issue_diagnostics(
 def format_tool_error_with_diagnostics(
     message: str, diagnostics: dict[str, Any]
 ) -> str:
-    """Append issue-report locations to a tool-facing error message."""
+    """Append local note locations and packet guidance to a tool-facing error."""
     lines = [message, "", "Diagnostics:"]
     if diagnostics.get("issue_template_path"):
         lines.append(f"- Local diagnostic notes: {diagnostics['issue_template_path']}")
     runtime = diagnostics.get("runtime") or {}
     if runtime.get("trace_dir"):
-        lines.append(f"- Trace artifacts: {runtime['trace_dir']}")
+        lines.append(f"- Local trace artifacts: {runtime['trace_dir']}")
     if runtime.get("log_path"):
-        lines.append(f"- Server log: {runtime['log_path']}")
-    if runtime.get("suggested_gist_command"):
-        lines.append(f"- Suggested gist command: {runtime['suggested_gist_command']}")
+        lines.append(f"- Local server log: {runtime['log_path']}")
     lines.append(f"- Runtime: {runtime.get('current_runtime_id', 'unknown')}")
+    lines.append(PACKET_GUIDANCE)
     existing_issues = diagnostics.get("existing_issues") or []
     if existing_issues:
-        lines.append("- Matching open issues were found. Review them first:")
+        lines.append("- Candidate open issues to review:")
         for issue in existing_issues:
             lines.append(f"  - #{issue['number']}: {issue['title']} ({issue['url']})")
         lines.append(
-            "- If one matches this failure, upload the gist and post it as a comment on that issue instead of opening a new issue."
+            "- If one matches this failure, prepare a redacted comment with new evidence and ask for an explicit yes before posting."
+        )
+    elif diagnostics.get("issue_search_skipped"):
+        lines.append(
+            "- Advisory open-issue search was skipped in async server context. Packet search of open and closed issues is still required."
         )
     else:
-        if diagnostics.get("issue_search_skipped"):
-            lines.append(
-                "- Matching open-issue search was skipped in async server context to avoid blocking the server event loop."
-            )
-        lines.append(f"- File the issue here: {ISSUE_URL}")
-    lines.append(
-        "- Read the generated issue template and attach the listed files before posting."
-    )
+        lines.append(
+            "- Diagnostics did not establish a canonical match. Packet search of open and closed issues is still required."
+        )
     return "\n".join(lines)
 
 
 def _render_issue_template(payload: dict[str, Any]) -> str:
+    # Local notes cannot be a completed packet: the reporter supplies the
+    # actual call and account context. Path keys here are local troubleshooting
+    # aids. They are not permission to copy their values into an issue or gist.
     runtime = payload["runtime"]
     existing_issues = payload.get("existing_issues") or []
     has_existing_issues = bool(existing_issues)
     issue_search_skipped = bool(payload.get("issue_search_skipped"))
-    installation_lines = _installation_method_lines(runtime)
-    tool_name = _tool_name_for_context(payload) or "unknown"
-    setup_lines = [
-        f"- Installation method: {_installation_method_summary(runtime)}",
-        "- MCP client: Local curl-based MCP HTTP client against the server's streamable-http transport",
-        f"- Operating system / runtime: {runtime['current_runtime_id']}",
-    ]
-    if runtime.get("trace_dir"):
-        setup_lines.append(f"- Trace artifacts directory: {runtime['trace_dir']}")
-    if runtime.get("log_path"):
-        setup_lines.append(f"- Server log path: {runtime['log_path']}")
-
-    what_happened_lines = [
-        f"- Suggested title: {payload['suggested_issue_title']}",
-        f"- Context: {payload['context']}",
-        f"- Tool: {tool_name}",
-        f"- Section: {payload.get('section_name') or 'n/a'}",
-        f"- Target URL: {payload.get('target_url') or 'n/a'}",
-        f"- Error: {payload['error_type']}: {payload['error_message']}",
-        "- Expected behavior: The MCP tool call should complete and return structured scraping output.",
-    ]
-
-    reproduction_lines = [
-        "1. Run a fresh local `uv run -m linkedin_mcp_server --login`.",
-        "2. Start the server again using the same installation method and debug env vars used for this run.",
-        f"3. Call `{tool_name}` again with the same target URL and section selection.",
-        (
-            "4. If one of the listed open issues matches, post the gist as a comment there as additional information."
-            if has_existing_issues
-            else "4. If no existing issue matches, open a new GitHub bug report with the information above."
-        ),
-    ]
+    if has_existing_issues:
+        advisory_lines = [
+            "- Candidate open issues to review:",
+            *[
+                f"  - #{issue['number']}: {issue['title']} ({issue['url']})"
+                for issue in existing_issues
+            ],
+        ]
+    elif issue_search_skipped:
+        advisory_lines = [
+            "- Advisory open-issue search was skipped in async server context. Packet search of open and closed issues is still required."
+        ]
+    else:
+        advisory_lines = [
+            "- Diagnostics did not establish a canonical match. Packet search of open and closed issues is still required."
+        ]
     return (
         "\n".join(
             [
-                "# LinkedIn MCP scrape failure",
+                "# Local diagnostic notes",
                 "",
-                "## File This Issue",
-                "- Read this generated file before posting.",
-                "- These are local diagnostic notes to review and redact before posting.",
-                "- Follow the GitHub issue form at https://github.com/stickerdaniel/linkedin-mcp-server/issues/new/choose.",
-                "- Attach relevant excerpts, the server log, and the trace artifacts directory.",
-                (
-                    "- Review the existing open issues below first. If one matches, post the gist as a comment there instead of opening a new issue."
-                    if has_existing_issues
-                    else f"- GitHub issue link: {ISSUE_URL}"
-                ),
+                "These notes are local troubleshooting aids. They are not a completed packet.",
+                PACKET_GUIDANCE,
                 "",
-                "## Existing Open Issues",
-                *(
-                    [
-                        f"- #{issue['number']}: {issue['title']} ({issue['url']})"
-                        for issue in existing_issues
-                    ]
-                    if has_existing_issues
-                    else (
-                        [
-                            "- Matching open-issue search was skipped in async server context to avoid blocking the server event loop."
-                        ]
-                        if issue_search_skipped
-                        else ["- No matching open issues found during diagnostics."]
-                    )
-                ),
+                "## Captured failure",
+                f"- Context: {payload['context']}",
+                f"- Section: {payload.get('section_name') or 'n/a'}",
+                f"- Target URL: {payload.get('target_url') or 'n/a'}",
+                f"- Error: {payload['error_type']}: {payload['error_message']}",
+                f"- Suggested title (local only): {payload['suggested_issue_title']}",
                 "",
-                "## Setup",
-                *setup_lines,
+                "## Advisory open issues",
+                *advisory_lines,
                 "",
-                "## What Happened",
-                *what_happened_lines,
-                "",
-                "## Steps to Reproduce",
-                *reproduction_lines,
-                "",
-                "## Logs",
-                "```text",
-                "See attached server log and trace artifacts.",
-                "```",
-                "",
-                "## Additional Diagnostics",
-                "",
-                "### Installation Method Details",
-                *installation_lines,
-                "",
-                "### Runtime Diagnostics",
-                f"- Hostname: {runtime['hostname']}",
+                "## Local runtime",
+                f"- Hostname (local): {runtime['hostname']}",
                 f"- Current runtime: {runtime['current_runtime_id']}",
-                f"- Source profile: {runtime['source_profile_dir']}",
-                f"- Portable cookies: {runtime['portable_cookie_path']}",
-                f"- Derived runtime profile: {runtime['runtime_profile_dir']}",
-                f"- Derived storage-state: {runtime['runtime_storage_state_path']}",
-                f"- Trace artifacts: {runtime['trace_dir'] or 'not enabled'}",
-                f"- Server log: {runtime['log_path'] or 'not enabled'}",
-                f"- Suggested gist command: {runtime['suggested_gist_command'] or 'not available'}",
+                f"- Source profile (local): {runtime['source_profile_dir']}",
+                f"- Portable cookies (local): {runtime['portable_cookie_path']}",
+                f"- Derived runtime profile (local): {runtime['runtime_profile_dir']}",
+                f"- Derived storage-state (local): {runtime['runtime_storage_state_path']}",
+                f"- Trace artifacts (local): {runtime['trace_dir'] or 'not enabled'}",
+                f"- Server log (local): {runtime['log_path'] or 'not enabled'}",
                 "",
-                "### Session State",
+                "## Session state (local)",
                 "```json",
                 json.dumps(
                     {
@@ -243,18 +203,6 @@ def _render_issue_template(payload: dict[str, Any]) -> str:
                     indent=2,
                     sort_keys=True,
                 ),
-                "```",
-                "",
-                "### Attachment Checklist",
-                "- Read this generated markdown file and use it as the issue body/context.",
-                "- Attach this generated markdown file itself.",
-                "- Attach the server log if available.",
-                "- Attach the trace screenshots/trace.jsonl if available.",
-                "- Optional: run the suggested gist command below to upload the text artifacts as a single shareable bundle.",
-                "",
-                "### Suggested Gist Command",
-                "```bash",
-                runtime["suggested_gist_command"] or "# gist command unavailable",
                 "```",
             ]
         )
@@ -281,7 +229,7 @@ def _public_issue_diagnostics(
             "current_runtime_id": runtime["current_runtime_id"],
             "trace_dir": runtime["trace_dir"],
             "log_path": runtime["log_path"],
-            "suggested_gist_command": runtime["suggested_gist_command"],
+            "suggested_gist_command": None,
         },
     }
 
@@ -307,21 +255,6 @@ def _suggest_issue_title(
     else:
         summary = f"{section} scrape failure in {context} on {current_runtime_id}"
     return f"{ISSUE_TITLE_PREFIX} {summary}"
-
-
-def _build_gist_command(
-    issue_dir: Path,
-    issue_path: Path,
-    log_path: Path | None,
-) -> str:
-    trace_path = issue_dir / "trace.jsonl"
-    files = [str(issue_path)]
-    if log_path is not None and log_path.exists():
-        files.append(str(log_path))
-    if trace_path.exists():
-        files.append(str(trace_path))
-    quoted = " ".join(f'"{path}"' for path in files)
-    return f'gh gist create {quoted} -d "LinkedIn MCP debug artifacts"'
 
 
 def _find_existing_issues(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -360,56 +293,6 @@ def _inside_running_event_loop() -> bool:
     except RuntimeError:
         return False
     return True
-
-
-def _installation_method_lines(runtime: dict[str, Any]) -> list[str]:
-    current_runtime_id = str(runtime.get("current_runtime_id") or "")
-    docker_checked = "x" if "container" in current_runtime_id else " "
-    managed_checked = " " if "container" in current_runtime_id else "x"
-    return [
-        f"- [{docker_checked}] Docker (specify docker image version/tag): `stickerdaniel/linkedin-mcp-server:<version-or-latest>` with `~/.linkedin-mcp` mounted into `/home/pwuser/.linkedin-mcp`",
-        f"- [{managed_checked}] Managed runtime (Claude Desktop MCP Bundle, `uvx`, or local `uv run` setup)",
-    ]
-
-
-def _installation_method_summary(runtime: dict[str, Any]) -> str:
-    current_runtime_id = str(runtime.get("current_runtime_id") or "")
-    if "container" in current_runtime_id:
-        return (
-            "Docker using `stickerdaniel/linkedin-mcp-server:<version-or-latest>` with "
-            "`~/.linkedin-mcp` mounted into `/home/pwuser/.linkedin-mcp`"
-        )
-    return "Managed runtime (Claude Desktop MCP Bundle, `uvx`, or local `uv run` setup)"
-
-
-def _tool_name_for_context(payload: dict[str, Any]) -> str | None:
-    context = str(payload.get("context") or "")
-    if context in {
-        "get_person_profile",
-        "get_company_profile",
-        "get_company_posts",
-        "get_job_details",
-        "search_jobs",
-        "get_saved_jobs",
-        "search_people",
-        "close_session",
-    }:
-        return context
-
-    if context in {"extract_page", "extract_overlay", "scrape_person"}:
-        return "get_person_profile"
-    if context == "scrape_company":
-        return "get_company_profile"
-    if context == "extract_search_page":
-        target_url = str(payload.get("target_url") or "")
-        if "/search/results/people" in target_url:
-            return "search_people"
-        if "/jobs/search" in target_url:
-            return "search_jobs"
-    if context == "extract_saved_jobs_page":
-        return "get_saved_jobs"
-
-    return None
 
 
 def _issue_search_query(payload: dict[str, Any]) -> str:
