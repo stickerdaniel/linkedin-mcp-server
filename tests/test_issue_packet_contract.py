@@ -239,15 +239,68 @@ def test_reporting_workflow_links_do_not_contain_stale_intake_copy() -> None:
         )
 
 
-def test_repro_skill_does_not_trigger_on_raw_issue_url() -> None:
+def _maintainer_skill_text(name: str) -> str:
     repo_root = Path(__file__).resolve().parents[1]
-    repro_path = repo_root / ".agents" / "skills" / "2-repro-issue" / "SKILL.md"
-    content = repro_path.read_text(encoding="utf-8")
+    return (repo_root / ".agents" / "skills" / name / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_repro_skill_does_not_trigger_on_raw_issue_url() -> None:
+    content = _maintainer_skill_text("2-repro-issue")
     parts = content.split("---", 2)
     assert len(parts) >= 3, "Frontmatter not found in repro skill"
     frontmatter = yaml.safe_load(parts[1])
     desc = frontmatter.get("description", "")
     assert "pastes an issue URL" not in desc
+    assert "authenticated LinkedIn session" not in desc
+
+
+def test_maintainer_skills_use_trigger_descriptions() -> None:
+    expected = {
+        "1-triage-issues": ["Triage backlog", "scan open issues"],
+        "2-repro-issue": ["Reproduce #N", "investigate #N"],
+        "3-verify-pr-fix": ["Verify PR #N"],
+    }
+    for name, phrases in expected.items():
+        content = _maintainer_skill_text(name)
+        parts = content.split("---", 2)
+        desc = yaml.safe_load(parts[1]).get("description", "")
+        assert "#" in desc or name == "1-triage-issues"
+        for phrase in phrases:
+            assert phrase in desc, f"{name} description missing {phrase!r}: {desc!r}"
+
+
+def test_maintainer_skills_evaluate_packet_before_live() -> None:
+    triage = _maintainer_skill_text("1-triage-issues")
+    assert "## 2. Packet admission" in triage
+    assert "Incomplete packets never enter the reproduction shortlist." in triage
+    assert "Recommend `needs more info`" in triage
+    assert (
+        "Do not check out, start the MCP server, run scrapers, apply labels, "
+        "comment, close, or assign."
+    ) in triage
+
+    repro = _maintainer_skill_text("2-repro-issue")
+    assert "A live LinkedIn call is optional." in repro
+    assert "ask before login, session changes, or LinkedIn writes." in repro
+    assert "/tmp/repro-$NUM-init.json" in repro
+    assert "/tmp/repro-$NUM-initialized.json" in repro
+    assert """grep -q '"error"' /tmp/repro-$NUM-init.json""" in repro
+    assert "Capture and inspect both response bodies before `tools/call`." in repro
+    assert "This is harmless." not in repro
+    assert "Never mock." not in repro
+
+    verify = _maintainer_skill_text("3-verify-pr-fix")
+    assert (
+        "Absence of a local baseline limits the live branch, not the whole PR verdict."
+    ) in verify
+    assert "Do not create fake success or failure files." in verify
+    assert "Assumes /2-repro-issue has already captured" not in verify
+    assert "Do not check out or call the server." in verify
+    assert "Worktree is dirty. Ask before checkout." in verify
+    assert "/tmp/verify-pr-$PR-init.json" in verify
+    assert """grep -q '"error"' /tmp/verify-pr-$PR-init.json""" in verify
 
 
 def test_packet_copy_uses_plain_public_text() -> None:
