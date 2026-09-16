@@ -38,6 +38,19 @@ logger = logging.getLogger(__name__)
 
 MESSAGING_URL = "https://www.linkedin.com/messaging/"
 
+# Structural, locale-independent handle for one conversation row.
+CONVERSATION_ROW_SELECTOR = "main li label[aria-label]"
+
+# Accessible names for the sidebar's paging control, per locale. `text.py`
+# already pins the en string for this same control as `sidebar_end`; this is the
+# documented-locale-table route AGENTS.md allows where no structural handle
+# exists. Extend rather than translate at runtime.
+LOAD_MORE_NAMES: tuple[str, ...] = ("Load more conversations",)
+
+# Fallback when the locale is not in the table: a button that sits directly in
+# the conversation list rather than inside one of its rows.
+LOAD_MORE_STRUCTURAL_SELECTOR = "main > * button:not(li button)"
+
 # Substitutes a cursor into the query's `variables=(...)` blob. The paging
 # query carries `nextCursor:` already, so replacement is enough; there is no
 # need to understand the rest of the (non-JSON, Rest.li) encoding.
@@ -93,85 +106,116 @@ class VoyagerMessagingReader:
     # ------------------------------------------------------------------ #
     # Query discovery
     # ------------------------------------------------------------------ #
-    async def _discover_paging_query(self) -> str:
-        """Return the conversations query URL that accepts a cursor.
+    async def _discover_query(self) -> tuple[str, bool]:
+        """Return a CURSORLESS conversations query, and whether paging is available.
 
-        The queryId is a *persisted* GraphQL hash: it pins a fixed variable
-        signature and LinkedIn rotates it on every deploy. Two consequences
-        drive this method's shape.
+        Two things have to be true of the result and they pull in opposite
+        directions.
 
-        First, it cannot be hardcoded — a pinned hash silently rots.
+        It must start at the FIRST page. The query that supports paging is the
+        one the "load more" control issues, and that request already carries a
+        cursor pointing past page one — returning it unchanged made every fresh
+        walk silently skip the newest conversations. So the cursor is stripped
+        here and put back only when a caller resumes.
 
-        Second, the query issued on page load accepts only ``mailboxUrn``.
-        Appending ``count`` or ``lastUpdatedBefore`` to it returns **HTTP 200
-        and the identical first page**, because unknown variables are dropped
-        rather than rejected. A 200 that ignores the parameter is
-        indistinguishable from one that honoured it, so the cursor-bearing
-        query has to be observed rather than assumed. Clicking "Load more
-        conversations" once is what makes the web app issue it.
+        It must also work for a mailbox that fits on one page, where no "load
+        more" control exists and no cursor-bearing request is ever emitted.
+        Requiring one made the tool raise on a perfectly valid mailbox, so the
+        page-load request is captured too and used as the fallback. The boolean
+        says which happened: False means this mailbox has one page.
+
+        The queryId is a persisted hash that LinkedIn rotates, and the
+        page-load query accepts only ``mailboxUrn`` while silently ignoring
+        added cursor variables, so neither query can be synthesised or pinned.
+        Both are observed.
         """
         page = self._session.page
-        seen: list[str] = []
+        page_load: list[str] = []
+        cursored: list[str] = []
 
         def _capture(request: Any) -> None:
             url = request.url
-            if "messengerConversations" in url and "nextCursor" in url:
-                seen.append(url)
+            if "messengerConversations" not in url:
+                return
+            (cursored if "nextCursor" in url else page_load).append(url)
 
         page.on("request", _capture)
         try:
             await self._navigator._navigate_to_page(MESSAGING_URL)
             await self._session.check_rate_limit()
 
-            # Wait for the sidebar to mount before looking for the control.
-            # Ember hydrates the conversation list seconds after the document
-            # is ready, and an absent button means "not rendered yet" far more
-            # often than "no more conversations".
+            # Ember hydrates the sidebar seconds after the document is ready, so
+            # an absent control means "not rendered yet" far more often than
+            # "no more conversations".
             try:
                 await page.wait_for_selector(
-                    "main li label[aria-label]", state="attached", timeout=15000
+                    CONVERSATION_ROW_SELECTOR, state="attached", timeout=15000
                 )
             except PlaywrightTimeoutError:
                 logger.debug("conversation sidebar did not mount within 15s")
 
             for _ in range(6):
-                if seen:
+                if cursored:
                     break
-                # The control only mounts once the list bottom is reached.
-                await page.evaluate(
-                    """() => {
-                        const main = document.querySelector('main');
-                        if (!main) return;
-                        const scrollable = [main, ...main.querySelectorAll('*')].filter(el => {
-                            const s = getComputedStyle(el);
-                            return (s.overflowY === 'auto' || s.overflowY === 'scroll')
-                                && el.scrollHeight > el.clientHeight + 20;
-                        });
-                        scrollable.forEach(el => { el.scrollTop = el.scrollHeight; });
-                    }"""
-                )
-                button = page.get_by_role(
-                    "button", name=re.compile("load more conversation", re.I)
-                )
-                if not await button.count():
-                    # Not necessarily exhausted -- give it another beat.
+                await self._scroll_conversation_list()
+                button = await self._load_more_control()
+                if button is None:
                     await self._session.delay(1.5)
                     continue
                 try:
-                    await button.first.click(timeout=5000)
+                    await button.click(timeout=5000)
                 except PlaywrightTimeoutError:
                     break
                 await self._session.delay(2.5)
         finally:
             page.remove_listener("request", _capture)
 
-        if not seen:
-            raise LinkedInScraperException(
-                "Could not observe a cursor-bearing messengerConversations "
-                "query. The inbox may hold a single page, or LinkedIn changed "
-                "the messaging client."
-            )
-        return seen[-1]
+        if cursored:
+            return _drop_cursor(cursored[-1]), True
+        if page_load:
+            return page_load[-1], False
+        raise LinkedInScraperException(
+            "No messengerConversations request was observed. The messaging page "
+            "did not load, or LinkedIn changed the messaging client."
+        )
+
+    async def _scroll_conversation_list(self) -> None:
+        """Scroll the sidebar to its bottom, where the paging control mounts."""
+        await self._session.page.evaluate(
+            """() => {
+                const main = document.querySelector('main');
+                if (!main) return;
+                const scrollable = [main, ...main.querySelectorAll('*')].filter(el => {
+                    const s = getComputedStyle(el);
+                    return (s.overflowY === 'auto' || s.overflowY === 'scroll')
+                        && el.scrollHeight > el.clientHeight + 20;
+                });
+                scrollable.forEach(el => { el.scrollTop = el.scrollHeight; });
+            }"""
+        )
+
+    async def _load_more_control(self) -> Any | None:
+        """Locate the paging control without depending on English.
+
+        AGENTS.md requires button identity to be locale-independent or to come
+        from an explicit documented locale table. The accessible name is the
+        only reliable handle LinkedIn gives this control, so the table is the
+        route taken, mirroring ``_MESSAGING_CHROME_STRINGS`` in ``text.py``
+        which already pins this exact string for the same control. An unknown
+        locale falls through to the structural probe rather than failing.
+        """
+        page = self._session.page
+        for name in LOAD_MORE_NAMES:
+            control = page.get_by_role("button", name=name, exact=False)
+            if await control.count():
+                return control.first
+
+        # Structural fallback for locales not in the table: the control is the
+        # only button inside the conversation list that is not part of a row.
+        structural = page.locator(LOAD_MORE_STRUCTURAL_SELECTOR)
+        if await structural.count():
+            return structural.first
+        return None
 
     # ------------------------------------------------------------------ #
     # Fetching
@@ -446,9 +490,14 @@ class VoyagerMessagingReader:
                 f"quiet_for_days must be >= 1, got {quiet_for_days}."
             )
 
-        url = await self._discover_paging_query()
+        url, can_page = await self._discover_query()
         me = self._me_profile_id(url)
         if cursor:
+            if not can_page:
+                raise LinkedInScraperException(
+                    "A cursor was supplied but this mailbox exposes no paging "
+                    "query, so the cursor cannot be honoured. Call without one."
+                )
             url = _set_cursor(url, cursor.strip())
 
         page_size = max(1, min(page_size, MAX_PAGE_SIZE))

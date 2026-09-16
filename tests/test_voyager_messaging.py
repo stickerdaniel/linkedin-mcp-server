@@ -99,8 +99,8 @@ class _Reader(VoyagerMessagingReader):
         self._pages = pages
         self.fetched: list[str] = []
 
-    async def _discover_paging_query(self) -> str:  # type: ignore[override]
-        return QUERY_URL
+    async def _discover_query(self) -> tuple[str, bool]:  # type: ignore[override]
+        return QUERY_URL, True
 
     async def _fetch(self, url: str) -> dict:  # type: ignore[override]
         self.fetched.append(url)
@@ -404,3 +404,86 @@ class TestReviewRegressions:
         reader = _Reader([_payload(rows, None)])
         await reader.get_all_conversations(limit=5, page_size=25, quiet_for_days=365)
         assert "count:25" in reader.fetched[0], "filtered walk keeps full pages"
+
+
+class TestDiscovery:
+    """The two P1 bugs review found in discovery, each pinned."""
+
+    def _reader_with_requests(self, urls: list[str]):
+        """A reader whose page replays a scripted set of observed requests."""
+
+        class _Req:
+            def __init__(self, url):
+                self.url = url
+
+        class _Locator:
+            async def count(self):
+                return 0
+
+        class _Page:
+            def __init__(self):
+                self.listeners = []
+
+            def on(self, _event, cb):
+                self.listeners.append(cb)
+
+            def remove_listener(self, _event, cb):
+                self.listeners.remove(cb)
+
+            async def wait_for_selector(self, *a, **k):
+                for cb in list(self.listeners):
+                    for u in urls:
+                        cb(_Req(u))
+
+            async def evaluate(self, *a, **k):
+                return None
+
+            def get_by_role(self, *a, **k):
+                return _Locator()
+
+            def locator(self, *a, **k):
+                return _Locator()
+
+        class _Session(_FakeSession):
+            def __init__(self):
+                super().__init__()
+                self.page = _Page()
+
+            async def check_rate_limit(self):
+                return None
+
+        class _Nav:
+            async def _navigate_to_page(self, _url):
+                return None
+
+        return VoyagerMessagingReader(session=_Session(), navigator=_Nav())
+
+    async def test_a_fresh_walk_starts_at_the_first_page(self):
+        """Discovery observes the cursor-bearing request the load-more control
+        issues, and that cursor points PAST page one. Returning it unchanged
+        made every fresh walk silently skip the newest conversations."""
+        reader = self._reader_with_requests(
+            [
+                f"{QUERY_URL.split(',nextCursor')[0]})",
+                QUERY_URL,
+            ]
+        )
+        url, can_page = await reader._discover_query()
+        assert can_page is True
+        assert "nextCursor" not in url, "a fresh walk must not inherit a cursor"
+
+    async def test_a_single_page_mailbox_is_not_an_error(self):
+        """With one page there is no load-more control and no cursor-bearing
+        request ever fires. Requiring one made a valid mailbox raise."""
+        page_load = f"{QUERY_URL.split(',nextCursor')[0]})"
+        reader = self._reader_with_requests([page_load])
+        url, can_page = await reader._discover_query()
+        assert can_page is False
+        assert "nextCursor" not in url
+
+    async def test_no_conversations_request_at_all_still_raises(self):
+        """The genuinely broken case must stay distinguishable from the two
+        above, rather than being swallowed by the new fallback."""
+        reader = self._reader_with_requests([])
+        with pytest.raises(LinkedInScraperException, match="No messengerConversations"):
+            await reader._discover_query()
