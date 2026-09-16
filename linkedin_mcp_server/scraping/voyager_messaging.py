@@ -547,6 +547,48 @@ class VoyagerMessagingReader:
             return "parse-failure: included entities present, zero Conversations"
         return "control-empty: session or endpoint returned nothing at all"
 
+    async def _page_url(self, cursor: str | None, category: str | None) -> str:
+        """Discover, validate and assemble the URL for one page.
+
+        Both the first attempt and the post-rediscovery retry go through here.
+        They used to assemble it separately, and the retry silently omitted the
+        paging check -- so a rediscovery that came back "single-page" would have
+        a cursor inserted into a query that ignores it, handing the caller page
+        one as though it were page five: duplicated conversations and a mailbox
+        traversal that stops early. Two call sites, one of them forgetting a
+        rule, is the shape of that bug; one call site cannot have it.
+        """
+        url, paging = await self._discover_query()
+
+        if paging == "unconfirmed":
+            raise LinkedInScraperException(
+                "The paging control was present and clicked, but no "
+                "cursor-bearing conversations query followed, so only the first "
+                "page is reachable and there is no way to tell a short mailbox "
+                "from a failed one. Refusing to return a partial listing that "
+                "would look complete."
+            )
+        if cursor and paging != "cursored":
+            raise LinkedInScraperException(
+                "A cursor was supplied but no paging query is available for "
+                "this mailbox, so it cannot be honoured. Call without one."
+            )
+
+        url = _COUNT_RE.sub(lambda _: f"count:{PAGE_SIZE}", url)
+        if category:
+            normalized = category.strip().upper()
+            if normalized not in KNOWN_CATEGORIES:
+                # An unrecognised category returns an empty page rather than an
+                # error, which would read as "you have none of those".
+                raise LinkedInScraperException(
+                    f"Unknown category {normalized!r}. Known: "
+                    f"{', '.join(sorted(KNOWN_CATEGORIES))}. An unrecognised "
+                    "category returns an empty result rather than an error, so "
+                    "it is rejected here instead of silently reading as zero."
+                )
+            url = _CATEGORY_RE.sub(lambda _: f"category:{normalized}", url)
+        return _set_cursor(url, cursor.strip()) if cursor else _drop_cursor(url)
+
     async def get_conversations(
         self,
         cursor: str | None = None,
@@ -582,26 +624,8 @@ class VoyagerMessagingReader:
                 "next_cursor from a previous call."
             )
 
-        url, paging = await self._discover_query()
-        if cursor and paging != "cursored":
-            raise LinkedInScraperException(
-                "A cursor was supplied but no paging query is available for "
-                "this mailbox, so it cannot be honoured. Call without one."
-            )
-        me = self._me_profile_id(url)
-
-        url = _COUNT_RE.sub(lambda _: f"count:{PAGE_SIZE}", url)
-        if category:
-            category = category.strip().upper()
-            if category not in KNOWN_CATEGORIES:
-                raise LinkedInScraperException(
-                    f"Unknown category {category!r}. Known: "
-                    f"{', '.join(sorted(KNOWN_CATEGORIES))}. An unrecognised "
-                    "category returns an empty result rather than an error, so "
-                    "it is rejected here instead of silently reading as zero."
-                )
-            url = _CATEGORY_RE.sub(lambda _: f"category:{category}", url)
-        url = _set_cursor(url, cursor.strip()) if cursor else _drop_cursor(url)
+        me = self._me_profile_id((await self._discover_query())[0])
+        url = await self._page_url(cursor, category)
 
         try:
             payload = await self._fetch(url)
@@ -618,11 +642,7 @@ class VoyagerMessagingReader:
                 raise
             logger.info("Conversations query failed; rediscovering once.")
             forget_cached_query()
-            url, paging = await self._discover_query()
-            url = _COUNT_RE.sub(lambda _: f"count:{PAGE_SIZE}", url)
-            if category:
-                url = _CATEGORY_RE.sub(lambda _: f"category:{category}", url)
-            url = _set_cursor(url, cursor.strip()) if cursor else _drop_cursor(url)
+            url = await self._page_url(cursor, category)
             payload = await self._fetch(url)
 
         rows = self._conversations(payload)

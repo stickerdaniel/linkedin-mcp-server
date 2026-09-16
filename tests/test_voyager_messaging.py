@@ -536,3 +536,45 @@ class TestCursorActuallyReachesTheQuery:
         assert "nextCursor" not in reader.fetched[0]
         assert "nextCursor:N2" in reader.fetched[1]
         assert "nextCursor:N3" in reader.fetched[2]
+
+
+class TestRetryCannotSkipValidation:
+    """The retry after a stale-cache rediscovery assembled its own URL and
+    omitted the paging check, so a rediscovery returning `single-page` would
+    have a cursor inserted into a query that ignores it: the caller receives
+    page one as though it were page five, duplicating conversations and ending
+    traversal early. Both paths go through one builder now."""
+
+    async def test_rediscovery_without_paging_refuses_the_cursor(self):
+        class _StaleThenSinglePage(_Reader):
+            async def _fetch(self, url: str) -> dict:
+                self.fetched.append(url)
+                if len(self.fetched) == 1:
+                    # the cached query has gone stale
+                    raise LinkedInScraperException("HTTP 400")
+                return self._pages[0]
+
+            async def _discover_query_uncached(self):
+                self.discoveries += 1
+                # rediscovery finds no paging query this time
+                return QUERY_URL, (
+                    "cursored" if self.discoveries == 1 else "single-page"
+                )
+
+        reader = _StaleThenSinglePage([_payload(_rows(PAGE_SIZE), "N")])
+        with pytest.raises(LinkedInScraperException, match="cannot be honoured"):
+            await reader.get_conversations(cursor="PAGE2")
+
+    async def test_rediscovery_that_still_pages_completes_the_retry(self):
+        class _StaleThenFine(_Reader):
+            async def _fetch(self, url: str) -> dict:
+                self.fetched.append(url)
+                if len(self.fetched) == 1:
+                    raise LinkedInScraperException("HTTP 400")
+                return self._pages[0]
+
+        reader = _StaleThenFine([_payload(_rows(PAGE_SIZE), "N")])
+        result = await reader.get_conversations(cursor="PAGE2")
+        assert result["count"] == PAGE_SIZE
+        assert reader.discoveries == 2, "must rediscover exactly once"
+        assert "nextCursor:PAGE2" in reader.fetched[1]
