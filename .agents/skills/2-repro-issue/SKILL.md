@@ -1,17 +1,16 @@
 ---
 name: 2-repro-issue
-description: Reproduce a single LinkedIn-MCP issue locally on the current branch against the real authenticated LinkedIn session at ~/.linkedin-mcp/profile/, using the MCP streamable-http server. Captures the exact failure mode (tool output, error, missing data) and maps it back to the scraper code path. Use when the user says "reproduce #N", "investigate #N", "try #N locally", or "verify the bug in #N". Does NOT check out a PR or attempt a fix — that's /3-verify-pr-fix.
+description: "Reproduce #N, investigate #N, try #N locally, or verify the bug in #N."
 argument-hint: '<issue-number-or-url>'
 ---
 
-# Reproduce a LinkedIn-MCP Issue Locally
+# Investigate a LinkedIn-MCP issue
 
-Goal: take an issue number, run the exact failing tool call against the real LinkedIn via the local MCP server, and produce concrete evidence — output JSON, error message, partial state — that confirms or refutes the bug on the current branch. Always use the authenticated profile already at `~/.linkedin-mcp/profile/`. Never mock.
+Evaluate the reporter packet and the matching source. A live LinkedIn call is optional. Do not check out a PR or attempt a fix. That is `/3-verify-pr-fix`.
 
-## Phase 1 — Read and map
+## 1. Read the issue
 
 ```bash
-# Accept "442", "#442", or "https://github.com/.../issues/442" — extract the digits only
 NUM=$(echo "$ARGUMENTS" | sed -E 's|.*/||; s|#||g' | grep -oE '^[0-9]+' | head -1)
 [ -z "$NUM" ] && { echo "Invalid input: '$ARGUMENTS'. Pass an issue number or URL." >&2; exit 1; }
 REPO=stickerdaniel/linkedin-mcp-server
@@ -19,93 +18,92 @@ REPO=stickerdaniel/linkedin-mcp-server
 gh issue view $NUM --repo $REPO --comments
 ```
 
-From the issue body extract:
+From the thread extract the tool, arguments, observed result, runtime, LinkedIn variant, and related issues. Distinguish observations, source findings, hypotheses, and work not run.
 
-- **Which MCP tool** is affected (`get_person_profile`, `connect_with_person`, `search_jobs`, …). The issue templates ask for this explicitly.
-- **The exact arguments** that trigger the failure (username, company slug, job ID, sections list).
-- **The expected vs actual** behaviour.
-- **Any locale signal** — German UI, non-English profile name, RTL language. Locale-sensitive bugs need a deliberately diverse target.
+Map the tool to code:
 
-Map the tool to code so you know where to look if the repro confirms the bug:
+1. `linkedin_mcp_server/tools/<surface>.py`. MCP entrypoint and arg validation
+2. `docs/scraping-architecture.md`. Generated ownership table; follow it to `linkedin_mcp_server/scraping/<owner>.py` rather than treating `scraping/extractor.py` as the implementation
+3. `linkedin_mcp_server/scraping/fields.py`. `PERSON_SECTIONS` / `COMPANY_SECTIONS` (each entry = one navigation)
+4. The owner-local test, usually `tests/scraping/test_<owner>.py`; use `tests/test_fields.py`, `tests/test_identifiers.py`, and `tests/test_link_metadata.py` for those owners, and `tests/scraping/test_facade_*.py` only for facade contracts
 
-1. `linkedin_mcp_server/tools/<surface>.py` — MCP entrypoint and arg validation
-2. `docs/scraping-architecture.md` — generated ownership table; follow it to the canonical `linkedin_mcp_server/scraping/<owner>.py` module rather than treating `scraping/extractor.py` as the implementation
-3. `linkedin_mcp_server/scraping/fields.py` — `PERSON_SECTIONS` / `COMPANY_SECTIONS` (each entry = one navigation)
-4. The owner-local test, usually `tests/scraping/test_<owner>.py`; use the root files `tests/test_fields.py`, `tests/test_identifiers.py`, and `tests/test_link_metadata.py` for `fields`, `identifiers`, and `link_metadata`, and use `tests/scraping/test_facade_*.py` only for facade delegation contracts
+## 2. Packet and source
 
-State out loud before running anything: "Reproducing tool `X` with args `Y` on branch `<current>` — expecting `<failure mode from issue>`."
+Inspect the relevant source at the current SHA. Do not invent a LinkedIn result or an unimplemented tool call.
 
-## Phase 2 — Confirm session, branch, dependencies
+This step is complete when the report names the issue, the code SHA, the inspected evidence, the facts established, the unverified runtime claims, and the next decision.
+
+Use one of:
+
+- supported by reporter evidence
+- confirmed in source
+- needs more evidence (list the specific missing fields)
+- not supported by the supplied evidence
+
+A successful call on the maintainer's different account never refutes a failure on the reporter's account. Target content language is not the authenticated account's UI language. Captures and URL or attribute evidence may establish the needed variation without another live call.
+
+Review reporter commands before execution. Publishing permission does not authorize `send_message`, a connection request, a forced login, or repeated calls with account side effects. Record `sent`, `recipient_selected`, and `retry_safe` as observed fields, not as replay authorization.
+
+If the next decision needs a live observation, name the exact unresolved question and ask before login, session changes, or LinkedIn writes. If the human declines, keep the packet-and-source verdict.
+
+## 3. Optional live check
+
+Only after an explicit yes for this run. Use `uv run`, never `uvx`, so the server reflects the workspace. Record the actual tool, arguments, runtime, account variant, code SHA, and timestamp before the call. Keep the reporter's installed-launcher context distinct from a workspace check.
 
 ```bash
-git status --porcelain | head -5         # workspace must be clean
-git log -1 --oneline                     # record the SHA we're testing
-ls ~/.linkedin-mcp/profile/ | head -3    # profile must exist
+git status --porcelain | head -5
+git log -1 --oneline
 ```
 
-If the workspace is dirty, ask the user before continuing — they may have local changes that affect the repro. If the profile is missing or stale, run `uv run -m linkedin_mcp_server --login` once and only once per skill invocation.
-
-## Phase 3 — Run the MCP server
-
-Always `uv run`, never `uvx` — the running server must reflect the current workspace (per `CLAUDE.md → Verifying Bug Reports`).
-
-Default port 8000 is commonly taken by other dev servers (workspace-mcp, etc.). Probe for a free port from 8765 upward instead of failing late on `address already in use`:
+If the workspace is dirty, ask before continuing. If a login is required, ask; do not run `--login` as a default.
 
 ```bash
-# Probe a free port starting at 8765
 PORT=8765
 while lsof -nP -iTCP:$PORT -sTCP:LISTEN >/dev/null 2>&1; do PORT=$((PORT+1)); done
 echo $PORT > /tmp/repro-$NUM.port
 
-# Start in background
 uv run -m linkedin_mcp_server --transport streamable-http --port $PORT --log-level INFO > /tmp/repro-$NUM.log 2>&1 &
 SERVER_PID=$!
 echo $SERVER_PID > /tmp/repro-$NUM.pid
 
-# Wait for the port to actually start LISTENing instead of a blind sleep.
-# Cap at ~30s so a stuck startup doesn't hang the run.
 for i in $(seq 1 30); do
   lsof -nP -iTCP:$PORT -sTCP:LISTEN >/dev/null 2>&1 && break
   kill -0 $SERVER_PID 2>/dev/null || { echo "Server died during startup. Tail of /tmp/repro-$NUM.log:" >&2; tail -20 /tmp/repro-$NUM.log >&2; exit 1; }
   sleep 1
 done
 lsof -nP -iTCP:$PORT -sTCP:LISTEN >/dev/null 2>&1 || { echo "Server never bound port $PORT after 30s" >&2; tail -20 /tmp/repro-$NUM.log >&2; exit 1; }
-echo "Server PID: $SERVER_PID  Port: $PORT  Ready"
 ```
-
-If `/tmp/repro-$NUM.log` shows login failure or browser issues, stop and report, do not try to brute-force around it.
-
-## Phase 4 — Initialize MCP session
 
 ```bash
 PORT=$(cat /tmp/repro-$NUM.port)
 curl -s -D /tmp/repro-$NUM-headers -X POST http://127.0.0.1:$PORT/mcp \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"repro-issue","version":"1.0"}}}' > /dev/null
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"repro-issue","version":"1.0"}}}' \
+  > /tmp/repro-$NUM-init.json
 
 SESSION_ID=$(grep -i 'Mcp-Session-Id' /tmp/repro-$NUM-headers | awk '{print $2}' | tr -d '\r')
 [ -z "$SESSION_ID" ] && { echo "MCP initialize returned no Mcp-Session-Id. Tail of /tmp/repro-$NUM.log:" >&2; tail -20 /tmp/repro-$NUM.log >&2; kill $SERVER_PID 2>/dev/null; exit 1; }
+grep -q '"error"' /tmp/repro-$NUM-init.json && { echo "Initialize returned a protocol error. Execution limit." >&2; cat /tmp/repro-$NUM-init.json >&2; kill $SERVER_PID 2>/dev/null; exit 1; }
 
 curl -s -X POST http://127.0.0.1:$PORT/mcp \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -H "Mcp-Session-Id: $SESSION_ID" \
-  -d '{"jsonrpc":"2.0","id":2,"method":"notifications/initialized","params":{}}' > /dev/null
+  -d '{"jsonrpc":"2.0","id":2,"method":"notifications/initialized","params":{}}' \
+  > /tmp/repro-$NUM-initialized.json
+grep -q '"error"' /tmp/repro-$NUM-initialized.json && { echo "notifications/initialized returned a protocol error. Execution limit." >&2; cat /tmp/repro-$NUM-initialized.json >&2; kill $SERVER_PID 2>/dev/null; exit 1; }
 ```
 
-The `notifications/initialized` post often returns `{"error":{"code":-32602,"message":"Invalid request parameters"}}` and the server log shows a long pydantic ClientRequest validation dump. **This is harmless.** The session is still valid and `tools/call` works on the same `SESSION_ID`. Do not retry, do not treat as a session failure.
-
-## Phase 5 — Call the failing tool
-
-Substitute the tool name and arguments from Phase 1 verbatim. Save the response to a stable path **and** persist the request metadata so `/3-verify-pr-fix` can replay the exact same call without guessing.
+Capture and inspect both response bodies before `tools/call`. A protocol or validation error is an execution limit. Do not retry around it.
 
 ```bash
-TOOL="<TOOL>"                 # e.g. get_person_profile
-ARGS_JSON='{<ARGS>}'           # e.g. {"linkedin_username":"williamhgates","sections":"basic_info"}
+SHA=$(git rev-parse HEAD)
+TOOL="<TOOL>"
+ARGS_JSON='{<ARGS>}'
 
-# Persist what we are about to call so the verifier can re-run identically
-jq -n --arg t "$TOOL" --argjson a "$ARGS_JSON" '{tool: $t, arguments: $a}' \
+jq -n --arg t "$TOOL" --argjson a "$ARGS_JSON" --arg sha "$SHA" \
+  '{tool: $t, arguments: $a, sha: $sha}' \
   > /tmp/repro-issue-$NUM-meta.json
 
 curl -s -X POST http://127.0.0.1:$PORT/mcp \
@@ -116,56 +114,42 @@ curl -s -X POST http://127.0.0.1:$PORT/mcp \
   | tee /tmp/repro-issue-$NUM-main.json | head -200
 ```
 
-If the issue doesn't pin a concrete target, pick a stable public one:
+If the issue does not pin a concrete target, do not invent one to complete the live check. Ask, or stop with the packet-and-source verdict.
 
-- Person tools: `williamhgates`, plus one non-English target if locale matters.
-- Company tools: `microsoft`, plus one German/EU company if locale matters.
-- Search tools: a query from the issue, else a deliberately diverse phrase.
-
-Run the call twice if the result looks flaky (network, slow render) — LinkedIn rate-limit / partial-render can mask real bugs.
-
-## Phase 6 — Classify
-
-Read `/tmp/repro-issue-$NUM-main.json` and the server log. Pick one verdict:
-
-- **Reproduced ✓** — failure matches the issue description. Note exactly what's missing/wrong (which section is empty, which reference field is null, which error is raised).
-- **Reproduced different mode ⚠** — there is a problem but it doesn't match the issue exactly. Could be a related-but-distinct bug.
-- **Not reproduced ✗** — tool returned expected data. The bug may already be fixed in an unreleased commit (check `git log --oneline -20` and last release tag) or the issue may be environment-specific (different LinkedIn account, different locale).
-- **Inconclusive** — network/rate-limit/login error, not a code-level signal.
-
-Locate the failure in code:
-
-- Grep for the tool name: `grep -rn "def <tool>" linkedin_mcp_server/`
-- Trace from tool entrypoint into the scraper module.
-- For empty-section bugs, check `scraping/fields.py` for the section's URL and verify it's correct.
-
-## Phase 7 — Report and clean up
+Preserve `/tmp/repro-issue-$NUM-main.json` and `/tmp/repro-issue-$NUM-meta.json` only for a genuine captured run. A run from a non-main commit must identify that SHA in the meta file. Do not claim an on-main baseline because of the filename.
 
 ```bash
 kill $SERVER_PID 2>/dev/null
 wait $SERVER_PID 2>/dev/null
-rm -f /tmp/repro-$NUM-headers /tmp/repro-$NUM.log /tmp/repro-$NUM.port /tmp/repro-$NUM.pid
-# Keep /tmp/repro-issue-$NUM-main.json (response baseline) and
-# /tmp/repro-issue-$NUM-meta.json (tool + args) — /3-verify-pr-fix uses both.
+rm -f /tmp/repro-$NUM-headers /tmp/repro-$NUM.log /tmp/repro-$NUM.port /tmp/repro-$NUM.pid /tmp/repro-$NUM-init.json /tmp/repro-$NUM-initialized.json
 ```
 
-Report format:
+Live verdicts, when a run happened:
+
+- reproduced in the stated environment
+- reproduced a different mode
+- not reproduced in the maintainer environment (does not refute the reporter)
+- execution limit (startup, protocol, login, rate limit)
+
+## 4. Report
 
 ```
-**#<N>** — <one-line issue summary>
-**Branch / SHA:** <branch> @ <short-sha>
-**Tool / args:** <TOOL>(<ARGS>)
-**Verdict:** <Reproduced ✓ | Reproduced different mode ⚠ | Not reproduced ✗ | Inconclusive>
-**Evidence:** <2–4 lines of the actual tool output that proves the verdict>
-**Likely code path:** <file:line> — <one-line why>
-**Baseline saved at:** /tmp/repro-issue-<N>-main.json (used by /3-verify-pr-fix)
-**Next:** <suggest /3-verify-pr-fix N if a candidate PR exists | suggest fix sketch | suggest closing as already-fixed>
+**#<N>**. <one-line issue summary>
+**SHA:** <short-sha>
+**Inspected:** <packet fields and source files>
+**Facts established:** <list>
+**Unverified:** <runtime claims not checked>
+**Verdict:** <supported by reporter evidence | confirmed in source | reproduced in the stated environment | needs more evidence | not supported by the supplied evidence>
+**Evidence:** <2 to 4 lines>
+**Likely code path:** <file:line>. <one-line why>
+**Baseline:** <path and SHA, or none>
+**Next:** <missing fields | /3-verify-pr-fix N | fix sketch | no live check needed>
 ```
 
 ## Non-negotiables
 
-- Real LinkedIn against the real profile. No mocks, no fixtures.
-- `uv run`, not `uvx`. The server must reflect the workspace.
-- One run per skill invocation — don't repeatedly hammer LinkedIn.
-- Do not edit code, do not commit, do not check out a PR. This skill only reproduces and reports.
-- If the workspace is dirty, ask before continuing — local changes can hide or fake the bug.
+- Packet and source first. Live LinkedIn only after yes, and only for a named unresolved question.
+- `uv run`, not `uvx`, for a workspace live check. Use the reporter's launcher only to test that installation.
+- One live run per invocation.
+- Do not edit code, commit, or check out a PR.
+- Do not create fake success or failure files to unlock `/3-verify-pr-fix`.
