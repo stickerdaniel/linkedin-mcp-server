@@ -114,26 +114,54 @@ KNOWN_CATEGORIES = frozenset(
 )
 
 
+# Discovery has to be cached ACROSS tool calls, not within one. A fresh
+# LinkedInExtractor -- and so a fresh reader -- is built for every call, so an
+# instance attribute lives exactly one page and the caller-driven loop would
+# re-navigate, re-wait and re-click for each 25 conversations.
+#
+# The natural lifetime is the PAGE: a discovered queryId is valid for as long
+# as that browser session is. The page it was discovered on is stored alongside
+# it, so a browser restart hands over a different object and the cache lapses
+# on its own rather than serving a query from a dead session.
+_QUERY_CACHE: tuple[Any, str, str] | None = None
+
+
+def _cached_query(page: Any) -> tuple[str, str] | None:
+    if _QUERY_CACHE is None:
+        return None
+    cached_page, url, paging = _QUERY_CACHE
+    return (url, paging) if cached_page is page else None
+
+
+def _remember_query(page: Any, url: str, paging: str) -> None:
+    global _QUERY_CACHE
+    _QUERY_CACHE = (page, url, paging)
+
+
+def forget_cached_query() -> None:
+    """Drop the cached query so the next read rediscovers it."""
+    global _QUERY_CACHE
+    _QUERY_CACHE = None
+
+
 class VoyagerMessagingReader:
     """Page the full conversation list without touching the DOM."""
 
     def __init__(self, session: Any, navigator: Any):
         self._session = session
         self._navigator = navigator
-        # Discovery costs a navigation, a sidebar wait and a click -- tens of
-        # seconds before any data. Paying that per page would make a
-        # caller-driven loop unusable, so it is paid once per session. The
-        # queryId is stable for as long as LinkedIn does not redeploy, and a
-        # stale one surfaces as a failed fetch rather than as wrong data.
-        self._query_cache: tuple[str, str] | None = None
 
     # ------------------------------------------------------------------ #
     # Query discovery
     # ------------------------------------------------------------------ #
     async def _discover_query(self) -> tuple[str, str]:
-        if self._query_cache is None:
-            self._query_cache = await self._discover_query_uncached()
-        return self._query_cache
+        page = self._session.page
+        cached = _cached_query(page)
+        if cached is not None:
+            return cached
+        found = await self._discover_query_uncached()
+        _remember_query(page, *found)
+        return found
 
     async def _discover_query_uncached(self) -> tuple[str, str]:
         """Return a CURSORLESS conversations query, and whether paging is available.
@@ -575,7 +603,28 @@ class VoyagerMessagingReader:
             url = _CATEGORY_RE.sub(lambda _: f"category:{category}", url)
         url = _set_cursor(url, cursor.strip()) if cursor else _drop_cursor(url)
 
-        payload = await self._fetch(url)
+        try:
+            payload = await self._fetch(url)
+        except (AuthenticationError, RateLimitError):
+            raise
+        except LinkedInScraperException:
+            # A cached query outlives the deploy that issued it: LinkedIn
+            # rotates the persisted queryId and every later call fails against a
+            # hash that no longer exists. Without this the session stays broken
+            # until the server restarts. Rediscover once and retry, but only
+            # when a cache was actually in play -- otherwise a genuinely broken
+            # request would be retried forever.
+            if _cached_query(self._session.page) is None:
+                raise
+            logger.info("Conversations query failed; rediscovering once.")
+            forget_cached_query()
+            url, paging = await self._discover_query()
+            url = _COUNT_RE.sub(lambda _: f"count:{PAGE_SIZE}", url)
+            if category:
+                url = _CATEGORY_RE.sub(lambda _: f"category:{category}", url)
+            url = _set_cursor(url, cursor.strip()) if cursor else _drop_cursor(url)
+            payload = await self._fetch(url)
+
         rows = self._conversations(payload)
 
         # Entities present but none parsed as a Conversation is a shape change,

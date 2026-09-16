@@ -15,6 +15,7 @@ from linkedin_mcp_server.core.exceptions import (
     LinkedInScraperException,
     RateLimitError,
 )
+from linkedin_mcp_server.scraping import voyager_messaging as vm_module
 from linkedin_mcp_server.scraping.voyager_messaging import (
     KNOWN_CATEGORIES,
     PAGE_SIZE,
@@ -94,6 +95,11 @@ class _FakeSession:
 
     def __init__(self) -> None:
         self.delays: list[float] = []
+        # The query cache is keyed on page identity, so each fake session needs
+        # its own stand-in -- unless a subclass supplies a real scripted page,
+        # in which case leave it alone.
+        if not hasattr(type(self), "page"):
+            self.page = object()
 
     async def delay(self, seconds: float) -> None:
         self.delays.append(seconds)
@@ -212,17 +218,47 @@ class TestEmptyFirstPageIsNeverBare:
             await reader.get_conversations()
 
 
+@pytest.fixture(autouse=True)
+def _clear_query_cache():
+    """The query cache is module-level by necessity, so tests must not leak it."""
+    vm_module.forget_cached_query()
+    yield
+    vm_module.forget_cached_query()
+
+
 class TestDiscoveryIsPaidOnce:
     """Discovery costs a navigation, a sidebar wait and a click. Paying it per
     page would make a caller-driven loop unusable."""
 
-    async def test_repeated_calls_reuse_the_discovered_query(self):
-        reader = _Reader([_payload(_rows(PAGE_SIZE), "A")])
-        await reader.get_conversations()
-        await reader.get_conversations(cursor="A")
-        await reader.get_conversations(cursor="B")
-        assert reader.discoveries == 1, "discovery must be cached for the session"
-        assert len(reader.fetched) == 3, "but every page is still fetched"
+    async def test_discovery_is_cached_across_separate_reader_instances(self):
+        """The real failure: a fresh extractor, and so a fresh reader, is built
+        for EVERY tool call, so an instance attribute cached nothing and every
+        page re-navigated and re-clicked."""
+        page = object()
+        readers = [_Reader([_payload(_rows(PAGE_SIZE), "A")]) for _ in range(3)]
+        for r in readers:
+            r._session.page = page
+        await readers[0].get_conversations()
+        await readers[1].get_conversations(cursor="A")
+        await readers[2].get_conversations(cursor="B")
+
+        assert sum(r.discoveries for r in readers) == 1, (
+            "discovery must survive between tool calls, not just within one"
+        )
+        assert all(len(r.fetched) == 1 for r in readers), "every page still fetched"
+
+    async def test_a_different_page_object_lapses_the_cache(self):
+        """A browser restart hands over a different page; the cache must not
+        serve a query discovered against a dead session."""
+        first = _Reader([_payload(_rows(PAGE_SIZE), "A")])
+        first._session.page = object()
+        await first.get_conversations()
+
+        second = _Reader([_payload(_rows(PAGE_SIZE), "A")])
+        second._session.page = object()
+        await second.get_conversations()
+
+        assert second.discoveries == 1, "a new page must rediscover"
 
     async def test_a_cursor_against_a_single_page_mailbox_is_refused(self):
         reader = _Reader([_payload(_rows(1), None)])
