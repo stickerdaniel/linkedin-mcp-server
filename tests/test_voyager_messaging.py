@@ -99,8 +99,10 @@ class _Reader(VoyagerMessagingReader):
         self._pages = pages
         self.fetched: list[str] = []
 
-    async def _discover_query(self) -> tuple[str, bool]:  # type: ignore[override]
-        return QUERY_URL, True
+    paging_state = "cursored"
+
+    async def _discover_query(self) -> tuple[str, str]:  # type: ignore[override]
+        return QUERY_URL, self.paging_state
 
     async def _fetch(self, url: str) -> dict:  # type: ignore[override]
         self.fetched.append(url)
@@ -468,8 +470,8 @@ class TestDiscovery:
                 QUERY_URL,
             ]
         )
-        url, can_page = await reader._discover_query()
-        assert can_page is True
+        url, state = await reader._discover_query()
+        assert state == "cursored"
         assert "nextCursor" not in url, "a fresh walk must not inherit a cursor"
 
     async def test_a_single_page_mailbox_is_not_an_error(self):
@@ -477,8 +479,8 @@ class TestDiscovery:
         request ever fires. Requiring one made a valid mailbox raise."""
         page_load = f"{QUERY_URL.split(',nextCursor')[0]})"
         reader = self._reader_with_requests([page_load])
-        url, can_page = await reader._discover_query()
-        assert can_page is False
+        url, state = await reader._discover_query()
+        assert state == "single-page"
         assert "nextCursor" not in url
 
     async def test_no_conversations_request_at_all_still_raises(self):
@@ -509,3 +511,36 @@ class TestTimestampsAreHostIndependent:
 
         assert len(set(renders)) == 1, renders
         assert renders[0].endswith("+00:00"), renders[0]
+
+
+class TestExhaustionIsNeverClaimedWithoutEvidence:
+    """Review found that the single-page fallback could report a truncated
+    mailbox as complete, which is worse than the raise it replaced."""
+
+    async def test_a_full_page_without_paging_is_not_called_exhausted(self):
+        rows = [
+            _conversation(f"c{i}", last_activity=100 - i, participants=[])
+            for i in range(5)
+        ]
+        reader = _Reader([_payload(rows, None)])
+        reader.paging_state = "single-page"
+        result = await reader.get_all_conversations(limit=50, page_size=5)
+        assert result["count"] == 5
+        assert result["exhausted"] is False, (
+            "a full page with no paging query proves nothing about what follows"
+        )
+
+    async def test_a_short_page_without_paging_is_exhausted(self):
+        rows = [_conversation("c1", last_activity=1, participants=[])]
+        reader = _Reader([_payload(rows, None)])
+        reader.paging_state = "single-page"
+        result = await reader.get_all_conversations(limit=50, page_size=25)
+        assert result["exhausted"] is True, "a short page really is the end"
+
+    async def test_a_clicked_control_with_no_cursor_query_refuses(self):
+        """Control found and clicked but no cursor-bearing request followed.
+        That is a failure, not a short mailbox, and must not be served as one."""
+        reader = _Reader([_payload([], None)])
+        reader.paging_state = "unconfirmed"
+        with pytest.raises(LinkedInScraperException, match="cursor-bearing"):
+            await reader.get_all_conversations()

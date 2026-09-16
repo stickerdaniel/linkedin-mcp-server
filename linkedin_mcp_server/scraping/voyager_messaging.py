@@ -106,7 +106,7 @@ class VoyagerMessagingReader:
     # ------------------------------------------------------------------ #
     # Query discovery
     # ------------------------------------------------------------------ #
-    async def _discover_query(self) -> tuple[str, bool]:
+    async def _discover_query(self) -> tuple[str, str]:
         """Return a CURSORLESS conversations query, and whether paging is available.
 
         Two things have to be true of the result and they pull in opposite
@@ -121,8 +121,18 @@ class VoyagerMessagingReader:
         It must also work for a mailbox that fits on one page, where no "load
         more" control exists and no cursor-bearing request is ever emitted.
         Requiring one made the tool raise on a perfectly valid mailbox, so the
-        page-load request is captured too and used as the fallback. The boolean
-        says which happened: False means this mailbox has one page.
+        page-load request is captured too.
+
+        The second return value says WHICH of three things happened, because
+        "no paging query" has two very different causes and conflating them is
+        worse than the bug it replaced:
+
+        - ``"cursored"``  — paging works.
+        - ``"single-page"`` — the control was never present across every
+          attempt, so the mailbox plausibly has one page.
+        - ``"unconfirmed"`` — the control WAS found and clicked, yet no
+          cursor-bearing request followed. Something went wrong; this must not
+          be mistaken for a short mailbox.
 
         The queryId is a persisted hash that LinkedIn rotates, and the
         page-load query accepts only ``mailboxUrn`` while silently ignoring
@@ -154,6 +164,7 @@ class VoyagerMessagingReader:
             except PlaywrightTimeoutError:
                 logger.debug("conversation sidebar did not mount within 15s")
 
+            control_seen = False
             for _ in range(6):
                 if cursored:
                     break
@@ -162,6 +173,7 @@ class VoyagerMessagingReader:
                 if button is None:
                     await self._session.delay(1.5)
                     continue
+                control_seen = True
                 try:
                     await button.click(timeout=5000)
                 except PlaywrightTimeoutError:
@@ -171,9 +183,9 @@ class VoyagerMessagingReader:
             page.remove_listener("request", _capture)
 
         if cursored:
-            return _drop_cursor(cursored[-1]), True
+            return _drop_cursor(cursored[-1]), "cursored"
         if page_load:
-            return page_load[-1], False
+            return page_load[-1], "unconfirmed" if control_seen else "single-page"
         raise LinkedInScraperException(
             "No messengerConversations request was observed. The messaging page "
             "did not load, or LinkedIn changed the messaging client."
@@ -511,10 +523,18 @@ class VoyagerMessagingReader:
                 f"quiet_for_days must be >= 1, got {quiet_for_days}."
             )
 
-        url, can_page = await self._discover_query()
+        url, paging = await self._discover_query()
+        if paging == "unconfirmed":
+            raise LinkedInScraperException(
+                "The paging control was present and clicked, but no "
+                "cursor-bearing conversations query followed, so only the first "
+                "page is reachable and there is no way to tell a short mailbox "
+                "from a failed one. Refusing to return a partial listing that "
+                "would look complete."
+            )
         me = self._me_profile_id(url)
         if cursor:
-            if not can_page:
+            if paging != "cursored":
                 raise LinkedInScraperException(
                     "A cursor was supplied but this mailbox exposes no paging "
                     "query, so the cursor cannot be honoured. Call without one."
@@ -626,7 +646,15 @@ class VoyagerMessagingReader:
             next_cursor = self._next_cursor(payload)
 
             if not rows or not next_cursor:
-                exhausted = True
+                # Without a paging query there is no cursor to end on, so
+                # exhaustion has to be argued rather than observed. A page that
+                # came back SHORT is real evidence the mailbox ended; a FULL one
+                # is not, and claiming exhaustion there is how an incomplete
+                # listing starts looking like a census.
+                if paging == "single-page" and len(rows) >= request_size:
+                    exhausted = False
+                else:
+                    exhausted = True
                 break
 
             # A repeated cursor means the server is handing back a page this
