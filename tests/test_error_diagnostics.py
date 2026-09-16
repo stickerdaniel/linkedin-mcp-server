@@ -3,9 +3,9 @@ from pathlib import Path
 import pytest
 
 from linkedin_mcp_server.error_diagnostics import (
-    _installation_method_lines,
-    _installation_method_summary,
-    _tool_name_for_context,
+    ISSUE_URL,
+    PACKET_GUIDANCE,
+    PACKET_SKILL_URL,
     build_issue_diagnostics,
     format_tool_error_with_diagnostics,
 )
@@ -35,16 +35,17 @@ def test_build_issue_diagnostics_includes_existing_issues(monkeypatch, tmp_path)
     assert diagnostics["issue_search_skipped"] is False
     assert diagnostics["section_name"] == "posts"
     assert diagnostics["runtime"]["trace_dir"] is not None
+    assert diagnostics["runtime"]["suggested_gist_command"] is None
     assert "issue_template" not in diagnostics
     assert "hostname" not in diagnostics["runtime"]
     issue_body = Path(diagnostics["issue_template_path"]).read_text()
-    assert "## Existing Open Issues" in issue_body
+    assert "## Advisory open issues" in issue_body
     assert "#220" in issue_body
-    assert "post the gist as a comment there" in issue_body
-    assert "## Setup" in issue_body
-    assert "## What Happened" in issue_body
-    assert "## Steps to Reproduce" in issue_body
-    assert "## Logs" in issue_body
+    assert "Candidate open issues to review" in issue_body
+    assert "gist" not in issue_body.lower()
+    assert PACKET_GUIDANCE in issue_body
+    assert PACKET_SKILL_URL in issue_body
+    assert ISSUE_URL in issue_body
 
 
 def test_format_tool_error_with_diagnostics_prefers_existing_issue_comment_flow():
@@ -69,12 +70,31 @@ def test_format_tool_error_with_diagnostics_prefers_existing_issue_comment_flow(
     message = format_tool_error_with_diagnostics("Scrape failed", diagnostics)
 
     assert "- Local diagnostic notes: /tmp/issue.md" in message
-    assert "Matching open issues were found" in message
+    assert "- Local trace artifacts: /tmp/trace" in message
+    assert "- Local server log: /tmp/trace/server.log" in message
+    assert "Candidate open issues to review" in message
     assert "#220" in message
-    assert "post it as a comment" in message
+    assert PACKET_GUIDANCE in message
+    assert "gist" not in message.lower()
     assert "File the issue here" not in message
     assert "- Runtime: linux-arm64-container" in message
     assert "test-host" not in message
+
+
+def test_format_tool_error_empty_search_still_requires_packet_search():
+    message = format_tool_error_with_diagnostics(
+        "Scrape failed",
+        {
+            "issue_template_path": "/tmp/issue.md",
+            "existing_issues": [],
+            "issue_search_skipped": False,
+            "runtime": {"current_runtime_id": "macos-arm64-host"},
+        },
+    )
+
+    assert "did not establish a canonical match" in message
+    assert "Packet search of open and closed issues is still required" in message
+    assert PACKET_GUIDANCE in message
 
 
 def test_find_existing_issues_query_failure_is_tolerated(monkeypatch, tmp_path):
@@ -94,11 +114,12 @@ def test_find_existing_issues_query_failure_is_tolerated(monkeypatch, tmp_path):
 
     assert diagnostics["existing_issues"] == []
     assert diagnostics["issue_search_skipped"] is False
+    issue_body = Path(diagnostics["issue_template_path"]).read_text()
+    assert "did not establish a canonical match" in issue_body
+    assert "No matching open issues found" not in issue_body
 
 
-def test_build_issue_diagnostics_omits_missing_server_log_from_gist(
-    monkeypatch, tmp_path
-):
+def test_build_issue_diagnostics_sets_gist_command_none(monkeypatch, tmp_path):
     monkeypatch.setenv("USER_DATA_DIR", str(tmp_path / "profile"))
     monkeypatch.setattr(
         "linkedin_mcp_server.error_diagnostics._find_existing_issues",
@@ -112,8 +133,10 @@ def test_build_issue_diagnostics_omits_missing_server_log_from_gist(
         section_name="main_profile",
     )
 
-    gist_command = diagnostics["runtime"]["suggested_gist_command"]
-    assert "server.log" not in gist_command
+    assert diagnostics["runtime"]["suggested_gist_command"] is None
+    issue_body = Path(diagnostics["issue_template_path"]).read_text()
+    assert "gist" not in issue_body.lower()
+    assert "gh gist create" not in issue_body
 
 
 @pytest.mark.asyncio
@@ -122,13 +145,22 @@ async def test_build_issue_diagnostics_skips_network_search_in_event_loop(
 ):
     monkeypatch.setenv("USER_DATA_DIR", str(tmp_path / "profile"))
 
-    called = {"value": False}
+    called = {"urlopen": False, "find": False}
 
-    def fail(*args, **kwargs):
-        called["value"] = True
+    def fail_urlopen(*args, **kwargs):
+        called["urlopen"] = True
         raise AssertionError("urlopen should not be called inside the event loop")
 
-    monkeypatch.setattr("linkedin_mcp_server.error_diagnostics.urlopen", fail)
+    def fail_find(*args, **kwargs):
+        called["find"] = True
+        raise AssertionError(
+            "_find_existing_issues should not be called inside the event loop"
+        )
+
+    monkeypatch.setattr("linkedin_mcp_server.error_diagnostics.urlopen", fail_urlopen)
+    monkeypatch.setattr(
+        "linkedin_mcp_server.error_diagnostics._find_existing_issues", fail_find
+    )
 
     diagnostics = build_issue_diagnostics(
         RuntimeError("boom"),
@@ -139,9 +171,11 @@ async def test_build_issue_diagnostics_skips_network_search_in_event_loop(
 
     assert diagnostics["existing_issues"] == []
     assert diagnostics["issue_search_skipped"] is True
-    assert called["value"] is False
+    assert called["urlopen"] is False
+    assert called["find"] is False
     issue_body = Path(diagnostics["issue_template_path"]).read_text()
     assert "search was skipped in async server context" in issue_body
+    assert "Packet search of open and closed issues is still required" in issue_body
 
 
 def test_build_issue_diagnostics_preserves_captured_failure(monkeypatch, tmp_path):
@@ -160,20 +194,25 @@ def test_build_issue_diagnostics_preserves_captured_failure(monkeypatch, tmp_pat
 
     issue_body = Path(diagnostics["issue_template_path"]).read_text()
 
-    assert "## Setup" in issue_body
-    assert "## What Happened" in issue_body
-    assert "- Error:" in issue_body
-    assert "- Expected behavior:" in issue_body
-    assert "- Installation method:" in issue_body
-    assert "- MCP client:" in issue_body
-    assert "search_jobs" in issue_body
-    assert "1. Run a fresh local `uv run -m linkedin_mcp_server --login`." in issue_body
-    assert "Call `search_jobs` again" in issue_body
-    assert "## Additional Diagnostics" in issue_body
-    assert "### Session State" in issue_body
+    assert diagnostics["context"] == "search_jobs"
+    assert diagnostics["error_type"] == "RuntimeError"
+    assert diagnostics["error_message"] == "boom"
+    assert diagnostics["target_url"].endswith("keywords=python")
+    assert diagnostics["section_name"] == "search_results"
+    assert Path(diagnostics["issue_template_path"]).is_file()
+    assert "# Local diagnostic notes" in issue_body
+    assert "- Context: search_jobs" in issue_body
+    assert "- Section: search_results" in issue_body
+    assert "- Error: RuntimeError: boom" in issue_body
+    assert "MCP client" not in issue_body
+    assert "Installation method" not in issue_body
+    assert "uv run -m linkedin_mcp_server --login" not in issue_body
+    assert "Expected behavior" not in issue_body
+    assert "curl-based" not in issue_body
+    assert "Call `search_jobs` again" not in issue_body
 
 
-def test_build_issue_diagnostics_marks_inferred_tool_and_container_runtime(
+def test_build_issue_diagnostics_does_not_invent_install_or_tool_call(
     monkeypatch, tmp_path
 ):
     monkeypatch.setenv("USER_DATA_DIR", str(tmp_path / "profile"))
@@ -188,57 +227,17 @@ def test_build_issue_diagnostics_marks_inferred_tool_and_container_runtime(
 
     diagnostics = build_issue_diagnostics(
         RuntimeError("boom"),
-        context="search_jobs",
-        target_url="https://www.linkedin.com/jobs/search/?keywords=python",
-        section_name="search_results",
+        context="extract_saved_jobs_page",
+        target_url="https://www.linkedin.com/my-items/saved-jobs/",
+        section_name="saved_jobs",
     )
 
     issue_body = Path(diagnostics["issue_template_path"]).read_text()
-    assert "- Installation method: Docker using" in issue_body
-    assert "`~/.linkedin-mcp` mounted into `/home/pwuser/.linkedin-mcp`" in issue_body
-    assert "- [x] Docker" in issue_body
-    assert "- Tool: search_jobs" in issue_body
-
-
-@pytest.mark.parametrize(
-    ("context", "expected"),
-    [
-        ("get_saved_jobs", "get_saved_jobs"),
-        ("extract_saved_jobs_page", "get_saved_jobs"),
-    ],
-)
-def test_saved_jobs_contexts_resolve_to_the_tool(context: str, expected: str) -> None:
-    """A saved-jobs failure names the tool the user called, not the helper."""
-    assert _tool_name_for_context({"context": context}) == expected
-
-
-def test_installation_method_lines_marks_managed_runtime() -> None:
-    lines = _installation_method_lines(
-        {
-            "current_runtime_id": "macos-arm64-host",
-        }
-    )
-
-    assert lines[0].startswith("- [ ] Docker")
-    assert (
-        lines[1]
-        == "- [x] Managed runtime (Claude Desktop MCP Bundle, `uvx`, or local `uv run` setup)"
-    )
-
-
-def test_installation_method_summary_returns_managed_runtime_for_non_container() -> (
-    None
-):
-    summary = _installation_method_summary(
-        {
-            "current_runtime_id": "macos-arm64-host",
-        }
-    )
-
-    assert (
-        summary
-        == "Managed runtime (Claude Desktop MCP Bundle, `uvx`, or local `uv run` setup)"
-    )
+    assert "- Current runtime: linux-amd64-container" in issue_body
+    assert "- Context: extract_saved_jobs_page" in issue_body
+    assert "Tool: get_saved_jobs" not in issue_body
+    assert "Docker using" not in issue_body
+    assert "`~/.linkedin-mcp` mounted" not in issue_body
 
 
 def test_build_issue_diagnostics_keeps_sensitive_runtime_details_out_of_mcp_payload(
@@ -263,5 +262,6 @@ def test_build_issue_diagnostics_keeps_sensitive_runtime_details_out_of_mcp_payl
     assert "source_profile_dir" not in diagnostics["runtime"]
     assert diagnostics["issue_search_skipped"] is False
     issue_body = Path(diagnostics["issue_template_path"]).read_text()
-    assert "### Runtime Diagnostics" in issue_body
-    assert "Source profile:" in issue_body
+    assert "## Local runtime" in issue_body
+    assert "Source profile (local):" in issue_body
+    assert "upload" not in issue_body.lower()
