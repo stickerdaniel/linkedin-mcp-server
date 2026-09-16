@@ -112,14 +112,123 @@ _SAVED_ITEMS_JS = r"""() => {
 }"""
 
 # The post-detail page renders the body in full, so the primitive behind
-# enrichment is one navigation and one read: innerText plus the raw image
-# and anchor URLs, filtered in Python where the rules are testable.
-_POST_DETAIL_JS = r"""() => {
+# enrichment is one navigation and one read. What it must not read is the
+# rest of the page: the author header, the follow/translate/react controls
+# and the entire comment thread are innerText too, and a body drowned in
+# them is not a body.
+#
+# The page addresses its own content, and every signal used here is a URN or
+# an attribute, never a class or a label (measured live on 2026-09-16):
+#
+# - the post is `[role="article"][data-urn="urn:li:activity:<id>"]`, matched
+#   against the URN the caller asked for, so a page carrying several updates
+#   cannot answer with the wrong one;
+# - each comment is a `urn:li:comment:(activity:…,…)` element **inside** that
+#   post element, which is why comments are excluded by their own URN rather
+#   than by being outside the post. It announces that URN under `data-id`,
+#   not `data-urn` — measured, and the reason both attributes are matched:
+#   scoping on `data-urn` alone returned the whole thread;
+# - the body blocks carry `dir` (LinkedIn marks user-authored text with its
+#   direction); a `dir` element inside an anchor is the author card or the
+#   link-preview card, not prose. A reshare's quoted body carries no comment
+#   URN of its own and is kept on purpose.
+#
+# Images and links are read from the post element, minus the same comment
+# subtrees: a commenter's attachment and links are not the post's.
+_POST_DETAIL_JS = r"""({ urn }) => {
     const main = document.querySelector('main') || document.body;
+    const pageText = (main.innerText || '').trim();
+    const root = Array.from(
+        main.querySelectorAll('[role="article"][data-urn]')
+    ).find(el => el.getAttribute('data-urn') === urn) || null;
+    const commentSelector =
+        '[data-id^="urn:li:comment"], [data-urn^="urn:li:comment"]';
+    const inComment = el => Boolean(el.closest(commentSelector));
+
+    // A `dir` block inside an anchor is a card, not prose — except one: a
+    // reshare wraps the quoted post in an anchor to *that post's*
+    // `/feed/update/` permalink, which is how the quoted body reaches the
+    // reader at all (measured on 2026-09-16). The wrapper is told apart from
+    // the author and link-preview cards by where it points, never by its
+    // text, and `/pulse/` is deliberately not in the exception: an article
+    // card points there too, and its title belongs to `preview`, not to the
+    // body.
+    const resharedPostHref = /\/feed\/update\//;
+    const inCardAnchor = el => {
+        const anchor = el.closest('a');
+        if (!anchor) return false;
+        return !resharedPostHref.test(
+            anchor.getAttribute('href') || anchor.href || ''
+        );
+    };
+
+    // Screen-reader-only labels inside the body. LinkedIn prefixes every
+    // hashtag anchor with a hidden word ("Hashtag"), which innerText reports
+    // on a line of its own, and that word is localized. They are recognized
+    // by how they are rendered — clipped to nothing, or one pixel square and
+    // taken out of flow — never by the class that does it or the word it
+    // says, and are handed to Python as exact lines to drop.
+    const isScreenReaderOnly = el => {
+        const style = getComputedStyle(el);
+        if (style.clip === 'rect(0px, 0px, 0px, 0px)') return true;
+        return (
+            style.position === 'absolute' &&
+            parseFloat(style.width) <= 1 &&
+            parseFloat(style.height) <= 1
+        );
+    };
+
+    let text = '';
+    let firstBody = null;
+    const hiddenLabels = new Set();
+    if (root) {
+        const blocks = Array.from(root.querySelectorAll('[dir]')).filter(
+            el => !inCardAnchor(el) && !inComment(el)
+        );
+        const outermost = blocks.filter(
+            el => !blocks.some(other => other !== el && other.contains(el))
+        );
+        firstBody = outermost[0] || null;
+        text = outermost
+            .map(el => (el.innerText || '').trim())
+            .filter(Boolean)
+            .join('\n\n');
+        for (const block of outermost) {
+            for (const el of block.querySelectorAll('*')) {
+                if (!isScreenReaderOnly(el)) continue;
+                const label = (el.textContent || '').trim();
+                if (label) hiddenLabels.add(label);
+            }
+        }
+    }
+
+    // The author card sits above the body and carries links of its own — the
+    // profile, and the website button an author with a page gets. Neither is
+    // something the post points at, and both are indistinguishable from a
+    // body link by host. Position separates them: the body's own links and
+    // the link-preview card below it follow the first body block, the header
+    // precedes it. A post with no text keeps everything, having no header to
+    // tell apart.
+    const ownLink = link =>
+        !firstBody ||
+        firstBody.contains(link) ||
+        Boolean(
+            firstBody.compareDocumentPosition(link) &
+                Node.DOCUMENT_POSITION_FOLLOWING
+        );
+
+    const scope = root || main;
     return {
-        text: (main.innerText || '').trim(),
-        images: Array.from(main.querySelectorAll('img[src]')).map(img => img.src),
-        links: Array.from(main.querySelectorAll('a[href]')).map(link => link.href),
+        text: text,
+        page_text: pageText,
+        scoped: Boolean(root),
+        hidden_labels: Array.from(hiddenLabels),
+        images: Array.from(scope.querySelectorAll('img[src]'))
+            .filter(img => !inComment(img))
+            .map(img => img.src),
+        links: Array.from(scope.querySelectorAll('a[href]'))
+            .filter(link => !inComment(link) && ownLink(link))
+            .map(link => link.href),
     };
 }"""
 
@@ -391,7 +500,7 @@ class PostSearch:
 
     async def _scrape_post_detail(self, reference: str) -> dict[str, Any]:
         """Navigate to one post's permalink and read text, images and links."""
-        url = _post_detail_url(reference)
+        url, urn = _post_target(reference)
         page = self._session.page
         await self._navigator._navigate_to_page(url)
         await self._session.check_rate_limit()
@@ -403,18 +512,29 @@ class PostSearch:
 
         await self._session.dismiss_modal()
 
-        payload = await page.evaluate(_POST_DETAIL_JS)
-        raw = payload.get("text", "") or ""
-        truncated = truncate_linkedin_noise(raw)
-        if raw.strip() and not truncated:
+        payload = await page.evaluate(_POST_DETAIL_JS, {"urn": urn or ""})
+        page_text = payload.get("page_text", "") or ""
+        if page_text.strip() and not truncate_linkedin_noise(page_text):
             logger.warning(
                 "Page %s returned only LinkedIn chrome (likely rate-limited)", url
             )
             raise RateLimitError(RATE_LIMITED_SECTION_TEXT)
 
+        # A post element was found: its text is the body and needs no chrome
+        # trimming. Without one — an article page, or a layout that stopped
+        # carrying the URN — the whole page is all there is, and the noise
+        # filters are what keep it readable.
+        if payload.get("scoped"):
+            text = _without_hidden_labels(
+                payload.get("text") or "", payload.get("hidden_labels") or []
+            )
+        else:
+            logger.debug("No post element for %s; falling back to page text", url)
+            text = filter_linkedin_noise_lines(truncate_linkedin_noise(page_text))
+
         return {
             "url": url,
-            "text": filter_linkedin_noise_lines(truncated),
+            "text": text,
             "images": _content_images(payload.get("images") or []),
             "links": _external_links(payload.get("links") or []),
         }
@@ -540,6 +660,22 @@ def _preview(text: str) -> dict[str, str] | None:
     return preview or None
 
 
+def _without_hidden_labels(text: str, labels: list[str]) -> str:
+    """Drop the lines a screen-reader-only element put in the body.
+
+    innerText reports a hidden label on a line of its own, so the match is
+    whole-line: a hashtag's "Hashtag" prefix goes, the "#topic" beneath it
+    stays, and a body that happens to contain the same word mid-sentence is
+    untouched. The labels come from the page rather than from a table here
+    because every one of them is localized.
+    """
+    hidden = {label.strip() for label in labels if label.strip()}
+    if not hidden:
+        return text.strip()
+    kept = [line for line in text.splitlines() if line.strip() not in hidden]
+    return "\n".join(kept).strip()
+
+
 def _content_images(sources: list[str]) -> list[str]:
     """Keep a post's own media, dropping avatars, logos and inline assets."""
     images: list[str] = []
@@ -569,8 +705,13 @@ def _external_links(hrefs: list[str]) -> list[str]:
     return links
 
 
-def _post_detail_url(reference: str) -> str:
-    """Resolve a URN, permalink path or URL into one post-detail URL."""
+def _post_target(reference: str) -> tuple[str, str | None]:
+    """Resolve a URN, permalink path or URL into a URL and its activity URN.
+
+    The URN travels with the URL because the page addresses its own post by
+    it: without one — a ``/pulse/`` article — the reader has no post element
+    to scope to and falls back to the whole page.
+    """
     value = (reference or "").strip()
     if not value:
         raise InvalidReferenceError(
@@ -579,7 +720,7 @@ def _post_detail_url(reference: str) -> str:
         )
 
     if _ACTIVITY_URN_RE.match(value):
-        return f"{LINKEDIN_BASE_URL}/feed/update/{value}/"
+        return f"{LINKEDIN_BASE_URL}/feed/update/{value}/", value
 
     candidate = value if value.startswith("http") else f"{LINKEDIN_BASE_URL}{value}"
     normalized = normalize_url(candidate) if value.startswith(("http", "/")) else None
@@ -590,4 +731,10 @@ def _post_detail_url(reference: str) -> str:
             "(urn:li:activity:123), a /feed/update/ or /pulse/ permalink, or "
             "the LinkedIn URL of either."
         )
-    return f"{LINKEDIN_BASE_URL}{classified[1]}"
+
+    permalink = classified[1]
+    urn = None
+    if match := _FEED_PERMALINK_RE.match(permalink):
+        candidate_urn = unquote(match.group(1))
+        urn = candidate_urn if _ACTIVITY_URN_RE.match(candidate_urn) else None
+    return f"{LINKEDIN_BASE_URL}{permalink}", urn

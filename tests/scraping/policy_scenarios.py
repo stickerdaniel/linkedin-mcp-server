@@ -893,6 +893,9 @@ async def _saved_posts_enrich_scenario() -> dict[str, Any]:
         "evaluate:post_detail",
         {
             "text": "Full body of the saved post",
+            "page_text": "Feedbeitrag\nFull body of the saved post\nKommentare",
+            "scoped": True,
+            "hidden_labels": [],
             "images": [
                 "https://media.licdn.com/dms/image/v2/feedshare-shrink_800/x",
                 "https://media.licdn.com/dms/image/v2/profile-displayphoto/y",
@@ -920,6 +923,9 @@ async def _read_post_scenario() -> dict[str, Any]:
         "evaluate:post_detail",
         {
             "text": "Full body of the post",
+            "page_text": "Feedbeitrag\nFull body of the post",
+            "scoped": True,
+            "hidden_labels": [],
             "images": ["https://media.licdn.com/dms/image/v2/feedshare-shrink_800/x"],
             "links": ["https://lnkd.in/abc"],
         },

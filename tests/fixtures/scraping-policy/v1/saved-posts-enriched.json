@@ -174,10 +174,13 @@
       "section": "saved_posts"
     },
     {
+      "arg": {
+        "urn": "urn:li:activity:1"
+      },
       "call": "get_saved_posts",
       "kind": "evaluate",
       "operation": "post_detail",
-      "program_digest": "2e6994494c40",
+      "program_digest": "89a94e54b37a",
       "section": "saved_posts"
     }
   ],

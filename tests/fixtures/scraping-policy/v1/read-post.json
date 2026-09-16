@@ -73,10 +73,13 @@
       "kind": "boundary.modal"
     },
     {
+      "arg": {
+        "urn": "urn:li:activity:1"
+      },
       "call": "read_post",
       "kind": "evaluate",
       "operation": "post_detail",
-      "program_digest": "2e6994494c40"
+      "program_digest": "89a94e54b37a"
     }
   ],
   "result": {

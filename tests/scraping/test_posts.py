@@ -354,9 +354,23 @@ def _script_saved_posts_page(
     return programs
 
 
-def _detail(text="Full body", images=None, links=None) -> dict[str, Any]:
+def _detail(
+    text="Full body",
+    images=None,
+    links=None,
+    *,
+    scoped=True,
+    page_text=None,
+) -> dict[str, Any]:
+    """One post-detail read as the browser program reports it.
+
+    ``scoped`` says whether the page carried the post element the program
+    addresses by URN; without it the reader falls back to ``page_text``.
+    """
     return {
-        "text": text,
+        "text": text if scoped else "",
+        "page_text": page_text if page_text is not None else f"Chrome\n{text}",
+        "scoped": scoped,
         "images": images if images is not None else [],
         "links": links if links is not None else [],
     }
@@ -748,6 +762,93 @@ class TestReadPost:
         )
         assert result["text"] == "The whole body"
         mock_page.goto.assert_awaited()
+
+    async def test_the_post_element_is_asked_for_by_urn(self, mock_page):
+        """The program can only scope to the post the caller named.
+
+        A detail page renders several updates' worth of markup (the post,
+        its reshare source, every comment), so the URN travels with the URL
+        rather than being rediscovered on the page.
+        """
+        search = _search(mock_page)
+        with _suppress_delay():
+            _script_saved_posts_page(
+                mock_page, counts=[1], detail=[_detail("The whole body")]
+            )
+            await search.read_post("/feed/update/urn%3Ali%3Aactivity%3A111/")
+
+        detail_call = next(
+            call
+            for call in mock_page.evaluate.await_args_list
+            if "img[src]" in call.args[0]
+        )
+        assert detail_call.args[1] == {"urn": "urn:li:activity:111"}
+
+    async def test_a_scoped_body_is_taken_as_is(self, mock_page):
+        """The post element holds prose only, so nothing is trimmed off it.
+
+        Running the page-level noise filters over it would be the bug this
+        catches: they cut at chrome markers, and a body that happens to
+        mention one would lose everything after it.
+        """
+        search = _search(mock_page)
+        with _suppress_delay():
+            _script_saved_posts_page(
+                mock_page,
+                counts=[1],
+                detail=[
+                    _detail(
+                        "Body line\nMehr dazu",
+                        page_text="Feedbeitrag\nAuthor\nBody line\nKommentare",
+                    )
+                ],
+            )
+            result = await search.read_post("urn:li:activity:111")
+
+        assert result["text"] == "Body line\nMehr dazu"
+
+    async def test_a_page_without_the_post_element_falls_back_to_page_text(
+        self, mock_page
+    ):
+        """An article page carries no activity URN, and still has to answer.
+
+        Returning nothing when the scope is missing would turn every
+        ``/pulse/`` item into an empty read, so the fallback keeps the whole
+        page and pays for it with the usual chrome filtering.
+        """
+        search = _search(mock_page)
+        with _suppress_delay():
+            _script_saved_posts_page(
+                mock_page,
+                counts=[1],
+                detail=[_detail(scoped=False, page_text="Article body")],
+            )
+            result = await search.read_post("/pulse/some-article/")
+
+        assert result["text"] == "Article body"
+
+    async def test_a_screen_reader_label_is_dropped_from_the_body(self, mock_page):
+        """innerText reports hidden labels, and every one of them is localized.
+
+        LinkedIn puts one in front of each hashtag, so a body ending in tags
+        ends in alternating noise; the page reports which strings they are,
+        and only whole lines matching them go.
+        """
+        search = _search(mock_page)
+        with _suppress_delay():
+            _script_saved_posts_page(
+                mock_page,
+                counts=[1],
+                detail=[
+                    {
+                        **_detail("Body about a Hashtag rule\nHashtag\n#patterns"),
+                        "hidden_labels": ["Hashtag"],
+                    }
+                ],
+            )
+            result = await search.read_post("urn:li:activity:111")
+
+        assert result["text"] == "Body about a Hashtag rule\n#patterns"
 
     @pytest.mark.parametrize(
         "reference", ["", "ada-lovelace", "/in/ada-lovelace/", "https://example.com/x"]
