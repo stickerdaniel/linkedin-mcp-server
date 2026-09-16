@@ -575,7 +575,7 @@ class TestExhaustionIsNeverClaimedWithoutEvidence:
         await reader.get_all_conversations(limit=200, page_size=5)
         assert len(reader.fetched) == 2, reader.fetched
 
-    async def test_a_full_page_at_max_is_reported_as_unproven(self):
+    async def test_a_full_page_at_max_means_there_is_probably_more(self):
         rows = [
             _conversation(f"c{i}", last_activity=100 - i, participants=[])
             for i in range(25)
@@ -586,7 +586,7 @@ class TestExhaustionIsNeverClaimedWithoutEvidence:
         assert result["exhausted"] is False, (
             "a full page with no cursor proves nothing about what follows"
         )
-        assert result["exhaustion_basis"] == "unproven-full-page"
+        assert result["exhaustion_basis"] == "full-page-no-cursor"
 
     async def test_a_clicked_control_with_no_cursor_query_refuses(self):
         """Control found and clicked but no cursor-bearing request followed.
@@ -603,3 +603,16 @@ class TestExhaustionIsNeverClaimedWithoutEvidence:
         result = await reader.get_all_conversations(limit=10)
         assert result["exhausted"] is True
         assert result["exhaustion_basis"] == "short-page"
+
+    async def test_an_empty_page_is_unproven_not_the_end(self):
+        """Zero is the ambiguous outcome, not the conclusive one: an empty page
+        is equally consistent with an exhausted mailbox, a silently rejected
+        argument and a dead session. Calling it the end was the last place a
+        census could be manufactured out of a failure."""
+        first = _payload([_conversation("c1", last_activity=2, participants=[])], "C2")
+        empty = _payload([], None)
+        reader = _Reader([first, empty])
+        result = await reader.get_all_conversations(limit=50, page_size=1)
+        assert result["count"] == 1
+        assert result["exhausted"] is False
+        assert result["exhaustion_basis"] == "empty-page-unproven"
