@@ -197,10 +197,9 @@ class VoyagerMessagingReader:
         if not isinstance(raw, dict) or raw.get("error"):
             detail = (raw or {}).get("error", "unknown")
             status = (raw or {}).get("status")
-            # Auth and rate-limit failures keep their own types. Collapsing them
-            # into a generic scraper error would let `get_inbox(backend="auto")`
-            # fall back to the DOM path, which CLICKS rows to harvest thread ids
-            # and marks them read -- a write, triggered by a transient failure.
+            # Auth and rate-limit failures keep their own types so a caller can
+            # tell "sign in again" and "slow down" apart from "this broke", and
+            # so neither is retried as though it were transient noise.
             if status in (401, 403):
                 raise AuthenticationError(
                     f"Voyager conversations request rejected: {detail}"
@@ -338,42 +337,6 @@ class VoyagerMessagingReader:
     # ------------------------------------------------------------------ #
     # Public
     # ------------------------------------------------------------------ #
-    @staticmethod
-    def render_inbox_text(conversations: list[dict[str, Any]]) -> str:
-        """Render conversations as an inbox-style text block.
-
-        Keeps the Voyager path a drop-in superset of the DOM path: callers that
-        only read ``sections["inbox"]`` keep working, while callers that want
-        structure read ``conversations``.
-        """
-        lines: list[str] = ["Messaging", "Conversation List"]
-        for c in conversations:
-            who = ", ".join(c.get("participants") or []) or (
-                c.get("title") or "Unknown"
-            )
-            when = c.get("last_activity_iso") or ""
-            unread = c.get("unread_count") or 0
-            flag = f" [{unread} unread]" if unread else ""
-            mailbox = ""
-            cats = c.get("categories") or []
-            if isinstance(cats, list) and cats:
-                mailbox = f" ({'/'.join(str(x) for x in cats)})"
-            header = f"{who} - {when}{flag}{mailbox}".replace(" - \n", "")
-            lines.append(header.rstrip(" -").rstrip())
-
-            headlines = c.get("headlines") or []
-            if headlines:
-                lines.append(f"    {headlines[0]}")
-
-            text = (c.get("last_message_text") or "").replace("\n", " ").strip()
-            if text:
-                # "You:" mirrors LinkedIn's own inbox convention, so a reader
-                # sees who spoke last without consulting a second field.
-                speaker = "You: " if c.get("last_message_from_me") else ""
-                lines.append(f"    {speaker}{text[:200]}")
-            if c.get("awaiting_my_reply"):
-                lines.append("    >> awaiting your reply")
-        return "\n".join(lines)
 
     @staticmethod
     def _next_cursor(payload: dict[str, Any]) -> str | None:

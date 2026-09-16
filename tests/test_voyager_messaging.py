@@ -307,30 +307,6 @@ class TestReplyState:
         assert result["scanned"] == 2
 
 
-class TestRendering:
-    async def test_rendered_text_carries_what_triage_reads(self):
-        """The routines parse this text, so it must carry timestamp, speaker
-        and preview, not just names."""
-        me_p = f"urn:li:msg_messagingParticipant:urn:li:fsd_profile:{ME}"
-        them_p = "urn:li:msg_messagingParticipant:urn:li:fsd_profile:ACoAthem"
-        conv = _conversation(
-            "c1", last_activity=1_700_000_000_000, participants=[me_p, them_p]
-        )
-        included = [
-            _participant(me_p, "Taylor", "Medford"),
-            _participant(them_p, "Dana", "Scully"),
-            _message("c1", them_p, "are you around this week", 1_700_000_000_000),
-        ]
-        reader = _Reader([_payload([conv], None, included=included)])
-        result = await reader.get_all_conversations()
-        text = VoyagerMessagingReader.render_inbox_text(result["conversations"])
-        assert "Dana Scully" in text
-        assert "Taylor Medford" not in text, "self must not appear"
-        assert "are you around this week" in text
-        assert "awaiting your reply" in text
-        assert "20" in text, "an ISO timestamp must be present"
-
-
 class TestReviewRegressions:
     """One test per defect found in review. A fix without a test is a hope."""
 

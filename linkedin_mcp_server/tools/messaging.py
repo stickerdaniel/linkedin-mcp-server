@@ -5,8 +5,7 @@ Provides inbox listing, conversation reading, message search, and sending.
 """
 
 import logging
-import os
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 
 from fastmcp import Context, FastMCP
 from pydantic import Field
@@ -25,24 +24,6 @@ from linkedin_mcp_server.scraping.contracts import (
 
 logger = logging.getLogger(__name__)
 
-# Which messaging implementation `get_inbox` uses when the caller does not say.
-# Set LINKEDIN_MESSAGING_BACKEND to "voyager", "dom" or "auto" (default).
-# "auto" prefers Voyager and falls back to the DOM scrape, so a LinkedIn-side
-# change degrades instead of failing.
-_BACKEND_ENV = "LINKEDIN_MESSAGING_BACKEND"
-
-
-def _default_backend() -> str:
-    value = (os.environ.get(_BACKEND_ENV) or "auto").strip().lower()
-    if value not in {"auto", "voyager", "dom"}:
-        logger.warning(
-            "%s=%r is not one of auto/voyager/dom; using auto",
-            _BACKEND_ENV,
-            value,
-        )
-        return "auto"
-    return value
-
 
 def register_messaging_tools(
     mcp: FastMCP, *, tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS
@@ -58,8 +39,7 @@ def register_messaging_tools(
     )
     async def get_inbox(
         ctx: Context,
-        limit: Annotated[int, Field(ge=1, le=500)] = 20,
-        backend: Literal["default", "auto", "voyager", "dom"] = "default",
+        limit: Annotated[int, Field(ge=1, le=50)] = 20,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
@@ -67,37 +47,28 @@ def register_messaging_tools(
 
         Args:
             ctx: FastMCP context for progress reporting
-            limit: Maximum number of conversations to load (1-500, default 20)
-            backend: Which implementation to use.
-                "voyager" reads LinkedIn's own conversations API: it reaches the
-                whole mailbox and clicks nothing.
-                "dom" scrapes the rendered sidebar: it sees only what LinkedIn
-                painted (observed ~16-17 rows) and click-visits each row to
-                recover its thread id, which MARKS THOSE ROWS READ.
-                "auto" prefers Voyager and falls back to "dom" on failure.
-                "default" (the default) defers to the LINKEDIN_MESSAGING_BACKEND
-                environment variable, itself defaulting to "auto".
+            limit: Maximum number of conversations to load (1-50, default 20)
 
         Returns:
             Dict with url, sections (inbox -> raw text), and optional references.
-            The Voyager backend additionally returns `conversations` (structured,
-            with thread_urn/read/unread_count/last_activity_at), `backend`,
-            `pages_fetched`, and `exhausted`. **Check `exhausted` before treating
-            the result as a complete mailbox**: False means the walk stopped on
-            `limit` and more conversations exist.
+
+        Note: this reads the rendered sidebar, so it sees only what LinkedIn has
+        painted and it recovers thread ids by click-visiting rows, which marks
+        them read. For a whole-mailbox question -- which threads are unanswered,
+        who has gone quiet, reconciling against an external record -- use
+        get_all_conversations instead.
         """
         try:
             extractor = extractor or await get_ready_extractor(
                 ctx, tool_name="get_inbox"
             )
-            chosen = _default_backend() if backend == "default" else backend
-            logger.info("Fetching inbox (limit=%d, backend=%s)", limit, chosen)
+            logger.info("Fetching inbox (limit=%d)", limit)
 
             await ctx.report_progress(
                 progress=0, total=100, message="Loading messaging inbox"
             )
 
-            result = await extractor.get_inbox(limit=limit, backend=chosen)
+            result = await extractor.get_inbox(limit=limit)
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 

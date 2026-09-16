@@ -17,10 +17,6 @@ from linkedin_mcp_server.scraping.contracts import (
     FilterValidationError as FilterValidationError,
     rate_limited_section_error as rate_limited_section_error,
 )
-from linkedin_mcp_server.core.exceptions import (
-    AuthenticationError,
-    RateLimitError,
-)
 from linkedin_mcp_server.scraping.conversations import ConversationReader
 from linkedin_mcp_server.scraping.voyager_messaging import VoyagerMessagingReader
 from linkedin_mcp_server.scraping.feed import FeedScraper
@@ -230,94 +226,9 @@ class LinkedInExtractor:
             max_pages=max_pages,
         )
 
-    async def get_inbox(self, limit: int = 20, backend: str = "auto") -> dict[str, Any]:
-        """List recent conversations from the messaging inbox.
-
-        ``backend`` selects the implementation:
-
-        - ``voyager`` reads LinkedIn's own conversations API. Sees the whole
-          mailbox and clicks nothing.
-        - ``dom`` scrapes the rendered sidebar. Sees only what is painted and
-          click-visits each row to recover its thread id, marking those rows
-          read.
-        - ``auto`` (default) tries Voyager and falls back to the DOM, so a
-          LinkedIn-side change degrades to the old behaviour instead of failing.
-
-        The Voyager path is a superset: it returns the same ``sections`` and
-        ``references`` shape plus a structured ``conversations`` list.
-        """
-        if backend not in {"auto", "voyager", "dom"}:
-            raise ValueError(f"unknown messaging backend: {backend!r}")
-
-        if backend in {"auto", "voyager"}:
-            try:
-                return await self._voyager_inbox(limit)
-            except (AuthenticationError, RateLimitError):
-                # Never fall back on these. The DOM path harvests thread ids by
-                # CLICKING each row, which marks it read -- a write. Doing that
-                # because a request was rejected or throttled turns a transient
-                # failure into a permanent change to the user's mailbox.
-                raise
-            except Exception as exc:
-                if backend == "voyager":
-                    raise
-                logger.warning(
-                    "Voyager inbox failed (%s), falling back to DOM scrape: %s",
-                    type(exc).__name__,
-                    exc,
-                )
-
+    async def get_inbox(self, limit: int = 20) -> dict[str, Any]:
+        """List recent conversations from the messaging inbox."""
         return await self._conversations.get_inbox(limit)
-
-    async def _voyager_inbox(self, limit: int) -> dict[str, Any]:
-        """Shape a Voyager walk like a `get_inbox` result, plus structure."""
-        walked = await self._voyager_messaging.get_all_conversations(limit=limit)
-        conversations = walked["conversations"]
-        references = [
-            {
-                "kind": "conversation",
-                "url": c["thread_url"],
-                "context": "inbox",
-                "text": ", ".join(c.get("participants") or [])
-                or (c.get("title") or ""),
-            }
-            for c in conversations
-            if c.get("thread_url")
-        ]
-        return {
-            "url": "https://www.linkedin.com/messaging/",
-            "sections": {
-                "inbox": self._voyager_messaging.render_inbox_text(conversations)
-            },
-            "references": {"inbox": references},
-            "conversations": conversations,
-            "backend": "voyager",
-            "pages_fetched": walked["pages_fetched"],
-            "exhausted": walked["exhausted"],
-        }
-
-    async def get_all_conversations(
-        self,
-        limit: int = 200,
-        max_pages: int = 60,
-        cursor: str | None = None,
-        quiet_for_days: int | None = None,
-        awaiting_reply_only: bool = False,
-        category: str | None = None,
-        page_size: int = 25,
-        known_thread_urns: list[str] | None = None,
-    ) -> dict[str, Any]:
-        """Page the mailbox via Voyager, clicking nothing."""
-        return await self._voyager_messaging.get_all_conversations(
-            limit=limit,
-            max_pages=max_pages,
-            cursor=cursor,
-            quiet_for_days=quiet_for_days,
-            awaiting_reply_only=awaiting_reply_only,
-            category=category,
-            page_size=page_size,
-            stop_at_thread_urns=set(known_thread_urns or ()) or None,
-        )
 
     async def get_conversation(
         self,

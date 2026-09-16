@@ -23,35 +23,28 @@ those two files plus one new module. Rebase on upstream tags rather than re-patc
 ## What changed
 
 - **`scraping/voyager_messaging.py`** (new) — cursor walk over the conversations API.
-- **`scraping/extractor.py`** — `get_inbox(limit, backend)` + `get_all_conversations(...)`.
-- **`tools/messaging.py`** — `backend` arg on `get_inbox`, new `get_all_conversations` tool.
+- **`scraping/extractor.py`** — new `get_all_conversations(...)` passthrough. `get_inbox` untouched.
+- **`tools/messaging.py`** — new `get_all_conversations` tool. `get_inbox` untouched.
 
-## The flag
+## `get_inbox` is left exactly as upstream wrote it
 
-`get_inbox(backend=...)` takes `default` | `auto` | `voyager` | `dom`.
-`default` defers to **`LINKEDIN_MESSAGING_BACKEND`**, itself defaulting to `auto`.
+This fork adds **one tool**, `get_all_conversations`, and **does not change `get_inbox`**.
 
-| value | behaviour |
+That is deliberate. Upstream declines Voyager on principle, and `get_inbox` is their method; quietly
+swapping its mechanism would mean carrying a behavioural fork of a function they maintain, and every
+rebase would have to re-litigate it. Keeping the new mechanism in a new tool means the divergence is
+purely additive — upstream can change `get_inbox` freely and this fork just takes it.
+
+It also removes a hazard that existed while `get_inbox` had a Voyager path with a DOM fallback: the
+DOM path harvests thread ids by **clicking rows, which marks them read**, so any Voyager failure
+could turn into a write. With no fallback, that cannot happen.
+
+So the split is:
+
+| question | tool |
 |---|---|
-| `dom` | original scrape. Sees ~16–17 rows, **click-marks them read**. |
-| `voyager` | conversations API. Whole mailbox, paged, clicks nothing. |
-| `auto` | Voyager, falling back to `dom` on any failure. |
-
-## The deployed default is `auto`
-
-`auto` prefers Voyager and falls back to the DOM scrape on failure, so a LinkedIn-side change
-degrades instead of breaking. The earlier reason for defaulting to `dom` was that the routines parse
-`get_inbox`'s TEXT block and the Voyager renderer did not emit per-message timestamps or previews.
-**That blocker is gone** — `render_inbox_text` now emits `last_activity_iso`, the other party's
-headline, a `You:` speaker marker and a 200-char preview, so the text block is a **superset** of the
-DOM one rather than a differently-shaped peer.
-
-**`auto` does not fall back on auth or rate-limit failures**, and that exception matters: the DOM
-path harvests thread ids by *clicking* rows, which marks them read. Falling back on a 401 or 429
-would turn a transient failure into a permanent change to the mailbox, so those propagate.
-
-Use **`get_all_conversations`** for census work, where structure is what matters and the text block
-is irrelevant.
+| what is at the top of the inbox right now | `get_inbox` (unchanged, DOM) |
+| which threads are unanswered / who has gone quiet / reconcile against a record | `get_all_conversations` |
 
 ## What LinkedIn's API will and will not filter (measured 2026-09-16)
 

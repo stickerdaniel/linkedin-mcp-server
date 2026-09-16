@@ -919,41 +919,7 @@ class TestMessagingTools:
         result = await tool_fn(mock_context, extractor=mock_extractor)
 
         assert result["sections"]["inbox"] == "Conversation 1\nConversation 2"
-        # Default resolves through LINKEDIN_MESSAGING_BACKEND, which is unset here.
-        mock_extractor.get_inbox.assert_awaited_once_with(limit=20, backend="auto")
-
-    async def test_get_inbox_backend_is_forwarded(self, mock_context):
-        """An explicit backend must reach the extractor unchanged."""
-        mock_extractor = _make_mock_extractor(
-            {"url": "https://www.linkedin.com/messaging/", "sections": {"inbox": "x"}}
-        )
-
-        from linkedin_mcp_server.tools.messaging import register_messaging_tools
-
-        mcp = FastMCP("test")
-        register_messaging_tools(mcp)
-
-        tool_fn = await get_tool_fn(mcp, "get_inbox")
-        await tool_fn(mock_context, backend="dom", extractor=mock_extractor)
-
-        mock_extractor.get_inbox.assert_awaited_once_with(limit=20, backend="dom")
-
-    async def test_get_inbox_env_sets_default_backend(self, mock_context, monkeypatch):
-        """`default` defers to the env var, which is the whole point of the flag."""
-        monkeypatch.setenv("LINKEDIN_MESSAGING_BACKEND", "voyager")
-        mock_extractor = _make_mock_extractor(
-            {"url": "https://www.linkedin.com/messaging/", "sections": {"inbox": "x"}}
-        )
-
-        from linkedin_mcp_server.tools.messaging import register_messaging_tools
-
-        mcp = FastMCP("test")
-        register_messaging_tools(mcp)
-
-        tool_fn = await get_tool_fn(mcp, "get_inbox")
-        await tool_fn(mock_context, extractor=mock_extractor)
-
-        mock_extractor.get_inbox.assert_awaited_once_with(limit=20, backend="voyager")
+        mock_extractor.get_inbox.assert_awaited_once_with(limit=20)
 
     async def test_get_conversation_success(self, mock_context):
         expected = {
