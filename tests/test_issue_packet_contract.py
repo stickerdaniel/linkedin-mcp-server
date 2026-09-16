@@ -168,17 +168,13 @@ def test_packet_skill_frontmatter_and_trigger_branches() -> None:
     assert frontmatter.get("disable-model-invocation") is not True
 
     desc = frontmatter.get("description", "")
-    for keyword in [
-        "file",
-        "open",
-        "create",
-        "bug report",
-        "feature request",
-        "gh issue create",
+    assert "Packet intake" not in desc
+    for phrase in [
+        "Open or file a GitHub issue, bug report, feature request, docs issue, or chore.",
+        "Add evidence to an existing issue.",
+        "Run gh issue create or gh issue comment.",
     ]:
-        assert keyword in desc, (
-            f"Keyword {keyword!r} not in frontmatter description: {desc!r}"
-        )
+        assert phrase in desc, f"Missing trigger sentence: {phrase!r}"
 
 
 def test_packet_skill_requires_search_first_and_consent() -> None:
