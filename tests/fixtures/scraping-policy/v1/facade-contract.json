@@ -156,6 +156,96 @@
           "type": "object"
         }
       },
+      "get_all_conversations": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "awaiting_reply_only": {
+              "default": false,
+              "description": "only return threads whose newest message is\ntheirs, so a reply is owed",
+              "type": "boolean"
+            },
+            "category": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "SERVER-SIDE filter, the only one LinkedIn actually honours.\nOne of INBOX, PRIMARY_INBOX, ARCHIVE, INMAIL, STARRED, SPAM.\nThese jump anywhere in time in a single call. An unknown value\nis rejected rather than passed through, because the API answers\none with an empty page rather than an error."
+            },
+            "cursor": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "next_cursor from a previous call, to resume the walk"
+            },
+            "known_thread_urns": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "thread urns already recorded elsewhere. The\nmailbox is recency-ordered, so once a whole page is threads you\nalready know, everything behind it is older and also known, and\nthe walk stops. This is what keeps a repeat sync to one or two\npages instead of the whole mailbox."
+            },
+            "limit": {
+              "default": 200,
+              "description": "Maximum conversations to return (1-2000, default 200)",
+              "maximum": 2000,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "max_pages": {
+              "default": 60,
+              "description": "Safety cap on cursor pages to walk (1-200, default 60)",
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "page_size": {
+              "default": 25,
+              "description": "rows per request, max 25 (measured). Above 25 the API\nreturns EMPTY rather than an error, so this is clamped.",
+              "maximum": 25,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "quiet_for_days": {
+              "anyOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "only return threads with no activity for this many\ndays — the reconnect filter"
+            }
+          },
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
       "get_company_employees": {
         "input": {
           "additionalProperties": false,

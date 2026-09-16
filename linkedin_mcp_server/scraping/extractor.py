@@ -230,6 +230,29 @@ class LinkedInExtractor:
         """List recent conversations from the messaging inbox."""
         return await self._conversations.get_inbox(limit)
 
+    async def get_all_conversations(
+        self,
+        limit: int = 200,
+        max_pages: int = 60,
+        cursor: str | None = None,
+        quiet_for_days: int | None = None,
+        awaiting_reply_only: bool = False,
+        category: str | None = None,
+        page_size: int = 25,
+        known_thread_urns: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Page the whole mailbox via the conversations API, clicking nothing."""
+        return await self._voyager_messaging.get_all_conversations(
+            limit=limit,
+            max_pages=max_pages,
+            cursor=cursor,
+            quiet_for_days=quiet_for_days,
+            awaiting_reply_only=awaiting_reply_only,
+            category=category,
+            page_size=page_size,
+            stop_at_thread_urns=set(known_thread_urns or ()) or None,
+        )
+
     async def get_conversation(
         self,
         linkedin_username: str | None = None,

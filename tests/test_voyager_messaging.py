@@ -406,3 +406,58 @@ class TestReviewRegressions:
         reader = _Reader([_payload(rows, None)])
         await reader.get_all_conversations(limit=5, page_size=25, quiet_for_days=365)
         assert "count:25" in reader.fetched[0], "filtered walk keeps full pages"
+
+
+class TestExtractorWiring:
+    """The tool calls `extractor.get_all_conversations`. Every other test here
+    either drives the reader directly or mocks the extractor, so none of them
+    would notice the method going missing -- which is exactly what happened
+    during a refactor, caught only by the type checker."""
+
+    def test_extractor_exposes_the_tool_entrypoint(self):
+        from linkedin_mcp_server.scraping.extractor import LinkedInExtractor
+
+        assert hasattr(LinkedInExtractor, "get_all_conversations")
+
+    async def test_extractor_forwards_every_argument_to_the_reader(self):
+        """A passthrough that silently drops an argument is the other way this
+        breaks without any test noticing."""
+        import inspect
+
+        from linkedin_mcp_server.scraping.extractor import LinkedInExtractor
+
+        seen: dict = {}
+
+        class _Spy:
+            async def get_all_conversations(self, **kwargs):
+                seen.update(kwargs)
+                return {"conversations": [], "count": 0}
+
+        extractor = LinkedInExtractor.__new__(LinkedInExtractor)
+        extractor._voyager_messaging = _Spy()  # type: ignore[attr-defined]
+
+        await extractor.get_all_conversations(
+            limit=7,
+            max_pages=3,
+            cursor="CUR",
+            quiet_for_days=30,
+            awaiting_reply_only=True,
+            category="INMAIL",
+            page_size=11,
+            known_thread_urns=["a", "b"],
+        )
+
+        assert seen["limit"] == 7
+        assert seen["max_pages"] == 3
+        assert seen["cursor"] == "CUR"
+        assert seen["quiet_for_days"] == 30
+        assert seen["awaiting_reply_only"] is True
+        assert seen["category"] == "INMAIL"
+        assert seen["page_size"] == 11
+        assert seen["stop_at_thread_urns"] == {"a", "b"}
+
+        # Every reader parameter the extractor is meant to relay must be relayed.
+        reader_params = set(
+            inspect.signature(VoyagerMessagingReader.get_all_conversations).parameters
+        ) - {"self"}
+        assert reader_params == set(seen), reader_params ^ set(seen)
