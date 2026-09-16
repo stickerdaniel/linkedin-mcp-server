@@ -8,11 +8,13 @@ one question: does a zero come back labelled, or does it come back bare?
 from __future__ import annotations
 
 import time
-from typing import Any
-
 import pytest
 
-from linkedin_mcp_server.core.exceptions import LinkedInScraperException
+from linkedin_mcp_server.core.exceptions import (
+    AuthenticationError,
+    LinkedInScraperException,
+    RateLimitError,
+)
 from linkedin_mcp_server.scraping.voyager_messaging import (
     KNOWN_CATEGORIES,
     MAX_PAGE_SIZE,
@@ -144,7 +146,13 @@ class TestBlankInputs:
 
     async def test_every_known_category_is_accepted(self):
         for category in KNOWN_CATEGORIES:
-            reader = _Reader([_payload([_conversation("c1", last_activity=1, participants=[])], None)])
+            reader = _Reader(
+                [
+                    _payload(
+                        [_conversation("c1", last_activity=1, participants=[])], None
+                    )
+                ]
+            )
             result = await reader.get_all_conversations(category=category)
             assert result["count"] == 1
             assert f"category:{category}" in reader.fetched[0]
@@ -154,7 +162,9 @@ class TestEmptyResultsAreLabelled:
     """A zero must say which kind of zero it is."""
 
     async def test_empty_with_passing_control_is_verified_empty(self):
-        control = _payload([_conversation("ctl", last_activity=1, participants=[])], None)
+        control = _payload(
+            [_conversation("ctl", last_activity=1, participants=[])], None
+        )
         reader = _Reader([_payload([], None), control])
         result = await reader.get_all_conversations()
         assert result["count"] == 0
@@ -169,14 +179,18 @@ class TestEmptyResultsAreLabelled:
 
     async def test_included_entities_but_no_conversations_is_a_parse_failure(self):
         """The one shape that silently turns a full mailbox into a zero."""
-        payload = _payload([], None, included=[{"$type": "x.Something", "entityUrn": "u"}])
+        payload = _payload(
+            [], None, included=[{"$type": "x.Something", "entityUrn": "u"}]
+        )
         reader = _Reader([payload])
         with pytest.raises(LinkedInScraperException, match="changed shape"):
             await reader.get_all_conversations()
 
     async def test_filtered_to_nothing_is_distinguishable_from_empty(self):
         """Rows existed; the filter excluded them. That is a real answer."""
-        rows = [_conversation("c1", last_activity=int(time.time() * 1000), participants=[])]
+        rows = [
+            _conversation("c1", last_activity=int(time.time() * 1000), participants=[])
+        ]
         reader = _Reader([_payload(rows, None)])
         result = await reader.get_all_conversations(quiet_for_days=365)
         assert result["count"] == 0
@@ -187,12 +201,16 @@ class TestEmptyResultsAreLabelled:
 class TestPaging:
     async def test_page_size_is_clamped_to_the_measured_ceiling(self):
         """Above 25 LinkedIn returns an empty page rather than an error."""
-        reader = _Reader([_payload([_conversation("c1", last_activity=1, participants=[])], None)])
+        reader = _Reader(
+            [_payload([_conversation("c1", last_activity=1, participants=[])], None)]
+        )
         await reader.get_all_conversations(page_size=500)
         assert f"count:{MAX_PAGE_SIZE}" in reader.fetched[0]
 
     async def test_cursor_advances_between_pages(self):
-        p1 = _payload([_conversation("c1", last_activity=2, participants=[])], "CURSOR2")
+        p1 = _payload(
+            [_conversation("c1", last_activity=2, participants=[])], "CURSOR2"
+        )
         p2 = _payload([_conversation("c2", last_activity=1, participants=[])], None)
         reader = _Reader([p1, p2])
         result = await reader.get_all_conversations(limit=10)
@@ -202,7 +220,9 @@ class TestPaging:
         assert result["next_cursor"] is None
 
     async def test_next_cursor_is_returned_when_stopping_on_limit(self):
-        p1 = _payload([_conversation("c1", last_activity=2, participants=[])], "CURSOR2")
+        p1 = _payload(
+            [_conversation("c1", last_activity=2, participants=[])], "CURSOR2"
+        )
         reader = _Reader([p1])
         result = await reader.get_all_conversations(limit=1)
         assert result["exhausted"] is False
@@ -210,7 +230,9 @@ class TestPaging:
 
     async def test_known_threads_stop_the_walk(self):
         """Incremental sync: a page of entirely-known threads ends the walk."""
-        p1 = _payload([_conversation("c1", last_activity=2, participants=[])], "CURSOR2")
+        p1 = _payload(
+            [_conversation("c1", last_activity=2, participants=[])], "CURSOR2"
+        )
         reader = _Reader([p1])
         result = await reader.get_all_conversations(
             limit=50, stop_at_thread_urns={"c1"}
@@ -291,7 +313,9 @@ class TestRendering:
         and preview, not just names."""
         me_p = f"urn:li:msg_messagingParticipant:urn:li:fsd_profile:{ME}"
         them_p = "urn:li:msg_messagingParticipant:urn:li:fsd_profile:ACoAthem"
-        conv = _conversation("c1", last_activity=1_700_000_000_000, participants=[me_p, them_p])
+        conv = _conversation(
+            "c1", last_activity=1_700_000_000_000, participants=[me_p, them_p]
+        )
         included = [
             _participant(me_p, "Taylor", "Medford"),
             _participant(them_p, "Dana", "Scully"),
@@ -305,3 +329,80 @@ class TestRendering:
         assert "are you around this week" in text
         assert "awaiting your reply" in text
         assert "20" in text, "an ISO timestamp must be present"
+
+
+class TestReviewRegressions:
+    """One test per defect found in review. A fix without a test is a hope."""
+
+    async def test_cursor_with_backslash_is_inserted_literally(self):
+        """re.sub interprets backslash escapes in a REPLACEMENT TEMPLATE, so a
+        cursor containing one would raise re.error or become a backreference.
+        LinkedIn's cursors are opaque base64, so this must be inserted verbatim."""
+        reader = _Reader(
+            [_payload([_conversation("c1", last_activity=1, participants=[])], None)]
+        )
+        nasty = r"ABC\g<0>\1DEF"
+        await reader.get_all_conversations(cursor=nasty)
+        assert f"nextCursor:{nasty}" in reader.fetched[0]
+
+    async def test_repeated_cursor_stops_the_walk(self):
+        """A server handing back a cursor already used would otherwise re-fetch
+        the same page until max_pages, and hand the caller a loop to resume."""
+        page = _payload([_conversation("c1", last_activity=1, participants=[])], "SAME")
+        reader = _Reader([page, page, page, page])
+        result = await reader.get_all_conversations(limit=100, max_pages=10)
+        assert len(reader.fetched) == 2, "must stop once the cursor repeats"
+        assert result["exhausted"] is True
+        assert result["next_cursor"] is None, "must not hand back a looping cursor"
+
+    async def test_positive_control_drops_the_cursor_rather_than_blanking_it(self):
+        """An empty `nextCursor:` is a MALFORMED request. If the control were
+        built that way, its empty response would be misread as a broken
+        instrument and a genuinely empty mailbox would raise."""
+        control = _payload(
+            [_conversation("ctl", last_activity=1, participants=[])], None
+        )
+        reader = _Reader([_payload([], None), control])
+        result = await reader.get_all_conversations()
+        assert result["zero_reason"] == "verified-empty"
+        control_url = reader.fetched[-1]
+        assert "nextCursor:" not in control_url, "control must be cursorless"
+        assert "count:1" in control_url
+
+    @pytest.mark.parametrize(
+        "status, expected",
+        [(401, AuthenticationError), (403, AuthenticationError), (429, RateLimitError)],
+    )
+    async def test_auth_and_rate_limit_keep_their_own_types(self, status, expected):
+        """Exercises the REAL _fetch. Collapsing these into a generic error lets
+        `auto` fall back to the DOM path, which CLICKS rows and marks them read,
+        so a transient failure would cause a write."""
+
+        class _Page:
+            async def evaluate(self, _script, _url):
+                return {"error": f"HTTP {status}", "status": status}
+
+        class _SessionWithPage(_FakeSession):
+            page = _Page()
+
+        # The REAL class, not the scripted _Reader, so _fetch's own error
+        # handling is what runs.
+        reader = VoyagerMessagingReader(session=_SessionWithPage(), navigator=None)
+        with pytest.raises(expected):
+            await reader._fetch(QUERY_URL)
+
+    async def test_generic_http_failure_stays_a_scraper_exception(self):
+        """Only auth and throttling are special-cased; everything else keeps the
+        generic type so `auto` may still fall back."""
+
+        class _Page:
+            async def evaluate(self, _script, _url):
+                return {"error": "HTTP 500", "status": 500}
+
+        class _SessionWithPage(_FakeSession):
+            page = _Page()
+
+        reader = VoyagerMessagingReader(session=_SessionWithPage(), navigator=None)
+        with pytest.raises(LinkedInScraperException) as excinfo:
+            await reader._fetch(QUERY_URL)
+        assert not isinstance(excinfo.value, (AuthenticationError, RateLimitError))

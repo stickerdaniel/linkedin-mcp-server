@@ -37,34 +37,21 @@ those two files plus one new module. Rebase on upstream tags rather than re-patc
 | `voyager` | conversations API. Whole mailbox, paged, clicks nothing. |
 | `auto` | Voyager, falling back to `dom` on any failure. |
 
-## ⚠ Why the deployed default is `dom`, not `auto`
+## The deployed default is `auto`
 
-**The routines parse `get_inbox`'s TEXT block**, and the Voyager renderer does not yet emit
-**per-message timestamps or preview text** — both of which inbox triage reads to decide what is new
-and what a message says. Flipping to `auto` before the renderer carries those would silently degrade
-triage: it would return *more* threads carrying *less* per-thread detail, which is the worse trade
-for the routine that runs every day.
+`auto` prefers Voyager and falls back to the DOM scrape on failure, so a LinkedIn-side change
+degrades instead of breaking. The earlier reason for defaulting to `dom` was that the routines parse
+`get_inbox`'s TEXT block and the Voyager renderer did not emit per-message timestamps or previews.
+**That blocker is gone** — `render_inbox_text` now emits `last_activity_iso`, the other party's
+headline, a `You:` speaker marker and a 200-char preview, so the text block is a **superset** of the
+DOM one rather than a differently-shaped peer.
 
-So: `dom` stays the default for `get_inbox`. Use **`get_all_conversations`** for census work, where
-structure is what matters and the text block is irrelevant.
+**`auto` does not fall back on auth or rate-limit failures**, and that exception matters: the DOM
+path harvests thread ids by *clicking* rows, which marks them read. Falling back on a 401 or 429
+would turn a transient failure into a permanent change to the mailbox, so those propagate.
 
-**Next change that unblocks `auto`:** render `lastActivityAt` as a local timestamp and pull the last
-message body out of the `Message` entities already present in `included`, so the text block is a
-superset of the DOM one rather than a differently-shaped peer.
-
-## Two traps worth keeping
-
-1. **The page-load query silently ignores cursor variables.** Appending `count` or
-   `lastUpdatedBefore` to it returns **HTTP 200 and the identical first page**. A 200 that drops your
-   parameter is indistinguishable from one that honoured it. The cursor-bearing query is a *different
-   persisted queryId*, issued by the Load-more button, and LinkedIn rotates the hash every deploy —
-   so it is **discovered at runtime, never pinned**.
-2. **Do not regex a cursor out of `json.dumps` output.** Python emits `"nextCursor": "..."` with a
-   space LinkedIn's wire format lacks, so the match fails and the walk ends after one page, looking
-   exactly like a mailbox that fit on one page. Walk the metadata structurally.
-
-Also: the sidebar virtualizes and recycles nodes — its row count was observed going **17 → 10 while
-more conversations were loading**. Never terminate a loop on it.
+Use **`get_all_conversations`** for census work, where structure is what matters and the text block
+is irrelevant.
 
 ## What LinkedIn's API will and will not filter (measured 2026-09-16)
 

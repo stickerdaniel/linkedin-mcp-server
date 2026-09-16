@@ -17,6 +17,10 @@ from linkedin_mcp_server.scraping.contracts import (
     FilterValidationError as FilterValidationError,
     rate_limited_section_error as rate_limited_section_error,
 )
+from linkedin_mcp_server.core.exceptions import (
+    AuthenticationError,
+    RateLimitError,
+)
 from linkedin_mcp_server.scraping.conversations import ConversationReader
 from linkedin_mcp_server.scraping.voyager_messaging import VoyagerMessagingReader
 from linkedin_mcp_server.scraping.feed import FeedScraper
@@ -248,6 +252,12 @@ class LinkedInExtractor:
         if backend in {"auto", "voyager"}:
             try:
                 return await self._voyager_inbox(limit)
+            except (AuthenticationError, RateLimitError):
+                # Never fall back on these. The DOM path harvests thread ids by
+                # CLICKING each row, which marks it read -- a write. Doing that
+                # because a request was rejected or throttled turns a transient
+                # failure into a permanent change to the user's mailbox.
+                raise
             except Exception as exc:
                 if backend == "voyager":
                     raise

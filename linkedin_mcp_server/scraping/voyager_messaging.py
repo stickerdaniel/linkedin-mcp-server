@@ -28,7 +28,11 @@ from typing import Any
 
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
-from linkedin_mcp_server.core.exceptions import LinkedInScraperException
+from linkedin_mcp_server.core.exceptions import (
+    AuthenticationError,
+    LinkedInScraperException,
+    RateLimitError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +41,25 @@ MESSAGING_URL = "https://www.linkedin.com/messaging/"
 # Substitutes a cursor into the query's `variables=(...)` blob. The paging
 # query carries `nextCursor:` already, so replacement is enough; there is no
 # need to understand the rest of the (non-JSON, Rest.li) encoding.
-_CURSOR_RE = re.compile(r"nextCursor:[^,)]*")
+_CURSOR_RE = re.compile(r",?nextCursor:[^,)]*")
+
+
+def _set_cursor(url: str, cursor: str) -> str:
+    """Swap the cursor in a query URL.
+
+    Uses a replacement FUNCTION, not a template: `re.sub` interprets backslash
+    escapes in a template string, so a cursor containing a backslash would
+    either raise `re.error` or be silently rewritten as a backreference. The
+    cursor is opaque server-issued text, so it is inserted verbatim.
+    """
+    return _CURSOR_RE.sub(lambda _: f",nextCursor:{cursor}", url, count=1)
+
+
+def _drop_cursor(url: str) -> str:
+    """Remove the cursor variable entirely, yielding a first-page request."""
+    return _CURSOR_RE.sub(lambda _: "", url, count=1)
+
+
 _COUNT_RE = re.compile(r"(?<![A-Za-z])count:[^,)]*")
 _CATEGORY_RE = re.compile(r"(?<![A-Za-z])category:[^,)]*")
 
@@ -167,15 +189,28 @@ class VoyagerMessagingReader:
                         'accept': 'application/vnd.linkedin.normalized+json+2.1',
                     },
                 });
-                if (r.status !== 200) return {error: 'HTTP ' + r.status};
+                if (r.status !== 200) return {error: 'HTTP ' + r.status, status: r.status};
                 return {body: await r.text()};
             }""",
             url,
         )
         if not isinstance(raw, dict) or raw.get("error"):
+            detail = (raw or {}).get("error", "unknown")
+            status = (raw or {}).get("status")
+            # Auth and rate-limit failures keep their own types. Collapsing them
+            # into a generic scraper error would let `get_inbox(backend="auto")`
+            # fall back to the DOM path, which CLICKS rows to harvest thread ids
+            # and marks them read -- a write, triggered by a transient failure.
+            if status in (401, 403):
+                raise AuthenticationError(
+                    f"Voyager conversations request rejected: {detail}"
+                )
+            if status == 429:
+                raise RateLimitError(
+                    f"Voyager conversations request rate limited: {detail}"
+                )
             raise LinkedInScraperException(
-                f"Voyager conversations request failed: "
-                f"{(raw or {}).get('error', 'unknown')}"
+                f"Voyager conversations request failed: {detail}"
             )
         return json.loads(raw["body"])
 
@@ -382,9 +417,14 @@ class VoyagerMessagingReader:
         instrument works and the zero is real. If it does not, the zero is
         about the instrument, not the mailbox.
         """
-        control = _CURSOR_RE.sub("nextCursor:", url)
-        control = _COUNT_RE.sub("count:1", control)
-        control = _CATEGORY_RE.sub("category:PRIMARY_INBOX", control)
+        # Drop the cursor variable outright rather than blanking it. An empty
+        # `nextCursor:` is a MALFORMED request, and a malformed request that
+        # returns nothing would be read here as a broken instrument -- turning
+        # this control into exactly the kind of unvalidated measurement it
+        # exists to prevent.
+        control = _drop_cursor(url)
+        control = _COUNT_RE.sub(lambda _: "count:1", control)
+        control = _CATEGORY_RE.sub(lambda _: "category:PRIMARY_INBOX", control)
         try:
             payload = await self._fetch(control)
         except Exception as exc:  # the control itself could not run
@@ -446,7 +486,7 @@ class VoyagerMessagingReader:
         url = await self._discover_paging_query()
         me = self._me_profile_id(url)
         if cursor:
-            url = _CURSOR_RE.sub(f"nextCursor:{cursor.strip()}", url)
+            url = _set_cursor(url, cursor.strip())
 
         page_size = max(1, min(page_size, MAX_PAGE_SIZE))
         url = _COUNT_RE.sub(f"count:{page_size}", url)
@@ -476,6 +516,9 @@ class VoyagerMessagingReader:
         pages = 0
         exhausted = False
         next_cursor: str | None = None
+        seen_cursors: set[str] = set()
+        if cursor:
+            seen_cursors.add(cursor.strip())
 
         # Filters narrow what is RETURNED, never what is walked: the mailbox is
         # ordered by recency, so the dormant threads a reconnect pass wants sit
@@ -533,7 +576,22 @@ class VoyagerMessagingReader:
                 exhausted = True
                 break
 
-            url = _CURSOR_RE.sub(f"nextCursor:{next_cursor}", url)
+            # A repeated cursor means the server is handing back a page this
+            # walk already requested. Continuing would re-fetch it until
+            # max_pages, and returning it as next_cursor would hand a caller a
+            # loop of their own. Deduplicating rows hides this rather than
+            # stopping it, so the cursor itself is tracked.
+            if next_cursor in seen_cursors:
+                logger.warning(
+                    "Conversations cursor repeated after %d page(s); stopping.",
+                    pages,
+                )
+                next_cursor = None
+                exhausted = True
+                break
+            seen_cursors.add(next_cursor)
+
+            url = _set_cursor(url, next_cursor)
             await self._session.delay(0.4)
 
         logger.info(
