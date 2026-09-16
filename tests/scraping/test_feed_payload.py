@@ -1,5 +1,7 @@
 """Tests for feed permalink recognition across DOM anchors and SDUI payloads."""
 
+from pathlib import Path
+
 from linkedin_mcp_server.scraping.feed_payload import (
     append_permalink_references,
     build_feed_references,
@@ -232,3 +234,42 @@ class TestAppendPermalinkReferences:
         assert len(refs) == 50
         assert refs[0]["url"] == "/feed/update/urn:li:ugcPost:7505583248597512000/"
         assert refs[-1]["url"] == "/feed/update/urn:li:ugcPost:7505583248597512049/"
+
+
+CONTENT_SEARCH_FIXTURE = (
+    Path(__file__).parents[1] / "fixtures" / "scraping" / "content_search_document.html"
+)
+CONTENT_SEARCH_URL = "https://www.linkedin.com/search/results/content/?keywords=sample"
+
+
+class TestContentSearchDocumentFixture:
+    """Guards the live payload shape behind search_posts permalinks.
+
+    The fixture is a sanitized excerpt of a real logged-in content-search
+    document, so recognition and extraction run against the genuine field
+    names and escaping rather than hand-built snippets. If LinkedIn drops
+    postSlugUrl or the permalink URNs from the document, this fails.
+    """
+
+    def _fixture_text(self) -> str:
+        return CONTENT_SEARCH_FIXTURE.read_text(encoding="utf-8")
+
+    def test_the_real_document_content_type_is_recognized(self):
+        assert is_permalink_payload_response(
+            CONTENT_SEARCH_URL, "text/html; charset=utf-8"
+        )
+
+    def test_the_document_carries_slugged_and_urn_permalinks(self):
+        urls = set(permalink_paths_from_payload(self._fixture_text()))
+        assert urls == {
+            "/posts/sample-topic-ugcPost-7214916299250905089-2_2a",
+            "/posts/sample-topic-ugcPost-7424761687905288194-WwYG",
+            "/posts/sample-topic-ugcPost-7481465171073236992-U1pG",
+            "/feed/update/urn:li:activity:7214916299838103554/",
+            "/feed/update/urn:li:activity:7424761688761069570/",
+            "/feed/update/urn:li:activity:7481482393992921088/",
+        }
+
+    def test_no_member_identifiers_survive_in_permalinks(self):
+        urls = permalink_paths_from_payload(self._fixture_text())
+        assert all("member" not in url and "ACoA" not in url for url in urls)
