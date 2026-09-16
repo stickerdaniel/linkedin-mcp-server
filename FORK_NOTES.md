@@ -34,12 +34,12 @@ rebase on upstream tags rather than re-patching; conflicts should confine to tho
 ## What changed
 
 - **`scraping/voyager_messaging.py`** (new) — cursor walk over the conversations API.
-- **`scraping/extractor.py`** — new `get_all_conversations(...)` passthrough. `get_inbox` untouched.
-- **`tools/messaging.py`** — new `get_all_conversations` tool. `get_inbox` untouched.
+- **`scraping/extractor.py`** — new `get_conversations(...)` passthrough. `get_inbox` untouched.
+- **`tools/messaging.py`** — new `get_conversations` tool. `get_inbox` untouched.
 
 ## `get_inbox` is left exactly as upstream wrote it
 
-This fork adds **one tool**, `get_all_conversations`, and **does not change `get_inbox`**.
+This fork adds **one tool**, `get_conversations`, and **does not change `get_inbox`**.
 
 That is deliberate. Upstream declines Voyager on principle, and `get_inbox` is their method; quietly
 swapping its mechanism would mean carrying a behavioural fork of a function they maintain, and every
@@ -55,7 +55,7 @@ So the split is:
 | question | tool |
 |---|---|
 | what is at the top of the inbox right now | `get_inbox` (unchanged, DOM) |
-| which threads are unanswered / who has gone quiet / reconcile against a record | `get_all_conversations` |
+| which threads are unanswered / who has gone quiet / reconcile against a record | `get_conversations` |
 
 ## What LinkedIn's API will and will not filter (measured 2026-09-16)
 
@@ -86,13 +86,24 @@ never self-explanatory. That is why `category` is validated against `KNOWN_CATEG
 control that proved it was passing a category that cannot exist and watching it come back
 looking exactly like a real, empty answer.
 
-### The efficiency answer: walk once, then sync incrementally
+### The efficiency answer: the caller owns the loop
 
-Since the server cannot filter by time, the only real defence is not re-walking. Pass
-`stop_at_thread_urns` (the thread urns already in the ledger): the mailbox is recency-ordered,
-so once a whole page is threads you already know, everything behind it is older and also known,
-and the walk stops. **A daily run then costs one or two pages instead of the whole mailbox**,
-and the long walk is paid once.
+Since the server cannot filter by time, dormant-contact work means paging backwards through
+everything newer. That cost is unavoidable, so the tool does not try to hide it.
+
+`get_conversations` returns **one page of 25 and the cursor for the next**. The caller pages until
+its own job is done, which for a daily run is usually a page or two, once it reaches threads it has
+already recorded. An earlier version took a `limit` and paged internally; every defect review found
+lived in that machinery rather than in the reading, so it is gone.
+
+**Discovery is cached for the session**, which is what makes a caller-driven loop viable. Working
+out which URL to call costs a navigation, a sidebar wait and a click -- tens of seconds before any
+data -- because the `queryId` is a rotating hash that cannot be pinned. Paid once, every later page
+is a single fetch. A stale cache after a LinkedIn redeploy surfaces as a failed fetch rather than as
+wrong data.
+
+`at_end` is measured, never inferred: fewer than 25 rows is the end, exactly 25 is not, and an empty
+page proves neither.
 
 ## Running it
 
@@ -110,4 +121,4 @@ patchright browser is 149, which the server refuses as a downgrade.
 ```bash
 git fetch origin && git rebase origin/main
 ```
-Conflicts should be confined to the two touched files; `voyager_messaging.py` is standalone.
+Conflicts should be confined to those three files; `voyager_messaging.py` is standalone.

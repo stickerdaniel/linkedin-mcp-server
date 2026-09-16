@@ -22,13 +22,21 @@ from linkedin_mcp_server.scraping.voyager_messaging import (
 )
 
 ME = "ACoAAme"
+# CURSORLESS on purpose: this is what `_discover_query` actually returns, since
+# a fresh read must start at page one. A fixture carrying `nextCursor:SEED` was
+# more forgiving than reality and hid a bug where the caller's cursor was
+# silently dropped, serving page one forever.
 QUERY_URL = (
     "https://www.linkedin.com/voyager/api/voyagerMessagingGraphQL/graphql"
     "?queryId=messengerConversations.deadbeef&variables="
     "(query:(predicateUnions:List((conversationCategoryPredicate:"
     "(category:PRIMARY_INBOX)))),count:20,"
-    f"mailboxUrn:urn:li:fsd_profile:{ME},nextCursor:SEED)"
+    f"mailboxUrn:urn:li:fsd_profile:{ME})"
 )
+
+# What the load-more control causes LinkedIn to issue: the same query carrying a
+# cursor that points PAST page one.
+CURSORED_URL = f"{QUERY_URL[:-1]},nextCursor:SEED)"
 
 
 def _conversation(urn: str, *, last_activity: int, participants: list[str]) -> dict:
@@ -394,12 +402,7 @@ class TestDiscovery:
         """Discovery observes the cursor-bearing request the load-more control
         issues, and that cursor points PAST page one. Returning it unchanged
         made every fresh walk silently skip the newest conversations."""
-        reader = self._reader_with_requests(
-            [
-                f"{QUERY_URL.split(',nextCursor')[0]})",
-                QUERY_URL,
-            ]
-        )
+        reader = self._reader_with_requests([QUERY_URL, CURSORED_URL])
         url, state = await reader._discover_query()
         assert state == "cursored"
         assert "nextCursor" not in url, "a fresh walk must not inherit a cursor"
@@ -407,8 +410,7 @@ class TestDiscovery:
     async def test_a_single_page_mailbox_is_not_an_error(self):
         """With one page there is no load-more control and no cursor-bearing
         request ever fires. Requiring one made a valid mailbox raise."""
-        page_load = f"{QUERY_URL.split(',nextCursor')[0]})"
-        reader = self._reader_with_requests([page_load])
+        reader = self._reader_with_requests([QUERY_URL])
         url, state = await reader._discover_query()
         assert state == "single-page"
         assert "nextCursor" not in url
@@ -473,3 +475,28 @@ class TestCursorRepeat:
         reader = _Reader([_payload(_rows(PAGE_SIZE), "NEXT")])
         result = await reader.get_conversations(cursor="PREV")
         assert result["next_cursor"] == "NEXT"
+
+
+class TestCursorActuallyReachesTheQuery:
+    """The fixture used to carry a cursor, so `_set_cursor` always had one to
+    replace. Against the real cursorless discovery url it replaced nothing and
+    silently dropped the caller's cursor -- every 'next page' returned page one."""
+
+    async def test_a_supplied_cursor_reaches_the_request(self):
+        reader = _Reader([_payload(_rows(PAGE_SIZE), "N2")])
+        await reader.get_conversations(cursor="PAGE2")
+        assert "nextCursor:PAGE2" in reader.fetched[0], reader.fetched[0]
+
+    async def test_a_first_page_read_carries_no_cursor(self):
+        reader = _Reader([_payload(_rows(PAGE_SIZE), "N1")])
+        await reader.get_conversations()
+        assert "nextCursor" not in reader.fetched[0], reader.fetched[0]
+
+    async def test_successive_pages_each_carry_their_own_cursor(self):
+        reader = _Reader([_payload(_rows(PAGE_SIZE), "N2")])
+        await reader.get_conversations()
+        await reader.get_conversations(cursor="N2")
+        await reader.get_conversations(cursor="N3")
+        assert "nextCursor" not in reader.fetched[0]
+        assert "nextCursor:N2" in reader.fetched[1]
+        assert "nextCursor:N3" in reader.fetched[2]

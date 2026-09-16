@@ -58,14 +58,32 @@ _CURSOR_RE = re.compile(r",?nextCursor:[^,)]*")
 
 
 def _set_cursor(url: str, cursor: str) -> str:
-    """Swap the cursor in a query URL.
+    """Put a cursor into a query URL, whether or not one is already there.
 
-    Uses a replacement FUNCTION, not a template: `re.sub` interprets backslash
-    escapes in a template string, so a cursor containing a backslash would
-    either raise `re.error` or be silently rewritten as a backreference. The
-    cursor is opaque server-issued text, so it is inserted verbatim.
+    Replacing is not enough. Discovery hands back a CURSORLESS url so that a
+    fresh read starts at page one, so the common case is inserting into a url
+    with no cursor to swap -- and a substitution that finds nothing silently
+    does nothing, which would drop the cursor and serve page one forever.
+
+    Uses a replacement FUNCTION rather than a template: `re.sub` interprets
+    backslash escapes in a template string, so an opaque server-issued cursor
+    containing one would either raise `re.error` or be rewritten as a
+    backreference.
     """
-    return _CURSOR_RE.sub(lambda _: f",nextCursor:{cursor}", url, count=1)
+    if _CURSOR_RE.search(url):
+        return _CURSOR_RE.sub(lambda _: f",nextCursor:{cursor}", url, count=1)
+    # No cursor to replace: append inside the variables=(...) block. A
+    # replacement FUNCTION here too -- this branch is new, and it does not
+    # inherit the template-escaping guarantee from the branch above.
+    replaced, count = re.subn(
+        r"\)(?!.*\))", lambda _: f",nextCursor:{cursor})", url, count=1
+    )
+    if count == 0:
+        raise LinkedInScraperException(
+            f"Could not place a cursor into the conversations query: {url!r} "
+            "has no variables block to append to."
+        )
+    return replaced
 
 
 def _drop_cursor(url: str) -> str:
