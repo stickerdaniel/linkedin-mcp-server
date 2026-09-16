@@ -51,6 +51,12 @@ def register_messaging_tools(
 
         Returns:
             Dict with url, sections (inbox -> raw text), and optional references.
+
+        Note: this reads the rendered sidebar, so it sees only what LinkedIn has
+        painted and it recovers thread ids by click-visiting rows, which marks
+        them read. For a whole-mailbox question -- which threads are unanswered,
+        who has gone quiet, reconciling against an external record -- use
+        get_conversations instead.
         """
         try:
             extractor = extractor or await get_ready_extractor(
@@ -75,6 +81,94 @@ def register_messaging_tools(
                 raise_tool_error(relogin_exc, "get_inbox")
         except Exception as e:
             raise_tool_error(e, "get_inbox")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Get Conversations",
+        # Genuinely read-only, unlike get_inbox: this reads LinkedIn's own
+        # conversations API and never clicks a row, so no thread is marked read.
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"messaging", "scraping"},
+        exclude_args=["extractor"],
+    )
+    async def get_conversations(
+        ctx: Context,
+        cursor: str | None = None,
+        category: str | None = None,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        Read ONE page of conversations (up to 25) from LinkedIn's messaging API.
+
+        Use this, not get_inbox, for anything about the mailbox as a whole:
+        which threads are unanswered, who has gone quiet, reconciling against an
+        external record. get_inbox returns only what LinkedIn painted into the
+        sidebar and click-visits each row to recover its thread id, which marks
+        those rows read. This reads the API the web client itself calls, so it
+        reaches any page of the mailbox and alters nothing.
+
+        To read more, call again with `cursor` set to the `next_cursor` you were
+        given. Paging is recency-first, so page one is the most recent
+        conversations. Reconnect work ("who have I fallen out of touch with")
+        means paging backwards until `last_activity_iso` is old enough; that is
+        deliberately the caller's loop, since only the caller knows when to stop.
+
+        Each conversation carries thread_urn, participants, last_activity_iso,
+        read, unread_count, last_message_text and awaiting_my_reply, so
+        "have I replied to everyone" is a field rather than an inference.
+
+        Args:
+            ctx: FastMCP context for progress reporting
+            cursor: next_cursor from a previous call. Omit for the first page.
+            category: SERVER-SIDE filter, the only one LinkedIn honours. One of
+                INBOX, PRIMARY_INBOX, ARCHIVE, INMAIL, STARRED, SPAM. These
+                reach any point in time in a single call. An unknown value is
+                rejected rather than passed through, because the API answers one
+                with an empty page that would read as "you have none".
+
+        Returns:
+            Dict with url and sections (the standard scraping-tool shape), plus
+            conversations, count, page_size, next_cursor, at_end and
+            zero_reason. `conversations` is the structured answer; `sections`
+            carries the same page as readable text for generic consumers.
+
+            **at_end is measured, not inferred**: True means the server returned
+            FEWER than page_size, so there is no more. False means a full page,
+            so there is more. **None means an empty page, which proves nothing
+            either way and must never be read as the end.**
+
+            zero_reason explains an empty page: "verified-empty" (a positive
+            control confirmed the mailbox is empty) or "after-cursor" (the page
+            after the last one). An empty page that cannot be explained raises
+            rather than returning, so this never answers "no conversations" on
+            the strength of a silent failure.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="get_conversations"
+            )
+            logger.info("Reading conversations page (cursor=%s)", bool(cursor))
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Reading conversations"
+            )
+
+            result = await extractor.get_conversations(
+                cursor=cursor,
+                category=category,
+            )
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_conversations")
+        except Exception as e:
+            raise_tool_error(e, "get_conversations")  # NoReturn
 
     @mcp.tool(
         timeout=tool_timeout,

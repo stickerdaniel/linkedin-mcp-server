@@ -5101,7 +5101,11 @@ class TestRealOwner:
             # in a `register_*` call.
             assert "get_person_profile" in names
             assert "close_session" in names
-            assert len(names) == 19, sorted(names)
+            # This fork adds the Voyager conversations walk, so the set is one
+            # larger than upstream's. Named explicitly: a bare count bump would
+            # pass just as well if some other tool had silently gone missing.
+            assert "get_conversations" in names
+            assert len(names) == 20, sorted(names)
         finally:
             _stop(result.get("pid"))
 

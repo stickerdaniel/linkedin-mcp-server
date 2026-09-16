@@ -1,0 +1,193 @@
+{
+  "call": {
+    "arguments": {},
+    "method": "get_conversations"
+  },
+  "events": [
+    {
+      "call": "get_conversations",
+      "callback_id": "callback-1",
+      "event": "request",
+      "kind": "listener.add",
+      "section": "conversation"
+    },
+    {
+      "call": "get_conversations",
+      "callback_id": "callback-2",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "section": "conversation"
+    },
+    {
+      "call": "get_conversations",
+      "extra": {
+        "target_url": "https://www.linkedin.com/messaging/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "section": "conversation"
+    },
+    {
+      "call": "get_conversations",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/messaging/",
+      "requested_url": "https://www.linkedin.com/messaging/",
+      "section": "conversation",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "get_conversations",
+      "description": "goto https://www.linkedin.com/messaging/",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "conversation"
+    },
+    {
+      "call": "get_conversations",
+      "extra": {
+        "target_url": "https://www.linkedin.com/messaging/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "section": "conversation"
+    },
+    {
+      "call": "get_conversations",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "section": "conversation"
+    },
+    {
+      "call": "get_conversations",
+      "callback_id": "callback-2",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "section": "conversation"
+    },
+    {
+      "call": "get_conversations",
+      "kind": "boundary.rate_limit",
+      "section": "conversation"
+    },
+    {
+      "call": "get_conversations",
+      "kind": "wait_for_selector",
+      "operation": "conversation_rows",
+      "section": "conversation",
+      "selector": "main li label[aria-label]",
+      "state": "attached",
+      "timeout_ms": 15000
+    },
+    {
+      "call": "get_conversations",
+      "kind": "evaluate",
+      "operation": "scroll_main_region",
+      "program_digest": "e4da68152611",
+      "section": "conversation"
+    },
+    {
+      "call": "get_conversations",
+      "exact": false,
+      "kind": "locator.by_role",
+      "locator": "load-more",
+      "name": "Load more conversations",
+      "role": "button",
+      "section": "conversation"
+    },
+    {
+      "call": "get_conversations",
+      "kind": "locator.count",
+      "locator": "load-more",
+      "section": "conversation"
+    },
+    {
+      "call": "get_conversations",
+      "kind": "locator.derive",
+      "locator": "load-more-first",
+      "operation": "first",
+      "parent": "load-more",
+      "section": "conversation"
+    },
+    {
+      "call": "get_conversations",
+      "kind": "locator.click",
+      "locator": "load-more-first",
+      "section": "conversation",
+      "timeout_ms": 5000
+    },
+    {
+      "call": "get_conversations",
+      "count": 1,
+      "event": "request",
+      "kind": "listener.emit",
+      "section": "conversation"
+    },
+    {
+      "call": "get_conversations",
+      "count": 1,
+      "event": "request",
+      "kind": "listener.emit",
+      "section": "conversation"
+    },
+    {
+      "call": "get_conversations",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 2.5,
+      "section": "conversation"
+    },
+    {
+      "call": "get_conversations",
+      "callback_id": "callback-1",
+      "event": "request",
+      "kind": "listener.remove",
+      "section": "conversation"
+    },
+    {
+      "arg": "https://www.linkedin.com/voyager/api/voyagerMessagingGraphQL/graphql?queryId=messengerConversations.deadbeef&variables=(query:(predicateUnions:List((conversationCategoryPredicate:(category:PRIMARY_INBOX)))),count:25,mailboxUrn:urn:li:fsd_profile:ACoAAme)",
+      "call": "get_conversations",
+      "kind": "evaluate",
+      "operation": "voyager_conversations_fetch",
+      "program_digest": "9d8f473bd12b",
+      "section": "conversation"
+    }
+  ],
+  "result": {
+    "at_end": true,
+    "conversations": [
+      {
+        "awaiting_my_reply": null,
+        "categories": [
+          "INBOX"
+        ],
+        "group_chat": null,
+        "headlines": [],
+        "last_activity_at": 1700000000000,
+        "last_activity_iso": "2023-11-14T22:13+00:00",
+        "last_message_at": "2023-11-14T22:13+00:00",
+        "last_message_from_me": null,
+        "last_message_text": "",
+        "last_read_at": null,
+        "participants": [],
+        "read": null,
+        "thread_url": "/messaging/thread/2-abc/",
+        "thread_urn": "urn:li:msg_conversation:1",
+        "title": null,
+        "unread_count": 0
+      }
+    ],
+    "count": 1,
+    "next_cursor": null,
+    "page_size": 25,
+    "sections": {
+      "conversations": "Conversations\nUnknown - 2023-11-14T22:13+00:00"
+    },
+    "url": "https://www.linkedin.com/messaging/",
+    "zero_reason": null
+  },
+  "scenario": "get_conversations__baseline",
+  "schema_version": 1
+}

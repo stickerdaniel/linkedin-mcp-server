@@ -307,6 +307,7 @@ class ScriptedPage:
         self.scripts: dict[str, Script] = {}
         self.locator_ids: dict[tuple[str | None, str], str] = {}
         self.derived_ids: dict[tuple[str, str], str] = {}
+        self.role_ids: dict[tuple[str, str], str] = {}
         self.listeners: dict[str, list[Callable[..., Any]]] = defaultdict(list)
         self.goto_landings: deque[str] = deque()
         self.handles: list[ScriptedHandle] = []
@@ -336,6 +337,35 @@ class ScriptedPage:
                 f"{self.recorder.scenario}: unknown scripted operation {operation!r}"
             )
         return script.take(operation, self.recorder.scenario, default)
+
+    def declare_role(self, role: str, name: str, semantic_id: str) -> ScriptedPage:
+        self.role_ids[(role, name)] = semantic_id
+        return self
+
+    def get_by_role(
+        self, role: str, *, name: Any = None, exact: bool | None = None
+    ) -> ScriptedLocator:
+        """Role-and-name lookup, declared ahead of time like every locator here.
+
+        Kept as strict as `_locator_for`: an undeclared role/name pair is an
+        error rather than an empty match, so a scenario cannot silently drift
+        away from the selector the code actually asks for.
+        """
+        key = (role, name if isinstance(name, str) else getattr(name, "pattern", name))
+        semantic_id = self.role_ids.get(key)
+        if semantic_id is None:
+            raise AssertionError(
+                f"{self.recorder.scenario}: undeclared role locator "
+                f"role={role!r} name={key[1]!r}"
+            )
+        self.recorder.record(
+            "locator.by_role",
+            locator=semantic_id,
+            role=role,
+            name=key[1],
+            exact=bool(exact),
+        )
+        return ScriptedLocator(self, semantic_id)
 
     def _locator_for(self, parent: str | None, selector: str) -> ScriptedLocator:
         semantic_id = self.locator_ids.get((parent, selector))
@@ -595,6 +625,7 @@ def semantic_program_id(program: str) -> str:
 
     compact = " ".join(program.split())
     checks = (
+        ("'csrf-token': m[1]", "voyager_conversations_fetch"),
         ("performance.timeOrigin", "document_origin"),
         ("MAX_HEADING_CONTAINERS", "root_content"),
         ("SIDEBAR_SECTIONS", "sidebar_profiles"),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 
 from patchright.async_api import Page
@@ -17,6 +18,7 @@ from linkedin_mcp_server.scraping.contracts import (
     rate_limited_section_error as rate_limited_section_error,
 )
 from linkedin_mcp_server.scraping.conversations import ConversationReader
+from linkedin_mcp_server.scraping.voyager_messaging import VoyagerMessagingReader
 from linkedin_mcp_server.scraping.feed import FeedScraper
 from linkedin_mcp_server.scraping.job_pages import JobPageReader
 from linkedin_mcp_server.scraping.jobs import JobScraper
@@ -34,6 +36,9 @@ from linkedin_mcp_server.scraping.text import (
 
 if TYPE_CHECKING:
     from linkedin_mcp_server.callbacks import ProgressCallback
+
+
+logger = logging.getLogger(__name__)
 
 
 class LinkedInExtractor:
@@ -68,6 +73,7 @@ class LinkedInExtractor:
         self._conversations = ConversationReader(
             session, navigator, content, profile_page
         )
+        self._voyager_messaging = VoyagerMessagingReader(session, navigator)
 
     async def get_page_text(self) -> str:
         """Extract innerText from the main content area of the current page."""
@@ -223,6 +229,17 @@ class LinkedInExtractor:
     async def get_inbox(self, limit: int = 20) -> dict[str, Any]:
         """List recent conversations from the messaging inbox."""
         return await self._conversations.get_inbox(limit)
+
+    async def get_conversations(
+        self,
+        cursor: str | None = None,
+        category: str | None = None,
+    ) -> dict[str, Any]:
+        """Read one page of conversations from the messaging API."""
+        return await self._voyager_messaging.get_conversations(
+            cursor=cursor,
+            category=category,
+        )
 
     async def get_conversation(
         self,

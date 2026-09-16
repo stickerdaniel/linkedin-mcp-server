@@ -36,6 +36,10 @@
         "coroutine": true,
         "signature": "(self, linkedin_username: 'str | None' = None, thread_id: 'str | None' = None, index: 'int' = 0) -> 'dict[str, Any]'"
       },
+      "get_conversations": {
+        "coroutine": true,
+        "signature": "(self, cursor: 'str | None' = None, category: 'str | None' = None) -> 'dict[str, Any]'"
+      },
       "get_inbox": {
         "coroutine": true,
         "signature": "(self, limit: 'int' = 20) -> 'dict[str, Any]'"
@@ -99,6 +103,7 @@
       "extract_page",
       "get_company_employees",
       "get_conversation",
+      "get_conversations",
       "get_inbox",
       "get_my_profile",
       "get_saved_jobs",
@@ -270,6 +275,42 @@
               ],
               "default": null,
               "description": "LinkedIn messaging thread ID"
+            }
+          },
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "get_conversations": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "category": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "SERVER-SIDE filter, the only one LinkedIn honours. One of\nINBOX, PRIMARY_INBOX, ARCHIVE, INMAIL, STARRED, SPAM. These\nreach any point in time in a single call. An unknown value is\nrejected rather than passed through, because the API answers one\nwith an empty page that would read as \"you have none\"."
+            },
+            "cursor": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "next_cursor from a previous call. Omit for the first page."
             }
           },
           "type": "object"
