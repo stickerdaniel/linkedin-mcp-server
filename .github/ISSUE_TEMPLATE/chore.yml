@@ -3,24 +3,53 @@ description: Request maintenance, cleanup, or internal tooling work that is not 
 title: "[CHORE] "
 labels: ["chore"]
 body:
-  - type: textarea
-    id: chore-description
+  - type: markdown
     attributes:
-      label: Chore Description
-      description: What should be maintained or cleaned up.
+      value: |
+        Search open and closed issues first. Add your evidence to a matching issue. Otherwise, fill this packet. Keep excerpts short and review attachments before posting.
+  - type: textarea
+    id: packet-summary
+    attributes:
+      label: "Packet Summary"
+      description: "Give five short lines: repository area; locale or not applicable; the maintenance problem and why it matters; related issue numbers; your verdict after checking the current setup."
+      placeholder: |
+        Repository area:
+        Locale:
+        Maintenance problem and why it matters:
+        Related issues:
+        Verdict:
     validations:
       required: true
   - type: textarea
-    id: motivation
+    id: related-issues
     attributes:
-      label: Motivation
-      description: Why this maintenance work is worthwhile.
+      label: "Related Issues"
+      description: "List the existing tools or documented alternatives you checked. Give your open and closed issue searches, link the closest results, and explain the match or difference in one sentence. If no result matches, include the searches that found none."
+      placeholder: |
+        Checked tools:
+        Open and closed searches:
+        Candidate issues:
+        Match or difference:
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: "Evidence"
+      description: "Name the affected files or commands and show the current problem. Include the relevant output or source reference. Explain why the existing setup does not cover this maintenance need."
+    validations:
+      required: true
+  - type: textarea
+    id: steps-to-reproduce
+    attributes:
+      label: "Reproduction"
+      description: "Give one command, navigation path, or reading step that exposes the problem. State when the finding comes from source review rather than a run."
     validations:
       required: true
   - type: textarea
     id: suggested-approach
     attributes:
-      label: Suggested Approach
-      description: How you would approach it. Leave blank if unsure.
+      label: "Suggested Change"
+      description: "Describe the change you propose. Keep untested implementation ideas separate from the evidence."
     validations:
       required: false
