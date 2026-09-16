@@ -28,6 +28,10 @@
         "coroutine": true,
         "signature": "(self, url: 'str', section_name: 'str', max_scrolls: 'int | None' = None) -> 'ExtractedSection'"
       },
+      "get_all_conversations": {
+        "coroutine": true,
+        "signature": "(self, limit: 'int' = 200, max_pages: 'int' = 60, cursor: 'str | None' = None, quiet_for_days: 'int | None' = None, awaiting_reply_only: 'bool' = False, category: 'str | None' = None, page_size: 'int' = 25, known_thread_urns: 'list[str] | None' = None) -> 'dict[str, Any]'"
+      },
       "get_company_employees": {
         "coroutine": true,
         "signature": "(self, company_name: 'str', keywords: 'str | None' = None) -> 'dict[str, Any]'"
@@ -97,6 +101,7 @@
       "connect_with_person",
       "extract_feed",
       "extract_page",
+      "get_all_conversations",
       "get_company_employees",
       "get_conversation",
       "get_inbox",
