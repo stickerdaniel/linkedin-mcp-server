@@ -628,6 +628,7 @@ def semantic_program_id(program: str) -> str:
         ("minimumLength", "main_text_minimum"),
         ('a[href*="/in/"]', "company_people_ready"),
         ("text.startsWith('Load more')", "profile_details_ready"),
+        ("lines.includes(heading)", "job_description_ready"),
         ("premium/", "premium_dialog_text"),
         ('main a[href*="/in/"]', "sidebar_expanded_profiles"),
     )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import json
 import re
 
 
@@ -48,6 +49,40 @@ _DETAIL_CAPTURE_TEXT: dict[str, DetailCaptureTextTable] = {
 # capture owner receives this exact entry. Unsupported locales are deliberately
 # not inferred from language prefixes or detected from page text.
 DETAIL_CAPTURE_EN_US = _DETAIL_CAPTURE_TEXT["en-US"]
+
+
+@dataclass(frozen=True)
+class JobPostingTextTable:
+    """Visible-text policy for knowing a job posting's description has loaded."""
+
+    description_headings: tuple[str, ...]
+
+    def readiness_expression(self) -> str:
+        """Build a predicate that holds once a description heading is a line.
+
+        A whole line and not a substring, so the same words quoted mid-sentence
+        elsewhere on the page do not pass for the panel.
+        """
+        headings = json.dumps(list(self.description_headings), ensure_ascii=False)
+        return (
+            "() => {\n"
+            "    const main = document.querySelector('main');\n"
+            "    if (!main) return false;\n"
+            "    const lines = main.innerText.split('\\n').map((line) => line.trim());\n"
+            f"    return {headings}.some((heading) => lines.includes(heading));\n"
+            "}"
+        )
+
+
+_JOB_POSTING_TEXT: dict[str, JobPostingTextTable] = {
+    "en-US": JobPostingTextTable(description_headings=("About the job",)),
+}
+
+# Same locale contract as `DETAIL_CAPTURE_EN_US`: the context is forced to
+# en-US, so only this entry is ever used. A posting rendered in another
+# language never matches: it spends the full timeout and then extracts what
+# loaded, keeping the race the wait exists to close.
+JOB_POSTING_EN_US = _JOB_POSTING_TEXT["en-US"]
 
 # Patterns that mark the start of LinkedIn page chrome (sidebar/footer).
 # Everything from the earliest match onwards is stripped.
