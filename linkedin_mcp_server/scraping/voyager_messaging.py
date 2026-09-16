@@ -25,6 +25,8 @@ import logging
 import re
 from typing import Any
 
+from patchright.async_api import TimeoutError as PlaywrightTimeoutError
+
 from linkedin_mcp_server.core.exceptions import LinkedInScraperException
 
 logger = logging.getLogger(__name__)
@@ -77,10 +79,21 @@ class VoyagerMessagingReader:
             await self._navigator._navigate_to_page(MESSAGING_URL)
             await self._session.check_rate_limit()
 
-            # The control only mounts once the list bottom is reached.
-            for _ in range(3):
+            # Wait for the sidebar to mount before looking for the control.
+            # Ember hydrates the conversation list seconds after the document
+            # is ready, and an absent button means "not rendered yet" far more
+            # often than "no more conversations".
+            try:
+                await page.wait_for_selector(
+                    "main li label[aria-label]", state="attached", timeout=15000
+                )
+            except PlaywrightTimeoutError:
+                logger.debug("conversation sidebar did not mount within 15s")
+
+            for _ in range(6):
                 if seen:
                     break
+                # The control only mounts once the list bottom is reached.
                 await page.evaluate(
                     """() => {
                         const main = document.querySelector('main');
@@ -97,9 +110,14 @@ class VoyagerMessagingReader:
                     "button", name=re.compile("load more conversation", re.I)
                 )
                 if not await button.count():
+                    # Not necessarily exhausted -- give it another beat.
+                    await self._session.delay(1.5)
+                    continue
+                try:
+                    await button.first.click(timeout=5000)
+                except PlaywrightTimeoutError:
                     break
-                await button.first.click(timeout=5000)
-                await self._session.delay(2.0)
+                await self._session.delay(2.5)
         finally:
             page.remove_listener("request", _capture)
 
@@ -222,6 +240,31 @@ class VoyagerMessagingReader:
                 lines.append(f"    {headlines[0]}")
         return "\n".join(lines)
 
+    @staticmethod
+    def _next_cursor(payload: dict[str, Any]) -> str | None:
+        """Pull the paging cursor out of the query result's metadata.
+
+        Walked structurally rather than matched against re-serialized JSON.
+        The query key varies by mailbox view
+        (``messengerConversationsByCategoryQuery`` vs a sync-token variant), so
+        the shape is searched for instead of named; and a regex over
+        ``json.dumps`` output is brittle in a way that bites silently here,
+        since Python emits ``"nextCursor": "..."`` with a space that LinkedIn's
+        own wire format does not have. A missed cursor does not raise, it just
+        ends the walk one page in, which is indistinguishable from an inbox
+        that really did fit on one page.
+        """
+        inner = (payload.get("data") or {}).get("data") or {}
+        for value in inner.values():
+            if not isinstance(value, dict):
+                continue
+            metadata = value.get("metadata")
+            if isinstance(metadata, dict):
+                cursor = metadata.get("nextCursor")
+                if isinstance(cursor, str) and cursor:
+                    return cursor
+        return None
+
     async def get_all_conversations(
         self, limit: int = 200, max_pages: int = 60
     ) -> dict[str, Any]:
@@ -249,12 +292,7 @@ class VoyagerMessagingReader:
                 if urn and urn not in collected:
                     collected[urn] = self._normalize(row, people)
 
-            cursor = None
-            match = re.search(
-                r'"nextCursor":"([^"]+)"', json.dumps(payload.get("data") or {})
-            )
-            if match:
-                cursor = match.group(1)
+            cursor = self._next_cursor(payload)
 
             if not rows or not cursor:
                 exhausted = True
