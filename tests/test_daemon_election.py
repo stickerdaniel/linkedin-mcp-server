@@ -5104,7 +5104,7 @@ class TestRealOwner:
             # This fork adds the Voyager conversations walk, so the set is one
             # larger than upstream's. Named explicitly: a bare count bump would
             # pass just as well if some other tool had silently gone missing.
-            assert "get_all_conversations" in names
+            assert "get_conversations" in names
             assert len(names) == 20, sorted(names)
         finally:
             _stop(result.get("pid"))

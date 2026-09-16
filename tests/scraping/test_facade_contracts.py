@@ -45,7 +45,7 @@ TOOL_DELEGATES = {
     "get_company_employees": "get_company_employees",
     "get_company_posts": "extract_page",
     "get_company_profile": "scrape_company",
-    "get_all_conversations": "get_all_conversations",
+    "get_conversations": "get_conversations",
     "get_conversation": "get_conversation",
     "get_feed": "extract_feed",
     "get_inbox": "get_inbox",

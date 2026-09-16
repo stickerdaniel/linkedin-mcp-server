@@ -950,8 +950,8 @@ async def _sidebar_scenario() -> dict[str, Any]:
     )
 
 
-async def _all_conversations_scenario() -> dict[str, Any]:
-    """Record what `get_all_conversations` does to the page.
+async def _conversations_page_scenario() -> dict[str, Any]:
+    """Record what `get_conversations` does to the page.
 
     The point of the trace is the side-effect profile, not the payload: this
     tool's whole claim is that it reads the mailbox WITHOUT clicking
@@ -959,7 +959,7 @@ async def _all_conversations_scenario() -> dict[str, Any]:
     below are that claim in machine-checkable form. One click is recorded, on
     the paging control, and no conversation row is ever touched.
     """
-    name = "get_all_conversations__baseline"
+    name = "get_conversations__baseline"
     recorder = TraceRecorder(name, _COMMON_ALLOWED)
     clock = FakeClock(recorder)
     page = _page(recorder)
@@ -1022,12 +1022,12 @@ async def _all_conversations_scenario() -> dict[str, Any]:
 
     extractor = _extractor(page)
     async with boundaries(recorder, clock):
-        with recorder.context("get_all_conversations", "conversation"):
-            arguments = {"limit": 10}
-            result = await extractor.get_all_conversations(limit=10)
+        with recorder.context("get_conversations", "conversation"):
+            arguments = {}
+            result = await extractor.get_conversations()
     page.assert_clean()
     return recorder.trace(
-        {"method": "get_all_conversations", "arguments": arguments},
+        {"method": "get_conversations", "arguments": arguments},
         result,
     )
 
@@ -1109,7 +1109,7 @@ async def _facade_contract_trace() -> dict[str, Any]:
 
 TOOL_FACADE_METHODS = {
     "connect_with_person",
-    "get_all_conversations",
+    "get_conversations",
     "extract_feed",
     "extract_page",
     "get_company_employees",
@@ -1201,7 +1201,7 @@ async def build_policy_traces() -> dict[str, dict[str, Any]]:
         "search-posts.json": await _single_capture_facade_scenario("search_posts"),
         "inbox.json": await _conversation_scenario("get_inbox"),
         "conversation.json": await _conversation_scenario("get_conversation"),
-        "all-conversations.json": await _all_conversations_scenario(),
+        "conversations-page.json": await _conversations_page_scenario(),
         "search-conversations.json": await _conversation_scenario(
             "search_conversations"
         ),

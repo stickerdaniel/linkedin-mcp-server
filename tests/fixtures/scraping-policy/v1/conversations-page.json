@@ -1,27 +1,25 @@
 {
   "call": {
-    "arguments": {
-      "limit": 10
-    },
-    "method": "get_all_conversations"
+    "arguments": {},
+    "method": "get_conversations"
   },
   "events": [
     {
-      "call": "get_all_conversations",
+      "call": "get_conversations",
       "callback_id": "callback-1",
       "event": "request",
       "kind": "listener.add",
       "section": "conversation"
     },
     {
-      "call": "get_all_conversations",
+      "call": "get_conversations",
       "callback_id": "callback-2",
       "event": "framenavigated",
       "kind": "listener.add",
       "section": "conversation"
     },
     {
-      "call": "get_all_conversations",
+      "call": "get_conversations",
       "extra": {
         "target_url": "https://www.linkedin.com/messaging/",
         "wait_until": "domcontentloaded"
@@ -31,7 +29,7 @@
       "section": "conversation"
     },
     {
-      "call": "get_all_conversations",
+      "call": "get_conversations",
       "kind": "navigate",
       "landed_url": "https://www.linkedin.com/messaging/",
       "requested_url": "https://www.linkedin.com/messaging/",
@@ -40,14 +38,14 @@
       "wait_until": "domcontentloaded"
     },
     {
-      "call": "get_all_conversations",
+      "call": "get_conversations",
       "description": "goto https://www.linkedin.com/messaging/",
       "kind": "boundary.stabilize",
       "result": null,
       "section": "conversation"
     },
     {
-      "call": "get_all_conversations",
+      "call": "get_conversations",
       "extra": {
         "target_url": "https://www.linkedin.com/messaging/",
         "wait_until": "domcontentloaded"
@@ -57,25 +55,25 @@
       "section": "conversation"
     },
     {
-      "call": "get_all_conversations",
+      "call": "get_conversations",
       "kind": "boundary.auth_quick",
       "result": null,
       "section": "conversation"
     },
     {
-      "call": "get_all_conversations",
+      "call": "get_conversations",
       "callback_id": "callback-2",
       "event": "framenavigated",
       "kind": "listener.remove",
       "section": "conversation"
     },
     {
-      "call": "get_all_conversations",
+      "call": "get_conversations",
       "kind": "boundary.rate_limit",
       "section": "conversation"
     },
     {
-      "call": "get_all_conversations",
+      "call": "get_conversations",
       "kind": "wait_for_selector",
       "operation": "conversation_rows",
       "section": "conversation",
@@ -84,14 +82,14 @@
       "timeout_ms": 15000
     },
     {
-      "call": "get_all_conversations",
+      "call": "get_conversations",
       "kind": "evaluate",
       "operation": "scroll_main_region",
       "program_digest": "e4da68152611",
       "section": "conversation"
     },
     {
-      "call": "get_all_conversations",
+      "call": "get_conversations",
       "exact": false,
       "kind": "locator.by_role",
       "locator": "load-more",
@@ -100,13 +98,13 @@
       "section": "conversation"
     },
     {
-      "call": "get_all_conversations",
+      "call": "get_conversations",
       "kind": "locator.count",
       "locator": "load-more",
       "section": "conversation"
     },
     {
-      "call": "get_all_conversations",
+      "call": "get_conversations",
       "kind": "locator.derive",
       "locator": "load-more-first",
       "operation": "first",
@@ -114,43 +112,43 @@
       "section": "conversation"
     },
     {
-      "call": "get_all_conversations",
+      "call": "get_conversations",
       "kind": "locator.click",
       "locator": "load-more-first",
       "section": "conversation",
       "timeout_ms": 5000
     },
     {
-      "call": "get_all_conversations",
+      "call": "get_conversations",
       "count": 1,
       "event": "request",
       "kind": "listener.emit",
       "section": "conversation"
     },
     {
-      "call": "get_all_conversations",
+      "call": "get_conversations",
       "count": 1,
       "event": "request",
       "kind": "listener.emit",
       "section": "conversation"
     },
     {
-      "call": "get_all_conversations",
+      "call": "get_conversations",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 2.5,
       "section": "conversation"
     },
     {
-      "call": "get_all_conversations",
+      "call": "get_conversations",
       "callback_id": "callback-1",
       "event": "request",
       "kind": "listener.remove",
       "section": "conversation"
     },
     {
-      "arg": "https://www.linkedin.com/voyager/api/voyagerMessagingGraphQL/graphql?queryId=messengerConversations.deadbeef&variables=(query:(predicateUnions:List((conversationCategoryPredicate:(category:PRIMARY_INBOX)))),count:10,mailboxUrn:urn:li:fsd_profile:ACoAAme)",
-      "call": "get_all_conversations",
+      "arg": "https://www.linkedin.com/voyager/api/voyagerMessagingGraphQL/graphql?queryId=messengerConversations.deadbeef&variables=(query:(predicateUnions:List((conversationCategoryPredicate:(category:PRIMARY_INBOX)))),count:25,mailboxUrn:urn:li:fsd_profile:ACoAAme)",
+      "call": "get_conversations",
       "kind": "evaluate",
       "operation": "voyager_conversations_fetch",
       "program_digest": "9d8f473bd12b",
@@ -158,6 +156,7 @@
     }
   ],
   "result": {
+    "at_end": true,
     "conversations": [
       {
         "awaiting_my_reply": null,
@@ -181,13 +180,10 @@
       }
     ],
     "count": 1,
-    "exhausted": true,
-    "exhaustion_basis": "short-page",
     "next_cursor": null,
-    "pages_fetched": 1,
-    "scanned": 1,
+    "page_size": 25,
     "zero_reason": null
   },
-  "scenario": "get_all_conversations__baseline",
+  "scenario": "get_conversations__baseline",
   "schema_version": 1
 }

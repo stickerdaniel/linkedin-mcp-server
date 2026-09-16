@@ -80,9 +80,9 @@ _CATEGORY_RE = re.compile(r"(?<![A-Za-z])category:[^,)]*")
 #
 # count is honoured exactly (5 -> 5, 21 -> 21) up to 25. At 30 and above the
 # response is EMPTY rather than an error, so an over-large page reads as an
-# empty mailbox. 25 is the largest verified value; it is the default because
-# round trips, not rows, are what the long dormant-contact walk pays for.
-MAX_PAGE_SIZE = 25
+# empty mailbox. 25 is the largest verified value, and it is always used: a
+# fixed page size is what lets "fewer than asked for" mean "the end".
+PAGE_SIZE = 25
 
 # category IS filtered server-side: ARCHIVE, INMAIL, STARRED and SPAM each
 # return a set whose date range differs from the unfiltered one, and SPAM
@@ -102,11 +102,22 @@ class VoyagerMessagingReader:
     def __init__(self, session: Any, navigator: Any):
         self._session = session
         self._navigator = navigator
+        # Discovery costs a navigation, a sidebar wait and a click -- tens of
+        # seconds before any data. Paying that per page would make a
+        # caller-driven loop unusable, so it is paid once per session. The
+        # queryId is stable for as long as LinkedIn does not redeploy, and a
+        # stale one surfaces as a failed fetch rather than as wrong data.
+        self._query_cache: tuple[str, str] | None = None
 
     # ------------------------------------------------------------------ #
     # Query discovery
     # ------------------------------------------------------------------ #
     async def _discover_query(self) -> tuple[str, str]:
+        if self._query_cache is None:
+            self._query_cache = await self._discover_query_uncached()
+        return self._query_cache
+
+    async def _discover_query_uncached(self) -> tuple[str, str]:
         """Return a CURSORLESS conversations query, and whether paging is available.
 
         Two things have to be true of the result and they pull in opposite
@@ -415,6 +426,16 @@ class VoyagerMessagingReader:
     # Public
     # ------------------------------------------------------------------ #
 
+    def _forward_cursor(
+        self, payload: dict[str, Any], supplied: str | None
+    ) -> str | None:
+        """The next cursor, unless the server just handed back the current one."""
+        cursor = self._next_cursor(payload)
+        if cursor is not None and supplied is not None and cursor == supplied.strip():
+            logger.warning("Conversations cursor repeated; withholding it.")
+            return None
+        return cursor
+
     @staticmethod
     def _next_cursor(payload: dict[str, Any]) -> str | None:
         """Pull the paging cursor out of the query result's metadata.
@@ -480,30 +501,30 @@ class VoyagerMessagingReader:
             return "parse-failure: included entities present, zero Conversations"
         return "control-empty: session or endpoint returned nothing at all"
 
-    async def get_all_conversations(
+    async def get_conversations(
         self,
-        limit: int = 200,
-        max_pages: int = 60,
         cursor: str | None = None,
-        quiet_for_days: int | None = None,
-        awaiting_reply_only: bool = False,
         category: str | None = None,
-        page_size: int = MAX_PAGE_SIZE,
-        known_thread_urns: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Walk the mailbox by cursor and return normalized conversations.
+        """Read ONE page of conversations. The caller decides whether to continue.
 
-        Terminates on the *extracted row count*, never on a reported total and
-        never on anything the DOM says: the sidebar virtualizes and recycles
-        nodes, so its row count has been observed going DOWN while more
-        conversations were being loaded.
+        Deliberately not a walk. An earlier version took a `limit` and paged
+        internally, and every defect found in review lived in that machinery:
+        slicing a page to `limit` while the cursor advanced past the remainder,
+        an exhaustion probe that overfetched the same way, and an inference
+        about where the mailbox ended. A single page has none of those, because
+        the page IS the answer.
+
+        `at_end` is measured, never inferred, by comparing what came back
+        against what was asked for:
+
+            fewer than PAGE_SIZE -> True.  The server had no more.
+            exactly PAGE_SIZE    -> False. There is more; use `next_cursor`.
+            nothing at all       -> None.  Says nothing either way.
+
+        The agent calling this is already a loop. It does not need a second one
+        hidden inside a tool call.
         """
-        # Blank arguments are rejected, never coerced. Every one of these would
-        # otherwise reach LinkedIn as a malformed variable and come back as an
-        # empty page -- the same shape as a real answer, which is precisely the
-        # confusion this whole module is built to avoid. A caller that passes a
-        # blank means something went wrong upstream of here; saying so beats
-        # answering "you have no conversations".
         if category is not None and not category.strip():
             raise LinkedInScraperException(
                 "category was blank. Pass None for no filter, or one of: "
@@ -511,264 +532,79 @@ class VoyagerMessagingReader:
             )
         if cursor is not None and not cursor.strip():
             raise LinkedInScraperException(
-                "cursor was blank. Pass None to start from the most recent "
-                "conversations, or a next_cursor from a previous call."
-            )
-        if limit < 1:
-            raise LinkedInScraperException(f"limit must be >= 1, got {limit}.")
-        if max_pages < 1:
-            raise LinkedInScraperException(f"max_pages must be >= 1, got {max_pages}.")
-        if quiet_for_days is not None and quiet_for_days < 1:
-            raise LinkedInScraperException(
-                f"quiet_for_days must be >= 1, got {quiet_for_days}."
+                "cursor was blank. Pass None for the first page, or a "
+                "next_cursor from a previous call."
             )
 
         url, paging = await self._discover_query()
-        if paging == "unconfirmed":
+        if cursor and paging != "cursored":
             raise LinkedInScraperException(
-                "The paging control was present and clicked, but no "
-                "cursor-bearing conversations query followed, so only the first "
-                "page is reachable and there is no way to tell a short mailbox "
-                "from a failed one. Refusing to return a partial listing that "
-                "would look complete."
+                "A cursor was supplied but no paging query is available for "
+                "this mailbox, so it cannot be honoured. Call without one."
             )
         me = self._me_profile_id(url)
-        if cursor:
-            if paging != "cursored":
-                raise LinkedInScraperException(
-                    "A cursor was supplied but this mailbox exposes no paging "
-                    "query, so the cursor cannot be honoured. Call without one."
-                )
-            url = _set_cursor(url, cursor.strip())
 
-        page_size = max(1, min(page_size, MAX_PAGE_SIZE))
-
+        url = _COUNT_RE.sub(lambda _: f"count:{PAGE_SIZE}", url)
         if category:
             category = category.strip().upper()
             if category not in KNOWN_CATEGORIES:
-                # Refuse rather than let the API answer an unknown category with
-                # an empty page, which is indistinguishable from "you have none".
                 raise LinkedInScraperException(
                     f"Unknown category {category!r}. Known: "
                     f"{', '.join(sorted(KNOWN_CATEGORIES))}. An unrecognised "
                     "category returns an empty result rather than an error, so "
                     "it is rejected here instead of silently reading as zero."
                 )
-            url = _CATEGORY_RE.sub(f"category:{category}", url)
+            url = _CATEGORY_RE.sub(lambda _: f"category:{category}", url)
+        url = _set_cursor(url, cursor.strip()) if cursor else _drop_cursor(url)
 
-        cutoff_ms: float | None = None
-        if quiet_for_days is not None:
-            cutoff_ms = (
-                datetime.now(tz=timezone.utc).timestamp() - quiet_for_days * 86400
-            ) * 1000
+        payload = await self._fetch(url)
+        rows = self._conversations(payload)
 
-        # Converted here rather than by the caller: the extractor is a thin
-        # delegate by design, so shaping arguments is this layer's job.
-        known: set[str] = set(known_thread_urns or ())
+        # Entities present but none parsed as a Conversation is a shape change,
+        # which is the one failure that silently turns a full page into a zero.
+        if not rows and payload.get("included"):
+            raise LinkedInScraperException(
+                "Conversations payload changed shape: "
+                f"{len(payload['included'])} included entities but zero parsed "
+                "as Conversation. Refusing to report this as an empty page."
+            )
 
-        filters_active = bool(quiet_for_days is not None or awaiting_reply_only)
+        people = self._participants(payload)
+        messages = self._messages_by_conversation(payload)
+        conversations = [
+            self._normalize(row, people, messages.get(row.get("entityUrn", "")), me)
+            for row in rows
+        ]
 
-        collected: dict[str, dict[str, Any]] = {}
-        raw_rows = 0
-        scanned = 0
-        pages = 0
-        exhausted = False
-        next_cursor: str | None = None
-        exhaustion_basis: str | None = None
-        # Set once, when a full page arrives with no cursor and the page was
-        # below the API maximum. It has to persist across iterations because
-        # `request_size` is recomputed every loop and would otherwise undo the
-        # escalation immediately -- which it did, spinning to `max_pages`.
-        escalated = False
-        seen_cursors: set[str] = set()
-        if cursor:
-            seen_cursors.add(cursor.strip())
-
-        # Filters narrow what is RETURNED, never what is walked: the mailbox is
-        # ordered by recency, so the dormant threads a reconnect pass wants sit
-        # behind every recent one. `scanned` is reported so a caller can tell a
-        # filtered-empty page from an empty mailbox.
-        while pages < max_pages and len(collected) < limit:
-            # Ask for no more than the caller still wants. Fetching a full page
-            # and slicing to `limit` afterwards would DISCARD the overflow while
-            # the cursor advanced past it, so those conversations could not be
-            # recovered by resuming from `next_cursor` -- silent data loss
-            # wearing the costume of an honoured limit.
-            #
-            # Filters are the exception: they narrow what is KEPT, so the number
-            # of rows needed to find `limit` matches is unbounded and the page
-            # stays full.
-            # Never ask for more than the caller still wants, escalation
-            # included. Overfetching advances the cursor past rows that the
-            # final slice then discards, and those rows are unreachable when a
-            # caller resumes -- the same silent loss the plain page size was
-            # already capped to avoid.
-            #
-            # Filters are the exception, as everywhere here: they narrow what is
-            # KEPT, so the rows needed to find `limit` matches are unbounded and
-            # the cursor legitimately advances past non-matching rows.
-            ceiling = MAX_PAGE_SIZE if escalated else page_size
-            if filters_active:
-                request_size = ceiling
-            else:
-                request_size = max(1, min(ceiling, limit - len(collected)))
-            url = _COUNT_RE.sub(lambda _: f"count:{request_size}", url)
-
-            payload = await self._fetch(url)
-            pages += 1
-
-            rows = self._conversations(payload)
-            raw_rows += len(rows)
-
-            # A page with entities but no conversations is a shape change, not
-            # an empty page. Fail loudly rather than let it read as a zero.
-            if not rows and payload.get("included"):
-                raise LinkedInScraperException(
-                    "Conversations payload changed shape: "
-                    f"{len(payload['included'])} included entities but zero "
-                    "parsed as Conversation. Refusing to report this as an "
-                    "empty mailbox."
-                )
-
-            people = self._participants(payload)
-            messages = self._messages_by_conversation(payload)
-            for row in rows:
-                urn = row.get("entityUrn")
-                if not urn or urn in collected:
-                    continue
-                scanned += 1
-                record = self._normalize(row, people, messages.get(urn), me)
-                if cutoff_ms is not None:
-                    activity = row.get("lastActivityAt") or 0
-                    if activity > cutoff_ms:
-                        continue
-                if awaiting_reply_only and not record.get("awaiting_my_reply"):
-                    continue
-                collected[urn] = record
-
-            # Incremental sync: the mailbox is recency-ordered, so once a page
-            # is entirely threads the caller already knows, everything behind it
-            # is older and also known. This is what keeps a routine run at one
-            # or two pages instead of re-walking the whole mailbox, and it is
-            # the only real defence against a server side that cannot filter by
-            # time (lastUpdatedBefore is ignored -- see module docstring).
-            if known and rows:
-                page_urns = {r.get("entityUrn") for r in rows if r.get("entityUrn")}
-                if page_urns and page_urns <= known:
-                    exhaustion_basis = "known-thread-boundary"
-                    exhausted = False
-                    next_cursor = self._next_cursor(payload)
-                    break
-
-            next_cursor = self._next_cursor(payload)
-
-            if not rows or not next_cursor:
-                # Three outcomes, decided by comparing what came back against
-                # what was asked for. The comparison is the measurement; none
-                # of these is an inference about the mailbox.
-                #
-                #   fewer than requested -> the server had no more. THE END.
-                #   exactly as requested -> there is probably more. NOT the end.
-                #   nothing at all       -> says nothing either way. UNPROVEN.
-                #
-                # Zero is the ambiguous one, not the conclusive one. An empty
-                # page is equally consistent with an exhausted mailbox, a
-                # silently rejected argument and a session that stopped being
-                # authoritative, which is the same reason `_diagnose_empty`
-                # exists. Treating it as the end was the one case here that
-                # could still manufacture a census out of a failure.
-                if not rows:
-                    exhaustion_basis = "empty-page-unproven"
-                    exhausted = False
-                elif len(rows) < request_size:
-                    exhaustion_basis = "short-page"
-                    exhausted = True
-                else:
-                    # A full page with no cursor. Ask once more at the largest
-                    # page the API accepts before concluding: exhaustion cannot
-                    # be proven but it CAN be disproven, and that costs one
-                    # request. Often it settles the question outright, because
-                    # asking for 25 and receiving 5 turns this into a short page.
-                    headroom = (
-                        MAX_PAGE_SIZE
-                        if filters_active
-                        else min(MAX_PAGE_SIZE, limit - len(collected))
-                    )
-                    if not escalated and request_size < headroom:
-                        escalated = True
-                        continue
-                    exhaustion_basis = "full-page-no-cursor"
-                    exhausted = False
-                break
-
-            # A repeated cursor means the server is handing back a page this
-            # walk already requested. Continuing would re-fetch it until
-            # max_pages, and returning it as next_cursor would hand a caller a
-            # loop of their own. Deduplicating rows hides this rather than
-            # stopping it, so the cursor itself is tracked.
-            if next_cursor in seen_cursors:
-                exhaustion_basis = "cursor-repeated"
-                logger.warning(
-                    "Conversations cursor repeated after %d page(s); stopping.",
-                    pages,
-                )
-                next_cursor = None
-                exhausted = True
-                break
-            seen_cursors.add(next_cursor)
-
-            url = _set_cursor(url, next_cursor)
-            await self._session.delay(0.4)
-
-        logger.info(
-            "Voyager conversations: %d kept of %d scanned over %d page(s), exhausted=%s",
-            len(collected),
-            scanned,
-            pages,
-            exhausted,
-        )
-        # Only an UNFILTERED walk that found nothing is ambiguous. If filters
-        # were applied and rows were scanned, zero is a real answer about the
-        # filter, and re-probing would only add noise.
         zero_reason: str | None = None
-        if raw_rows == 0:
-            zero_reason = await self._diagnose_empty(url)
-            if zero_reason != "verified-empty":
+        if not rows:
+            # A zero is never returned bare. On the first page a positive
+            # control decides whether the instrument works at all; with a cursor
+            # it may simply be the page after the last one.
+            zero_reason = "after-cursor" if cursor else await self._diagnose_empty(url)
+            if zero_reason not in {"verified-empty", "after-cursor"}:
                 raise LinkedInScraperException(
-                    f"Conversation walk returned nothing and the positive "
-                    f"control did not clear it ({zero_reason}). Treating this "
-                    "as an instrument failure rather than an empty mailbox."
+                    f"An empty page came back and the positive control did not "
+                    f"clear it ({zero_reason}). Treating this as an instrument "
+                    "failure rather than an empty mailbox."
                 )
-        elif not collected:
-            zero_reason = "filtered-empty"
 
         return {
-            "conversations": list(collected.values())[:limit],
-            "count": min(len(collected), limit),
-            "scanned": scanned,
-            # None when rows were returned. "verified-empty" means a positive
-            # control confirmed the mailbox really is empty; "filtered-empty"
-            # means rows existed but the filters excluded them all.
+            "conversations": conversations,
+            "count": len(conversations),
+            "page_size": PAGE_SIZE,
+            # Pass back as `cursor` to read the next page. None when the server
+            # offered none, which for a full page means paging is unavailable
+            # rather than that the mailbox ended.
+            #
+            # A cursor identical to the one supplied is the server re-serving
+            # the page just read. Handing it back would invite the caller into
+            # an endless loop, and the caller cannot easily notice: each page
+            # looks perfectly valid on its own. Withheld instead.
+            "next_cursor": self._forward_cursor(payload, cursor),
+            # True only when the server returned fewer rows than asked for.
+            # None means an empty page, which proves nothing either way and
+            # must never be read as the end.
+            "at_end": None if not rows else len(rows) < PAGE_SIZE,
             "zero_reason": zero_reason,
-            # Pass back into `cursor` to continue where this walk stopped.
-            # None once exhausted.
-            "next_cursor": None if exhausted else next_cursor,
-            # HOW the walk ended, so a caller can judge the claim rather than
-            # trust it:
-            #   "short-page"            fewer rows than requested. THE END.
-            #   "full-page-no-cursor"   a full page, even at the API maximum,
-            #                           with no cursor. There is probably more
-            #                           and it cannot be reached from here.
-            #   "empty-page-unproven"   nothing came back. Says nothing either
-            #                           way; never read as the end.
-            #   "cursor-repeated"       the server re-served a page already seen.
-            #   "known-thread-boundary" the caller's own records ended the walk.
-            #   None                    stopped on `limit` or `max_pages`.
-            # Only "short-page" ever accompanies `exhausted: true`.
-            "exhaustion_basis": exhaustion_basis,
-            "pages_fetched": pages,
-            # False means the walk stopped on `limit` or `max_pages`, so the
-            # mailbox holds more than was returned. Callers reconciling against
-            # their own records must not read a truncated walk as a complete one.
-            "exhausted": exhausted,
         }

@@ -56,7 +56,7 @@ def register_messaging_tools(
         painted and it recovers thread ids by click-visiting rows, which marks
         them read. For a whole-mailbox question -- which threads are unanswered,
         who has gone quiet, reconciling against an external record -- use
-        get_all_conversations instead.
+        get_conversations instead.
         """
         try:
             extractor = extractor or await get_ready_extractor(
@@ -84,111 +84,76 @@ def register_messaging_tools(
 
     @mcp.tool(
         timeout=tool_timeout,
-        title="Get All Conversations",
+        title="Get Conversations",
         # Genuinely read-only, unlike get_inbox: this reads LinkedIn's own
         # conversations API and never clicks a row, so no thread is marked read.
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"messaging", "scraping"},
         exclude_args=["extractor"],
     )
-    async def get_all_conversations(
+    async def get_conversations(
         ctx: Context,
-        limit: Annotated[int, Field(ge=1, le=2000)] = 200,
-        max_pages: Annotated[int, Field(ge=1, le=200)] = 60,
         cursor: str | None = None,
-        quiet_for_days: Annotated[int | None, Field(ge=1)] = None,
-        awaiting_reply_only: bool = False,
         category: str | None = None,
-        page_size: Annotated[int, Field(ge=1, le=25)] = 25,
-        known_thread_urns: list[str] | None = None,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
-        Page the entire messaging mailbox and return structured conversations.
+        Read ONE page of conversations (up to 25) from LinkedIn's messaging API.
 
-        Use this, not get_inbox, whenever the question is about the mailbox as a
-        whole — "which threads are unanswered", "have I replied to everyone",
-        reconciling against an external record. get_inbox returns only what
-        LinkedIn has painted into the sidebar (observed: ~16-17 rows) and
-        click-visits each row to recover its thread id, which marks those rows
-        read. This reads the conversations API the web client itself calls, so
-        it reaches the whole mailbox and alters nothing.
+        Use this, not get_inbox, for anything about the mailbox as a whole:
+        which threads are unanswered, who has gone quiet, reconciling against an
+        external record. get_inbox returns only what LinkedIn painted into the
+        sidebar and click-visits each row to recover its thread id, which marks
+        those rows read. This reads the API the web client itself calls, so it
+        reaches any page of the mailbox and alters nothing.
 
-        Each conversation carries thread_urn (the thread id), participants,
-        last_activity_at, last_read_at, read, unread_count and categories
-        (the Focused/Other mailbox), so "unanswered" can be computed directly.
+        To read more, call again with `cursor` set to the `next_cursor` you were
+        given. Paging is recency-first, so page one is the most recent
+        conversations. Reconnect work ("who have I fallen out of touch with")
+        means paging backwards until `last_activity_iso` is old enough; that is
+        deliberately the caller's loop, since only the caller knows when to stop.
 
-        Paging is recency-ordered, so page one is the most recent conversations.
-        Pass the returned next_cursor back in as `cursor` to continue from where
-        a previous call stopped, rather than re-walking from the top.
-
-        Reconnect work ("who have I fallen out of touch with") is what
-        quiet_for_days is for. It is necessarily a LONG walk: LinkedIn ignores
-        lastUpdatedBefore, so there is no way to jump to a date server-side and
-        dormant threads sit behind every recent one. `category` is the one
-        filter the server does honour, so prefer it when it fits the question. Filters narrow what is RETURNED, never
-        what is walked, and `scanned` reports how many were examined so a
-        filtered-empty result is distinguishable from an empty mailbox.
+        Each conversation carries thread_urn, participants, last_activity_iso,
+        read, unread_count, last_message_text and awaiting_my_reply, so
+        "have I replied to everyone" is a field rather than an inference.
 
         Args:
             ctx: FastMCP context for progress reporting
-            limit: Maximum conversations to return (1-2000, default 200)
-            max_pages: Safety cap on cursor pages to walk (1-200, default 60)
-            cursor: next_cursor from a previous call, to resume the walk
-            quiet_for_days: only return threads with no activity for this many
-                days — the reconnect filter
-            awaiting_reply_only: only return threads whose newest message is
-                theirs, so a reply is owed
-            category: SERVER-SIDE filter, the only one LinkedIn actually honours.
-                One of INBOX, PRIMARY_INBOX, ARCHIVE, INMAIL, STARRED, SPAM.
-                These jump anywhere in time in a single call. An unknown value
-                is rejected rather than passed through, because the API answers
-                one with an empty page rather than an error.
-            page_size: rows per request, max 25 (measured). Above 25 the API
-                returns EMPTY rather than an error, so this is clamped.
-            known_thread_urns: thread urns already recorded elsewhere. The
-                mailbox is recency-ordered, so once a whole page is threads you
-                already know, everything behind it is older and also known, and
-                the walk stops. This is what keeps a repeat sync to one or two
-                pages instead of the whole mailbox.
+            cursor: next_cursor from a previous call. Omit for the first page.
+            category: SERVER-SIDE filter, the only one LinkedIn honours. One of
+                INBOX, PRIMARY_INBOX, ARCHIVE, INMAIL, STARRED, SPAM. These
+                reach any point in time in a single call. An unknown value is
+                rejected rather than passed through, because the API answers one
+                with an empty page that would read as "you have none".
 
         Returns:
-            Dict with conversations, count, pages_fetched, and exhausted.
-            **exhausted is the field that matters for any reconciliation**: when
-            it is False the walk stopped on limit, max_pages or a known-thread
-            boundary, so the mailbox holds more than was returned and the result
-            must not be treated as a complete census.
+            Dict with conversations, count, page_size, next_cursor, at_end and
+            zero_reason.
 
-            **zero_reason disambiguates an empty result**, which is otherwise
-            the shared shape of four different situations. None means rows were
-            returned. "verified-empty" means a positive control confirmed the
-            mailbox really is empty. "filtered-empty" means rows existed and the
-            filters excluded them all — check `scanned` to see how many were
-            examined. A zero that could not be explained raises instead of
-            returning, so this tool never answers "you have no conversations"
-            on the strength of a silent failure.
+            **at_end is measured, not inferred**: True means the server returned
+            FEWER than page_size, so there is no more. False means a full page,
+            so there is more. **None means an empty page, which proves nothing
+            either way and must never be read as the end.**
+
+            zero_reason explains an empty page: "verified-empty" (a positive
+            control confirmed the mailbox is empty) or "after-cursor" (the page
+            after the last one). An empty page that cannot be explained raises
+            rather than returning, so this never answers "no conversations" on
+            the strength of a silent failure.
         """
         try:
             extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="get_all_conversations"
+                ctx, tool_name="get_conversations"
             )
-            logger.info(
-                "Paging all conversations (limit=%d, max_pages=%d)", limit, max_pages
-            )
+            logger.info("Reading conversations page (cursor=%s)", bool(cursor))
 
             await ctx.report_progress(
-                progress=0, total=100, message="Paging conversations"
+                progress=0, total=100, message="Reading conversations"
             )
 
-            result = await extractor.get_all_conversations(
-                limit=limit,
-                max_pages=max_pages,
+            result = await extractor.get_conversations(
                 cursor=cursor,
-                quiet_for_days=quiet_for_days,
-                awaiting_reply_only=awaiting_reply_only,
                 category=category,
-                page_size=page_size,
-                known_thread_urns=known_thread_urns,
             )
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
@@ -199,9 +164,9 @@ def register_messaging_tools(
             try:
                 await handle_auth_error(e, ctx)
             except Exception as relogin_exc:
-                raise_tool_error(relogin_exc, "get_all_conversations")
+                raise_tool_error(relogin_exc, "get_conversations")
         except Exception as e:
-            raise_tool_error(e, "get_all_conversations")  # NoReturn
+            raise_tool_error(e, "get_conversations")  # NoReturn
 
     @mcp.tool(
         timeout=tool_timeout,

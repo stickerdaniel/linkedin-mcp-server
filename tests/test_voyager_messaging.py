@@ -17,7 +17,7 @@ from linkedin_mcp_server.core.exceptions import (
 )
 from linkedin_mcp_server.scraping.voyager_messaging import (
     KNOWN_CATEGORIES,
-    MAX_PAGE_SIZE,
+    PAGE_SIZE,
     VoyagerMessagingReader,
 )
 
@@ -98,15 +98,27 @@ class _Reader(VoyagerMessagingReader):
         super().__init__(session=_FakeSession(), navigator=None)
         self._pages = pages
         self.fetched: list[str] = []
+        self.discoveries = 0
 
     paging_state = "cursored"
 
-    async def _discover_query(self) -> tuple[str, str]:  # type: ignore[override]
+    async def _discover_query_uncached(self) -> tuple[str, str]:  # type: ignore[override]
+        # Overriding the UNCACHED variant on purpose: the cache lives in
+        # `_discover_query`, so replacing that would test the double instead of
+        # the code.
+        self.discoveries += 1
         return QUERY_URL, self.paging_state
 
     async def _fetch(self, url: str) -> dict:  # type: ignore[override]
         self.fetched.append(url)
         return self._pages[min(len(self.fetched) - 1, len(self._pages) - 1)]
+
+
+def _rows(n: int) -> list[dict]:
+    return [
+        _conversation(f"c{i}", last_activity=1000 - i, participants=[])
+        for i in range(n)
+    ]
 
 
 class TestBlankInputs:
@@ -116,129 +128,99 @@ class TestBlankInputs:
     async def test_blank_category_is_rejected(self, blank):
         reader = _Reader([_payload([], None)])
         with pytest.raises(LinkedInScraperException, match="category was blank"):
-            await reader.get_all_conversations(category=blank)
+            await reader.get_conversations(category=blank)
         assert reader.fetched == [], "a blank must not cost a request"
 
     @pytest.mark.parametrize("blank", ["", "  "])
     async def test_blank_cursor_is_rejected(self, blank):
         reader = _Reader([_payload([], None)])
         with pytest.raises(LinkedInScraperException, match="cursor was blank"):
-            await reader.get_all_conversations(cursor=blank)
+            await reader.get_conversations(cursor=blank)
 
     async def test_unknown_category_is_rejected_before_the_request(self):
         """An unknown category returns an empty page from LinkedIn, so it must
         be refused here rather than read back as 'you have none of those'."""
         reader = _Reader([_payload([], None)])
         with pytest.raises(LinkedInScraperException, match="Unknown category"):
-            await reader.get_all_conversations(category="UNREAD")
+            await reader.get_conversations(category="UNREAD")
         assert reader.fetched == []
-
-    @pytest.mark.parametrize(
-        "kwargs, expected",
-        [
-            ({"limit": 0}, "limit must be >= 1"),
-            ({"max_pages": 0}, "max_pages must be >= 1"),
-            ({"quiet_for_days": 0}, "quiet_for_days must be >= 1"),
-        ],
-    )
-    async def test_non_positive_bounds_are_rejected(self, kwargs, expected):
-        reader = _Reader([_payload([], None)])
-        with pytest.raises(LinkedInScraperException, match=expected):
-            await reader.get_all_conversations(**kwargs)
 
     async def test_every_known_category_is_accepted(self):
         for category in KNOWN_CATEGORIES:
-            reader = _Reader(
-                [
-                    _payload(
-                        [_conversation("c1", last_activity=1, participants=[])], None
-                    )
-                ]
-            )
-            result = await reader.get_all_conversations(category=category)
+            reader = _Reader([_payload(_rows(1), None)])
+            result = await reader.get_conversations(category=category)
             assert result["count"] == 1
             assert f"category:{category}" in reader.fetched[0]
 
 
-class TestEmptyResultsAreLabelled:
-    """A zero must say which kind of zero it is."""
+class TestAtEndIsMeasuredNotInferred:
+    """Taylor's three rules, which are the whole algorithm now."""
 
+    async def test_fewer_than_a_full_page_is_the_end(self):
+        reader = _Reader([_payload(_rows(23), None)])
+        result = await reader.get_conversations()
+        assert result["count"] == 23
+        assert result["at_end"] is True
+
+    async def test_a_full_page_is_not_the_end(self):
+        reader = _Reader([_payload(_rows(PAGE_SIZE), "NEXT")])
+        result = await reader.get_conversations()
+        assert result["count"] == PAGE_SIZE
+        assert result["at_end"] is False
+        assert result["next_cursor"] == "NEXT"
+
+    async def test_an_empty_page_after_a_cursor_is_unproven(self):
+        reader = _Reader([_payload([], None)])
+        result = await reader.get_conversations(cursor="SEED")
+        assert result["count"] == 0
+        assert result["at_end"] is None, "zero proves nothing either way"
+        assert result["zero_reason"] == "after-cursor"
+
+    async def test_always_asks_for_a_full_page(self):
+        """A fixed page size is what lets 'fewer than asked for' mean 'the end'."""
+        reader = _Reader([_payload(_rows(PAGE_SIZE), None)])
+        await reader.get_conversations()
+        assert f"count:{PAGE_SIZE}" in reader.fetched[0]
+
+
+class TestEmptyFirstPageIsNeverBare:
     async def test_empty_with_passing_control_is_verified_empty(self):
-        control = _payload(
-            [_conversation("ctl", last_activity=1, participants=[])], None
-        )
+        control = _payload(_rows(1), None)
         reader = _Reader([_payload([], None), control])
-        result = await reader.get_all_conversations()
+        result = await reader.get_conversations()
         assert result["count"] == 0
         assert result["zero_reason"] == "verified-empty"
+        assert result["at_end"] is None
 
     async def test_empty_with_failing_control_raises(self):
-        """If the control is also empty the instrument is suspect, so the walk
-        must not answer 'your mailbox is empty'."""
         reader = _Reader([_payload([], None), _payload([], None)])
         with pytest.raises(LinkedInScraperException, match="positive control"):
-            await reader.get_all_conversations()
+            await reader.get_conversations()
 
     async def test_included_entities_but_no_conversations_is_a_parse_failure(self):
-        """The one shape that silently turns a full mailbox into a zero."""
-        payload = _payload(
-            [], None, included=[{"$type": "x.Something", "entityUrn": "u"}]
-        )
+        payload = _payload([], None, included=[{"$type": "x.Y", "entityUrn": "u"}])
         reader = _Reader([payload])
         with pytest.raises(LinkedInScraperException, match="changed shape"):
-            await reader.get_all_conversations()
-
-    async def test_filtered_to_nothing_is_distinguishable_from_empty(self):
-        """Rows existed; the filter excluded them. That is a real answer."""
-        rows = [
-            _conversation("c1", last_activity=int(time.time() * 1000), participants=[])
-        ]
-        reader = _Reader([_payload(rows, None)])
-        result = await reader.get_all_conversations(quiet_for_days=365)
-        assert result["count"] == 0
-        assert result["zero_reason"] == "filtered-empty"
-        assert result["scanned"] == 1, "scanned proves rows were examined"
+            await reader.get_conversations()
 
 
-class TestPaging:
-    async def test_page_size_is_clamped_to_the_measured_ceiling(self):
-        """Above 25 LinkedIn returns an empty page rather than an error."""
-        reader = _Reader(
-            [_payload([_conversation("c1", last_activity=1, participants=[])], None)]
-        )
-        await reader.get_all_conversations(page_size=500)
-        assert f"count:{MAX_PAGE_SIZE}" in reader.fetched[0]
+class TestDiscoveryIsPaidOnce:
+    """Discovery costs a navigation, a sidebar wait and a click. Paying it per
+    page would make a caller-driven loop unusable."""
 
-    async def test_cursor_advances_between_pages(self):
-        p1 = _payload(
-            [_conversation("c1", last_activity=2, participants=[])], "CURSOR2"
-        )
-        p2 = _payload([_conversation("c2", last_activity=1, participants=[])], None)
-        reader = _Reader([p1, p2])
-        result = await reader.get_all_conversations(limit=10)
-        assert result["count"] == 2
-        assert "nextCursor:CURSOR2" in reader.fetched[1]
-        assert result["exhausted"] is True
-        assert result["next_cursor"] is None
+    async def test_repeated_calls_reuse_the_discovered_query(self):
+        reader = _Reader([_payload(_rows(PAGE_SIZE), "A")])
+        await reader.get_conversations()
+        await reader.get_conversations(cursor="A")
+        await reader.get_conversations(cursor="B")
+        assert reader.discoveries == 1, "discovery must be cached for the session"
+        assert len(reader.fetched) == 3, "but every page is still fetched"
 
-    async def test_next_cursor_is_returned_when_stopping_on_limit(self):
-        p1 = _payload(
-            [_conversation("c1", last_activity=2, participants=[])], "CURSOR2"
-        )
-        reader = _Reader([p1])
-        result = await reader.get_all_conversations(limit=1)
-        assert result["exhausted"] is False
-        assert result["next_cursor"] == "CURSOR2", "caller must be able to resume"
-
-    async def test_known_threads_stop_the_walk(self):
-        """Incremental sync: a page of entirely-known threads ends the walk."""
-        p1 = _payload(
-            [_conversation("c1", last_activity=2, participants=[])], "CURSOR2"
-        )
-        reader = _Reader([p1])
-        result = await reader.get_all_conversations(limit=50, known_thread_urns=["c1"])
-        assert len(reader.fetched) == 1, "must not page past known threads"
-        assert result["exhausted"] is False
+    async def test_a_cursor_against_a_single_page_mailbox_is_refused(self):
+        reader = _Reader([_payload(_rows(1), None)])
+        reader.paging_state = "single-page"
+        with pytest.raises(LinkedInScraperException, match="cannot be honoured"):
+            await reader.get_conversations(cursor="SEED")
 
 
 class TestReplyState:
@@ -259,7 +241,7 @@ class TestReplyState:
         reader = self._reader_with_message(
             "urn:li:msg_messagingParticipant:urn:li:fsd_profile:ACoAthem"
         )
-        c = (await reader.get_all_conversations())["conversations"][0]
+        c = (await reader.get_conversations())["conversations"][0]
         assert c["last_message_from_me"] is False
         assert c["awaiting_my_reply"] is True
         assert c["last_message_text"] == "hello there"
@@ -268,7 +250,7 @@ class TestReplyState:
         reader = self._reader_with_message(
             f"urn:li:msg_messagingParticipant:urn:li:fsd_profile:{ME}"
         )
-        c = (await reader.get_all_conversations())["conversations"][0]
+        c = (await reader.get_conversations())["conversations"][0]
         assert c["last_message_from_me"] is True
         assert c["awaiting_my_reply"] is False
 
@@ -277,7 +259,7 @@ class TestReplyState:
         True hides one. Absent is the honest answer."""
         conv = _conversation("c1", last_activity=5, participants=[])
         reader = _Reader([_payload([conv], None)])
-        c = (await reader.get_all_conversations())["conversations"][0]
+        c = (await reader.get_conversations())["conversations"][0]
         assert c["last_message_from_me"] is None
         assert c["awaiting_my_reply"] is None
 
@@ -285,26 +267,8 @@ class TestReplyState:
         reader = self._reader_with_message(
             "urn:li:msg_messagingParticipant:urn:li:fsd_profile:ACoAthem"
         )
-        c = (await reader.get_all_conversations())["conversations"][0]
+        c = (await reader.get_conversations())["conversations"][0]
         assert c["participants"] == ["Dana Scully"], "self must be excluded"
-
-    async def test_awaiting_reply_only_filters_on_that_field(self):
-        me_p = f"urn:li:msg_messagingParticipant:urn:li:fsd_profile:{ME}"
-        them_p = "urn:li:msg_messagingParticipant:urn:li:fsd_profile:ACoAthem"
-        convs = [
-            _conversation("mine", last_activity=5, participants=[me_p, them_p]),
-            _conversation("theirs", last_activity=6, participants=[me_p, them_p]),
-        ]
-        included = [
-            _participant(me_p, "Taylor", "Medford"),
-            _participant(them_p, "Dana", "Scully"),
-            _message("mine", me_p, "I spoke last", 5),
-            _message("theirs", them_p, "they spoke last", 6),
-        ]
-        reader = _Reader([_payload(convs, None, included=included)])
-        result = await reader.get_all_conversations(awaiting_reply_only=True)
-        assert [c["thread_urn"] for c in result["conversations"]] == ["theirs"]
-        assert result["scanned"] == 2
 
 
 class TestReviewRegressions:
@@ -318,18 +282,8 @@ class TestReviewRegressions:
             [_payload([_conversation("c1", last_activity=1, participants=[])], None)]
         )
         nasty = r"ABC\g<0>\1DEF"
-        await reader.get_all_conversations(cursor=nasty)
+        await reader.get_conversations(cursor=nasty)
         assert f"nextCursor:{nasty}" in reader.fetched[0]
-
-    async def test_repeated_cursor_stops_the_walk(self):
-        """A server handing back a cursor already used would otherwise re-fetch
-        the same page until max_pages, and hand the caller a loop to resume."""
-        page = _payload([_conversation("c1", last_activity=1, participants=[])], "SAME")
-        reader = _Reader([page, page, page, page])
-        result = await reader.get_all_conversations(limit=100, max_pages=10)
-        assert len(reader.fetched) == 2, "must stop once the cursor repeats"
-        assert result["exhausted"] is True
-        assert result["next_cursor"] is None, "must not hand back a looping cursor"
 
     async def test_positive_control_drops_the_cursor_rather_than_blanking_it(self):
         """An empty `nextCursor:` is a MALFORMED request. If the control were
@@ -339,7 +293,7 @@ class TestReviewRegressions:
             [_conversation("ctl", last_activity=1, participants=[])], None
         )
         reader = _Reader([_payload([], None), control])
-        result = await reader.get_all_conversations()
+        result = await reader.get_conversations()
         assert result["zero_reason"] == "verified-empty"
         control_url = reader.fetched[-1]
         assert "nextCursor:" not in control_url, "control must be cursorless"
@@ -382,30 +336,6 @@ class TestReviewRegressions:
         with pytest.raises(LinkedInScraperException) as excinfo:
             await reader._fetch(QUERY_URL)
         assert not isinstance(excinfo.value, (AuthenticationError, RateLimitError))
-
-    async def test_limit_never_discards_rows_the_cursor_has_passed(self):
-        """The loop used to fetch a full page, keep `limit`, and advance the
-        cursor past the rest -- so the overflow was unreachable on resume. The
-        page request is now bounded by what is still wanted."""
-        rows = [
-            _conversation(f"c{i}", last_activity=100 - i, participants=[])
-            for i in range(25)
-        ]
-        reader = _Reader([_payload(rows, "NEXT")])
-        result = await reader.get_all_conversations(limit=10, page_size=25)
-        assert "count:10" in reader.fetched[0], "must request only what it wants"
-        assert result["count"] == 10
-
-    async def test_filtered_walks_still_request_full_pages(self):
-        """Filters narrow what is KEPT, so the rows needed to find `limit`
-        matches are unbounded and shrinking the page would stall the walk."""
-        rows = [
-            _conversation(f"c{i}", last_activity=100 - i, participants=[])
-            for i in range(25)
-        ]
-        reader = _Reader([_payload(rows, None)])
-        await reader.get_all_conversations(limit=5, page_size=25, quiet_for_days=365)
-        assert "count:25" in reader.fetched[0], "filtered walk keeps full pages"
 
 
 class TestDiscovery:
@@ -504,7 +434,7 @@ class TestTimestampsAreHostIndependent:
         below exists as well."""
         conv = _conversation("c1", last_activity=self.EPOCH_MS, participants=[])
         reader = _Reader([_payload([conv], None)])
-        result = await reader.get_all_conversations()
+        result = await reader.get_conversations()
         assert result["conversations"][0]["last_activity_iso"] == self.EXPECTED
 
     @pytest.mark.skipif(not hasattr(time, "tzset"), reason="time.tzset is Unix-only")
@@ -523,7 +453,7 @@ class TestTimestampsAreHostIndependent:
             monkeypatch.setenv("TZ", zone)
             time.tzset()
             reader = _Reader([_payload([conv], None)])
-            result = await reader.get_all_conversations()
+            result = await reader.get_conversations()
             renders.append(result["conversations"][0]["last_activity_iso"])
         monkeypatch.undo()
         time.tzset()
@@ -531,117 +461,15 @@ class TestTimestampsAreHostIndependent:
         assert renders == [self.EXPECTED] * 3, renders
 
 
-class TestExhaustionIsNeverClaimedWithoutEvidence:
-    """Every ending must say HOW it knows, so a caller can judge the claim
-    instead of trusting it."""
+class TestCursorRepeat:
+    async def test_a_repeated_cursor_is_withheld(self):
+        """The caller is the loop now, and it cannot easily notice a server
+        re-serving the same page: each page looks valid on its own."""
+        reader = _Reader([_payload(_rows(PAGE_SIZE), "SAME")])
+        result = await reader.get_conversations(cursor="SAME")
+        assert result["next_cursor"] is None, "must not invite an endless loop"
 
-    async def test_a_short_page_is_the_server_saying_it_had_no_more(self):
-        rows = [_conversation("c1", last_activity=1, participants=[])]
-        reader = _Reader([_payload(rows, None)])
-        reader.paging_state = "single-page"
-        result = await reader.get_all_conversations(limit=50, page_size=25)
-        assert result["exhausted"] is True
-        assert result["exhaustion_basis"] == "short-page"
-
-    async def test_a_full_page_below_max_escalates_and_can_settle_the_question(self):
-        """Exhaustion cannot be proven, but it CAN be disproven, and that costs
-        one request. Asking again at the API maximum turns an unanswerable case
-        into an answered one whenever the mailbox really was short: 5 rows came
-        back against a request for 25, which is the server saying it had no more.
-        """
-        rows = [
-            _conversation(f"c{i}", last_activity=100 - i, participants=[])
-            for i in range(5)
-        ]
-        reader = _Reader([_payload(rows, None)])
-        reader.paging_state = "single-page"
-        result = await reader.get_all_conversations(limit=50, page_size=5)
-
-        assert len(reader.fetched) == 2, "must re-ask at the largest page size"
-        assert "count:5" in reader.fetched[0]
-        assert "count:25" in reader.fetched[1]
-        assert result["exhausted"] is True
-        assert result["exhaustion_basis"] == "short-page"
-
-    async def test_the_escalation_happens_at_most_once(self):
-        """The retry must not become a loop: request_size is recomputed every
-        iteration, so an escalation that did not persist spun to max_pages."""
-        rows = [
-            _conversation(f"c{i}", last_activity=100 - i, participants=[])
-            for i in range(25)
-        ]
-        reader = _Reader([_payload(rows, None)])
-        reader.paging_state = "single-page"
-        await reader.get_all_conversations(limit=200, page_size=5)
-        assert len(reader.fetched) == 2, reader.fetched
-
-    async def test_a_full_page_at_max_means_there_is_probably_more(self):
-        rows = [
-            _conversation(f"c{i}", last_activity=100 - i, participants=[])
-            for i in range(25)
-        ]
-        reader = _Reader([_payload(rows, None)])
-        reader.paging_state = "single-page"
-        result = await reader.get_all_conversations(limit=200, page_size=25)
-        assert result["exhausted"] is False, (
-            "a full page with no cursor proves nothing about what follows"
-        )
-        assert result["exhaustion_basis"] == "full-page-no-cursor"
-
-    async def test_a_clicked_control_with_no_cursor_query_refuses(self):
-        """Control found and clicked but no cursor-bearing request followed.
-        That is a failure, not a short mailbox, and must not be served as one."""
-        reader = _Reader([_payload([], None)])
-        reader.paging_state = "unconfirmed"
-        with pytest.raises(LinkedInScraperException, match="cursor-bearing"):
-            await reader.get_all_conversations()
-
-    async def test_a_cursor_walk_that_ends_records_why(self):
-        p1 = _payload([_conversation("c1", last_activity=2, participants=[])], "C2")
-        p2 = _payload([_conversation("c2", last_activity=1, participants=[])], None)
-        reader = _Reader([p1, p2])
-        result = await reader.get_all_conversations(limit=10)
-        assert result["exhausted"] is True
-        assert result["exhaustion_basis"] == "short-page"
-
-    async def test_an_empty_page_is_unproven_not_the_end(self):
-        """Zero is the ambiguous outcome, not the conclusive one: an empty page
-        is equally consistent with an exhausted mailbox, a silently rejected
-        argument and a dead session. Calling it the end was the last place a
-        census could be manufactured out of a failure."""
-        first = _payload([_conversation("c1", last_activity=2, participants=[])], "C2")
-        empty = _payload([], None)
-        reader = _Reader([first, empty])
-        result = await reader.get_all_conversations(limit=50, page_size=1)
-        assert result["count"] == 1
-        assert result["exhausted"] is False
-        assert result["exhaustion_basis"] == "empty-page-unproven"
-
-    async def test_escalation_never_overfetches_past_the_limit(self):
-        """The escalation re-introduced the very loss the page cap prevents:
-        requesting 25 when the caller wanted 10 advances the cursor past rows
-        the final slice discards, and a resuming caller never sees them."""
-        rows = [
-            _conversation(f"c{i}", last_activity=100 - i, participants=[])
-            for i in range(25)
-        ]
-        reader = _Reader([_payload(rows, "NEXT")])
-        reader.paging_state = "single-page"
-        result = await reader.get_all_conversations(limit=10, page_size=5)
-
-        for url in reader.fetched:
-            asked = int(url.split("count:")[1].split(",")[0].split(")")[0])
-            assert asked <= 10, f"asked {asked} while the caller wanted 10: {url}"
-        assert result["count"] <= 10
-
-    async def test_escalation_still_happens_when_there_is_headroom(self):
-        """Capping must not disable it: with room to grow, it still escalates."""
-        rows = [
-            _conversation(f"c{i}", last_activity=100 - i, participants=[])
-            for i in range(5)
-        ]
-        reader = _Reader([_payload(rows, None)])
-        reader.paging_state = "single-page"
-        await reader.get_all_conversations(limit=200, page_size=5)
-        assert len(reader.fetched) == 2
-        assert "count:25" in reader.fetched[1]
+    async def test_a_new_cursor_is_passed_through(self):
+        reader = _Reader([_payload(_rows(PAGE_SIZE), "NEXT")])
+        result = await reader.get_conversations(cursor="PREV")
+        assert result["next_cursor"] == "NEXT"
