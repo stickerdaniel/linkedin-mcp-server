@@ -41,8 +41,8 @@ If missing material evidence prevents a decision, return the incomplete draft an
 
 ## 5. Ask, then post once
 
-Show the exact repository, new-issue title or canonical issue number, complete body, and attachments. Ask the human in this session for an explicit yes to this create or comment. The initial request to report, a prior session's permission, or a CLI flag is not that approval. Ask again after a material change to the payload or destination.
+Show the exact repository, new-issue title (preserving the selected form's title prefix such as `[BUG] `, `[FEATURE] `, `[DOCS] `, or `[CHORE] `) or canonical issue number, complete body, and attachments. Ask the human in this session for an explicit yes to this create or comment. The initial request to report, a prior session's permission, or a CLI flag is not that approval. Ask again after a material change to the payload or destination.
 
-After approval, post the reviewed body with `gh issue create` or `gh issue comment`, scoped to the repository and using a body file. If authentication is missing, keep the draft and let the human choose how to authenticate or submit it. Do not change credentials as part of intake.
+After approval, post the reviewed body with `gh issue create` or `gh issue comment`, scoped to the repository and using a body file. For `gh issue create`, pass the form's title prefix in `--title` and the form's label in `--label` (such as `--label bug`, `--label enhancement`, `--label documentation`, or `--label chore`). If authentication is missing, keep the draft and let the human choose how to authenticate or submit it. Do not change credentials as part of intake.
 
 Read back the result and return its URL. If the command reports an uncertain outcome, check whether the issue or comment already exists before retrying. Finish only when the approved post is confirmed or the unresolved outcome is stated.

@@ -152,10 +152,14 @@ def test_agent_instructions_match_and_point_to_packet_skill() -> None:
     assert skill_path.is_file()
 
 
-def test_packet_skill_frontmatter_and_trigger_branches() -> None:
+def _packet_skill_text() -> str:
     repo_root = Path(__file__).resolve().parents[1]
     skill_path = repo_root / ".agents" / "skills" / "issue-packet" / "SKILL.md"
-    content = skill_path.read_text(encoding="utf-8")
+    return skill_path.read_text(encoding="utf-8")
+
+
+def test_packet_skill_frontmatter_and_trigger_branches() -> None:
+    content = _packet_skill_text()
     parts = content.split("---", 2)
     assert len(parts) >= 3, "Frontmatter not found between --- markers"
     frontmatter = yaml.safe_load(parts[1])
@@ -174,6 +178,45 @@ def test_packet_skill_frontmatter_and_trigger_branches() -> None:
     ]:
         assert keyword in desc, (
             f"Keyword {keyword!r} not in frontmatter description: {desc!r}"
+        )
+
+
+def test_packet_skill_requires_search_first_and_consent() -> None:
+    content = _packet_skill_text()
+    required = [
+        "Search this repository's open and closed issues.",
+        "Prepare a new issue only after completed searches leave no matching report.",
+        "Read the matching `.github/ISSUE_TEMPLATE/*.yml`, including every required id",
+        "Build a separate public copy from local evidence.",
+        "Ask the human in this session for an explicit yes to this create or comment.",
+        "The initial request to report, a prior session's permission, or a CLI flag is not that approval.",
+    ]
+    for phrase in required:
+        assert phrase in content, f"Missing workflow requirement: {phrase!r}"
+
+
+def test_packet_skill_cli_create_preserves_form_routes() -> None:
+    content = _packet_skill_text()
+    assert "pass the form's title prefix in `--title`" in content
+    assert "the form's label in `--label`" in content
+
+    expected_routes = {
+        "bug_report.yml": {"prefix": "[BUG] ", "label": "bug"},
+        "feature_request.yml": {"prefix": "[FEATURE] ", "label": "enhancement"},
+        "documentation_issue.yml": {"prefix": "[DOCS] ", "label": "documentation"},
+        "chore.yml": {"prefix": "[CHORE] ", "label": "chore"},
+    }
+    for filename, route in expected_routes.items():
+        data = _load_yaml(filename)
+        title = data.get("title", "")
+        assert title.startswith(route["prefix"])
+        labels = data.get("labels", [])
+        assert route["label"] in labels
+        assert route["prefix"] in content, (
+            f"Skill missing title prefix {route['prefix']!r} from {filename}"
+        )
+        assert f"--label {route['label']}" in content, (
+            f"Skill missing --label {route['label']} from {filename}"
         )
 
 
