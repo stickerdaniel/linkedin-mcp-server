@@ -293,6 +293,8 @@ class LinkedInExtractor:
         cursor: str | None = None,
         quiet_for_days: int | None = None,
         awaiting_reply_only: bool = False,
+        category: str | None = None,
+        page_size: int = 25,
     ) -> dict[str, Any]:
         """Page the mailbox via Voyager, clicking nothing."""
         return await self._voyager_messaging.get_all_conversations(
@@ -301,6 +303,8 @@ class LinkedInExtractor:
             cursor=cursor,
             quiet_for_days=quiet_for_days,
             awaiting_reply_only=awaiting_reply_only,
+            category=category,
+            page_size=page_size,
         )
 
     async def get_conversation(

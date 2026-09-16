@@ -38,6 +38,27 @@ MESSAGING_URL = "https://www.linkedin.com/messaging/"
 # query carries `nextCursor:` already, so replacement is enough; there is no
 # need to understand the rest of the (non-JSON, Rest.li) encoding.
 _CURSOR_RE = re.compile(r"nextCursor:[^,)]*")
+_COUNT_RE = re.compile(r"(?<![A-Za-z])count:[^,)]*")
+_CATEGORY_RE = re.compile(r"(?<![A-Za-z])category:[^,)]*")
+
+# Measured against the live API on 2026-09-16.
+#
+# count is honoured exactly (5 -> 5, 21 -> 21) up to 25. At 30 and above the
+# response is EMPTY rather than an error, so an over-large page reads as an
+# empty mailbox. 25 is the largest verified value; it is the default because
+# round trips, not rows, are what the long dormant-contact walk pays for.
+MAX_PAGE_SIZE = 25
+
+# category IS filtered server-side: ARCHIVE, INMAIL, STARRED and SPAM each
+# return a set whose date range differs from the unfiltered one, and SPAM
+# reached 2025 rows in a single call with no paging at all.
+#
+# ⚠ An UNRECOGNISED category also returns an empty set rather than an error --
+# confirmed with a deliberate nonsense value. So "category X returned nothing"
+# never means "you have none of X" unless X is on this list.
+KNOWN_CATEGORIES = frozenset(
+    {"INBOX", "PRIMARY_INBOX", "ARCHIVE", "INMAIL", "STARRED", "SPAM"}
+)
 
 
 class VoyagerMessagingReader:
@@ -351,6 +372,9 @@ class VoyagerMessagingReader:
         cursor: str | None = None,
         quiet_for_days: int | None = None,
         awaiting_reply_only: bool = False,
+        category: str | None = None,
+        page_size: int = MAX_PAGE_SIZE,
+        stop_at_thread_urns: set[str] | None = None,
     ) -> dict[str, Any]:
         """Walk the mailbox by cursor and return normalized conversations.
 
@@ -363,6 +387,22 @@ class VoyagerMessagingReader:
         me = self._me_profile_id(url)
         if cursor:
             url = _CURSOR_RE.sub(f"nextCursor:{cursor}", url)
+
+        page_size = max(1, min(page_size, MAX_PAGE_SIZE))
+        url = _COUNT_RE.sub(f"count:{page_size}", url)
+
+        if category:
+            category = category.upper()
+            if category not in KNOWN_CATEGORIES:
+                # Refuse rather than let the API answer an unknown category with
+                # an empty page, which is indistinguishable from "you have none".
+                raise LinkedInScraperException(
+                    f"Unknown category {category!r}. Known: "
+                    f"{', '.join(sorted(KNOWN_CATEGORIES))}. An unrecognised "
+                    "category returns an empty result rather than an error, so "
+                    "it is rejected here instead of silently reading as zero."
+                )
+            url = _CATEGORY_RE.sub(f"category:{category}", url)
 
         cutoff_ms: float | None = None
         if quiet_for_days is not None:
@@ -400,6 +440,19 @@ class VoyagerMessagingReader:
                 if awaiting_reply_only and not record.get("awaiting_my_reply"):
                     continue
                 collected[urn] = record
+
+            # Incremental sync: the mailbox is recency-ordered, so once a page
+            # is entirely threads the caller already knows, everything behind it
+            # is older and also known. This is what keeps a routine run at one
+            # or two pages instead of re-walking the whole mailbox, and it is
+            # the only real defence against a server side that cannot filter by
+            # time (lastUpdatedBefore is ignored -- see module docstring).
+            if stop_at_thread_urns and rows:
+                page_urns = {r.get("entityUrn") for r in rows if r.get("entityUrn")}
+                if page_urns and page_urns <= stop_at_thread_urns:
+                    exhausted = False
+                    next_cursor = self._next_cursor(payload)
+                    break
 
             next_cursor = self._next_cursor(payload)
 

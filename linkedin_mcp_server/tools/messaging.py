@@ -127,6 +127,8 @@ def register_messaging_tools(
         cursor: str | None = None,
         quiet_for_days: Annotated[int | None, Field(ge=1)] = None,
         awaiting_reply_only: bool = False,
+        category: str | None = None,
+        page_size: Annotated[int, Field(ge=1, le=25)] = 25,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
@@ -149,8 +151,10 @@ def register_messaging_tools(
         a previous call stopped, rather than re-walking from the top.
 
         Reconnect work ("who have I fallen out of touch with") is what
-        quiet_for_days is for: dormant threads sit behind every recent one, so
-        that walk is necessarily long. Filters narrow what is RETURNED, never
+        quiet_for_days is for. It is necessarily a LONG walk: LinkedIn ignores
+        lastUpdatedBefore, so there is no way to jump to a date server-side and
+        dormant threads sit behind every recent one. `category` is the one
+        filter the server does honour, so prefer it when it fits the question. Filters narrow what is RETURNED, never
         what is walked, and `scanned` reports how many were examined so a
         filtered-empty result is distinguishable from an empty mailbox.
 
@@ -163,6 +167,13 @@ def register_messaging_tools(
                 days — the reconnect filter
             awaiting_reply_only: only return threads whose newest message is
                 theirs, so a reply is owed
+            category: SERVER-SIDE filter, the only one LinkedIn actually honours.
+                One of INBOX, PRIMARY_INBOX, ARCHIVE, INMAIL, STARRED, SPAM.
+                These jump anywhere in time in a single call. An unknown value
+                is rejected rather than passed through, because the API answers
+                one with an empty page rather than an error.
+            page_size: rows per request, max 25 (measured). Above 25 the API
+                returns EMPTY rather than an error, so this is clamped.
 
         Returns:
             Dict with conversations, count, pages_fetched, and exhausted.
@@ -189,6 +200,8 @@ def register_messaging_tools(
                 cursor=cursor,
                 quiet_for_days=quiet_for_days,
                 awaiting_reply_only=awaiting_reply_only,
+                category=category,
+                page_size=page_size,
             )
 
             await ctx.report_progress(progress=100, total=100, message="Complete")

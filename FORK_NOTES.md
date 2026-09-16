@@ -66,6 +66,43 @@ superset of the DOM one rather than a differently-shaped peer.
 Also: the sidebar virtualizes and recycles nodes — its row count was observed going **17 → 10 while
 more conversations were loading**. Never terminate a loop on it.
 
+## What LinkedIn's API will and will not filter (measured 2026-09-16)
+
+The query's real variable shape is:
+
+```
+(query:(predicateUnions:List((conversationCategoryPredicate:(category:PRIMARY_INBOX)))),
+ count:20, mailboxUrn:urn:li:fsd_profile:<me>, nextCursor:<cursor>)
+```
+
+| knob | server-side? | evidence |
+|---|---|---|
+| `category` | **YES** | ARCHIVE, INMAIL, STARRED, SPAM each return a set whose **date range differs** from unfiltered. SPAM reached **2025** rows in ONE call, no paging. |
+| `count` | **YES, up to 25** | 5→5, 10→10, 21→21, 25→25. **30+ returns EMPTY, not an error.** |
+| `lastUpdatedBefore` | **NO** | `-90d` and `-365d` returned **byte-identical** result sets. Silently ignored. |
+| unread / awaiting-reply | **NO such category** | `UNREAD` returns 0 — but so does a deliberate nonsense value, so 0 proves nothing. |
+
+**So: there is no way to jump to a date server-side.** Dormant-contact search must page
+backwards through everything newer, at ≤25 per request. `category` is the only filter that
+teleports, so prefer it whenever the question fits one.
+
+### ⚠ The trap that runs through all of this
+
+**Three different mistakes all return an empty page rather than an error**: an unknown
+`category`, a `count` above 25, and a genuinely empty mailbox. An empty result is therefore
+never self-explanatory. That is why `category` is validated against `KNOWN_CATEGORIES` and
+`page_size` is clamped — a rejected argument is honest, a silent zero is not. The negative
+control that proved it was passing a category that cannot exist and watching it come back
+looking exactly like a real, empty answer.
+
+### The efficiency answer: walk once, then sync incrementally
+
+Since the server cannot filter by time, the only real defence is not re-walking. Pass
+`stop_at_thread_urns` (the thread urns already in the ledger): the mailbox is recency-ordered,
+so once a whole page is threads you already know, everything behind it is older and also known,
+and the walk stops. **A daily run then costs one or two pages instead of the whole mailbox**,
+and the long walk is paid once.
+
 ## Running it
 
 ```bash
