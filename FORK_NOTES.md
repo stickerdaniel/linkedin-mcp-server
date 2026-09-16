@@ -14,15 +14,22 @@ renders the result, so every thread id is already in the payload as `entityUrn`.
 **Measured on Taylor's live mailbox, 2026-09-16:** 400 conversations over 20 cursor pages, still not
 exhausted, nothing clicked. The DOM path saw 16–17.
 
-## Why it can never go upstream
+## Relationship to upstream
 
-The upstream author refuses Voyager **on principle** — the only two mentions of it in the package are
-instructions not to use it — those two mentions live in `message_sender.py` and `tools/messaging.py`,
-which is where upstream states the policy, not where this fork changes anything.
+The two "no Voyager" statements in the package are both scoped to **`send_message`'s recipient
+verification** (`message_sender.py`, and the `send_message` docstring in `tools/messaging.py`).
+There, the concern is proving you are messaging the right person, and the rule is that recipient
+authorization must come from a validated top-card action and a pinned route rather than a private
+API. That is a constraint on a **write** path, not a project-wide ban — an earlier version of this
+file described it as one, which was wrong.
+
+This change is **read-only and additive**: a new tool, no behaviour change to any existing one, and
+`get_inbox` untouched. So it is a reasonable upstream proposal rather than a permanent fork, and it
+has been offered as one.
 
 **The divergence is three files:** `scraping/voyager_messaging.py` (new and standalone), plus
-additive changes to `scraping/extractor.py` and `tools/messaging.py`. **`get_inbox` is untouched**,
-so a rebase starts and usually ends in those three. Rebase on upstream tags rather than re-patching.
+additive changes to `scraping/extractor.py` and `tools/messaging.py`. If it is not taken upstream,
+rebase on upstream tags rather than re-patching; conflicts should confine to those three.
 
 ## What changed
 
