@@ -7,6 +7,8 @@ from urllib.parse import quote_plus
 
 import logging
 
+from patchright._impl._errors import TargetClosedError
+
 from linkedin_mcp_server.core.exceptions import LinkedInScraperException
 from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
 from linkedin_mcp_server.scraping.capture import (
@@ -25,7 +27,7 @@ from linkedin_mcp_server.scraping.identifiers import (
 )
 from linkedin_mcp_server.scraping.link_metadata import Reference
 from linkedin_mcp_server.scraping.search_urls import build_company_search_url
-from linkedin_mcp_server.scraping.session import NAV_DELAY, ScrapingSession
+from linkedin_mcp_server.scraping.session import ScrapingSession, nav_delay
 
 if TYPE_CHECKING:
     from linkedin_mcp_server.callbacks import ProgressCallback
@@ -72,7 +74,7 @@ class CompanyScraper:
         try:
             for i, spec in enumerate(requested_ordered):
                 if i > 0:
-                    await self._session.delay(NAV_DELAY)
+                    await self._session.pace(nav_delay())
 
                 section_name = spec.name
                 url = base_url + spec.suffix
@@ -99,6 +101,9 @@ class CompanyScraper:
                         section_errors[section_name] = extracted.error
                 except LinkedInScraperException:
                     raise
+                except TargetClosedError:
+                    # Not a property of the section; see scrape_person.
+                    raise
                 except Exception as e:
                     logger.warning("Error scraping section %s: %s", section_name, e)
                     section_errors[section_name] = build_issue_diagnostics(
@@ -118,7 +123,9 @@ class CompanyScraper:
 
                 if rate_limited:
                     break
-        except LinkedInScraperException as e:
+        except (LinkedInScraperException, TargetClosedError) as e:
+            # The closed target is re-raised past the section loop above, so
+            # it reaches the caller only through this handler.
             if callbacks:
                 await callbacks.on_error(e)
             raise

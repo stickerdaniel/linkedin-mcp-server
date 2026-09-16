@@ -1,0 +1,566 @@
+"""Tests for the cached, paced company-enrichment tools.
+
+The cache and parsers are covered in test_company_cache.py; these cover the
+tool loop: cache-first behaviour, the search batch lever, the deep jobs fetch,
+and that a rate limit never loses progress.
+"""
+
+import asyncio
+import logging
+import time
+from datetime import datetime, timedelta
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+from fastmcp import FastMCP
+
+from linkedin_mcp_server.company_cache import CompanyCache
+from linkedin_mcp_server.config.loaders import EnvironmentKeys
+from linkedin_mcp_server.core.exceptions import RateLimitError
+from linkedin_mcp_server.pacing import (
+    ACCOUNT_BUDGET_JOB,
+    Job,
+    JobStore,
+    Ledger,
+    Schedule,
+    request_arrived_at,
+)
+from linkedin_mcp_server.tools.enrichment import RETRY_AFTER_QUEUED_OUT
+
+from test_tools import get_tool_fn
+
+# Always open: no weekend, no lunch, so tests never depend on the wall clock.
+OPEN_ALL = Schedule(work_start=0, work_end=24, days_off=())
+
+
+@pytest.fixture
+def wired(tmp_path, monkeypatch):
+    """Point both the company cache and the shared budget store at tmp_path."""
+    import linkedin_mcp_server.tools.company_enrichment as ce
+
+    cache = CompanyCache(tmp_path / "companies")
+    jobs = JobStore(tmp_path / "jobs")
+    monkeypatch.setattr(ce, "CompanyCache", lambda *a, **k: cache)
+    monkeypatch.setattr(ce, "JobStore", lambda *a, **k: jobs)
+
+    # A shared budget whose schedule is always open, so tests do not depend on
+    # the wall clock's hour.
+    budget = Job(
+        name=ACCOUNT_BUDGET_JOB,
+        started_on=datetime(2020, 1, 1).date(),
+        warmup=False,
+        daily_cap=100,
+        schedule=OPEN_ALL,
+    )
+    jobs.save(budget)
+    return cache, jobs
+
+
+@pytest.fixture
+def mcp(wired):
+    from linkedin_mcp_server.tools.company_enrichment import (
+        register_company_enrichment_tools,
+    )
+
+    server = FastMCP("test")
+    register_company_enrichment_tools(server)
+    return server
+
+
+def _search_extractor(hits):
+    """A mock whose search_companies returns the given company references."""
+    mock = MagicMock()
+    refs = [
+        {"url": f"https://www.linkedin.com/company/{s}", "text": s.title()}
+        for s in hits
+    ]
+    mock.search_companies = AsyncMock(
+        return_value={
+            "sections": {"search_results": "1-50 employees\nSoftware"},
+            "references": {"search_results": refs},
+        }
+    )
+    return mock
+
+
+class TestEnrichCompanies:
+    async def test_serves_fresh_cache_without_touching_linkedin(
+        self, mcp, wired, mock_context
+    ):
+        cache, _ = wired
+        now = datetime.now().astimezone()
+        cache.record_firmographics(
+            "Copado", now, source="company_page", industry="Software"
+        )
+        extractor = _search_extractor([])
+
+        fn = await get_tool_fn(mcp, "enrich_companies")
+        out = await fn(["Copado"], mock_context, extractor=extractor)
+
+        assert out["served_from_cache"] == 1
+        assert out["fetched"] == 0
+        extractor.search_companies.assert_not_awaited()
+
+    async def test_searches_for_a_miss_and_caches_the_page(
+        self, mcp, wired, mock_context, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tools.company_enrichment.step_delay", lambda **k: 0
+        )
+        cache, _ = wired
+        # One search page reveals three companies; all three should be cached.
+        extractor = _search_extractor(["copado", "gearset", "flosum"])
+
+        fn = await get_tool_fn(mcp, "enrich_companies")
+        out = await fn(["Copado"], mock_context, extractor=extractor)
+
+        assert out["fetched"] == 1
+        assert cache.get("Copado") is not None
+        # Companies seen in passing are cached too -> future free hits.
+        assert cache.get("Gearset") is not None
+        assert cache.get("Flosum") is not None
+
+    async def test_second_name_on_the_same_page_is_a_free_hit(
+        self, mcp, wired, mock_context, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tools.company_enrichment.step_delay", lambda **k: 0
+        )
+        _, _ = wired
+        extractor = _search_extractor(["copado", "gearset"])
+
+        fn = await get_tool_fn(mcp, "enrich_companies")
+        # Gearset was revealed by Copado's search, so only one search runs.
+        out = await fn(["Copado", "Gearset"], mock_context, extractor=extractor)
+
+        assert out["fetched"] == 1
+        assert extractor.search_companies.await_count == 1
+
+    async def test_a_free_hit_does_not_consume_a_search_slot(
+        self, mcp, wired, mock_context, monkeypatch
+    ):
+        """bunch_searches bounds searches run, not names looked at: a name
+        resolved for free (in passing) must not use up a slot that a later
+        unresolved name needs."""
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tools.company_enrichment.step_delay", lambda **k: 0
+        )
+        _, _ = wired
+
+        # Searching "a" reveals a+b (b becomes a free hit); "c" is its own page.
+        def per_name(name):
+            slugs = {"a": ["a", "b"], "c": ["c"]}.get(name.lower(), [name.lower()])
+            refs = [
+                {"url": f"https://www.linkedin.com/company/{s}", "text": s}
+                for s in slugs
+            ]
+            return {
+                "sections": {"search_results": "x"},
+                "references": {"search_results": refs},
+            }
+
+        extractor = MagicMock()
+        extractor.search_companies = AsyncMock(side_effect=lambda n: per_name(n))
+
+        fn = await get_tool_fn(mcp, "enrich_companies")
+        # bunch_searches=2. Old bug: a(search)+b(free) exhausts 2 slots, c
+        # never tried. Fixed: b is free, so c still gets its search.
+        out = await fn(
+            ["a", "b", "c"], mock_context, bunch_searches=2, extractor=extractor
+        )
+
+        assert out["fetched"] == 2  # a and c searched; b free
+        assert extractor.search_companies.await_count == 2
+        assert set(out["results"]) == {"a", "b", "c"}  # all three resolved
+
+    async def test_stops_when_shared_budget_is_spent(self, mcp, wired, mock_context):
+        cache, jobs = wired
+        now = datetime.now().astimezone()
+        budget = jobs.load(ACCOUNT_BUDGET_JOB)
+        budget.daily_cap = 3
+        budget.ledger = Ledger(actions=[now.timestamp()] * 3)
+        jobs.save(budget)
+
+        fn = await get_tool_fn(mcp, "enrich_companies")
+        out = await fn(["NewCo"], mock_context, extractor=_search_extractor([]))
+
+        assert out["stopped_because"] == "daily_budget_spent"
+        assert out["fetched"] == 0
+
+    async def test_bunch_searches_is_clamped_to_the_configured_ceiling(
+        self, mcp, wired, mock_context, monkeypatch, caplog
+    ):
+        """``BUNCH_SEARCHES_MAX`` has to reach the tool, as ``BUNCH_SIZE_MAX``
+        reaches run_enrichment_bunch; a ceiling only the docs know is none."""
+        monkeypatch.setenv(EnvironmentKeys.BUNCH_SEARCHES_MAX, "2")
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tools.company_enrichment.step_delay", lambda **k: 0
+        )
+        extractor = MagicMock()
+        extractor.search_companies = AsyncMock(
+            side_effect=lambda n: {
+                "sections": {"search_results": "x"},
+                "references": {
+                    "search_results": [
+                        {"url": f"https://www.linkedin.com/company/{n}", "text": n}
+                    ]
+                },
+            }
+        )
+
+        fn = await get_tool_fn(mcp, "enrich_companies")
+        with caplog.at_level(logging.INFO):
+            out = await fn(
+                ["a", "b", "c", "d"],
+                mock_context,
+                bunch_searches=5,
+                extractor=extractor,
+            )
+
+        assert out["fetched"] == 2
+        assert extractor.search_companies.await_count == 2
+        assert any(
+            "Clamping bunch_searches=5" in r.getMessage() for r in caplog.records
+        )
+
+    async def test_rate_limit_saves_progress(self, mcp, wired, mock_context):
+        _, jobs = wired
+        extractor = MagicMock()
+        extractor.search_companies = AsyncMock(side_effect=RateLimitError("slow down"))
+
+        fn = await get_tool_fn(mcp, "enrich_companies")
+        out = await fn(["NewCo"], mock_context, extractor=extractor)
+
+        assert out["stopped_because"] == "rate_limited"
+        assert out["next_run_after_seconds"] >= 3600
+        # The throttled search was still a request LinkedIn saw. The middleware
+        # leaves the recording to this tool, so an unrecorded 429 is a page
+        # load the daily cap never learns about.
+        now = datetime.now().astimezone()
+        assert jobs.load(ACCOUNT_BUDGET_JOB).ledger.spent(now) == 1
+
+    async def test_no_confident_match_does_not_serve_a_different_company(
+        self, mcp, wired, mock_context, monkeypatch
+    ):
+        """When the query normalizes differently from every hit, return the
+        candidates + raw page -- never mislabel the top hit as the answer."""
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tools.company_enrichment.step_delay", lambda **k: 0
+        )
+        # Query "Wonka Industries", but the page only returns unrelated firms.
+        extractor = _search_extractor(["acme-corp", "globex"])
+
+        fn = await get_tool_fn(mcp, "enrich_companies")
+        out = await fn(["Wonka Industries"], mock_context, extractor=extractor)
+
+        served = out["results"]["Wonka Industries"]
+        assert served["status"] == "no_confident_match"
+        assert "Acme-Corp" in served["candidates"]
+        assert "linkedin_url" not in served  # not attributed to a wrong company
+
+    async def test_a_call_queued_past_its_deadline_loads_nothing(
+        self, mcp, wired, mock_context
+    ):
+        """Queued 200 s behind another session, past the 210 s the frontend
+        proxy waits: nothing is searched and nothing is charged."""
+        _, jobs = wired
+        extractor = _search_extractor(["copado"])
+
+        arrival = request_arrived_at.set(time.monotonic() - 200)
+        try:
+            fn = await get_tool_fn(mcp, "enrich_companies")
+            out = await fn(["Copado"], mock_context, extractor=extractor)
+        finally:
+            request_arrived_at.reset(arrival)
+
+        extractor.search_companies.assert_not_awaited()
+        assert out["stopped_because"] == "tool_deadline"
+        assert out["next_run_after_seconds"] == RETRY_AFTER_QUEUED_OUT
+        assert out["fetched"] == 0
+        now = datetime.now().astimezone()
+        assert jobs.load(ACCOUNT_BUDGET_JOB).ledger.spent(now) == 0
+
+    async def test_time_spent_queued_shortens_the_deadline(
+        self, wired, mock_context, monkeypatch
+    ):
+        from linkedin_mcp_server.tools.company_enrichment import (
+            register_company_enrichment_tools,
+        )
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tools.company_enrichment.step_delay", lambda **k: 0
+        )
+        _, jobs = wired
+        extractor = _search_extractor(["copado"])
+        page = extractor.search_companies.return_value
+
+        async def slow_search(name):
+            await asyncio.sleep(0.3)
+            return page
+
+        extractor.search_companies = AsyncMock(side_effect=slow_search)
+        server = FastMCP("test")
+        # 75% of 13.6 s is 10.2 s from arrival; 10 s of that already went by
+        # in the queue, so the one 0.3 s search is all there is time for.
+        register_company_enrichment_tools(server, tool_timeout=13.6)
+
+        arrival = request_arrived_at.set(time.monotonic() - 10)
+        try:
+            fn = await get_tool_fn(server, "enrich_companies")
+            out = await fn(["Copado", "Globex"], mock_context, extractor=extractor)
+        finally:
+            request_arrived_at.reset(arrival)
+
+        assert extractor.search_companies.await_count == 1
+        assert out["stopped_because"] == "tool_deadline"
+        assert out["fetched"] == 1
+        now = datetime.now().astimezone()
+        assert jobs.load(ACCOUNT_BUDGET_JOB).ledger.spent(now) == 1
+
+    async def test_empty_input_rejected(self, mcp, mock_context):
+        from fastmcp.exceptions import ToolError
+
+        fn = await get_tool_fn(mcp, "enrich_companies")
+        with pytest.raises(ToolError, match="empty"):
+            await fn([], mock_context)
+
+
+class TestEnrichCompanyDeep:
+    def _deep_extractor(self):
+        """Mock the two calls the tool now makes: scrape_company(about) -- which
+        yields the firmographics and the company URN reference -- and
+        extract_page(job-search URL) for the open-roles count."""
+        from linkedin_mcp_server.scraping.contracts import ExtractedSection
+
+        mock = MagicMock()
+        mock.scrape_company = AsyncMock(
+            return_value={
+                "url": "https://www.linkedin.com/company/acme/",
+                "sections": {
+                    "about": (
+                        "Acme\nIndustry\nRetail\n"
+                        "Company size\n1,001-5,000 employees\n"
+                        "Headquarters\nCairo, Egypt\n"
+                    ),
+                },
+                "references": {
+                    "about": [
+                        {
+                            "kind": "company_urn",
+                            "url": "/search/results/people/?currentCompany=%5B%229999%22%5D",
+                            "value": "9999",
+                        }
+                    ]
+                },
+            }
+        )
+        mock.extract_page = AsyncMock(
+            return_value=ExtractedSection(
+                text="Jobs in Worldwide\n42 results\nSalesforce Administrator\n",
+                references=[],
+            )
+        )
+        return mock
+
+    async def test_fetches_firmographics_and_open_roles(self, mcp, wired, mock_context):
+        cache, _ = wired
+        extractor = self._deep_extractor()
+
+        fn = await get_tool_fn(mcp, "enrich_company_deep")
+        out = await fn("Acme", mock_context, extractor=extractor)
+
+        assert out["status"] == "fetched"
+        assert out["industry"] == "Retail"
+        assert out["employee_count"] == "1,001-5,000 employees"
+        assert out["open_roles_count"] == 42  # from the job SEARCH, not the tab
+        # Open roles came from job-search-by-URN, not the company /jobs/ tab.
+        jobs_url = extractor.extract_page.await_args.args[0]
+        assert "/jobs/search/?f_C=9999" in jobs_url
+        rec = cache.get("Acme")
+        assert rec.has_firmographics() and rec.has_jobs()
+        assert rec.company_urn == "9999"  # cached for later jobs-only refresh
+
+    async def test_cache_fresh_skips_the_fetch(self, mcp, wired, mock_context):
+        cache, _ = wired
+        now = datetime.now().astimezone()
+        cache.record_firmographics(
+            "Acme", now, source="company_page", industry="Retail"
+        )
+        cache.record_jobs("Acme", now, count=5, sample=["X"])
+        extractor = self._deep_extractor()
+
+        fn = await get_tool_fn(mcp, "enrich_company_deep")
+        out = await fn("Acme", mock_context, extractor=extractor)
+
+        assert out["status"] == "cache_fresh"
+        extractor.scrape_company.assert_not_awaited()
+        extractor.extract_page.assert_not_awaited()
+
+    async def test_a_raised_rate_limit_still_costs_the_page_load(
+        self, mcp, wired, mock_context
+    ):
+        _, jobs = wired
+        extractor = self._deep_extractor()
+        extractor.scrape_company = AsyncMock(side_effect=RateLimitError("HTTP 429"))
+
+        fn = await get_tool_fn(mcp, "enrich_company_deep")
+        out = await fn("Acme", mock_context, extractor=extractor)
+
+        assert out["next_run_after_seconds"] == 3600
+        now = datetime.now().astimezone()
+        assert jobs.load(ACCOUNT_BUDGET_JOB).ledger.spent(now) == 1
+
+    async def test_a_rate_limited_jobs_page_is_not_cached_as_fresh(
+        self, mcp, wired, mock_context
+    ):
+        """extract_page can return the soft rate-limit sentinel WITHOUT raising.
+        Caching it would serve a failed lookup as fresh for the jobs TTL, so the
+        jobs half must stay stale (unrecorded) instead."""
+        from linkedin_mcp_server.scraping.contracts import (
+            RATE_LIMITED_SECTION_TEXT,
+            ExtractedSection,
+        )
+
+        cache, _ = wired
+        extractor = self._deep_extractor()
+        extractor.extract_page = AsyncMock(
+            return_value=ExtractedSection(text=RATE_LIMITED_SECTION_TEXT, references=[])
+        )
+
+        fn = await get_tool_fn(mcp, "enrich_company_deep")
+        out = await fn("Acme", mock_context, extractor=extractor)
+
+        rec = cache.get("Acme")
+        assert rec.has_firmographics()  # About succeeded
+        assert not rec.has_jobs()  # rate-limited jobs NOT stamped fresh
+        assert cache.needs_jobs("Acme", datetime.now().astimezone())  # retried next
+        # And the caller is told, exactly as when the throttle raised.
+        assert out["status"] == "rate_limited"
+        assert out["next_run_after_seconds"] == 3600
+        assert out["industry"] == "Retail"
+
+    async def test_a_failed_jobs_page_is_not_reported_as_fetched(
+        self, mcp, wired, mock_context
+    ):
+        """An error section or an empty page skips the cache write; the
+        status has to say so, or stale open roles read as a refresh."""
+        from linkedin_mcp_server.scraping.contracts import ExtractedSection
+
+        cache, _ = wired
+        fn = await get_tool_fn(mcp, "enrich_company_deep")
+
+        extractor = self._deep_extractor()
+        extractor.extract_page = AsyncMock(
+            return_value=ExtractedSection(
+                text="",
+                references=[],
+                error={"error_type": "TimeoutError", "error_message": "slow"},
+            )
+        )
+        out = await fn("Acme", mock_context, extractor=extractor)
+        assert out["status"] == "jobs_failed"
+        assert "slow" in out["jobs_note"]
+        assert not cache.get("Acme").has_jobs()
+
+        extractor.extract_page = AsyncMock(
+            return_value=ExtractedSection(text="", references=[])
+        )
+        out = await fn("Acme", mock_context, extractor=extractor, refresh=True)
+        assert out["status"] == "jobs_failed"
+        assert "empty page" in out["jobs_note"]
+        assert not cache.get("Acme").has_jobs()
+
+    async def test_an_unparsed_count_is_stamped_fresh_but_said_so(
+        self, mcp, wired, mock_context
+    ):
+        """The "N results" header is matched in English only, so on any other
+        locale the count is None on every fetch. Refusing the stamp would make
+        jobs never fresh there; the page is recorded and the view says the
+        count could not be read, so a None is not mistaken for zero."""
+        from linkedin_mcp_server.scraping.contracts import ExtractedSection
+
+        cache, _ = wired
+        extractor = self._deep_extractor()
+        extractor.extract_page = AsyncMock(
+            return_value=ExtractedSection(
+                text=(
+                    "Jobs in Weltweit\n42 Ergebnisse\n"
+                    "Salesforce Administrator\nSalesforce Administrator\n"
+                ),
+                references=[],
+            )
+        )
+
+        fn = await get_tool_fn(mcp, "enrich_company_deep")
+        out = await fn("Acme", mock_context, extractor=extractor)
+
+        assert out["status"] == "fetched"
+        assert out["open_roles_count"] is None
+        assert out["open_roles_sample"] == ["Salesforce Administrator"]
+        assert "count unparsed" in out["jobs_note"]
+        rec = cache.get("Acme")
+        assert rec.has_jobs()  # stamped: the page loaded, only the header is foreign
+
+        # The same note travels with the cached record.
+        read = await get_tool_fn(mcp, "get_company_cache")
+        assert "count unparsed" in (await read("Acme"))["jobs_note"]
+
+    async def test_stale_jobs_refetch_uses_cached_urn_without_about(
+        self, mcp, wired, mock_context
+    ):
+        """Firmographics fresh, jobs stale -> re-fetch ONLY open roles, using
+        the URN cached from the earlier deep fetch (no About re-scrape)."""
+        cache, _ = wired
+        now = datetime.now().astimezone()
+        cache.record_firmographics(
+            "Acme",
+            now,
+            source="company_page",
+            industry="Retail",
+            company_urn="9999",
+        )
+        old = (now - timedelta(days=30)).isoformat()
+        rec = cache.get("Acme")
+        rec.open_roles_count = 5
+        rec.jobs_fetched_at = old
+        cache.save(rec)
+
+        extractor = self._deep_extractor()
+        fn = await get_tool_fn(mcp, "enrich_company_deep")
+        await fn("Acme", mock_context, extractor=extractor)
+
+        extractor.scrape_company.assert_not_awaited()  # firmographics still fresh
+        extractor.extract_page.assert_awaited_once()  # only open roles refreshed
+        assert "f_C=9999" in extractor.extract_page.await_args.args[0]
+
+    async def test_include_jobs_false_skips_the_job_search(
+        self, mcp, wired, mock_context
+    ):
+        cache, _ = wired
+        extractor = self._deep_extractor()
+
+        fn = await get_tool_fn(mcp, "enrich_company_deep")
+        await fn("Acme", mock_context, include_jobs=False, extractor=extractor)
+
+        extractor.scrape_company.assert_awaited_once()  # About still fetched
+        extractor.extract_page.assert_not_awaited()  # no open-roles lookup
+
+
+class TestGetCompanyCache:
+    async def test_lists_and_reads(self, mcp, wired):
+        cache, _ = wired
+        now = datetime.now().astimezone()
+        cache.record_firmographics("Acme", now, source="search", industry="Retail")
+
+        fn = await get_tool_fn(mcp, "get_company_cache")
+        listing = await fn()
+        assert "acme" in listing["cached_companies"]
+
+        detail = await fn("Acme")
+        assert detail["status"] == "cached"
+        assert detail["industry"] == "Retail"
+        assert detail["firmographics_fresh"] is True
+
+    async def test_unknown_company(self, mcp, wired):
+        fn = await get_tool_fn(mcp, "get_company_cache")
+        assert (await fn("Nope"))["status"] == "not_cached"

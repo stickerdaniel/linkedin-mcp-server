@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-import asyncio
 import logging
 import time
 
@@ -36,7 +35,7 @@ from linkedin_mcp_server.scraping.job_policy import (
 from linkedin_mcp_server.scraping.link_metadata import Reference, dedupe_references
 from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.search_urls import build_job_search_url
-from linkedin_mcp_server.scraping.session import NAV_DELAY
+from linkedin_mcp_server.scraping.session import ScrapingSession, nav_delay
 
 logger = logging.getLogger(__name__)
 
@@ -54,10 +53,12 @@ class JobScraper:
 
     def __init__(
         self,
+        session: ScrapingSession,
         navigator: PageNavigator,
         capture: SectionCapture,
         pages: JobPageReader,
     ):
+        self._session = session
         self._navigator = navigator
         self._capture = capture
         self._pages = pages
@@ -187,22 +188,23 @@ class JobScraper:
                 break
 
             elapsed = time.monotonic() - started
-            if page_num > 0 and elapsed + NAV_DELAY + slowest_page > budget:
+            delay = nav_delay()
+            if page_num > 0 and elapsed + delay + slowest_page > budget:
                 logger.debug(
                     "Stopping after %d pages: %.1fs spent, another page costs "
                     "up to %.1fs and the budget is %.1fs",
                     page_num,
                     elapsed,
-                    NAV_DELAY + slowest_page,
+                    delay + slowest_page,
                     budget,
                 )
                 break
 
             if page_num > 0:
-                await asyncio.sleep(NAV_DELAY)
+                await self._session.pace(delay)
 
             # Started after the delay, because the prediction above adds
-            # `NAV_DELAY` to `slowest_page` itself. Timing from before the
+            # the delay to `slowest_page` itself. Timing from before the
             # sleep folds it into every page after the first and then charges
             # it a second time, which stops a page early for every two seconds
             # of delay the run has already paid for.
@@ -471,7 +473,7 @@ class JobScraper:
                 break
 
             if page_num > 0:
-                await asyncio.sleep(NAV_DELAY)
+                await self._session.pace(nav_delay())
 
             url = (
                 base_url

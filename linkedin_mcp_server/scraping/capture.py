@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 
 import logging
 
+from patchright._impl._errors import TargetClosedError
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.core.exceptions import LinkedInScraperException
@@ -28,12 +29,6 @@ from linkedin_mcp_server.scraping.text import (
 )
 
 logger = logging.getLogger(__name__)
-
-# Backoff before retrying a temporarily blocked page. Owned here rather than
-# copied, because the job-page reads that still sit on the facade share it: two
-# constants would let one relocation give the two retry paths different policies
-# without anything failing.
-RATE_LIMIT_RETRY_DELAY = 5.0
 
 
 class CaptureMode(Flag):
@@ -106,26 +101,30 @@ class SectionCapture:
         section_name: str,
         plan: CapturePlan,
     ) -> ExtractedSection:
-        """Navigate and capture a section according to an explicit plan."""
+        """Navigate and capture a section according to an explicit plan.
+
+        Retries after a backoff when the page returns only LinkedIn chrome
+        (sidebar/footer noise with no actual content), which indicates a soft
+        rate limit, for as long as the scrape-wide retry budget allows. Page
+        and overlay reads draw on the same budget, because the requests land
+        on the same limit.
+        """
         try:
             result = await self._capture_once(url, section_name, plan)
             if result.text != RATE_LIMITED_SECTION_TEXT:
                 return result
 
-            if CaptureMode.OVERLAY in plan.mode:
-                logger.info(
-                    "Retrying overlay %s after %.0fs backoff",
-                    url,
-                    RATE_LIMIT_RETRY_DELAY,
-                )
-            else:
-                logger.info(
-                    "Retrying %s after %.0fs backoff", url, RATE_LIMIT_RETRY_DELAY
-                )
-            await self._session.delay(RATE_LIMIT_RETRY_DELAY)
+            if not await self._session.claim_soft_retry(url):
+                return result
             return await self._capture_once(url, section_name, plan)
 
         except LinkedInScraperException:
+            raise
+        except TargetClosedError:
+            # A closed target is not a property of the section; every later
+            # section would fail identically, so it is the call that has to
+            # fail, not the section. Isolating it here is where the incident's
+            # error was swallowed.
             raise
         except Exception as e:
             is_overlay = CaptureMode.OVERLAY in plan.mode
@@ -240,7 +239,7 @@ class SectionCapture:
                         break
                     await target.scroll_into_view_if_needed(timeout=2000)
                     await target.click(timeout=2000)
-                    await self._session.delay(1.0)
+                    await self._session.pace(1.0)
                 except PlaywrightTimeoutError:
                     logger.debug("Show more click timed out after %d clicks", i)
                     break
