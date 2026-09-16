@@ -136,6 +136,81 @@ def test_issue_form_routes_preserve_existing_issue_types() -> None:
         )
 
 
+def test_agent_instructions_match_and_point_to_packet_skill() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    agents_path = repo_root / "AGENTS.md"
+    claude_path = repo_root / "CLAUDE.md"
+    assert agents_path.read_bytes() == claude_path.read_bytes()
+
+    pointer = (
+        "[.agents/skills/issue-packet/SKILL.md](.agents/skills/issue-packet/SKILL.md)"
+    )
+    agents_text = agents_path.read_text(encoding="utf-8")
+    assert pointer in agents_text
+
+    skill_path = repo_root / ".agents" / "skills" / "issue-packet" / "SKILL.md"
+    assert skill_path.is_file()
+
+
+def test_packet_skill_frontmatter_and_trigger_branches() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    skill_path = repo_root / ".agents" / "skills" / "issue-packet" / "SKILL.md"
+    content = skill_path.read_text(encoding="utf-8")
+    parts = content.split("---", 2)
+    assert len(parts) >= 3, "Frontmatter not found between --- markers"
+    frontmatter = yaml.safe_load(parts[1])
+
+    assert frontmatter.get("name") == "issue-packet"
+    assert frontmatter.get("disable-model-invocation") is not True
+
+    desc = frontmatter.get("description", "")
+    for keyword in [
+        "file",
+        "open",
+        "create",
+        "bug report",
+        "feature request",
+        "gh issue create",
+    ]:
+        assert keyword in desc, (
+            f"Keyword {keyword!r} not in frontmatter description: {desc!r}"
+        )
+
+
+def test_reporting_workflow_links_do_not_contain_stale_intake_copy() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    readme_path = repo_root / "README.md"
+    contributing_path = repo_root / "CONTRIBUTING.md"
+
+    readme_text = readme_path.read_text(encoding="utf-8")
+    contributing_text = contributing_path.read_text(encoding="utf-8")
+
+    for text, name in [
+        (readme_text, "README.md"),
+        (contributing_text, "CONTRIBUTING.md"),
+    ]:
+        assert "Please [open an issue]" not in text, (
+            f"Stale 'Please [open an issue]' found in {name}"
+        )
+        assert "1. [Open an issue]" not in text, (
+            f"Stale '1. [Open an issue]' found in {name}"
+        )
+        assert "issue-packet/SKILL.md" in text, (
+            f"Missing issue-packet/SKILL.md in {name}"
+        )
+
+
+def test_repro_skill_does_not_trigger_on_raw_issue_url() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    repro_path = repo_root / ".agents" / "skills" / "2-repro-issue" / "SKILL.md"
+    content = repro_path.read_text(encoding="utf-8")
+    parts = content.split("---", 2)
+    assert len(parts) >= 3, "Frontmatter not found in repro skill"
+    frontmatter = yaml.safe_load(parts[1])
+    desc = frontmatter.get("description", "")
+    assert "pastes an issue URL" not in desc
+
+
 def test_packet_copy_uses_plain_public_text() -> None:
     for filename in ISSUE_FORM_FILES:
         data = _load_yaml(filename)

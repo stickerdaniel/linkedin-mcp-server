@@ -166,7 +166,7 @@ Optional additional keys:
 
 ## Verifying Bug Reports
 
-Always verify scraping bugs end-to-end against live LinkedIn, not just code analysis. Use `uv run`, not `uvx`, so the running process reflects your workspace. Use `uvx` only for packaged distribution verification. For live Docker investigations, refresh the source session first with `uv run -m linkedin_mcp_server --login` before testing each materially different approach. Assume a valid login profile already exists at `~/.linkedin-mcp/profile/`.
+Evaluate bug reports from the reporter's packet and the matching source. Live LinkedIn reproduction is optional. State which account variant and code version each observation covers. For a chosen local live check, use `uv run` to test the workspace or the reported launcher to test a packaged installation. Ask before login, session changes, or LinkedIn writes.
 
 ```bash
 # Start server
@@ -262,7 +262,7 @@ Always read [`CONTRIBUTING.md`](CONTRIBUTING.md) before filing an issue or worki
   Generated with <model name and version>
   ```
 - When implementing a new feature/fix:
-  1. Check open issues. If no issue exists, create one following the templates in `.github/ISSUE_TEMPLATE/`. Fill in every section; delete optional sections if not applicable.
+  1. Packet: before filing or commenting on a GitHub issue, read [.agents/skills/issue-packet/SKILL.md](.agents/skills/issue-packet/SKILL.md).
   2. Branch from `main`: `feature/issue-number-short-description`
   3. Implement and test
   4. Update README.md and docs/docker-hub.md if relevant
