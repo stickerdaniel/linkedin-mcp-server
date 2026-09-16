@@ -412,7 +412,7 @@ class VoyagerMessagingReader:
         awaiting_reply_only: bool = False,
         category: str | None = None,
         page_size: int = MAX_PAGE_SIZE,
-        stop_at_thread_urns: set[str] | None = None,
+        known_thread_urns: list[str] | None = None,
     ) -> dict[str, Any]:
         """Walk the mailbox by cursor and return normalized conversations.
 
@@ -471,6 +471,10 @@ class VoyagerMessagingReader:
             cutoff_ms = (
                 datetime.now(tz=timezone.utc).timestamp() - quiet_for_days * 86400
             ) * 1000
+
+        # Converted here rather than by the caller: the extractor is a thin
+        # delegate by design, so shaping arguments is this layer's job.
+        known: set[str] = set(known_thread_urns or ())
 
         filters_active = bool(quiet_for_days is not None or awaiting_reply_only)
 
@@ -542,9 +546,9 @@ class VoyagerMessagingReader:
             # or two pages instead of re-walking the whole mailbox, and it is
             # the only real defence against a server side that cannot filter by
             # time (lastUpdatedBefore is ignored -- see module docstring).
-            if stop_at_thread_urns and rows:
+            if known and rows:
                 page_urns = {r.get("entityUrn") for r in rows if r.get("entityUrn")}
-                if page_urns and page_urns <= stop_at_thread_urns:
+                if page_urns and page_urns <= known:
                     exhausted = False
                     next_cursor = self._next_cursor(payload)
                     break

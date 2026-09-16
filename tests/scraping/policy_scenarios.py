@@ -1019,6 +1019,7 @@ async def _facade_contract_trace() -> dict[str, Any]:
 
 TOOL_FACADE_METHODS = {
     "connect_with_person",
+    "get_all_conversations",
     "extract_feed",
     "extract_page",
     "get_company_employees",

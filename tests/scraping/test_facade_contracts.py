@@ -45,6 +45,7 @@ TOOL_DELEGATES = {
     "get_company_employees": "get_company_employees",
     "get_company_posts": "extract_page",
     "get_company_profile": "scrape_company",
+    "get_all_conversations": "get_all_conversations",
     "get_conversation": "get_conversation",
     "get_feed": "extract_feed",
     "get_inbox": "get_inbox",
@@ -97,6 +98,7 @@ async def test_constructor_export_and_dependency_use_the_same_facade(monkeypatch
         "_message_sender",
         "_person",
         "_posts",
+        "_voyager_messaging",
     }
     assert set(vars(extractor)) == expected_state
     assert type(constructed) is LinkedInExtractor
@@ -119,9 +121,9 @@ async def test_registered_tools_and_extractor_delegates_are_counted_separately()
     tools = await create_mcp_server().list_tools()
     tool_names = {tool.name for tool in tools}
 
-    assert len(tool_names) == 19
+    assert len(tool_names) == 20
     assert tool_names == {*TOOL_DELEGATES, "close_session"}
-    assert len(TOOL_DELEGATES) == 18
+    assert len(TOOL_DELEGATES) == 19
     assert set(TOOL_DELEGATES.values()) == TOOL_FACADE_METHODS
     assert "close_session" not in TOOL_DELEGATES
 
@@ -497,7 +499,7 @@ def test_facade_methods_are_exactly_the_frozen_coroutine_surface():
     }
 
     assert actual == expected
-    assert len(TOOL_FACADE_METHODS) == 18
+    assert len(TOOL_FACADE_METHODS) == 19
     assert len(COMPATIBILITY_METHODS) == 2
 
 

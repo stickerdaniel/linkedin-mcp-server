@@ -250,7 +250,7 @@ class LinkedInExtractor:
             awaiting_reply_only=awaiting_reply_only,
             category=category,
             page_size=page_size,
-            stop_at_thread_urns=set(known_thread_urns or ()) or None,
+            known_thread_urns=known_thread_urns,
         )
 
     async def get_conversation(
