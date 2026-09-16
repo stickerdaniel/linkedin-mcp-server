@@ -11,32 +11,6 @@ from linkedin_mcp_server.error_diagnostics import (
 )
 
 
-def _required_issue_form_labels() -> list[str]:
-    labels: list[str] = []
-    current_label: str | None = None
-    in_body = False
-    issue_form_path = (
-        Path(__file__).resolve().parents[1] / ".github/ISSUE_TEMPLATE/bug_report.yml"
-    )
-    lines = issue_form_path.read_text().splitlines()
-    for line in lines:
-        stripped = line.strip()
-        if stripped == "body:":
-            in_body = True
-            continue
-        if not in_body:
-            continue
-        if stripped.startswith("- type:"):
-            current_label = None
-            continue
-        if stripped.startswith("label:"):
-            current_label = stripped.removeprefix("label:").strip().strip('"')
-            continue
-        if stripped == "required: true" and current_label:
-            labels.append(current_label)
-    return labels
-
-
 def test_build_issue_diagnostics_includes_existing_issues(monkeypatch, tmp_path):
     monkeypatch.setenv("USER_DATA_DIR", str(tmp_path / "profile"))
     monkeypatch.setattr(
@@ -94,6 +68,7 @@ def test_format_tool_error_with_diagnostics_prefers_existing_issue_comment_flow(
 
     message = format_tool_error_with_diagnostics("Scrape failed", diagnostics)
 
+    assert "- Local diagnostic notes: /tmp/issue.md" in message
     assert "Matching open issues were found" in message
     assert "#220" in message
     assert "post it as a comment" in message
@@ -169,9 +144,7 @@ async def test_build_issue_diagnostics_skips_network_search_in_event_loop(
     assert "search was skipped in async server context" in issue_body
 
 
-def test_build_issue_diagnostics_covers_required_bug_report_fields(
-    monkeypatch, tmp_path
-):
+def test_build_issue_diagnostics_preserves_captured_failure(monkeypatch, tmp_path):
     monkeypatch.setenv("USER_DATA_DIR", str(tmp_path / "profile"))
     monkeypatch.setattr(
         "linkedin_mcp_server.error_diagnostics._find_existing_issues",
@@ -187,13 +160,13 @@ def test_build_issue_diagnostics_covers_required_bug_report_fields(
 
     issue_body = Path(diagnostics["issue_template_path"]).read_text()
 
-    for label in _required_issue_form_labels():
-        assert f"## {label}" in issue_body
-
-    assert "- Installation method:" in issue_body
-    assert "- MCP client:" in issue_body
+    assert "## Setup" in issue_body
+    assert "## What Happened" in issue_body
     assert "- Error:" in issue_body
     assert "- Expected behavior:" in issue_body
+    assert "- Installation method:" in issue_body
+    assert "- MCP client:" in issue_body
+    assert "search_jobs" in issue_body
     assert "1. Run a fresh local `uv run -m linkedin_mcp_server --login`." in issue_body
     assert "Call `search_jobs` again" in issue_body
     assert "## Additional Diagnostics" in issue_body

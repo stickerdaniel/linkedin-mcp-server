@@ -1,35 +1,77 @@
 name: Bug Report
-description: Something is broken or not working as expected
+description: Report broken behavior, regressions, crashes, or reliability problems
 title: "[BUG] "
 labels: ["bug"]
 body:
-  - type: input
-    id: setup
+  - type: markdown
     attributes:
-      label: Setup
-      description: How you run the server, which MCP client, and what OS.
-      placeholder: "e.g. uvx on macOS, Claude Desktop"
+      value: |
+        Search open and closed issues first. Add your evidence to a matching issue. Otherwise, fill this packet. Keep excerpts short and review attachments before posting.
+  - type: textarea
+    id: packet-summary
+    attributes:
+      label: "Packet Summary"
+      description: "Give five short lines: tool or installer; UI language and region; what failed; related issue numbers; your verdict and its evidence. Separate what you observed from a suspected cause."
+      placeholder: |
+        Tool or installer:
+        UI language and region:
+        What failed:
+        Related issues:
+        Verdict and evidence:
     validations:
       required: true
   - type: textarea
-    id: what-happened
+    id: related-issues
     attributes:
-      label: What Happened
-      description: What broke and what you expected instead.
+      label: "Related Issues"
+      description: "List the existing tools or documented alternatives you checked. Give your open and closed issue searches, link the closest results, and explain the match or difference in one sentence. If no result matches, include the searches that found none."
+      placeholder: |
+        Checked tools:
+        Open and closed searches:
+        Candidate issues:
+        Match or difference:
+    validations:
+      required: true
+  - type: textarea
+    id: setup
+    attributes:
+      label: "Runtime"
+      description: "Give the server version or commit, installation method, MCP client, OS, and browser mode. Use the installed version, not 'latest'. Name uvx, Docker, uv run, or the actual launcher you use. Mark facts you could not establish."
+      placeholder: |
+        Server version or commit:
+        Installation method:
+        MCP client:
+        OS:
+        Browser mode (headless or visible):
+    validations:
+      required: true
+  - type: textarea
+    id: linkedin-variant
+    attributes:
+      label: "LinkedIn Variant"
+      description: "Give LinkedIn's UI language, country or region, and product: Free, Premium, Sales Nav, or Recruiter. Describe the target relationship with URL patterns such as /in/<person>/edit/intro/ or /messaging/compose/, or state that it is your own profile. Use URL and attribute evidence to identify actions. If setup failed before LinkedIn loaded, say so."
+      placeholder: |
+        UI language:
+        Country or region:
+        Product:
+        Target relationship:
+    validations:
+      required: true
+  - type: markdown
+    attributes:
+      value: |
+        Share a redacted copy. Replace names, message text, credentials, machine names, and local profile paths. Keep argument keys, URL route patterns, and error names. Put full redacted traces in a gist and link it here.
+  - type: textarea
+    id: evidence
+    attributes:
+      label: "Evidence"
+      description: "Paste the tool name and arguments as called, with private values replaced consistently. Include the returned url, present section names, section_errors or error_type, and a short redacted excerpt. If the result uses status instead, include it. State which keys were absent. For installer-only failures, give the launch command and setup error instead. A screenshot may show the page the scraper saw."
     validations:
       required: true
   - type: textarea
     id: steps-to-reproduce
     attributes:
-      label: Steps to Reproduce
-      description: Minimal steps to trigger the bug. Include the tool name and arguments if relevant.
+      label: "Reproduction"
+      description: "Give one command or MCP call for your machine. Use the same argument keys as the failing call and identify redacted values that you substitute locally. Add only essential prerequisites. For installer failures, use the launch command."
     validations:
       required: true
-  - type: textarea
-    id: logs
-    attributes:
-      label: Logs
-      description: Paste relevant log output. Remove credentials.
-      render: shell
-    validations:
-      required: false

@@ -105,7 +105,7 @@ def format_tool_error_with_diagnostics(
     """Append issue-report locations to a tool-facing error message."""
     lines = [message, "", "Diagnostics:"]
     if diagnostics.get("issue_template_path"):
-        lines.append(f"- Issue template: {diagnostics['issue_template_path']}")
+        lines.append(f"- Local diagnostic notes: {diagnostics['issue_template_path']}")
     runtime = diagnostics.get("runtime") or {}
     if runtime.get("trace_dir"):
         lines.append(f"- Trace artifacts: {runtime['trace_dir']}")
@@ -178,8 +178,9 @@ def _render_issue_template(payload: dict[str, Any]) -> str:
                 "",
                 "## File This Issue",
                 "- Read this generated file before posting.",
-                "- Copy the `Setup`, `What Happened`, `Steps to Reproduce`, and `Logs` sections below into the matching GitHub bug report fields.",
-                "- Attach this generated markdown file, the server log, and the trace artifacts directory.",
+                "- These are local diagnostic notes to review and redact before posting.",
+                "- Follow the GitHub issue form at https://github.com/stickerdaniel/linkedin-mcp-server/issues/new/choose.",
+                "- Attach relevant excerpts, the server log, and the trace artifacts directory.",
                 (
                     "- Review the existing open issues below first. If one matches, post the gist as a comment there instead of opening a new issue."
                     if has_existing_issues
