@@ -56,8 +56,10 @@ If either file is missing or empty, keep the packet-and-diff verdict. Offer the 
 Read `sha` from the meta file. Do not claim an on-main baseline merely because of the filename. Compare the same call and a sufficiently comparable account context before claiming a live fix.
 
 ```bash
-[ -s /tmp/repro-issue-$ISSUE-main.json ] || { echo "No captured baseline. Packet-and-diff verdict stands." >&2; }
-[ -s /tmp/repro-issue-$ISSUE-meta.json ] || { echo "No captured meta. Packet-and-diff verdict stands." >&2; }
+if [ ! -s /tmp/repro-issue-$ISSUE-main.json ] || [ ! -s /tmp/repro-issue-$ISSUE-meta.json ]; then
+  echo "No captured baseline. Keep the packet-and-diff verdict. Do not check out or call the server." >&2
+  exit 0
+fi
 TOOL=$(jq -r .tool /tmp/repro-issue-$ISSUE-meta.json)
 ARGS_JSON=$(jq -c .arguments /tmp/repro-issue-$ISSUE-meta.json)
 BASE_SHA=$(jq -r .sha /tmp/repro-issue-$ISSUE-meta.json)
@@ -67,7 +69,10 @@ echo "Replaying: $TOOL($ARGS_JSON) from sha $BASE_SHA"
 Guarded checkout. Leave the user's original branch or detached SHA intact. Clean up only processes and files this run created.
 
 ```bash
-git status --porcelain | head -5
+if [ -n "$(git status --porcelain)" ]; then
+  echo "Worktree is dirty. Ask before checkout. Do not continue live comparison on a dirty tree." >&2
+  exit 1
+fi
 CURRENT_REF=$(git symbolic-ref -q --short HEAD || git rev-parse HEAD)
 
 git fetch origin "pull/$PR/head" || { echo "git fetch for PR #$PR failed, aborting before checkout." >&2; exit 1; }
@@ -80,7 +85,7 @@ cleanup_verify() {
   kill $SERVER_PID 2>/dev/null
   wait $SERVER_PID 2>/dev/null
   git checkout "$CURRENT_REF" 2>/dev/null
-  rm -f /tmp/verify-pr-$PR.json /tmp/verify-pr-$PR-headers /tmp/verify-pr-$PR.log
+  rm -f /tmp/verify-pr-$PR.json /tmp/verify-pr-$PR-headers /tmp/verify-pr-$PR.log /tmp/verify-pr-$PR-init.json /tmp/verify-pr-$PR-initialized.json
   exit $rc
 }
 trap cleanup_verify EXIT INT TERM
@@ -104,19 +109,23 @@ lsof -nP -iTCP:$PORT -sTCP:LISTEN >/dev/null 2>&1 || { echo "Server never bound 
 curl -s -D /tmp/verify-pr-$PR-headers -X POST http://127.0.0.1:$PORT/mcp \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"verify-pr","version":"1.0"}}}' > /dev/null
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"verify-pr","version":"1.0"}}}' \
+  > /tmp/verify-pr-$PR-init.json
 
 SESSION_ID=$(grep -i 'Mcp-Session-Id' /tmp/verify-pr-$PR-headers | awk '{print $2}' | tr -d '\r')
 [ -z "$SESSION_ID" ] && { echo "MCP initialize returned no Mcp-Session-Id. Tail of /tmp/verify-pr-$PR.log:" >&2; tail -20 /tmp/verify-pr-$PR.log >&2; kill $SERVER_PID 2>/dev/null; exit 1; }
+grep -q '"error"' /tmp/verify-pr-$PR-init.json && { echo "Initialize returned a protocol error. Execution limit." >&2; cat /tmp/verify-pr-$PR-init.json >&2; kill $SERVER_PID 2>/dev/null; exit 1; }
 
 curl -s -X POST http://127.0.0.1:$PORT/mcp \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -H "Mcp-Session-Id: $SESSION_ID" \
-  -d '{"jsonrpc":"2.0","id":2,"method":"notifications/initialized","params":{}}' > /dev/null
+  -d '{"jsonrpc":"2.0","id":2,"method":"notifications/initialized","params":{}}' \
+  > /tmp/verify-pr-$PR-initialized.json
+grep -q '"error"' /tmp/verify-pr-$PR-initialized.json && { echo "notifications/initialized returned a protocol error. Execution limit." >&2; cat /tmp/verify-pr-$PR-initialized.json >&2; kill $SERVER_PID 2>/dev/null; exit 1; }
 ```
 
-If initialize or `notifications/initialized` returns a protocol or validation error, report it as an execution limit.
+Capture and inspect both response bodies before `tools/call`. A protocol or validation error is an execution limit.
 
 ```bash
 curl -s -X POST http://127.0.0.1:$PORT/mcp \

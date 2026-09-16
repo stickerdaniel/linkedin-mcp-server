@@ -284,7 +284,10 @@ def test_maintainer_skills_evaluate_packet_before_live() -> None:
     repro = _maintainer_skill_text("2-repro-issue")
     assert "A live LinkedIn call is optional." in repro
     assert "ask before login, session changes, or LinkedIn writes." in repro
-    assert "report it as an execution limit" in repro
+    assert "/tmp/repro-$NUM-init.json" in repro
+    assert "/tmp/repro-$NUM-initialized.json" in repro
+    assert """grep -q '"error"' /tmp/repro-$NUM-init.json""" in repro
+    assert "Capture and inspect both response bodies before `tools/call`." in repro
     assert "This is harmless." not in repro
     assert "Never mock." not in repro
 
@@ -294,6 +297,10 @@ def test_maintainer_skills_evaluate_packet_before_live() -> None:
     ) in verify
     assert "Do not create fake success or failure files." in verify
     assert "Assumes /2-repro-issue has already captured" not in verify
+    assert "Do not check out or call the server." in verify
+    assert "Worktree is dirty. Ask before checkout." in verify
+    assert "/tmp/verify-pr-$PR-init.json" in verify
+    assert """grep -q '"error"' /tmp/verify-pr-$PR-init.json""" in verify
 
 
 def test_packet_copy_uses_plain_public_text() -> None:

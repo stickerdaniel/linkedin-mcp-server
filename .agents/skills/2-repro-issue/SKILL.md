@@ -79,19 +79,23 @@ PORT=$(cat /tmp/repro-$NUM.port)
 curl -s -D /tmp/repro-$NUM-headers -X POST http://127.0.0.1:$PORT/mcp \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"repro-issue","version":"1.0"}}}' > /dev/null
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"repro-issue","version":"1.0"}}}' \
+  > /tmp/repro-$NUM-init.json
 
 SESSION_ID=$(grep -i 'Mcp-Session-Id' /tmp/repro-$NUM-headers | awk '{print $2}' | tr -d '\r')
 [ -z "$SESSION_ID" ] && { echo "MCP initialize returned no Mcp-Session-Id. Tail of /tmp/repro-$NUM.log:" >&2; tail -20 /tmp/repro-$NUM.log >&2; kill $SERVER_PID 2>/dev/null; exit 1; }
+grep -q '"error"' /tmp/repro-$NUM-init.json && { echo "Initialize returned a protocol error. Execution limit." >&2; cat /tmp/repro-$NUM-init.json >&2; kill $SERVER_PID 2>/dev/null; exit 1; }
 
 curl -s -X POST http://127.0.0.1:$PORT/mcp \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -H "Mcp-Session-Id: $SESSION_ID" \
-  -d '{"jsonrpc":"2.0","id":2,"method":"notifications/initialized","params":{}}' > /dev/null
+  -d '{"jsonrpc":"2.0","id":2,"method":"notifications/initialized","params":{}}' \
+  > /tmp/repro-$NUM-initialized.json
+grep -q '"error"' /tmp/repro-$NUM-initialized.json && { echo "notifications/initialized returned a protocol error. Execution limit." >&2; cat /tmp/repro-$NUM-initialized.json >&2; kill $SERVER_PID 2>/dev/null; exit 1; }
 ```
 
-If initialize or `notifications/initialized` returns a protocol or validation error, report it as an execution limit. Do not treat it as harmless and do not retry around it.
+Capture and inspect both response bodies before `tools/call`. A protocol or validation error is an execution limit. Do not retry around it.
 
 ```bash
 SHA=$(git rev-parse HEAD)
@@ -117,7 +121,7 @@ Preserve `/tmp/repro-issue-$NUM-main.json` and `/tmp/repro-issue-$NUM-meta.json`
 ```bash
 kill $SERVER_PID 2>/dev/null
 wait $SERVER_PID 2>/dev/null
-rm -f /tmp/repro-$NUM-headers /tmp/repro-$NUM.log /tmp/repro-$NUM.port /tmp/repro-$NUM.pid
+rm -f /tmp/repro-$NUM-headers /tmp/repro-$NUM.log /tmp/repro-$NUM.port /tmp/repro-$NUM.pid /tmp/repro-$NUM-init.json /tmp/repro-$NUM-initialized.json
 ```
 
 Live verdicts, when a run happened:
