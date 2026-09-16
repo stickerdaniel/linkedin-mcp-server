@@ -5,7 +5,8 @@ Provides inbox listing, conversation reading, message search, and sending.
 """
 
 import logging
-from typing import Annotated, Any
+import os
+from typing import Annotated, Any, Literal
 
 from fastmcp import Context, FastMCP
 from pydantic import Field
@@ -24,6 +25,24 @@ from linkedin_mcp_server.scraping.contracts import (
 
 logger = logging.getLogger(__name__)
 
+# Which messaging implementation `get_inbox` uses when the caller does not say.
+# Set LINKEDIN_MESSAGING_BACKEND to "voyager", "dom" or "auto" (default).
+# "auto" prefers Voyager and falls back to the DOM scrape, so a LinkedIn-side
+# change degrades instead of failing.
+_BACKEND_ENV = "LINKEDIN_MESSAGING_BACKEND"
+
+
+def _default_backend() -> str:
+    value = (os.environ.get(_BACKEND_ENV) or "auto").strip().lower()
+    if value not in {"auto", "voyager", "dom"}:
+        logger.warning(
+            "%s=%r is not one of auto/voyager/dom; using auto",
+            _BACKEND_ENV,
+            value,
+        )
+        return "auto"
+    return value
+
 
 def register_messaging_tools(
     mcp: FastMCP, *, tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS
@@ -39,7 +58,8 @@ def register_messaging_tools(
     )
     async def get_inbox(
         ctx: Context,
-        limit: Annotated[int, Field(ge=1, le=50)] = 20,
+        limit: Annotated[int, Field(ge=1, le=500)] = 20,
+        backend: Literal["default", "auto", "voyager", "dom"] = "default",
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
@@ -47,22 +67,37 @@ def register_messaging_tools(
 
         Args:
             ctx: FastMCP context for progress reporting
-            limit: Maximum number of conversations to load (1-50, default 20)
+            limit: Maximum number of conversations to load (1-500, default 20)
+            backend: Which implementation to use.
+                "voyager" reads LinkedIn's own conversations API: it reaches the
+                whole mailbox and clicks nothing.
+                "dom" scrapes the rendered sidebar: it sees only what LinkedIn
+                painted (observed ~16-17 rows) and click-visits each row to
+                recover its thread id, which MARKS THOSE ROWS READ.
+                "auto" prefers Voyager and falls back to "dom" on failure.
+                "default" (the default) defers to the LINKEDIN_MESSAGING_BACKEND
+                environment variable, itself defaulting to "auto".
 
         Returns:
             Dict with url, sections (inbox -> raw text), and optional references.
+            The Voyager backend additionally returns `conversations` (structured,
+            with thread_urn/read/unread_count/last_activity_at), `backend`,
+            `pages_fetched`, and `exhausted`. **Check `exhausted` before treating
+            the result as a complete mailbox**: False means the walk stopped on
+            `limit` and more conversations exist.
         """
         try:
             extractor = extractor or await get_ready_extractor(
                 ctx, tool_name="get_inbox"
             )
-            logger.info("Fetching inbox (limit=%d)", limit)
+            chosen = _default_backend() if backend == "default" else backend
+            logger.info("Fetching inbox (limit=%d, backend=%s)", limit, chosen)
 
             await ctx.report_progress(
                 progress=0, total=100, message="Loading messaging inbox"
             )
 
-            result = await extractor.get_inbox(limit=limit)
+            result = await extractor.get_inbox(limit=limit, backend=chosen)
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
@@ -75,6 +110,76 @@ def register_messaging_tools(
                 raise_tool_error(relogin_exc, "get_inbox")
         except Exception as e:
             raise_tool_error(e, "get_inbox")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Get All Conversations",
+        # Genuinely read-only, unlike get_inbox: this reads LinkedIn's own
+        # conversations API and never clicks a row, so no thread is marked read.
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"messaging", "scraping"},
+        exclude_args=["extractor"],
+    )
+    async def get_all_conversations(
+        ctx: Context,
+        limit: Annotated[int, Field(ge=1, le=2000)] = 200,
+        max_pages: Annotated[int, Field(ge=1, le=200)] = 60,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        Page the entire messaging mailbox and return structured conversations.
+
+        Use this, not get_inbox, whenever the question is about the mailbox as a
+        whole — "which threads are unanswered", "have I replied to everyone",
+        reconciling against an external record. get_inbox returns only what
+        LinkedIn has painted into the sidebar (observed: ~16-17 rows) and
+        click-visits each row to recover its thread id, which marks those rows
+        read. This reads the conversations API the web client itself calls, so
+        it reaches the whole mailbox and alters nothing.
+
+        Each conversation carries thread_urn (the thread id), participants,
+        last_activity_at, last_read_at, read, unread_count and categories
+        (the Focused/Other mailbox), so "unanswered" can be computed directly.
+
+        Args:
+            ctx: FastMCP context for progress reporting
+            limit: Maximum conversations to return (1-2000, default 200)
+            max_pages: Safety cap on cursor pages to walk (1-200, default 60)
+
+        Returns:
+            Dict with conversations, count, pages_fetched, and exhausted.
+            **exhausted is the field that matters for any reconciliation**: when
+            it is False the walk stopped on limit or max_pages and the mailbox
+            holds more than was returned, so the result must not be treated as a
+            complete census.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="get_all_conversations"
+            )
+            logger.info(
+                "Paging all conversations (limit=%d, max_pages=%d)", limit, max_pages
+            )
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Paging conversations"
+            )
+
+            result = await extractor.get_all_conversations(
+                limit=limit, max_pages=max_pages
+            )
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_all_conversations")
+        except Exception as e:
+            raise_tool_error(e, "get_all_conversations")  # NoReturn
 
     @mcp.tool(
         timeout=tool_timeout,
