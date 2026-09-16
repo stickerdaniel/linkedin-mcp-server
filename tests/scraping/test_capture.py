@@ -13,7 +13,6 @@ import pytest
 
 from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.scraping.capture import (
-    RATE_LIMIT_RETRY_DELAY,
     CaptureMode,
     CapturePlan,
     SectionCapture,
@@ -25,6 +24,10 @@ from linkedin_mcp_server.scraping.contracts import (
     ExtractedSection,
 )
 from linkedin_mcp_server.scraping.navigation import PageNavigator
+from linkedin_mcp_server.scraping.rate_limit import (
+    RATE_LIMIT_RETRY_BUDGET,
+    RATE_LIMIT_RETRY_DELAY,
+)
 from linkedin_mcp_server.scraping.session import ScrapingSession
 from linkedin_mcp_server.scraping.text import DetailCaptureTextTable
 
@@ -33,6 +36,18 @@ def _capture(page) -> SectionCapture:
     """Wire the capture owner the way the facade does."""
     session = ScrapingSession(page)
     return SectionCapture(session, PageNavigator(session), PageContentReader(session))
+
+
+def _identity_jitter():
+    """Neutralise the session's pause jitter so a delay is readable.
+
+    The jitter itself is asserted where the session owns it; here it would
+    only hide whether the delay doubled.
+    """
+    return patch(
+        "linkedin_mcp_server.scraping.session.jitter",
+        side_effect=lambda base, *a, **kw: base,
+    )
 
 
 class TestExtractPage:
@@ -174,7 +189,7 @@ class TestExtractPage:
             )
 
         assert result.text == RATE_LIMITED_SECTION_TEXT
-        # goto called twice (initial + retry)
+        # goto called twice (initial + the first retry of a fresh budget)
         assert mock_page.goto.await_count == 2
 
     async def test_retry_succeeds_after_rate_limit(self, mock_page):
@@ -223,6 +238,96 @@ class TestExtractPage:
             )
 
         assert result.text == "Education\nHarvard University\n1973 – 1975"
+
+    async def test_soft_retry_budget_is_shared_across_sections(self, mock_page):
+        """The retry budget belongs to the scrape, not to each section.
+
+        Per section it was one retry each, so a throttled multi-section scrape
+        doubled its own request volume. Four throttled sections may spend the
+        two retries the session holds and no more.
+        """
+        noise_only = (
+            "More profiles for you\n\n"
+            "You've approached your profile search limit\n\n"
+            "About\nAccessibility\nTalent Solutions"
+        )
+        mock_page.evaluate = AsyncMock(
+            return_value={"source": "root", "text": noise_only, "references": []}
+        )
+        capture = _capture(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.session.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            for section in ("experience", "education", "skills", "projects"):
+                result = await capture.extract_page(
+                    f"https://www.linkedin.com/in/testuser/details/{section}/",
+                    section_name=section,
+                )
+                assert result.text == RATE_LIMITED_SECTION_TEXT
+
+        # Four sections plus the scrape-wide budget of two, not four plus four.
+        assert mock_page.goto.await_count == 4 + RATE_LIMIT_RETRY_BUDGET
+
+    async def test_soft_retry_delay_escalates_within_one_scrape(self, mock_page):
+        """The second retry of a scrape waits twice as long as the first."""
+        noise_only = (
+            "More profiles for you\n\n"
+            "You've approached your profile search limit\n\n"
+            "About\nAccessibility\nTalent Solutions"
+        )
+        mock_page.evaluate = AsyncMock(
+            return_value={"source": "root", "text": noise_only, "references": []}
+        )
+        slept: list[float] = []
+        capture = _capture(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.session.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            _identity_jitter(),
+            patch(
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
+                new_callable=AsyncMock,
+                side_effect=lambda delay: slept.append(delay),
+            ),
+        ):
+            for section in ("experience", "education"):
+                await capture.extract_page(
+                    f"https://www.linkedin.com/in/testuser/details/{section}/",
+                    section_name=section,
+                )
+
+        # Everything shorter is humanizer entropy, which is sub-second.
+        assert [d for d in slept if d >= 2.0] == [
+            RATE_LIMIT_RETRY_DELAY,
+            RATE_LIMIT_RETRY_DELAY * 2,
+        ]
 
     async def test_media_only_controls_are_not_misclassified_as_rate_limited(
         self, mock_page
@@ -628,6 +733,55 @@ class TestActivityFeedExtraction:
             )
 
         assert show_more.click.await_count == 2
+
+    async def test_details_page_show_more_clicks_pace_like_navigations(self, mock_page):
+        """The pause after a click is a deliberate one, so it goes through the
+        session's jittered pacing rather than a fixed sleep."""
+        mock_page.evaluate = AsyncMock(
+            return_value={"source": "root", "text": "text", "references": []}
+        )
+        mock_page.wait_for_function = AsyncMock()
+
+        show_more = MagicMock()
+        show_more.count = AsyncMock(side_effect=[1, 0])
+        show_more.is_visible = AsyncMock(return_value=True)
+        show_more.scroll_into_view_if_needed = AsyncMock()
+        show_more.click = AsyncMock()
+        show_more.first = show_more
+        show_more.filter = MagicMock(return_value=show_more)
+
+        def locator_side_effect(selector):
+            if selector == "main button":
+                return show_more
+            return MagicMock(count=AsyncMock(return_value=0))
+
+        mock_page.locator = MagicMock(side_effect=locator_side_effect)
+        capture = _capture(mock_page)
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.session.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch.object(ScrapingSession, "pace", new_callable=AsyncMock) as pace,
+        ):
+            await capture._capture_once(
+                "https://www.linkedin.com/in/billgates/details/certifications/",
+                section_name="certifications",
+                plan=CapturePlan(CaptureMode.DETAILS),
+            )
+
+        show_more.click.assert_awaited_once()
+        pace.assert_awaited_once_with(1.0)
 
     async def test_details_page_show_more_respects_max_scrolls_budget(self, mock_page):
         """When 'Show more' never disappears, loop exits after max_scrolls clicks."""
@@ -1084,6 +1238,7 @@ class TestExtractOverlay:
                 "linkedin_mcp_server.scraping.session.detect_rate_limit",
                 new_callable=AsyncMock,
             ),
+            _identity_jitter(),
             patch(
                 "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
@@ -1096,6 +1251,46 @@ class TestExtractOverlay:
         assert result.text == "Email\nada@example.com"
         assert mock_page.goto.await_count == 2
         sleep.assert_awaited_once_with(RATE_LIMIT_RETRY_DELAY)
+
+    async def test_an_overlay_read_draws_on_the_page_reads_budget(self, mock_page):
+        """Page and overlay reads land on the same limit, so they share one
+        budget: two throttled page reads leave the overlay nothing to spend."""
+        mock_page.evaluate = AsyncMock(
+            return_value={"source": "root", "text": self.NOISE_ONLY, "references": []}
+        )
+        capture = _capture(mock_page)
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.session.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            for _ in range(RATE_LIMIT_RETRY_BUDGET):
+                await capture.extract_page(
+                    "https://www.linkedin.com/in/testuser/details/experience/",
+                    section_name="experience",
+                )
+            spent = mock_page.goto.await_count
+            result = await capture._extract_overlay(
+                self.OVERLAY_URL, section_name="contact_info"
+            )
+
+        assert result.text == RATE_LIMITED_SECTION_TEXT
+        assert mock_page.goto.await_count == spent + 1
 
     async def test_a_noise_only_retry_reports_the_rate_limit_sentinel(self, mock_page):
         mock_page.evaluate = AsyncMock(

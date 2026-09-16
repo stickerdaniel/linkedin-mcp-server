@@ -297,11 +297,11 @@ class TestBuildPeopleSearchUrl:
     def test_every_parameter_keeps_its_recorded_position(self):
         assert build_people_search_url(
             "engineer",
-            location="Seattle",
+            geo_id="104116203",
             network=["F"],
             current_company="1115",
         ) == (
-            f"{PEOPLE}keywords=engineer&location=Seattle"
+            f"{PEOPLE}keywords=engineer&geoUrn=%5B%22104116203%22%5D"
             "&network=%5B%22F%22%5D&currentCompany=%5B%221115%22%5D"
         )
 
@@ -311,6 +311,13 @@ class TestBuildPeopleSearchUrl:
 
     def test_empty_keywords_still_produce_the_parameter(self):
         assert build_people_search_url("") == f"{PEOPLE}keywords="
+
+    def test_location_is_the_geo_id_facet_not_free_text(self):
+        # LinkedIn ignores ``location=``; the id its own dropdown produced is
+        # what filters.
+        url = build_people_search_url("engineer", geo_id="104116203")
+        assert url == f"{PEOPLE}keywords=engineer&geoUrn=%5B%22104116203%22%5D"
+        assert "location=" not in url
 
     @pytest.mark.parametrize(
         "token,encoded",
@@ -388,11 +395,6 @@ class TestBuildPeopleSearchUrl:
     def test_empty_current_company_is_omitted_rather_than_refused(self):
         assert build_people_search_url("engineer", current_company="") == (
             f"{PEOPLE}keywords=engineer"
-        )
-
-    def test_location_is_percent_encoded(self):
-        assert build_people_search_url("engineer", location="São Paulo") == (
-            f"{PEOPLE}keywords=engineer&location=S%C3%A3o+Paulo"
         )
 
     def test_network_is_refused_before_a_company_urn_is_looked_at(self):

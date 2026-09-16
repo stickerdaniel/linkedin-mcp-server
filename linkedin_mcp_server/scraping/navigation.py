@@ -14,7 +14,8 @@ from linkedin_mcp_server.core.auth import (
     detect_auth_barrier_quick,
     resolve_remember_me_prompt,
 )
-from linkedin_mcp_server.core.exceptions import AuthenticationError
+from linkedin_mcp_server.core.exceptions import AuthenticationError, RateLimitError
+from linkedin_mcp_server.core.humanize import humanize_after_nav
 from linkedin_mcp_server.core.proxy_errors import (
     raise_if_proxy_error,
     redact_proxy_credentials,
@@ -22,6 +23,15 @@ from linkedin_mcp_server.core.proxy_errors import (
 )
 from linkedin_mcp_server.debug_trace import record_page_trace
 from linkedin_mcp_server.debug_utils import stabilize_navigation
+from linkedin_mcp_server.scraping.rate_limit import (
+    HTTP_STATUS_NAV_FAILURE,
+    HTTP_STATUS_ON_INTERSTITIAL,
+    HTTP_TOO_MANY_REQUESTS,
+    RATE_LIMIT_BACKOFF_DELAY,
+    RATE_LIMIT_BACKOFF_MAX,
+    RATE_LIMIT_BACKOFF_MAX_DOUBLINGS,
+    retry_after_seconds,
+)
 from linkedin_mcp_server.scraping.session import ScrapingSession
 
 logger = logging.getLogger(__name__)
@@ -139,6 +149,64 @@ class PageNavigator:
             raise AuthenticationError(message) from navigation_error
         raise AuthenticationError(message)
 
+    async def _refusal_was_a_rate_limit(self) -> bool:
+        """Read the status off the error page Chromium left in the tab.
+
+        Only called after a navigation raised, where there is no response
+        object to ask. The interstitial carries the numeric status, so this
+        distinguishes the 429 the backoff exists for from the 404 a mistyped
+        username produces -- both of which arrive as the same net error token.
+
+        Fails closed: a body that cannot be read is not evidence of a rate
+        limit, and the caller re-raises the navigation error instead.
+        """
+        try:
+            body = await self._session.page.evaluate(
+                "() => document.body?.innerText || ''"
+            )
+        except Exception:
+            return False
+        return bool(HTTP_STATUS_ON_INTERSTITIAL.search(str(body)))
+
+    async def _rate_limit_error(
+        self, url: str, *, retry_after: int | None
+    ) -> RateLimitError:
+        """Pause, then build the error for a navigation LinkedIn refused.
+
+        The pause is the only backoff available here: retrying the navigation
+        would be one more request into a live limit, so the wait happens before
+        the failure is handed back and the client's next call inherits it.
+        """
+        budget = self._session.rate_limit
+        # Clamped after the jitter, not before: jittering the cap first meant
+        # `RATE_LIMIT_BACKOFF_MAX` of 30 could still sleep ~45s at the +50%
+        # end, so the constant did not name the maximum it claimed to. The
+        # exponent is capped too -- it is bounded in practice because every
+        # hit sleeps, but nothing in the type says so.
+        delay = min(
+            RATE_LIMIT_BACKOFF_MAX,
+            self._session.jittered(
+                RATE_LIMIT_BACKOFF_DELAY
+                * 2 ** min(budget.rate_limit_hits, RATE_LIMIT_BACKOFF_MAX_DOUBLINGS)
+            ),
+        )
+        budget.rate_limit_hits += 1
+        logger.warning(
+            "LinkedIn rate-limited %s (retry-after: %s); backing off %.1fs",
+            url,
+            retry_after if retry_after is not None else "not sent",
+            delay,
+        )
+        await self._session.delay(delay)
+
+        message = f"LinkedIn refused {url} with HTTP 429 (too many requests)."
+        if retry_after is None:
+            return RateLimitError(f"{message} Wait before scraping again.")
+        return RateLimitError(
+            f"{message} It asked to be left alone for {retry_after}s.",
+            suggested_wait_time=retry_after,
+        )
+
     async def _goto_with_auth_checks(
         self,
         url: str,
@@ -150,6 +218,7 @@ class PageNavigator:
         page = self._session.page
         hops: list[str] = []
         listener_registered = False
+        response: Any = None
 
         def record_navigation(frame: Any) -> None:
             if frame != page.main_frame:
@@ -174,8 +243,11 @@ class PageNavigator:
                 extra={"target_url": url, "wait_until": wait_until},
             )
             try:
-                await page.goto(url, wait_until=wait_until, timeout=30000)
+                response = await page.goto(url, wait_until=wait_until, timeout=30000)
                 await stabilize_navigation(f"goto {url}", logger)
+                # A little cursor entropy after each load: a frozen mouse across
+                # navigations is a cheap bot tell. Best-effort, never fatal.
+                await humanize_after_nav(page)
                 await record_page_trace(
                     page,
                     "extractor-after-goto",
@@ -187,6 +259,18 @@ class PageNavigator:
                 # password in trace.jsonl. Converting here also keeps a proxy
                 # outage from being reported as a LinkedIn navigation problem.
                 raise_if_proxy_error(exc)
+                if (
+                    HTTP_STATUS_NAV_FAILURE in str(exc)
+                    and await self._refusal_was_a_rate_limit()
+                ):
+                    # No response object exists on this path, so no
+                    # `Retry-After` can be read and none is invented.
+                    # `from None` for the same reason the generic re-raise
+                    # below copies the exception rather than passing it on:
+                    # the driver's own text is not carried into anything
+                    # that logs it.
+                    error = await self._rate_limit_error(url, retry_after=None)
+                    raise error from None
                 if allow_remember_me and await resolve_remember_me_prompt(page):
                     await stabilize_navigation(
                         f"remember-me resolution for {url}", logger
@@ -241,6 +325,16 @@ class PageNavigator:
                 # that. Only the message is rewritten; the type is preserved so
                 # callers that branch on it are unaffected.
                 raise redacted_copy(exc) from None
+
+            # Outside the block above on purpose: raising in there would be
+            # caught by its own handler and re-raised as a navigation failure.
+            if response is not None and response.status == HTTP_TOO_MANY_REQUESTS:
+                raise await self._rate_limit_error(
+                    url,
+                    retry_after=retry_after_seconds(
+                        response.headers.get("retry-after")
+                    ),
+                )
 
             barrier = await detect_auth_barrier_quick(page)
             if not barrier:
