@@ -1551,6 +1551,19 @@ def _run_frontend(profile: Path) -> dict[str, object]:
     return json.loads(result.stdout.strip().splitlines()[-1])
 
 
+def _both_ends(text: str, *, head: int = 3000, tail: int = 2000) -> str:
+    """Keep a long diagnostic's beginning as well as its end.
+
+    A tail slice is the wrong half for a native crash: ``faulthandler`` prints
+    the exception and the faulting thread *first*, so #838 has twice been
+    reported with everything below it and the fault location cut off.
+    """
+    if len(text) <= head + tail:
+        return text
+    dropped = len(text) - head - tail
+    return f"{text[:head]}\n[... {dropped} characters ...]\n{text[-tail:]}"
+
+
 def _reap_frontends(frontends: list[subprocess.Popen[str]]) -> None:
     """Kill direct frontends together, then reap them without reading pipes."""
     for frontend in frontends:
@@ -1638,6 +1651,28 @@ def _stop(pid: object) -> None:
         return
     with contextlib.suppress(OSError):
         os.kill(pid, signal.SIGKILL)
+
+
+def test_a_native_crash_report_keeps_the_faulting_thread():
+    # Twice now (#838) a Windows access violation has been reported with the
+    # fault cut off, because the assertion kept the last 2000 characters and
+    # faulthandler prints the faulting thread before every other one.
+    crash = (
+        "Windows fatal exception: access violation\n\n"
+        "Current thread 0x00001734 (most recent call first):\n"
+        '  File "daemon_election.py", line 706 in collect\n'
+        + "".join(
+            f'  File "threading.py", line {line} in run\n' for line in range(4000)
+        )
+        + "the last line of the report\n"
+    )
+
+    kept = _both_ends(crash)
+
+    assert "Current thread 0x00001734" in kept
+    assert "line 706 in collect" in kept
+    assert kept.endswith("the last line of the report\n")
+    assert len(kept) < len(crash)
 
 
 @pytest.mark.parametrize(("exit_code", "expected"), [(259, True), (7, False)])
@@ -4770,10 +4805,10 @@ class TestRealOwner:
     @pytest.mark.skipif(
         os.name == "nt"
         and sys.implementation.name == "cpython"
-        and sys.version_info[:3] == (3, 12, 4),
+        and sys.version_info[:2] == (3, 12),
         reason=(
-            "CPython 3.12.4 intermittently access-violates under this "
-            "daemon-thread I/O stress"
+            "CPython 3.12 intermittently access-violates under this "
+            "daemon-thread I/O stress (#838)"
         ),
     )
     def test_many_clients_starting_at_once_elect_exactly_one_owner(
@@ -4833,7 +4868,7 @@ class TestRealOwner:
 
             for frontend in running:
                 out, err = frontend.communicate(timeout=300)
-                assert frontend.returncode == 0, err[-2000:]
+                assert frontend.returncode == 0, _both_ends(err)
                 result = json.loads(out.strip().splitlines()[-1])
                 results.append(result)
                 owners.add(result["pid"])
