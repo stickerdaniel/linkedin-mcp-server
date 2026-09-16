@@ -86,6 +86,25 @@ def _set_cursor(url: str, cursor: str) -> str:
     return replaced
 
 
+def _set_count(url: str, count: int) -> str:
+    """Pin the page size, appending when the query carries no `count`.
+
+    The page-load query takes only `mailboxUrn`, so a substitution finds nothing
+    and silently leaves the server's own default in force. `at_end` then
+    compares that default against PAGE_SIZE and calls a full page the end of the
+    mailbox: 20 rows read as "fewer than 25".
+    """
+    if _COUNT_RE.search(url):
+        return _COUNT_RE.sub(lambda _: f"count:{count}", url)
+    replaced, n = re.subn(r"\)(?!.*\))", lambda _: f",count:{count})", url, count=1)
+    if n == 0:
+        raise LinkedInScraperException(
+            f"Could not pin a page size into the conversations query: {url!r} "
+            "has no variables block to append to."
+        )
+    return replaced
+
+
 def _drop_cursor(url: str) -> str:
     """Remove the cursor variable entirely, yielding a first-page request."""
     return _CURSOR_RE.sub(lambda _: "", url, count=1)
@@ -507,46 +526,6 @@ class VoyagerMessagingReader:
                     return cursor
         return None
 
-    async def _diagnose_empty(self, url: str) -> str:
-        """Decide WHY a page came back empty, before anyone reports a zero.
-
-        An empty page is the shared failure mode of at least four different
-        situations here: a genuinely empty mailbox, an argument the API
-        silently rejected, a session that stopped being authoritative, and a
-        payload whose shape changed under the parser. They are
-        indistinguishable from the response alone, and the wrong reading is
-        expensive in both directions -- a false zero says "nobody is waiting on
-        you", a false alarm sends someone hunting a bug that is not there.
-
-        So a zero is never taken at face value. This runs a POSITIVE CONTROL:
-        the same endpoint, same session, same parser, with the filters stripped
-        and a single row requested. If the control returns a row, the
-        instrument works and the zero is real. If it does not, the zero is
-        about the instrument, not the mailbox.
-        """
-        # Drop the cursor variable outright rather than blanking it. An empty
-        # `nextCursor:` is a MALFORMED request, and a malformed request that
-        # returns nothing would be read here as a broken instrument -- turning
-        # this control into exactly the kind of unvalidated measurement it
-        # exists to prevent.
-        control = _drop_cursor(url)
-        control = _COUNT_RE.sub(lambda _: "count:1", control)
-        control = _CATEGORY_RE.sub(lambda _: "category:PRIMARY_INBOX", control)
-        try:
-            payload = await self._fetch(control)
-        except Exception as exc:  # the control itself could not run
-            return f"control-failed: {type(exc).__name__}: {exc}"
-
-        rows = self._conversations(payload)
-        if rows:
-            return "verified-empty"
-        if payload.get("included"):
-            # Entities came back, but none of them parsed as a Conversation.
-            # That is a SHAPE change, which is the one case that silently
-            # turns a full mailbox into a zero.
-            return "parse-failure: included entities present, zero Conversations"
-        return "control-empty: session or endpoint returned nothing at all"
-
     @staticmethod
     def render_page_text(conversations: list[dict[str, Any]]) -> str:
         """Render a page as readable text.
@@ -605,7 +584,7 @@ class VoyagerMessagingReader:
                 "this mailbox, so it cannot be honoured. Call without one."
             )
 
-        url = _COUNT_RE.sub(lambda _: f"count:{PAGE_SIZE}", url)
+        url = _set_count(url, PAGE_SIZE)
         if category:
             normalized = category.strip().upper()
             if normalized not in KNOWN_CATEGORIES:
@@ -633,6 +612,10 @@ class VoyagerMessagingReader:
         an exhaustion probe that overfetched the same way, and an inference
         about where the mailbox ended. A single page has none of those, because
         the page IS the answer.
+
+        `category` defaults to whatever the messaging page's own query carried,
+        in practice PRIMARY_INBOX -- omitting it is not the same as asking for
+        every mailbox, and there is no query here that means "no filter".
 
         `at_end` is measured, never inferred, by comparing what came back
         against what was asked for:
@@ -696,16 +679,19 @@ class VoyagerMessagingReader:
 
         zero_reason: str | None = None
         if not rows:
-            # A zero is never returned bare. On the first page a positive
-            # control decides whether the instrument works at all; with a cursor
-            # it may simply be the page after the last one.
-            zero_reason = "after-cursor" if cursor else await self._diagnose_empty(url)
-            if zero_reason not in {"verified-empty", "after-cursor"}:
-                raise LinkedInScraperException(
-                    f"An empty page came back and the positive control did not "
-                    f"clear it ({zero_reason}). Treating this as an instrument "
-                    "failure rather than an empty mailbox."
-                )
+            # No positive control here, because no query can serve as one. Every
+            # conversations query carries a category, so a "control" is either
+            # the same request that just returned nothing, or a different
+            # mailbox whose contents say nothing about this one. An earlier
+            # version re-queried PRIMARY_INBOX and got both wrong: a genuinely
+            # empty primary inbox raised, and an empty SPAM filter reported the
+            # whole mailbox as verified-empty.
+            #
+            # The protection that does work is in `_fetch`: a dead session or a
+            # rejected request is a non-200 and raises there. So a 200 whose
+            # shape parses really is an empty result, and it is reported as
+            # unproven rather than as the end.
+            zero_reason = "after-cursor" if cursor else "empty-page"
 
         return {
             # `url` and `sections` keep this tool's result shape consistent with

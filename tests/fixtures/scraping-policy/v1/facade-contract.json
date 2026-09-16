@@ -298,7 +298,7 @@
                 }
               ],
               "default": null,
-              "description": "SERVER-SIDE filter, the only one LinkedIn honours. One of\nINBOX, PRIMARY_INBOX, ARCHIVE, INMAIL, STARRED, SPAM. These\nreach any point in time in a single call. An unknown value is\nrejected rather than passed through, because the API answers one\nwith an empty page that would read as \"you have none\"."
+              "description": "SERVER-SIDE filter, the only one LinkedIn honours. One of\nINBOX, PRIMARY_INBOX, ARCHIVE, INMAIL, STARRED, SPAM. These\nreach any point in time in a single call. An unknown value is\nrejected rather than passed through, because the API answers one\nwith an empty page that would read as \"you have none\".\n**Omitting it is not \"no filter\"**: the query the messaging page\nissues already carries a category, so leaving this unset reads\nwhichever mailbox that page was showing, in practice\nPRIMARY_INBOX. Pass one explicitly to be sure which you get."
             },
             "cursor": {
               "anyOf": [

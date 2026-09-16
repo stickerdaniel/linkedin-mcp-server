@@ -47,6 +47,7 @@ An MCP server that connects AI assistants like Claude to LinkedIn through your o
 | `connect_with_person` | Send a connection request or accept an incoming one, with optional note |
 | `get_sidebar_profiles` | Extract profile URLs from sidebar recommendation sections ("More profiles for you", "Explore premium profiles", "People you may know") on a profile page |
 | `get_inbox` | List recent conversations from the LinkedIn messaging inbox |
+| `get_conversations` | Read one page (25) of conversations from the messaging API, cursor-paged. Reaches the whole mailbox and clicks nothing, so no thread is marked read; each row carries thread urn, participants, last activity, read state and whether a reply is owed. Pass `next_cursor` back as `cursor` for the next page |
 | `get_conversation` | Read a specific messaging conversation by username or thread ID |
 | `search_conversations` | Search messages by keyword |
 | `send_message` | Compose/send a new message to a LinkedIn user (requires confirmation; profile-based targeting may open a separate DM instead of replying in an existing thread — see #483) |

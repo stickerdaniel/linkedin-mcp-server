@@ -197,19 +197,27 @@ class TestAtEndIsMeasuredNotInferred:
         assert f"count:{PAGE_SIZE}" in reader.fetched[0]
 
 
-class TestEmptyFirstPageIsNeverBare:
-    async def test_empty_with_passing_control_is_verified_empty(self):
-        control = _payload(_rows(1), None)
-        reader = _Reader([_payload([], None), control])
+class TestEmptyPagesAreNeverTheEnd:
+    """The maintainer's finding: the old positive control re-queried
+    PRIMARY_INBOX, so a genuinely empty primary inbox RAISED and an empty SPAM
+    filter reported the whole mailbox verified-empty. No query can serve as a
+    control here, so none is used; `_fetch` raising on a non-200 is what
+    actually distinguishes a dead session from an empty result."""
+
+    async def test_an_empty_default_page_does_not_raise(self):
+        reader = _Reader([_payload([], None)])
         result = await reader.get_conversations()
         assert result["count"] == 0
-        assert result["zero_reason"] == "verified-empty"
-        assert result["at_end"] is None
+        assert result["at_end"] is None, "empty proves nothing either way"
+        assert result["zero_reason"] == "empty-page"
 
-    async def test_empty_with_failing_control_raises(self):
-        reader = _Reader([_payload([], None), _payload([], None)])
-        with pytest.raises(LinkedInScraperException, match="positive control"):
-            await reader.get_conversations()
+    async def test_an_empty_filtered_page_is_about_that_filter_only(self):
+        reader = _Reader([_payload([], None)])
+        result = await reader.get_conversations(category="SPAM")
+        assert result["zero_reason"] == "empty-page"
+        assert result["at_end"] is None, (
+            "an empty SPAM view says nothing about the mailbox"
+        )
 
     async def test_included_entities_but_no_conversations_is_a_parse_failure(self):
         payload = _payload([], None, included=[{"$type": "x.Y", "entityUrn": "u"}])
@@ -328,20 +336,6 @@ class TestReviewRegressions:
         nasty = r"ABC\g<0>\1DEF"
         await reader.get_conversations(cursor=nasty)
         assert f"nextCursor:{nasty}" in reader.fetched[0]
-
-    async def test_positive_control_drops_the_cursor_rather_than_blanking_it(self):
-        """An empty `nextCursor:` is a MALFORMED request. If the control were
-        built that way, its empty response would be misread as a broken
-        instrument and a genuinely empty mailbox would raise."""
-        control = _payload(
-            [_conversation("ctl", last_activity=1, participants=[])], None
-        )
-        reader = _Reader([_payload([], None), control])
-        result = await reader.get_conversations()
-        assert result["zero_reason"] == "verified-empty"
-        control_url = reader.fetched[-1]
-        assert "nextCursor:" not in control_url, "control must be cursorless"
-        assert "count:1" in control_url
 
     @pytest.mark.parametrize(
         "status, expected",
@@ -608,3 +602,27 @@ class TestResultShapeMatchesTheRepositoryContract:
         assert "are you around this week" in text
         assert "awaiting your reply" in text
         assert "2023-11-14T22:13+00:00" in text
+
+
+class TestPageSizeIsAlwaysPinned:
+    """The maintainer's finding: the page-load query takes only `mailboxUrn`, so
+    a substitution found no `count:` and left the server's default in force.
+    `at_end` then compared 20 rows against PAGE_SIZE 25 and called it the end."""
+
+    async def test_count_is_appended_when_the_query_has_none(self):
+        from linkedin_mcp_server.scraping.voyager_messaging import _set_count
+
+        bare = "https://x/g?variables=(mailboxUrn:urn:li:fsd_profile:ME)"
+        assert f"count:{PAGE_SIZE}" in _set_count(bare, PAGE_SIZE)
+
+    async def test_count_is_replaced_when_the_query_has_one(self):
+        from linkedin_mcp_server.scraping.voyager_messaging import _set_count
+
+        withcount = "https://x/g?variables=(count:20,mailboxUrn:M)"
+        out = _set_count(withcount, PAGE_SIZE)
+        assert f"count:{PAGE_SIZE}" in out and "count:20" not in out
+
+    async def test_every_request_pins_the_page_size(self):
+        reader = _Reader([_payload(_rows(PAGE_SIZE), None)])
+        await reader.get_conversations()
+        assert f"count:{PAGE_SIZE}" in reader.fetched[0]

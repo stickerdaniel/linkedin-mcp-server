@@ -125,6 +125,10 @@ def register_messaging_tools(
                 reach any point in time in a single call. An unknown value is
                 rejected rather than passed through, because the API answers one
                 with an empty page that would read as "you have none".
+                **Omitting it is not "no filter"**: the query the messaging page
+                issues already carries a category, so leaving this unset reads
+                whichever mailbox that page was showing, in practice
+                PRIMARY_INBOX. Pass one explicitly to be sure which you get.
 
         Returns:
             Dict with url and sections (the standard scraping-tool shape), plus
@@ -137,11 +141,11 @@ def register_messaging_tools(
             so there is more. **None means an empty page, which proves nothing
             either way and must never be read as the end.**
 
-            zero_reason explains an empty page: "verified-empty" (a positive
-            control confirmed the mailbox is empty) or "after-cursor" (the page
-            after the last one). An empty page that cannot be explained raises
-            rather than returning, so this never answers "no conversations" on
-            the strength of a silent failure.
+            zero_reason explains an empty page: "after-cursor" (the page after
+            the last one) or "empty-page" (nothing came back for what was
+            asked). Neither is evidence of the end, which is why at_end is None
+            there. A dead session or a rejected request is a non-200 and raises,
+            so an empty page that reaches you really is an empty result.
         """
         try:
             extractor = extractor or await get_ready_extractor(
