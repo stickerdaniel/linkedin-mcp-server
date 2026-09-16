@@ -2,7 +2,7 @@
   "call": {
     "arguments": {
       "keywords": "mathematics",
-      "max_pages": 2
+      "max_posts": 2
     },
     "method": "search_posts"
   },
@@ -82,11 +82,34 @@
       "timeout_ms": 10000
     },
     {
-      "actual_scrolls": 2,
       "call": "search_posts",
-      "kind": "boundary.scroll_body",
-      "max_scrolls": 10,
-      "pause_time": 0.5
+      "kind": "mouse.move",
+      "x": 640,
+      "y": 360
+    },
+    {
+      "call": "search_posts",
+      "kind": "evaluate",
+      "operation": "content_search_count",
+      "program_digest": "a4782c0fae8e"
+    },
+    {
+      "call": "search_posts",
+      "delta_x": 0,
+      "delta_y": 2000,
+      "kind": "mouse.wheel"
+    },
+    {
+      "call": "search_posts",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 1.0
+    },
+    {
+      "call": "search_posts",
+      "kind": "evaluate",
+      "operation": "content_search_count",
+      "program_digest": "a4782c0fae8e"
     },
     {
       "arg": {

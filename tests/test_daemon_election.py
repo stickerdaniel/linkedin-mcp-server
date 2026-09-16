@@ -5066,7 +5066,9 @@ class TestRealOwner:
             # in a `register_*` call.
             assert "get_person_profile" in names
             assert "close_session" in names
-            assert len(names) == 19, sorted(names)
+            assert len(names) == 26, sorted(
+                names
+            )  # every @mcp.tool, query_company_cache included
         finally:
             _stop(result.get("pid"))
 

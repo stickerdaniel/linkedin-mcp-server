@@ -40,7 +40,7 @@ def register_post_tools(
         keywords: str,
         ctx: Context,
         date_posted: str | None = None,
-        max_pages: Annotated[int, Field(ge=1, le=10)] = 3,
+        max_posts: Annotated[int, Field(ge=1, le=50)] = 10,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
@@ -48,9 +48,10 @@ def register_post_tools(
 
         Use this to catch informal hiring posts ("we're hiring", "Buscamos
         ...", "estamos contratando", "join our team") that often appear before
-        a formal job listing exists. This is global content search, distinct
-        from get_feed (your own home feed) and get_company_posts (one
-        company's page).
+        a formal job listing exists, or to build a prospect list of people
+        posting about a topic. This is global content search, distinct from
+        get_feed (your own home feed) and get_company_posts (one company's
+        page).
 
         Args:
             keywords: Search keywords (e.g., "Buscamos Unity", "AI automation hiring")
@@ -59,28 +60,29 @@ def register_post_tools(
                 "past-week", "past-month"; the "past_24_hours" / "past_week" /
                 "past_month" spellings used by search_jobs are accepted too.
                 Omit for any time.
-            max_pages: Scroll depth as result "pages" of ~5 scrolls each
-                (1-10, default 3). Content search is an infinite scroll, so
-                this caps how far the page is scrolled rather than fetching
-                discrete pages.
+            max_posts: Stop scrolling once this many results are loaded
+                (1-50, default 10). Content search is an infinite scroll, so
+                results are capped by count rather than by page.
 
         Returns:
             Dict with url, sections (search_results -> raw text), and optional
             references (post authors, companies, linked jobs) and
             section_errors. The results page carries no per-post permalinks,
-            so reach a post through its author. The LLM should parse the raw
-            text to extract each post's author, headline/role, company, body,
-            posted date, and reaction/comment counts.
+            so reach a post through its author: the /in/ entries in
+            references.search_results are the authors, which makes the result
+            usable as a prospect list. The LLM should parse the raw text to
+            extract each post's author, headline/role, company, body, posted
+            date, and reaction/comment counts.
         """
         try:
             extractor = extractor or await get_ready_extractor(
                 ctx, tool_name="search_posts"
             )
             logger.info(
-                "Searching posts: keywords='%s', date_posted='%s', max_pages=%d",
+                "Searching posts: keywords='%s', date_posted='%s', max_posts=%d",
                 keywords,
                 date_posted,
-                max_pages,
+                max_posts,
             )
 
             await ctx.report_progress(
@@ -91,7 +93,7 @@ def register_post_tools(
                 result = await extractor.search_posts(
                     keywords,
                     date_posted=date_posted,
-                    max_pages=max_pages,
+                    max_posts=max_posts,
                 )
             except FilterValidationError as e:
                 # Validation messages carry actionable detail; surface them as

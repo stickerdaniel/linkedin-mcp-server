@@ -13,15 +13,17 @@ A Model Context Protocol (MCP) server that connects AI assistants to LinkedIn. A
 - **Messaging**: List the inbox, read a conversation by username or thread ID, search messages by keyword, and compose/send a new message with explicit confirmation (profile-based send may open a separate DM rather than reply in an existing thread)
 - **Company Profiles**: Extract comprehensive company data, including the LinkedIn company URN id (used by LinkedIn's people-search `currentCompany` URL facet)
 - **Company Employees**: List employees at a company with optional keyword filtering
-- **Company Search**: Search for companies by keyword
+- **Company Search**: Search for companies by keywords and/or facets (industry, size, hq_location, has_jobs), with multi-page pagination and structured `companies` rows (name, industry, location, tagline, followers, url), capped per page under `references`
 - **Job Details**: Retrieve job posting information
 - **Job Search**: Search for jobs with keywords and location filters
 - **Saved Jobs**: List job postings saved by the authenticated user
-- **People Search**: Search for people by keywords and location
+- **People Search**: Search for people by keywords (Boolean search) and/or facets (location, connection degree, current/past company, title via a quoted phrase in keywords, industry, school, name, profile language), keywords optional, with multi-page pagination and structured `people` rows (name, degree, headline, location, snippet, url), capped per page under `references`
 - **Person Posts**: Get recent activity/posts from a person's profile
 - **Company Posts**: Get recent posts from a company's LinkedIn feed
 - **Home Feed**: Get recent posts from the authenticated user's LinkedIn home feed
-- **Post Search**: Search posts/content globally by keyword (the "Posts" tab) with an optional recency filter
+- **Post Search**: Search posts/content globally by keyword (the "Posts" tab) with an optional recency filter and `max_posts` (default 10)
+- **Bulk Profile Enrichment**: Queue a large list of profiles and work through it in small, human-paced bunches, resumable across days under a shared account-safety budget
+- **Company Enrichment**: Resolve and cache company firmographics (industry, size, HQ) and live open roles, cache-first with configurable TTLs, batching via company search, with an optional `about` pass for deeper firmographics and a `query_company_cache` tool to filter cached companies without hitting LinkedIn
 - **Compact References**: Return typed per-section links alongside readable text without shipping full-page markdown
 
 ## Quick Start
@@ -131,6 +133,28 @@ Use `$env:USERPROFILE\.linkedin-mcp` when constructing the host path outside JSO
 | `BROWSER_WAIT` | `25` | How long to wait for another server process to hand over the shared browser, in seconds (max 45; `0` = report busy at once). |
 | `BROWSER_MIN_HOLD` | `20` | Shortest time a process keeps the shared browser before handing it over, in seconds. Clamped to 3 seconds below `BROWSER_WAIT`, so raise that one along with it. Higher means fewer browser restarts but longer waits for other clients. |
 | `BROWSER_IDLE_TIMEOUT` | `600` | Close an idle browser and release the profile after this many seconds without a tool call (`0` = keep it open). |
+| `TOOL_CALL_GAP_SECONDS` | `5.0` | Minimum gap between two tool calls, in seconds, jittered by ±20% (`0` = no spacing). LinkedIn answers bursts of navigations with HTTP 429; this caps one client at roughly 12 page loads a minute. Tools answered from local disk never wait. |
+| `TOOL_CALL_GAP_JITTER` | `0.2` | ± fraction applied to `TOOL_CALL_GAP_SECONDS`. |
+| `NAV_DELAY_SECONDS` | `2` | Pause between page navigations inside one tool call, in seconds. |
+| `DAILY_ACTIONS_MAX` | `150` | Ceiling on any enrichment job's `daily_cap`. Raising it raises detection exposure in step; the defaults are the deliberate ceiling. |
+| `DAILY_ACTIONS_DEFAULT` | `100` | `daily_cap` when a job does not set one. |
+| `DAILY_CAP_JITTER` | `0.15` | Fraction shaved off the daily cap at random each day. |
+| `WARMUP_CAPS` | `10,20,50` | Per-day caps during the warm-up ramp, one per step. |
+| `WARMUP_DAYS` | `7,14,21` | Day thresholds for each warm-up step. |
+| `STEP_DELAY_MIN_SECONDS` / `STEP_DELAY_MAX_SECONDS` | `8` / `25` | Gap between page loads inside an enrichment bunch, in seconds. |
+| `BUNCH_PAUSE_MIN_SECONDS` / `BUNCH_PAUSE_MAX_SECONDS` | `60` / `3600` | Clamp on the pause between enrichment bunches, in seconds. |
+| `BUNCH_PAUSE_JITTER` | `0.25` | ± fraction on the bunch pause. |
+| `BUNCH_SIZE_MAX` | `25` | Ceiling on `bunch_size` per enrichment call. |
+| `BUNCH_SEARCHES_MAX` | `20` | Ceiling on `bunch_searches` per company-enrichment call. |
+| `RATE_LIMIT_RETRY_DELAY_SECONDS` | `5` | Base delay before retrying a soft 429, in seconds. |
+| `RATE_LIMIT_RETRY_BUDGET` | `2` | Soft-429 retries per navigation. |
+| `RATE_LIMIT_BACKOFF_DELAY_SECONDS` | `5` | Base of the hard-429 backoff, in seconds. |
+| `RATE_LIMIT_BACKOFF_MAX_SECONDS` | `30` | Cap on one backoff wait, in seconds. |
+| `RATE_LIMIT_BACKOFF_MAX_DOUBLINGS` | `8` | Doublings before the backoff stops growing. |
+| `RETRY_AFTER_CEILING_SECONDS` | `3600` | Cap on a relayed `Retry-After`, in seconds. |
+| `LOGIN_INLINE_WAIT_MAX` | `45` | Ceiling on `LOGIN_INLINE_WAIT`. |
+| `BROWSER_WAIT_MAX` | `45` | Ceiling on `BROWSER_WAIT`. |
+| `BLOCK_SUBRESOURCES` | on | Abort images, fonts and media instead of fetching them. A LinkedIn page pulls 100+ subrequests and text extraction reads none of these three, so this is the largest single lever against HTTP 429. Stylesheets are always fetched: layout decides `innerText` and visibility. |
 | `AUTO_IMPORT_FROM_BROWSER` | on | Import a session from a signed-in local browser on the first tool call that needs one. Skipped in containers, which have no host browser or keychain. |
 | `TRANSPORT` | `stdio` | Transport mode: stdio, streamable-http |
 | `HOST` | `127.0.0.1` | HTTP server host (for streamable-http transport) |

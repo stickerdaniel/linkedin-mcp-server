@@ -7,13 +7,18 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import ast
+import logging
 import re
 
 import pytest
+from patchright._impl._errors import TargetClosedError
 
 from linkedin_mcp_server.core.exceptions import AuthenticationError
+from linkedin_mcp_server.scraping import capture as capture_module
+from linkedin_mcp_server.scraping import session as session_module
 from linkedin_mcp_server.scraping.capture import (
-    RATE_LIMIT_RETRY_DELAY,
+    CONTENT_SEARCH_COUNT_JS,
+    CONTENT_SEARCH_SCROLL_BUDGET,
     CaptureMode,
     CapturePlan,
     SectionCapture,
@@ -25,6 +30,10 @@ from linkedin_mcp_server.scraping.contracts import (
     ExtractedSection,
 )
 from linkedin_mcp_server.scraping.navigation import PageNavigator
+from linkedin_mcp_server.scraping.rate_limit import (
+    RATE_LIMIT_RETRY_BUDGET,
+    RATE_LIMIT_RETRY_DELAY,
+)
 from linkedin_mcp_server.scraping.session import ScrapingSession
 from linkedin_mcp_server.scraping.text import DetailCaptureTextTable
 
@@ -33,6 +42,18 @@ def _capture(page) -> SectionCapture:
     """Wire the capture owner the way the facade does."""
     session = ScrapingSession(page)
     return SectionCapture(session, PageNavigator(session), PageContentReader(session))
+
+
+def _identity_jitter():
+    """Neutralise the session's pause jitter so a delay is readable.
+
+    The jitter itself is asserted where the session owns it; here it would
+    only hide whether the delay doubled.
+    """
+    return patch(
+        "linkedin_mcp_server.scraping.session.jitter",
+        side_effect=lambda base, *a, **kw: base,
+    )
 
 
 class TestExtractPage:
@@ -174,7 +195,7 @@ class TestExtractPage:
             )
 
         assert result.text == RATE_LIMITED_SECTION_TEXT
-        # goto called twice (initial + retry)
+        # goto called twice (initial + the first retry of a fresh budget)
         assert mock_page.goto.await_count == 2
 
     async def test_retry_succeeds_after_rate_limit(self, mock_page):
@@ -223,6 +244,113 @@ class TestExtractPage:
             )
 
         assert result.text == "Education\nHarvard University\n1973 – 1975"
+
+    async def test_soft_retry_budget_is_shared_across_sections(self, mock_page):
+        """The retry budget belongs to the scrape, not to each section.
+
+        Per section it was one retry each, so a throttled multi-section scrape
+        doubled its own request volume. Four throttled sections may spend the
+        two retries the session holds and no more.
+        """
+        noise_only = (
+            "More profiles for you\n\n"
+            "You've approached your profile search limit\n\n"
+            "About\nAccessibility\nTalent Solutions"
+        )
+        mock_page.evaluate = AsyncMock(
+            return_value={"source": "root", "text": noise_only, "references": []}
+        )
+        capture = _capture(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.session.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            for section in ("experience", "education", "skills", "projects"):
+                result = await capture.extract_page(
+                    f"https://www.linkedin.com/in/testuser/details/{section}/",
+                    section_name=section,
+                )
+                assert result.text == RATE_LIMITED_SECTION_TEXT
+
+        # Four sections plus the scrape-wide budget of two, not four plus four.
+        assert mock_page.goto.await_count == 4 + RATE_LIMIT_RETRY_BUDGET
+
+    async def test_soft_retry_delay_escalates_within_one_scrape(self, mock_page):
+        """The second retry of a scrape waits twice as long as the first."""
+        noise_only = (
+            "More profiles for you\n\n"
+            "You've approached your profile search limit\n\n"
+            "About\nAccessibility\nTalent Solutions"
+        )
+        mock_page.evaluate = AsyncMock(
+            return_value={"source": "root", "text": noise_only, "references": []}
+        )
+        slept: list[float] = []
+        capture = _capture(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.session.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            _identity_jitter(),
+            patch(
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
+                new_callable=AsyncMock,
+                side_effect=lambda delay: slept.append(delay),
+            ),
+        ):
+            for section in ("experience", "education"):
+                await capture.extract_page(
+                    f"https://www.linkedin.com/in/testuser/details/{section}/",
+                    section_name=section,
+                )
+
+        # Everything shorter is humanizer entropy, which is sub-second.
+        assert [d for d in slept if d >= 2.0] == [
+            RATE_LIMIT_RETRY_DELAY,
+            RATE_LIMIT_RETRY_DELAY * 2,
+        ]
+
+    async def test_extract_page_reraises_closed_target(self, mock_page):
+        """The isolation handler is where the incident's error was swallowed;
+        re-raising only in the section walks would never see it."""
+        capture = _capture(mock_page)
+        with (
+            patch.object(
+                capture,
+                "_capture_once",
+                new_callable=AsyncMock,
+                side_effect=TargetClosedError("closed"),
+            ),
+            pytest.raises(TargetClosedError),
+        ):
+            await capture.extract_page(
+                "https://www.linkedin.com/in/testuser/", section_name="main_profile"
+            )
 
     async def test_media_only_controls_are_not_misclassified_as_rate_limited(
         self, mock_page
@@ -628,6 +756,55 @@ class TestActivityFeedExtraction:
             )
 
         assert show_more.click.await_count == 2
+
+    async def test_details_page_show_more_clicks_pace_like_navigations(self, mock_page):
+        """The pause after a click is a deliberate one, so it goes through the
+        session's jittered pacing rather than a fixed sleep."""
+        mock_page.evaluate = AsyncMock(
+            return_value={"source": "root", "text": "text", "references": []}
+        )
+        mock_page.wait_for_function = AsyncMock()
+
+        show_more = MagicMock()
+        show_more.count = AsyncMock(side_effect=[1, 0])
+        show_more.is_visible = AsyncMock(return_value=True)
+        show_more.scroll_into_view_if_needed = AsyncMock()
+        show_more.click = AsyncMock()
+        show_more.first = show_more
+        show_more.filter = MagicMock(return_value=show_more)
+
+        def locator_side_effect(selector):
+            if selector == "main button":
+                return show_more
+            return MagicMock(count=AsyncMock(return_value=0))
+
+        mock_page.locator = MagicMock(side_effect=locator_side_effect)
+        capture = _capture(mock_page)
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.session.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch.object(ScrapingSession, "pace", new_callable=AsyncMock) as pace,
+        ):
+            await capture._capture_once(
+                "https://www.linkedin.com/in/billgates/details/certifications/",
+                section_name="certifications",
+                plan=CapturePlan(CaptureMode.DETAILS),
+            )
+
+        show_more.click.assert_awaited_once()
+        pace.assert_awaited_once_with(1.0)
 
     async def test_details_page_show_more_respects_max_scrolls_budget(self, mock_page):
         """When 'Show more' never disappears, loop exits after max_scrolls clicks."""
@@ -1084,6 +1261,7 @@ class TestExtractOverlay:
                 "linkedin_mcp_server.scraping.session.detect_rate_limit",
                 new_callable=AsyncMock,
             ),
+            _identity_jitter(),
             patch(
                 "linkedin_mcp_server.scraping.session.asyncio.sleep",
                 new_callable=AsyncMock,
@@ -1096,6 +1274,46 @@ class TestExtractOverlay:
         assert result.text == "Email\nada@example.com"
         assert mock_page.goto.await_count == 2
         sleep.assert_awaited_once_with(RATE_LIMIT_RETRY_DELAY)
+
+    async def test_an_overlay_read_draws_on_the_page_reads_budget(self, mock_page):
+        """Page and overlay reads land on the same limit, so they share one
+        budget: two throttled page reads leave the overlay nothing to spend."""
+        mock_page.evaluate = AsyncMock(
+            return_value={"source": "root", "text": self.NOISE_ONLY, "references": []}
+        )
+        capture = _capture(mock_page)
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.session.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            for _ in range(RATE_LIMIT_RETRY_BUDGET):
+                await capture.extract_page(
+                    "https://www.linkedin.com/in/testuser/details/experience/",
+                    section_name="experience",
+                )
+            spent = mock_page.goto.await_count
+            result = await capture._extract_overlay(
+                self.OVERLAY_URL, section_name="contact_info"
+            )
+
+        assert result.text == RATE_LIMITED_SECTION_TEXT
+        assert mock_page.goto.await_count == spent + 1
 
     async def test_a_noise_only_retry_reports_the_rate_limit_sentinel(self, mock_page):
         mock_page.evaluate = AsyncMock(
@@ -1137,6 +1355,267 @@ class TestExtractOverlay:
         assert diagnostics.call_args.kwargs["context"] == "extract_overlay"
 
 
+class TestContentSearchScroll:
+    """The count-driven wheel loop behind content search.
+
+    Content search renders in an inner scroll container, so the generic
+    ``scroll_to_bottom`` never moved it and every search came back with the
+    first paint. These drive ``_scroll_content_search_results`` with a page
+    whose ``evaluate`` answers a scripted card count per call.
+    """
+
+    CONTENT_SEARCH = CapturePlan(
+        CaptureMode.SEARCH_RESULTS | CaptureMode.CONTENT_SEARCH, max_posts=7
+    )
+
+    @staticmethod
+    def _page(counts: list[int]) -> MagicMock:
+        page = MagicMock()
+        page.viewport_size = {"width": 1280, "height": 720}
+        page.mouse.move = AsyncMock()
+        page.mouse.wheel = AsyncMock()
+        # Repeat the last value once the script runs out, so a stalled page
+        # keeps answering the same count for as long as it is polled.
+        page.evaluate = AsyncMock(
+            side_effect=lambda *_: counts.pop(0) if len(counts) > 1 else counts[0]
+        )
+        return page
+
+    @staticmethod
+    def _no_pause():
+        return patch.object(ScrapingSession, "pace", new_callable=AsyncMock)
+
+    class _Clock:
+        """A monotonic clock the pauses move, so the budget is testable."""
+
+        def __init__(self) -> None:
+            self.now = 0.0
+
+        def monotonic(self) -> float:
+            return self.now
+
+    async def test_the_count_runs_the_card_counting_program(self):
+        page = self._page([3])
+        capture = _capture(page)
+
+        assert await capture._count_content_search_results() == 3
+        page.evaluate.assert_awaited_once_with(CONTENT_SEARCH_COUNT_JS)
+
+    async def test_stops_once_count_reaches_max_posts(self):
+        # 4 on first paint, then a batch of 3 per wheel: 4 -> 7 -> 10. The
+        # second batch lands exactly on the cap, so a loop that only stops
+        # past it would wheel a third time and answer 13.
+        page = self._page([4, 7, 10, 13])
+        capture = _capture(page)
+        with self._no_pause():
+            count = await capture._scroll_content_search_results(max_posts=10)
+
+        assert count == 10
+        assert page.mouse.wheel.await_count == 2
+
+    async def test_max_posts_already_met_does_not_scroll(self):
+        page = self._page([6, 9])
+        capture = _capture(page)
+        with self._no_pause():
+            count = await capture._scroll_content_search_results(max_posts=6)
+
+        assert count == 6
+        page.mouse.wheel.assert_not_awaited()
+
+    async def test_stops_after_three_stale_rounds(self):
+        # One productive wheel (3 -> 5), then the page never grows again.
+        page = self._page([3, 5])
+        capture = _capture(page)
+        with self._no_pause():
+            count = await capture._scroll_content_search_results(max_posts=50)
+
+        assert count == 5
+        assert page.mouse.wheel.await_count == 1 + 3
+
+    async def test_a_stale_stop_below_max_posts_warns(self, caplog):
+        page = self._page([3, 5])
+        capture = _capture(page)
+        with (
+            self._no_pause(),
+            caplog.at_level(logging.WARNING, logger=capture_module.__name__),
+        ):
+            await capture._scroll_content_search_results(max_posts=50)
+
+        assert [r.message for r in caplog.records if r.levelno == logging.WARNING] == [
+            "content search stopped at 5 of max_posts 50: page stopped producing "
+            "new results"
+        ]
+
+    async def test_reaching_max_posts_does_not_warn(self, caplog):
+        page = self._page([4, 7, 10])
+        capture = _capture(page)
+        with (
+            self._no_pause(),
+            caplog.at_level(logging.WARNING, logger=capture_module.__name__),
+        ):
+            await capture._scroll_content_search_results(max_posts=10)
+
+        assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+
+    async def test_stops_at_the_scroll_budget_while_still_loading(self, caplog):
+        """A page that keeps answering one more card never goes stale and
+        would otherwise wheel all twenty rounds; the 60s budget stops it."""
+        clock = self._Clock()
+        page = self._page(list(range(1, 40)))
+        capture = _capture(page)
+
+        async def pause(seconds: float) -> None:
+            clock.now += CONTENT_SEARCH_SCROLL_BUDGET / 2
+
+        with (
+            patch.object(session_module, "time", clock),
+            patch.object(ScrapingSession, "pace", side_effect=pause),
+            caplog.at_level(logging.WARNING, logger=capture_module.__name__),
+        ):
+            count = await capture._scroll_content_search_results(max_posts=50)
+
+        # Two productive rounds land on the deadline; the third never wheels.
+        assert count == 3
+        assert page.mouse.wheel.await_count == 2
+        assert [r.message for r in caplog.records if r.levelno == logging.WARNING] == [
+            "content search stopped at 3 of max_posts 50: 60s scroll budget spent"
+        ]
+
+    async def test_the_budget_cuts_a_poll_short(self):
+        """The deadline is checked between polls too, so a stalled page does
+        not get its full six-second wait after the budget is gone."""
+        clock = self._Clock()
+        page = self._page([3])
+        capture = _capture(page)
+
+        async def pause(seconds: float) -> None:
+            clock.now += CONTENT_SEARCH_SCROLL_BUDGET / 2
+
+        with (
+            patch.object(session_module, "time", clock),
+            patch.object(ScrapingSession, "pace", side_effect=pause) as pauses,
+        ):
+            count = await capture._scroll_content_search_results(max_posts=50)
+
+        assert count == 3
+        assert page.mouse.wheel.await_count == 1
+        # The second pause reaches the deadline; four more would follow
+        # without the check inside the poll loop.
+        assert pauses.await_count == 2
+
+    async def test_the_polls_pace_like_every_other_deliberate_pause(self):
+        page = self._page([3, 5])
+        capture = _capture(page)
+        with self._no_pause() as pauses:
+            await capture._scroll_content_search_results(max_posts=50)
+
+        assert pauses.await_args_list
+        assert {call.args for call in pauses.await_args_list} == {(1.0,)}
+
+    async def test_loaded_section_routes_content_search_to_wheel_loop(self, mock_page):
+        mock_page.evaluate = AsyncMock(return_value={"text": "", "references": []})
+        capture = _capture(mock_page)
+        with (
+            patch.object(
+                capture, "_scroll_content_search_results", new_callable=AsyncMock
+            ) as wheel_loop,
+            patch(
+                "linkedin_mcp_server.scraping.session.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ) as body_scroll,
+            patch(
+                "linkedin_mcp_server.scraping.session.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+        ):
+            await capture._extract_loaded_section(
+                "https://www.linkedin.com/search/results/content/?keywords=x",
+                "search_results",
+                self.CONTENT_SEARCH,
+            )
+
+        wheel_loop.assert_awaited_once_with(7)
+        body_scroll.assert_not_awaited()
+
+    async def test_loaded_section_defaults_the_wheel_loop_to_ten_posts(self, mock_page):
+        mock_page.evaluate = AsyncMock(return_value={"text": "", "references": []})
+        capture = _capture(mock_page)
+        with (
+            patch.object(
+                capture, "_scroll_content_search_results", new_callable=AsyncMock
+            ) as wheel_loop,
+            patch(
+                "linkedin_mcp_server.scraping.session.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+        ):
+            await capture._extract_loaded_section(
+                "https://www.linkedin.com/search/results/content/?keywords=x",
+                "search_results",
+                CapturePlan(CaptureMode.CONTENT_SEARCH),
+            )
+
+        wheel_loop.assert_awaited_once_with(10)
+
+
+class TestReferenceCap:
+    """``apply_cap`` reaches the reference builder from the plan."""
+
+    @staticmethod
+    def _anchors(n: int) -> list[dict]:
+        return [
+            {"href": f"https://www.linkedin.com/in/person-{i}/", "text": f"P{i}"}
+            for i in range(n)
+        ]
+
+    @pytest.mark.parametrize(("apply_cap", "expected"), [(True, 15), (False, 20)])
+    async def test_the_plan_decides_whether_search_references_are_capped(
+        self, mock_page, apply_cap, expected
+    ):
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "source": "root",
+                "text": "Ada Lovelace\nAnalyst",
+                "references": self._anchors(20),
+            }
+        )
+        capture = _capture(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.session.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            result = await capture._extract_loaded_section(
+                "https://www.linkedin.com/search/results/people/?keywords=ada",
+                "search_results",
+                CapturePlan(CaptureMode.SEARCH_RESULTS, apply_cap=apply_cap),
+            )
+
+        assert len(result.references) == expected
+
+
 class TestCapturePlans:
     @pytest.mark.parametrize(
         ("url", "mode"),
@@ -1162,10 +1641,18 @@ class TestCapturePlans:
                 "https://www.linkedin.com/in/ada/details/experience/",
                 CaptureMode.DETAILS,
             ),
+            (
+                "https://www.linkedin.com/search/results/content/?keywords=ada",
+                CaptureMode.SEARCH_RESULTS | CaptureMode.CONTENT_SEARCH,
+            ),
         ],
     )
     def test_url_adapter_preserves_generic_mode_selection(self, url, mode):
         assert capture_plan_for_url(url, 17) == CapturePlan(mode, max_scrolls=17)
+
+    def test_url_adapter_content_search_marker_uses_parsed_path_only(self):
+        url = "https://www.linkedin.com/in/ada/?next=/search/results/content/"
+        assert capture_plan_for_url(url).mode is CaptureMode.SEARCH_RESULTS
 
     def test_url_adapter_preserves_independent_mode_branches(self):
         url = "https://www.linkedin.com/company/acme/people/search/results/"
@@ -1247,6 +1734,13 @@ BUTTON = re.compile(r"^Show (more|all)\\b")
     }
 
 
+# A CSS attribute selector on an anchor's ``href`` picks DOM nodes to count or
+# wait for; it says nothing about the page's own address, which is what the
+# guard is for. ``location`` checks and ``in url`` tests are not selectors and
+# stay visible to it.
+_HREF_ATTRIBUTE_SELECTOR = re.compile(r"""\[href[*^$~|]?=(["'])[^"']*\1\]""")
+
+
 def _generic_capture_domain_path_literals(source: str) -> set[str]:
     tree = ast.parse(source)
     domain_fragments = (
@@ -1256,6 +1750,11 @@ def _generic_capture_domain_path_literals(source: str) -> set[str]:
         "/people/",
         "/details/",
     )
+
+    def carries_domain_path(value: str) -> bool:
+        stripped = _HREF_ATTRIBUTE_SELECTOR.sub("", value)
+        return any(fragment in stripped for fragment in domain_fragments)
+
     root_names = {
         "capture",
         "_capture_once",
@@ -1307,7 +1806,7 @@ def _generic_capture_domain_path_literals(source: str) -> set[str]:
         literals: set[str] = set()
         for child in ast.walk(constants[name]):
             if isinstance(child, ast.Constant) and isinstance(child.value, str):
-                if any(fragment in child.value for fragment in domain_fragments):
+                if carries_domain_path(child.value):
                     literals.add(child.value)
             elif isinstance(child, ast.Name):
                 referenced = (
@@ -1338,7 +1837,7 @@ def _generic_capture_domain_path_literals(source: str) -> set[str]:
         visited.add(id(function))
         for child in ast.walk(function):
             if isinstance(child, ast.Constant) and isinstance(child.value, str):
-                if any(fragment in child.value for fragment in domain_fragments):
+                if carries_domain_path(child.value):
                     literals.add(child.value)
             elif isinstance(child, ast.Name):
                 literals.update(
@@ -1383,6 +1882,41 @@ class SectionCapture:
             return "domain policy"
 """
     assert _generic_capture_domain_path_literals(mutation) == {"/details/"}
+
+
+def test_generic_capture_ast_guard_ignores_anchor_href_selectors():
+    """The card-counting program selects author links by ``href``; that is DOM
+    selection, not a branch on the page's address."""
+    mutation = """
+COUNT_JS = '() => main.querySelectorAll(\\'a[href*="/in/"], a[href*="/company/"]\\')'
+class SectionCapture:
+    async def _extract_loaded_section(self, url):
+        return await self._session.page.evaluate(COUNT_JS)
+"""
+    assert _generic_capture_domain_path_literals(mutation) == set()
+
+
+def test_generic_capture_ast_guard_still_sees_a_path_branch_beside_a_selector():
+    mutation = """
+class SectionCapture:
+    async def _extract_loaded_section(self, url):
+        if "/company/" in url:
+            return await self._session.page.evaluate('a[href*="/company/"]')
+"""
+    assert _generic_capture_domain_path_literals(mutation) == {"/company/"}
+
+
+def test_generic_capture_ast_guard_still_sees_a_location_check_in_a_program():
+    mutation = """
+class SectionCapture:
+    async def _extract_loaded_section(self, url):
+        return await self._session.page.evaluate(
+            '() => location.pathname.includes("/details/")'
+        )
+"""
+    assert _generic_capture_domain_path_literals(mutation) == {
+        '() => location.pathname.includes("/details/")'
+    }
 
 
 def test_generic_capture_ast_guard_follows_referenced_module_constants():

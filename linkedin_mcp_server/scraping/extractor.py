@@ -17,6 +17,7 @@ from linkedin_mcp_server.scraping.contracts import (
     rate_limited_section_error as rate_limited_section_error,
 )
 from linkedin_mcp_server.scraping.conversations import ConversationReader
+from linkedin_mcp_server.scraping.facets import FacetResolver
 from linkedin_mcp_server.scraping.feed import FeedScraper
 from linkedin_mcp_server.scraping.job_pages import JobPageReader
 from linkedin_mcp_server.scraping.jobs import JobScraper
@@ -49,21 +50,22 @@ class LinkedInExtractor:
             session,
             lambda: message_sender._read_profile_message_target(),
         )
-        person = PersonScraper(session, navigator, capture, profile_page)
+        facets = FacetResolver(session, navigator, capture)
+        person = PersonScraper(session, navigator, capture, profile_page, facets)
 
         self._content = content
         self._capture = capture
         self._feed = FeedScraper(session, navigator, content)
         self._message_sender = message_sender
         self._person = person
-        self._company = CompanyScraper(session, capture)
+        self._company = CompanyScraper(session, capture, facets)
         self._connection = ConnectionActions(
             session,
             navigator,
             lambda username: self.scrape_person(username, {"main_profile"}),
         )
         job_pages = JobPageReader(session, navigator, content)
-        self._jobs = JobScraper(navigator, capture, job_pages)
+        self._jobs = JobScraper(session, navigator, capture, job_pages)
         self._posts = PostSearch(capture)
         self._conversations = ConversationReader(
             session, navigator, content, profile_page
@@ -190,34 +192,66 @@ class LinkedInExtractor:
 
     async def search_people(
         self,
-        keywords: str,
+        keywords: str | None = None,
         location: str | None = None,
         network: list[str] | None = None,
-        current_company: str | None = None,
+        current_company: str | list[str] | None = None,
+        max_pages: int = 1,
+        *,
+        title: str | None = None,
+        past_company: str | list[str] | None = None,
+        industry: str | list[str] | None = None,
+        school: str | None = None,
+        first_name: str | None = None,
+        last_name: str | None = None,
+        profile_language: str | list[str] | None = None,
     ) -> dict[str, Any]:
-        """Search for people and extract the results page."""
+        """Search for people and extract the results pages."""
         return await self._person.search_people(
             keywords,
             location=location,
             network=network,
             current_company=current_company,
+            max_pages=max_pages,
+            title=title,
+            past_company=past_company,
+            industry=industry,
+            school=school,
+            first_name=first_name,
+            last_name=last_name,
+            profile_language=profile_language,
         )
 
-    async def search_companies(self, keywords: str) -> dict[str, Any]:
-        """Search for companies and extract the results page."""
-        return await self._company.search_companies(keywords)
+    async def search_companies(
+        self,
+        keywords: str | None = None,
+        industry: list[str] | None = None,
+        size: list[str] | None = None,
+        hq_location: str | None = None,
+        has_jobs: bool | None = None,
+        max_pages: int = 1,
+    ) -> dict[str, Any]:
+        """Search for companies and extract the results pages."""
+        return await self._company.search_companies(
+            keywords,
+            industry=industry,
+            size=size,
+            hq_location=hq_location,
+            has_jobs=has_jobs,
+            max_pages=max_pages,
+        )
 
     async def search_posts(
         self,
         keywords: str,
         date_posted: str | None = None,
-        max_pages: int = 3,
+        max_posts: int = 10,
     ) -> dict[str, Any]:
         """Search LinkedIn posts and extract the results page."""
         return await self._posts.search_posts(
             keywords,
             date_posted=date_posted,
-            max_pages=max_pages,
+            max_posts=max_posts,
         )
 
     async def get_inbox(self, limit: int = 20) -> dict[str, Any]:

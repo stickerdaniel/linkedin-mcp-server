@@ -280,6 +280,8 @@ class BrowserBusyError(LinkedInMCPError):
             or (
                 "Another LinkedIn MCP client is currently using the browser. "
                 "This is not a failure and your saved session was not changed. "
-                "Wait a moment and call this exact tool again."
+                "Wait a moment and call this exact tool again. If several "
+                "clients run at once, add --daemon to each so they share one "
+                "browser instead of contending for the profile."
             )
         )

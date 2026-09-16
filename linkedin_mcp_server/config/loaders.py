@@ -15,6 +15,8 @@ from urllib.parse import unquote, urlsplit
 
 from dotenv import load_dotenv
 
+from linkedin_mcp_server import limits
+
 from .schema import AppConfig, ConfigurationError
 
 # Load .env file if present
@@ -146,7 +148,41 @@ class EnvironmentKeys:
     AUTO_IMPORT_FROM_BROWSER = "AUTO_IMPORT_FROM_BROWSER"
     EAGER_FULL_CHROMIUM = "EAGER_FULL_CHROMIUM"
     DAEMON_ENABLED = "DAEMON_ENABLED"
+    BLOCK_SUBRESOURCES = "BLOCK_SUBRESOURCES"
     INSTALLER_TEMP_DIR = "INSTALLER_TEMP_DIR"
+    # Company-cache TTLs, in days. Firmographics move on the order of years, so
+    # a long default is safe; open roles are the volatile signal, so a short one.
+    COMPANY_FIRMOGRAPHICS_TTL_DAYS = "COMPANY_FIRMOGRAPHICS_TTL_DAYS"
+    COMPANY_JOBS_TTL_DAYS = "COMPANY_JOBS_TTL_DAYS"
+    # Minimum gap between two tool calls, in seconds, jittered by +/-20%.
+    # 0 removes the spacing; see pacing.DEFAULT_TOOL_CALL_GAP for the default.
+    TOOL_CALL_GAP_SECONDS = "TOOL_CALL_GAP_SECONDS"
+    # Pacing limits. Every one of these has a built-in default in ``pacing.py``
+    # or ``scraping/extractor.py``; the variable replaces it per process, and a
+    # process is one profile. See ``limits.py`` for the parse rules.
+    TOOL_CALL_GAP_JITTER = "TOOL_CALL_GAP_JITTER"
+    DAILY_ACTIONS_MAX = "DAILY_ACTIONS_MAX"
+    DAILY_ACTIONS_DEFAULT = "DAILY_ACTIONS_DEFAULT"
+    DAILY_CAP_JITTER = "DAILY_CAP_JITTER"
+    WARMUP_CAPS = "WARMUP_CAPS"
+    WARMUP_DAYS = "WARMUP_DAYS"
+    STEP_DELAY_MIN_SECONDS = "STEP_DELAY_MIN_SECONDS"
+    STEP_DELAY_MAX_SECONDS = "STEP_DELAY_MAX_SECONDS"
+    BUNCH_PAUSE_MIN_SECONDS = "BUNCH_PAUSE_MIN_SECONDS"
+    BUNCH_PAUSE_MAX_SECONDS = "BUNCH_PAUSE_MAX_SECONDS"
+    BUNCH_PAUSE_JITTER = "BUNCH_PAUSE_JITTER"
+    BUNCH_SIZE_MAX = "BUNCH_SIZE_MAX"
+    BUNCH_SEARCHES_MAX = "BUNCH_SEARCHES_MAX"
+    NAV_DELAY_SECONDS = "NAV_DELAY_SECONDS"
+    RATE_LIMIT_RETRY_DELAY_SECONDS = "RATE_LIMIT_RETRY_DELAY_SECONDS"
+    RATE_LIMIT_RETRY_BUDGET = "RATE_LIMIT_RETRY_BUDGET"
+    RATE_LIMIT_BACKOFF_DELAY_SECONDS = "RATE_LIMIT_BACKOFF_DELAY_SECONDS"
+    RATE_LIMIT_BACKOFF_MAX_SECONDS = "RATE_LIMIT_BACKOFF_MAX_SECONDS"
+    RATE_LIMIT_BACKOFF_MAX_DOUBLINGS = "RATE_LIMIT_BACKOFF_MAX_DOUBLINGS"
+    RETRY_AFTER_CEILING_SECONDS = "RETRY_AFTER_CEILING_SECONDS"
+    # Ceilings on the two inline waits; the defaults are already tunable.
+    LOGIN_INLINE_WAIT_MAX = limits.LOGIN_INLINE_WAIT_MAX_KEY
+    BROWSER_WAIT_MAX = limits.BROWSER_WAIT_MAX_KEY
 
 
 # What ``manifest.json`` fills from ``user_config``, and the exact string each
@@ -430,6 +466,15 @@ def load_from_env(config: AppConfig) -> AppConfig:
             config.browser.eager_full_chromium = False
         elif eager_full_value in TRUTHY_VALUES:
             config.browser.eager_full_chromium = True
+
+    # Abort images, fonts and media instead of fetching them. On unless set
+    # falsy; text extraction does not read any of the three.
+    if block_subresources_env := os.environ.get(EnvironmentKeys.BLOCK_SUBRESOURCES):
+        block_subresources_value = _normalize_env(block_subresources_env)
+        if block_subresources_value in FALSY_VALUES:
+            config.browser.block_subresources = False
+        elif block_subresources_value in TRUTHY_VALUES:
+            config.browser.block_subresources = True
 
     # Share one browser-owning process across stdio clients.
     if daemon_env := os.environ.get(EnvironmentKeys.DAEMON_ENABLED):

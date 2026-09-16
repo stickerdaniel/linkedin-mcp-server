@@ -100,6 +100,8 @@
     }
   ],
   "result": {
+    "companies": [],
+    "result_count": null,
     "section_names": [
       "search_results"
     ],

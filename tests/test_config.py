@@ -64,6 +64,20 @@ class TestBrowserConfig:
         config.validate()  # Clamps, does not raise
         assert config.login_inline_wait_seconds == MAX_LOGIN_INLINE_WAIT_SECONDS
 
+    def test_login_inline_wait_max_raises_the_ceiling(self, monkeypatch):
+        monkeypatch.setenv("LOGIN_INLINE_WAIT_MAX", "90")
+        config = BrowserConfig(login_inline_wait_seconds=80)
+        config.validate()
+        assert config.login_inline_wait_seconds == 80.0
+
+    def test_login_inline_wait_max_garbage_falls_back(self, monkeypatch, caplog):
+        monkeypatch.setenv("LOGIN_INLINE_WAIT_MAX", "ninety")
+        config = BrowserConfig(login_inline_wait_seconds=80)
+        with caplog.at_level(logging.WARNING, logger="linkedin_mcp_server.limits"):
+            config.validate()
+        assert "Ignoring non-numeric LOGIN_INLINE_WAIT_MAX='ninety'" in caplog.text
+        assert config.login_inline_wait_seconds == MAX_LOGIN_INLINE_WAIT_SECONDS
+
 
 class TestProfileSharingConfig:
     """The wait/hold/idle values that govern cross-process browser handoff.
@@ -129,6 +143,20 @@ class TestProfileSharingConfig:
     def test_clamps_wait_to_the_ceiling(self):
         config = BrowserConfig(browser_wait_seconds=120, browser_min_hold_seconds=0)
         config.validate()  # Clamps, does not raise
+        assert config.browser_wait_seconds == MAX_BROWSER_WAIT_SECONDS
+
+    def test_browser_wait_max_raises_the_ceiling(self, monkeypatch):
+        monkeypatch.setenv("BROWSER_WAIT_MAX", "90")
+        config = BrowserConfig(browser_wait_seconds=80, browser_min_hold_seconds=0)
+        config.validate()
+        assert config.browser_wait_seconds == 80.0
+
+    def test_browser_wait_max_garbage_falls_back(self, monkeypatch, caplog):
+        monkeypatch.setenv("BROWSER_WAIT_MAX", "ninety")
+        config = BrowserConfig(browser_wait_seconds=80, browser_min_hold_seconds=0)
+        with caplog.at_level(logging.WARNING, logger="linkedin_mcp_server.limits"):
+            config.validate()
+        assert "Ignoring non-numeric BROWSER_WAIT_MAX='ninety'" in caplog.text
         assert config.browser_wait_seconds == MAX_BROWSER_WAIT_SECONDS
 
     def test_clamps_hold_below_the_wait_budget(self):
