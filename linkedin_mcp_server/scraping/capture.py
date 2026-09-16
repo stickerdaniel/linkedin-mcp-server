@@ -8,6 +8,9 @@ from urllib.parse import urlparse
 
 import logging
 
+import asyncio
+from typing import Any
+
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.core.exceptions import LinkedInScraperException
@@ -16,6 +19,11 @@ from linkedin_mcp_server.scraping.content import PageContentReader
 from linkedin_mcp_server.scraping.contracts import (
     RATE_LIMITED_SECTION_TEXT,
     ExtractedSection,
+)
+from linkedin_mcp_server.scraping.feed_payload import (
+    append_permalink_references,
+    is_permalink_payload_response,
+    permalink_paths_from_payload,
 )
 from linkedin_mcp_server.scraping.link_metadata import build_references
 from linkedin_mcp_server.scraping.navigation import PageNavigator
@@ -45,6 +53,7 @@ class CaptureMode(Flag):
     COMPANY_PEOPLE = auto()
     DETAILS = auto()
     OVERLAY = auto()
+    POST_PERMALINKS = auto()
 
 
 @dataclass(frozen=True)
@@ -65,11 +74,87 @@ def capture_plan_for_url(url: str, max_scrolls: int | None = None) -> CapturePla
         mode |= CaptureMode.ACTIVITY
     if "/search/results/" in url:
         mode |= CaptureMode.SEARCH_RESULTS
+    if path.startswith("/search/results/content"):
+        mode |= CaptureMode.POST_PERMALINKS
     if "/company/" in url and "/people/" in url:
         mode |= CaptureMode.COMPANY_PEOPLE
     if "/details/" in url:
         mode |= CaptureMode.DETAILS
     return CapturePlan(mode=mode, max_scrolls=max_scrolls)
+
+
+class _PermalinkResponseListener:
+    """Collect post permalinks from payload responses while a page is captured.
+
+    LinkedIn renders no permalink anchor per post on the content-search tab,
+    so the permalinks are read from the JSON/document responses the way the
+    feed scraper reads its SDUI payloads. The response listener must be
+    installed before navigation: the initial document response already
+    carries the first batch of permalinks.
+    """
+
+    _READ_DRAIN_TIMEOUT = 2.0
+
+    def __init__(self, page: Any):
+        self._page = page
+        self._urls: list[str] = []
+        self._seen: set[str] = set()
+        self._pending: list[asyncio.Task[None]] = []
+
+    def install(self) -> None:
+        self._page.on("response", self._handle_response)
+
+    def remove(self) -> None:
+        try:
+            # The registered closure itself, never an equivalent: Playwright
+            # matches listeners by identity (see feed.py for the failure this
+            # avoids: a re-created closure removes nothing).
+            self._page.remove_listener("response", self._handle_response)
+        except Exception:
+            pass
+
+    def _handle_response(self, response: Any) -> None:
+        try:
+            content_type = response.headers.get("content-type", "")
+        except Exception:
+            return
+        if not is_permalink_payload_response(response.url, content_type):
+            return
+
+        async def _read() -> None:
+            try:
+                body = await response.body()
+            except Exception:
+                return
+            if not body:
+                return
+            text = body.decode("utf-8", errors="replace")
+            for path in permalink_paths_from_payload(text):
+                if path not in self._seen:
+                    self._seen.add(path)
+                    self._urls.append(path)
+
+        self._pending.append(asyncio.create_task(_read()))
+
+    async def collect(self) -> list[str]:
+        """Await in-flight response reads, then snapshot the captured paths."""
+        if self._pending:
+            done, still = await asyncio.wait(
+                self._pending, timeout=self._READ_DRAIN_TIMEOUT
+            )
+            for task in still:
+                task.cancel()
+            for task in self._pending:
+                if task.done() and not task.cancelled():
+                    task.exception()
+            self._pending = [task for task in self._pending if not task.done()]
+        return list(self._urls)
+
+    def cancel_pending(self) -> None:
+        for task in self._pending:
+            if not task.done():
+                task.cancel()
+        self._pending = []
 
 
 class SectionCapture:
@@ -107,62 +192,85 @@ class SectionCapture:
         plan: CapturePlan,
     ) -> ExtractedSection:
         """Navigate and capture a section according to an explicit plan."""
+        # Installed before any navigation and removed after every attempt: the
+        # initial document response is part of what the listener must catch,
+        # and the retry would otherwise leak the first registration.
+        listener: _PermalinkResponseListener | None = None
+        if CaptureMode.POST_PERMALINKS in plan.mode:
+            listener = _PermalinkResponseListener(self._session.page)
+            listener.install()
         try:
-            result = await self._capture_once(url, section_name, plan)
-            if result.text != RATE_LIMITED_SECTION_TEXT:
-                return result
+            try:
+                result = await self._capture_once(url, section_name, plan, listener)
+                if result.text != RATE_LIMITED_SECTION_TEXT:
+                    return result
 
-            if CaptureMode.OVERLAY in plan.mode:
-                logger.info(
-                    "Retrying overlay %s after %.0fs backoff",
+                if CaptureMode.OVERLAY in plan.mode:
+                    logger.info(
+                        "Retrying overlay %s after %.0fs backoff",
+                        url,
+                        RATE_LIMIT_RETRY_DELAY,
+                    )
+                else:
+                    logger.info(
+                        "Retrying %s after %.0fs backoff",
+                        url,
+                        RATE_LIMIT_RETRY_DELAY,
+                    )
+                await self._session.delay(RATE_LIMIT_RETRY_DELAY)
+                return await self._capture_once(url, section_name, plan, listener)
+
+            except LinkedInScraperException:
+                raise
+            except Exception as e:
+                is_overlay = CaptureMode.OVERLAY in plan.mode
+                logger.warning(
+                    "Failed to extract %s %s: %s",
+                    "overlay" if is_overlay else "page",
                     url,
-                    RATE_LIMIT_RETRY_DELAY,
-                )
-            else:
-                logger.info(
-                    "Retrying %s after %.0fs backoff", url, RATE_LIMIT_RETRY_DELAY
-                )
-            await self._session.delay(RATE_LIMIT_RETRY_DELAY)
-            return await self._capture_once(url, section_name, plan)
-
-        except LinkedInScraperException:
-            raise
-        except Exception as e:
-            is_overlay = CaptureMode.OVERLAY in plan.mode
-            logger.warning(
-                "Failed to extract %s %s: %s",
-                "overlay" if is_overlay else "page",
-                url,
-                e,
-            )
-            return ExtractedSection(
-                text="",
-                references=[],
-                error=build_issue_diagnostics(
                     e,
-                    context="extract_overlay" if is_overlay else "extract_page",
-                    target_url=url,
-                    section_name=section_name,
-                ),
-            )
+                )
+                return ExtractedSection(
+                    text="",
+                    references=[],
+                    error=build_issue_diagnostics(
+                        e,
+                        context="extract_overlay" if is_overlay else "extract_page",
+                        target_url=url,
+                        section_name=section_name,
+                    ),
+                )
+
+        finally:
+            if listener is not None:
+                listener.remove()
+                # A read still running here belongs to an attempt that ended
+                # early (rate limit or failure); nothing will collect its
+                # result, so stop it instead of leaking it.
+                listener.cancel_pending()
 
     async def _capture_once(
         self,
         url: str,
         section_name: str,
         plan: CapturePlan,
+        permalink_capture: _PermalinkResponseListener | None = None,
     ) -> ExtractedSection:
         """Single attempt to navigate and capture a section."""
         await self._navigator._navigate_to_page(url)
         if CaptureMode.OVERLAY in plan.mode:
             return await self._extract_overlay_content(url, section_name)
-        return await self._extract_loaded_section(url, section_name, plan)
+        return await self._extract_loaded_section(
+            url, section_name, plan, permalink_capture=permalink_capture
+        )
 
     async def _extract_loaded_section(
         self,
         url: str,
         section_name: str,
         plan: CapturePlan,
+        *,
+        permalink_capture: _PermalinkResponseListener | None = None,
     ) -> ExtractedSection:
         """Run an explicit post-navigation extraction plan on the current page."""
         await self._session.check_rate_limit()
@@ -267,10 +375,13 @@ class SectionCapture:
             )
             return ExtractedSection(text=RATE_LIMITED_SECTION_TEXT, references=[])
         cleaned = filter_linkedin_noise_lines(truncated)
-        return ExtractedSection(
-            text=cleaned,
-            references=build_references(raw_result["references"], section_name),
-        )
+        references = build_references(raw_result["references"], section_name)
+        if permalink_capture is not None:
+            captured = await permalink_capture.collect()
+            references = append_permalink_references(
+                references, captured, context=section_name
+            )
+        return ExtractedSection(text=cleaned, references=references)
 
     async def _extract_overlay(
         self,

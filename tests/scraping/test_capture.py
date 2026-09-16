@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1007,6 +1008,204 @@ class TestSearchResultsExtraction:
             )
 
         assert result.text == placeholder
+
+
+class TestPostPermalinkCapture:
+    """Tests for the POST_PERMALINKS payload-capture plan."""
+
+    CONTENT_URL = "https://www.linkedin.com/search/results/content/?keywords=policy"
+
+    @staticmethod
+    def _response(*, body, content_type="application/vnd.linkedin.normalized+json"):
+        response = MagicMock()
+        response.url = "https://www.linkedin.com/voyager/api/graphql"
+        response.headers = {"content-type": content_type}
+        response.body = AsyncMock(
+            side_effect=body if isinstance(body, BaseException) else None,
+            return_value=None if isinstance(body, BaseException) else body,
+        )
+        return response
+
+    @staticmethod
+    def _page_with_listeners(mock_page, root_references):
+        ops: list[tuple[str, str | None]] = []
+        listeners: dict[str, list] = {}
+
+        def _on(event, callback):
+            ops.append(("listener.add", event))
+            listeners.setdefault(event, []).append(callback)
+
+        def _remove(event, callback):
+            ops.append(("listener.remove", event))
+            listeners[event].remove(callback)
+
+        mock_page.on = MagicMock(side_effect=_on)
+        mock_page.remove_listener = MagicMock(side_effect=_remove)
+        mock_page.goto = AsyncMock(
+            side_effect=lambda *a, **k: ops.append(("navigate", None))
+        )
+        mock_page.wait_for_function = AsyncMock()
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "source": "root",
+                "text": "Search result " * 30,
+                "references": root_references,
+            }
+        )
+        return ops, listeners
+
+    @staticmethod
+    @contextmanager
+    def _quiet_patches(scroll):
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.session.scroll_to_bottom",
+                new=scroll,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            yield
+
+    def test_content_tab_url_selects_post_permalink_mode(self):
+        plan = capture_plan_for_url(self.CONTENT_URL)
+        assert CaptureMode.POST_PERMALINKS in plan.mode
+        assert CaptureMode.SEARCH_RESULTS in plan.mode
+
+    def test_people_tab_url_does_not_select_post_permalink_mode(self):
+        plan = capture_plan_for_url(
+            "https://www.linkedin.com/search/results/people/?keywords=ada"
+        )
+        assert CaptureMode.POST_PERMALINKS not in plan.mode
+
+    async def test_listener_installs_before_navigation_and_captures_both_forms(
+        self, mock_page
+    ):
+        ops, listeners = self._page_with_listeners(
+            mock_page,
+            [{"href": "https://www.linkedin.com/in/ada/", "text": "Ada"}],
+        )
+        response = self._response(
+            body=(
+                b'{"postSlugUrl":"https://www.linkedin.com/posts/alice_x-ugcPost-'
+                b'1234567890-z","urn":"urn:li:ugcPost:7505583248597512192"}'
+            )
+        )
+
+        async def scroll(*args, **kwargs):
+            for callback in list(listeners["response"]):
+                callback(response)
+
+        capture = _capture(mock_page)
+        with self._quiet_patches(scroll):
+            result = await capture.capture(
+                self.CONTENT_URL,
+                "search_results",
+                CapturePlan(
+                    CaptureMode.SEARCH_RESULTS | CaptureMode.POST_PERMALINKS,
+                    max_scrolls=2,
+                ),
+            )
+
+        # The initial document response is only seen when the listener was
+        # installed before the navigation itself. Navigation registers its
+        # own framenavigated listener, so only the response event is ours.
+        response_ops = [op for op in ops if op[1] == "response"]
+        assert response_ops == [
+            ("listener.add", "response"),
+            ("listener.remove", "response"),
+        ]
+        assert ops.index(("listener.add", "response")) < ops.index(("navigate", None))
+        assert ops.index(("navigate", None)) < ops.index(
+            ("listener.remove", "response")
+        )
+        urls = [ref["url"] for ref in result.references]
+        assert urls == [
+            "/in/ada/",
+            "/posts/alice_x-ugcPost-1234567890-z",
+            "/feed/update/urn:li:ugcPost:7505583248597512192/",
+        ]
+        assert result.references[1]["kind"] == "feed_post"
+        assert result.references[1]["context"] == "search_results"
+
+    async def test_binary_responses_are_never_read(self, mock_page):
+        ops, listeners = self._page_with_listeners(mock_page, [])
+        response = self._response(
+            body=AssertionError("binary response body must not be read"),
+            content_type="image/png",
+        )
+
+        async def scroll(*args, **kwargs):
+            for callback in list(listeners["response"]):
+                callback(response)
+
+        capture = _capture(mock_page)
+        with self._quiet_patches(scroll):
+            result = await capture.capture(
+                self.CONTENT_URL,
+                "search_results",
+                CapturePlan(
+                    CaptureMode.SEARCH_RESULTS | CaptureMode.POST_PERMALINKS,
+                    max_scrolls=2,
+                ),
+            )
+
+        response_ops = [op for op in ops if op[1] == "response"]
+        assert response_ops == [
+            ("listener.add", "response"),
+            ("listener.remove", "response"),
+        ]
+        response.body.assert_not_awaited()
+        assert result.references == []
+
+    async def test_failed_response_body_degrades_to_dom_references(self, mock_page):
+        ops, listeners = self._page_with_listeners(
+            mock_page,
+            [{"href": "https://www.linkedin.com/in/ada/", "text": "Ada"}],
+        )
+        response = self._response(body=RuntimeError("body unavailable"))
+
+        async def scroll(*args, **kwargs):
+            for callback in list(listeners["response"]):
+                callback(response)
+
+        capture = _capture(mock_page)
+        with self._quiet_patches(scroll):
+            result = await capture.capture(
+                self.CONTENT_URL,
+                "search_results",
+                CapturePlan(
+                    CaptureMode.SEARCH_RESULTS | CaptureMode.POST_PERMALINKS,
+                    max_scrolls=2,
+                ),
+            )
+
+        urls = [ref["url"] for ref in result.references]
+        assert urls == ["/in/ada/"]
+
+    async def test_people_search_plan_never_installs_the_listener(self, mock_page):
+        ops, _listeners = self._page_with_listeners(mock_page, [])
+        capture = _capture(mock_page)
+        with self._quiet_patches(AsyncMock()):
+            result = await capture.capture(
+                "https://www.linkedin.com/search/results/people/?keywords=ada",
+                "search_results",
+                CapturePlan(CaptureMode.SEARCH_RESULTS, max_scrolls=2),
+            )
+
+        assert [op for op in ops if op[1] == "response"] == []
+        assert result.references == []
 
 
 class TestExtractOverlay:

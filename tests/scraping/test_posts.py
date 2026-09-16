@@ -62,7 +62,10 @@ class TestSearchPosts:
             call(
                 result["url"],
                 section_name="search_results",
-                plan=CapturePlan(CaptureMode.SEARCH_RESULTS, max_scrolls=15),
+                plan=CapturePlan(
+                    CaptureMode.SEARCH_RESULTS | CaptureMode.POST_PERMALINKS,
+                    max_scrolls=15,
+                ),
             )
         ]
 
@@ -101,7 +104,10 @@ class TestSearchPosts:
             call(
                 ANY,
                 section_name="search_results",
-                plan=CapturePlan(CaptureMode.SEARCH_RESULTS, max_scrolls=10),
+                plan=CapturePlan(
+                    CaptureMode.SEARCH_RESULTS | CaptureMode.POST_PERMALINKS,
+                    max_scrolls=10,
+                ),
             )
         ]
 
@@ -129,7 +135,7 @@ class TestSearchPosts:
                 ANY,
                 section_name="search_results",
                 plan=CapturePlan(
-                    CaptureMode.SEARCH_RESULTS,
+                    CaptureMode.SEARCH_RESULTS | CaptureMode.POST_PERMALINKS,
                     max_scrolls=posts_module._CONTENT_SCROLLS_PER_REQUESTED_PAGE,
                 ),
             )

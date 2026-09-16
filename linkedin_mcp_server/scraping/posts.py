@@ -57,11 +57,14 @@ class PostSearch:
 
         Returns:
             {url, sections: {search_results: text}} plus optional ``references``
-            (post authors, companies, linked jobs) and ``section_errors``.
-            Verified live: the results page carries no per-post permalink
-            anchors, so a post is addressable only through its author.
-            The LLM should parse the raw text to extract each post's author,
-            headline, body, date, and reaction counts.
+            (post authors, companies, linked jobs, and ``feed_post`` permalinks
+            read from the payload responses) and ``section_errors``.
+            Verified live: the results page renders no per-post permalink
+            anchors in the DOM; the permalinks come from the JSON/document
+            responses instead, in either ``/feed/update/<urn>/`` or
+            ``/posts/<slug>`` form (both valid). The LLM should parse the raw
+            text to extract each post's author, headline, body, date, and
+            reaction counts.
         """
         # Builds before it navigates, so a recency filter LinkedIn would
         # ignore is refused rather than answered with unfiltered results.
@@ -70,7 +73,10 @@ class PostSearch:
         extracted = await self._capture.capture(
             url,
             section_name="search_results",
-            plan=CapturePlan(CaptureMode.SEARCH_RESULTS, max_scrolls),
+            plan=CapturePlan(
+                CaptureMode.SEARCH_RESULTS | CaptureMode.POST_PERMALINKS,
+                max_scrolls,
+            ),
         )
 
         sections: dict[str, str] = {}

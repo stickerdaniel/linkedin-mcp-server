@@ -1,6 +1,12 @@
 """Tests for feed permalink recognition across DOM anchors and SDUI payloads."""
 
-from linkedin_mcp_server.scraping.feed_payload import build_feed_references
+from linkedin_mcp_server.scraping.feed_payload import (
+    append_permalink_references,
+    build_feed_references,
+    is_permalink_payload_response,
+    permalink_paths_from_payload,
+)
+from linkedin_mcp_server.scraping.link_metadata import Reference
 
 
 class TestBuildFeedReferences:
@@ -105,3 +111,124 @@ class TestBuildFeedReferences:
             "/posts/alice_x-ugcPost-1-xx",
         ]
         assert kinds == {"feed_post"}
+
+
+class TestIsPermalinkPayloadResponse:
+    def test_voyager_normalized_json_counts(self):
+        assert is_permalink_payload_response(
+            "https://www.linkedin.com/voyager/api/graphql",
+            "application/vnd.linkedin.normalized+json+2.1",
+        )
+
+    def test_json_media_type_parameters_are_stripped(self):
+        assert is_permalink_payload_response(
+            "https://www.linkedin.com/voyager/api/search",
+            "application/json; charset=utf-8",
+        )
+
+    def test_document_html_counts(self):
+        assert is_permalink_payload_response(
+            "https://www.linkedin.com/search/results/content/?keywords=python",
+            "text/html",
+        )
+
+    def test_binary_media_does_not_count(self):
+        for media in ("image/png", "text/css", "font/woff2", "video/mp4", ""):
+            assert not is_permalink_payload_response(
+                "https://www.linkedin.com/voyager/api/graphql", media
+            )
+
+    def test_non_linkedin_hosts_never_count(self):
+        assert not is_permalink_payload_response(
+            "https://evil.example/voyager/api/graphql",
+            "application/json",
+        )
+
+
+class TestPermalinkPathsFromPayload:
+    def test_slug_urls_in_both_escape_forms(self):
+        payload = (
+            '{"a":"https://www.linkedin.com/posts/alice_hi-ugcPost-1234567890-x",'
+            '"b":"https:\\u002f\\u002fwww.linkedin.com\\u002fposts\\u002f'
+            'bob_yo-share-9876543210-y"}'
+        )
+        assert permalink_paths_from_payload(payload) == [
+            "/posts/alice_hi-ugcPost-1234567890-x",
+            "/posts/bob_yo-share-9876543210-y",
+        ]
+
+    def test_post_entity_urns_become_feed_update_paths(self):
+        payload = (
+            '"urn:li:ugcPost:7505583248597512192" '
+            '"urn:li:share:7123456789012345678" '
+            '"urn:li:activity:7000000000000000000"'
+        )
+        assert permalink_paths_from_payload(payload) == [
+            "/feed/update/urn:li:ugcPost:7505583248597512192/",
+            "/feed/update/urn:li:share:7123456789012345678/",
+            "/feed/update/urn:li:activity:7000000000000000000/",
+        ]
+
+    def test_non_post_urns_are_not_matched(self):
+        payload = (
+            '"urn:li:comment:(ugcPost:7505583248597512192,7505593519835721729)" '
+            '"urn:li:fsd_profile:ACoAAABCD1234" "urn:li:ugcPost:123"'
+        )
+        assert permalink_paths_from_payload(payload) == []
+
+    def test_slug_form_precedes_urn_form_and_dedupes(self):
+        slug = "https://www.linkedin.com/posts/alice_x-ugcPost-1234567890-z"
+        payload = (
+            f'{{"urn":"urn:li:ugcPost:1234567890","url":"{slug}","again":"{slug}"}}'
+        )
+        assert permalink_paths_from_payload(payload) == [
+            "/posts/alice_x-ugcPost-1234567890-z",
+            "/feed/update/urn:li:ugcPost:1234567890/",
+        ]
+
+
+class TestAppendPermalinkReferences:
+    def test_dom_references_stay_in_front_and_are_never_displaced(self):
+        dom: list[Reference] = [
+            {"kind": "person", "url": "/in/ada/", "text": "Ada"},
+            {"kind": "company", "url": "/company/acme/", "text": "Acme"},
+        ]
+        refs = append_permalink_references(
+            dom, ["/feed/update/urn:li:ugcPost:1234567890/"], context="search_results"
+        )
+        assert refs[:2] == dom
+        assert refs[2:] == [
+            {
+                "kind": "feed_post",
+                "url": "/feed/update/urn:li:ugcPost:1234567890/",
+                "context": "search_results",
+            }
+        ]
+
+    def test_paths_already_present_as_dom_urls_are_skipped(self):
+        dom: list[Reference] = [
+            {"kind": "feed_post", "url": "/feed/update/urn:li:activity:123/"}
+        ]
+        refs = append_permalink_references(
+            dom,
+            ["/feed/update/urn:li:activity:123/", "/posts/alice_x-ugcPost-9-xx"],
+            context="search_results",
+        )
+        assert [r["url"] for r in refs] == [
+            "/feed/update/urn:li:activity:123/",
+            "/posts/alice_x-ugcPost-9-xx",
+        ]
+
+    def test_empty_capture_returns_dom_references_unchanged(self):
+        dom: list[Reference] = [{"kind": "person", "url": "/in/ada/"}]
+        assert append_permalink_references(dom, [], context="search_results") == dom
+
+    def test_appended_permalinks_are_capped(self):
+        captured = [
+            f"/feed/update/urn:li:ugcPost:{7505583248597512000 + i}/" for i in range(60)
+        ]
+        refs = append_permalink_references([], captured, context="search_results")
+        # Cap mirrors build_feed_references' 50-entry ceiling.
+        assert len(refs) == 50
+        assert refs[0]["url"] == "/feed/update/urn:li:ugcPost:7505583248597512000/"
+        assert refs[-1]["url"] == "/feed/update/urn:li:ugcPost:7505583248597512049/"

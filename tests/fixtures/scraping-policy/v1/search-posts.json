@@ -10,6 +10,12 @@
     {
       "call": "search_posts",
       "callback_id": "callback-1",
+      "event": "response",
+      "kind": "listener.add"
+    },
+    {
+      "call": "search_posts",
+      "callback_id": "callback-2",
       "event": "framenavigated",
       "kind": "listener.add"
     },
@@ -52,7 +58,7 @@
     },
     {
       "call": "search_posts",
-      "callback_id": "callback-1",
+      "callback_id": "callback-2",
       "event": "framenavigated",
       "kind": "listener.remove"
     },
@@ -98,6 +104,12 @@
       "kind": "evaluate",
       "operation": "root_content",
       "program_digest": "e8a0e21ac6f5"
+    },
+    {
+      "call": "search_posts",
+      "callback_id": "callback-3",
+      "event": "response",
+      "kind": "listener.remove"
     }
   ],
   "result": {
