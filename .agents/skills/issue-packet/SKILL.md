@@ -1,6 +1,6 @@
 ---
 name: issue-packet
-description: Packet intake when asked to file, open, or create a GitHub issue, write a bug report, make a feature request, report a docs issue, or run gh issue create. Also use when adding reporter evidence to an existing issue or reporting a maintenance task.
+description: Open or file a GitHub issue, bug report, feature request, docs issue, or chore. Add evidence to an existing issue. Run gh issue create or gh issue comment.
 ---
 
 # Packet intake

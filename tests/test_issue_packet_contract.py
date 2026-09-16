@@ -168,16 +168,19 @@ def test_packet_skill_frontmatter_and_trigger_branches() -> None:
     assert frontmatter.get("disable-model-invocation") is not True
 
     desc = frontmatter.get("description", "")
+    assert "Packet intake" not in desc
     for keyword in [
-        "file",
-        "open",
-        "create",
+        "GitHub issue",
         "bug report",
         "feature request",
+        "docs issue",
+        "chore",
+        "existing issue",
         "gh issue create",
+        "gh issue comment",
     ]:
         assert keyword in desc, (
-            f"Keyword {keyword!r} not in frontmatter description: {desc!r}"
+            f"Trigger branch {keyword!r} not in frontmatter description: {desc!r}"
         )
 
 
