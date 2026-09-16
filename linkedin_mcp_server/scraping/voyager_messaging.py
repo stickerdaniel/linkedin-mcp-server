@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 import re
 from typing import Any
 
@@ -174,6 +175,47 @@ class VoyagerMessagingReader:
         ]
 
     @staticmethod
+    def _iso(epoch_ms: Any) -> str | None:
+        """Epoch milliseconds to a local ISO-8601 string, or None."""
+        if not isinstance(epoch_ms, (int, float)) or epoch_ms <= 0:
+            return None
+        return (
+            datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc)
+            .astimezone()
+            .isoformat(timespec="minutes")
+        )
+
+    @staticmethod
+    def _me_profile_id(query_url: str) -> str | None:
+        """Pull the mailbox owner's profile id out of the query's variables.
+
+        The mailbox belongs to the signed-in member, so ``mailboxUrn`` is the
+        cheapest available identity for "me" — no extra request, and it cannot
+        drift from the mailbox actually being read.
+        """
+        match = re.search(
+            r"mailboxUrn[:%A-Za-z0-9]*?fsd_profile(?::|%3A)([A-Za-z0-9_-]+)", query_url
+        )
+        return match.group(1) if match else None
+
+    @staticmethod
+    def _messages_by_conversation(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        """Index the newest included Message per conversation urn."""
+        latest: dict[str, dict[str, Any]] = {}
+        for item in payload.get("included", []):
+            if not str(item.get("$type", "")).endswith("Message"):
+                continue
+            conversation = item.get("*conversation")
+            if not conversation:
+                continue
+            current = latest.get(conversation)
+            if current is None or (item.get("deliveredAt") or 0) > (
+                current.get("deliveredAt") or 0
+            ):
+                latest[conversation] = item
+        return latest
+
+    @staticmethod
     def _participants(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
         out: dict[str, dict[str, Any]] = {}
         for item in payload.get("included", []):
@@ -190,14 +232,38 @@ class VoyagerMessagingReader:
         return out
 
     def _normalize(
-        self, conversation: dict[str, Any], participants: dict[str, dict[str, Any]]
+        self,
+        conversation: dict[str, Any],
+        participants: dict[str, dict[str, Any]],
+        last_message: dict[str, Any] | None = None,
+        me_profile_id: str | None = None,
     ) -> dict[str, Any]:
+        # Drop the mailbox owner: every thread contains him, so leaving him in
+        # makes each row read "Taylor Medford, X" and surfaces his own headline
+        # instead of the other person's.
         people = [
             participants[urn]
             for urn in conversation.get("*conversationParticipants", [])
-            if urn in participants
+            if urn in participants and not (me_profile_id and me_profile_id in urn)
         ]
+
+        text = ((last_message or {}).get("body") or {}).get("text") or ""
+        sender = str((last_message or {}).get("*sender") or "")
+        # None rather than False when identity is unknown: a wrong "they spoke
+        # last" would invent a reply that is owed, and a wrong "I spoke last"
+        # would hide one. Absent is honest; guessed is not.
+        from_me = (me_profile_id in sender) if (me_profile_id and sender) else None
+
         return {
+            "last_message_text": text[:300],
+            "last_message_at": self._iso(
+                (last_message or {}).get("deliveredAt")
+                or conversation.get("lastActivityAt")
+            ),
+            "last_message_from_me": from_me,
+            # The whole point of the walk: True means their message is the most
+            # recent, so a reply is owed. None means it could not be determined.
+            "awaiting_my_reply": (not from_me) if from_me is not None else None,
             "thread_urn": conversation.get("entityUrn"),
             "thread_url": conversation.get("conversationUrl"),
             "title": conversation.get("title")
@@ -205,6 +271,7 @@ class VoyagerMessagingReader:
             "participants": [p["name"] for p in people if p["name"]],
             "headlines": [p["headline"] for p in people if p["headline"]],
             "last_activity_at": conversation.get("lastActivityAt"),
+            "last_activity_iso": self._iso(conversation.get("lastActivityAt")),
             "last_read_at": conversation.get("lastReadAt"),
             "read": conversation.get("read"),
             "unread_count": conversation.get("unreadCount"),
@@ -228,16 +295,28 @@ class VoyagerMessagingReader:
             who = ", ".join(c.get("participants") or []) or (
                 c.get("title") or "Unknown"
             )
+            when = c.get("last_activity_iso") or ""
             unread = c.get("unread_count") or 0
             flag = f" [{unread} unread]" if unread else ""
             mailbox = ""
             cats = c.get("categories") or []
             if isinstance(cats, list) and cats:
                 mailbox = f" ({'/'.join(str(x) for x in cats)})"
-            lines.append(f"{who}{flag}{mailbox}")
+            header = f"{who} - {when}{flag}{mailbox}".replace(" - \n", "")
+            lines.append(header.rstrip(" -").rstrip())
+
             headlines = c.get("headlines") or []
             if headlines:
                 lines.append(f"    {headlines[0]}")
+
+            text = (c.get("last_message_text") or "").replace("\n", " ").strip()
+            if text:
+                # "You:" mirrors LinkedIn's own inbox convention, so a reader
+                # sees who spoke last without consulting a second field.
+                speaker = "You: " if c.get("last_message_from_me") else ""
+                lines.append(f"    {speaker}{text[:200]}")
+            if c.get("awaiting_my_reply"):
+                lines.append("    >> awaiting your reply")
         return "\n".join(lines)
 
     @staticmethod
@@ -266,7 +345,12 @@ class VoyagerMessagingReader:
         return None
 
     async def get_all_conversations(
-        self, limit: int = 200, max_pages: int = 60
+        self,
+        limit: int = 200,
+        max_pages: int = 60,
+        cursor: str | None = None,
+        quiet_for_days: int | None = None,
+        awaiting_reply_only: bool = False,
     ) -> dict[str, Any]:
         """Walk the mailbox by cursor and return normalized conversations.
 
@@ -276,40 +360,70 @@ class VoyagerMessagingReader:
         conversations were being loaded.
         """
         url = await self._discover_paging_query()
+        me = self._me_profile_id(url)
+        if cursor:
+            url = _CURSOR_RE.sub(f"nextCursor:{cursor}", url)
+
+        cutoff_ms: float | None = None
+        if quiet_for_days is not None:
+            cutoff_ms = (
+                datetime.now(tz=timezone.utc).timestamp() - quiet_for_days * 86400
+            ) * 1000
 
         collected: dict[str, dict[str, Any]] = {}
+        scanned = 0
         pages = 0
         exhausted = False
+        next_cursor: str | None = None
 
+        # Filters narrow what is RETURNED, never what is walked: the mailbox is
+        # ordered by recency, so the dormant threads a reconnect pass wants sit
+        # behind every recent one. `scanned` is reported so a caller can tell a
+        # filtered-empty page from an empty mailbox.
         while pages < max_pages and len(collected) < limit:
             payload = await self._fetch(url)
             pages += 1
 
             rows = self._conversations(payload)
             people = self._participants(payload)
+            messages = self._messages_by_conversation(payload)
             for row in rows:
                 urn = row.get("entityUrn")
-                if urn and urn not in collected:
-                    collected[urn] = self._normalize(row, people)
+                if not urn or urn in collected:
+                    continue
+                scanned += 1
+                record = self._normalize(row, people, messages.get(urn), me)
+                if cutoff_ms is not None:
+                    activity = row.get("lastActivityAt") or 0
+                    if activity > cutoff_ms:
+                        continue
+                if awaiting_reply_only and not record.get("awaiting_my_reply"):
+                    continue
+                collected[urn] = record
 
-            cursor = self._next_cursor(payload)
+            next_cursor = self._next_cursor(payload)
 
-            if not rows or not cursor:
+            if not rows or not next_cursor:
                 exhausted = True
                 break
 
-            url = _CURSOR_RE.sub(f"nextCursor:{cursor}", url)
+            url = _CURSOR_RE.sub(f"nextCursor:{next_cursor}", url)
             await self._session.delay(0.4)
 
         logger.info(
-            "Voyager conversations: %d threads over %d page(s), exhausted=%s",
+            "Voyager conversations: %d kept of %d scanned over %d page(s), exhausted=%s",
             len(collected),
+            scanned,
             pages,
             exhausted,
         )
         return {
             "conversations": list(collected.values())[:limit],
             "count": min(len(collected), limit),
+            "scanned": scanned,
+            # Pass back into `cursor` to continue where this walk stopped.
+            # None once exhausted.
+            "next_cursor": None if exhausted else next_cursor,
             "pages_fetched": pages,
             # False means the walk stopped on `limit` or `max_pages`, so the
             # mailbox holds more than was returned. Callers reconciling against

@@ -124,6 +124,9 @@ def register_messaging_tools(
         ctx: Context,
         limit: Annotated[int, Field(ge=1, le=2000)] = 200,
         max_pages: Annotated[int, Field(ge=1, le=200)] = 60,
+        cursor: str | None = None,
+        quiet_for_days: Annotated[int | None, Field(ge=1)] = None,
+        awaiting_reply_only: bool = False,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
@@ -141,10 +144,25 @@ def register_messaging_tools(
         last_activity_at, last_read_at, read, unread_count and categories
         (the Focused/Other mailbox), so "unanswered" can be computed directly.
 
+        Paging is recency-ordered, so page one is the most recent conversations.
+        Pass the returned next_cursor back in as `cursor` to continue from where
+        a previous call stopped, rather than re-walking from the top.
+
+        Reconnect work ("who have I fallen out of touch with") is what
+        quiet_for_days is for: dormant threads sit behind every recent one, so
+        that walk is necessarily long. Filters narrow what is RETURNED, never
+        what is walked, and `scanned` reports how many were examined so a
+        filtered-empty result is distinguishable from an empty mailbox.
+
         Args:
             ctx: FastMCP context for progress reporting
             limit: Maximum conversations to return (1-2000, default 200)
             max_pages: Safety cap on cursor pages to walk (1-200, default 60)
+            cursor: next_cursor from a previous call, to resume the walk
+            quiet_for_days: only return threads with no activity for this many
+                days — the reconnect filter
+            awaiting_reply_only: only return threads whose newest message is
+                theirs, so a reply is owed
 
         Returns:
             Dict with conversations, count, pages_fetched, and exhausted.
@@ -166,7 +184,11 @@ def register_messaging_tools(
             )
 
             result = await extractor.get_all_conversations(
-                limit=limit, max_pages=max_pages
+                limit=limit,
+                max_pages=max_pages,
+                cursor=cursor,
+                quiet_for_days=quiet_for_days,
+                awaiting_reply_only=awaiting_reply_only,
             )
 
             await ctx.report_progress(progress=100, total=100, message="Complete")

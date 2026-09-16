@@ -287,11 +287,20 @@ class LinkedInExtractor:
         }
 
     async def get_all_conversations(
-        self, limit: int = 200, max_pages: int = 60
+        self,
+        limit: int = 200,
+        max_pages: int = 60,
+        cursor: str | None = None,
+        quiet_for_days: int | None = None,
+        awaiting_reply_only: bool = False,
     ) -> dict[str, Any]:
-        """Page the whole mailbox via Voyager, clicking nothing."""
+        """Page the mailbox via Voyager, clicking nothing."""
         return await self._voyager_messaging.get_all_conversations(
-            limit=limit, max_pages=max_pages
+            limit=limit,
+            max_pages=max_pages,
+            cursor=cursor,
+            quiet_for_days=quiet_for_days,
+            awaiting_reply_only=awaiting_reply_only,
         )
 
     async def get_conversation(
