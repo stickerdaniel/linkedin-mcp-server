@@ -129,6 +129,7 @@ def register_messaging_tools(
         awaiting_reply_only: bool = False,
         category: str | None = None,
         page_size: Annotated[int, Field(ge=1, le=25)] = 25,
+        known_thread_urns: list[str] | None = None,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
@@ -174,13 +175,27 @@ def register_messaging_tools(
                 one with an empty page rather than an error.
             page_size: rows per request, max 25 (measured). Above 25 the API
                 returns EMPTY rather than an error, so this is clamped.
+            known_thread_urns: thread urns already recorded elsewhere. The
+                mailbox is recency-ordered, so once a whole page is threads you
+                already know, everything behind it is older and also known, and
+                the walk stops. This is what keeps a repeat sync to one or two
+                pages instead of the whole mailbox.
 
         Returns:
             Dict with conversations, count, pages_fetched, and exhausted.
             **exhausted is the field that matters for any reconciliation**: when
-            it is False the walk stopped on limit or max_pages and the mailbox
-            holds more than was returned, so the result must not be treated as a
-            complete census.
+            it is False the walk stopped on limit, max_pages or a known-thread
+            boundary, so the mailbox holds more than was returned and the result
+            must not be treated as a complete census.
+
+            **zero_reason disambiguates an empty result**, which is otherwise
+            the shared shape of four different situations. None means rows were
+            returned. "verified-empty" means a positive control confirmed the
+            mailbox really is empty. "filtered-empty" means rows existed and the
+            filters excluded them all — check `scanned` to see how many were
+            examined. A zero that could not be explained raises instead of
+            returning, so this tool never answers "you have no conversations"
+            on the strength of a silent failure.
         """
         try:
             extractor = extractor or await get_ready_extractor(
@@ -202,6 +217,7 @@ def register_messaging_tools(
                 awaiting_reply_only=awaiting_reply_only,
                 category=category,
                 page_size=page_size,
+                known_thread_urns=known_thread_urns,
             )
 
             await ctx.report_progress(progress=100, total=100, message="Complete")

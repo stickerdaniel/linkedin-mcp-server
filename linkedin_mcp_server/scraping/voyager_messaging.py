@@ -365,6 +365,41 @@ class VoyagerMessagingReader:
                     return cursor
         return None
 
+    async def _diagnose_empty(self, url: str) -> str:
+        """Decide WHY a page came back empty, before anyone reports a zero.
+
+        An empty page is the shared failure mode of at least four different
+        situations here: a genuinely empty mailbox, an argument the API
+        silently rejected, a session that stopped being authoritative, and a
+        payload whose shape changed under the parser. They are
+        indistinguishable from the response alone, and the wrong reading is
+        expensive in both directions -- a false zero says "nobody is waiting on
+        you", a false alarm sends someone hunting a bug that is not there.
+
+        So a zero is never taken at face value. This runs a POSITIVE CONTROL:
+        the same endpoint, same session, same parser, with the filters stripped
+        and a single row requested. If the control returns a row, the
+        instrument works and the zero is real. If it does not, the zero is
+        about the instrument, not the mailbox.
+        """
+        control = _CURSOR_RE.sub("nextCursor:", url)
+        control = _COUNT_RE.sub("count:1", control)
+        control = _CATEGORY_RE.sub("category:PRIMARY_INBOX", control)
+        try:
+            payload = await self._fetch(control)
+        except Exception as exc:  # the control itself could not run
+            return f"control-failed: {type(exc).__name__}: {exc}"
+
+        rows = self._conversations(payload)
+        if rows:
+            return "verified-empty"
+        if payload.get("included"):
+            # Entities came back, but none of them parsed as a Conversation.
+            # That is a SHAPE change, which is the one case that silently
+            # turns a full mailbox into a zero.
+            return "parse-failure: included entities present, zero Conversations"
+        return "control-empty: session or endpoint returned nothing at all"
+
     async def get_all_conversations(
         self,
         limit: int = 200,
@@ -383,16 +418,41 @@ class VoyagerMessagingReader:
         nodes, so its row count has been observed going DOWN while more
         conversations were being loaded.
         """
+        # Blank arguments are rejected, never coerced. Every one of these would
+        # otherwise reach LinkedIn as a malformed variable and come back as an
+        # empty page -- the same shape as a real answer, which is precisely the
+        # confusion this whole module is built to avoid. A caller that passes a
+        # blank means something went wrong upstream of here; saying so beats
+        # answering "you have no conversations".
+        if category is not None and not category.strip():
+            raise LinkedInScraperException(
+                "category was blank. Pass None for no filter, or one of: "
+                f"{', '.join(sorted(KNOWN_CATEGORIES))}."
+            )
+        if cursor is not None and not cursor.strip():
+            raise LinkedInScraperException(
+                "cursor was blank. Pass None to start from the most recent "
+                "conversations, or a next_cursor from a previous call."
+            )
+        if limit < 1:
+            raise LinkedInScraperException(f"limit must be >= 1, got {limit}.")
+        if max_pages < 1:
+            raise LinkedInScraperException(f"max_pages must be >= 1, got {max_pages}.")
+        if quiet_for_days is not None and quiet_for_days < 1:
+            raise LinkedInScraperException(
+                f"quiet_for_days must be >= 1, got {quiet_for_days}."
+            )
+
         url = await self._discover_paging_query()
         me = self._me_profile_id(url)
         if cursor:
-            url = _CURSOR_RE.sub(f"nextCursor:{cursor}", url)
+            url = _CURSOR_RE.sub(f"nextCursor:{cursor.strip()}", url)
 
         page_size = max(1, min(page_size, MAX_PAGE_SIZE))
         url = _COUNT_RE.sub(f"count:{page_size}", url)
 
         if category:
-            category = category.upper()
+            category = category.strip().upper()
             if category not in KNOWN_CATEGORIES:
                 # Refuse rather than let the API answer an unknown category with
                 # an empty page, which is indistinguishable from "you have none".
@@ -411,6 +471,7 @@ class VoyagerMessagingReader:
             ) * 1000
 
         collected: dict[str, dict[str, Any]] = {}
+        raw_rows = 0
         scanned = 0
         pages = 0
         exhausted = False
@@ -425,6 +486,18 @@ class VoyagerMessagingReader:
             pages += 1
 
             rows = self._conversations(payload)
+            raw_rows += len(rows)
+
+            # A page with entities but no conversations is a shape change, not
+            # an empty page. Fail loudly rather than let it read as a zero.
+            if not rows and payload.get("included"):
+                raise LinkedInScraperException(
+                    "Conversations payload changed shape: "
+                    f"{len(payload['included'])} included entities but zero "
+                    "parsed as Conversation. Refusing to report this as an "
+                    "empty mailbox."
+                )
+
             people = self._participants(payload)
             messages = self._messages_by_conversation(payload)
             for row in rows:
@@ -470,10 +543,29 @@ class VoyagerMessagingReader:
             pages,
             exhausted,
         )
+        # Only an UNFILTERED walk that found nothing is ambiguous. If filters
+        # were applied and rows were scanned, zero is a real answer about the
+        # filter, and re-probing would only add noise.
+        zero_reason: str | None = None
+        if raw_rows == 0:
+            zero_reason = await self._diagnose_empty(url)
+            if zero_reason != "verified-empty":
+                raise LinkedInScraperException(
+                    f"Conversation walk returned nothing and the positive "
+                    f"control did not clear it ({zero_reason}). Treating this "
+                    "as an instrument failure rather than an empty mailbox."
+                )
+        elif not collected:
+            zero_reason = "filtered-empty"
+
         return {
             "conversations": list(collected.values())[:limit],
             "count": min(len(collected), limit),
             "scanned": scanned,
+            # None when rows were returned. "verified-empty" means a positive
+            # control confirmed the mailbox really is empty; "filtered-empty"
+            # means rows existed but the filters excluded them all.
+            "zero_reason": zero_reason,
             # Pass back into `cursor` to continue where this walk stopped.
             # None once exhausted.
             "next_cursor": None if exhausted else next_cursor,
