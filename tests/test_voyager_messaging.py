@@ -514,10 +514,23 @@ class TestTimestampsAreHostIndependent:
 
 
 class TestExhaustionIsNeverClaimedWithoutEvidence:
-    """Review found that the single-page fallback could report a truncated
-    mailbox as complete, which is worse than the raise it replaced."""
+    """Every ending must say HOW it knows, so a caller can judge the claim
+    instead of trusting it."""
 
-    async def test_a_full_page_without_paging_is_not_called_exhausted(self):
+    async def test_a_short_page_is_the_server_saying_it_had_no_more(self):
+        rows = [_conversation("c1", last_activity=1, participants=[])]
+        reader = _Reader([_payload(rows, None)])
+        reader.paging_state = "single-page"
+        result = await reader.get_all_conversations(limit=50, page_size=25)
+        assert result["exhausted"] is True
+        assert result["exhaustion_basis"] == "short-page"
+
+    async def test_a_full_page_below_max_escalates_and_can_settle_the_question(self):
+        """Exhaustion cannot be proven, but it CAN be disproven, and that costs
+        one request. Asking again at the API maximum turns an unanswerable case
+        into an answered one whenever the mailbox really was short: 5 rows came
+        back against a request for 25, which is the server saying it had no more.
+        """
         rows = [
             _conversation(f"c{i}", last_activity=100 - i, participants=[])
             for i in range(5)
@@ -525,17 +538,37 @@ class TestExhaustionIsNeverClaimedWithoutEvidence:
         reader = _Reader([_payload(rows, None)])
         reader.paging_state = "single-page"
         result = await reader.get_all_conversations(limit=50, page_size=5)
-        assert result["count"] == 5
-        assert result["exhausted"] is False, (
-            "a full page with no paging query proves nothing about what follows"
-        )
 
-    async def test_a_short_page_without_paging_is_exhausted(self):
-        rows = [_conversation("c1", last_activity=1, participants=[])]
+        assert len(reader.fetched) == 2, "must re-ask at the largest page size"
+        assert "count:5" in reader.fetched[0]
+        assert "count:25" in reader.fetched[1]
+        assert result["exhausted"] is True
+        assert result["exhaustion_basis"] == "short-page"
+
+    async def test_the_escalation_happens_at_most_once(self):
+        """The retry must not become a loop: request_size is recomputed every
+        iteration, so an escalation that did not persist spun to max_pages."""
+        rows = [
+            _conversation(f"c{i}", last_activity=100 - i, participants=[])
+            for i in range(25)
+        ]
         reader = _Reader([_payload(rows, None)])
         reader.paging_state = "single-page"
-        result = await reader.get_all_conversations(limit=50, page_size=25)
-        assert result["exhausted"] is True, "a short page really is the end"
+        await reader.get_all_conversations(limit=200, page_size=5)
+        assert len(reader.fetched) == 2, reader.fetched
+
+    async def test_a_full_page_at_max_is_reported_as_unproven(self):
+        rows = [
+            _conversation(f"c{i}", last_activity=100 - i, participants=[])
+            for i in range(25)
+        ]
+        reader = _Reader([_payload(rows, None)])
+        reader.paging_state = "single-page"
+        result = await reader.get_all_conversations(limit=200, page_size=25)
+        assert result["exhausted"] is False, (
+            "a full page with no cursor proves nothing about what follows"
+        )
+        assert result["exhaustion_basis"] == "unproven-full-page"
 
     async def test_a_clicked_control_with_no_cursor_query_refuses(self):
         """Control found and clicked but no cursor-bearing request followed.
@@ -544,3 +577,11 @@ class TestExhaustionIsNeverClaimedWithoutEvidence:
         reader.paging_state = "unconfirmed"
         with pytest.raises(LinkedInScraperException, match="cursor-bearing"):
             await reader.get_all_conversations()
+
+    async def test_a_cursor_walk_that_ends_records_why(self):
+        p1 = _payload([_conversation("c1", last_activity=2, participants=[])], "C2")
+        p2 = _payload([_conversation("c2", last_activity=1, participants=[])], None)
+        reader = _Reader([p1, p2])
+        result = await reader.get_all_conversations(limit=10)
+        assert result["exhausted"] is True
+        assert result["exhaustion_basis"] == "short-page"

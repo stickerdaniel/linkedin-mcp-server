@@ -182,6 +182,7 @@
     ],
     "count": 1,
     "exhausted": true,
+    "exhaustion_basis": "short-page",
     "next_cursor": null,
     "pages_fetched": 1,
     "scanned": 1,

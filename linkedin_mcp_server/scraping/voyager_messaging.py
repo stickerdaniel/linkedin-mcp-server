@@ -574,6 +574,12 @@ class VoyagerMessagingReader:
         pages = 0
         exhausted = False
         next_cursor: str | None = None
+        exhaustion_basis: str | None = None
+        # Set once, when a full page arrives with no cursor and the page was
+        # below the API maximum. It has to persist across iterations because
+        # `request_size` is recomputed every loop and would otherwise undo the
+        # escalation immediately -- which it did, spinning to `max_pages`.
+        escalated = False
         seen_cursors: set[str] = set()
         if cursor:
             seen_cursors.add(cursor.strip())
@@ -592,7 +598,9 @@ class VoyagerMessagingReader:
             # Filters are the exception: they narrow what is KEPT, so the number
             # of rows needed to find `limit` matches is unbounded and the page
             # stays full.
-            if filters_active:
+            if escalated:
+                request_size = MAX_PAGE_SIZE
+            elif filters_active:
                 request_size = page_size
             else:
                 request_size = max(1, min(page_size, limit - len(collected)))
@@ -639,6 +647,7 @@ class VoyagerMessagingReader:
             if known and rows:
                 page_urns = {r.get("entityUrn") for r in rows if r.get("entityUrn")}
                 if page_urns and page_urns <= known:
+                    exhaustion_basis = "known-thread-boundary"
                     exhausted = False
                     next_cursor = self._next_cursor(payload)
                     break
@@ -646,14 +655,26 @@ class VoyagerMessagingReader:
             next_cursor = self._next_cursor(payload)
 
             if not rows or not next_cursor:
-                # Without a paging query there is no cursor to end on, so
-                # exhaustion has to be argued rather than observed. A page that
-                # came back SHORT is real evidence the mailbox ended; a FULL one
-                # is not, and claiming exhaustion there is how an incomplete
-                # listing starts looking like a census.
-                if paging == "single-page" and len(rows) >= request_size:
+                # How the walk ended decides what may be claimed about it.
+                #
+                # A cursor that ran out is the server saying there is no next
+                # page. A page SHORTER than requested is the server saying it
+                # had no more to give -- both are readings, not inferences.
+                #
+                # A FULL page with no cursor says nothing either way, and that
+                # is the case worth being careful about: assuming exhaustion
+                # there is how a truncated mailbox starts looking like a census.
+                # Before giving up on it, ask once more at the largest page the
+                # API accepts. Exhaustion cannot be proven, but it CAN be
+                # disproven, and that costs one request.
+                if next_cursor is None and rows and len(rows) >= request_size:
+                    if not escalated and request_size < MAX_PAGE_SIZE:
+                        escalated = True
+                        continue
+                    exhaustion_basis = "unproven-full-page"
                     exhausted = False
                 else:
+                    exhaustion_basis = "empty-page" if not rows else "short-page"
                     exhausted = True
                 break
 
@@ -663,6 +684,7 @@ class VoyagerMessagingReader:
             # loop of their own. Deduplicating rows hides this rather than
             # stopping it, so the cursor itself is tracked.
             if next_cursor in seen_cursors:
+                exhaustion_basis = "cursor-repeated"
                 logger.warning(
                     "Conversations cursor repeated after %d page(s); stopping.",
                     pages,
@@ -708,6 +730,15 @@ class VoyagerMessagingReader:
             # Pass back into `cursor` to continue where this walk stopped.
             # None once exhausted.
             "next_cursor": None if exhausted else next_cursor,
+            # HOW the walk ended, so a caller can judge the claim rather than
+            # trust it. "short-page" and "empty-page" are the server saying it
+            # had no more. "cursor-repeated" and "known-thread-boundary" are
+            # this code stopping deliberately. "unproven-full-page" means a full
+            # page arrived with no cursor even at the largest page size the API
+            # accepts, so completeness could NOT be established -- `exhausted`
+            # is False there, and a census must not be declared from it.
+            # None means the walk stopped on `limit` or `max_pages`.
+            "exhaustion_basis": exhaustion_basis,
             "pages_fetched": pages,
             # False means the walk stopped on `limit` or `max_pages`, so the
             # mailbox holds more than was returned. Callers reconciling against
