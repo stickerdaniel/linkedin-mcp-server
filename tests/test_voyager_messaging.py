@@ -487,3 +487,25 @@ class TestDiscovery:
         reader = self._reader_with_requests([])
         with pytest.raises(LinkedInScraperException, match="No messengerConversations"):
             await reader._discover_query()
+
+
+class TestTimestampsAreHostIndependent:
+    async def test_iso_timestamps_do_not_depend_on_the_machine_timezone(self):
+        """A local-time render made the same mailbox produce different output on
+        a laptop and on CI, which is how this was found."""
+        import os
+        import time
+
+        conv = _conversation("c1", last_activity=1_700_000_000_000, participants=[])
+        renders = []
+        for zone in ("UTC", "America/New_York", "Asia/Tokyo"):
+            os.environ["TZ"] = zone
+            time.tzset()
+            reader = _Reader([_payload([conv], None)])
+            result = await reader.get_all_conversations()
+            renders.append(result["conversations"][0]["last_activity_iso"])
+        os.environ.pop("TZ", None)
+        time.tzset()
+
+        assert len(set(renders)) == 1, renders
+        assert renders[0].endswith("+00:00"), renders[0]

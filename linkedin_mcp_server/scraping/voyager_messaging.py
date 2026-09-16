@@ -289,13 +289,20 @@ class VoyagerMessagingReader:
 
     @staticmethod
     def _iso(epoch_ms: Any) -> str | None:
-        """Epoch milliseconds to a local ISO-8601 string, or None."""
+        """Epoch milliseconds to a UTC ISO-8601 string, or None.
+
+        UTC rather than local time on purpose. `.astimezone()` with no argument
+        renders in whatever zone the machine happens to be in, which makes the
+        same mailbox produce different timestamps on a laptop and a server --
+        the value stops being a property of the data and becomes a property of
+        the host. The raw epoch stays available as `last_activity_at`, so a
+        caller that wants a local clock can convert with its own zone rather
+        than inherit ours.
+        """
         if not isinstance(epoch_ms, (int, float)) or epoch_ms <= 0:
             return None
-        return (
-            datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc)
-            .astimezone()
-            .isoformat(timespec="minutes")
+        return datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc).isoformat(
+            timespec="minutes"
         )
 
     @staticmethod
