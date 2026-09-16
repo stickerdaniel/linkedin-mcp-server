@@ -492,25 +492,43 @@ class TestDiscovery:
 
 
 class TestTimestampsAreHostIndependent:
-    async def test_iso_timestamps_do_not_depend_on_the_machine_timezone(self):
-        """A local-time render made the same mailbox produce different output on
-        a laptop and on CI, which is how this was found."""
-        import os
-        import time
+    """A local-time render made the same mailbox produce different output on a
+    laptop and on CI, which is how the original bug was found."""
 
-        conv = _conversation("c1", last_activity=1_700_000_000_000, participants=[])
+    EPOCH_MS = 1_700_000_000_000
+    EXPECTED = "2023-11-14T22:13+00:00"
+
+    async def test_the_rendered_timestamp_is_utc(self):
+        """Runs everywhere, including Windows. On a UTC machine this alone
+        would not have caught the original bug, which is why the varying test
+        below exists as well."""
+        conv = _conversation("c1", last_activity=self.EPOCH_MS, participants=[])
+        reader = _Reader([_payload([conv], None)])
+        result = await reader.get_all_conversations()
+        assert result["conversations"][0]["last_activity_iso"] == self.EXPECTED
+
+    @pytest.mark.skipif(not hasattr(time, "tzset"), reason="time.tzset is Unix-only")
+    async def test_the_render_does_not_move_with_the_machine_timezone(
+        self, monkeypatch
+    ):
+        """The discriminating test: three zones, one expected answer.
+
+        monkeypatch rather than manual os.environ juggling so the process zone
+        is restored even when an assertion fails partway through -- a leaked TZ
+        would silently colour every later test in the session.
+        """
+        conv = _conversation("c1", last_activity=self.EPOCH_MS, participants=[])
         renders = []
         for zone in ("UTC", "America/New_York", "Asia/Tokyo"):
-            os.environ["TZ"] = zone
+            monkeypatch.setenv("TZ", zone)
             time.tzset()
             reader = _Reader([_payload([conv], None)])
             result = await reader.get_all_conversations()
             renders.append(result["conversations"][0]["last_activity_iso"])
-        os.environ.pop("TZ", None)
+        monkeypatch.undo()
         time.tzset()
 
-        assert len(set(renders)) == 1, renders
-        assert renders[0].endswith("+00:00"), renders[0]
+        assert renders == [self.EXPECTED] * 3, renders
 
 
 class TestExhaustionIsNeverClaimedWithoutEvidence:
