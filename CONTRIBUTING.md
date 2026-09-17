@@ -100,6 +100,7 @@ When adding an entirely new MCP tool (e.g., `search_companies`):
 ### Code
 
 - [ ] Add the workflow to its canonical owner module from `docs/scraping-architecture.md`; keep `LinkedInExtractor` in `scraping/extractor.py` as a thin delegate only if the stable facade needs a new method
+- [ ] No LinkedIn private API (Voyager). See [Read the rendered page](docs/decisions/2026-09-16-rendered-page.md)
 - [ ] Add or extend tool registration function (`tools/*.py`)
 - [ ] Register tools in `create_mcp_server()` if new file (`server.py`)
 
@@ -160,6 +161,8 @@ when the reviewed policy change is intentional.
    subject; commits inside a PR are for review only
 
 ## Scraping Philosophy: Minimize DOM Dependence
+
+Voyager and other LinkedIn private APIs are out of scope. See [Read the rendered page](docs/decisions/2026-09-16-rendered-page.md).
 
 This project favours **innerText extraction and URL navigation** over DOM selectors. LinkedIn's markup changes frequently — class names, `data-` attributes, and component structure are unstable. Our scraping engine is deliberately built to survive those changes:
 
