@@ -1217,8 +1217,10 @@ class TestPostPermalinkCapture:
         )
         ops, listeners = self._page_with_listeners(mock_page, [])
         first = self._response(body=b'{"urn":"urn:li:ugcPost:7505583248597512192"}')
+        stale = self._response(body=b'{"urn":"urn:li:ugcPost:7700000000000000000"}')
         second = self._response(body=b'{"urn":"urn:li:ugcPost:7600000000000000000"}')
         responses = [first, second]
+        seen_handlers: list = []
         reads = [
             {"source": "root", "text": noise, "references": []},
             {
@@ -1229,6 +1231,7 @@ class TestPostPermalinkCapture:
         ]
 
         async def scroll(*args, **kwargs):
+            seen_handlers.extend(listeners.get("response", []))
             for callback in list(listeners["response"]):
                 callback(responses.pop(0))
 
@@ -1237,9 +1240,21 @@ class TestPostPermalinkCapture:
                 return None
             return reads.pop(0)
 
+        async def sleep_during_backoff(_seconds):
+            # Call the first-attempt handler even if the page unsubscribed it.
+            # Disarm must ignore this; unsubscribe alone is not the assertion.
+            for callback in seen_handlers:
+                callback(stale)
+
         mock_page.evaluate = AsyncMock(side_effect=evaluate)
         capture = _capture(mock_page)
-        with self._quiet_patches(scroll):
+        with (
+            self._quiet_patches(scroll),
+            patch(
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
+                new=sleep_during_backoff,
+            ),
+        ):
             result = await capture.capture(
                 self.CONTENT_URL,
                 "search_results",
@@ -1252,6 +1267,7 @@ class TestPostPermalinkCapture:
         urls = [ref["url"] for ref in result.references]
         assert urls == ["/feed/update/urn:li:ugcPost:7600000000000000000/"]
         assert "/feed/update/urn:li:ugcPost:7505583248597512192/" not in urls
+        assert "/feed/update/urn:li:ugcPost:7700000000000000000/" not in urls
         assert ops.count(("navigate", None)) == 2
 
     async def test_in_flight_reads_are_done_when_capture_returns(self, mock_page):
@@ -1264,8 +1280,12 @@ class TestPostPermalinkCapture:
             created.append(task)
             return task
 
+        hang = asyncio.Event()
+
         async def hanging_body():
-            await asyncio.sleep(60)
+            # Must not use asyncio.sleep: _quiet_patches replaces that name
+            # on the shared asyncio module, so a sleep(60) returns immediately.
+            await hang.wait()
             return b'{"urn":"urn:li:ugcPost:7505583248597512192"}'
 
         response = self._response(body=b"")

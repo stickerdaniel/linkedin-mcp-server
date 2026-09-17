@@ -103,11 +103,14 @@ class _PermalinkResponseListener:
         self._urls: list[str] = []
         self._seen: set[str] = set()
         self._pending: list[asyncio.Task[None]] = []
+        self._armed = False
 
     def install(self) -> None:
+        self._armed = True
         self._page.on("response", self._handle_response)
 
     def remove(self) -> None:
+        self._armed = False
         try:
             # The registered closure itself, never an equivalent: Playwright
             # matches listeners by identity (see feed.py for the failure this
@@ -117,6 +120,8 @@ class _PermalinkResponseListener:
             pass
 
     def _handle_response(self, response: Any) -> None:
+        if not self._armed:
+            return
         try:
             content_type = response.headers.get("content-type", "")
         except Exception:
@@ -147,6 +152,7 @@ class _PermalinkResponseListener:
 
     async def discard_attempt(self) -> None:
         """Drop URLs and in-flight reads from an attempt that will not be kept."""
+        self._armed = False
         await self.drain()
         self._urls.clear()
         self._seen.clear()
@@ -250,11 +256,13 @@ class SectionCapture:
                 if listener is not None:
                     # The noise-only first attempt never collected, but the
                     # listener already stored whatever payloads arrived. Drop
-                    # those paths and their in-flight reads before the retry
-                    # navigates, or the accepted text is paired with the
-                    # rejected attempt's URLs.
+                    # those paths, ignore first-document traffic during the
+                    # backoff, then arm again before the retry navigates.
+                    listener.remove()
                     await listener.discard_attempt()
                 await self._session.delay(RATE_LIMIT_RETRY_DELAY)
+                if listener is not None:
+                    listener.install()
                 return await self._capture_once(url, section_name, plan, listener)
 
             except LinkedInScraperException:
