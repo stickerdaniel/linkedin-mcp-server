@@ -5069,6 +5069,7 @@ class TestRealOwner:
         import asyncio
 
         from fastmcp import Client
+        from fastmcp.client.transports import StreamableHttpTransport
 
         from linkedin_mcp_server.daemon import look_up_owner
         from linkedin_mcp_server.server import ServerRole, create_mcp_server
@@ -5082,26 +5083,35 @@ class TestRealOwner:
             # returned: the descriptor and token on disk are what a proxy is
             # built from.
             lookup = look_up_owner(profile.parent, profile, _config(profile))
-            assert lookup.attachment is not None, lookup.reason
+            attachment = lookup.attachment
+            assert attachment is not None, lookup.reason
 
             proxy = create_mcp_server(
                 tool_timeout=30.0,
                 role=ServerRole.PROXY,
-                proxy_backend=_proxy_backend_for(lookup.attachment),
+                proxy_backend=_proxy_backend_for(attachment),
             )
 
-            async def served() -> set[str]:
+            async def served() -> tuple[set[str], set[str]]:
+                # Read the expectation directly from the same owner so proxy
+                # omissions cannot change both sides of the comparison.
+                transport = StreamableHttpTransport(
+                    attachment.descriptor.url,
+                    auth=attachment.token,
+                    httpx_client_factory=daemon_owner.direct_async_http_client,
+                )
+                async with Client(transport, timeout=30.0) as owner_client:
+                    owner_names = {
+                        tool.name for tool in await owner_client.list_tools()
+                    }
                 async with Client(proxy) as client:
-                    return {tool.name for tool in await client.list_tools()}
+                    names = {tool.name for tool in await client.list_tools()}
+                return owner_names, names
 
-            names = asyncio.run(served())
+            owner_names, names = asyncio.run(served())
 
-            # The owner registers the full local set, so the proxy must show it
-            # all, including `close_session`, the one defined inline rather than
-            # in a `register_*` call.
-            assert "get_person_profile" in names
-            assert "close_session" in names
-            assert len(names) == 19, sorted(names)
+            assert {"get_person_profile", "close_session"} <= owner_names
+            assert names == owner_names
         finally:
             _stop(result.get("pid"))
 
