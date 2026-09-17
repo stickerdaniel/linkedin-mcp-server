@@ -11,6 +11,8 @@ import logging
 import asyncio
 from typing import Any
 
+import anyio
+import anyio.lowlevel
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.core.exceptions import LinkedInScraperException
@@ -94,6 +96,7 @@ class _PermalinkResponseListener:
     """
 
     _READ_DRAIN_TIMEOUT = 2.0
+    _CANCEL_DRAIN_TIMEOUT = 1.0
 
     def __init__(self, page: Any):
         self._page = page
@@ -139,22 +142,49 @@ class _PermalinkResponseListener:
     async def collect(self) -> list[str]:
         """Await in-flight response reads, then snapshot the captured paths."""
         if self._pending:
-            done, still = await asyncio.wait(
-                self._pending, timeout=self._READ_DRAIN_TIMEOUT
-            )
-            for task in still:
-                task.cancel()
-            for task in self._pending:
-                if task.done() and not task.cancelled():
-                    task.exception()
-            self._pending = [task for task in self._pending if not task.done()]
+            await asyncio.wait(self._pending, timeout=self._READ_DRAIN_TIMEOUT)
         return list(self._urls)
 
-    def cancel_pending(self) -> None:
-        for task in self._pending:
-            if not task.done():
-                task.cancel()
-        self._pending = []
+    async def discard_attempt(self) -> None:
+        """Drop URLs and in-flight reads from an attempt that will not be kept."""
+        await self.drain()
+        self._urls.clear()
+        self._seen.clear()
+
+    async def drain(self) -> None:
+        """Bounded teardown for fire-and-forget response listener tasks.
+
+        The capture path appends a read task per matching response; those
+        tasks must finish (or be cancelled) before we leave the extractor or
+        the event loop's "Task exception was never retrieved" warnings will
+        surface unrelated errors. The caps below let a stuck ``resp.body()``
+        call burn at most three seconds of teardown budget.
+        """
+        pending = self._pending
+        if not pending:
+            return
+        try:
+            await asyncio.wait(pending, timeout=self._READ_DRAIN_TIMEOUT)
+        finally:
+            for task in pending:
+                if not task.done():
+                    task.cancel()
+            with anyio.CancelScope(shield=True):
+                try:
+                    await asyncio.wait(pending, timeout=self._CANCEL_DRAIN_TIMEOUT)
+                finally:
+                    leftover = [task for task in pending if not task.done()]
+                    for task in pending:
+                        if task.done() and not task.cancelled():
+                            task.exception()
+                    if leftover:
+                        logger.warning(
+                            "Permalink listener tasks did not drain after "
+                            "cancel; leaking %d task(s)",
+                            len(leftover),
+                        )
+            await anyio.lowlevel.checkpoint()
+        self._pending = [task for task in pending if not task.done()]
 
 
 class SectionCapture:
@@ -217,6 +247,13 @@ class SectionCapture:
                         url,
                         RATE_LIMIT_RETRY_DELAY,
                     )
+                if listener is not None:
+                    # The noise-only first attempt never collected, but the
+                    # listener already stored whatever payloads arrived. Drop
+                    # those paths and their in-flight reads before the retry
+                    # navigates, or the accepted text is paired with the
+                    # rejected attempt's URLs.
+                    await listener.discard_attempt()
                 await self._session.delay(RATE_LIMIT_RETRY_DELAY)
                 return await self._capture_once(url, section_name, plan, listener)
 
@@ -244,10 +281,7 @@ class SectionCapture:
         finally:
             if listener is not None:
                 listener.remove()
-                # A read still running here belongs to an attempt that ended
-                # early (rate limit or failure); nothing will collect its
-                # result, so stop it instead of leaking it.
-                listener.cancel_pending()
+                await listener.drain()
 
     async def _capture_once(
         self,

@@ -8,11 +8,13 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import ast
+import asyncio
 import re
 
 import pytest
 
 from linkedin_mcp_server.core.exceptions import AuthenticationError
+from linkedin_mcp_server.scraping import capture as capture_module
 from linkedin_mcp_server.scraping.capture import (
     RATE_LIMIT_RETRY_DELAY,
     CaptureMode,
@@ -1206,6 +1208,99 @@ class TestPostPermalinkCapture:
 
         assert [op for op in ops if op[1] == "response"] == []
         assert result.references == []
+
+    async def test_a_rate_limit_retry_drops_the_first_attempt_urls(self, mock_page):
+        noise = (
+            "More profiles for you\n\n"
+            "You've approached your profile search limit\n\n"
+            "About\nAccessibility\nTalent Solutions"
+        )
+        ops, listeners = self._page_with_listeners(mock_page, [])
+        first = self._response(body=b'{"urn":"urn:li:ugcPost:7505583248597512192"}')
+        second = self._response(body=b'{"urn":"urn:li:ugcPost:7600000000000000000"}')
+        responses = [first, second]
+        reads = [
+            {"source": "root", "text": noise, "references": []},
+            {
+                "source": "root",
+                "text": "Search result " * 30,
+                "references": [],
+            },
+        ]
+
+        async def scroll(*args, **kwargs):
+            for callback in list(listeners["response"]):
+                callback(responses.pop(0))
+
+        async def evaluate(script, *args, **kwargs):
+            if "MAX_REFERENCE_ANCHORS" not in script:
+                return None
+            return reads.pop(0)
+
+        mock_page.evaluate = AsyncMock(side_effect=evaluate)
+        capture = _capture(mock_page)
+        with self._quiet_patches(scroll):
+            result = await capture.capture(
+                self.CONTENT_URL,
+                "search_results",
+                CapturePlan(
+                    CaptureMode.SEARCH_RESULTS | CaptureMode.POST_PERMALINKS,
+                    max_scrolls=2,
+                ),
+            )
+
+        urls = [ref["url"] for ref in result.references]
+        assert urls == ["/feed/update/urn:li:ugcPost:7600000000000000000/"]
+        assert "/feed/update/urn:li:ugcPost:7505583248597512192/" not in urls
+        assert ops.count(("navigate", None)) == 2
+
+    async def test_in_flight_reads_are_done_when_capture_returns(self, mock_page):
+        _ops, listeners = self._page_with_listeners(mock_page, [])
+        created: list[asyncio.Task[None]] = []
+        real_create = capture_module.asyncio.create_task
+
+        def tracking_create(coro, **kwargs):
+            task = real_create(coro, **kwargs)
+            created.append(task)
+            return task
+
+        async def hanging_body():
+            await asyncio.sleep(60)
+            return b'{"urn":"urn:li:ugcPost:7505583248597512192"}'
+
+        response = self._response(body=b"")
+        response.body = hanging_body
+
+        async def scroll(*args, **kwargs):
+            for callback in list(listeners["response"]):
+                callback(response)
+
+        capture = _capture(mock_page)
+        with (
+            self._quiet_patches(scroll),
+            patch.object(
+                capture_module._PermalinkResponseListener,
+                "_READ_DRAIN_TIMEOUT",
+                0.05,
+            ),
+            patch.object(
+                capture_module._PermalinkResponseListener,
+                "_CANCEL_DRAIN_TIMEOUT",
+                0.05,
+            ),
+            patch.object(capture_module.asyncio, "create_task", tracking_create),
+        ):
+            await capture.capture(
+                self.CONTENT_URL,
+                "search_results",
+                CapturePlan(
+                    CaptureMode.SEARCH_RESULTS | CaptureMode.POST_PERMALINKS,
+                    max_scrolls=2,
+                ),
+            )
+
+        assert created
+        assert all(task.done() for task in created)
 
 
 class TestExtractOverlay:
