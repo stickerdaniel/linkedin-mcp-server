@@ -1393,6 +1393,7 @@ class MessageSender:
         # recipient boundary. LinkedIn may strip the query and expose no local
         # identity, so capture the final route now and fail on any later change or
         # visible contradiction. Do not replace this with a Voyager/private API.
+        # See docs/decisions/2026-09-16-rendered-page.md.
         await self._navigator._navigate_to_page(target.compose_url)
         expected_route = self._page.url
         if not _message_page_url_is_safe(expected_route, target.profile_urn):

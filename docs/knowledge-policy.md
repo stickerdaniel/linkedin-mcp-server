@@ -5,7 +5,7 @@
 - Do not restate derivable facts by hand. Keep generated facts only when a freshness check owns them.
 - Put enforceable rules in mechanical guards or tests.
 - Use a short local comment when a plausible edit could break ordering, ownership, cancellation, cleanup, or platform behavior and the guard or code does not explain the constraint.
-- Record externally justified or repository-wide decisions in dated, immutable Decision Records. Replace a decision with a new record whose `supersedes` field names the earlier record.
+- Record externally justified or repository-wide decisions in dated, immutable Decision Records under `docs/decisions/`. Replace a decision with a new record whose `supersedes` field names the earlier record.
 - Keep measurements and external references in mutable documents with their source and measurement date.
 - Write operational procedures as reproducible runbooks with prerequisites, commands, and completion criteria.
 
