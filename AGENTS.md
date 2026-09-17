@@ -150,14 +150,13 @@ Optional additional keys:
 
 ## Tests
 
-- **A test that cannot fail is not a test.** Before committing one, mutate
-  the code it covers and watch it fail. A test that survives the mutation
-  asserts something every implementation satisfies (a count that holds
-  either way, a branch merely touched), and the usual repair is to assert
-  the log line, the elapsed time, or a count scoped to the thing under
-  test. Fixtures that reload on every scroll event mask a premature stop:
-  slow them down until one batch lands per round, or the mutation survives
-  for the wrong reason.
+- **Tautologies.** Assert an observable contract independent of the
+  implementation. Before committing a test, mutate the covered behaviour
+  to introduce a plausible regression and watch that test fail. Reject
+  language restatements and redundant assertions. Pin an always-loaded
+  instruction pointer. A sentence in a disclosed doc is not a test.
+  For scroll-stop tests, let one batch land per round so a premature
+  stop fails the test.
 - **Browser-DOM tests belong where the unit suite mocks `page.evaluate`.**
   Extractor JS never executes under a mock, so a `browser_dom` test is its
   only coverage. Prefer a unit test elsewhere, and keep in mind that a

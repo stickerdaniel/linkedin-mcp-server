@@ -115,13 +115,11 @@ def test_permanent_facade_aliases_are_the_canonical_objects():
     assert strip_conversation_chrome is text.strip_conversation_chrome
 
 
-async def test_registered_tools_and_extractor_delegates_are_counted_separately():
+async def test_registered_tools_match_extractor_delegates():
     tools = await create_mcp_server().list_tools()
     tool_names = {tool.name for tool in tools}
 
-    assert len(tool_names) == 19
     assert tool_names == {*TOOL_DELEGATES, "close_session"}
-    assert len(TOOL_DELEGATES) == 18
     assert set(TOOL_DELEGATES.values()) == TOOL_FACADE_METHODS
     assert "close_session" not in TOOL_DELEGATES
 
@@ -497,8 +495,6 @@ def test_facade_methods_are_exactly_the_frozen_coroutine_surface():
     }
 
     assert actual == expected
-    assert len(TOOL_FACADE_METHODS) == 18
-    assert len(COMPATIBILITY_METHODS) == 2
 
 
 async def test_compatibility_helpers_keep_their_browser_behavior():
