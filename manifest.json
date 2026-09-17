@@ -117,7 +117,7 @@
     },
     {
       "name": "search_posts",
-      "description": "Search LinkedIn posts/content globally by keyword (the 'Posts' tab) with an optional recency filter (past-24h/past-week/past-month); returns per-post permalinks in references"
+      "description": "Search LinkedIn posts/content globally by keyword (the 'Posts' tab) with an optional recency filter (past-24h/past-week/past-month); returns unordered candidate permalinks in references"
     },
     {
       "name": "close_session",
