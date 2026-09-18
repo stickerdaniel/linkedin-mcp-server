@@ -1,0 +1,118 @@
+# .github/workflows/election-soak.yml
+#
+# The reproducer for #838, on demand.
+#
+# The eight-client election crashed a frontend with 0xC0000005 on Windows
+# CPython 3.12.10 and never gave up a fault location. #996 skipped the test on
+# every Windows 3.12, and #1003 then dropped the floating `3.12` matrix entry
+# altogether, so the crashing interpreter now appears in no push or pull request
+# run at all. That is the right default for a job every unrelated pull request
+# waits on, and it also means CI can no longer produce the evidence #838 needs.
+#
+# This workflow puts that interpreter back, by hand, with the skip lifted and
+# Windows Error Reporting armed. It is the only path from "skipped" to either a
+# minidump naming the faulting frame or a soak clean enough to lift the skip.
+name: Election soak
+
+on:
+  workflow_dispatch:
+    inputs:
+      python-version:
+        description: "Windows CPython to soak (3.12.10 is the one that crashed)"
+        type: string
+        default: "3.12.10"
+      rounds:
+        description: "Eight-client elections to run, stopping at the first crash"
+        type: number
+        default: 20
+
+permissions:
+  contents: read
+
+env:
+  TARGET: tests/test_daemon_election.py::TestRealOwner::test_many_clients_starting_at_once_elect_exactly_one_owner
+  # Lifts the #838 skip. Read at collection, so it has to be in the environment
+  # before pytest starts rather than set from inside a test.
+  LINKEDIN_MCP_ELECTION_SOAK: "1"
+
+jobs:
+  soak:
+    name: Election soak
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          enable-cache: true
+          python-version: ${{ inputs.python-version }}
+
+      - run: uv sync --group dev
+
+      # Minidumps, written from outside the failing process. Everything #838
+      # has been given so far came from `faulthandler` inside a process that
+      # was already access-violating, and twice it stopped before the frame
+      # that matters.
+      - name: Arm a crash dump
+        shell: pwsh
+        run: |
+          $folder = Join-Path $env:RUNNER_TEMP 'crash-dumps'
+          New-Item -ItemType Directory -Force -Path $folder | Out-Null
+          $key = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps'
+          New-Item -Path $key -Force | Out-Null
+          Set-ItemProperty -Path $key -Name DumpFolder -Value $folder -Type ExpandString
+          Set-ItemProperty -Path $key -Name DumpCount -Value 16 -Type DWord
+          Set-ItemProperty -Path $key -Name DumpType -Value 1 -Type DWord
+
+      # A soak whose test was skipped reports the same green as a soak that
+      # held, and would be read as grounds to lift the skip. So the predicate
+      # pytest is about to evaluate is evaluated here first, in this same
+      # environment: if the variable above did not reach it, this fails now
+      # rather than after twenty rounds of running nothing. That predicate is
+      # the only thing that can skip this test, so a run past it is a run.
+      - name: Prove the skip is lifted
+        shell: bash
+        run: |
+          uv run python - <<'PY'
+          import os
+          import sys
+
+          sys.path.insert(0, "tests")
+          from test_daemon_election import _ELECTION_SOAK, _skip_the_election_stress
+
+          if _skip_the_election_stress(
+              name=os.name,
+              implementation=sys.implementation.name,
+              version=sys.version_info[:2],
+              soak=os.environ.get(_ELECTION_SOAK),
+          ):
+              raise SystemExit(f"{_ELECTION_SOAK} did not lift the #838 skip")
+          PY
+
+      - name: Soak the eight-client election
+        shell: bash
+        env:
+          ROUNDS: ${{ inputs.rounds }}
+        run: |
+          # A round count of zero would leave the loop below with nothing to do
+          # and report the same green as a soak that held, which is the reading
+          # the step above exists to refuse. `number` accepts zero, negatives
+          # and decimals, so it is checked here rather than trusted.
+          if ! [[ "$ROUNDS" =~ ^[0-9]+$ ]] || (( ROUNDS < 1 )); then
+            echo "rounds must be a positive whole number, got: $ROUNDS"
+            exit 1
+          fi
+          for (( round = 1; round <= ROUNDS; round++ )); do
+            echo "::group::round $round of $ROUNDS"
+            uv run pytest "$TARGET" -q -x
+            echo "::endgroup::"
+          done
+
+      - name: Upload the crash dump
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: crash-dumps
+          path: ${{ runner.temp }}/crash-dumps
+          if-no-files-found: ignore
+          retention-days: 14
