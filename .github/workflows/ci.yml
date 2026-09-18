@@ -115,6 +115,25 @@ jobs:
 
       - run: uv sync --group dev
 
+      # #838: a frontend in this job has twice exited 0xC0000005 with no fault
+      # location. `faulthandler` cannot always supply one, because the report
+      # is written by the process that is already failing; Windows Error
+      # Reporting writes from outside it, so a dump survives what the process
+      # could not report. `DumpType` 1 is a minidump: the faulting stack is the
+      # missing evidence, and a full heap dump of eight Python processes is
+      # hundreds of megabytes per crash. Costs nothing on a green run, which is
+      # every run since the crashing interpreter left the matrix.
+      - name: Arm a crash dump for #838
+        shell: pwsh
+        run: |
+          $folder = Join-Path $env:RUNNER_TEMP 'crash-dumps'
+          New-Item -ItemType Directory -Force -Path $folder | Out-Null
+          $key = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps'
+          New-Item -Path $key -Force | Out-Null
+          Set-ItemProperty -Path $key -Name DumpFolder -Value $folder -Type ExpandString
+          Set-ItemProperty -Path $key -Name DumpCount -Value 16 -Type DWord
+          Set-ItemProperty -Path $key -Name DumpType -Value 1 -Type DWord
+
       - name: Run daemon protocol and containment tests
         run: >-
           uv run pytest
@@ -133,6 +152,18 @@ jobs:
           tests/test_installer_worker.py
           tests/test_process_tree.py
           tests/test_private_state.py
+
+      # Only on failure, and tolerant of an empty folder: a Python exception
+      # fails this job without ever reaching Windows Error Reporting, and that
+      # is the ordinary red run.
+      - name: Upload the crash dump
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: crash-dumps-${{ matrix.python-version }}
+          path: ${{ runner.temp }}/crash-dumps
+          if-no-files-found: ignore
+          retention-days: 14
 
       - run: uv cache prune --ci
 

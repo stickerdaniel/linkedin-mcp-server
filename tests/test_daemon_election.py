@@ -88,6 +88,30 @@ _POSIX_ONLY = pytest.mark.skipif(
     os.name == "nt", reason="the lock is handed to the child only on POSIX"
 )
 
+#: Set by the election soak workflow to run the eight-client stress on the very
+#: interpreter the skip below exists for. Without a way back in, #838 can only
+#: ever be skipped and never answered: the crash has no reproducer outside this
+#: test, and the version that produced it is no longer in the push matrix.
+_ELECTION_SOAK = "LINKEDIN_MCP_ELECTION_SOAK"
+
+
+def _skip_the_election_stress(
+    *,
+    name: str,
+    implementation: str,
+    version: tuple[int, int],
+    soak: str | None,
+) -> bool:
+    """Whether #838's access violation makes the eight-client stress unrunnable.
+
+    Takes what it judges rather than reading the interpreter, so the decision
+    can be tested for the platform this suite is not running on. Evaluated once
+    at collection, so the soak variable has to be set before pytest starts.
+    """
+    if soak:
+        return False
+    return name == "nt" and implementation == "cpython" and version == (3, 12)
+
 
 async def _until(condition: Callable[[], bool], *, seconds: float) -> float:
     """Poll *condition* for at most *seconds* and say how long that took.
@@ -1673,6 +1697,36 @@ def test_a_native_crash_report_keeps_the_faulting_thread():
     assert "line 706 in collect" in kept
     assert kept.endswith("the last line of the report\n")
     assert len(kept) < len(crash)
+
+
+@pytest.mark.parametrize(
+    ("name", "implementation", "version", "soak", "skipped"),
+    [
+        ("nt", "cpython", (3, 12), None, True),
+        # The soak workflow runs exactly the combination above, on purpose: a
+        # skip with no way back in can never produce the fault location #838
+        # is waiting for.
+        ("nt", "cpython", (3, 12), "1", False),
+        # 3.13 and 3.14 carry this coverage on Windows and must keep it.
+        ("nt", "cpython", (3, 13), None, False),
+        ("nt", "pypy", (3, 12), None, False),
+        ("posix", "cpython", (3, 12), None, False),
+    ],
+)
+def test_the_election_stress_is_skipped_only_where_it_access_violates(
+    name: str,
+    implementation: str,
+    version: tuple[int, int],
+    soak: str | None,
+    skipped: bool,
+):
+    """#838 costs the eight-client election one interpreter, and no more."""
+    assert (
+        _skip_the_election_stress(
+            name=name, implementation=implementation, version=version, soak=soak
+        )
+        is skipped
+    )
 
 
 @pytest.mark.parametrize(("exit_code", "expected"), [(259, True), (7, False)])
@@ -4803,12 +4857,15 @@ class TestRealOwner:
                 stop(pid)
 
     @pytest.mark.skipif(
-        os.name == "nt"
-        and sys.implementation.name == "cpython"
-        and sys.version_info[:2] == (3, 12),
+        _skip_the_election_stress(
+            name=os.name,
+            implementation=sys.implementation.name,
+            version=sys.version_info[:2],
+            soak=os.environ.get(_ELECTION_SOAK),
+        ),
         reason=(
             "CPython 3.12 intermittently access-violates under this "
-            "daemon-thread I/O stress (#838)"
+            f"daemon-thread I/O stress (#838); set {_ELECTION_SOAK} to run it"
         ),
     )
     def test_many_clients_starting_at_once_elect_exactly_one_owner(
