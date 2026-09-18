@@ -49,20 +49,70 @@ jobs:
 
       - run: uv sync --group dev
 
-      # Minidumps, written from outside the failing process. Everything #838
-      # has been given so far came from `faulthandler` inside a process that
-      # was already access-violating, and twice it stopped before the frame
-      # that matters.
+      # Minidumps, written from outside the failing process. `faulthandler`
+      # has now been read out in full and it cannot name this fault: the dump
+      # is complete, every thread is printed as `Thread 0x…` and none as
+      # `Current thread 0x…`. `faulthandler_dump_traceback` takes the faulting
+      # thread from `PyGILState_GetThisThreadState()` and
+      # `_Py_DumpTracebackThreads` marks a thread only on pointer equality with
+      # it, so an unmarked dump means that call returned NULL: the thread that
+      # access-violated holds no Python thread state, and no Python-level
+      # report can describe it. Only a native stack can.
+      #
+      # WER's LocalDumps alone did not produce one. Armed exactly as it was
+      # before this change, run 35367449209 caught the access violation and
+      # still uploaded nothing. The runner image leaves Windows Error
+      # Reporting disabled, and a disabled WER never consults LocalDumps at
+      # all, which looks the same in the log as a run that never crashed.
       - name: Arm a crash dump
         shell: pwsh
         run: |
           $folder = Join-Path $env:RUNNER_TEMP 'crash-dumps'
           New-Item -ItemType Directory -Force -Path $folder | Out-Null
-          $key = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps'
+
+          $wer = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting'
+          New-Item -Path $wer -Force | Out-Null
+          Set-ItemProperty -Path $wer -Name Disabled -Value 0 -Type DWord
+          # No dialog: a crash that waits for a click would hang the job
+          # instead of failing it.
+          Set-ItemProperty -Path $wer -Name DontShowUI -Value 1 -Type DWord
+
+          $key = Join-Path $wer 'LocalDumps'
           New-Item -Path $key -Force | Out-Null
           Set-ItemProperty -Path $key -Name DumpFolder -Value $folder -Type ExpandString
           Set-ItemProperty -Path $key -Name DumpCount -Value 16 -Type DWord
           Set-ItemProperty -Path $key -Name DumpType -Value 1 -Type DWord
+
+          Set-Service -Name WerSvc -StartupType Manual
+          Get-Service WerSvc | Format-List Name, Status, StartType
+
+      # The process that dies is a grandchild: the test starts eight
+      # frontends and each of those starts a daemon of its own. No step here
+      # can attach to the one that will fault, and which one it is only
+      # becomes known once it is already gone. So the debugger has to be the
+      # one Windows starts *after* a process dies. `procdump -i` registers
+      # itself under `AeDebug` for 64-bit and 32-bit alike, and that path is
+      # taken on an unhandled exception whether or not WER answers, which is
+      # the failure this is here to cover.
+      - name: Register a postmortem debugger
+        shell: pwsh
+        run: |
+          $folder = Join-Path $env:RUNNER_TEMP 'crash-dumps'
+          $tools = Join-Path $env:RUNNER_TEMP 'procdump'
+          New-Item -ItemType Directory -Force -Path $tools | Out-Null
+          $zip = Join-Path $tools 'Procdump.zip'
+          Invoke-WebRequest -UseBasicParsing `
+            -Uri 'https://download.sysinternals.com/files/Procdump.zip' `
+            -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $tools -Force
+          $exe = Join-Path $tools 'procdump64.exe'
+          if (-not (Test-Path $exe)) { $exe = Join-Path $tools 'procdump.exe' }
+          & $exe -accepteula -ma -i $folder
+          if ($LASTEXITCODE -ne 0) {
+            throw "procdump -i failed with exit code $LASTEXITCODE"
+          }
+          Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AeDebug' |
+            Format-List Debugger, Auto
 
       # A soak whose test was skipped reports the same green as a soak that
       # held, and would be read as grounds to lift the skip. So the predicate
@@ -107,6 +157,23 @@ jobs:
             uv run pytest "$TARGET" -q -x
             echo "::endgroup::"
           done
+
+      # The upload below reports "no files were found" both for a run that
+      # never crashed and for a run that crashed while every dump mechanism
+      # stayed silent. That is the reading that cost run 35367449209, so the
+      # folder and the system's own record of the fault are printed here.
+      - name: Report what the dump folder holds
+        if: always()
+        shell: pwsh
+        run: |
+          $folder = Join-Path $env:RUNNER_TEMP 'crash-dumps'
+          Get-ChildItem -Path $folder -Force -ErrorAction SilentlyContinue |
+            Select-Object Name, Length, LastWriteTime |
+            Format-Table -AutoSize
+          Get-WinEvent -MaxEvents 10 -ErrorAction SilentlyContinue -FilterHashtable @{
+            LogName = 'Application'
+            ProviderName = 'Application Error', 'Windows Error Reporting'
+          } | Select-Object TimeCreated, ProviderName, Message | Format-List
 
       - name: Upload the crash dump
         if: failure()
