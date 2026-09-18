@@ -9,6 +9,16 @@ on:
   # entirely for the stacks this repository's workflow produces.
   pull_request:
 
+# One run per branch. Restacking a stacked pull request pushes every branch in
+# the stack, and without this every superseded push kept its whole matrix alive
+# to completion, Windows legs included. Those are the ones that cost anything:
+# macOS and Linux runs bill at zero here while Windows is the entire spend.
+# Confined to pull requests, because a run on `main` is the history the release
+# workflow reads and a cancelled one leaves no result there at all.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   lint-and-check:
     runs-on: ubuntu-latest
@@ -79,10 +89,15 @@ jobs:
       fail-fast: false
       matrix:
         # 3.12.4 exactly, because it is the declared floor and the one version
-        # where private state creation on Windows became possible at all. The
-        # others follow their newest patch, so nothing else here would notice a
-        # daemon path reaching for something added after it.
-        python-version: ["3.12.4", "3.12", "3.13", "3.14"]
+        # where private state creation on Windows became possible at all, and
+        # the newest release opposite it. The floor is what notices a daemon
+        # path reaching for something added after it; the newest is what
+        # notices a removal. A version between them can only fail where one of
+        # those two already does, unless it carries a regression of its own,
+        # and paying for that on Windows costs more per push than every other
+        # runner in this file put together. Widen the matrix again if an
+        # interpreter-specific bug ever does land in the middle.
+        python-version: ["3.12.4", "3.14"]
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
