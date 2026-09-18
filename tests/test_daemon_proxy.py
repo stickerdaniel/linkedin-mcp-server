@@ -794,11 +794,11 @@ class TestRepeatingOnlyWhatIsSafe:
     ) -> MagicMock:
         """A call context whose tool declares *read_only*, or declares nothing.
 
-        *then_unreachable* makes the second lookup fail the way it fails against
-        an owner that has just gone. The annotations are read fresh each time
-        through `fastmcp.get_tool`, which with the component cache off is a
-        forwarded listing, so a replacement that dies during the repeat takes
-        the answer to the second question with it.
+        *then_unreachable* arms a second lookup to fail the way one fails
+        against an owner that has just gone: `fastmcp.get_tool` is a forwarded
+        listing with the component cache off, so it needs somebody alive to
+        answer. It is armed rather than expected, and a test uses it to show
+        that the second lookup is never reached.
         """
         tool = MagicMock()
         tool.annotations = (
@@ -1102,33 +1102,39 @@ class TestRepeatingOnlyWhatIsSafe:
         self._escaped(answer, "a failed read was reported as an unknown outcome")
         assert attempts == 2
 
-    async def test_a_read_whose_second_lookup_dies_is_reported(self, _recovering):
-        """A read answered as unknown, because the second lookup fails open.
+    async def test_a_read_is_not_reclassified_against_the_departed_owner(
+        self, _recovering
+    ):
+        """The classification the first attempt read decides the second too.
 
-        The conservative corner of the rule above, and a real change to what a
-        read does. The first failure is classified read-only and repeated; the
-        replacement then dies with that repeat possibly sent, and the
-        annotations are read again through `fastmcp.get_tool` — a forwarded
-        listing, with the component cache off — against the owner that has just
-        gone. The lookup raises, `a_repeat_could_change_something` catches it
-        and answers `True` on the cautious side, and the read comes back as
-        `outcome_unknown` where before this it escaped as a raise.
+        The same read as above, with the second lookup armed to fail. Asking
+        again means asking the owner that has just gone: `fastmcp.get_tool` is a
+        forwarded listing with the component cache off, it raises, and
+        `a_repeat_could_change_something` catches that and answers `True` on the
+        cautious side. The read would then come back as `outcome_unknown`
+        carrying `retry_safe: False` — a client sent to look on LinkedIn for an
+        effect a scrape cannot have had, and a safely repeatable read declared
+        unrepeatable, for no reason but that the owner holding the answer died.
 
-        Nothing is sent twice by that, so it errs in the direction that costs
-        nothing. It is pinned here rather than left for a client to discover as
-        a `retry_safe` flag on a profile scrape.
+        So the armed failure is never reached. Which is what the await count
+        says: the annotations belong to the tool, one live owner already read
+        them, and an owner going away does not turn a read into a write.
         """
         backend, failed = _recovering
+        context = self._context(read_only=True, then_unreachable=True)
         answer, attempts = await self._run(
             backend,
-            self._context(read_only=True, then_unreachable=True),
+            context,
             nothing_was_sent=False,
             instance_id=failed,
             the_repeat_sent_nothing=False,
         )
 
         assert attempts == 2
-        assert self._reported(answer)["status"] == "outcome_unknown"
+        self._escaped(answer, "a failed read was reported as an unknown outcome")
+        assert context.fastmcp_context.fastmcp.get_tool.await_count == 1, (
+            "the classification was read again from the owner that had gone"
+        )
 
     async def test_a_read_only_call_is_repeated_even_when_it_may_have_run(
         self, _recovering

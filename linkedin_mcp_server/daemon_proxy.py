@@ -771,10 +771,16 @@ class FrontendOwnerRecoveryMiddleware(Middleware):
             # cautious side: `CancelledError` is a `BaseException`, so it passes
             # that `except Exception` and leaves through here, which is what
             # should happen to it.
-            if not failure.nothing_was_sent and await a_repeat_could_change_something(
-                context
-            ):
-                return self._report_an_unknown_outcome(context, failure)
+            #
+            # Kept rather than dropped, because the second `except` below needs
+            # the same answer and by then there is nobody left to give it. It
+            # stays `None` when the short-circuit means the question was never
+            # put, which is the one case with nothing to remember.
+            could_change_something: bool | None = None
+            if not failure.nothing_was_sent:
+                could_change_something = await a_repeat_could_change_something(context)
+                if could_change_something:
+                    return self._report_an_unknown_outcome(context, failure)
 
             if replacement is None:
                 raise
@@ -797,12 +803,31 @@ class FrontendOwnerRecoveryMiddleware(Middleware):
                 # failed twice, and the question it raises — whether the second
                 # attempt acted — is the one nothing here can answer.
                 repeat = unreachable_owner_in(again)
-                if (
-                    repeat is not None
-                    and not repeat.nothing_was_sent
-                    and await a_repeat_could_change_something(context)
-                ):
-                    return self._report_an_unknown_outcome(context, repeat)
+                if repeat is not None and not repeat.nothing_was_sent:
+                    # The answer the first attempt already has, rather than the
+                    # same question put to an owner that has just died. Both
+                    # readings are about one tool and the tool did not change;
+                    # what changed is who is left to answer. The lookup goes
+                    # through `fastmcp.get_tool`, which with the component cache
+                    # off is a forwarded listing against exactly that departed
+                    # owner, so it raises and `a_repeat_could_change_something`
+                    # answers `True` on the cautious side. Caution about a
+                    # question already answered is not caution: it turns a read
+                    # repeated *because* the first lookup called it read-only
+                    # into an `outcome_unknown` carrying `retry_safe: False`,
+                    # which sends the user to look on LinkedIn for an effect a
+                    # read cannot have had.
+                    if could_change_something is None:
+                        # Nothing was remembered, because the first pass
+                        # short-circuited on `nothing_was_sent` and never asked.
+                        # Here the lookup is the only source there is, and its
+                        # failing open is still the right side to fail on: an
+                        # unreadable annotation is not a promise of safety.
+                        could_change_something = await a_repeat_could_change_something(
+                            context
+                        )
+                    if could_change_something:
+                        return self._report_an_unknown_outcome(context, repeat)
                 raise
 
 
