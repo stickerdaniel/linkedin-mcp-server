@@ -12,8 +12,9 @@ import asyncio
 import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from functools import partial
-from typing import Any
+from typing import Any, NoReturn
 from unittest.mock import AsyncMock, MagicMock
 from pathlib import Path
 
@@ -21,6 +22,7 @@ import httpx
 import mcp.types as mt
 import pytest
 from fastmcp import Client, Context, FastMCP
+from fastmcp.exceptions import ToolError
 from fastmcp.client.transports import (
     ClientTransport,
     FastMCPTransport,
@@ -718,6 +720,60 @@ class TestServingTheOwnersTools:
         assert tool.annotations.readOnlyHint is True
 
 
+@dataclass(frozen=True)
+class _Escaped:
+    """An exception the middleware let out, in the slot an answer would fill.
+
+    A helper that spells a raise `None` cannot tell one from a middleware that
+    returned `None`, and that difference is the whole of what the tests named
+    "still raises" claim. With both spelled the same, replacing the final
+    `raise` in `on_call_tool` with `return None` left every one of them green.
+    """
+
+    error: BaseException
+
+
+def _fail_the_way_a_real_call_fails(
+    *, instance_id: str, nothing_was_sent: bool
+) -> NoReturn:
+    """Raise an owner-loss failure in the shape that reaches the middleware.
+
+    Every link is a real one, in the order the installed versions produce it,
+    rather than the bare tag a helper can raise but nothing here can deliver:
+
+    * `httpx.ConnectError`, off the socket.
+    * `RuntimeError("Client failed to connect: ...")`, raised `from` it in
+      `fastmcp/client/client.py:622-624` (fastmcp 3.4.7) whenever the session
+      task ended in anything but an `McpError` or an `HTTPStatusError`.
+    * `OwnerUnreachableError`, raised `from` that by `_saying_which_owner` in
+      `daemon_proxy`, which is where the owner's identity and the dispatch
+      answer are attached.
+    * `ToolError("Error calling tool ...")`, raised `from` that at
+      `fastmcp/server/server.py:1357` under the `mask_error_details=True` this
+      server switches on, and the outermost thing a middleware is handed.
+
+    So the tag sits three links down and finding it is a walk, which is why
+    `unreachable_owner_in` exists rather than an `isinstance`. A second failure
+    raised bare leaves that walk unrun on the way back out.
+    """
+    from linkedin_mcp_server.daemon_proxy import OwnerUnreachableError
+
+    try:
+        try:
+            try:
+                raise httpx.ConnectError("gone as well")
+            except httpx.ConnectError as connect:
+                raise RuntimeError(f"Client failed to connect: {connect}") from connect
+        except RuntimeError as connecting:
+            raise OwnerUnreachableError(
+                instance_id=instance_id,
+                nothing_was_sent=nothing_was_sent,
+                cause=connecting,
+            ) from connecting
+    except OwnerUnreachableError as tag:
+        raise ToolError("Error calling tool 'do_the_thing'") from tag
+
+
 class TestRepeatingOnlyWhatIsSafe:
     """Which calls a recovery may run again, and which it must merely report.
 
@@ -733,15 +789,28 @@ class TestRepeatingOnlyWhatIsSafe:
     """
 
     @staticmethod
-    def _context(*, read_only: bool | None) -> MagicMock:
-        """A call context whose tool declares *read_only*, or declares nothing."""
+    def _context(
+        *, read_only: bool | None, then_unreachable: bool = False
+    ) -> MagicMock:
+        """A call context whose tool declares *read_only*, or declares nothing.
+
+        *then_unreachable* arms a second lookup to fail the way one fails
+        against an owner that has just gone: `fastmcp.get_tool` is a forwarded
+        listing with the component cache off, so it needs somebody alive to
+        answer. It is armed rather than expected, and a test uses it to show
+        that the second lookup is never reached.
+        """
         tool = MagicMock()
         tool.annotations = (
             None if read_only is None else MagicMock(readOnlyHint=read_only)
         )
         context = MagicMock()
         context.message.name = "do_the_thing"
-        context.fastmcp_context.fastmcp.get_tool = AsyncMock(return_value=tool)
+        context.fastmcp_context.fastmcp.get_tool = (
+            AsyncMock(side_effect=[tool, RuntimeError("the replacement is gone too")])
+            if then_unreachable
+            else AsyncMock(return_value=tool)
+        )
         return context
 
     @staticmethod
@@ -751,10 +820,30 @@ class TestRepeatingOnlyWhatIsSafe:
         *,
         nothing_was_sent: bool,
         instance_id: str,
-    ) -> tuple[bool, int]:
+        the_repeat_sent_nothing: bool | None = None,
+        the_repeat_arrives_wrapped: bool = False,
+    ) -> tuple[Any, int]:
         """Drive one failing call through the middleware.
 
-        Returns whether it succeeded and how many times the call was attempted.
+        Returns what the middleware answered and how many times the call was
+        attempted, with an `_Escaped` in place of the answer when it raised
+        instead of answering. Spelling that raise `None` was the same value a
+        middleware can return, so the two could not be told apart: `return None`
+        in place of the final `raise` in `on_call_tool` passed every test here.
+        The answer itself is kept rather than reduced to a pass/fail because the
+        branch that cannot repeat a call now reports it: "did not succeed" no
+        longer distinguishes a payload naming the unknown outcome from a masked
+        raise that names nothing.
+
+        *the_repeat_sent_nothing* is the replacement dying too: `None` for a
+        repeat that succeeds, and otherwise the second failure's own
+        `nothing_was_sent`. A repeat that always answers "the result" is the only
+        thing this helper could express before, and it cannot show what happens
+        to a failure on the way back out.
+
+        *the_repeat_arrives_wrapped* gives that second failure the chain a real
+        one carries, with the tag three links under a `ToolError` instead of
+        raised bare.
         """
         from linkedin_mcp_server.daemon_proxy import (
             FrontendOwnerRecoveryMiddleware,
@@ -772,14 +861,32 @@ class TestRepeatingOnlyWhatIsSafe:
                     nothing_was_sent=nothing_was_sent,
                     cause=httpx.ConnectError("gone"),
                 )
+            if the_repeat_sent_nothing is not None:
+                # The replacement's identity, not the failed owner's: this is a
+                # second owner going away, not the first failing late.
+                the_replacement = f"{instance_id}-replacement"
+                if the_repeat_arrives_wrapped:
+                    _fail_the_way_a_real_call_fails(
+                        instance_id=the_replacement,
+                        nothing_was_sent=the_repeat_sent_nothing,
+                    )
+                raise OwnerUnreachableError(
+                    instance_id=the_replacement,
+                    nothing_was_sent=the_repeat_sent_nothing,
+                    cause=httpx.ConnectError("gone as well"),
+                )
             return "the result"
 
         middleware = FrontendOwnerRecoveryMiddleware(backend)
         try:
-            await middleware.on_call_tool(context, call_next)  # ty: ignore
-        except OwnerUnreachableError:
-            return False, attempts
-        return True, attempts
+            answer = await middleware.on_call_tool(context, call_next)  # ty: ignore
+        except Exception as escaped:
+            # Anything, rather than `OwnerUnreachableError` alone: a failure
+            # that arrived wrapped leaves wrapped too, and the narrow catch
+            # would let that one past this helper instead of recording it as
+            # the raise it is.
+            return _Escaped(escaped), attempts
+        return answer, attempts
 
     @pytest.fixture
     def _recovering(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -792,6 +899,45 @@ class TestRepeatingOnlyWhatIsSafe:
         )
         return _backend(elected, tmp_path), elected.descriptor.instance_id
 
+    @pytest.fixture
+    def _alone(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        """A backend whose election finds nobody and cannot start one either."""
+        elected = _attachment(tmp_path)
+
+        def elect(*_a: Any, **_k: Any):
+            raise RuntimeError("no owner could be started")
+
+        monkeypatch.setattr("linkedin_mcp_server.daemon_election.obtain_owner", elect)
+        return _backend(elected, tmp_path), elected.descriptor.instance_id
+
+    @staticmethod
+    def _reported(answer: Any) -> dict[str, Any]:
+        """The structured payload of an answer that reports an unknown outcome."""
+        assert not isinstance(answer, _Escaped), (
+            f"the call was reported by raising, not by result: {answer.error!r}"
+        )
+        assert answer.is_error is True
+        assert answer.structured_content is not None
+        return answer.structured_content
+
+    @staticmethod
+    def _escaped(answer: Any, why: str) -> BaseException:
+        """The owner-loss failure the middleware raised, rather than an answer.
+
+        Both halves are asserted. That the call left through a raise at all is
+        what `answer is None` could not say, since a middleware returning
+        `None` reads exactly the same; and that what escaped is still the
+        owner-loss failure, rather than something the recovery itself broke on
+        while deciding what to do with it.
+        """
+        from linkedin_mcp_server.daemon_proxy import unreachable_owner_in
+
+        assert isinstance(answer, _Escaped), f"{why}: answered {answer!r}"
+        assert unreachable_owner_in(answer.error) is not None, (
+            f"a different failure escaped the recovery: {answer.error!r}"
+        )
+        return answer.error
+
     async def test_a_mutating_call_is_not_repeated_when_it_may_have_run(
         self, _recovering
     ):
@@ -799,45 +945,210 @@ class TestRepeatingOnlyWhatIsSafe:
         # measurement behind the rule: a client answered with an error at 0.66s
         # and the effect landing 0.7s later.
         backend, failed = _recovering
-        succeeded, attempts = await self._run(
+        answer, attempts = await self._run(
             backend,
             self._context(read_only=False),
             nothing_was_sent=False,
             instance_id=failed,
         )
 
-        assert not succeeded, "a call that may already have run was repeated"
-        assert attempts == 1
+        assert attempts == 1, "a call that may already have run was repeated"
+        # Reported rather than raised, because a raise reaches the client as the
+        # tool's name and nothing else. The status and `retry_safe` are the whole
+        # answer: they are what tells a client to look before calling again.
+        reported = self._reported(answer)
+        assert reported["status"] == "outcome_unknown"
+        assert reported["retry_safe"] is False
+        assert "do_the_thing" in reported["message"]
         # And the replacement was still adopted, for the next call.
         assert backend.attachment.descriptor.instance_id != failed
+
+    async def test_an_unknown_outcome_says_nothing_about_what_was_sent(
+        self, _recovering
+    ):
+        # Absent, not null. `sent` is precisely the thing nobody here knows, and
+        # a null answers the question a client asked with a "no".
+        backend, failed = _recovering
+        answer, _attempts = await self._run(
+            backend,
+            self._context(read_only=False),
+            nothing_was_sent=False,
+            instance_id=failed,
+        )
+
+        reported = self._reported(answer)
+        assert "sent" not in reported
+        assert "recipient_selected" not in reported
+        assert "url" not in reported
+
+    async def test_the_unknown_outcome_speaks_the_send_contracts_vocabulary(self):
+        """The two halves of the payload are keys a send already uses.
+
+        The builder lives in `daemon_proxy` on purpose: this is the transport
+        saying it knows nothing, not a scraping outcome, and no daemon module
+        imports from `scraping/`. The cost of that is two places naming the same
+        keys, so the names are pinned against their source here rather than
+        left to drift until a client reads one of them and not the other.
+        """
+        from linkedin_mcp_server.daemon_proxy import _unknown_outcome
+        from linkedin_mcp_server.scraping.contracts import message_action_result
+
+        reported = _unknown_outcome(tool="send_message", reason="the owner went away")
+        a_send = message_action_result("https://www.linkedin.com/in/x/", "sent", "ok")
+
+        assert set(reported) <= set(a_send), (
+            "an owner-loss result must not invent keys a send does not have"
+        )
+        assert {"status", "message", "retry_safe"} <= set(reported)
 
     async def test_a_mutating_call_is_repeated_when_nothing_was_sent(self, _recovering):
         # The only reason the dispatch question is worth asking. Without it every
         # write tool would keep failing across an upgrade.
         backend, failed = _recovering
-        succeeded, attempts = await self._run(
+        answer, attempts = await self._run(
             backend,
             self._context(read_only=False),
             nothing_was_sent=True,
             instance_id=failed,
         )
 
-        assert succeeded
+        assert answer == "the result"
         assert attempts == 2
+
+    async def test_a_replacement_that_dies_too_is_reported(self, _recovering):
+        """The repeat can act, and an escaping failure is #891 one round later.
+
+        The first attempt was repeated only because nothing had left this
+        process; that says nothing about the second, which the replacement may
+        have taken and run before going away itself. Escaping, it is flattened
+        to `Error calling tool 'do_the_thing'` — and a client told only that
+        sends the message again.
+        """
+        backend, failed = _recovering
+        answer, attempts = await self._run(
+            backend,
+            self._context(read_only=False),
+            nothing_was_sent=True,
+            instance_id=failed,
+            the_repeat_sent_nothing=False,
+        )
+
+        assert attempts == 2, "a repeat that may have run was attempted again"
+        reported = self._reported(answer)
+        assert reported["status"] == "outcome_unknown"
+        assert reported["retry_safe"] is False
+
+    async def test_a_second_failure_is_found_through_its_wrapping(self, _recovering):
+        """The chain a second failure really carries, rather than the bare tag.
+
+        Masking sits below this middleware, so what comes back from the repeat
+        is `ToolError -> OwnerUnreachableError -> RuntimeError('Client failed to
+        connect') -> httpx.ConnectError` and the tag is three links down.
+        Reading the exception's own type instead of walking its causes passes
+        every other test here, because every other one raises the tag bare, and
+        loses exactly this call: the mutating repeat a replacement may already
+        have sent before dying.
+        """
+        backend, failed = _recovering
+        answer, attempts = await self._run(
+            backend,
+            self._context(read_only=False),
+            nothing_was_sent=True,
+            instance_id=failed,
+            the_repeat_sent_nothing=False,
+            the_repeat_arrives_wrapped=True,
+        )
+
+        assert attempts == 2
+        reported = self._reported(answer)
+        assert reported["status"] == "outcome_unknown"
+        assert reported["retry_safe"] is False
+
+    async def test_a_repeat_that_never_left_either_still_raises(self, _recovering):
+        """Two attempts, neither of which reached anybody: nothing to describe.
+
+        `outcome_unknown` is a claim that something may have happened on
+        LinkedIn. A repeat that provably never left the process makes no such
+        claim, and reporting one would hand a client a `retry_safe` flag about a
+        call nobody ever received.
+        """
+        backend, failed = _recovering
+        answer, attempts = await self._run(
+            backend,
+            self._context(read_only=False),
+            nothing_was_sent=True,
+            instance_id=failed,
+            the_repeat_sent_nothing=True,
+        )
+
+        self._escaped(answer, "a call that provably never left was called unknown")
+        assert attempts == 2
+
+    async def test_a_read_only_repeat_that_fails_stays_a_failure(self, _recovering):
+        """A read has no outcome to be unknown about, on either attempt.
+
+        The same rule as with no replacement at all: turning this into a result
+        would dress a plain transport failure up as a LinkedIn answer.
+        """
+        backend, failed = _recovering
+        answer, attempts = await self._run(
+            backend,
+            self._context(read_only=True),
+            nothing_was_sent=False,
+            instance_id=failed,
+            the_repeat_sent_nothing=False,
+        )
+
+        self._escaped(answer, "a failed read was reported as an unknown outcome")
+        assert attempts == 2
+
+    async def test_a_read_is_not_reclassified_against_the_departed_owner(
+        self, _recovering
+    ):
+        """The classification the first attempt read decides the second too.
+
+        The same read as above, with the second lookup armed to fail. Asking
+        again means asking the owner that has just gone: `fastmcp.get_tool` is a
+        forwarded listing with the component cache off, it raises, and
+        `a_repeat_could_change_something` catches that and answers `True` on the
+        cautious side. The read would then come back as `outcome_unknown`
+        carrying `retry_safe: False` — a client sent to look on LinkedIn for an
+        effect a scrape cannot have had, and a safely repeatable read declared
+        unrepeatable, for no reason but that the owner holding the answer died.
+
+        So the armed failure is never reached. Which is what the await count
+        says: the annotations belong to the tool, one live owner already read
+        them, and an owner going away does not turn a read into a write.
+        """
+        backend, failed = _recovering
+        context = self._context(read_only=True, then_unreachable=True)
+        answer, attempts = await self._run(
+            backend,
+            context,
+            nothing_was_sent=False,
+            instance_id=failed,
+            the_repeat_sent_nothing=False,
+        )
+
+        assert attempts == 2
+        self._escaped(answer, "a failed read was reported as an unknown outcome")
+        assert context.fastmcp_context.fastmcp.get_tool.await_count == 1, (
+            "the classification was read again from the owner that had gone"
+        )
 
     async def test_a_read_only_call_is_repeated_even_when_it_may_have_run(
         self, _recovering
     ):
         # Repeating a read costs a page load and nothing else.
         backend, failed = _recovering
-        succeeded, attempts = await self._run(
+        answer, attempts = await self._run(
             backend,
             self._context(read_only=True),
             nothing_was_sent=False,
             instance_id=failed,
         )
 
-        assert succeeded
+        assert answer == "the result"
         assert attempts == 2
 
     async def test_an_unannotated_call_is_treated_as_mutating(self, _recovering):
@@ -845,14 +1156,91 @@ class TestRepeatingOnlyWhatIsSafe:
         # has to be the safe one: this is what keeps a tool added later from
         # being replayed because nobody remembered to annotate it.
         backend, failed = _recovering
-        succeeded, attempts = await self._run(
+        answer, attempts = await self._run(
             backend,
             self._context(read_only=None),
             nothing_was_sent=False,
             instance_id=failed,
         )
 
-        assert not succeeded
+        assert attempts == 1
+        assert self._reported(answer)["retry_safe"] is False
+
+    async def test_a_call_that_may_have_run_is_reported_with_no_replacement_too(
+        self, _alone
+    ):
+        """An election that found nobody makes the outcome no more knowable.
+
+        The order the decision is taken in: the unsafe question is asked before
+        the replacement is looked at, because the answer does not depend on it.
+        Taken the other way around, the one call that needs the detail most
+        loses it exactly when the host is down and nothing will elect.
+        """
+        backend, failed = _alone
+        answer, attempts = await self._run(
+            backend,
+            self._context(read_only=False),
+            nothing_was_sent=False,
+            instance_id=failed,
+        )
+
+        assert attempts == 1
+        assert self._reported(answer)["status"] == "outcome_unknown"
+        assert backend.attachment.descriptor.instance_id == failed
+
+    async def test_a_repeatable_call_needs_somewhere_to_repeat_it(self, _alone):
+        """Nothing was sent, and there is nobody left to send it to.
+
+        The dispatch question says a repeat would be *safe*, not that there is
+        anywhere to run it: the owner it would go to is the one that has just
+        gone away, so a repeat here is a second failure rather than a second
+        chance. It stays a raise, because a call that provably never left has no
+        unknown outcome to report either.
+        """
+        backend, failed = _alone
+        answer, attempts = await self._run(
+            backend,
+            self._context(read_only=False),
+            nothing_was_sent=True,
+            instance_id=failed,
+        )
+
+        self._escaped(answer, "a transport failure was dressed up as an outcome")
+        assert attempts == 1, "the call was repeated against the departed owner"
+        assert backend.attachment.descriptor.instance_id == failed
+
+    async def test_a_safe_call_with_no_replacement_still_raises(self, _alone):
+        """Nothing to report and nowhere to run it: the failure stays a failure.
+
+        A read that could be repeated has no unknown outcome to describe, so
+        turning this into a result would dress a plain transport failure up as a
+        LinkedIn answer and hand a client a `retry_safe` flag about a call that
+        never acted.
+        """
+        from linkedin_mcp_server.daemon_proxy import (
+            FrontendOwnerRecoveryMiddleware,
+            OwnerUnreachableError,
+        )
+
+        backend, failed = _alone
+        attempts = 0
+
+        async def call_next(_context: Any) -> Any:
+            nonlocal attempts
+            attempts += 1
+            raise OwnerUnreachableError(
+                instance_id=failed,
+                nothing_was_sent=False,
+                cause=httpx.ConnectError("gone"),
+            )
+
+        middleware = FrontendOwnerRecoveryMiddleware(backend)
+        with pytest.raises(OwnerUnreachableError, match="did not answer"):
+            await middleware.on_call_tool(
+                self._context(read_only=True),
+                call_next,  # ty: ignore
+            )
+
         assert attempts == 1
 
     async def test_a_failure_from_something_else_is_left_alone(self, _recovering):
@@ -1146,6 +1534,11 @@ class TestRecoveringThroughTheWholeProxy:
         have been queued, may have held the profile lease, may have sent the
         connection request. Nothing in the protocol says which, so the failure is
         reported rather than guessed at.
+
+        Driven through the real server rather than the middleware because
+        `mask_error_details` is what makes the shape matter: the whole path is
+        the only place that shows a raise arriving as the tool's name and
+        nothing else, and this result surviving with its payload intact.
         """
         backend, elected, _replacement, elections = _upgraded
         ran = 0
@@ -1176,11 +1569,24 @@ class TestRecoveringThroughTheWholeProxy:
         )
 
         async with Client(self._proxy(backend)) as client:
-            # Reported rather than repeated. The text is the server's masked one,
-            # so what is pinned here is that the call failed, not how it read.
-            with pytest.raises(Exception, match="send_connection_request"):
-                await client.call_tool("send_connection_request", {})
+            # Reported rather than repeated, and reported in full: a raise from
+            # the middleware would leave `Error calling tool
+            # 'send_connection_request'` and no way to tell it from a tool that
+            # simply failed, which is the difference between a client checking
+            # LinkedIn and a client calling again.
+            result = await client.call_tool(
+                "send_connection_request", {}, raise_on_error=False
+            )
 
+        assert result.is_error is True
+        assert result.structured_content is not None
+        assert result.structured_content["status"] == "outcome_unknown"
+        assert result.structured_content["retry_safe"] is False
+        assert "sent" not in result.structured_content
+        assert any(
+            "Check LinkedIn before calling again" in getattr(block, "text", "")
+            for block in result.content
+        )
         assert ran == 0, "a call that may already have run was sent again"
         assert elections() == 1
         assert (

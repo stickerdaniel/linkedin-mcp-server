@@ -270,7 +270,11 @@ def register_messaging_tools(
             where the outcome is unknown. ``retry_safe`` separates the two: it
             is false from the moment a submission is attempted, and calling
             again while it is
-            false can deliver the message twice.
+            false can deliver the message twice. A ``status`` of
+            ``outcome_unknown`` is that same warning from the transport rather
+            than the page: the browser process went away with the call in
+            flight, so ``sent`` is absent instead of false and only LinkedIn
+            itself can say whether the message left.
         """
         try:
             # Answered before a session is acquired. Caller-owned message
