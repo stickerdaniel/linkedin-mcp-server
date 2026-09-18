@@ -6,6 +6,13 @@ on:
   # reaches main when the stack merges.
   pull_request:
 
+# One run per branch, for the same reason as CI: restacking pushes every branch
+# in the stack, and the trailers this reads are a property of the head commit,
+# so a superseded run answers a question nobody is asking any more.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 # Coding agents sign their work either with a Co-Authored-By trailer or by
 # claiming the author/committer field. Squash-merging collects the trailers of
 # every commit in the PR into the merge commit, so a single unnoticed trailer
