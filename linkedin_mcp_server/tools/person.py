@@ -254,6 +254,12 @@ def register_person_tools(
             personalized invite notes because the free note quota for the
             account is exhausted. The ``message`` is the raw Premium dialog
             text read from LinkedIn.
+
+            A status of ``outcome_unknown`` comes from the transport rather
+            than the page: the browser process went away with the call in
+            flight, so whether the invitation was sent is unknown. It carries
+            ``retry_safe: False`` and no ``note_sent``; check the profile
+            before calling again, because a repeat may invite twice.
         """
         try:
             extractor = extractor or await get_ready_extractor(

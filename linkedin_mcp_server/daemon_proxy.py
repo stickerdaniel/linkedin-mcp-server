@@ -587,6 +587,38 @@ def create_proxy_provider(
     )
 
 
+# What a client is told when the owner vanished with a mutating call in flight.
+# A value of its own rather than messaging's `send_unconfirmed`, which already
+# says a submission was attempted: here even that is unknown, and the same answer
+# has to fit a connection request as well as a message.
+UNKNOWN_OUTCOME_STATUS = "outcome_unknown"
+
+
+def _unknown_outcome(*, tool: str, reason: str) -> dict[str, Any]:
+    """The structured half of an owner-loss failure, in terms a client knows.
+
+    The field names are `scraping.contracts.message_action_result`'s, so a client
+    that already reads `status` and `retry_safe` on a send needs nothing new for
+    this one. Built here rather than imported from there because no daemon module
+    reaches into `scraping/`: this is not a scraping outcome but the transport
+    saying it knows nothing, and it answers for every mutating tool.
+
+    `url`, `sent` and `recipient_selected` are left out rather than set to null.
+    `sent` is the one thing nobody here knows, and a null reads as a "no" to any
+    client that tests the value rather than the key's presence.
+    """
+    return {
+        "status": UNKNOWN_OUTCOME_STATUS,
+        "message": (
+            f"{tool} was in flight when the shared browser process went away "
+            f"({reason}). Whether the action reached LinkedIn is unknown. Check "
+            "LinkedIn before calling again, because a repeat may perform the "
+            "action a second time."
+        ),
+        "retry_safe": False,
+    }
+
+
 class FrontendOwnerRecoveryMiddleware(Middleware):
     """Find a replacement owner when this one is gone, and repeat what is safe.
 
@@ -668,9 +700,16 @@ class FrontendOwnerRecoveryMiddleware(Middleware):
 
             # Before deciding whether to repeat anything: a replacement is worth
             # having for the *next* call even when this one cannot be repeated.
-            if await self._backend.recover(failure.instance_id) is None:
-                raise
+            replacement = await self._backend.recover(failure.instance_id)
 
+            # Asked before the replacement is looked at, because the answer does
+            # not depend on it: whether the departed owner already acted is
+            # unknown either way, and an election that found nobody makes it no
+            # more knowable. The cost of the new order is that
+            # `a_repeat_could_change_something` now also runs when the election
+            # failed; it catches its own exceptions and answers `True`, so a
+            # lookup against a dead backend lands on the cautious side and is
+            # bounded by the tool timeout.
             if not failure.nothing_was_sent and await a_repeat_could_change_something(
                 context
             ):
@@ -679,10 +718,36 @@ class FrontendOwnerRecoveryMiddleware(Middleware):
                 # already sent the connection request or the message, and asking
                 # costs one retry while guessing wrong sends it twice. The user
                 # knows which happened; this process does not.
+                #
+                # Reported as a result and not by re-raising, because the server
+                # masks error details and that masking sits below this
+                # middleware: a raise here arrives as `Error calling tool
+                # 'send_message'` and nothing else, on the one call whose client
+                # most needs to be told that a retry can deliver the message
+                # twice. `is_error` stays true so a client that reads no
+                # structured content still sees a failure rather than a success
+                # carrying no data, the way `daemon_auth` answers a sign-in.
+                #
+                # Keeping it true is also what lets this payload ignore the
+                # tool's declared output schema: an error result travels as a
+                # whole `CallToolResult`, which `mcp.server.lowlevel.server`
+                # returns unchanged instead of validating it. A success-shaped
+                # dict would be checked against the schema of whichever tool was
+                # called, and this one is a stand-in for all of them.
                 logger.info(
-                    "Attached to a replacement owner; not repeating a call that "
-                    "could change something"
+                    "Owner lost mid-call; reporting an unknown outcome rather "
+                    "than repeating a call that could change something"
                 )
+                answer = _unknown_outcome(
+                    tool=context.message.name, reason=str(failure)
+                )
+                return ToolResult(
+                    content=[mt.TextContent(type="text", text=answer["message"])],
+                    structured_content=answer,
+                    is_error=True,
+                )
+
+            if replacement is None:
                 raise
 
             logger.info("Attached to a replacement owner; running the call again")
