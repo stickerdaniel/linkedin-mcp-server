@@ -9,14 +9,20 @@ on:
   # entirely for the stacks this repository's workflow produces.
   pull_request:
 
-# One run per branch. Restacking a stacked pull request pushes every branch in
-# the stack, and without this every superseded push kept its whole matrix alive
-# to completion, Windows legs included. Those are the ones that cost anything:
-# macOS and Linux runs bill at zero here while Windows is the entire spend.
-# Confined to pull requests, because a run on `main` is the history the release
-# workflow reads and a cancelled one leaves no result there at all.
+# One run per pull request branch. Restacking a stacked pull request pushes
+# every branch in the stack, and without this every superseded push kept its
+# whole matrix alive to completion, Windows legs included. Those are the ones
+# that cost anything: macOS and Linux bill at zero here while Windows is the
+# entire spend.
+#
+# Pushes to main get a group of their own per run, never a shared one. A shared
+# group does not merely decline to cancel the running job; GitHub also evicts
+# whichever run is already waiting when a newer one arrives, so merging three
+# pull requests in quick succession would leave the middle commit with no CI
+# result at all. Keying on run_id makes every main run its own group, which is
+# the only arrangement where each commit on main keeps a result.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -89,15 +95,16 @@ jobs:
       fail-fast: false
       matrix:
         # 3.12.4 exactly, because it is the declared floor and the one version
-        # where private state creation on Windows became possible at all, and
-        # the newest release opposite it. The floor is what notices a daemon
-        # path reaching for something added after it; the newest is what
-        # notices a removal. A version between them can only fail where one of
-        # those two already does, unless it carries a regression of its own,
-        # and paying for that on Windows costs more per push than every other
-        # runner in this file put together. Widen the matrix again if an
-        # interpreter-specific bug ever does land in the middle.
-        python-version: ["3.12.4", "3.14"]
+        # where private state creation on Windows became possible at all.
+        # 3.13 and 3.14 carry the eight-client election stress, which #996
+        # skipped on every Windows 3.12 after 3.12.10 crashed a frontend with
+        # 0xC0000005 while 3.12.4, 3.13 and 3.14 all passed. That incident is
+        # also why no version here may be dropped on the argument that a middle
+        # release can only fail where an endpoint already does: in this
+        # subsystem one demonstrably did. What is gone is the floating `3.12`
+        # entry, which resolved to the crashing interpreter and whose election
+        # coverage #996 had already skipped away.
+        python-version: ["3.12.4", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
