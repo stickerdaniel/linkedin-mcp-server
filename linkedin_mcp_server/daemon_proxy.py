@@ -686,6 +686,55 @@ class FrontendOwnerRecoveryMiddleware(Middleware):
     ) -> Any:
         return await self._repeat_the_listing(context, call_next)
 
+    def _report_an_unknown_outcome(
+        self,
+        context: MiddlewareContext[mt.CallToolRequestParams],
+        failure: OwnerUnreachableError,
+    ) -> ToolResult:
+        """Say that nobody here knows whether the call acted.
+
+        The one case where the honest answer is to report the failure. Nothing in
+        the protocol says whether the departed owner had already sent the
+        connection request or the message, and asking costs one retry while
+        guessing wrong sends it twice. The user knows which happened; this
+        process does not.
+
+        A result rather than a raise, and what decides that is the payload rather
+        than the masking. Two raises have to be told apart, both measured against
+        fastmcp 3.4.7 with the masking this server switches on (``server.py``,
+        ``mask_error_details=True``). Re-raising the failure that arrived says
+        nothing: ``OwnerUnreachableError`` is a plain ``Exception``, so the call
+        below has already replaced it with ``ToolError("Error calling tool
+        'send_message'")`` (``fastmcp/server/server.py:1342-1358``), and that is
+        the whole of what the client gets on the one call that most needs to
+        hear a retry can deliver the message twice. A ``ToolError`` raised
+        *here* keeps its own text: the masking sits below this middleware, and
+        even there a ``FastMCPError`` — which ``ToolError`` is — is re-raised
+        untouched (``:1327-1331``). What neither raise carries is ``status`` and
+        ``retry_safe``, the two fields a client can act on without reading
+        prose, and they are why this answer is a result.
+
+        ``is_error`` stays true so a client that reads no structured content
+        still sees a failure rather than a success carrying no data, the way
+        ``daemon_auth`` answers a sign-in.
+
+        Keeping it true is also what lets this payload ignore the tool's declared
+        output schema: an error result travels as a whole ``CallToolResult``,
+        which ``mcp.server.lowlevel.server`` returns unchanged instead of
+        validating it. A success-shaped dict would be checked against the schema
+        of whichever tool was called, and this one is a stand-in for all of them.
+        """
+        logger.info(
+            "Owner lost mid-call; reporting an unknown outcome rather "
+            "than repeating a call that could change something"
+        )
+        answer = _unknown_outcome(tool=context.message.name, reason=str(failure))
+        return ToolResult(
+            content=[mt.TextContent(type="text", text=answer["message"])],
+            structured_content=answer,
+            is_error=True,
+        )
+
     async def on_call_tool(
         self,
         context: MiddlewareContext[mt.CallToolRequestParams],
@@ -708,50 +757,53 @@ class FrontendOwnerRecoveryMiddleware(Middleware):
             # more knowable. The cost of the new order is that
             # `a_repeat_could_change_something` now also runs when the election
             # failed; it catches its own exceptions and answers `True`, so a
-            # lookup against a dead backend lands on the cautious side and is
-            # bounded by the tool timeout.
+            # lookup against a dead backend lands on the cautious side.
+            #
+            # Not bounded by the owner's tool timeout, which bounds the forwarded
+            # call that has already failed and never enclosed this middleware.
+            # Several separate budgets do bound it: the lookup goes through
+            # `fastmcp.get_tool`, and with the component cache off
+            # (`_NO_COMPONENT_CACHE`) that is a fresh forwarded listing carrying
+            # the client's own deadline (`create_proxy_provider`, `tool_timeout +
+            # _TIMEOUT_MARGIN_SECONDS`), after a `recover` above that may already
+            # have spent `daemon_election.DEFAULT_ELECTION_SECONDS`. And a
+            # cancellation is not one of the exceptions that lands on the
+            # cautious side: `CancelledError` is a `BaseException`, so it passes
+            # that `except Exception` and leaves through here, which is what
+            # should happen to it.
             if not failure.nothing_was_sent and await a_repeat_could_change_something(
                 context
             ):
-                # The one case where the honest answer is to report the failure.
-                # Nothing in the protocol says whether the departed owner had
-                # already sent the connection request or the message, and asking
-                # costs one retry while guessing wrong sends it twice. The user
-                # knows which happened; this process does not.
-                #
-                # Reported as a result and not by re-raising, because the server
-                # masks error details and that masking sits below this
-                # middleware: a raise here arrives as `Error calling tool
-                # 'send_message'` and nothing else, on the one call whose client
-                # most needs to be told that a retry can deliver the message
-                # twice. `is_error` stays true so a client that reads no
-                # structured content still sees a failure rather than a success
-                # carrying no data, the way `daemon_auth` answers a sign-in.
-                #
-                # Keeping it true is also what lets this payload ignore the
-                # tool's declared output schema: an error result travels as a
-                # whole `CallToolResult`, which `mcp.server.lowlevel.server`
-                # returns unchanged instead of validating it. A success-shaped
-                # dict would be checked against the schema of whichever tool was
-                # called, and this one is a stand-in for all of them.
-                logger.info(
-                    "Owner lost mid-call; reporting an unknown outcome rather "
-                    "than repeating a call that could change something"
-                )
-                answer = _unknown_outcome(
-                    tool=context.message.name, reason=str(failure)
-                )
-                return ToolResult(
-                    content=[mt.TextContent(type="text", text=answer["message"])],
-                    structured_content=answer,
-                    is_error=True,
-                )
+                return self._report_an_unknown_outcome(context, failure)
 
             if replacement is None:
                 raise
 
             logger.info("Attached to a replacement owner; running the call again")
-            return await call_next(context)
+            try:
+                return await call_next(context)
+            except Exception as again:
+                # The replacement can go away exactly like the first owner, and
+                # by then the repeat may have acted: it was made only because
+                # nothing left this process the first time, which says nothing
+                # about the second. Left to escape, it reaches the client as
+                # `Error calling tool 'send_message'` and nothing else, which is
+                # the #891 damage one round later — a client told nothing repeats
+                # a message that may already be delivered.
+                #
+                # Classified again rather than attempted again. Exactly two
+                # attempts: no recursion here and no second `recover`, because a
+                # third attempt would be a guess about an owner that has now
+                # failed twice, and the question it raises — whether the second
+                # attempt acted — is the one nothing here can answer.
+                repeat = unreachable_owner_in(again)
+                if (
+                    repeat is not None
+                    and not repeat.nothing_was_sent
+                    and await a_repeat_could_change_something(context)
+                ):
+                    return self._report_an_unknown_outcome(context, repeat)
+                raise
 
 
 class FrontendCallHeartbeatMiddleware(Middleware):

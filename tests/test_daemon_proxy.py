@@ -751,6 +751,7 @@ class TestRepeatingOnlyWhatIsSafe:
         *,
         nothing_was_sent: bool,
         instance_id: str,
+        the_repeat_sent_nothing: bool | None = None,
     ) -> tuple[Any | None, int]:
         """Drive one failing call through the middleware.
 
@@ -760,6 +761,12 @@ class TestRepeatingOnlyWhatIsSafe:
         that cannot repeat a call now reports it: "did not succeed" no longer
         distinguishes a payload naming the unknown outcome from a masked raise
         that names nothing.
+
+        *the_repeat_sent_nothing* is the replacement dying too: `None` for a
+        repeat that succeeds, and otherwise the second failure's own
+        `nothing_was_sent`. A repeat that always answers "the result" is the only
+        thing this helper could express before, and it cannot show what happens
+        to a failure on the way back out.
         """
         from linkedin_mcp_server.daemon_proxy import (
             FrontendOwnerRecoveryMiddleware,
@@ -776,6 +783,14 @@ class TestRepeatingOnlyWhatIsSafe:
                     instance_id=instance_id,
                     nothing_was_sent=nothing_was_sent,
                     cause=httpx.ConnectError("gone"),
+                )
+            if the_repeat_sent_nothing is not None:
+                raise OwnerUnreachableError(
+                    # The replacement's identity, not the failed owner's: this is
+                    # a second owner going away, not the first failing late.
+                    instance_id=f"{instance_id}-replacement",
+                    nothing_was_sent=the_repeat_sent_nothing,
+                    cause=httpx.ConnectError("gone as well"),
                 )
             return "the result"
 
@@ -893,6 +908,67 @@ class TestRepeatingOnlyWhatIsSafe:
         assert answer == "the result"
         assert attempts == 2
 
+    async def test_a_replacement_that_dies_too_is_reported(self, _recovering):
+        """The repeat can act, and an escaping failure is #891 one round later.
+
+        The first attempt was repeated only because nothing had left this
+        process; that says nothing about the second, which the replacement may
+        have taken and run before going away itself. Escaping, it is flattened
+        to `Error calling tool 'do_the_thing'` — and a client told only that
+        sends the message again.
+        """
+        backend, failed = _recovering
+        answer, attempts = await self._run(
+            backend,
+            self._context(read_only=False),
+            nothing_was_sent=True,
+            instance_id=failed,
+            the_repeat_sent_nothing=False,
+        )
+
+        assert attempts == 2, "a repeat that may have run was attempted again"
+        reported = self._reported(answer)
+        assert reported["status"] == "outcome_unknown"
+        assert reported["retry_safe"] is False
+
+    async def test_a_repeat_that_never_left_either_still_raises(self, _recovering):
+        """Two attempts, neither of which reached anybody: nothing to describe.
+
+        `outcome_unknown` is a claim that something may have happened on
+        LinkedIn. A repeat that provably never left the process makes no such
+        claim, and reporting one would hand a client a `retry_safe` flag about a
+        call nobody ever received.
+        """
+        backend, failed = _recovering
+        answer, attempts = await self._run(
+            backend,
+            self._context(read_only=False),
+            nothing_was_sent=True,
+            instance_id=failed,
+            the_repeat_sent_nothing=True,
+        )
+
+        assert answer is None, "a call that provably never left was called unknown"
+        assert attempts == 2
+
+    async def test_a_read_only_repeat_that_fails_stays_a_failure(self, _recovering):
+        """A read has no outcome to be unknown about, on either attempt.
+
+        The same rule as with no replacement at all: turning this into a result
+        would dress a plain transport failure up as a LinkedIn answer.
+        """
+        backend, failed = _recovering
+        answer, attempts = await self._run(
+            backend,
+            self._context(read_only=True),
+            nothing_was_sent=False,
+            instance_id=failed,
+            the_repeat_sent_nothing=False,
+        )
+
+        assert answer is None, "a failed read was reported as an unknown outcome"
+        assert attempts == 2
+
     async def test_a_read_only_call_is_repeated_even_when_it_may_have_run(
         self, _recovering
     ):
@@ -943,6 +1019,27 @@ class TestRepeatingOnlyWhatIsSafe:
 
         assert attempts == 1
         assert self._reported(answer)["status"] == "outcome_unknown"
+        assert backend.attachment.descriptor.instance_id == failed
+
+    async def test_a_repeatable_call_needs_somewhere_to_repeat_it(self, _alone):
+        """Nothing was sent, and there is nobody left to send it to.
+
+        The dispatch question says a repeat would be *safe*, not that there is
+        anywhere to run it: the owner it would go to is the one that has just
+        gone away, so a repeat here is a second failure rather than a second
+        chance. It stays a raise, because a call that provably never left has no
+        unknown outcome to report either.
+        """
+        backend, failed = _alone
+        answer, attempts = await self._run(
+            backend,
+            self._context(read_only=False),
+            nothing_was_sent=True,
+            instance_id=failed,
+        )
+
+        assert answer is None, "a transport failure was dressed up as an outcome"
+        assert attempts == 1, "the call was repeated against the departed owner"
         assert backend.attachment.descriptor.instance_id == failed
 
     async def test_a_safe_call_with_no_replacement_still_raises(self, _alone):
