@@ -94,7 +94,15 @@ jobs:
         env:
           ROUNDS: ${{ inputs.rounds }}
         run: |
-          for round in $(seq 1 "$ROUNDS"); do
+          # A round count of zero would leave the loop below with nothing to do
+          # and report the same green as a soak that held, which is the reading
+          # the step above exists to refuse. `number` accepts zero, negatives
+          # and decimals, so it is checked here rather than trusted.
+          if ! [[ "$ROUNDS" =~ ^[0-9]+$ ]] || (( ROUNDS < 1 )); then
+            echo "rounds must be a positive whole number, got: $ROUNDS"
+            exit 1
+          fi
+          for (( round = 1; round <= ROUNDS; round++ )); do
             echo "::group::round $round of $ROUNDS"
             uv run pytest "$TARGET" -q -x
             echo "::endgroup::"
