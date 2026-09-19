@@ -1727,3 +1727,52 @@ class TestRecoveringThroughTheWholeProxy:
         assert result.data == "sent"
         assert ran == ["sent"], "the owner did not run the call exactly once"
         assert elections() == 0, "a closing failure stood a replacement up"
+
+    async def test_a_caller_that_gives_up_at_the_close_stays_cancelled(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The one failure at this boundary that is not the session's: a cancel.
+
+        The guard catches `Exception`, and the whole distance between that and
+        `BaseException` sits here: a `CancelledError` is a caller giving up
+        rather than the owner's session failing, and a guard that returned for
+        one would tell a caller that had already walked away that its call went
+        through.
+
+        Where such a cancellation can reach this boundary was measured against
+        this client, and it is one window. Delivered any earlier it is already
+        in flight at `__aexit__`, where a falsy return changes nothing about it.
+        Delivered while `Client._disconnect` awaits the session task — the
+        disconnect timeout, a close that hangs, the forced cancel that follows
+        it — it is absorbed by that method's own
+        `suppress(asyncio.CancelledError)` (`client.py`) and never arrives at
+        all. What is left is the window below: the answer is in hand and the
+        close has not started, so the delivery lands on the first checkpoint
+        inside `_disconnect`, acquiring `_session_state.lock`.
+
+        Driven against the client `open_client` builds rather than the whole
+        server, because only the operation's own task can give up in that
+        window, and in the server that task is inside `ProxyTool.run`.
+        """
+        ran: list[str] = []
+        _reach_owners_in_process(monkeypatch, lambda _url: self._mutating_owner(ran))
+        client = _backend(_attachment(tmp_path), tmp_path).open_client(timeout=1.0)
+        went_on: list[str] = []
+
+        async def gives_up_with_the_answer_in_hand() -> None:
+            async with client:
+                await client.call_tool_mcp("send_connection_request", {})
+                giving_up = asyncio.current_task()
+                assert giving_up is not None
+                giving_up.cancel()
+            went_on.append("the close answered a caller that had gone")
+
+        operation = asyncio.create_task(gives_up_with_the_answer_in_hand())
+        with pytest.raises(asyncio.CancelledError):
+            await operation
+
+        assert went_on == [], "a caller that gave up was carried on regardless"
+        assert ran == ["sent"], "the owner did not run the call exactly once"
+        # The cancelled close never reached the session task. Clearing up after
+        # the caller, not part of what this pins.
+        await client.close()

@@ -396,13 +396,16 @@ def _tells_which_owner_failed() -> type:
             a call that did send the connection request, and this half carries no
             tag anywhere, so no detector could have found it.
 
-            Swallowing costs nothing that was worth keeping. A client here is
+            Swallowing adds no leak of its own here, which is a narrower claim
+            than a promise about every way cleanup can fail. A client here is
             built for one operation and dropped (``open_client``), and
             ``_disconnect`` drops the session task in its own ``finally`` —
             cancelling it first if it is still running — before this is reached,
-            so no transport resource depends on the exception being seen. The
-            operation succeeded or it failed, and a departure this one misses is
-            found by the next operation, which opens a client of its own.
+            so what arrives is the report of a failure and not a resource still
+            held; what a future ``_disconnect`` might leave behind when *it*
+            fails is its own to answer for. The operation succeeded or it
+            failed, and a departure this one misses is found by the next
+            operation, which opens a client of its own.
             Cancellation is not caught, because ``CancelledError`` is a
             ``BaseException`` and a caller giving up is not the session's own
             failure.
