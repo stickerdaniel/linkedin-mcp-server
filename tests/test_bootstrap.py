@@ -1578,21 +1578,41 @@ class TestTwoStageInstall:
 
         loop = asyncio.get_running_loop()
         clock = [loop.time()]
+        setup_started = asyncio.Event()
+        request_activity = asyncio.Event()
+        activity_recorded = asyncio.Event()
         monkeypatch.setattr(loop, "time", lambda: clock[0])
 
         async def progressing_setup(
             *, activity_callback: Callable[[], None], **_kwargs: object
         ) -> None:
+            setup_started.set()
             for _ in range(3):
-                clock[0] += 0.04
+                await request_activity.wait()
+                request_activity.clear()
                 activity_callback()
-                await asyncio.sleep(0)
+                activity_recorded.set()
 
         monkeypatch.setattr(bootstrap, "_browser_setup_ready", lambda: False)
         monkeypatch.setattr(bootstrap, "_run_browser_setup", progressing_setup)
         monkeypatch.setattr(bootstrap, "_BACKGROUND_BROWSER_SETUP_SECONDS", 0.06)
 
-        await bootstrap._run_background_browser_setup()
+        setup = asyncio.create_task(bootstrap._run_background_browser_setup())
+        await setup_started.wait()
+        for _ in range(3):
+            clock[0] += 0.04
+            timers_checked = asyncio.Event()
+            loop.call_at(clock[0], timers_checked.set)
+            await timers_checked.wait()
+            if setup.done():
+                pytest.fail(
+                    "the inactivity deadline expired before activity: "
+                    f"{setup.exception()}"
+                )
+            request_activity.set()
+            await activity_recorded.wait()
+            activity_recorded.clear()
+        await setup
 
     async def test_activity_still_extends_inactivity_under_the_ceiling(
         self, isolate_profile_dir, monkeypatch
@@ -1600,28 +1620,48 @@ class TestTwoStageInstall:
         """The absolute ceiling must not cost the inactivity extension."""
         from linkedin_mcp_server import bootstrap
 
+        loop = asyncio.get_running_loop()
+        clock = [loop.time()]
+        setup_started = asyncio.Event()
+        request_activity = asyncio.Event()
+        activity_recorded = asyncio.Event()
         rounds = 0
+        monkeypatch.setattr(loop, "time", lambda: clock[0])
 
         async def progressing_setup(
             *, activity_callback: Callable[[], None], **_kwargs: object
         ) -> None:
             nonlocal rounds
+            setup_started.set()
             for _ in range(6):
-                await asyncio.sleep(0.04)
+                await request_activity.wait()
+                request_activity.clear()
                 activity_callback()
                 rounds += 1
+                activity_recorded.set()
 
         monkeypatch.setattr(bootstrap, "_browser_setup_ready", lambda: False)
         monkeypatch.setattr(bootstrap, "_run_browser_setup", progressing_setup)
         monkeypatch.setattr(bootstrap, "_BACKGROUND_BROWSER_SETUP_SECONDS", 0.06)
         monkeypatch.setattr(bootstrap, "_BROWSER_SETUP_LIFETIME_SECONDS", 30.0)
 
-        await bootstrap._run_background_browser_setup()
+        setup = asyncio.create_task(bootstrap._run_background_browser_setup())
+        await setup_started.wait()
+        for _ in range(6):
+            clock[0] += 0.04
+            timers_checked = asyncio.Event()
+            loop.call_at(clock[0], timers_checked.set)
+            await timers_checked.wait()
+            if setup.done():
+                pytest.fail(
+                    "the inactivity deadline expired before activity: "
+                    f"{setup.exception()}"
+                )
+            request_activity.set()
+            await activity_recorded.wait()
+            activity_recorded.clear()
+        await setup
 
-        # Six rounds of 40ms outlive a 60ms inactivity window only because each
-        # one rescheduled it. The margin is a third of the window rather than a
-        # quarter of it: at 15ms against 20ms an ordinary scheduling delay was
-        # enough to expire the deadline this test says cannot expire.
         assert rounds == 6
 
     async def test_continuous_activity_cannot_extend_the_absolute_lifetime(
@@ -1862,12 +1902,17 @@ class TestTwoStageInstall:
 
         blocked = threading.Event()
         release = threading.Event()
+        fallback_fired = threading.Event()
         loop = asyncio.get_running_loop()
         clock = [loop.time()]
 
         def slow_mkdir(path: Path) -> None:
             blocked.set()
             release.wait()
+
+        def release_fallback() -> None:
+            fallback_fired.set()
+            release.set()
 
         async def install_must_not_start(*args: object, **kwargs: object) -> None:
             pytest.fail("the deadline should expire during cache preparation")
@@ -1880,21 +1925,21 @@ class TestTwoStageInstall:
         monkeypatch.setattr(bootstrap, "_BACKGROUND_BROWSER_SETUP_SECONDS", 0.01)
 
         setup = asyncio.create_task(bootstrap._run_background_browser_setup())
-        fallback = threading.Timer(1.0, release.set)
+        fallback = threading.Timer(1.0, release_fallback)
         fallback.start()
         try:
             assert await asyncio.to_thread(blocked.wait, 5), (
                 "cache preparation did not enter its worker thread"
             )
-            started = time.monotonic()
             clock[0] += 0.01
             with pytest.raises(BrowserSetupFailedError, match="background deadline"):
                 await setup
+            assert not fallback_fired.is_set(), (
+                "the hang fallback released cache preparation before the deadline"
+            )
         finally:
             release.set()
             fallback.cancel()
-
-        assert time.monotonic() - started < 0.1
 
     async def test_setup_filesystem_work_uses_a_daemon_thread(self, monkeypatch):
         from linkedin_mcp_server import bootstrap
