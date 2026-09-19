@@ -1,11 +1,15 @@
 """Tests for core utility functions (rate-limit detection, scrolling, modals)."""
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from linkedin_mcp_server.core.exceptions import RateLimitError
-from linkedin_mcp_server.core.utils import detect_rate_limit, scroll_job_sidebar
+from linkedin_mcp_server.core.utils import (
+    detect_rate_limit,
+    scroll_job_sidebar,
+    scroll_to_bottom,
+)
 
 
 @pytest.fixture
@@ -141,3 +145,25 @@ class TestScrollDeadline:
         await scroll_job_sidebar(page, deadline=0.0004)
 
         assert page.wait_for_selector.await_args.kwargs["timeout"] == 1
+
+
+class TestScrollToBottomPacing:
+    async def test_the_pause_between_scrolls_is_jittered(self):
+        """A constant scroll cadence is a bot tell; every pause goes through
+        `jitter`, so the sleep is the jittered length and not `pause_time`."""
+        page = MagicMock()
+        page.evaluate = AsyncMock(side_effect=[1000, None, 2000, 2000, None, 2000])
+
+        with (
+            patch(
+                "linkedin_mcp_server.core.utils.jitter",
+                side_effect=lambda base, *a, **kw: base * 1.5,
+            ) as jitter,
+            patch(
+                "linkedin_mcp_server.core.utils.asyncio.sleep", new_callable=AsyncMock
+            ) as sleep,
+        ):
+            await scroll_to_bottom(page, pause_time=1.0, max_scrolls=5)
+
+        assert jitter.call_args_list == [((1.0,),), ((1.0,),)]
+        assert sleep.await_args_list == [((1.5,),), ((1.5,),)]

@@ -632,6 +632,55 @@ class TestActivityFeedExtraction:
 
         assert show_more.click.await_count == 2
 
+    async def test_details_page_show_more_clicks_pace_like_navigations(self, mock_page):
+        """The pause after a click is a deliberate one, so it goes through the
+        session's jittered pacing rather than a fixed sleep."""
+        mock_page.evaluate = AsyncMock(
+            return_value={"source": "root", "text": "text", "references": []}
+        )
+        mock_page.wait_for_function = AsyncMock()
+
+        show_more = MagicMock()
+        show_more.count = AsyncMock(side_effect=[1, 0])
+        show_more.is_visible = AsyncMock(return_value=True)
+        show_more.scroll_into_view_if_needed = AsyncMock()
+        show_more.click = AsyncMock()
+        show_more.first = show_more
+        show_more.filter = MagicMock(return_value=show_more)
+
+        def locator_side_effect(selector):
+            if selector == "main button":
+                return show_more
+            return MagicMock(count=AsyncMock(return_value=0))
+
+        mock_page.locator = MagicMock(side_effect=locator_side_effect)
+        capture = _capture(mock_page)
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.session.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch.object(ScrapingSession, "pace", new_callable=AsyncMock) as pace,
+        ):
+            await capture._capture_once(
+                "https://www.linkedin.com/in/billgates/details/certifications/",
+                section_name="certifications",
+                plan=CapturePlan(CaptureMode.DETAILS),
+            )
+
+        show_more.click.assert_awaited_once()
+        pace.assert_awaited_once_with(1.0)
+
     async def test_details_page_show_more_respects_max_scrolls_budget(self, mock_page):
         """When 'Show more' never disappears, loop exits after max_scrolls clicks."""
         mock_page.evaluate = AsyncMock(
