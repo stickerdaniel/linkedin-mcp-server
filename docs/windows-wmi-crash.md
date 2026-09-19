@@ -35,8 +35,15 @@ against a CPython clone:
 | 3.14 | yes |
 | main | yes |
 
-3.12 is in security-only maintenance and this is a crash, not a vulnerability,
-so no backport is coming. That split is exactly the one #838 reports.
+A branch is not a release. The fix reached 3.13 users in **3.13.4**, released
+2025-06-03, so 3.13.0 through 3.13.3 carry the defect as well. Read the table
+as the current state of those branches, not as a property every release on them
+has always had.
+
+3.12 is in security-only maintenance, so no backport has come. That is a
+statement about today rather than a guarantee about tomorrow, and calling this
+a crash is not a finding that it could never be a vulnerability. The split the
+table shows is the one #838 reports.
 
 ## The captured fault
 
@@ -80,9 +87,12 @@ above.
 
 ## The load that reaches it
 
-The timeouts are only reached under contention. The eight-client election
-starts eight frontends at once, each spawning a daemon owner, so sixteen
-processes initialise COM together. Every one of them asks for the runtime id.
+Contention is the trigger observed here, not the only way to exhaust those
+waits: the same 3.12 source discusses a five-second delay when the caller
+lacks permission to connect, which alone exceeds them. What this test supplies
+is load. The eight-client election starts eight frontends at once, each
+spawning a daemon owner, so sixteen processes initialise COM together, and
+every one of them asks for the runtime id.
 
 ## Verification of the fix
 
@@ -100,3 +110,12 @@ About a dozen crashes were expected across 254 rounds at the observed rate.
 against it, including dependencies: 0 calls during imports, 0 calls from
 `get_runtime_id()` on the Windows branch, and `platform._uname_cache` still
 `None` afterwards.
+
+## Alternatives
+
+Avoiding the query does not mean the architecture is unobtainable. Windows
+answers it without WMI through `GetNativeSystemInfo`, which this project now
+uses when the environment is silent, and through `IsWow64Process2`, which
+reports the process and native machines separately. Neither is a drop-in
+replacement for the WMI reply under emulation; see the decision record for
+which pairing is established and which is not.

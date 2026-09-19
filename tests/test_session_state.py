@@ -7,6 +7,8 @@ import pytest
 
 from linkedin_mcp_server.profile_claim import ensure_profile_claim
 from linkedin_mcp_server.session_state import (
+    _WINDOWS_ARCHITECTURES,
+    _normalize_arch,
     clear_auth_state,
     get_runtime_id,
     load_runtime_state,
@@ -324,16 +326,79 @@ def test_a_wow64_windows_frontend_reports_the_native_architecture(monkeypatch):
     assert get_runtime_id() == "windows-arm64-host"
 
 
+def test_a_stripped_windows_environment_keeps_the_architecture(monkeypatch):
+    # The regression this fix nearly shipped. `platform._get_machine_win32`
+    # asks WMI *first* and reads these variables only when that fails, so a
+    # process launched without them — an MCP host or a service that sanitises
+    # the environment — used to be told AMD64 by the query. Answering "unknown"
+    # there would rename the directory holding its runtime profile, and the
+    # session inside it would simply stop being found.
+    _windows_runtime(monkeypatch)
+    _refuse_uname(monkeypatch)
+    monkeypatch.delenv("PROCESSOR_ARCHITEW6432", raising=False)
+    monkeypatch.delenv("PROCESSOR_ARCHITECTURE", raising=False)
+    monkeypatch.setattr(
+        "linkedin_mcp_server.session_state._native_machine_win32", lambda: "AMD64"
+    )
+
+    assert get_runtime_id() == "windows-amd64-host"
+
+
 def test_an_unnamed_windows_architecture_does_not_fall_back_to_wmi(monkeypatch):
-    # Windows sets PROCESSOR_ARCHITECTURE in every process environment, so this
-    # is a machine that has had it removed. "unknown" is a poor answer and a
-    # stable one; the only better answer available is the query that crashes.
+    # Both variables gone and the kernel refusing to name the machine too.
+    # "unknown" is a poor answer and a stable one; the only answer left is the
+    # query that crashes, and this asserts it is still not asked.
     _windows_runtime(monkeypatch)
     _refuse_uname(monkeypatch)
     monkeypatch.setenv("PROCESSOR_ARCHITEW6432", "")
     monkeypatch.setenv("PROCESSOR_ARCHITECTURE", "")
+    monkeypatch.setattr(
+        "linkedin_mcp_server.session_state._native_machine_win32", lambda: ""
+    )
 
     assert get_runtime_id() == "windows-unknown-host"
+
+
+def test_the_kernel_architecture_table_matches_cpython(monkeypatch):
+    # The fallback only preserves the id while it spells architectures the way
+    # the WMI reply did. `Win32_Processor.Architecture` and
+    # `SYSTEM_INFO.wProcessorArchitecture` are one enumeration, so the table is
+    # CPython's, and this is the check that it stays CPython's.
+    assert _WINDOWS_ARCHITECTURES == (
+        "x86",
+        "MIPS",
+        "Alpha",
+        "PowerPC",
+        "",
+        "ARM",
+        "ia64",
+        "",
+        "",
+        "AMD64",
+        "",
+        "",
+        "ARM64",
+    )
+    assert _normalize_arch(_WINDOWS_ARCHITECTURES[9]) == "amd64"
+    assert _normalize_arch(_WINDOWS_ARCHITECTURES[12]) == "arm64"
+
+
+def test_the_kernel_is_not_asked_when_the_environment_answers(monkeypatch):
+    # Precedence, so the fallback cannot start deciding for processes that
+    # already had an answer. Those are every ordinary Windows process.
+    _windows_runtime(monkeypatch)
+    _refuse_uname(monkeypatch)
+    monkeypatch.delenv("PROCESSOR_ARCHITEW6432", raising=False)
+    monkeypatch.setenv("PROCESSOR_ARCHITECTURE", "ARM64")
+
+    def refuse() -> str:
+        raise AssertionError("the runtime id asked the kernel needlessly")
+
+    monkeypatch.setattr(
+        "linkedin_mcp_server.session_state._native_machine_win32", refuse
+    )
+
+    assert get_runtime_id() == "windows-arm64-host"
 
 
 def _seed_session(profile_dir, *, machine_id: str = "4663753") -> None:

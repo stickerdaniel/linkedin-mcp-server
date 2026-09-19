@@ -159,9 +159,7 @@ def _platform_names() -> tuple[str, str]:
     ``platform.uname()``, which on Windows runs two WMI queries, and a WMI
     query can take a CPython 3.12 process down with it (#838). Windows is
     therefore decided from ``sys.platform``: asking in order to decide whether
-    to avoid asking would defeat it, and a first attempt that avoided only
-    ``platform.machine()`` still crashed for that reason. There is deliberately
-    no fallback past ``PROCESSOR_ARCHITECTURE``.
+    to avoid asking would defeat it.
 
     See ``docs/decisions/2026-09-19-windows-runtime-identity.md``.
     """
@@ -170,7 +168,72 @@ def _platform_names() -> tuple[str, str]:
     return "Windows", (
         os.environ.get("PROCESSOR_ARCHITEW6432", "")
         or os.environ.get("PROCESSOR_ARCHITECTURE", "")
+        or _native_machine_win32()
     )
+
+
+# `Win32_Processor.Architecture`, which CPython indexes with the WMI reply, and
+# `SYSTEM_INFO.wProcessorArchitecture` are one enumeration, so the same table
+# reads the kernel's answer. Kept verbatim from `platform._get_machine_win32`
+# so the two spell every architecture identically; the blanks are that
+# function's `None` entries.
+_WINDOWS_ARCHITECTURES = (
+    "x86",
+    "MIPS",
+    "Alpha",
+    "PowerPC",
+    "",
+    "ARM",
+    "ia64",
+    "",
+    "",
+    "AMD64",
+    "",
+    "",
+    "ARM64",
+)
+
+
+def _native_machine_win32() -> str:
+    """Ask the kernel for the processor architecture, rather than WMI.
+
+    Reached only when neither architecture variable is set. Without it the id
+    would move for such a process, because the WMI query this replaces was
+    tried *before* those variables and answers where they are absent.
+
+    Every failure returns the empty string, which the caller reports as an
+    unknown architecture. That is the same outcome as before this fallback
+    existed, so a refusal here cannot be worse than not asking.
+    """
+    try:
+        import ctypes
+
+        class _SystemInfo(ctypes.Structure):
+            _fields_ = (
+                ("wProcessorArchitecture", ctypes.c_ushort),
+                ("wReserved", ctypes.c_ushort),
+                ("dwPageSize", ctypes.c_ulong),
+                ("lpMinimumApplicationAddress", ctypes.c_void_p),
+                ("lpMaximumApplicationAddress", ctypes.c_void_p),
+                ("dwActiveProcessorMask", ctypes.c_void_p),
+                ("dwNumberOfProcessors", ctypes.c_ulong),
+                ("dwProcessorType", ctypes.c_ulong),
+                ("dwAllocationGranularity", ctypes.c_ulong),
+                ("wProcessorLevel", ctypes.c_ushort),
+                ("wProcessorRevision", ctypes.c_ushort),
+            )
+
+        info = _SystemInfo()
+        # `GetNativeSystemInfo`, not `GetSystemInfo`: a WOW64 process has to
+        # read the architecture of the machine, not of its own emulation.
+        # WinDLL exists only on Windows, and a type checker running elsewhere
+        # resolves the attribute against its own platform.
+        _win_dll = getattr(ctypes, "WinDLL")
+        _win_dll("kernel32").GetNativeSystemInfo(ctypes.byref(info))
+        return _WINDOWS_ARCHITECTURES[info.wProcessorArchitecture]
+    except (AttributeError, ImportError, IndexError, OSError, ValueError):
+        logger.debug("the kernel did not name the architecture", exc_info=True)
+        return ""
 
 
 def _normalize_os(system: str) -> str:
