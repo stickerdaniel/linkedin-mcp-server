@@ -12,13 +12,16 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import windows_guardian_probe as probe
 
 from linkedin_mcp_server import process_tree
 from linkedin_mcp_server.profile_lease import ProfileLease
 from windows_guardian_probe import (
     guardian_shutdown_sequence,
+    observe_guardian_identity,
     observe_named_job_objects,
     sample_pre_crash_contention,
+    starter_termination_measurement,
     terminate_wait_close_handles,
 )
 
@@ -43,6 +46,12 @@ def communicate_harness(
     return output
 
 
+def assert_probe_returncode(
+    returncode: int | None, expected: int, stderr: bytes
+) -> None:
+    assert returncode == expected, stderr.decode("utf-8", "replace")
+
+
 def await_fail_closed_guardian(
     process: Any, harness: Any, root: Path, *, timeout: float
 ) -> dict[str, Any]:
@@ -60,6 +69,18 @@ def await_fail_closed_guardian(
                     "the failed guardian exited before handle observation: "
                     f"stdout={stdout!r} stderr={stderr!r}"
                 )
+            termination_path = root / "starter-termination.json"
+            while not termination_path.exists():
+                if process.poll() is not None:
+                    stdout, stderr = process.communicate()
+                    raise AssertionError(
+                        "the probe exited before starter termination evidence: "
+                        f"stdout={stdout!r} stderr={stderr!r}"
+                    )
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("the probe did not report starter termination")
+                time.sleep(0.01)
+            termination = json.loads(termination_path.read_text(encoding="utf-8"))
             browser_job_name = json.loads(
                 (root / "browser-job.json").read_text(encoding="utf-8")
             )["name"]
@@ -74,6 +95,9 @@ def await_fail_closed_guardian(
             if acquired_before_drain:
                 contender.release()
                 raise AssertionError("the failed guardian released its profile fence")
+            guardian_identity = observe_guardian_identity(
+                guardian["guardian_identity_mutex"]
+            )
             harness.terminate()
             try:
                 process.wait(timeout=30)
@@ -89,8 +113,9 @@ def await_fail_closed_guardian(
                 time.sleep(0.01)
             return {
                 "scenario": root.name,
+                **termination,
                 "guardian": guardian,
-                "guardian_alive_before_harness_drain": True,
+                "guardian_identity_before_harness_drain": guardian_identity,
                 "retained_jobs_before_harness_drain": retained_jobs,
                 "contended_before_harness_drain": not acquired_before_drain,
                 "acquired_after_harness_drain": acquired_after_drain,
@@ -126,6 +151,9 @@ def _run_probe(tmp_path: Path, scenario: str) -> dict[str, Any]:
         stderr=subprocess.PIPE,
     )
     assigned = False
+    measurement = None
+    stdout = b""
+    stderr = b""
     try:
         harness.assign_popen(process)
         assigned = True
@@ -133,8 +161,10 @@ def _run_probe(tmp_path: Path, scenario: str) -> dict[str, Any]:
             raise RuntimeError("the probe harness has no release stream")
         process_tree.release_windows_gate(process.stdin, nonce)
         if scenario.startswith("candidate-"):
-            return await_fail_closed_guardian(process, harness, root, timeout=20)
-        stdout, stderr = communicate_harness(process, harness, timeout=180)
+            measurement = await_fail_closed_guardian(process, harness, root, timeout=20)
+            stdout, stderr = process.communicate()
+        else:
+            stdout, stderr = communicate_harness(process, harness, timeout=180)
     finally:
         if not harness.closed:
             if assigned:
@@ -151,7 +181,10 @@ def _run_probe(tmp_path: Path, scenario: str) -> dict[str, Any]:
         if process.poll() is None:
             process.kill()
             process.wait(timeout=30)
-    assert process.returncode == 0, stderr.decode("utf-8", "replace")
+    expected_returncode = 1 if scenario.startswith("candidate-") else 0
+    assert_probe_returncode(process.returncode, expected_returncode, stderr)
+    if measurement is not None:
+        return measurement
     return json.loads(stdout)
 
 
@@ -175,6 +208,66 @@ def test_pre_crash_contention_is_measured_before_termination() -> None:
 
     assert events == ["try"]
     assert sample == {"attempted_ns": 123, "acquired": False}
+
+
+def test_starter_termination_requires_a_later_owner_exit() -> None:
+    assert starter_termination_measurement(10, 11) == {
+        "terminated_ns": 10,
+        "owner_exit_ns": 11,
+    }
+    with pytest.raises(RuntimeError, match="did not follow"):
+        starter_termination_measurement(10, 10)
+
+
+def test_guardian_identity_requires_an_owned_mutex(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class Handle:
+        def Close(self) -> None:
+            events.append("close")
+
+    class Win32Con:
+        SYNCHRONIZE = 1
+        MUTEX_MODIFY_STATE = 2
+
+    class Win32Event:
+        @staticmethod
+        def OpenMutex(access: int, inherit: bool, name: str) -> Handle:
+            events.append(f"open {access} {inherit} {name}")
+            return Handle()
+
+        @staticmethod
+        def WaitForSingleObject(_handle: Handle, timeout: int) -> int:
+            events.append(f"wait {timeout}")
+            return 0
+
+        @staticmethod
+        def ReleaseMutex(_handle: Handle) -> None:
+            events.append("release")
+
+    monkeypatch.setattr(
+        probe,
+        "_windows_modules",
+        lambda: (object(), Win32Con, Win32Event, object()),
+    )
+
+    with pytest.raises(RuntimeError, match="no longer owns"):
+        observe_guardian_identity("guardian-mutex")
+
+    assert events == [
+        "open 3 False guardian-mutex",
+        "wait 0",
+        "release",
+        "close",
+    ]
+
+
+def test_failed_probe_requires_the_harness_termination_returncode() -> None:
+    assert_probe_returncode(1, 1, b"")
+    with pytest.raises(AssertionError):
+        assert_probe_returncode(0, 1, b"")
 
 
 def test_harness_timeout_terminates_and_drains_the_outer_job() -> None:
@@ -360,7 +453,7 @@ def test_native_owner_crash_releases_lease_before_job_descendants_exit(
         measurement["pre_crash_contention"]["attempted_ns"]
         < measurement["terminated_ns"]
     )
-    assert measurement["owner_exit_ns"] >= measurement["terminated_ns"]
+    assert measurement["owner_exit_ns"] > measurement["terminated_ns"]
     assert measurement["lease_acquired_ns"] < measurement["descendants_exit_ns"]
     assert measurement["active_descendants_at_lease_acquire"] > 0
     assert measurement["guardian_outside_owner_job"] is None
@@ -394,8 +487,10 @@ def test_failed_guardian_holds_fence_until_outer_harness_drain(
     _record_measurement(measurement)
     guardian = measurement["guardian"]
     retained_jobs = measurement["retained_jobs_before_harness_drain"]
+    guardian_identity = measurement["guardian_identity_before_harness_drain"]
 
-    assert measurement["guardian_alive_before_harness_drain"] is True
+    assert measurement["owner_exit_ns"] > measurement["terminated_ns"]
+    assert guardian_identity["identity_mutex_owned"] is True
     assert measurement["contended_before_harness_drain"] is True
     assert retained_jobs["browser_job_open"] is True
     assert retained_jobs["project_job_open"] is True
@@ -449,6 +544,7 @@ def test_external_guardian_holds_fence_until_browser_job_is_empty(
         measurement["pre_crash_contention"]["attempted_ns"]
         < measurement["terminated_ns"]
     )
+    assert measurement["owner_exit_ns"] > measurement["terminated_ns"]
     assert measurement["guardian_outside_owner_job"] is True
     assert guardian["active_descendants_after_owner_death"] > 0
     assert guardian["owner_death_observed_ns"] < guardian["terminate_ns"]

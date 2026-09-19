@@ -20,6 +20,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 _DEADLINE_SECONDS = 30.0
 _DESCENDANT_COUNT = 24
 _WAIT_OBJECT_0 = 0
+_WAIT_ABANDONED = 128
 _WAIT_TIMEOUT = 258
 
 
@@ -74,6 +75,24 @@ def _configure_kill_on_close(job_handle: Any) -> None:
     win32job.SetInformationJobObject(
         job_handle, win32job.JobObjectExtendedLimitInformation, limits
     )
+
+
+def observe_guardian_identity(identity_mutex_name: str) -> dict[str, bool]:
+    _win32api, win32con, win32event, _win32job = _windows_modules()
+    handle = win32event.OpenMutex(
+        win32con.SYNCHRONIZE | win32con.MUTEX_MODIFY_STATE,
+        False,
+        identity_mutex_name,
+    )
+    try:
+        result = win32event.WaitForSingleObject(handle, 0)
+        if result in (_WAIT_OBJECT_0, _WAIT_ABANDONED):
+            win32event.ReleaseMutex(handle)
+        if result != _WAIT_TIMEOUT:
+            raise RuntimeError("the guardian no longer owns its identity mutex")
+        return {"identity_mutex_owned": True}
+    finally:
+        handle.Close()
 
 
 def observe_named_job_objects(
@@ -162,6 +181,14 @@ def _owner(
         if browser_job is not None:
             browser_job.Close()
         project_job.Close()
+
+
+def starter_termination_measurement(
+    terminated_ns: int, owner_exit_ns: int
+) -> dict[str, int]:
+    if owner_exit_ns <= terminated_ns:
+        raise RuntimeError("the owner exit did not follow starter termination")
+    return {"terminated_ns": terminated_ns, "owner_exit_ns": owner_exit_ns}
 
 
 def sample_pre_crash_contention(
@@ -313,12 +340,15 @@ def _guardian(
 
     win32api, win32con, win32event, win32job = _windows_modules()
     lease = ProfileLease(auth_root)
+    identity_mutex_name = f"Local\\linkedin-mcp-w1-guardian-{secrets.token_hex(16)}"
+    identity_mutex = win32event.CreateMutex(None, True, identity_mutex_name)
     browser_job = None
     project_job = None
     descendant_handles: list[Any] = []
     fence_acquired = False
     result: dict[str, Any] = {
         "guardian_pid": os.getpid(),
+        "guardian_identity_mutex": identity_mutex_name,
         "query_samples": [],
         "terminate_called": False,
     }
@@ -437,6 +467,8 @@ def _guardian(
         fence_acquired = False
         for handle in descendant_handles:
             handle.Close()
+        win32event.ReleaseMutex(identity_mutex)
+        identity_mutex.Close()
         _atomic_json(result_file, result)
         return 0
     except BaseException as exc:
@@ -622,17 +654,21 @@ def _run_probe(scenario: str, root: Path) -> dict[str, Any]:
         project_job.close()
         project_job = None
 
+        if not _is_active(owner_handle):
+            raise RuntimeError("the owner exited before starter termination")
         terminated_ns = time.perf_counter_ns()
         win32api.TerminateProcess(owner_handle, 196)
+        _wait(owner_handle, _DEADLINE_SECONDS, "the terminated owner did not exit")
+        termination = starter_termination_measurement(
+            terminated_ns, time.perf_counter_ns()
+        )
+        _atomic_json(root / "starter-termination.json", termination)
+
         deadline = time.monotonic() + _DEADLINE_SECONDS
         acquired_ns = None
         active_at_acquire = None
-        owner_exit_ns = None
         descendants_exit_ns = None
         while True:
-            now_ns = time.perf_counter_ns()
-            if owner_exit_ns is None and not _is_active(owner_handle):
-                owner_exit_ns = now_ns
             if acquired_ns is None and contender.try_acquire():
                 acquired_ns = time.perf_counter_ns()
                 active_at_acquire = sum(
@@ -649,8 +685,7 @@ def _run_probe(scenario: str, root: Path) -> dict[str, Any]:
 
         result: dict[str, Any] = {
             "scenario": scenario,
-            "terminated_ns": terminated_ns,
-            "owner_exit_ns": owner_exit_ns,
+            **termination,
             "lease_acquired_ns": acquired_ns,
             "descendants_exit_ns": descendants_exit_ns,
             "active_descendants_at_lease_acquire": active_at_acquire,
