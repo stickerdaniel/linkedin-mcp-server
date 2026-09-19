@@ -222,6 +222,20 @@ class TestNormalizeCompanyIdentifier:
     @pytest.mark.parametrize(
         "value",
         [
+            "beamy.io",
+            "https://www.linkedin.com/company/beamy.io",
+            "https://www.linkedin.com/company/beamy.io/people/",
+            "/company/beamy.io/",
+        ],
+    )
+    def test_keeps_the_period_of_a_domain_slug(self, value: str):
+        # Organizations claim their domain as a slug. The person allowlist has no
+        # period, and sharing it left such a company unreachable in every form.
+        assert normalize_company_identifier(value) == "beamy.io"
+
+    @pytest.mark.parametrize(
+        "value",
+        [
             "https://www.linkedin.com/school/rwth-aachen-university/",
             "https://www.linkedin.com/showcase/microsoft",
         ],
@@ -241,6 +255,10 @@ class TestNormalizeCompanyIdentifier:
             "https://www.linkedin.com/in/williamhgates",
             "https://www.linkedin.com/feed/",
             "microsoft/../../feed",
+            ".",
+            "..",
+            "%2e%2e",
+            "/company/../feed/",
             "",
         ],
     )
@@ -521,16 +539,23 @@ class TestNothingTidiesTheReference:
 
 
 class TestIdentifierAllowlist:
-    """A public identifier is letters, digits, hyphen and underscore. The old
-    rule listed forbidden syntax instead, so a value carrying none of it passed
-    and spent a page load on a 404."""
+    """A public identifier is letters, digits, hyphen and underscore, and a
+    company slug also takes a period. The old rule listed forbidden syntax
+    instead, so a value carrying none of it passed and spent a page load on a
+    404."""
 
-    @pytest.mark.parametrize(
-        "value", ["foo@example.com", "foo:bar", "foo!bar", "foo.bar"]
-    )
+    @pytest.mark.parametrize("value", ["foo@example.com", "foo:bar", "foo!bar"])
     def test_a_value_that_cannot_be_one_is_refused(self, value: str):
         with pytest.raises(InvalidReferenceError):
             normalize_company_identifier(value)
+
+    @pytest.mark.parametrize(
+        "value",
+        ["foo.bar", "/in/foo.bar/", "https://www.linkedin.com/in/foo.bar"],
+    )
+    def test_a_person_identifier_takes_no_period(self, value: str):
+        with pytest.raises(InvalidReferenceError):
+            normalize_person_identifier(value)
 
     @pytest.mark.parametrize(
         "value", ["williamhgates", "felix-krueckel", "андрей", "a_b"]
