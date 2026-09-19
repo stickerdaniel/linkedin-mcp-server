@@ -22,7 +22,7 @@ import socket
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -59,6 +59,39 @@ def _collect(channel: ControlListener, *, timeout: float, nonce: str = _NONCE) -
     """
     channel.start_accepting(nonce=nonce, timeout=timeout)
     channel.attached_within(timeout=timeout)
+
+
+class _DropObservedSocket:
+    """A real accepted socket whose first close records the drop."""
+
+    def __init__(self, connection: socket.socket, dropped_at: list[float]) -> None:
+        self._connection = connection
+        self._dropped_at = dropped_at
+        self._closed = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._connection, name)
+
+    def close(self) -> None:
+        if not self._closed:
+            self._closed = True
+            self._dropped_at.append(time.monotonic())
+        self._connection.close()
+
+
+class _DropObservedListener:
+    """Wrap accepted sockets without relying on platform selector support."""
+
+    def __init__(self, listener: socket.socket, dropped_at: list[float]) -> None:
+        self._listener = listener
+        self._dropped_at = dropped_at
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._listener, name)
+
+    def accept(self) -> tuple[_DropObservedSocket, Any]:
+        connection, address = self._listener.accept()
+        return _DropObservedSocket(connection, self._dropped_at), address
 
 
 class TestAuthorization:
@@ -138,7 +171,7 @@ class TestAuthorization:
             child.close()
 
     def test_a_full_queue_of_silent_peers_leaves_the_owner_its_turn(
-        self, listener: ControlListener
+        self, listener: ControlListener, monkeypatch: pytest.MonkeyPatch
     ):
         # The whole queue against the whole production wait, which is the worst
         # case that can be standing there when the wait begins: the listener
@@ -147,28 +180,57 @@ class TestAuthorization:
         # Measured, and the reason this is not _BACKLOG silent peers plus a
         # child: a seventeenth connect is not refused but dropped, and the client
         # then waits a full second on a SYN retransmit for a slot that nothing is
-        # draining. A share-of-what-is-left bound is what survives this; every
-        # fixed per-peer span, floors included, is emptied by enough repetitions.
+        # draining.
         silent = [
             socket.create_connection((listener.host, listener.port))
             for _ in range(process_control._BACKLOG - 1)
         ]
         child = _attach(listener)
+        dropped_at: list[float] = []
+        attached_at: list[float] = []
+        raw_listener = listener._listener
+        assert raw_listener is not None
+        listener._listener = cast(Any, _DropObservedListener(raw_listener, dropped_at))
+        keep = listener._keep
+
+        def observe_attachment(connection: socket.socket) -> None:
+            attached_at.append(time.monotonic())
+            keep(connection)
+
+        monkeypatch.setattr(listener, "_keep", observe_attachment)
         try:
             began = time.monotonic()
-            _collect(listener, timeout=daemon_election._PREPARED_READ_SECONDS)
-            elapsed = time.monotonic() - began
+            # Production starts the drain with the whole spawn budget. The
+            # owner's later attachment wait is the one-second bound asserted
+            # below; using it as the drain budget geometrically shrinks the peer
+            # allowances into a shape production never runs.
+            listener.start_accepting(nonce=_NONCE, timeout=30.0)
+            listener.attached_within(timeout=daemon_election._PREPARED_READ_SECONDS)
             listener.send(_RECORD)
 
             assert child.readline() == _RECORD
-            # Keep a quarter of the production wait for the owner. The peer
-            # allowances consume about three eighths; requiring the complete
-            # drain below one half left only one eighth for thread scheduling
-            # and socket cleanup, and a loaded runner spent 0.535s on a correct
-            # handoff. Three quarters still fails any peer that can spend the
-            # whole wait while leaving realistic scheduler margin.
-            assert elapsed < daemon_election._PREPARED_READ_SECONDS * 3 / 4, (
-                "a full queue of silent peers spent the production wait"
+            assert attached_at
+            assert attached_at[0] - began < daemon_election._PREPARED_READ_SECONDS, (
+                "the owner did not attach inside the production window"
+            )
+            assert len(dropped_at) == len(silent), (
+                "the owner was reached before every silent peer was dropped"
+            )
+            assert dropped_at[-1] <= attached_at[0]
+
+            # Observe the server's close calls directly. This is portable to
+            # Windows and avoids charging scheduler or socket-notification lag to
+            # the drain. One delayed peer is harmless; a delay paid for every
+            # peer moves even the smallest interval above this bound.
+            allowance = daemon_election._PREPARED_READ_SECONDS / (
+                2 * process_control._BACKLOG
+            )
+            intervals = [
+                later - earlier
+                for earlier, later in zip(dropped_at, dropped_at[1:], strict=False)
+            ]
+            assert min(intervals) < 1.5 * allowance, (
+                "every silent peer was held longer than its production allowance"
             )
         finally:
             for peer in silent:
