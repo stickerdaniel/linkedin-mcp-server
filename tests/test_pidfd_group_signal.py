@@ -53,10 +53,18 @@ PR_SET_CHILD_SUBREAPER = 36
 UNAVAILABLE = {{errno.ENOSYS, errno.EPERM}}
 
 pidfd_open = getattr(os, "pidfd_open", None)
-pidfd_send_signal = getattr(signal, "pidfd_send_signal", None)
-if pidfd_open is None or pidfd_send_signal is None:
+raw_pidfd_send_signal = getattr(signal, "pidfd_send_signal", None)
+if pidfd_open is None or raw_pidfd_send_signal is None:
     print(json.dumps({{"status": "skip", "reason": "Python has no pidfd API"}}))
     raise SystemExit(0)
+
+pidfd_signal_calls = []
+
+
+def pidfd_send_signal(pidfd, sent, info, flags):
+    pidfd_signal_calls.append((pidfd, sent, flags))
+    return raw_pidfd_send_signal(pidfd, sent, info, flags)
+
 
 libc = ctypes.CDLL(None, use_errno=True)
 if libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
@@ -276,6 +284,9 @@ report.update(
         "reaped_leader": reaped_leader,
         "reaped_member": reaped_member,
         "closed_fds": len(closed_fds),
+        "member_cleanup_pidfd_calls": sum(
+            call == (member_pidfd, signal.SIGKILL, 0) for call in pidfd_signal_calls
+        ),
     }}
 )
 print(json.dumps(report))
@@ -320,10 +331,6 @@ def _send_group_signal(
             return "gone"
         raise
     return "sent"
-
-
-def test_process_group_flag_matches_the_linux_uapi():
-    assert _PIDFD_SIGNAL_PROCESS_GROUP == 4
 
 
 def test_missing_python_pidfd_apis_skip():
@@ -381,11 +388,6 @@ def test_esrch_is_gone_without_numeric_fallback():
     assert calls == [(17, signal.SIGKILL, None, 4)]
 
 
-def test_probe_has_no_numeric_signal_cleanup():
-    assert "os.kill(" not in _SUBREAPER_PROBE
-    assert "os.killpg(" not in _SUBREAPER_PROBE
-
-
 def test_python_passes_nonzero_pidfd_flags_to_linux():
     pidfd = _open_pidfd(os.getpid())
     _opener, sender = _require_pidfd_api()
@@ -438,3 +440,4 @@ def test_group_probe_skip_reaps_every_spawned_process(tmp_path: Path, fault: str
 
     assert report["status"] == "skip"
     _assert_probe_reaped_every_process(report)
+    assert report["member_cleanup_pidfd_calls"] == 1

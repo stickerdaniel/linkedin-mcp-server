@@ -21,16 +21,18 @@ signal uses `pidfd_send_signal(member_pidfd, SIGKILL, None, 0)`; `ESRCH` means
 the member is already gone. No numeric PID or PGID signal is used. Both pidfds
 are closed and checked for `EBADF` before the helper exits.
 
-The flag is `1UL << 2` in Linux
-[`include/uapi/linux/pidfd.h`](https://github.com/torvalds/linux/blob/master/include/uapi/linux/pidfd.h).
-The test pins its numeric value and probes the operation against the private
-group. The member pidfd is opened before this probe, so every result after
+The probe uses `1UL << 2`, defined by Linux
+[`include/uapi/linux/pidfd.h`](https://github.com/torvalds/linux/blob/master/include/uapi/linux/pidfd.h),
+and exercises that value against the private group rather than restating it in
+a test. The member pidfd is opened before this probe, so every result after
 spawn already has identity-stable cleanup. `EINVAL` means that the running
 kernel does not support the group flag; flag-specific `ENOSYS` or `EPERM` means
 the group operation is unavailable. Those paths skip only after the leader and
 member have both been pidfd-signaled as needed, explicitly reaped, and their
-pidfds closed. Deterministic fault injection exercises all three paths. Missing
-Python APIs and failures of the flags-zero preflight skip before any group is
+pidfds closed. Deterministic fault injection exercises all three paths and an
+instrumented wrapper around the real Python API proves that member cleanup used
+its pidfd with flags zero. Missing Python APIs and failures of the flags-zero
+preflight skip before any group is
 spawned. No skip substitutes numeric `killpg`. A separate call with an unknown
 nonzero bit checks that the available Python API passes flags to Linux rather
 than accepting and discarding them.
