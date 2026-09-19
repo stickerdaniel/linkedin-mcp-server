@@ -90,6 +90,28 @@ async def _wait_event(event: asyncio.Event) -> None:
     await event.wait()
 
 
+async def _wait_for_setup_signal(
+    signal: asyncio.Event, setup: asyncio.Task[None], hang_guard: asyncio.Event
+) -> None:
+    signal_wait = asyncio.create_task(signal.wait())
+    hang_wait = asyncio.create_task(hang_guard.wait())
+    try:
+        done, _ = await asyncio.wait(
+            {signal_wait, setup, hang_wait}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if signal_wait in done:
+            return
+        if setup in done:
+            await setup
+            pytest.fail("browser setup completed before the expected test signal")
+        pytest.fail("browser setup test exceeded its independent hang guard")
+    finally:
+        for waiter in (signal_wait, hang_wait):
+            if not waiter.done():
+                waiter.cancel()
+        await asyncio.gather(signal_wait, hang_wait, return_exceptions=True)
+
+
 class TestBootstrap:
     async def test_managed_startup_starts_background_setup(self, monkeypatch):
         async def fake_setup(**_kwargs: object) -> None:
@@ -1576,18 +1598,53 @@ class TestTwoStageInstall:
     ):
         from linkedin_mcp_server import bootstrap
 
+        loop = asyncio.get_running_loop()
+        clock = [loop.time()]
+        setup_started = asyncio.Event()
+        request_activity = asyncio.Event()
+        activity_recorded = asyncio.Event()
+        hang_guard = asyncio.Event()
+        monkeypatch.setattr(loop, "time", lambda: clock[0])
+
         async def progressing_setup(
             *, activity_callback: Callable[[], None], **_kwargs: object
         ) -> None:
+            setup_started.set()
             for _ in range(3):
-                await asyncio.sleep(0.04)
+                await request_activity.wait()
+                request_activity.clear()
                 activity_callback()
+                activity_recorded.set()
+
+        def trip_hang_guard() -> None:
+            try:
+                loop.call_soon_threadsafe(hang_guard.set)
+            except RuntimeError:
+                pass
 
         monkeypatch.setattr(bootstrap, "_browser_setup_ready", lambda: False)
         monkeypatch.setattr(bootstrap, "_run_browser_setup", progressing_setup)
         monkeypatch.setattr(bootstrap, "_BACKGROUND_BROWSER_SETUP_SECONDS", 0.06)
 
-        await bootstrap._run_background_browser_setup()
+        setup = asyncio.create_task(bootstrap._run_background_browser_setup())
+        fallback = threading.Timer(5.0, trip_hang_guard)
+        fallback.start()
+        try:
+            await _wait_for_setup_signal(setup_started, setup, hang_guard)
+            for _ in range(3):
+                clock[0] += 0.059
+                timers_checked = asyncio.Event()
+                loop.call_at(clock[0], timers_checked.set)
+                await _wait_for_setup_signal(timers_checked, setup, hang_guard)
+                request_activity.set()
+                await _wait_for_setup_signal(activity_recorded, setup, hang_guard)
+                activity_recorded.clear()
+            await setup
+        finally:
+            fallback.cancel()
+            if not setup.done():
+                setup.cancel()
+            await asyncio.gather(setup, return_exceptions=True)
 
     async def test_activity_still_extends_inactivity_under_the_ceiling(
         self, isolate_profile_dir, monkeypatch
@@ -1595,28 +1652,58 @@ class TestTwoStageInstall:
         """The absolute ceiling must not cost the inactivity extension."""
         from linkedin_mcp_server import bootstrap
 
+        loop = asyncio.get_running_loop()
+        clock = [loop.time()]
+        setup_started = asyncio.Event()
+        request_activity = asyncio.Event()
+        activity_recorded = asyncio.Event()
+        hang_guard = asyncio.Event()
         rounds = 0
+        monkeypatch.setattr(loop, "time", lambda: clock[0])
 
         async def progressing_setup(
             *, activity_callback: Callable[[], None], **_kwargs: object
         ) -> None:
             nonlocal rounds
+            setup_started.set()
             for _ in range(6):
-                await asyncio.sleep(0.04)
+                await request_activity.wait()
+                request_activity.clear()
                 activity_callback()
                 rounds += 1
+                activity_recorded.set()
+
+        def trip_hang_guard() -> None:
+            try:
+                loop.call_soon_threadsafe(hang_guard.set)
+            except RuntimeError:
+                pass
 
         monkeypatch.setattr(bootstrap, "_browser_setup_ready", lambda: False)
         monkeypatch.setattr(bootstrap, "_run_browser_setup", progressing_setup)
         monkeypatch.setattr(bootstrap, "_BACKGROUND_BROWSER_SETUP_SECONDS", 0.06)
         monkeypatch.setattr(bootstrap, "_BROWSER_SETUP_LIFETIME_SECONDS", 30.0)
 
-        await bootstrap._run_background_browser_setup()
+        setup = asyncio.create_task(bootstrap._run_background_browser_setup())
+        fallback = threading.Timer(5.0, trip_hang_guard)
+        fallback.start()
+        try:
+            await _wait_for_setup_signal(setup_started, setup, hang_guard)
+            for _ in range(6):
+                clock[0] += 0.059
+                timers_checked = asyncio.Event()
+                loop.call_at(clock[0], timers_checked.set)
+                await _wait_for_setup_signal(timers_checked, setup, hang_guard)
+                request_activity.set()
+                await _wait_for_setup_signal(activity_recorded, setup, hang_guard)
+                activity_recorded.clear()
+            await setup
+        finally:
+            fallback.cancel()
+            if not setup.done():
+                setup.cancel()
+            await asyncio.gather(setup, return_exceptions=True)
 
-        # Six rounds of 40ms outlive a 60ms inactivity window only because each
-        # one rescheduled it. The margin is a third of the window rather than a
-        # quarter of it: at 15ms against 20ms an ordinary scheduling delay was
-        # enough to expire the deadline this test says cannot expire.
         assert rounds == 6
 
     async def test_continuous_activity_cannot_extend_the_absolute_lifetime(
@@ -1857,29 +1944,44 @@ class TestTwoStageInstall:
 
         blocked = threading.Event()
         release = threading.Event()
+        fallback_fired = threading.Event()
+        loop = asyncio.get_running_loop()
+        clock = [loop.time()]
 
         def slow_mkdir(path: Path) -> None:
             blocked.set()
             release.wait()
 
+        def release_fallback() -> None:
+            fallback_fired.set()
+            release.set()
+
         async def install_must_not_start(*args: object, **kwargs: object) -> None:
             pytest.fail("the deadline should expire during cache preparation")
 
+        monkeypatch.setattr(loop, "time", lambda: clock[0])
         monkeypatch.setattr(bootstrap, "secure_mkdir", slow_mkdir)
         monkeypatch.setattr(
             bootstrap, "_run_patchright_install", install_must_not_start
         )
         monkeypatch.setattr(bootstrap, "_BACKGROUND_BROWSER_SETUP_SECONDS", 0.01)
 
-        started = asyncio.get_running_loop().time()
+        setup = asyncio.create_task(bootstrap._run_background_browser_setup())
+        fallback = threading.Timer(1.0, release_fallback)
+        fallback.start()
         try:
+            assert await asyncio.to_thread(blocked.wait, 5), (
+                "cache preparation did not enter its worker thread"
+            )
+            clock[0] += 0.01
             with pytest.raises(BrowserSetupFailedError, match="background deadline"):
-                await bootstrap._run_background_browser_setup()
+                await setup
+            assert not fallback_fired.is_set(), (
+                "the hang fallback released cache preparation before the deadline"
+            )
         finally:
             release.set()
-
-        assert blocked.is_set()
-        assert asyncio.get_running_loop().time() - started < 0.1
+            fallback.cancel()
 
     async def test_setup_filesystem_work_uses_a_daemon_thread(self, monkeypatch):
         from linkedin_mcp_server import bootstrap
