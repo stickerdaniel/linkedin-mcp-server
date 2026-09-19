@@ -90,6 +90,28 @@ async def _wait_event(event: asyncio.Event) -> None:
     await event.wait()
 
 
+async def _wait_for_setup_signal(
+    signal: asyncio.Event, setup: asyncio.Task[None], hang_guard: asyncio.Event
+) -> None:
+    signal_wait = asyncio.create_task(signal.wait())
+    hang_wait = asyncio.create_task(hang_guard.wait())
+    try:
+        done, _ = await asyncio.wait(
+            {signal_wait, setup, hang_wait}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if signal_wait in done:
+            return
+        if setup in done:
+            await setup
+            pytest.fail("browser setup completed before the expected test signal")
+        pytest.fail("browser setup test exceeded its independent hang guard")
+    finally:
+        for waiter in (signal_wait, hang_wait):
+            if not waiter.done():
+                waiter.cancel()
+        await asyncio.gather(signal_wait, hang_wait, return_exceptions=True)
+
+
 class TestBootstrap:
     async def test_managed_startup_starts_background_setup(self, monkeypatch):
         async def fake_setup(**_kwargs: object) -> None:
@@ -1581,6 +1603,7 @@ class TestTwoStageInstall:
         setup_started = asyncio.Event()
         request_activity = asyncio.Event()
         activity_recorded = asyncio.Event()
+        hang_guard = asyncio.Event()
         monkeypatch.setattr(loop, "time", lambda: clock[0])
 
         async def progressing_setup(
@@ -1593,26 +1616,35 @@ class TestTwoStageInstall:
                 activity_callback()
                 activity_recorded.set()
 
+        def trip_hang_guard() -> None:
+            try:
+                loop.call_soon_threadsafe(hang_guard.set)
+            except RuntimeError:
+                pass
+
         monkeypatch.setattr(bootstrap, "_browser_setup_ready", lambda: False)
         monkeypatch.setattr(bootstrap, "_run_browser_setup", progressing_setup)
         monkeypatch.setattr(bootstrap, "_BACKGROUND_BROWSER_SETUP_SECONDS", 0.06)
 
         setup = asyncio.create_task(bootstrap._run_background_browser_setup())
-        await setup_started.wait()
-        for _ in range(3):
-            clock[0] += 0.04
-            timers_checked = asyncio.Event()
-            loop.call_at(clock[0], timers_checked.set)
-            await timers_checked.wait()
-            if setup.done():
-                pytest.fail(
-                    "the inactivity deadline expired before activity: "
-                    f"{setup.exception()}"
-                )
-            request_activity.set()
-            await activity_recorded.wait()
-            activity_recorded.clear()
-        await setup
+        fallback = threading.Timer(5.0, trip_hang_guard)
+        fallback.start()
+        try:
+            await _wait_for_setup_signal(setup_started, setup, hang_guard)
+            for _ in range(3):
+                clock[0] += 0.059
+                timers_checked = asyncio.Event()
+                loop.call_at(clock[0], timers_checked.set)
+                await _wait_for_setup_signal(timers_checked, setup, hang_guard)
+                request_activity.set()
+                await _wait_for_setup_signal(activity_recorded, setup, hang_guard)
+                activity_recorded.clear()
+            await setup
+        finally:
+            fallback.cancel()
+            if not setup.done():
+                setup.cancel()
+            await asyncio.gather(setup, return_exceptions=True)
 
     async def test_activity_still_extends_inactivity_under_the_ceiling(
         self, isolate_profile_dir, monkeypatch
@@ -1625,6 +1657,7 @@ class TestTwoStageInstall:
         setup_started = asyncio.Event()
         request_activity = asyncio.Event()
         activity_recorded = asyncio.Event()
+        hang_guard = asyncio.Event()
         rounds = 0
         monkeypatch.setattr(loop, "time", lambda: clock[0])
 
@@ -1640,27 +1673,36 @@ class TestTwoStageInstall:
                 rounds += 1
                 activity_recorded.set()
 
+        def trip_hang_guard() -> None:
+            try:
+                loop.call_soon_threadsafe(hang_guard.set)
+            except RuntimeError:
+                pass
+
         monkeypatch.setattr(bootstrap, "_browser_setup_ready", lambda: False)
         monkeypatch.setattr(bootstrap, "_run_browser_setup", progressing_setup)
         monkeypatch.setattr(bootstrap, "_BACKGROUND_BROWSER_SETUP_SECONDS", 0.06)
         monkeypatch.setattr(bootstrap, "_BROWSER_SETUP_LIFETIME_SECONDS", 30.0)
 
         setup = asyncio.create_task(bootstrap._run_background_browser_setup())
-        await setup_started.wait()
-        for _ in range(6):
-            clock[0] += 0.04
-            timers_checked = asyncio.Event()
-            loop.call_at(clock[0], timers_checked.set)
-            await timers_checked.wait()
-            if setup.done():
-                pytest.fail(
-                    "the inactivity deadline expired before activity: "
-                    f"{setup.exception()}"
-                )
-            request_activity.set()
-            await activity_recorded.wait()
-            activity_recorded.clear()
-        await setup
+        fallback = threading.Timer(5.0, trip_hang_guard)
+        fallback.start()
+        try:
+            await _wait_for_setup_signal(setup_started, setup, hang_guard)
+            for _ in range(6):
+                clock[0] += 0.059
+                timers_checked = asyncio.Event()
+                loop.call_at(clock[0], timers_checked.set)
+                await _wait_for_setup_signal(timers_checked, setup, hang_guard)
+                request_activity.set()
+                await _wait_for_setup_signal(activity_recorded, setup, hang_guard)
+                activity_recorded.clear()
+            await setup
+        finally:
+            fallback.cancel()
+            if not setup.done():
+                setup.cancel()
+            await asyncio.gather(setup, return_exceptions=True)
 
         assert rounds == 6
 
