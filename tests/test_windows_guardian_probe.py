@@ -14,6 +14,7 @@ import pytest
 
 from linkedin_mcp_server import process_tree
 from windows_guardian_probe import (
+    guardian_shutdown_sequence,
     sample_pre_crash_contention,
     terminate_drain_and_release,
     terminate_wait_close_handles,
@@ -162,6 +163,73 @@ def test_retained_handles_are_terminated_and_waited_before_close() -> None:
     ]
 
 
+def test_guardian_drains_browser_before_terminating_project_owner_job() -> None:
+    descendants = iter([2, 2, 1, 0, 0])
+    browser = iter([2, 1, 0])
+    project = iter([1, 0])
+    events: list[str] = []
+    ticks = iter(range(1, 100))
+    result: dict[str, Any] = {"query_samples": []}
+
+    def active_descendants() -> int:
+        events.append("descendants")
+        return next(descendants)
+
+    def query_browser() -> int:
+        events.append("browser query")
+        return next(browser)
+
+    def query_project() -> int:
+        events.append("project query")
+        return next(project)
+
+    guardian_shutdown_sequence(
+        result,
+        active_descendants=active_descendants,
+        terminate_browser_job=lambda: events.append("browser terminate"),
+        query_browser_job=query_browser,
+        close_browser_job=lambda: events.append("browser close"),
+        release_fence=lambda: events.append("release"),
+        terminate_project_job=lambda: events.append("project terminate"),
+        query_project_job=query_project,
+        close_project_job=lambda: events.append("project close"),
+        monotonic=lambda: 0.0,
+        clock_ns=lambda: next(ticks),
+        sleep=lambda _seconds: events.append("sleep"),
+    )
+
+    assert events == [
+        "descendants",
+        "browser terminate",
+        "descendants",
+        "browser query",
+        "sleep",
+        "descendants",
+        "browser query",
+        "sleep",
+        "descendants",
+        "browser query",
+        "descendants",
+        "browser close",
+        "release",
+        "project terminate",
+        "project query",
+        "sleep",
+        "project query",
+        "project close",
+    ]
+    assert result["active_descendants_after_owner_death"] == 2
+    assert result["terminate_ns"] < result["first_descendant_exit_ns"]
+    assert result["first_descendant_exit_ns"] <= result["zero_observed_ns"]
+    assert result["zero_observed_ns"] < result["browser_job_closed_ns"]
+    assert result["browser_job_closed_ns"] < result["project_owner_terminate_ns"]
+    assert (
+        result["project_owner_terminate_ns"]
+        <= result["project_owner_zero_observed_ns"]
+        < result["project_owner_closed_ns"]
+    )
+
+
 def test_candidate_releases_only_after_observing_an_empty_job() -> None:
     active = iter([2, 1, 0])
     events: list[str] = []
@@ -258,10 +326,25 @@ def test_external_guardian_holds_fence_until_browser_job_is_empty(
         < measurement["terminated_ns"]
     )
     assert measurement["guardian_outside_owner_job"] is True
+    assert guardian["active_descendants_after_owner_death"] > 0
+    assert guardian["owner_death_observed_ns"] < guardian["terminate_ns"]
     assert guardian["terminate_called"] is True
+    assert guardian["terminate_ns"] < guardian["first_descendant_exit_ns"]
+    assert guardian["first_descendant_exit_ns"] <= guardian["zero_observed_ns"]
     assert len(samples) >= 2
     assert samples[0]["active_processes"] > 0
     assert samples[-1]["active_processes"] == 0
     assert "query_error" not in guardian
     assert "query_timeout" not in guardian
+    assert guardian["zero_observed_ns"] < guardian["browser_job_closed_ns"]
+    assert guardian["browser_job_closed_ns"] < guardian["project_owner_terminate_ns"]
+    assert guardian["project_owner_terminate_called"] is True
+    assert (
+        guardian["project_owner_terminate_ns"]
+        <= guardian["project_owner_zero_observed_ns"]
+        < guardian["project_owner_closed_ns"]
+    )
+    assert guardian["project_owner_query_samples"][-1]["active_processes"] == 0
+    assert "project_owner_query_error" not in guardian
+    assert "project_owner_query_timeout" not in guardian
     assert measurement["lease_acquired_ns"] >= guardian["zero_observed_ns"]

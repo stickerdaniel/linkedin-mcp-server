@@ -125,6 +125,7 @@ def _owner(
             metadata_file,
             {
                 "owner_pid": os.getpid(),
+                "project_job_name": project_job_name,
                 "descendant_pids": [process.pid for process in descendants],
             },
         )
@@ -225,6 +226,90 @@ def terminate_drain_and_release(
         sleep(0.001)
 
 
+def guardian_shutdown_sequence(
+    result: dict[str, Any],
+    *,
+    active_descendants: Callable[[], int],
+    terminate_browser_job: Callable[[], None],
+    query_browser_job: Callable[[], int],
+    close_browser_job: Callable[[], None],
+    release_fence: Callable[[], None],
+    terminate_project_job: Callable[[], None],
+    query_project_job: Callable[[], int],
+    close_project_job: Callable[[], None],
+    monotonic: Callable[[], float] = time.monotonic,
+    clock_ns: Callable[[], int] = time.perf_counter_ns,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    result["owner_death_observed_ns"] = clock_ns()
+    active_before = active_descendants()
+    result["active_descendants_after_owner_death"] = active_before
+    if active_before <= 0:
+        raise RuntimeError("no browser descendant survived owner death")
+
+    result["terminate_ns"] = clock_ns()
+    terminate_browser_job()
+    result["terminate_called"] = True
+    deadline = monotonic() + _DEADLINE_SECONDS
+    while True:
+        living = active_descendants()
+        if living < active_before and "first_descendant_exit_ns" not in result:
+            result["first_descendant_exit_ns"] = clock_ns()
+        try:
+            active = query_browser_job()
+        except BaseException as exc:
+            result["query_error"] = f"{type(exc).__name__}: {exc}"
+            raise RuntimeError("the guardian could not query the browser Job") from exc
+        sampled_ns = clock_ns()
+        result["query_samples"].append(
+            {"sampled_ns": sampled_ns, "active_processes": active}
+        )
+        if active == 0:
+            living = active_descendants()
+            if living != 0:
+                raise RuntimeError("the browser Job was empty while descendants lived")
+            result.setdefault("first_descendant_exit_ns", sampled_ns)
+            result["zero_observed_ns"] = sampled_ns
+            close_browser_job()
+            result["browser_job_closed_ns"] = clock_ns()
+            release_fence()
+            result["fence_released_ns"] = clock_ns()
+            break
+        if monotonic() >= deadline:
+            result["query_timeout"] = True
+            raise RuntimeError("the browser Job did not drain before its deadline")
+        sleep(0.001)
+
+    result["project_owner_terminate_ns"] = clock_ns()
+    terminate_project_job()
+    result["project_owner_terminate_called"] = True
+    deadline = monotonic() + _DEADLINE_SECONDS
+    result["project_owner_query_samples"] = []
+    while True:
+        try:
+            active = query_project_job()
+        except BaseException as exc:
+            result["project_owner_query_error"] = f"{type(exc).__name__}: {exc}"
+            raise RuntimeError(
+                "the guardian could not query the project owner Job"
+            ) from exc
+        sampled_ns = clock_ns()
+        result["project_owner_query_samples"].append(
+            {"sampled_ns": sampled_ns, "active_processes": active}
+        )
+        if active == 0:
+            result["project_owner_zero_observed_ns"] = sampled_ns
+            close_project_job()
+            result["project_owner_closed_ns"] = clock_ns()
+            return
+        if monotonic() >= deadline:
+            result["project_owner_query_timeout"] = True
+            raise RuntimeError(
+                "the project owner Job did not drain before its deadline"
+            )
+        sleep(0.001)
+
+
 def _guardian(
     auth_root: Path,
     browser_job_file: Path,
@@ -238,7 +323,9 @@ def _guardian(
 
     win32api, win32con, win32event, win32job = _windows_modules()
     lease = ProfileLease(auth_root)
-    job = None
+    browser_job = None
+    project_job = None
+    descendant_handles: list[Any] = []
     result: dict[str, Any] = {
         "guardian_pid": os.getpid(),
         "query_samples": [],
@@ -248,8 +335,8 @@ def _guardian(
         if not lease.try_acquire():
             raise RuntimeError("the guardian could not acquire its profile fence")
         name = f"Local\\linkedin-mcp-w1-browser-{secrets.token_hex(16)}"
-        job = win32job.CreateJobObject(None, name)
-        _configure_kill_on_close(job)
+        browser_job = win32job.CreateJobObject(None, name)
+        _configure_kill_on_close(browser_job)
         _atomic_json(browser_job_file, {"name": name})
         _signal(ready_event)
 
@@ -261,9 +348,21 @@ def _guardian(
         finally:
             owner_ready.Close()
 
-        owner_pid = int(_read_json(owner_metadata_file)["owner_pid"])
+        metadata = _read_json(owner_metadata_file)
+        owner_pid = int(metadata["owner_pid"])
+        project_job = win32job.OpenJobObject(
+            win32job.JOB_OBJECT_ALL_ACCESS, False, metadata["project_job_name"]
+        )
+        descendant_handles = [
+            win32api.OpenProcess(
+                win32con.SYNCHRONIZE | win32con.PROCESS_QUERY_LIMITED_INFORMATION,
+                False,
+                int(pid),
+            )
+            for pid in metadata["descendant_pids"]
+        ]
         accounting = win32job.QueryInformationJobObject(
-            job, win32job.JobObjectBasicAccountingInformation
+            browser_job, win32job.JobObjectBasicAccountingInformation
         )
         result["query_samples"].append(
             {
@@ -278,15 +377,42 @@ def _guardian(
         finally:
             owner.Close()
 
-        terminate_drain_and_release(
+        def close_browser_job() -> None:
+            nonlocal browser_job
+            handle = browser_job
+            if handle is None:
+                raise RuntimeError("the browser Job handle is already closed")
+            handle.Close()
+            browser_job = None
+
+        def close_project_job() -> None:
+            nonlocal project_job
+            handle = project_job
+            if handle is None:
+                raise RuntimeError("the project owner Job handle is already closed")
+            handle.Close()
+            project_job = None
+
+        guardian_shutdown_sequence(
             result,
-            terminate=lambda: win32job.TerminateJobObject(job, 197),
-            query_active=lambda: int(
+            active_descendants=lambda: sum(
+                _is_active(handle) for handle in descendant_handles
+            ),
+            terminate_browser_job=lambda: win32job.TerminateJobObject(browser_job, 197),
+            query_browser_job=lambda: int(
                 win32job.QueryInformationJobObject(
-                    job, win32job.JobObjectBasicAccountingInformation
+                    browser_job, win32job.JobObjectBasicAccountingInformation
                 )["ActiveProcesses"]
             ),
-            release=lease.release,
+            close_browser_job=close_browser_job,
+            release_fence=lease.release,
+            terminate_project_job=lambda: win32job.TerminateJobObject(project_job, 198),
+            query_project_job=lambda: int(
+                win32job.QueryInformationJobObject(
+                    project_job, win32job.JobObjectBasicAccountingInformation
+                )["ActiveProcesses"]
+            ),
+            close_project_job=close_project_job,
         )
         _atomic_json(result_file, result)
         return 0
@@ -296,8 +422,12 @@ def _guardian(
         raise
     finally:
         lease.release()
-        if job is not None:
-            job.Close()
+        for handle in descendant_handles:
+            handle.Close()
+        if project_job is not None:
+            project_job.Close()
+        if browser_job is not None:
+            browser_job.Close()
 
 
 def _process_handle(pid: int, access: int) -> Any:
