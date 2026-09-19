@@ -9,14 +9,16 @@ arriving, or a dead owner that looks like a server with no tools.
 from __future__ import annotations
 
 import asyncio
+import datetime
+import inspect
 import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import partial
+from pathlib import Path
 from typing import Any, NoReturn
 from unittest.mock import AsyncMock, MagicMock
-from pathlib import Path
 
 import httpx
 import mcp.types as mt
@@ -254,6 +256,149 @@ class TestReachingTheOwner:
         client = _backend(_attachment(tmp_path), tmp_path).open_client(timeout=1.0)
 
         assert isinstance(client, ProxyClient)
+
+
+class TestCallingTheOwner:
+    async def test_meta_timeout_progress_and_monitoring_reach_send_request(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        owner = FastMCP("owner")
+
+        @owner.tool
+        async def report() -> str:
+            return "sent"
+
+        transport = _RecordsCallRequest(owner)
+        _reach_owners_in_process(monkeypatch, lambda _url: transport)
+        client = _backend(_attachment(tmp_path), tmp_path).open_client(timeout=1.0)
+
+        injected: list[dict[str, Any] | None] = []
+
+        def inject(meta: dict[str, Any] | None) -> dict[str, Any]:
+            injected.append(meta)
+            return {**(meta or {}), "traceparent": "00-trace-span-01"}
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.daemon_proxy.inject_trace_context", inject
+        )
+
+        original_monitor = type(client)._await_with_session_monitoring
+        monitor_calls = 0
+
+        async def monitor(self: Any, request: Any) -> Any:
+            nonlocal monitor_calls
+            monitor_calls += 1
+            return await original_monitor(self, request)
+
+        monkeypatch.setattr(type(client), "_await_with_session_monitoring", monitor)
+        seen_progress: list[tuple[float, float | None, str | None]] = []
+
+        async def record(
+            progress: float, total: float | None, message: str | None
+        ) -> None:
+            seen_progress.append((progress, total, message))
+
+        async with client:
+            monitor_calls = 0
+            result = await client.call_tool_mcp(
+                "report",
+                {},
+                timeout=2.5,
+                progress_handler=record,
+                meta={"marker": "carried"},
+            )
+
+        assert result.isError is False
+        assert injected == [{"marker": "carried"}]
+        assert transport.request is not None
+        assert isinstance(transport.request.root, mt.CallToolRequest)
+        request_meta = transport.request.root.params.meta
+        assert request_meta is not None
+        assert request_meta.model_dump(exclude_none=True) == {
+            "marker": "carried",
+            "traceparent": "00-trace-span-01",
+        }
+        assert transport.timeout == datetime.timedelta(seconds=2.5)
+        assert transport.progress_callback is record
+        assert seen_progress == [(7.0, 10.0, "forwarded")]
+        assert monitor_calls == 1
+
+    async def test_the_clients_progress_handler_reaches_send_request(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        owner = FastMCP("owner")
+
+        @owner.tool
+        async def report() -> str:
+            return "sent"
+
+        transport = _RecordsCallRequest(owner)
+        _reach_owners_in_process(monkeypatch, lambda _url: transport)
+        client = _backend(_attachment(tmp_path), tmp_path).open_client(timeout=1.0)
+        seen: list[tuple[float, float | None, str | None]] = []
+
+        async def record(
+            progress: float, total: float | None, message: str | None
+        ) -> None:
+            seen.append((progress, total, message))
+
+        async with client:
+            client._progress_handler = record
+            result = await client.call_tool_mcp("report", {})
+
+        assert result.isError is False
+        assert transport.progress_callback is record
+        assert seen == [(7.0, 10.0, "forwarded")]
+
+    def test_the_sdk_boundary_keeps_the_expected_signature(self, tmp_path: Path):
+        from fastmcp.client.mixins.tools import ClientToolsMixin
+        from mcp import ClientSession
+
+        client = _backend(_attachment(tmp_path), tmp_path).open_client(timeout=1.0)
+        boundary = inspect.signature(type(client).call_tool_mcp)
+        upstream = inspect.signature(ClientToolsMixin.call_tool_mcp)
+
+        assert (
+            list(boundary.parameters)
+            == list(upstream.parameters)
+            == [
+                "self",
+                "name",
+                "arguments",
+                "progress_handler",
+                "timeout",
+                "meta",
+            ]
+        )
+        for name, parameter in boundary.parameters.items():
+            assert parameter.kind is upstream.parameters[name].kind
+            assert parameter.default == upstream.parameters[name].default
+
+        send_request = inspect.signature(ClientSession.send_request)
+        assert list(send_request.parameters) == [
+            "self",
+            "request",
+            "result_type",
+            "request_read_timeout_seconds",
+            "metadata",
+            "progress_callback",
+        ]
+        assert all(
+            parameter.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+            for parameter in send_request.parameters.values()
+        )
+        assert [
+            parameter.default for parameter in send_request.parameters.values()
+        ] == [
+            inspect.Parameter.empty,
+            inspect.Parameter.empty,
+            inspect.Parameter.empty,
+            None,
+            None,
+            None,
+        ]
+        assert mt.ClientRequest.model_fields["root"].annotation is not None
+        assert mt.CallToolRequestParams.model_fields["meta"].alias == "_meta"
 
 
 class TestKeepingTheTokenOffTheNetwork:
@@ -1310,10 +1455,10 @@ class _FailsOneRequest:
             raise self._refuse()
         return await self._session.list_tools(*args, **kwargs)
 
-    async def call_tool(self, *args: Any, **kwargs: Any):
-        if self._fails == "call":
+    async def send_request(self, request: Any, *args: Any, **kwargs: Any):
+        if self._fails == "call" and isinstance(request.root, mt.CallToolRequest):
             raise self._refuse()
-        return await self._session.call_tool(*args, **kwargs)
+        return await self._session.send_request(request, *args, **kwargs)
 
 
 class _DiesAsTheCallsSessionCloses(FastMCPTransport):
@@ -1363,14 +1508,104 @@ class _CallsOnThisSession:
     def __getattr__(self, name: str) -> Any:
         return getattr(self._session, name)
 
-    async def call_tool(self, *args: Any, **kwargs: Any):
+    async def send_request(self, request: Any, *args: Any, **kwargs: Any):
         from mcp.shared.exceptions import McpError
 
+        if not isinstance(request.root, mt.CallToolRequest):
+            return await self._session.send_request(request, *args, **kwargs)
         self.calls += 1
         if self._refusing is None:
-            return await self._session.call_tool(*args, **kwargs)
+            return await self._session.send_request(request, *args, **kwargs)
         code, message = self._refusing
         raise McpError(mt.ErrorData(code=code, message=message))
+
+
+class _DiscoveryFailsAfterMutation(FastMCPTransport):
+    """An owner that answers a call, then cannot answer schema discovery."""
+
+    def __init__(self, server: FastMCP, ran: list[str]) -> None:
+        super().__init__(server)
+        self._ran = ran
+        self.discovery_attempts = 0
+
+    @asynccontextmanager
+    async def connect_session(self, **kwargs: Any) -> AsyncIterator[Any]:
+        async with super().connect_session(**kwargs) as session:
+            yield _FailsListingAfterMutation(session, self)
+
+
+class _FailsListingAfterMutation:
+    def __init__(self, session: Any, transport: _DiscoveryFailsAfterMutation) -> None:
+        self._session = session
+        self._list_tools = session.list_tools
+        self._transport = transport
+        self._called = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._session, name)
+
+    async def call_tool(self, *args: Any, **kwargs: Any):
+        self._called = True
+        self._session.list_tools = self.list_tools
+        return await self._session.call_tool(*args, **kwargs)
+
+    async def send_request(self, request: Any, *args: Any, **kwargs: Any):
+        if isinstance(request.root, mt.CallToolRequest):
+            self._called = True
+            self._session.list_tools = self.list_tools
+        return await self._session.send_request(request, *args, **kwargs)
+
+    async def list_tools(self, *args: Any, **kwargs: Any):
+        if self._called and self._transport._ran:
+            self._transport.discovery_attempts += 1
+            raise httpx.ConnectError("the owner left after answering the call")
+        return await self._list_tools(*args, **kwargs)
+
+
+class _RecordsCallRequest(FastMCPTransport):
+    """Record the protocol request sent by the owner-tagging client."""
+
+    def __init__(self, server: FastMCP) -> None:
+        super().__init__(server)
+        self.request: mt.ClientRequest | None = None
+        self.timeout: datetime.timedelta | None = None
+        self.progress_callback: Any = None
+
+    @asynccontextmanager
+    async def connect_session(self, **kwargs: Any) -> AsyncIterator[Any]:
+        async with super().connect_session(**kwargs) as session:
+            yield _RecordsCallSend(session, self)
+
+
+class _RecordsCallSend:
+    def __init__(self, session: Any, transport: _RecordsCallRequest) -> None:
+        self._session = session
+        self._transport = transport
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._session, name)
+
+    async def send_request(
+        self,
+        request: Any,
+        result_type: Any,
+        request_read_timeout_seconds: datetime.timedelta | None = None,
+        metadata: Any = None,
+        progress_callback: Any = None,
+    ) -> Any:
+        if result_type is mt.CallToolResult:
+            self._transport.request = request
+            self._transport.timeout = request_read_timeout_seconds
+            self._transport.progress_callback = progress_callback
+            if progress_callback is not None:
+                await progress_callback(7.0, 10.0, "forwarded")
+        return await self._session.send_request(
+            request,
+            result_type,
+            request_read_timeout_seconds=request_read_timeout_seconds,
+            metadata=metadata,
+            progress_callback=progress_callback,
+        )
 
 
 class TestRecoveringThroughTheWholeProxy:
@@ -1478,6 +1713,30 @@ class TestRecoveringThroughTheWholeProxy:
 
         assert result.data == "get_person_profile"
         assert elections() == 1
+
+    async def test_an_answer_is_not_replaced_by_schema_discovery(
+        self, monkeypatch: pytest.MonkeyPatch, _upgraded
+    ):
+        """A completed mutation must not be rediscovered and sent again."""
+        backend, elected, _replacement, elections = _upgraded
+        ran: list[str] = []
+        before = _DiscoveryFailsAfterMutation(self._mutating_owner(ran), ran)
+        after = self._mutating_owner(ran)
+        _reach_owners_in_process(
+            monkeypatch,
+            lambda url: before if url == elected.descriptor.url else after,
+        )
+
+        async with Client(self._proxy(backend)) as client:
+            result = await client.call_tool("send_connection_request", {})
+
+        assert result.data == "sent"
+        assert ran == ["sent"], (
+            "schema discovery repeated a completed mutation "
+            f"(elections={elections()}, discovery_attempts={before.discovery_attempts})"
+        )
+        assert elections() == 0, "schema discovery stood a replacement owner up"
+        assert before.discovery_attempts == 0
 
     async def test_an_owner_that_dies_after_the_handshake_is_still_recovered(
         self, monkeypatch: pytest.MonkeyPatch, _upgraded
