@@ -17,6 +17,7 @@ from linkedin_mcp_server import process_tree
 from linkedin_mcp_server.profile_lease import ProfileLease
 from windows_guardian_probe import (
     guardian_shutdown_sequence,
+    observe_named_job_objects,
     sample_pre_crash_contention,
     terminate_wait_close_handles,
 )
@@ -53,6 +54,21 @@ def await_fail_closed_guardian(
             if "error" not in guardian:
                 time.sleep(0.01)
                 continue
+            if process.poll() is not None:
+                stdout, stderr = process.communicate()
+                raise AssertionError(
+                    "the failed guardian exited before handle observation: "
+                    f"stdout={stdout!r} stderr={stderr!r}"
+                )
+            browser_job_name = json.loads(
+                (root / "browser-job.json").read_text(encoding="utf-8")
+            )["name"]
+            project_job_name = json.loads(
+                (root / "owner.json").read_text(encoding="utf-8")
+            )["project_job_name"]
+            retained_jobs = observe_named_job_objects(
+                browser_job_name, project_job_name
+            )
             contender = ProfileLease(root / "auth")
             acquired_before_drain = contender.try_acquire()
             if acquired_before_drain:
@@ -74,6 +90,8 @@ def await_fail_closed_guardian(
             return {
                 "scenario": root.name,
                 "guardian": guardian,
+                "guardian_alive_before_harness_drain": True,
+                "retained_jobs_before_harness_drain": retained_jobs,
                 "contended_before_harness_drain": not acquired_before_drain,
                 "acquired_after_harness_drain": acquired_after_drain,
             }
@@ -350,28 +368,71 @@ def test_native_owner_crash_releases_lease_before_job_descendants_exit(
 
 @_WINDOWS_ONLY
 @pytest.mark.parametrize(
-    "scenario",
+    ("scenario", "fault", "error"),
     [
-        "candidate-terminate-error",
-        "candidate-query-error",
-        "candidate-drain-timeout",
+        (
+            "candidate-terminate-error",
+            "terminate-error",
+            "OSError: injected browser Job termination failure",
+        ),
+        (
+            "candidate-query-error",
+            "query-error",
+            "RuntimeError: the guardian could not query the browser Job",
+        ),
+        (
+            "candidate-drain-timeout",
+            "drain-timeout",
+            "RuntimeError: the browser Job did not drain before its deadline",
+        ),
     ],
 )
 def test_failed_guardian_holds_fence_until_outer_harness_drain(
-    tmp_path: Path, scenario: str
+    tmp_path: Path, scenario: str, fault: str, error: str
 ) -> None:
     measurement = _run_probe(tmp_path, scenario)
     _record_measurement(measurement)
     guardian = measurement["guardian"]
+    retained_jobs = measurement["retained_jobs_before_harness_drain"]
 
+    assert measurement["guardian_alive_before_harness_drain"] is True
     assert measurement["contended_before_harness_drain"] is True
+    assert retained_jobs["browser_job_open"] is True
+    assert retained_jobs["project_job_open"] is True
     assert measurement["acquired_after_harness_drain"] is True
-    assert "error" in guardian
+    assert guardian["fault"] == fault
+    assert guardian["fault_injected"] == fault
+    assert guardian["error"] == error
+    assert guardian["active_descendants_after_owner_death"] > 0
+    assert (
+        guardian["owner_death_observed_ns"]
+        <= guardian["terminate_ns"]
+        <= guardian["fault_injected_ns"]
+    )
     assert "zero_observed_ns" not in guardian
     assert "fence_released_ns" not in guardian
     assert "browser_job_closed_ns" not in guardian
     assert "project_owner_terminate_ns" not in guardian
     assert "project_owner_closed_ns" not in guardian
+
+    if fault == "terminate-error":
+        assert guardian["terminate_called"] is False
+        assert "query_error" not in guardian
+        assert "query_timeout" not in guardian
+    elif fault == "query-error":
+        assert guardian["terminate_called"] is True
+        assert guardian["query_error"] == (
+            "OSError: injected browser Job query failure"
+        )
+        assert "query_timeout" not in guardian
+    else:
+        assert guardian["terminate_called"] is True
+        assert guardian["query_timeout"] is True
+        assert guardian["query_samples"][-1]["active_processes"] == 1
+        assert (
+            guardian["fault_injected_ns"] <= guardian["query_samples"][-1]["sampled_ns"]
+        )
+        assert "query_error" not in guardian
 
 
 @_WINDOWS_ONLY

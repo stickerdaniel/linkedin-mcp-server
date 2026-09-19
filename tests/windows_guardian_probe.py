@@ -76,6 +76,29 @@ def _configure_kill_on_close(job_handle: Any) -> None:
     )
 
 
+def observe_named_job_objects(
+    browser_job_name: str, project_job_name: str
+) -> dict[str, int | bool]:
+    _win32api, _win32con, _win32event, win32job = _windows_modules()
+    observations: dict[str, int | bool] = {}
+    for label, name in (
+        ("browser", browser_job_name),
+        ("project", project_job_name),
+    ):
+        handle = win32job.OpenJobObject(win32job.JOB_OBJECT_QUERY, False, name)
+        try:
+            accounting = win32job.QueryInformationJobObject(
+                handle, win32job.JobObjectBasicAccountingInformation
+            )
+            observations[f"{label}_job_open"] = True
+            observations[f"{label}_job_active_processes"] = int(
+                accounting["ActiveProcesses"]
+            )
+        finally:
+            handle.Close()
+    return observations
+
+
 def _owner(
     scenario: str,
     auth_root: Path,
@@ -362,15 +385,22 @@ def _guardian(
             handle.Close()
             project_job = None
 
+        def mark_injected_fault() -> None:
+            result["fault_injected"] = fault
+            result["fault_injected_ns"] = time.perf_counter_ns()
+
         def terminate_browser_job() -> None:
             if fault == "terminate-error":
+                mark_injected_fault()
                 raise OSError("injected browser Job termination failure")
             win32job.TerminateJobObject(browser_job, 197)
 
         def query_browser_job() -> int:
             if fault == "query-error":
+                mark_injected_fault()
                 raise OSError("injected browser Job query failure")
             if fault == "drain-timeout":
+                mark_injected_fault()
                 return 1
             return int(
                 win32job.QueryInformationJobObject(
