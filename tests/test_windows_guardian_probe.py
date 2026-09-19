@@ -47,12 +47,6 @@ def communicate_harness(
     return output
 
 
-def assert_probe_returncode(
-    returncode: int | None, expected: int, stderr: bytes
-) -> None:
-    assert returncode == expected, stderr.decode("utf-8", "replace")
-
-
 def await_fail_closed_guardian(
     process: Any, harness: Any, root: Path, *, timeout: float
 ) -> dict[str, Any]:
@@ -183,7 +177,7 @@ def _run_probe(tmp_path: Path, scenario: str) -> dict[str, Any]:
             process.kill()
             process.wait(timeout=30)
     expected_returncode = 1 if scenario.startswith("candidate-") else 0
-    assert_probe_returncode(process.returncode, expected_returncode, stderr)
+    assert process.returncode == expected_returncode, stderr.decode("utf-8", "replace")
     if measurement is not None:
         return measurement
     return json.loads(stdout)
@@ -284,10 +278,104 @@ def test_published_json_retries_a_windows_share_violation() -> None:
     assert sleeps == [0.01]
 
 
-def test_failed_probe_requires_the_harness_termination_returncode() -> None:
-    assert_probe_returncode(1, 1, b"")
-    with pytest.raises(AssertionError):
-        assert_probe_returncode(0, 1, b"")
+def test_failed_probe_path_requires_harness_termination_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[str] = []
+
+    class Process:
+        stdin = object()
+        returncode: int | None = None
+
+        def communicate(self) -> tuple[bytes, bytes]:
+            events.append("communicate")
+            return b"", b""
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def wait(self, *, timeout: float) -> int:
+            events.append(f"process wait {timeout}")
+            assert self.returncode is not None
+            return self.returncode
+
+        def kill(self) -> None:
+            events.append("process kill")
+            self.returncode = 1
+
+    process = Process()
+
+    class Harness:
+        closed = False
+
+        def assign_popen(self, assigned: Process) -> None:
+            assert assigned is process
+            events.append("assign")
+
+        def terminate(self) -> None:
+            events.append("harness terminate")
+            process.returncode = 1
+
+        def wait_until_empty(self, *, timeout: float) -> None:
+            events.append(f"harness drain {timeout}")
+            self.closed = True
+
+        def close(self) -> None:
+            events.append("harness close")
+            self.closed = True
+
+    harness = Harness()
+
+    def await_failure(
+        awaited_process: Process,
+        awaited_harness: Harness,
+        root: Path,
+        *,
+        timeout: float,
+    ) -> dict[str, Any]:
+        assert awaited_process is process
+        assert awaited_harness is harness
+        events.append(f"await {root.name} {timeout}")
+        harness.terminate()
+        process.wait(timeout=30)
+        harness.wait_until_empty(timeout=30)
+        return {"scenario": root.name}
+
+    monkeypatch.setattr(
+        process_tree.WindowsJob,
+        "anonymous",
+        classmethod(lambda _cls: harness),
+    )
+    monkeypatch.setattr(process_tree, "release_nonce", lambda: "nonce")
+    monkeypatch.setattr(
+        process_tree,
+        "windows_gate_command",
+        lambda command, nonce: command if nonce == "nonce" else [],
+    )
+    monkeypatch.setattr(
+        process_tree,
+        "release_windows_gate",
+        lambda stream, nonce: events.append(
+            f"release {stream is process.stdin} {nonce}"
+        ),
+    )
+    monkeypatch.setattr(subprocess, "Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(
+        sys.modules[__name__], "await_fail_closed_guardian", await_failure
+    )
+
+    assert _run_probe(tmp_path, "candidate-query-error") == {
+        "scenario": "candidate-query-error"
+    }
+    assert events == [
+        "assign",
+        "release True nonce",
+        "await candidate-query-error 20",
+        "harness terminate",
+        "process wait 30",
+        "harness drain 30",
+        "communicate",
+    ]
 
 
 def test_harness_timeout_terminates_and_drains_the_outer_job() -> None:
