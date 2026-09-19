@@ -42,9 +42,11 @@ _PROFILE_MESSAGE_TARGET_JS = r"""() => {
         !anchor.hasAttribute('disabled') &&
         (anchor.getAttribute('aria-disabled') || '').toLowerCase() !== 'true';
     const normalize = value => (value || '').replace(/\s+/g, ' ').trim();
-    const validComposeHref = value => {
+    const composeRecipient = value => {
+        // The normalized recipient identifier carried by a compose href, or
+        // null when the href is not a well-formed LinkedIn compose link.
         if (typeof value !== 'string' || /[\\\x00-\x1f\x7f]/.test(value)) {
-            return false;
+            return null;
         }
         try {
             const url = new URL(value, window.location.href);
@@ -58,7 +60,7 @@ _PROFILE_MESSAGE_TARGET_JS = r"""() => {
                 url.hash ||
                 url.pathname !== '/messaging/compose/'
             ) {
-                return false;
+                return null;
             }
             const values = [
                 ...url.searchParams.getAll('recipient'),
@@ -72,42 +74,63 @@ _PROFILE_MESSAGE_TARGET_JS = r"""() => {
                     : text;
                 return /^[A-Za-z0-9_-]+$/.test(identifier) ? identifier : null;
             });
-            return normalized.length > 0 &&
+            const consistent = normalized.length > 0 &&
                 normalized.every(item => item !== null && item === normalized[0]);
+            return consistent ? normalized[0] : null;
         } catch {
-            return false;
+            return null;
         }
     };
     const main = document.querySelector('main');
     if (!main) return {status: 'unresolved'};
 
-    const section = Array.from(main.children).find(
-        element => element.matches('section') && visible(element)
+    // The top card is the first visible <section> under <main> that carries
+    // both a profile-name heading and a compose action. It is no longer a
+    // direct child of <main> (LinkedIn wraps it in a div since September
+    // 2026), and the name moved from <h1> to <h2>, so neither position nor
+    // heading level can be assumed. Sections without a heading (sidebars,
+    // "people also viewed" rails) never qualify.
+    const ownHeadings = (section, tag) =>
+        Array.from(section.querySelectorAll(tag)).filter(
+            heading => visible(heading) && heading.closest('section') === section
+        );
+    const ownComposeAnchors = section =>
+        Array.from(section.querySelectorAll('a[href*="/messaging/compose/"]')).filter(
+            anchor => anchor.closest('section') === section
+        );
+    let section = null;
+    let headings = [];
+    for (const candidate of Array.from(main.querySelectorAll('section'))) {
+        if (!visible(candidate) || ownComposeAnchors(candidate).length === 0) {
+            continue;
+        }
+        const found = ownHeadings(candidate, 'h1');
+        const named = found.length > 0 ? found : ownHeadings(candidate, 'h2');
+        if (named.length === 0) continue;
+        section = candidate;
+        headings = named;
+        break;
+    }
+    if (!section) return {status: 'unavailable', pageUrl: window.location.href};
+    if (headings.length !== 1) return {status: 'unresolved'};
+
+    const visibleComposeAnchors = ownComposeAnchors(section).filter(visible);
+    if (visibleComposeAnchors.length === 0) {
+        return {status: 'unavailable', pageUrl: window.location.href};
+    }
+    // A profile can render the same Message action more than once (the top
+    // card button plus a duplicate in a highlights block). Several visible
+    // anchors are only ambiguous when they name different recipients.
+    const recipients = visibleComposeAnchors.map(
+        anchor => composeRecipient(anchor.getAttribute('href') || anchor.href || '')
     );
-    if (!section) return {status: 'unresolved'};
-    const headings = Array.from(section.querySelectorAll('h1')).filter(
-        heading => visible(heading) && heading.closest('section') === section
-    );
-    const visibleComposeAnchors = Array.from(
-        section.querySelectorAll('a[href*="/messaging/compose/"]')
-    ).filter(anchor => visible(anchor) && anchor.closest('section') === section);
+    if (recipients.some(item => item === null)) return {status: 'unresolved'};
+    if (new Set(recipients).size !== 1) return {status: 'unresolved'};
     const composeAnchors = visibleComposeAnchors.filter(active);
-    if (
-        headings.length !== 1 ||
-        composeAnchors.length > 1 ||
-        (composeAnchors.length === 1 && visibleComposeAnchors.length !== 1)
-    ) {
-        return {status: 'unresolved'};
-    }
-    if (composeAnchors.length === 0) {
-        return visibleComposeAnchors.length === 0
-            ? {status: 'unavailable', pageUrl: window.location.href}
-            : {status: 'unresolved'};
-    }
+    if (composeAnchors.length === 0) return {status: 'unresolved'};
 
     const anchor = composeAnchors[0];
     const composeHref = anchor.getAttribute('href') || anchor.href || '';
-    if (!validComposeHref(composeHref)) return {status: 'unresolved'};
     return {
         status: 'resolved',
         pageUrl: window.location.href,

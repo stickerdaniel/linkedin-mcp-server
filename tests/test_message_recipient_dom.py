@@ -245,6 +245,109 @@ class TestProfileMessageTargetDom:
         assert result["displayName"] == "Test User"
         assert result["composeHrefs"] == ["/messaging/compose/?recipient=ACoAAB"]
 
+    async def test_wrapped_top_card_with_h2_name_resolves(self, dom_page):
+        # September 2026 layout: <main> holds one wrapper div, the top card
+        # sits several levels down, the name is an <h2>, and the Message
+        # action is rendered twice for the same recipient (one hidden).
+        await _set_composer_content(
+            dom_page,
+            """<!DOCTYPE html><html><head><meta charset="utf-8"></head><body><main>
+              <div class="_70a6f2dc"><div><div>
+                <section><h2>Ads</h2><p>Sponsored</p></section>
+                <div><section>
+                  <h2>Test User</h2>
+                  <p>UX advisor</p>
+                  <a style="display:block" href="/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3AACoAAB&recipient=ACoAAB">
+                    Message
+                  </a>
+                  <a style="display:none" href="/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3AACoAAB&recipient=ACoAAB">
+                    Message
+                  </a>
+                </section></div>
+                <section><h2>About</h2><p>Bio</p></section>
+                <section>
+                  <a style="display:block" href="/messaging/compose/?recipient=OTHER">
+                    Sidebar
+                  </a>
+                </section>
+              </div></div></div>
+            </main></body></html>
+            """,
+        )
+
+        result = await dom_page.evaluate(_PROFILE_MESSAGE_TARGET_JS)
+
+        assert result["status"] == "resolved"
+        assert result["displayName"] == "Test User"
+        assert result["composeHrefs"] == [
+            "/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3AACoAAB&recipient=ACoAAB"
+        ]
+
+    async def test_duplicate_visible_actions_for_one_recipient_resolve(self, dom_page):
+        await _set_composer_content(
+            dom_page,
+            """<!DOCTYPE html><html><head><meta charset="utf-8"></head><body><main>
+              <div><section>
+                <h1>Test User</h1>
+                <a style="display:block" href="/messaging/compose/?recipient=ACoAAB">
+                  Message
+                </a>
+                <div class="highlights">
+                  <a style="display:block" href="/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3AACoAAB">
+                    Message
+                  </a>
+                </div>
+              </section></div>
+            </main></body></html>
+            """,
+        )
+
+        result = await dom_page.evaluate(_PROFILE_MESSAGE_TARGET_JS)
+
+        assert result["status"] == "resolved"
+        assert result["composeHrefs"] == ["/messaging/compose/?recipient=ACoAAB"]
+
+    async def test_visible_actions_for_different_recipients_stay_unresolved(
+        self, dom_page
+    ):
+        await _set_composer_content(
+            dom_page,
+            """<!DOCTYPE html><html><head><meta charset="utf-8"></head><body><main>
+              <div><section>
+                <h2>Test User</h2>
+                <a style="display:block" href="/messaging/compose/?recipient=ACoAAB">
+                  Message
+                </a>
+                <a style="display:block" href="/messaging/compose/?recipient=OTHER">
+                  Message
+                </a>
+              </section></div>
+            </main></body></html>
+            """,
+        )
+
+        result = await dom_page.evaluate(_PROFILE_MESSAGE_TARGET_JS)
+
+        assert result["status"] == "unresolved"
+
+    async def test_top_card_without_visible_action_is_unavailable(self, dom_page):
+        await _set_composer_content(
+            dom_page,
+            """<!DOCTYPE html><html><head><meta charset="utf-8"></head><body><main>
+              <div><section>
+                <h2>Test User</h2>
+                <a style="display:none" href="/messaging/compose/?recipient=ACoAAB">
+                  Message
+                </a>
+              </section></div>
+            </main></body></html>
+            """,
+        )
+
+        result = await dom_page.evaluate(_PROFILE_MESSAGE_TARGET_JS)
+
+        assert result["status"] == "unavailable"
+
 
 class TestMessageComposerDom:
     async def test_owner_handle_pins_one_dom_instance_and_disposes(self, dom_page):
