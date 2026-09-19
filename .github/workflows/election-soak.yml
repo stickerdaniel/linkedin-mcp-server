@@ -1,17 +1,12 @@
 # .github/workflows/election-soak.yml
 #
-# The reproducer for #838, on demand.
+# The high-round diagnostic reproducer for #838, on demand.
 #
-# The eight-client election crashed a frontend with 0xC0000005 on Windows
-# CPython 3.12.10 and never gave up a fault location. #996 skipped the test on
-# every Windows 3.12, and #1003 then dropped the floating `3.12` matrix entry
-# altogether, so the crashing interpreter now appears in no push or pull request
-# run at all. That is the right default for a job every unrelated pull request
-# waits on, and it also means CI can no longer produce the evidence #838 needs.
-#
-# This workflow puts that interpreter back, by hand, with the skip lifted and
-# Windows Error Reporting armed. It is the only path from "skipped" to either a
-# minidump naming the faulting frame or a soak clean enough to lift the skip.
+# The eight-client election historically crashed a frontend with 0xC0000005 on
+# Windows CPython 3.12.10 and never gave up a fault location. Product CI carries
+# the stress again at the declared 3.12.4 floor; this workflow keeps the affected
+# interpreter available for repeated rounds with Windows Error Reporting and a
+# postmortem debugger armed.
 name: Election soak
 
 on:
@@ -31,8 +26,8 @@ permissions:
 
 env:
   TARGET: tests/test_daemon_election.py::TestRealOwner::test_many_clients_starting_at_once_elect_exactly_one_owner
-  # Lifts the #838 skip. Read at collection, so it has to be in the environment
-  # before pytest starts rather than set from inside a test.
+  # Enables the frontend error-mode diagnostic gate after this workflow arms
+  # DontShowUI. Product CI intentionally runs without it.
   LINKEDIN_MCP_ELECTION_SOAK: "1"
 
 jobs:
@@ -157,40 +152,14 @@ jobs:
           Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AeDebug' |
             Format-List Debugger, Auto
 
-      # A soak whose test was skipped reports the same green as a soak that
-      # held, and would be read as grounds to lift the skip. So the predicate
-      # pytest is about to evaluate is evaluated here first, in this same
-      # environment: if the variable above did not reach it, this fails now
-      # rather than after twenty rounds of running nothing. That predicate is
-      # the only thing that can skip this test, so a run past it is a run.
-      - name: Prove the skip is lifted
-        shell: bash
-        run: |
-          uv run python - <<'PY'
-          import os
-          import sys
-
-          sys.path.insert(0, "tests")
-          from test_daemon_election import _ELECTION_SOAK, _skip_the_election_stress
-
-          if _skip_the_election_stress(
-              name=os.name,
-              implementation=sys.implementation.name,
-              version=sys.version_info[:2],
-              soak=os.environ.get(_ELECTION_SOAK),
-          ):
-              raise SystemExit(f"{_ELECTION_SOAK} did not lift the #838 skip")
-          PY
-
       - name: Soak the eight-client election
         shell: bash
         env:
           ROUNDS: ${{ inputs.rounds }}
         run: |
           # A round count of zero would leave the loop below with nothing to do
-          # and report the same green as a soak that held, which is the reading
-          # the step above exists to refuse. `number` accepts zero, negatives
-          # and decimals, so it is checked here rather than trusted.
+          # and report the same green as a soak that held. `number` accepts zero,
+          # negatives and decimals, so it is checked here rather than trusted.
           if ! [[ "$ROUNDS" =~ ^[0-9]+$ ]] || (( ROUNDS < 1 )); then
             echo "rounds must be a positive whole number, got: $ROUNDS"
             exit 1
