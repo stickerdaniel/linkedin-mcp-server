@@ -317,6 +317,10 @@ def _tells_which_owner_failed() -> type:
         * ``call_tool_mcp`` — only a failure to establish the connection proves
           it. A read timeout or a protocol error may mean the owner is scraping
           right now.
+
+        ``__aexit__`` is a boundary of the opposite kind and tags nothing: it
+        runs once the operation has an answer, so the only thing a failure there
+        can do is take that answer's place. See its own docstring.
         """
 
         def __init__(self, *args: Any, instance_id: str, **kwargs: Any) -> None:
@@ -354,6 +358,73 @@ def _tells_which_owner_failed() -> type:
             return await self._saying_which_owner(
                 super().__aenter__(), nothing_was_sent=True
             )
+
+        async def __aexit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc_val: BaseException | None,
+            exc_tb: Any,
+        ) -> bool | None:
+            """Close the session, and let nothing here decide the outcome.
+
+            The one boundary that runs *after* an answer exists, and the reason
+            it needs guarding at all is that the answer is already on its way
+            out. ``ProxyTool.run`` makes its call inside ``async with client``
+            and all four provider listings do the same (``proxy.py``, ``run``
+            and ``_list_tools`` with its siblings), while ``Client._disconnect``
+            awaits the session task under
+            ``suppress(asyncio.CancelledError)`` (``client.py``). Only
+            cancellation is suppressed, so an ordinary exception from that task
+            leaves this context manager and replaces whatever the operation had
+            decided.
+
+            Both directions are damage, measured through the real stack. With a
+            tagged ``OwnerUnreachableError`` in flight, the replacement reaches
+            the middleware carrying the tag in ``__context__`` only, which
+            ``unreachable_owner_in`` does not walk and must not start walking:
+            Python sets ``__context__`` on *any* exception raised while another
+            is being handled, and this middleware raises its repeat inside the
+            ``except`` that holds the first failure, so every unrelated failure
+            of a repeat would resolve to the owner loss before it — absorbed by
+            today's branches, which read that first failure's own
+            ``nothing_was_sent``, and one edit away from not being. The
+            middleware therefore re-raises at its ``failure is None`` branch and
+            masking flattens that to ``Error calling tool
+            'send_connection_request'`` — nothing about a call that may have
+            acted. With nothing in flight it is the *result* that is replaced,
+            and the owner had already run the tool: the same generic failure for
+            a call that did send the connection request, and this half carries no
+            tag anywhere, so no detector could have found it.
+
+            Swallowing adds no leak of its own here, which is a narrower claim
+            than a promise about every way cleanup can fail. A client here is
+            built for one operation and dropped (``open_client``), and
+            ``_disconnect`` drops the session task in its own ``finally`` —
+            cancelling it first if it is still running — before this is reached,
+            so what arrives is the report of a failure and not a resource still
+            held; what a future ``_disconnect`` might leave behind when *it*
+            fails is its own to answer for. The operation succeeded or it
+            failed, and a departure this one misses is found by the next
+            operation, which opens a client of its own.
+            Cancellation is not caught, because ``CancelledError`` is a
+            ``BaseException`` and a caller giving up is not the session's own
+            failure.
+
+            One falsy return says both things. Python consults it only while an
+            exception is in flight, where falsy means "do not suppress" and the
+            tagged failure goes on propagating; with nothing in flight it is
+            ignored and the result stands.
+            """
+            try:
+                return await super().__aexit__(exc_type, exc_val, exc_tb)
+            except Exception as closing:
+                logger.debug(
+                    "The shared browser owner's session failed while closing, "
+                    "after the operation had already %s",
+                    "failed" if exc_val is not None else "answered",
+                    exc_info=closing,
+                )
+                return False
 
         async def list_tools_mcp(self, *args: Any, **kwargs: Any) -> Any:
             return await self._saying_which_owner(

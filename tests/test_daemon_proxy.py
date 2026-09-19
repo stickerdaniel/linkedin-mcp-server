@@ -1316,6 +1316,63 @@ class _FailsOneRequest:
         return await self._session.call_tool(*args, **kwargs)
 
 
+class _DiesAsTheCallsSessionCloses(FastMCPTransport):
+    """An owner whose session fails to close, after a call was made on it.
+
+    The two halves of the displacement, in the order that does the damage.
+    `ProxyTool.run` makes its call inside `async with client`
+    (`fastmcp/server/providers/proxy.py:181`), and `Client._disconnect` awaits
+    the session task under `suppress(asyncio.CancelledError)`
+    (`fastmcp/client/client.py:672-676`), so an ordinary exception from that
+    task leaves the context manager after the call has already decided its
+    outcome, and replaces whatever that was.
+
+    *refusing* is the code and message the call comes back with, or `None` for a
+    call that succeeds. With a failure in flight it is the tag that gets
+    replaced, and with none it is the result.
+
+    Only a session that was asked to call dies while closing. Every upstream
+    operation opens a client of its own, so a transport that killed every
+    session would fail the lookup in front of the call and the call would never
+    be reached.
+    """
+
+    def __init__(
+        self, server: FastMCP, *, refusing: tuple[int, str] | None = None
+    ) -> None:
+        super().__init__(server)
+        self._refusing = refusing
+
+    @asynccontextmanager
+    async def connect_session(self, **kwargs: Any) -> AsyncIterator[Any]:
+        async with super().connect_session(**kwargs) as session:
+            calling = _CallsOnThisSession(session, self._refusing)
+            yield calling
+        if calling.calls:
+            raise httpx.ReadError("the owner went away as the session closed")
+
+
+class _CallsOnThisSession:
+    """A session that records the calls it was asked for, and may refuse them."""
+
+    def __init__(self, session: Any, refusing: tuple[int, str] | None) -> None:
+        self._session = session
+        self._refusing = refusing
+        self.calls = 0
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._session, name)
+
+    async def call_tool(self, *args: Any, **kwargs: Any):
+        from mcp.shared.exceptions import McpError
+
+        self.calls += 1
+        if self._refusing is None:
+            return await self._session.call_tool(*args, **kwargs)
+        code, message = self._refusing
+        raise McpError(mt.ErrorData(code=code, message=message))
+
+
 class TestRecoveringThroughTheWholeProxy:
     """The path a real request takes, with only the socket stood in for.
 
@@ -1334,6 +1391,22 @@ class TestRecoveringThroughTheWholeProxy:
         @owner.tool(name=name, annotations={"readOnlyHint": True})
         async def a_tool() -> str:
             return name
+
+        return owner
+
+    @staticmethod
+    def _mutating_owner(ran: list[str]) -> FastMCP:
+        """An owner with a write tool that records every run in *ran*.
+
+        Unannotated on purpose: a tool that declares no `readOnlyHint` is what
+        the recovery has to treat as something a repeat could change.
+        """
+        owner = FastMCP("owner")
+
+        @owner.tool(name="send_connection_request")
+        async def send() -> str:
+            ran.append("sent")
+            return "sent"
 
         return owner
 
@@ -1541,28 +1614,16 @@ class TestRecoveringThroughTheWholeProxy:
         nothing else, and this result surviving with its payload intact.
         """
         backend, elected, _replacement, elections = _upgraded
-        ran = 0
-
-        def with_a_mutating_tool() -> FastMCP:
-            owner = FastMCP("owner")
-
-            @owner.tool(name="send_connection_request")
-            async def send() -> str:
-                nonlocal ran
-                ran += 1
-                return "sent"
-
-            return owner
-
+        ran: list[str] = []
         # The departed owner still answers the listing, so the failure comes from
         # the call boundary rather than from the lookup in front of it.
         gone = _AnswersWithAnError(
-            with_a_mutating_tool(),
+            self._mutating_owner(ran),
             code=httpx.codes.REQUEST_TIMEOUT,
             message="Timed out while waiting for response to CallToolRequest",
             fails="call",
         )
-        after = with_a_mutating_tool()
+        after = self._mutating_owner(ran)
         _reach_owners_in_process(
             monkeypatch,
             lambda url: gone if url == elected.descriptor.url else after,
@@ -1587,8 +1648,131 @@ class TestRecoveringThroughTheWholeProxy:
             "Check LinkedIn before calling again" in getattr(block, "text", "")
             for block in result.content
         )
-        assert ran == 0, "a call that may already have run was sent again"
+        assert ran == [], "a call that may already have run was sent again"
         assert elections() == 1
         assert (
             backend.attachment.descriptor.instance_id != elected.descriptor.instance_id
         )
+
+    async def test_a_tag_the_closing_session_replaced_is_still_found(
+        self, monkeypatch: pytest.MonkeyPatch, _upgraded
+    ):
+        """The owner-loss failure a departing owner's own cleanup buries.
+
+        The call is classified as a departure and tagged, and then the client
+        closes: the session task's own exception leaves `__aexit__` and takes the
+        tag's place, which survives in `__context__` where nothing looks. The
+        recovery then finds no failure to act on, re-raises, and masking hands
+        the client `Error calling tool 'send_connection_request'` about a call
+        that may have reached LinkedIn. That is the #891 damage on the path the
+        #1008 answers never reach.
+
+        Every other test here lets the client close cleanly, and all of them pass
+        with the closing boundary unguarded.
+        """
+        backend, elected, _replacement, elections = _upgraded
+        ran: list[str] = []
+        gone = _DiesAsTheCallsSessionCloses(
+            self._mutating_owner(ran),
+            refusing=(
+                httpx.codes.REQUEST_TIMEOUT,
+                "Timed out while waiting for response to CallToolRequest",
+            ),
+        )
+        after = self._mutating_owner(ran)
+        _reach_owners_in_process(
+            monkeypatch,
+            lambda url: gone if url == elected.descriptor.url else after,
+        )
+
+        async with Client(self._proxy(backend)) as client:
+            result = await client.call_tool(
+                "send_connection_request", {}, raise_on_error=False
+            )
+
+        assert result.is_error is True
+        assert result.structured_content is not None, (
+            "the owner loss reached the client as a failure carrying nothing"
+        )
+        assert result.structured_content["status"] == "outcome_unknown"
+        assert result.structured_content["retry_safe"] is False
+        assert ran == [], "a call that may already have run was sent again"
+        assert elections() == 1
+
+    async def test_an_answer_survives_a_session_that_fails_to_close(
+        self, monkeypatch: pytest.MonkeyPatch, _upgraded
+    ):
+        """The same displacement with nothing in flight: the result is replaced.
+
+        The owner ran the tool and returned its result, and the client then fails
+        while closing a session it will never use again. Left to escape, that
+        failure replaces the answer, so masking turns a call that *did* act into
+        `Error calling tool 'send_connection_request'` — which a client reads as
+        a call to make again, for the one tool where that sends a second
+        connection request.
+        """
+        backend, _elected, _replacement, elections = _upgraded
+        ran: list[str] = []
+        dying = _DiesAsTheCallsSessionCloses(self._mutating_owner(ran))
+        _reach_owners_in_process(monkeypatch, lambda _url: dying)
+
+        async with Client(self._proxy(backend)) as client:
+            result = await client.call_tool(
+                "send_connection_request", {}, raise_on_error=False
+            )
+
+        assert result.is_error is False, (
+            "a call the owner answered was reported as a failure"
+        )
+        assert result.data == "sent"
+        assert ran == ["sent"], "the owner did not run the call exactly once"
+        assert elections() == 0, "a closing failure stood a replacement up"
+
+    async def test_a_caller_that_gives_up_at_the_close_stays_cancelled(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The one failure at this boundary that is not the session's: a cancel.
+
+        The guard catches `Exception`, and the whole distance between that and
+        `BaseException` sits here: a `CancelledError` is a caller giving up
+        rather than the owner's session failing, and a guard that returned for
+        one would tell a caller that had already walked away that its call went
+        through.
+
+        Where such a cancellation can reach this boundary was measured against
+        this client, and it is one window. Delivered any earlier it is already
+        in flight at `__aexit__`, where a falsy return changes nothing about it.
+        Delivered while `Client._disconnect` awaits the session task — the
+        disconnect timeout, a close that hangs, the forced cancel that follows
+        it — it is absorbed by that method's own
+        `suppress(asyncio.CancelledError)` (`client.py`) and never arrives at
+        all. What is left is the window below: the answer is in hand and the
+        close has not started, so the delivery lands on the first checkpoint
+        inside `_disconnect`, acquiring `_session_state.lock`.
+
+        Driven against the client `open_client` builds rather than the whole
+        server, because only the operation's own task can give up in that
+        window, and in the server that task is inside `ProxyTool.run`.
+        """
+        ran: list[str] = []
+        _reach_owners_in_process(monkeypatch, lambda _url: self._mutating_owner(ran))
+        client = _backend(_attachment(tmp_path), tmp_path).open_client(timeout=1.0)
+        went_on: list[str] = []
+
+        async def gives_up_with_the_answer_in_hand() -> None:
+            async with client:
+                await client.call_tool_mcp("send_connection_request", {})
+                giving_up = asyncio.current_task()
+                assert giving_up is not None
+                giving_up.cancel()
+            went_on.append("the close answered a caller that had gone")
+
+        operation = asyncio.create_task(gives_up_with_the_answer_in_hand())
+        with pytest.raises(asyncio.CancelledError):
+            await operation
+
+        assert went_on == [], "a caller that gave up was carried on regardless"
+        assert ran == ["sent"], "the owner did not run the call exactly once"
+        # The cancelled close never reached the session task. Clearing up after
+        # the caller, not part of what this pins.
+        await client.close()
