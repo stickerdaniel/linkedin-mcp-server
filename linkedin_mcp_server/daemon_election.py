@@ -6,8 +6,8 @@ exist. It never becomes the owner itself, because it cannot: ``cli_main`` runs
 the stdio server blocking, so a process that served the owner's HTTP could not
 also serve its own client.
 
-The child owns every operation that may mutate daemon state. It opens the log,
-takes the lock, starts the endpoint, and publishes while holding that lock. This
+The child owns every operation that may mutate daemon state. It takes the lock,
+opens the log, starts the endpoint, and publishes while holding that lock. This
 subprocess boundary is also the frontend's timeout boundary: if state storage is
 stuck in the kernel, the parent can kill the child and prove that no abandoned
 worker can later acquire the lock or publish over an in-process fallback. A
@@ -33,6 +33,7 @@ from typing import Any, BinaryIO, TypeVar, cast
 
 from linkedin_mcp_server import (
     __version__,
+    daemon as daemon_discovery,
     daemon_config,
     daemon_descriptor,
     daemon_owner,
@@ -44,7 +45,7 @@ from linkedin_mcp_server.daemon import (
     OwnerLookup,
     OwnerState,
     _DescriptorInspector,
-    look_up_owner,
+    _DescriptorReadTimeout,
 )
 from linkedin_mcp_server.daemon_lock import DaemonLockError
 from linkedin_mcp_server.process_control import ControlListener
@@ -72,6 +73,12 @@ _IS_WINDOWS = os.name == "nt"
 #: while still inside its own rules. The remainder covers configuration handover
 #: and lock attempts before the owner's clocks start.
 DEFAULT_ELECTION_SECONDS = 90.0
+
+#: A quiescent observation window after active election ends. Fifteen seconds
+#: bounds the known overhang of an operation already begun, one complete
+#: descriptor read and reachability probe, plus a small scheduling margin. It is
+#: not an allowance for arbitrary scheduler delay.
+DEFAULT_SETTLEMENT_SECONDS = 15.0
 
 #: How long a published owner has to answer before it is treated as *silent*.
 #: This is a loopback request to a process that is either serving or gone, so
@@ -236,9 +243,10 @@ class Reach(enum.Enum):
     SILENT = "silent"
 
 
-#: Proves a published endpoint is live. Injectable so the election can be tested
-#: without a real server; production passes nothing and gets a real round trip.
-Reachable = Callable[[Attachment], Reach]
+#: Proves a published endpoint is live within the supplied remaining budget.
+#: Injectable so the election can be tested without a real server; production
+#: passes nothing and gets a real round trip.
+Reachable = Callable[[Attachment, float], Reach]
 
 
 @dataclass(frozen=True)
@@ -261,60 +269,37 @@ def obtain_owner(
     config: AppConfig,
     *,
     deadline_seconds: float = DEFAULT_ELECTION_SECONDS,
+    settlement_seconds: float = DEFAULT_SETTLEMENT_SECONDS,
     connect: Reachable | None = None,
 ) -> ElectionOutcome:
     """Return an owner to talk to, starting one if nobody else has.
 
-    The loop, and why it is a loop rather than "attach, else own, else give up":
-
-    A frontend that loses the lock race has learned that *somebody is starting*,
-    which is a reason to wait rather than to conclude anything. The tempting
-    shortcut is to fall back to driving a browser in-process, and it is wrong in
-    the ordinary case: two clients starting together is not an edge, and the one
-    that lost would then drive its own Chromium against the same profile for its
-    whole life. That is precisely the per-call handoff this feature exists to
-    remove.
-
-    Equally, winning the lock is not permission to keep it. This process cannot
-    serve, so winning means starting a child and handing the lock over.
-
-    *connect* is what settles liveness, and it is not optional. ``ATTACHABLE``
-    is a statement about a *file*: an owner that dies after publishing leaves a
-    descriptor and a token that pass every check there is. Reproduced on this
-    tree — an owner was killed and the very next election read its leftovers as
-    attachable and handed back the dead process's endpoint. Only a request that
-    is answered establishes that anything is listening.
+    Active election and quiescent settlement have separate budgets. Their global
+    deadlines are fixed from this call's entry. An early terminal local failure
+    gets at most one settlement budget from that failure, capped by the global
+    deadline. Settlement never starts or turns over an owner; it only observes
+    the canonical descriptor and authenticates a compatible endpoint.
     """
-    deadline = time.monotonic() + max(deadline_seconds, 0.0)
+    entered = time.monotonic()
+    active_deadline = entered + max(deadline_seconds, 0.0)
+    settlement_budget = max(settlement_seconds, 0.0)
+    settlement_deadline = active_deadline + settlement_budget
     started = False
     starts = 0
     next_start = 0.0
     start_retry_seconds = _OWNER_START_RETRY_SECONDS
     reach = connect or _reachable
     inspector = _DescriptorInspector(auth_root, profile, config)
-    # Instances that answered *wrongly* — a refused connection, a rejected
-    # token, a stranger on the port — so a corpse is not handed back a second
-    # time. The descriptor stays on disk until a live owner overwrites it, and
-    # without this the loop would re-read it, probe it again, and spin.
-    #
-    # Deliberately narrower than "did not answer". An instance that merely ran
-    # out of time is never put here, because the next probe may well reach it:
-    # a paused or overloaded owner holds its port and says nothing, and burying
-    # it made a frontend refuse the healthy owner it had just started itself.
     buried: set[str] = set()
-    # A turnover is asked for at most once per election, and the bound is not
-    # decoration. A newer frontend replaces a stale owner and then reads the
-    # replacement, and if that one still looked stale it would be asked to stand
-    # down as well, and so on for the whole budget. Reproduced while testing the
-    # turnover with a version override: every owner elected was immediately told
-    # to hand over, and the run ended with no owner at all. One request settles
-    # the case it exists for, and anything past that is a disagreement no amount
-    # of restarting resolves.
     asked_for_turnover = False
+    last_lookup = OwnerLookup(
+        state=OwnerState.ABSENT,
+        reason="the election ended before daemon state was observed",
+    )
 
     def look(wait_seconds: float = 0.0) -> OwnerLookup:
-        nonlocal asked_for_turnover
-        found, asked = _live_lookup(
+        nonlocal asked_for_turnover, last_lookup
+        found, asked, observed = _live_lookup(
             auth_root,
             profile,
             config,
@@ -323,37 +308,52 @@ def obtain_owner(
             inspector=inspector,
             may_ask_for_turnover=not asked_for_turnover,
             wait_seconds=wait_seconds,
+            deadline=active_deadline,
         )
         asked_for_turnover = asked_for_turnover or asked
+        if observed:
+            last_lookup = found
         return found
 
+    def settle(*, deadline: float | None = None) -> ElectionOutcome:
+        effective_deadline = (
+            settlement_deadline
+            if deadline is None
+            else min(settlement_deadline, deadline)
+        )
+        return _settle_owner(
+            auth_root,
+            profile,
+            config,
+            reach,
+            buried,
+            inspector=inspector,
+            deadline=effective_deadline,
+            last_lookup=last_lookup,
+            started=started,
+        )
+
+    def settle_terminal_local_result() -> ElectionOutcome:
+        return settle(deadline=time.monotonic() + settlement_budget)
+
     while True:
+        if time.monotonic() >= active_deadline:
+            return settle()
         lookup = look()
         if lookup.worth_connecting:
             return ElectionOutcome(lookup, started_owner=started)
+        if time.monotonic() >= active_deadline:
+            return settle()
 
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return ElectionOutcome(lookup, started_owner=started)
-
-        # Asked only where a start is otherwise due, so the retry pacing is
-        # unchanged, and asked before the clock is read for that pacing, because
-        # the answer can involve waiting for an inspector still inside state
-        # storage and a start scheduled off a stale reading would be paced from
-        # before that wait.
         may_start = time.monotonic() >= next_start
         if may_start:
-            exclusion = _exclusion_state(inspector, deadline=deadline)
+            exclusion = _exclusion_state(inspector, deadline=active_deadline)
             if exclusion is _Exclusion.UNAVAILABLE:
-                # Nothing can be started against state this process cannot
-                # establish, and nothing later in this election changes that.
-                # Returning now is the fallback; the next election gets a fresh
-                # reader and may find the same state perfectly usable.
                 _report_unusable_exclusion(inspector)
-                return ElectionOutcome(lookup, started_owner=started)
+                return ElectionOutcome(last_lookup, started_owner=started)
             may_start = exclusion is _Exclusion.READY
         now = time.monotonic()
-        remaining = deadline - now
+        remaining = active_deadline - now
         if may_start and remaining > 0:
             starts += 1
             start_retry_seconds = _owner_start_delay_after(starts, start_retry_seconds)
@@ -368,63 +368,65 @@ def obtain_owner(
                     inspector=inspector,
                 )
             except DaemonLockError:
-                # Not contention: a filesystem without usable locking, or state
-                # this account cannot write. Waiting would never resolve it.
                 logger.warning("The daemon lock is unusable", exc_info=True)
-                return ElectionOutcome(lookup, started_owner=started)
+                return ElectionOutcome(last_lookup, started_owner=started)
             except OSError:
-                # From the control listener, the Job, the command or the spawn
-                # itself, and ``_spawn`` takes no lock on this path. Usually
-                # before a child exists, though not always: ``Popen`` can raise
-                # after the operating system made the process, when the parent's
-                # own pipe cleanup fails. It makes no difference here, because
-                # such a child is never handed its configuration and inherits no
-                # lock, and this owner reads neither profile state nor the lock
-                # before that handover. So the reasoning under ``_Attempt.FAILED``
-                # does not reach this either way: nothing served, and nothing was
-                # freed for a sibling frontend to pick up. Pacing retries here
-                # would only spend the caller's whole election budget before it
-                # can fall back to a direct browser, which is what the
-                # predecessor avoided and what this had quietly given up.
                 logger.warning("The daemon could not be started", exc_info=True)
-                return ElectionOutcome(lookup, started_owner=started)
+                return settle_terminal_local_result()
         else:
-            # A delayed attempt remains scheduled, or private state is not ready
-            # to have a child started against it. Descriptor observation continues
-            # in the meantime without one process per polling pass.
             attempt = _Attempt.CONTENDED
 
         if attempt is _Attempt.ABORTED:
             logger.warning("A daemon child reported a permanent startup failure")
-            return ElectionOutcome(look(), started_owner=started)
+            return settle_terminal_local_result()
         if attempt is _Attempt.FAILED:
-            # A local child failure proves only that child is gone. Another
-            # frontend may already have a child holding the lock this one freed,
-            # so falling back now could put two browsers on the profile.
             logger.warning(
                 "A daemon child failed; waiting for any concurrent election winner"
             )
         if attempt is _Attempt.STARTED:
             started = True
 
-        # A STARTED attempt returned only after this process atomically published
-        # its prepared generation, so this re-read normally succeeds at once.
-        # The wait is for the other
-        # branch: this process lost the lock race, so somebody else is coming up
-        # and the descriptor is not there yet.
-        #
-        # Bounded per pass rather than by the whole remaining budget, and that is
-        # not a detail. Waiting out the full budget here consumes it inside a
-        # single read, so the loop's own deadline check fires on the way back and
-        # the lock is attempted exactly once — measured: one attempt against a
-        # one second budget, in the case this loop exists to keep retrying. The
-        # holder may also release without ever publishing, which only another
-        # lock attempt can discover.
+        remaining = active_deadline - time.monotonic()
+        if remaining <= 0:
+            return settle()
+        lookup = look(min(_RETRY_SECONDS, remaining))
+        if lookup.worth_connecting:
+            return ElectionOutcome(lookup, started_owner=started)
+        if time.monotonic() >= active_deadline:
+            return settle()
+
+
+def _settle_owner(
+    auth_root: Path,
+    profile: Path,
+    config: AppConfig,
+    reach: Reachable,
+    buried: set[str],
+    *,
+    inspector: _DescriptorInspector,
+    deadline: float,
+    last_lookup: OwnerLookup,
+    started: bool,
+) -> ElectionOutcome:
+    """Observe one quiescent election tail without causing owner-side effects."""
+    while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            return ElectionOutcome(look(), started_owner=started)
-        lookup = look(min(_RETRY_SECONDS, remaining))
-        if lookup.worth_connecting or time.monotonic() >= deadline:
+            return ElectionOutcome(last_lookup, started_owner=started)
+        lookup, _asked, observed = _live_lookup(
+            auth_root,
+            profile,
+            config,
+            reach,
+            buried,
+            inspector=inspector,
+            may_ask_for_turnover=False,
+            wait_seconds=min(_RETRY_SECONDS, remaining),
+            deadline=deadline,
+        )
+        if observed:
+            last_lookup = lookup
+        if lookup.worth_connecting:
             return ElectionOutcome(lookup, started_owner=started)
 
 
@@ -435,10 +437,11 @@ def _live_lookup(
     reach: Reachable,
     buried: set[str],
     *,
-    inspector: _DescriptorInspector | None = None,
+    inspector: _DescriptorInspector,
     may_ask_for_turnover: bool = True,
     wait_seconds: float = 0.0,
-) -> tuple[OwnerLookup, bool]:
+    deadline: float,
+) -> tuple[OwnerLookup, bool, bool]:
     """Find an owner and prove it answers, or report it as leftovers.
 
     The one place ``ATTACHABLE`` is turned from a claim about a file into a
@@ -456,36 +459,62 @@ def _live_lookup(
     not asked again. A silence says only that the answer did not arrive in time,
     so nothing is recorded and the next pass asks afresh.
 
-    Every path here answers on the first readable descriptor, and the waiting
-    happens inside :func:`look_up_owner` alone. That split is measured rather
-    than tidy: an earlier version looped, and because nothing rewrites a
-    descriptor except a *new* owner publishing, an unusable one was simply
-    re-read until the budget ran out. After a version turnover that cost ninety
-    seconds and produced no owner, while the lock the departing owner had freed
-    sat there untouched, because taking it is the caller's job and this function
-    never returned to let it.
+    Reads stay on the caller's one inspector. A paced pass may re-read the
+    canonical descriptor, but returns when that pass's wait ends so the active
+    loop can try the lock again instead of spending its whole budget on reads.
 
-    Returns the reading and whether a turnover was requested. The caller counts
-    those, because asking twice in one election means telling a freshly elected
-    owner to stand down as well, and that does not terminate.
+    Returns the lookup, whether turnover was requested, and whether the lookup
+    came from a completed descriptor read. The last flag lets settlement retain
+    its last concrete observation when a bounded read times out.
     """
-    lookup = look_up_owner(
-        auth_root,
-        profile,
-        config,
-        wait_seconds=wait_seconds,
-        # Buried instances travel *into* the read, so a wait spends itself
-        # watching for a generation that could actually be used. Passing them
-        # only mattered once a wait was involved: a buried descriptor is still
-        # compatible on disk, so the read returned it instantly, the downgrade
-        # below turned it down, and the caller's retry loop came straight back
-        # with none of its budget spent. Snapshotted rather than shared, since
-        # the set is the caller's and this is the only thing here that reads it.
-        ignore_instances=frozenset(buried),
-        _inspector=inspector,
-    )
-    if not lookup.worth_connecting:
-        return lookup, False
+    del auth_root, profile, config  # carried by the reusable inspector
+    wait_deadline = min(deadline, time.monotonic() + max(wait_seconds, 0.0))
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return (
+                OwnerLookup(
+                    state=OwnerState.UNTRUSTED,
+                    reason="the election deadline expired before descriptor read",
+                ),
+                False,
+                False,
+            )
+        try:
+            lookup = inspector.inspect_until(
+                timeout=min(daemon_discovery._DESCRIPTOR_READ_SECONDS, remaining)
+            )
+        except _DescriptorReadTimeout as exc:
+            return (
+                OwnerLookup(state=OwnerState.UNTRUSTED, reason=str(exc)),
+                False,
+                False,
+            )
+        except daemon_descriptor.DescriptorError as exc:
+            # A completed, untrusted read is still a concrete observation. Pace it
+            # like every other unusable canonical state so a persistent parse or
+            # permission failure cannot create one reader thread per loop pass.
+            lookup = OwnerLookup(state=OwnerState.UNTRUSTED, reason=str(exc))
+
+        ignored = (
+            lookup.attachment is not None
+            and lookup.attachment.descriptor.instance_id in buried
+        )
+        if lookup.worth_connecting and not ignored:
+            break
+        remaining = min(wait_deadline, deadline) - time.monotonic()
+        if remaining <= 0:
+            if ignored:
+                return (
+                    OwnerLookup(
+                        state=OwnerState.INCOMPATIBLE,
+                        reason="the published daemon was already found unusable",
+                    ),
+                    False,
+                    True,
+                )
+            return lookup, False, True
+        time.sleep(min(daemon_discovery._ATTACH_POLL_SECONDS, remaining))
 
     attachment = lookup.attachment
     assert attachment is not None  # worth_connecting implies one
@@ -497,39 +526,50 @@ def _live_lookup(
                 reason="the published daemon was already found unusable",
             ),
             False,
+            True,
         )
 
-    if (
-        may_ask_for_turnover
-        and daemon_version.compare(
+    stale = (
+        daemon_version.compare(
             owner=attachment.descriptor.package_version, frontend=__version__
         )
         is daemon_version.Skew.OWNER_IS_STALE
-    ):
-        # A newer frontend does not attach to an older owner, and it does not
-        # merely refuse either: refusing without asking would leave it unable to
-        # proceed at all, since it cannot take a lock the owner holds. So it
-        # asks, and the replacement is elected from the ordinary path once the
-        # lock comes free.
-        logger.info(
-            "The running daemon is version %s and this build is %s; asking it to "
-            "hand the browser over",
-            attachment.descriptor.package_version,
-            __version__,
-        )
-        _ask_to_stand_down(attachment)
+    )
+    if stale:
+        if may_ask_for_turnover:
+            logger.info(
+                "The running daemon is version %s and this build is %s; asking it "
+                "to hand the browser over",
+                attachment.descriptor.package_version,
+                __version__,
+            )
+            _ask_to_stand_down(attachment)
+        # Classification and turnover are separate. Settlement never sends the
+        # request, but it still writes this generation off so its paced reads wait
+        # for a replacement instead of rediscovering the same stale owner at speed.
         buried.add(instance)
         return (
             OwnerLookup(
                 state=OwnerState.INCOMPATIBLE,
                 reason="the running daemon is older than this build",
             ),
+            may_ask_for_turnover,
             True,
         )
 
-    verdict = reach(attachment)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return (
+            OwnerLookup(
+                state=OwnerState.INCOMPATIBLE,
+                reason="the published daemon was not probed before the deadline",
+            ),
+            False,
+            True,
+        )
+    verdict = reach(attachment, min(_REACHABLE_SECONDS, remaining))
     if verdict is Reach.ANSWERED:
-        return lookup, False
+        return lookup, False, True
 
     if verdict is Reach.SILENT:
         # Not buried, and that is the whole of the fix. Something holds the port
@@ -552,6 +592,7 @@ def _live_lookup(
                 reason="the published daemon has not answered yet",
             ),
             False,
+            True,
         )
 
     buried.add(instance)
@@ -565,6 +606,7 @@ def _live_lookup(
             reason="the published daemon did not answer, so it is leftovers",
         ),
         False,
+        True,
     )
 
 
@@ -604,7 +646,7 @@ def _ask_to_stand_down(attachment: Attachment) -> None:
     logger.debug("Stand-down request answered with %s", response.status_code)
 
 
-def _reachable(attachment: Attachment) -> Reach:
+def _reachable(attachment: Attachment, timeout: float) -> Reach:
     """What the published endpoint says when asked with this token.
 
     An authenticated round trip rather than a TCP connect. A connect succeeds
@@ -643,8 +685,10 @@ def _reachable(attachment: Attachment) -> Reach:
             return Reach.REFUSED
         return Reach.ANSWERED
 
+    if timeout <= 0:
+        return Reach.SILENT
     try:
-        return asyncio.run(asyncio.wait_for(ask(), _REACHABLE_SECONDS))
+        return asyncio.run(asyncio.wait_for(ask(), timeout))
     except TimeoutError:
         # Something holds the port and did not get to us in time. Deliberately
         # not treated as leftovers: a loaded machine, a paused process or a busy
@@ -765,6 +809,7 @@ class _BootstrapReport:
             if candidate in {
                 daemon_owner.BOOTSTRAP_CONFIGURATION,
                 daemon_owner.BOOTSTRAP_STATE,
+                daemon_owner.BOOTSTRAP_LOCK,
                 daemon_owner.BOOTSTRAP_LOG,
                 daemon_owner.BOOTSTRAP_ATTACHED,
             }:
@@ -807,6 +852,8 @@ def _report_child_failure(report: _BootstrapReport) -> None:
         logger.warning("The daemon rejected its startup configuration")
     elif code == daemon_owner.BOOTSTRAP_STATE:
         logger.warning("The daemon could not resolve its profile state")
+    elif code == daemon_owner.BOOTSTRAP_LOCK:
+        logger.warning("The daemon could not take ownership")
     elif code == daemon_owner.BOOTSTRAP_LOG:
         logger.warning("The daemon log could not be opened")
     elif code == daemon_owner.BOOTSTRAP_ATTACHED:

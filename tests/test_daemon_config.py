@@ -745,8 +745,17 @@ class TestRefusing:
                     raise OSError("profile state is unavailable")
 
             monkeypatch.setattr(daemon_owner, "Path", lambda _value: UnresolvablePath())
+            expected = ["unlocked:123", f"diagnostic:{code}", "aborted"]
         else:
+
+            class AdoptedLock:
+                def release(self) -> None:
+                    events.append("released")
+
             monkeypatch.setattr(daemon_owner, "auth_root_dir", lambda profile: tmp_path)
+            monkeypatch.setattr(
+                daemon_owner, "_take_lock", lambda auth_root, fd: AdoptedLock()
+            )
             monkeypatch.setattr(
                 daemon_owner,
                 "_attach_daemon_log",
@@ -754,9 +763,10 @@ class TestRefusing:
                     OSError("daemon log is unavailable")
                 ),
             )
+            expected = [f"diagnostic:{code}", "aborted", "released"]
 
         assert daemon_owner.main(["--lock-fd", "123"]) == 1
-        assert events == ["unlocked:123", f"diagnostic:{code}", "aborted"]
+        assert events == expected
 
     def test_predecessor_windows_frontend_is_refused_before_state_access(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -857,9 +867,13 @@ class TestRefusing:
         monkeypatch.setattr(
             daemon_owner,
             "_attach_daemon_log",
-            lambda auth_root: tmp_path / "daemon.log",
+            lambda auth_root: pytest.fail("lock failure reached the daemon log"),
         )
-        monkeypatch.setattr(daemon_owner, "configure_logging", lambda **kwargs: None)
+        monkeypatch.setattr(
+            daemon_owner,
+            "configure_logging",
+            lambda **kwargs: pytest.fail("lock failure configured logging"),
+        )
         monkeypatch.setattr(
             daemon_owner,
             "_take_lock",
@@ -870,15 +884,21 @@ class TestRefusing:
             "_abandon_inherited_lock",
             lambda fd: events.append(f"unlocked:{fd}"),
         )
-        monkeypatch.setattr(daemon_owner.logger, "exception", lambda *args: None)
+        monkeypatch.setattr(
+            daemon_owner.logger,
+            "exception",
+            lambda *args, **kwargs: pytest.fail(
+                "lock failure logged before configuration"
+            ),
+        )
 
         assert daemon_owner.main(["--lock-fd", "123"]) == 1
         assert events == [
-            f"diagnostic:{daemon_owner.BOOTSTRAP_ATTACHED}",
-            "unlocked:123",
+            f"diagnostic:{daemon_owner.BOOTSTRAP_LOCK}",
             "aborted",
             "bootstrap-closed",
             "handshake-closed",
+            "unlocked:123",
         ]
 
     def test_attached_bootstrap_keeps_legacy_record_before_versioned_hint(
@@ -913,7 +933,7 @@ class TestRefusing:
         ]
         assert stream.closed
 
-    def test_log_attachment_closes_bootstrap_with_an_actionable_record(
+    def test_lock_loser_retries_without_attaching_the_log(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
         from linkedin_mcp_server import daemon_owner
@@ -930,10 +950,10 @@ class TestRefusing:
                 events.append(f"diagnostic:{code}")
 
             def attached(self, _log_path: Path, _nonce: str) -> None:
-                events.append(f"diagnostic:{daemon_owner.BOOTSTRAP_ATTACHED}")
+                pytest.fail("lock loser reported a daemon log path")
 
             def close(self) -> None:
-                pass
+                events.append("bootstrap-closed")
 
         class RecordingHandshake:
             def __init__(self, _stream: object, _nonce: str) -> None:
@@ -943,7 +963,7 @@ class TestRefusing:
                 events.append("retry")
 
             def close(self) -> None:
-                pass
+                events.append("handshake-closed")
 
         monkeypatch.setattr(daemon_owner, "_BootstrapDiagnostics", RecordingBootstrap)
         monkeypatch.setattr(daemon_owner, "_Handshake", RecordingHandshake)
@@ -958,16 +978,17 @@ class TestRefusing:
         monkeypatch.setattr(
             daemon_owner,
             "_attach_daemon_log",
-            lambda auth_root: tmp_path / "daemon.log",
+            lambda auth_root: pytest.fail("lock loser attached the daemon log"),
         )
-        monkeypatch.setattr(daemon_owner, "configure_logging", lambda **kwargs: None)
+        monkeypatch.setattr(
+            daemon_owner,
+            "configure_logging",
+            lambda **kwargs: pytest.fail("lock loser configured logging"),
+        )
         monkeypatch.setattr(daemon_owner, "_take_lock", lambda *args: None)
 
         assert daemon_owner.main([]) == 0
-        assert events == [
-            f"diagnostic:{daemon_owner.BOOTSTRAP_ATTACHED}",
-            "retry",
-        ]
+        assert events == ["retry", "bootstrap-closed", "handshake-closed"]
 
     def test_a_suspended_starter_cannot_pin_the_owner_on_config_read(
         self, monkeypatch: pytest.MonkeyPatch
