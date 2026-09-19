@@ -210,6 +210,22 @@ def starter_termination_measurement(
     return {"terminated_ns": terminated_ns, "owner_exit_ns": owner_exit_ns}
 
 
+def sample_lease_acquisition(
+    *,
+    active_descendants: Callable[[], int],
+    require_active: bool,
+    clock_ns: Callable[[], int] = time.perf_counter_ns,
+) -> dict[str, int]:
+    acquired_ns = clock_ns()
+    active = active_descendants()
+    if require_active and active <= 0:
+        raise RuntimeError("all descendants exited before lease acquisition")
+    return {
+        "lease_acquired_ns": acquired_ns,
+        "active_descendants_at_lease_acquire": active,
+    }
+
+
 def sample_pre_crash_contention(
     *,
     try_acquire: Callable[[], bool],
@@ -571,6 +587,10 @@ def _run_probe(scenario: str, root: Path) -> dict[str, Any]:
     owner_handle = None
     descendant_handles: list[Any] = []
     contender: ProfileLease | None = None
+    contender_start: threading.Event | None = None
+    contender_stop: threading.Event | None = None
+    contender_thread: threading.Thread | None = None
+    lease_acquired_event = None
     pre_crash_contention: dict[str, int | bool] | None = None
     candidate = scenario != "baseline"
     fault = scenario.removeprefix("candidate-") if "-" in scenario else "none"
@@ -666,6 +686,60 @@ def _run_probe(scenario: str, root: Path) -> dict[str, Any]:
             try_acquire=contender.try_acquire,
             release=contender.release,
         )
+        lease_acquired_event = win32event.CreateEvent(None, True, False, None)
+        contender_start = threading.Event()
+        contender_stop = threading.Event()
+        contender_ready = threading.Event()
+        lease_observation: dict[str, Any] = {}
+
+        def contend_for_lease() -> None:
+            assert contender is not None
+            assert contender_start is not None
+            assert contender_stop is not None
+            assert lease_acquired_event is not None
+            contender_ready.set()
+            if not contender_start.wait(_DEADLINE_SECONDS):
+                lease_observation["error"] = RuntimeError(
+                    "the lease contender was not released after owner termination"
+                )
+                win32event.SetEvent(lease_acquired_event)
+                return
+            while not contender_stop.is_set():
+                try:
+                    acquired = contender.try_acquire()
+                except BaseException as exc:
+                    lease_observation["error"] = exc
+                    win32event.SetEvent(lease_acquired_event)
+                    return
+                if acquired:
+                    try:
+                        lease_observation.update(
+                            sample_lease_acquisition(
+                                active_descendants=lambda: sum(
+                                    _is_active(handle) for handle in descendant_handles
+                                ),
+                                require_active=not candidate,
+                            )
+                        )
+                    except BaseException as exc:
+                        lease_observation["error"] = exc
+                    win32event.SetEvent(lease_acquired_event)
+                    return
+                if _is_active(owner_handle):
+                    time.sleep(0)
+                else:
+                    contender_stop.wait(0.001)
+
+        contender_thread = threading.Thread(target=contend_for_lease, daemon=True)
+        contender_thread.start()
+        if not contender_ready.wait(_DEADLINE_SECONDS):
+            raise RuntimeError("the lease contender did not become ready")
+        if "lease_acquired_ns" in lease_observation:
+            raise RuntimeError("the profile fence was free before the owner crash")
+        if "error" in lease_observation:
+            raise RuntimeError(
+                "the lease contender failed before the owner crash"
+            ) from (lease_observation["error"])
 
         # The owner now holds the only project-Job handle. Keeping this observer
         # handle would suppress kill-on-close and invalidate the baseline.
@@ -676,6 +750,7 @@ def _run_probe(scenario: str, root: Path) -> dict[str, Any]:
             raise RuntimeError("the owner exited before starter termination")
         terminated_ns = time.perf_counter_ns()
         win32api.TerminateProcess(owner_handle, 196)
+        contender_start.set()
 
         deadline = time.monotonic() + _DEADLINE_SECONDS
         termination = None
@@ -683,42 +758,25 @@ def _run_probe(scenario: str, root: Path) -> dict[str, Any]:
         acquired_ns = None
         active_at_acquire = None
         descendants_exit_ns = None
+        pending_descendants = set(range(len(descendant_handles)))
         while True:
-            if termination is None and not _is_active(owner_handle):
-                termination = starter_termination_measurement(
-                    terminated_ns, time.perf_counter_ns()
-                )
-                active_after_owner_exit = sum(
-                    _is_active(handle) for handle in descendant_handles
-                )
-                termination["active_descendants_at_owner_exit"] = (
-                    active_after_owner_exit
-                )
-                termination["descendant_alive_after_owner_exit_ns"] = (
-                    time.perf_counter_ns() if active_after_owner_exit > 0 else 0
-                )
-            if acquired_ns is None and contender.try_acquire():
-                acquired_ns = time.perf_counter_ns()
-                active_at_acquire = sum(
-                    _is_active(handle) for handle in descendant_handles
-                )
-            active = sum(_is_active(handle) for handle in descendant_handles)
-            if active == 0 and descendants_exit_ns is None:
-                descendants_exit_ns = time.perf_counter_ns()
-            if termination is not None and not termination_published:
-                _atomic_json(root / "starter-termination.json", termination)
-                termination_published = True
-            if (
-                termination_published
-                and acquired_ns is not None
-                and descendants_exit_ns is not None
-            ):
-                break
-            if time.monotonic() >= deadline:
+            wait_handles: list[Any] = []
+            if termination is None:
+                wait_handles.append(owner_handle)
+            if acquired_ns is None:
+                wait_handles.append(lease_acquired_event)
+            wait_handles.extend(
+                descendant_handles[index] for index in pending_descendants
+            )
+            remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+            wait_result = win32event.WaitForMultipleObjects(
+                wait_handles, False, remaining_ms
+            )
+            if wait_result == _WAIT_TIMEOUT:
                 detail: Any = {
                     "owner_exit_observed": termination is not None,
                     "lease_acquired": acquired_ns is not None,
-                    "active_descendants": active,
+                    "active_descendants": len(pending_descendants),
                 }
                 guardian_result = root / "guardian-result.json"
                 if guardian_result.exists():
@@ -729,7 +787,38 @@ def _run_probe(scenario: str, root: Path) -> dict[str, Any]:
                             f"{type(exc).__name__}: {exc}"
                         )
                 raise RuntimeError(f"the crash probe did not settle: {detail}")
-            time.sleep(0.001)
+            if not (_WAIT_OBJECT_0 <= wait_result < _WAIT_OBJECT_0 + len(wait_handles)):
+                raise RuntimeError(f"WaitForMultipleObjects returned {wait_result}")
+
+            if termination is None and not _is_active(owner_handle):
+                termination = starter_termination_measurement(
+                    terminated_ns, time.perf_counter_ns()
+                )
+            if acquired_ns is None and not _is_active(lease_acquired_event):
+                if "error" in lease_observation:
+                    raise RuntimeError(
+                        "the lease acquisition observation failed"
+                    ) from (lease_observation["error"])
+                acquired_ns = int(lease_observation["lease_acquired_ns"])
+                active_at_acquire = int(
+                    lease_observation["active_descendants_at_lease_acquire"]
+                )
+            pending_descendants = {
+                index
+                for index in pending_descendants
+                if _is_active(descendant_handles[index])
+            }
+            if not pending_descendants and descendants_exit_ns is None:
+                descendants_exit_ns = time.perf_counter_ns()
+            if termination is not None and not termination_published:
+                _atomic_json(root / "starter-termination.json", termination)
+                termination_published = True
+            if (
+                termination_published
+                and acquired_ns is not None
+                and descendants_exit_ns is not None
+            ):
+                break
 
         if termination is None:
             raise RuntimeError("the owner exit was not observed")
@@ -737,6 +826,9 @@ def _run_probe(scenario: str, root: Path) -> dict[str, Any]:
             "scenario": scenario,
             **termination,
             "lease_acquired_ns": acquired_ns,
+            "descendant_alive_after_owner_exit_ns": (
+                acquired_ns if active_at_acquire and active_at_acquire > 0 else 0
+            ),
             "descendants_exit_ns": descendants_exit_ns,
             "active_descendants_at_lease_acquire": active_at_acquire,
             "descendant_count": len(descendant_handles),
@@ -755,8 +847,16 @@ def _run_probe(scenario: str, root: Path) -> dict[str, Any]:
             result["guardian"] = _read_json(root / "guardian-result.json")
         return result
     finally:
+        if contender_start is not None:
+            contender_start.set()
+        if contender_stop is not None:
+            contender_stop.set()
+        if contender_thread is not None:
+            contender_thread.join(timeout=5)
         if contender is not None:
             contender.release()
+        if lease_acquired_event is not None:
+            lease_acquired_event.Close()
         if project_job is not None and not project_job.closed:
             with contextlib.suppress(Exception):
                 project_job.terminate()

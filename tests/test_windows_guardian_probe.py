@@ -21,6 +21,7 @@ from windows_guardian_probe import (
     observe_guardian_identity,
     observe_named_job_objects,
     read_published_json,
+    sample_lease_acquisition,
     sample_pre_crash_contention,
     starter_termination_measurement,
     terminate_wait_close_handles,
@@ -203,6 +204,31 @@ def test_pre_crash_contention_is_measured_before_termination() -> None:
 
     assert events == ["try"]
     assert sample == {"attempted_ns": 123, "acquired": False}
+
+
+def test_lease_acquisition_requires_a_live_descendant() -> None:
+    assert sample_lease_acquisition(
+        active_descendants=lambda: 2,
+        require_active=True,
+        clock_ns=lambda: 123,
+    ) == {
+        "lease_acquired_ns": 123,
+        "active_descendants_at_lease_acquire": 2,
+    }
+    with pytest.raises(RuntimeError, match="all descendants exited"):
+        sample_lease_acquisition(
+            active_descendants=lambda: 0,
+            require_active=True,
+            clock_ns=lambda: 456,
+        )
+    assert sample_lease_acquisition(
+        active_descendants=lambda: 0,
+        require_active=False,
+        clock_ns=lambda: 789,
+    ) == {
+        "lease_acquired_ns": 789,
+        "active_descendants_at_lease_acquire": 0,
+    }
 
 
 def test_starter_termination_requires_a_later_owner_exit() -> None:
@@ -602,10 +628,10 @@ def test_native_owner_crash_releases_lease_before_job_descendants_exit(
         < measurement["terminated_ns"]
     )
     assert measurement["owner_exit_ns"] > measurement["terminated_ns"]
-    assert measurement["active_descendants_at_owner_exit"] > 0
     assert (
         measurement["descendant_alive_after_owner_exit_ns"]
-        > measurement["owner_exit_ns"]
+        == measurement["lease_acquired_ns"]
+        > measurement["terminated_ns"]
     )
     assert measurement["lease_acquired_ns"] < measurement["descendants_exit_ns"]
     assert measurement["active_descendants_at_lease_acquire"] > 0
