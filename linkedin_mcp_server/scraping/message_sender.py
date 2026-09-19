@@ -111,9 +111,15 @@ _PROFILE_MESSAGE_TARGET_JS = r"""() => {
         headings = named;
         break;
     }
-    if (!section) return {status: 'unavailable', pageUrl: window.location.href};
+    // No qualifying section means the probe did not recognise the page,
+    // not that the profile lacks a Message action. Report that as
+    // unresolved (retry-safe) rather than unavailable, which would steer
+    // the caller towards a connection request on a parsing failure.
+    if (!section) return {status: 'unresolved'};
     if (headings.length !== 1) return {status: 'unresolved'};
 
+    // Unavailable is only claimed once the top card is positively
+    // identified and none of its Message actions are shown.
     const visibleComposeAnchors = ownComposeAnchors(section).filter(visible);
     if (visibleComposeAnchors.length === 0) {
         return {status: 'unavailable', pageUrl: window.location.href};

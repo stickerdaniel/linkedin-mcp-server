@@ -330,6 +330,28 @@ class TestProfileMessageTargetDom:
 
         assert result["status"] == "unresolved"
 
+    async def test_unrecognised_layout_stays_unresolved(self, dom_page):
+        # A page the probe cannot classify (name in an <h3>, no heading in
+        # the section that owns the action) is an extraction failure. It
+        # must not be reported as unavailable, which tells the caller to
+        # connect first and stop retrying.
+        await _set_composer_content(
+            dom_page,
+            """<!DOCTYPE html><html><head><meta charset="utf-8"></head><body><main>
+              <div><section>
+                <h3>Test User</h3>
+                <a style="display:block" href="/messaging/compose/?recipient=ACoAAB">
+                  Message
+                </a>
+              </section></div>
+            </main></body></html>
+            """,
+        )
+
+        result = await dom_page.evaluate(_PROFILE_MESSAGE_TARGET_JS)
+
+        assert result["status"] == "unresolved"
+
     async def test_top_card_without_visible_action_is_unavailable(self, dom_page):
         await _set_composer_content(
             dom_page,
