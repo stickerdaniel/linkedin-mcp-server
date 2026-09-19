@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import shutil
 import socket
+import sys
 from collections.abc import Callable, Iterator
 from typing import Any
 from uuid import uuid4
@@ -144,44 +145,51 @@ def profile_exists(profile_dir: Path | None = None) -> bool:
 
 def get_runtime_id() -> str:
     """Return a deterministic identity for the current browser runtime."""
-    system = platform.system()
+    system, machine = _platform_names()
     os_name = _normalize_os(system)
-    arch = _normalize_arch(_machine(system))
+    arch = _normalize_arch(machine)
     runtime_kind = "container" if _is_container_runtime() else "host"
     return f"{os_name}-{arch}-{runtime_kind}"
 
 
-def _machine(system: str) -> str:
-    """Name the processor architecture, without asking Windows over WMI.
+def _platform_names() -> tuple[str, str]:
+    """Name the OS and the processor architecture, never over WMI.
 
-    ``platform.machine()`` on Windows runs a WMI query, and on CPython 3.12
-    that query can take the process down with it (#838). ``_wmi.exec_query``
-    hands a ``CreateThread`` worker a pointer to a struct on its own stack and
-    then gives up waiting after 1000ms for COM and 100ms for the connection;
-    the caller returns, its frame goes away, and the worker that is still
-    running reads through it. Captured: ``EXCEPTION_ACCESS_VIOLATION_READ`` at
-    ``mov rcx, qword [rsi + 0x8]`` in ``_wmi.pyd``, on a thread with no Python
-    thread state at all, which is why every ``faulthandler`` report of it named
-    every thread except the one that faulted. GH-130727 fixed it by copying the
-    struct into the worker; that landed in 3.13 and 3.14 and was never
-    backported to 3.12, which is exactly the version split #838 shows.
+    ``platform.system()`` and ``platform.machine()`` are both
+    ``platform.uname()``, and on Windows ``uname()`` has no ``os.uname()`` to
+    read, so it fills every blank itself: ``win32_ver()`` and
+    ``_get_machine_win32()``, a WMI query each. Either call pays for both.
 
-    Eight frontends electing at once is enough load to reach those timeouts,
-    and every frontend and every owner asks for this id.
+    On CPython 3.12 a WMI query can take the process down with it (#838).
+    ``_wmi.exec_query`` hands a ``CreateThread`` worker a pointer to a struct
+    on its own stack, waits 1000ms for COM and 100ms for the connection, and
+    on timeout closes the handles and returns anyway; the worker is still
+    running and reads through the frame that just went away. Captured as
+    ``EXCEPTION_ACCESS_VIOLATION_READ`` at ``mov rcx, qword [rsi + 0x8]`` in
+    ``_wmi.pyd``, with ``rsi`` pointing into a thread stack. That worker has no
+    Python thread state, which is why every ``faulthandler`` report of this
+    named every thread except the one that faulted. GH-130727 fixed it upstream
+    by copying the struct into the worker; that is in 3.13 and 3.14 and was
+    never backported to 3.12, which is exactly the version split #838 shows.
 
-    The two variables are the ones ``platform`` itself falls back to when the
-    query fails, so this is its own answer by a route that cannot crash, and
-    ``_normalize_arch`` maps their values onto what the WMI reply maps onto:
-    ``AMD64`` and ``ARM64`` either way. The id names a directory, so it must
-    not move, and this is the reason it does not. Asking is still worth it if
-    both are empty, which is the one case where the two could disagree.
+    Eight frontends electing at once, each spawning an owner, is enough load to
+    reach those timeouts, and every one of those processes asks for this id.
+
+    So Windows is decided from ``sys.platform``, not from ``platform.system()``:
+    asking is the thing being avoided, and asking to find out whether to avoid
+    asking would defeat it. The architecture then comes from the two variables
+    ``platform`` itself falls back to, and ``_normalize_arch`` maps their values
+    onto what a WMI reply maps onto — ``AMD64`` and ``ARM64`` either way — so
+    the id, which names a directory, does not move. Windows sets
+    ``PROCESSOR_ARCHITECTURE`` in every process environment; there is
+    deliberately no fallback past it, because the only one left would be the
+    query this exists to avoid.
     """
-    if system != "Windows":
-        return platform.machine()
-    return (
+    if sys.platform != "win32":
+        return platform.system(), platform.machine()
+    return "Windows", (
         os.environ.get("PROCESSOR_ARCHITEW6432", "")
         or os.environ.get("PROCESSOR_ARCHITECTURE", "")
-        or platform.machine()
     )
 
 

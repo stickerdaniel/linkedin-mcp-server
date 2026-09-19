@@ -182,6 +182,7 @@ def test_runtime_storage_state_path_uses_runtime_dir(isolate_profile_dir):
 
 
 def test_get_runtime_id_marks_container(monkeypatch):
+    monkeypatch.setattr("linkedin_mcp_server.session_state.sys.platform", "linux")
     monkeypatch.setattr(
         "linkedin_mcp_server.session_state.platform.system", lambda: "Linux"
     )
@@ -197,6 +198,7 @@ def test_get_runtime_id_marks_container(monkeypatch):
 
 
 def test_get_runtime_id_marks_container_from_cgroup_v2_mountinfo(monkeypatch):
+    monkeypatch.setattr("linkedin_mcp_server.session_state.sys.platform", "linux")
     monkeypatch.setattr(
         "linkedin_mcp_server.session_state.platform.system", lambda: "Linux"
     )
@@ -219,6 +221,7 @@ def test_get_runtime_id_marks_container_from_cgroup_v2_mountinfo(monkeypatch):
 
 
 def test_get_runtime_id_ignores_non_root_overlay_mounts(monkeypatch):
+    monkeypatch.setattr("linkedin_mcp_server.session_state.sys.platform", "linux")
     monkeypatch.setattr(
         "linkedin_mcp_server.session_state.platform.system", lambda: "Linux"
     )
@@ -247,6 +250,7 @@ def test_get_runtime_id_ignores_other_containers_on_the_host(monkeypatch):
     # /var/lib/containers, which contains no marker word — so it passed either
     # way. A Docker host's mountinfo says "docker" outright, and that is what
     # the substring scan tripped over.
+    monkeypatch.setattr("linkedin_mcp_server.session_state.sys.platform", "linux")
     monkeypatch.setattr(
         "linkedin_mcp_server.session_state.platform.system", lambda: "Linux"
     )
@@ -273,29 +277,39 @@ def test_get_runtime_id_ignores_other_containers_on_the_host(monkeypatch):
 
 def _windows_runtime(monkeypatch) -> None:
     """Put the runtime id on the Windows branch, off a container."""
-    monkeypatch.setattr(
-        "linkedin_mcp_server.session_state.platform.system", lambda: "Windows"
-    )
+    monkeypatch.setattr("linkedin_mcp_server.session_state.sys.platform", "win32")
     monkeypatch.setattr(
         "linkedin_mcp_server.session_state._is_container_runtime", lambda: False
     )
 
 
-def test_the_windows_runtime_id_never_asks_wmi_for_the_architecture(monkeypatch):
-    # #838. `platform.machine()` on Windows runs a WMI query, and CPython 3.12
-    # ships a `_wmi` whose worker thread reads the caller's stack frame after
-    # the caller has given up waiting and returned. Captured as an access
-    # violation in `_wmi.pyd` that killed one of eight frontends mid-election.
-    # Reaching that call at all is the defect, so this refuses it outright
-    # rather than asserting on the value it returns.
+def _refuse_uname(monkeypatch) -> None:
+    """Fail the test if the runtime id reaches WMI.
+
+    `platform.system()` and `platform.machine()` are both `platform.uname()`,
+    and on Windows `uname()` fills its blanks with `win32_ver()` and
+    `_get_machine_win32()`, a WMI query each. Refusing the funnel catches
+    either route in, which a check on one of the two names would not: the
+    first version of this fix avoided `platform.machine()` and still crashed,
+    because it asked `platform.system()` first.
+    """
+
+    def refuse(*args: object, **kwargs: object) -> object:
+        raise AssertionError("the runtime id asked Windows over WMI")
+
+    monkeypatch.setattr("linkedin_mcp_server.session_state.platform.uname", refuse)
+
+
+def test_the_windows_runtime_id_never_asks_wmi(monkeypatch):
+    # #838. A WMI query on CPython 3.12 can kill the process: `_wmi`'s worker
+    # thread reads the caller's stack frame after the caller gives up waiting
+    # and returns. Captured as an access violation in `_wmi.pyd` that took out
+    # one of eight frontends mid-election. Reaching the query at all is the
+    # defect, so this refuses it rather than asserting on what it returns.
     _windows_runtime(monkeypatch)
+    _refuse_uname(monkeypatch)
     monkeypatch.delenv("PROCESSOR_ARCHITEW6432", raising=False)
     monkeypatch.setenv("PROCESSOR_ARCHITECTURE", "AMD64")
-
-    def refuse() -> str:
-        raise AssertionError("the runtime id asked WMI for the architecture")
-
-    monkeypatch.setattr("linkedin_mcp_server.session_state.platform.machine", refuse)
 
     assert get_runtime_id() == "windows-amd64-host"
 
@@ -306,29 +320,23 @@ def test_a_wow64_windows_frontend_reports_the_native_architecture(monkeypatch):
     # a different runtime id from every other one on the same machine, and the
     # id names a directory.
     _windows_runtime(monkeypatch)
+    _refuse_uname(monkeypatch)
     monkeypatch.setenv("PROCESSOR_ARCHITEW6432", "ARM64")
     monkeypatch.setenv("PROCESSOR_ARCHITECTURE", "x86")
-
-    def refuse() -> str:
-        raise AssertionError("the runtime id asked WMI for the architecture")
-
-    monkeypatch.setattr("linkedin_mcp_server.session_state.platform.machine", refuse)
 
     assert get_runtime_id() == "windows-arm64-host"
 
 
-def test_an_unnamed_windows_architecture_still_asks(monkeypatch):
-    # Both variables empty is the one case where the environment and the query
-    # can disagree, so there the query is still worth making: "unknown" would
-    # move the id of a runtime that has a perfectly good answer available.
+def test_an_unnamed_windows_architecture_does_not_fall_back_to_wmi(monkeypatch):
+    # Windows sets PROCESSOR_ARCHITECTURE in every process environment, so this
+    # is a machine that has had it removed. "unknown" is a poor answer and a
+    # stable one; the only better answer available is the query that crashes.
     _windows_runtime(monkeypatch)
+    _refuse_uname(monkeypatch)
     monkeypatch.setenv("PROCESSOR_ARCHITEW6432", "")
     monkeypatch.setenv("PROCESSOR_ARCHITECTURE", "")
-    monkeypatch.setattr(
-        "linkedin_mcp_server.session_state.platform.machine", lambda: "AMD64"
-    )
 
-    assert get_runtime_id() == "windows-amd64-host"
+    assert get_runtime_id() == "windows-unknown-host"
 
 
 def _seed_session(profile_dir, *, machine_id: str = "4663753") -> None:
