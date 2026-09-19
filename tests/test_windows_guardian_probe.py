@@ -7,16 +7,17 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from linkedin_mcp_server import process_tree
+from linkedin_mcp_server.profile_lease import ProfileLease
 from windows_guardian_probe import (
     guardian_shutdown_sequence,
     sample_pre_crash_contention,
-    terminate_drain_and_release,
     terminate_wait_close_handles,
 )
 
@@ -41,7 +42,53 @@ def communicate_harness(
     return output
 
 
+def await_fail_closed_guardian(
+    process: Any, harness: Any, root: Path, *, timeout: float
+) -> dict[str, Any]:
+    result_path = root / "guardian-result.json"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if result_path.exists():
+            guardian = json.loads(result_path.read_text(encoding="utf-8"))
+            if "error" not in guardian:
+                time.sleep(0.01)
+                continue
+            contender = ProfileLease(root / "auth")
+            acquired_before_drain = contender.try_acquire()
+            if acquired_before_drain:
+                contender.release()
+                raise AssertionError("the failed guardian released its profile fence")
+            harness.terminate()
+            try:
+                process.wait(timeout=30)
+            finally:
+                harness.wait_until_empty(timeout=30)
+            acquired_after_drain = False
+            release_deadline = time.monotonic() + 10
+            while time.monotonic() < release_deadline:
+                if contender.try_acquire():
+                    acquired_after_drain = True
+                    contender.release()
+                    break
+                time.sleep(0.01)
+            return {
+                "scenario": root.name,
+                "guardian": guardian,
+                "contended_before_harness_drain": not acquired_before_drain,
+                "acquired_after_harness_drain": acquired_after_drain,
+            }
+        if process.poll() is not None:
+            stdout, stderr = process.communicate()
+            raise AssertionError(
+                "the failed guardian exited before harness cleanup: "
+                f"stdout={stdout!r} stderr={stderr!r}"
+            )
+        time.sleep(0.01)
+    raise TimeoutError("the guardian did not report its injected failure")
+
+
 def _run_probe(tmp_path: Path, scenario: str) -> dict[str, Any]:
+    root = tmp_path / scenario
     harness = process_tree.WindowsJob.anonymous()
     nonce = process_tree.release_nonce()
     process = subprocess.Popen(
@@ -51,7 +98,7 @@ def _run_probe(tmp_path: Path, scenario: str) -> dict[str, Any]:
                 str(_PROBE),
                 "run",
                 scenario,
-                str(tmp_path / scenario),
+                str(root),
             ],
             nonce,
         ),
@@ -67,6 +114,8 @@ def _run_probe(tmp_path: Path, scenario: str) -> dict[str, Any]:
         if process.stdin is None:
             raise RuntimeError("the probe harness has no release stream")
         process_tree.release_windows_gate(process.stdin, nonce)
+        if scenario.startswith("candidate-"):
+            return await_fail_closed_guardian(process, harness, root, timeout=20)
         stdout, stderr = communicate_harness(process, harness, timeout=180)
     finally:
         if not harness.closed:
@@ -230,67 +279,55 @@ def test_guardian_drains_browser_before_terminating_project_owner_job() -> None:
     )
 
 
-def test_candidate_releases_only_after_observing_an_empty_job() -> None:
-    active = iter([2, 1, 0])
+@pytest.mark.parametrize(
+    ("fault", "message", "failure_key"),
+    [
+        ("terminate", "termination failed", None),
+        ("query", "could not query", "query_error"),
+        ("timeout", "did not drain", "query_timeout"),
+    ],
+)
+def test_guardian_failure_never_releases_an_unproven_fence(
+    fault: str, message: str, failure_key: str | None
+) -> None:
     events: list[str] = []
     result: dict[str, Any] = {"query_samples": []}
-
-    def query() -> int:
-        events.append("query")
-        return next(active)
-
-    terminate_drain_and_release(
-        result,
-        terminate=lambda: events.append("terminate"),
-        query_active=query,
-        release=lambda: events.append("release"),
-        sleep=lambda _seconds: None,
-    )
-
-    assert events == ["terminate", "query", "query", "query", "release"]
-    assert [sample["active_processes"] for sample in result["query_samples"]] == [
-        2,
-        1,
-        0,
-    ]
-
-
-def test_candidate_does_not_read_a_query_error_as_empty() -> None:
-    events: list[str] = []
-    result: dict[str, Any] = {"query_samples": []}
-
-    def fail_query() -> int:
-        events.append("query")
-        raise OSError("unreadable")
-
-    with pytest.raises(RuntimeError, match="could not query"):
-        terminate_drain_and_release(
-            result,
-            terminate=lambda: events.append("terminate"),
-            query_active=fail_query,
-            release=lambda: events.append("release"),
-        )
-
-    assert events == ["terminate", "query"]
-    assert result["query_error"] == "OSError: unreadable"
-
-
-def test_candidate_does_not_read_a_drain_timeout_as_empty() -> None:
     now = iter([0.0, 31.0])
-    events: list[str] = []
-    result: dict[str, Any] = {"query_samples": []}
 
-    with pytest.raises(RuntimeError, match="did not drain"):
-        terminate_drain_and_release(
+    def terminate_browser() -> None:
+        events.append("browser terminate")
+        if fault == "terminate":
+            raise OSError("termination failed")
+
+    def query_browser() -> int:
+        events.append("browser query")
+        if fault == "query":
+            raise OSError("unreadable")
+        return 1
+
+    with pytest.raises((OSError, RuntimeError), match=message):
+        guardian_shutdown_sequence(
             result,
-            terminate=lambda: events.append("terminate"),
-            query_active=lambda: 1,
-            release=lambda: events.append("release"),
-            monotonic=lambda: next(now),
+            active_descendants=lambda: 1,
+            terminate_browser_job=terminate_browser,
+            query_browser_job=query_browser,
+            close_browser_job=lambda: events.append("browser close"),
+            release_fence=lambda: events.append("release"),
+            terminate_project_job=lambda: events.append("project terminate"),
+            query_project_job=lambda: 0,
+            close_project_job=lambda: events.append("project close"),
+            monotonic=(lambda: next(now)) if fault == "timeout" else (lambda: 0),
+            sleep=lambda _seconds: None,
         )
 
-    assert events == ["terminate"]
-    assert result["query_timeout"] is True
+    assert "zero_observed_ns" not in result
+    assert "fence_released_ns" not in result
+    assert "release" not in events
+    assert "browser close" not in events
+    assert "project terminate" not in events
+    assert "project close" not in events
+    if failure_key is not None:
+        assert failure_key in result
 
 
 @_WINDOWS_ONLY
@@ -309,6 +346,32 @@ def test_native_owner_crash_releases_lease_before_job_descendants_exit(
     assert measurement["lease_acquired_ns"] < measurement["descendants_exit_ns"]
     assert measurement["active_descendants_at_lease_acquire"] > 0
     assert measurement["guardian_outside_owner_job"] is None
+
+
+@_WINDOWS_ONLY
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "candidate-terminate-error",
+        "candidate-query-error",
+        "candidate-drain-timeout",
+    ],
+)
+def test_failed_guardian_holds_fence_until_outer_harness_drain(
+    tmp_path: Path, scenario: str
+) -> None:
+    measurement = _run_probe(tmp_path, scenario)
+    _record_measurement(measurement)
+    guardian = measurement["guardian"]
+
+    assert measurement["contended_before_harness_drain"] is True
+    assert measurement["acquired_after_harness_drain"] is True
+    assert "error" in guardian
+    assert "zero_observed_ns" not in guardian
+    assert "fence_released_ns" not in guardian
+    assert "browser_job_closed_ns" not in guardian
+    assert "project_owner_terminate_ns" not in guardian
+    assert "project_owner_closed_ns" not in guardian
 
 
 @_WINDOWS_ONLY

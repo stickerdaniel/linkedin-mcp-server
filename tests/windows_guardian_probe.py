@@ -10,6 +10,7 @@ import os
 import secrets
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -191,41 +192,6 @@ def terminate_wait_close_handles(
         raise first_error
 
 
-def terminate_drain_and_release(
-    result: dict[str, Any],
-    *,
-    terminate: Callable[[], None],
-    query_active: Callable[[], int],
-    release: Callable[[], None],
-    monotonic: Callable[[], float] = time.monotonic,
-    clock_ns: Callable[[], int] = time.perf_counter_ns,
-    sleep: Callable[[float], None] = time.sleep,
-) -> None:
-    terminate()
-    result["terminate_called"] = True
-    result["terminate_ns"] = clock_ns()
-    deadline = monotonic() + _DEADLINE_SECONDS
-    while True:
-        try:
-            active = query_active()
-        except BaseException as exc:
-            result["query_error"] = f"{type(exc).__name__}: {exc}"
-            raise RuntimeError("the guardian could not query the browser Job") from exc
-        sampled_ns = clock_ns()
-        result["query_samples"].append(
-            {"sampled_ns": sampled_ns, "active_processes": active}
-        )
-        if active == 0:
-            result["zero_observed_ns"] = sampled_ns
-            release()
-            result["fence_released_ns"] = clock_ns()
-            return
-        if monotonic() >= deadline:
-            result["query_timeout"] = True
-            raise RuntimeError("the browser Job did not drain before its deadline")
-        sleep(0.001)
-
-
 def guardian_shutdown_sequence(
     result: dict[str, Any],
     *,
@@ -318,6 +284,7 @@ def _guardian(
     ready_event: str,
     owner_ready_event: str,
     armed_event: str,
+    fault: str,
 ) -> int:
     from linkedin_mcp_server.profile_lease import ProfileLease
 
@@ -326,6 +293,7 @@ def _guardian(
     browser_job = None
     project_job = None
     descendant_handles: list[Any] = []
+    fence_acquired = False
     result: dict[str, Any] = {
         "guardian_pid": os.getpid(),
         "query_samples": [],
@@ -334,6 +302,7 @@ def _guardian(
     try:
         if not lease.try_acquire():
             raise RuntimeError("the guardian could not acquire its profile fence")
+        fence_acquired = True
         name = f"Local\\linkedin-mcp-w1-browser-{secrets.token_hex(16)}"
         browser_job = win32job.CreateJobObject(None, name)
         _configure_kill_on_close(browser_job)
@@ -393,17 +362,31 @@ def _guardian(
             handle.Close()
             project_job = None
 
+        def terminate_browser_job() -> None:
+            if fault == "terminate-error":
+                raise OSError("injected browser Job termination failure")
+            win32job.TerminateJobObject(browser_job, 197)
+
+        def query_browser_job() -> int:
+            if fault == "query-error":
+                raise OSError("injected browser Job query failure")
+            if fault == "drain-timeout":
+                return 1
+            return int(
+                win32job.QueryInformationJobObject(
+                    browser_job, win32job.JobObjectBasicAccountingInformation
+                )["ActiveProcesses"]
+            )
+
+        timeout_clock = iter([0.0, _DEADLINE_SECONDS + 1.0])
+        result["fault"] = fault
         guardian_shutdown_sequence(
             result,
             active_descendants=lambda: sum(
                 _is_active(handle) for handle in descendant_handles
             ),
-            terminate_browser_job=lambda: win32job.TerminateJobObject(browser_job, 197),
-            query_browser_job=lambda: int(
-                win32job.QueryInformationJobObject(
-                    browser_job, win32job.JobObjectBasicAccountingInformation
-                )["ActiveProcesses"]
-            ),
+            terminate_browser_job=terminate_browser_job,
+            query_browser_job=query_browser_job,
             close_browser_job=close_browser_job,
             release_fence=lease.release,
             terminate_project_job=lambda: win32job.TerminateJobObject(project_job, 198),
@@ -413,21 +396,28 @@ def _guardian(
                 )["ActiveProcesses"]
             ),
             close_project_job=close_project_job,
+            monotonic=(
+                lambda: (
+                    next(timeout_clock)
+                    if fault == "drain-timeout"
+                    else time.monotonic()
+                )
+            ),
         )
+        fence_acquired = False
+        for handle in descendant_handles:
+            handle.Close()
         _atomic_json(result_file, result)
         return 0
     except BaseException as exc:
         result["error"] = f"{type(exc).__name__}: {exc}"
         _atomic_json(result_file, result)
-        raise
-    finally:
-        lease.release()
-        for handle in descendant_handles:
-            handle.Close()
-        if project_job is not None:
-            project_job.Close()
-        if browser_job is not None:
-            browser_job.Close()
+        if not fence_acquired:
+            raise
+        # The outer harness is the only authority allowed to break a failed
+        # proof. Keep the lease and both Job handles until it terminates us.
+        threading.Event().wait()
+        raise RuntimeError("the fail-closed guardian resumed unexpectedly") from exc
 
 
 def _process_handle(pid: int, access: int) -> Any:
@@ -502,10 +492,12 @@ def _run_probe(scenario: str, root: Path) -> dict[str, Any]:
     descendant_handles: list[Any] = []
     contender: ProfileLease | None = None
     pre_crash_contention: dict[str, int | bool] | None = None
+    candidate = scenario != "baseline"
+    fault = scenario.removeprefix("candidate-") if "-" in scenario else "none"
     try:
         guardian_ready_name = _new_event_name("guardian-ready")
         guardian_armed_name = _new_event_name("guardian-armed")
-        if scenario == "candidate":
+        if candidate:
             guardian_ready = win32event.CreateEvent(
                 None, True, False, guardian_ready_name
             )
@@ -524,6 +516,7 @@ def _run_probe(scenario: str, root: Path) -> dict[str, Any]:
                     guardian_ready_name,
                     owner_ready_name,
                     guardian_armed_name,
+                    fault,
                 ],
                 cwd=_REPO_ROOT,
                 stdin=subprocess.DEVNULL,
@@ -540,7 +533,11 @@ def _run_probe(scenario: str, root: Path) -> dict[str, Any]:
         if project_job.name is None:
             raise RuntimeError("the project owner Job has no name")
         owner_gate = _launch_owner(
-            scenario, root, project_job, project_job.name, owner_ready_name
+            "candidate" if candidate else "baseline",
+            root,
+            project_job,
+            project_job.name,
+            owner_ready_name,
         )
         _wait(owner_ready, _DEADLINE_SECONDS, "the owner did not become ready")
         if guardian_armed is not None:
@@ -691,7 +688,16 @@ def _parse_args() -> argparse.Namespace:
     subparsers = parser.add_subparsers(dest="role", required=True)
 
     run = subparsers.add_parser("run")
-    run.add_argument("scenario", choices=("baseline", "candidate"))
+    run.add_argument(
+        "scenario",
+        choices=(
+            "baseline",
+            "candidate",
+            "candidate-terminate-error",
+            "candidate-query-error",
+            "candidate-drain-timeout",
+        ),
+    )
     run.add_argument("root", type=Path)
 
     owner = subparsers.add_parser("owner")
@@ -710,6 +716,9 @@ def _parse_args() -> argparse.Namespace:
     guardian.add_argument("ready_event")
     guardian.add_argument("owner_ready_event")
     guardian.add_argument("armed_event")
+    guardian.add_argument(
+        "fault", choices=("none", "terminate-error", "query-error", "drain-timeout")
+    )
     return parser.parse_args()
 
 
@@ -737,6 +746,7 @@ def main() -> int:
         args.ready_event,
         args.owner_ready_event,
         args.armed_event,
+        args.fault,
     )
 
 

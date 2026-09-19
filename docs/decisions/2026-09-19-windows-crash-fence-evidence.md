@@ -13,8 +13,8 @@ Job, gives the owner the last Job handle and the profile lease, then calls
 `TerminateProcess` on the owner. For that project owner Job, the observer
 retains process handles only. It first makes and timestamps a real failed
 acquisition attempt against the held lease. It then closes its project-Job
-handle before termination so it cannot
-delay kill-on-close, and records owner exit, post-crash lease acquisition,
+handle before termination so it cannot delay kill-on-close, and records owner
+exit, post-crash lease acquisition,
 descendant exit and the number of descendants still active when the lease was
 acquired.
 
@@ -34,6 +34,12 @@ empty, releases the lease at the successful zero observation, and only afterward
 terminates and drains the project owner Job. The project handle closes last. A
 query error or either fixed drain deadline is a failed probe, never an empty Job.
 
+A failure before browser zero is fail-closed. The guardian atomically reports the
+error and then blocks while retaining the lease and both relevant Job handles.
+It performs no `finally` release. The outer harness runner must first prove that
+a real contender is still rejected, then terminate and drain the harness Job;
+only after that kernel-controlled cleanup may the contender acquire the lease.
+
 ## Measurement boundary
 
 This commit was prepared on Darwin. Darwin can compile, lint and collect the
@@ -52,8 +58,8 @@ Cleanup terminates and waits through retained process or Job handles before
 closing them, with no PID-only `taskkill` fallback. The probe exercises forced
 termination only; an unhandled-crash variant is deferred because this step has
 no safe helper that improves the teardown semantics beyond native
-`TerminateProcess` without also
-introducing a separate crash mechanism to validate.
+`TerminateProcess` without also introducing a separate crash mechanism to
+validate.
 
 ## Next production decision
 
@@ -63,6 +69,8 @@ acquires the lease while at least one project-Job descendant is active, and the
 candidate keeps a browser descendant alive after owner death until its explicit
 browser-Job termination. That termination must precede descendant exit and
 browser zero; project-owner termination must follow browser zero; the lease must
-remain unavailable until browser zero. If any observation fails, the
+remain unavailable until browser zero. Injected termination, query and timeout
+failures must also leave the lease unavailable until the outer harness has
+terminated and drained the blocked guardian. If any observation fails, the
 corresponding premise is falsified and the guardian design must not be
 implemented from this evidence.
