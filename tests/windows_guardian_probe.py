@@ -22,6 +22,8 @@ _DESCENDANT_COUNT = 24
 _WAIT_OBJECT_0 = 0
 _WAIT_ABANDONED = 128
 _WAIT_TIMEOUT = 258
+# Win32 MUTEX_MODIFY_STATE; pywin32 does not export it from win32con.
+_MUTEX_MODIFY_STATE = 0x0001
 
 
 def _atomic_json(path: Path, value: Any) -> None:
@@ -32,6 +34,23 @@ def _atomic_json(path: Path, value: Any) -> None:
 
 def _read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def read_published_json(
+    path: Path,
+    *,
+    deadline: float,
+    read: Callable[[Path], Any] = _read_json,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> Any:
+    while True:
+        try:
+            return read(path)
+        except PermissionError:
+            if monotonic() >= deadline:
+                raise
+            sleep(0.01)
 
 
 def _windows_modules() -> tuple[Any, Any, Any, Any]:
@@ -80,7 +99,7 @@ def _configure_kill_on_close(job_handle: Any) -> None:
 def observe_guardian_identity(identity_mutex_name: str) -> dict[str, bool]:
     _win32api, win32con, win32event, _win32job = _windows_modules()
     handle = win32event.OpenMutex(
-        win32con.SYNCHRONIZE | win32con.MUTEX_MODIFY_STATE,
+        win32con.SYNCHRONIZE | _MUTEX_MODIFY_STATE,
         False,
         identity_mutex_name,
     )
@@ -282,15 +301,14 @@ def guardian_shutdown_sequence(
         )
         if active == 0:
             living = active_descendants()
-            if living != 0:
-                raise RuntimeError("the browser Job was empty while descendants lived")
-            result.setdefault("first_descendant_exit_ns", sampled_ns)
-            result["zero_observed_ns"] = sampled_ns
-            close_browser_job()
-            result["browser_job_closed_ns"] = clock_ns()
-            release_fence()
-            result["fence_released_ns"] = clock_ns()
-            break
+            if living == 0:
+                result.setdefault("first_descendant_exit_ns", sampled_ns)
+                result["zero_observed_ns"] = sampled_ns
+                close_browser_job()
+                result["browser_job_closed_ns"] = clock_ns()
+                release_fence()
+                result["fence_released_ns"] = clock_ns()
+                break
         if monotonic() >= deadline:
             result["query_timeout"] = True
             raise RuntimeError("the browser Job did not drain before its deadline")
@@ -658,17 +676,27 @@ def _run_probe(scenario: str, root: Path) -> dict[str, Any]:
             raise RuntimeError("the owner exited before starter termination")
         terminated_ns = time.perf_counter_ns()
         win32api.TerminateProcess(owner_handle, 196)
-        _wait(owner_handle, _DEADLINE_SECONDS, "the terminated owner did not exit")
-        termination = starter_termination_measurement(
-            terminated_ns, time.perf_counter_ns()
-        )
-        _atomic_json(root / "starter-termination.json", termination)
 
         deadline = time.monotonic() + _DEADLINE_SECONDS
+        termination = None
+        termination_published = False
         acquired_ns = None
         active_at_acquire = None
         descendants_exit_ns = None
         while True:
+            if termination is None and not _is_active(owner_handle):
+                termination = starter_termination_measurement(
+                    terminated_ns, time.perf_counter_ns()
+                )
+                active_after_owner_exit = sum(
+                    _is_active(handle) for handle in descendant_handles
+                )
+                termination["active_descendants_at_owner_exit"] = (
+                    active_after_owner_exit
+                )
+                termination["descendant_alive_after_owner_exit_ns"] = (
+                    time.perf_counter_ns() if active_after_owner_exit > 0 else 0
+                )
             if acquired_ns is None and contender.try_acquire():
                 acquired_ns = time.perf_counter_ns()
                 active_at_acquire = sum(
@@ -677,12 +705,34 @@ def _run_probe(scenario: str, root: Path) -> dict[str, Any]:
             active = sum(_is_active(handle) for handle in descendant_handles)
             if active == 0 and descendants_exit_ns is None:
                 descendants_exit_ns = time.perf_counter_ns()
-            if acquired_ns is not None and descendants_exit_ns is not None:
+            if termination is not None and not termination_published:
+                _atomic_json(root / "starter-termination.json", termination)
+                termination_published = True
+            if (
+                termination_published
+                and acquired_ns is not None
+                and descendants_exit_ns is not None
+            ):
                 break
             if time.monotonic() >= deadline:
-                raise RuntimeError("the crash probe did not settle before its deadline")
+                detail: Any = {
+                    "owner_exit_observed": termination is not None,
+                    "lease_acquired": acquired_ns is not None,
+                    "active_descendants": active,
+                }
+                guardian_result = root / "guardian-result.json"
+                if guardian_result.exists():
+                    try:
+                        detail = _read_json(guardian_result)
+                    except OSError as exc:
+                        detail["guardian_result_read_error"] = (
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                raise RuntimeError(f"the crash probe did not settle: {detail}")
             time.sleep(0.001)
 
+        if termination is None:
+            raise RuntimeError("the owner exit was not observed")
         result: dict[str, Any] = {
             "scenario": scenario,
             **termination,

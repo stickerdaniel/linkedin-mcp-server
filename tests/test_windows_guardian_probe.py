@@ -20,6 +20,7 @@ from windows_guardian_probe import (
     guardian_shutdown_sequence,
     observe_guardian_identity,
     observe_named_job_objects,
+    read_published_json,
     sample_pre_crash_contention,
     starter_termination_measurement,
     terminate_wait_close_handles,
@@ -59,7 +60,7 @@ def await_fail_closed_guardian(
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if result_path.exists():
-            guardian = json.loads(result_path.read_text(encoding="utf-8"))
+            guardian = read_published_json(result_path, deadline=deadline)
             if "error" not in guardian:
                 time.sleep(0.01)
                 continue
@@ -80,7 +81,7 @@ def await_fail_closed_guardian(
                 if time.monotonic() >= deadline:
                     raise TimeoutError("the probe did not report starter termination")
                 time.sleep(0.01)
-            termination = json.loads(termination_path.read_text(encoding="utf-8"))
+            termination = read_published_json(termination_path, deadline=deadline)
             browser_job_name = json.loads(
                 (root / "browser-job.json").read_text(encoding="utf-8")
             )["name"]
@@ -229,8 +230,7 @@ def test_guardian_identity_requires_an_owned_mutex(
             events.append("close")
 
     class Win32Con:
-        SYNCHRONIZE = 1
-        MUTEX_MODIFY_STATE = 2
+        SYNCHRONIZE = 0x00100000
 
     class Win32Event:
         @staticmethod
@@ -257,11 +257,31 @@ def test_guardian_identity_requires_an_owned_mutex(
         observe_guardian_identity("guardian-mutex")
 
     assert events == [
-        "open 3 False guardian-mutex",
+        "open 1048577 False guardian-mutex",
         "wait 0",
         "release",
         "close",
     ]
+
+
+def test_published_json_retries_a_windows_share_violation() -> None:
+    attempts = iter([PermissionError("sharing violation"), {"ready": True}])
+    sleeps: list[float] = []
+
+    def read(_path: Path) -> Any:
+        value = next(attempts)
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+    assert read_published_json(
+        Path("result.json"),
+        deadline=1.0,
+        read=read,
+        monotonic=lambda: 0.0,
+        sleep=sleeps.append,
+    ) == {"ready": True}
+    assert sleeps == [0.01]
 
 
 def test_failed_probe_requires_the_harness_termination_returncode() -> None:
@@ -390,6 +410,38 @@ def test_guardian_drains_browser_before_terminating_project_owner_job() -> None:
     )
 
 
+def test_guardian_waits_for_process_handles_after_job_reports_zero() -> None:
+    descendants = iter([1, 1, 1, 0, 0])
+    browser = iter([0, 0])
+    events: list[str] = []
+    result: dict[str, Any] = {"query_samples": []}
+
+    guardian_shutdown_sequence(
+        result,
+        active_descendants=lambda: next(descendants),
+        terminate_browser_job=lambda: events.append("browser terminate"),
+        query_browser_job=lambda: next(browser),
+        close_browser_job=lambda: events.append("browser close"),
+        release_fence=lambda: events.append("release"),
+        terminate_project_job=lambda: events.append("project terminate"),
+        query_project_job=lambda: 0,
+        close_project_job=lambda: events.append("project close"),
+        monotonic=lambda: 0.0,
+        sleep=lambda _seconds: events.append("sleep"),
+    )
+
+    assert events == [
+        "browser terminate",
+        "sleep",
+        "browser close",
+        "release",
+        "project terminate",
+        "project close",
+    ]
+    assert result["query_samples"][-1]["active_processes"] == 0
+    assert result["active_descendants_after_owner_death"] == 1
+
+
 @pytest.mark.parametrize(
     ("fault", "message", "failure_key"),
     [
@@ -454,6 +506,11 @@ def test_native_owner_crash_releases_lease_before_job_descendants_exit(
         < measurement["terminated_ns"]
     )
     assert measurement["owner_exit_ns"] > measurement["terminated_ns"]
+    assert measurement["active_descendants_at_owner_exit"] > 0
+    assert (
+        measurement["descendant_alive_after_owner_exit_ns"]
+        > measurement["owner_exit_ns"]
+    )
     assert measurement["lease_acquired_ns"] < measurement["descendants_exit_ns"]
     assert measurement["active_descendants_at_lease_acquire"] > 0
     assert measurement["guardian_outside_owner_job"] is None
