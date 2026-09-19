@@ -1438,20 +1438,12 @@ from pathlib import Path
 # one into a stack that names where it happened.
 faulthandler.enable()
 
-# A native crash here reaches no debugger without this. Three armed soaks
-# produced no dump at all: no file from Windows Error Reporting, none from the
-# `AeDebug` debugger, and not one `Application Error` in the event log. All
-# three are downstream of `UnhandledExceptionFilter`, and it consults none of
-# them while `SEM_NOGPFAULTERRORBOX` is in the process error mode — it returns
-# at once and the process exits carrying the exception code, which is the
-# 0xC0000005 this test reports. Measured here as 0x0003, inherited from
-# somewhere above pytest; nothing in this repository sets it.
-#
-# That is what hid #838 for so long: `faulthandler` cannot describe the thread
-# that faults there, because it has no Python thread state and the report
-# marks a thread only on pointer equality with one. Clearing this one bit,
-# leaving the rest as found, is what finally produced the dump that named
-# `_wmi.pyd`.
+# A native crash here reaches no debugger while `SEM_NOGPFAULTERRORBOX` is in
+# the process error mode: `UnhandledExceptionFilter` returns at once, so there
+# is no dump, no `AeDebug` and no event-log entry, and the process just exits
+# carrying the 0xC0000005 this test reports. The bit is inherited, not set
+# here. Clear only that one and leave the rest, `SEM_FAILCRITICALERRORS`
+# included. See docs/windows-crash-dumps.md.
 if sys.platform == "win32":
     import ctypes
 

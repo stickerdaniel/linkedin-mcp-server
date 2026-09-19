@@ -49,21 +49,10 @@ jobs:
 
       - run: uv sync --group dev
 
-      # Minidumps, written from outside the failing process. `faulthandler`
-      # has now been read out in full and it cannot name this fault: the dump
-      # is complete, every thread is printed as `Thread 0x…` and none as
-      # `Current thread 0x…`. `faulthandler_dump_traceback` takes the faulting
-      # thread from `PyGILState_GetThisThreadState()` and
-      # `_Py_DumpTracebackThreads` marks a thread only on pointer equality with
-      # it, so an unmarked dump means that call returned NULL: the thread that
-      # access-violated holds no Python thread state, and no Python-level
-      # report can describe it. Only a native stack can.
-      #
-      # WER's LocalDumps alone did not produce one. Armed exactly as it was
-      # before this change, run 35367449209 caught the access violation and
-      # still uploaded nothing. The runner image leaves Windows Error
-      # Reporting disabled, and a disabled WER never consults LocalDumps at
-      # all, which looks the same in the log as a run that never crashed.
+      # Minidumps, because `faulthandler` cannot name a thread that holds no
+      # Python thread state. `Disabled=0` is not redundant: the runner image
+      # ships WER off, and a disabled WER never consults LocalDumps at all.
+      # See docs/windows-crash-dumps.md.
       - name: Arm a crash dump
         shell: pwsh
         run: |
@@ -86,14 +75,10 @@ jobs:
           Set-Service -Name WerSvc -StartupType Manual
           Get-Service WerSvc | Format-List Name, Status, StartType
 
-      # The process that dies is a grandchild: the test starts eight
-      # frontends and each of those starts a daemon of its own. No step here
-      # can attach to the one that will fault, and which one it is only
-      # becomes known once it is already gone. So the debugger has to be the
-      # one Windows starts *after* a process dies. `procdump -i` registers
-      # itself under `AeDebug` for 64-bit and 32-bit alike, and that path is
-      # taken on an unhandled exception whether or not WER answers, which is
-      # the failure this is here to cover.
+      # The process that dies is a grandchild, so nothing here can attach to
+      # it in advance; the debugger has to be the one Windows starts after a
+      # process dies. `AeDebug` is also taken when WER does not answer, which
+      # is the failure this covers. See docs/windows-crash-dumps.md.
       - name: Register a postmortem debugger
         shell: pwsh
         run: |
@@ -158,10 +143,9 @@ jobs:
             echo "::endgroup::"
           done
 
-      # The upload below reports "no files were found" both for a run that
-      # never crashed and for a run that crashed while every dump mechanism
-      # stayed silent. That is the reading that cost run 35367449209, so the
-      # folder and the system's own record of the fault are printed here.
+      # The upload below cannot tell a run that never crashed from a run whose
+      # dump mechanisms all stayed silent; both report "no files were found".
+      # So the folder and the system's own record of the fault are printed.
       - name: Report what the dump folder holds
         if: always()
         shell: pwsh
