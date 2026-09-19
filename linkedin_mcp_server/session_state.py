@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import contextmanager
+import ctypes
 from dataclasses import asdict, dataclass, fields
 import functools
 import json
@@ -14,6 +15,7 @@ from pathlib import Path
 import re
 import shutil
 import socket
+import sys
 from collections.abc import Callable, Iterator
 from typing import Any
 from uuid import uuid4
@@ -144,10 +146,158 @@ def profile_exists(profile_dir: Path | None = None) -> bool:
 
 def get_runtime_id() -> str:
     """Return a deterministic identity for the current browser runtime."""
-    os_name = _normalize_os(platform.system())
-    arch = _normalize_arch(platform.machine())
+    system, machine = _platform_names()
+    os_name = _normalize_os(system)
+    arch = _normalize_arch(machine)
     runtime_kind = "container" if _is_container_runtime() else "host"
     return f"{os_name}-{arch}-{runtime_kind}"
+
+
+def _platform_names() -> tuple[str, str]:
+    """Name the OS and the processor architecture, never over WMI.
+
+    ``platform.system()`` and ``platform.machine()`` are both
+    ``platform.uname()``, which on Windows runs two WMI queries, and a WMI
+    query can take a CPython 3.12 process down with it (#838). Windows is
+    therefore decided from ``sys.platform``: asking in order to decide whether
+    to avoid asking would defeat it.
+
+    See ``docs/decisions/2026-09-19-windows-runtime-identity.md``.
+    """
+    if sys.platform != "win32":
+        return platform.system(), platform.machine()
+    return "Windows", (
+        _native_machine_win32()
+        or os.environ.get("PROCESSOR_ARCHITEW6432", "")
+        or os.environ.get("PROCESSOR_ARCHITECTURE", "")
+    )
+
+
+# IMAGE_FILE_MACHINE values returned by IsWow64Process2. The spellings are the
+# ones CPython 3.12 produced from Win32_Processor.Architecture, so a stripped
+# environment keeps the runtime directory it used before the WMI removal.
+_WINDOWS_MACHINE_TYPES = {
+    0x014C: "x86",
+    0x0162: "MIPS",
+    0x0166: "MIPS",
+    0x0168: "MIPS",
+    0x0169: "MIPS",
+    0x0184: "Alpha",
+    0x01C0: "ARM",
+    0x01C2: "ARM",
+    0x01C4: "ARM",
+    0x01F0: "PowerPC",
+    0x0200: "ia64",
+    0x8664: "AMD64",
+    0xAA64: "ARM64",
+}
+
+# GetNativeSystemInfo uses the Win32_Processor.Architecture enumeration rather
+# than IMAGE_FILE_MACHINE. It is only a fallback on Windows versions older than
+# IsWow64Process2, which predate Windows on ARM64.
+_WINDOWS_ARCHITECTURES = (
+    "x86",
+    "MIPS",
+    "Alpha",
+    "PowerPC",
+    "",
+    "ARM",
+    "ia64",
+    "",
+    "",
+    "AMD64",
+    "",
+    "",
+    "ARM64",
+)
+
+
+def _native_machine_win32() -> str:
+    """Ask the kernel for the native machine architecture, rather than WMI.
+
+    Asked before the architecture variables because the WMI query this
+    replaces was authoritative before them. Under x64 emulation on ARM64, the
+    variables can describe AMD64 while the native machine remains ARM64.
+
+    Every failure returns the empty string so the caller can consult the
+    architecture variables and report unknown only when they are absent too.
+    """
+    try:
+        # WinDLL exists only on Windows, and a type checker running elsewhere
+        # resolves the attribute against its own platform.
+        kernel32 = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
+        get_current_process = kernel32.GetCurrentProcess
+        get_current_process.argtypes = []
+        get_current_process.restype = ctypes.c_void_p
+
+        try:
+            is_wow64_process2 = kernel32.IsWow64Process2
+        except AttributeError:
+            return _native_machine_legacy_win32(kernel32, ctypes)
+
+        is_wow64_process2.argtypes = (
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_ushort),
+            ctypes.POINTER(ctypes.c_ushort),
+        )
+        is_wow64_process2.restype = ctypes.c_int
+        process_machine = ctypes.c_ushort()
+        native_machine = ctypes.c_ushort()
+        if not is_wow64_process2(
+            get_current_process(),
+            ctypes.byref(process_machine),
+            ctypes.byref(native_machine),
+        ):
+            logger.debug("IsWow64Process2 did not name the native machine")
+            return ""
+        machine = _WINDOWS_MACHINE_TYPES.get(native_machine.value, "")
+        if not machine:
+            logger.debug(
+                "IsWow64Process2 returned unknown native machine %#x",
+                native_machine.value,
+            )
+        return machine
+    except (
+        AttributeError,
+        ctypes.ArgumentError,
+        OSError,
+        TypeError,
+        ValueError,
+    ):
+        logger.debug("the kernel did not name the architecture", exc_info=True)
+        return ""
+
+
+def _native_machine_legacy_win32(kernel32: Any, ctypes: Any) -> str:
+    """Read x86/AMD64 on Windows versions older than IsWow64Process2."""
+
+    class _SystemInfo(ctypes.Structure):
+        _fields_ = (
+            ("wProcessorArchitecture", ctypes.c_ushort),
+            ("wReserved", ctypes.c_ushort),
+            ("dwPageSize", ctypes.c_ulong),
+            ("lpMinimumApplicationAddress", ctypes.c_void_p),
+            ("lpMaximumApplicationAddress", ctypes.c_void_p),
+            ("dwActiveProcessorMask", ctypes.c_void_p),
+            ("dwNumberOfProcessors", ctypes.c_ulong),
+            ("dwProcessorType", ctypes.c_ulong),
+            ("dwAllocationGranularity", ctypes.c_ulong),
+            ("wProcessorLevel", ctypes.c_ushort),
+            ("wProcessorRevision", ctypes.c_ushort),
+        )
+
+    get_native_system_info = kernel32.GetNativeSystemInfo
+    get_native_system_info.argtypes = (ctypes.POINTER(_SystemInfo),)
+    get_native_system_info.restype = None
+    info = _SystemInfo()
+    get_native_system_info(ctypes.byref(info))
+    if info.wProcessorArchitecture not in (0, 9):
+        logger.debug(
+            "GetNativeSystemInfo returned unsupported architecture %d",
+            info.wProcessorArchitecture,
+        )
+        return ""
+    return _WINDOWS_ARCHITECTURES[info.wProcessorArchitecture]
 
 
 def _normalize_os(system: str) -> str:

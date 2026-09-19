@@ -1,3 +1,4 @@
+import ctypes
 import json
 import os
 import shutil
@@ -7,6 +8,7 @@ import pytest
 
 from linkedin_mcp_server.profile_claim import ensure_profile_claim
 from linkedin_mcp_server.session_state import (
+    _native_machine_win32,
     clear_auth_state,
     get_runtime_id,
     load_runtime_state,
@@ -182,6 +184,7 @@ def test_runtime_storage_state_path_uses_runtime_dir(isolate_profile_dir):
 
 
 def test_get_runtime_id_marks_container(monkeypatch):
+    monkeypatch.setattr("linkedin_mcp_server.session_state.sys.platform", "linux")
     monkeypatch.setattr(
         "linkedin_mcp_server.session_state.platform.system", lambda: "Linux"
     )
@@ -197,6 +200,7 @@ def test_get_runtime_id_marks_container(monkeypatch):
 
 
 def test_get_runtime_id_marks_container_from_cgroup_v2_mountinfo(monkeypatch):
+    monkeypatch.setattr("linkedin_mcp_server.session_state.sys.platform", "linux")
     monkeypatch.setattr(
         "linkedin_mcp_server.session_state.platform.system", lambda: "Linux"
     )
@@ -219,6 +223,7 @@ def test_get_runtime_id_marks_container_from_cgroup_v2_mountinfo(monkeypatch):
 
 
 def test_get_runtime_id_ignores_non_root_overlay_mounts(monkeypatch):
+    monkeypatch.setattr("linkedin_mcp_server.session_state.sys.platform", "linux")
     monkeypatch.setattr(
         "linkedin_mcp_server.session_state.platform.system", lambda: "Linux"
     )
@@ -247,6 +252,7 @@ def test_get_runtime_id_ignores_other_containers_on_the_host(monkeypatch):
     # /var/lib/containers, which contains no marker word — so it passed either
     # way. A Docker host's mountinfo says "docker" outright, and that is what
     # the substring scan tripped over.
+    monkeypatch.setattr("linkedin_mcp_server.session_state.sys.platform", "linux")
     monkeypatch.setattr(
         "linkedin_mcp_server.session_state.platform.system", lambda: "Linux"
     )
@@ -269,6 +275,245 @@ def test_get_runtime_id_ignores_other_containers_on_the_host(monkeypatch):
     )
 
     assert get_runtime_id() == "linux-amd64-host"
+
+
+def _windows_runtime(monkeypatch) -> None:
+    """Put the runtime id on the Windows branch, off a container."""
+    monkeypatch.setattr("linkedin_mcp_server.session_state.sys.platform", "win32")
+    monkeypatch.setattr(
+        "linkedin_mcp_server.session_state._is_container_runtime", lambda: False
+    )
+
+
+def _refuse_uname(monkeypatch) -> None:
+    """Fail the test if the runtime id reaches WMI.
+
+    Refusing ``platform.uname`` catches both routes in, which a check on one of
+    ``platform.system()`` or ``platform.machine()`` would not.
+    See ``docs/decisions/2026-09-19-windows-runtime-identity.md``.
+    """
+
+    def refuse(*args: object, **kwargs: object) -> object:
+        raise AssertionError("the runtime id asked Windows over WMI")
+
+    monkeypatch.setattr("linkedin_mcp_server.session_state.platform.uname", refuse)
+
+
+def test_the_windows_runtime_id_never_asks_wmi(monkeypatch):
+    # #838. A WMI query on CPython 3.12 can kill the process: `_wmi`'s worker
+    # thread reads the caller's stack frame after the caller gives up waiting
+    # and returns. Captured as an access violation in `_wmi.pyd` that took out
+    # one of eight frontends mid-election. Reaching the query at all is the
+    # defect, so this refuses it rather than asserting on what it returns.
+    _windows_runtime(monkeypatch)
+    _refuse_uname(monkeypatch)
+    monkeypatch.delenv("PROCESSOR_ARCHITEW6432", raising=False)
+    monkeypatch.setenv("PROCESSOR_ARCHITECTURE", "AMD64")
+    monkeypatch.setattr(
+        "linkedin_mcp_server.session_state._native_machine_win32", lambda: "AMD64"
+    )
+
+    assert get_runtime_id() == "windows-amd64-host"
+
+
+def test_a_wow64_windows_frontend_reports_the_native_architecture(monkeypatch):
+    # A 32-bit process on ARM64 is told `x86` by PROCESSOR_ARCHITECTURE and the
+    # truth by PROCESSOR_ARCHITEW6432. Taking the first would give that process
+    # a different runtime id from every other one on the same machine, and the
+    # id names a directory.
+    _windows_runtime(monkeypatch)
+    _refuse_uname(monkeypatch)
+    monkeypatch.setenv("PROCESSOR_ARCHITEW6432", "ARM64")
+    monkeypatch.setenv("PROCESSOR_ARCHITECTURE", "x86")
+    monkeypatch.setattr(
+        "linkedin_mcp_server.session_state._native_machine_win32", lambda: "ARM64"
+    )
+
+    assert get_runtime_id() == "windows-arm64-host"
+
+
+def test_a_stripped_windows_environment_keeps_the_architecture(monkeypatch):
+    # The regression this fix nearly shipped. `platform._get_machine_win32`
+    # asks WMI *first* and reads these variables only when that fails, so a
+    # process launched without them — an MCP host or a service that sanitises
+    # the environment — used to be told AMD64 by the query. Answering "unknown"
+    # there would rename the directory holding its runtime profile, and the
+    # session inside it would simply stop being found.
+    _windows_runtime(monkeypatch)
+    _refuse_uname(monkeypatch)
+    monkeypatch.delenv("PROCESSOR_ARCHITEW6432", raising=False)
+    monkeypatch.delenv("PROCESSOR_ARCHITECTURE", raising=False)
+    monkeypatch.setattr(
+        "linkedin_mcp_server.session_state._native_machine_win32", lambda: "AMD64"
+    )
+
+    assert get_runtime_id() == "windows-amd64-host"
+
+
+def test_an_unnamed_windows_architecture_does_not_fall_back_to_wmi(monkeypatch):
+    # Both variables gone and the kernel refusing to name the machine too.
+    # "unknown" is a poor answer and a stable one; the only answer left is the
+    # query that crashes, and this asserts it is still not asked.
+    _windows_runtime(monkeypatch)
+    _refuse_uname(monkeypatch)
+    monkeypatch.setenv("PROCESSOR_ARCHITEW6432", "")
+    monkeypatch.setenv("PROCESSOR_ARCHITECTURE", "")
+    monkeypatch.setattr(
+        "linkedin_mcp_server.session_state._native_machine_win32", lambda: ""
+    )
+
+    assert get_runtime_id() == "windows-unknown-host"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires the real Windows kernel API")
+def test_the_native_machine_api_answers_on_windows():
+    # Native execution is supplied by the Windows platform-behaviour CI leg;
+    # the portable tests below constrain the pointer and mapping details.
+    assert _native_machine_win32() in {
+        "x86",
+        "MIPS",
+        "Alpha",
+        "PowerPC",
+        "ARM",
+        "ia64",
+        "AMD64",
+        "ARM64",
+    }
+
+
+class _FakeKernelFunction:
+    def __init__(self, implementation):
+        self.implementation = implementation
+        self.argtypes = None
+        self.restype = None
+        self.calls = 0
+
+    def __call__(self, *args):
+        self.calls += 1
+        return self.implementation(*args)
+
+
+class _FakeKernel32:
+    def __init__(self, process_machine: int, native_machine: int, *, succeeds=True):
+        self.GetCurrentProcess = _FakeKernelFunction(lambda: 1)
+
+        def is_wow64_process2(_process, process_pointer, native_pointer):
+            ctypes.cast(process_pointer, ctypes.POINTER(ctypes.c_ushort))[0] = (
+                process_machine
+            )
+            ctypes.cast(native_pointer, ctypes.POINTER(ctypes.c_ushort))[0] = (
+                native_machine
+            )
+            return succeeds
+
+        self.IsWow64Process2 = _FakeKernelFunction(is_wow64_process2)
+        self.GetNativeSystemInfo = _FakeKernelFunction(
+            lambda _info: pytest.fail("legacy fallback was called needlessly")
+        )
+
+
+@pytest.mark.parametrize(
+    ("native_machine", "expected"),
+    (
+        (0x014C, "x86"),
+        (0x0166, "MIPS"),
+        (0x0184, "Alpha"),
+        (0x01F0, "PowerPC"),
+        (0x01C4, "ARM"),
+        (0x0200, "ia64"),
+        (0x8664, "AMD64"),
+        (0xAA64, "ARM64"),
+    ),
+)
+def test_the_native_machine_api_matches_the_old_wmi_spellings(
+    monkeypatch, native_machine, expected
+):
+    kernel32 = _FakeKernel32(0x014C, native_machine)
+    monkeypatch.setattr(
+        ctypes, "WinDLL", lambda *_args, **_kwargs: kernel32, raising=False
+    )
+
+    assert _native_machine_win32() == expected
+    assert kernel32.IsWow64Process2.argtypes == (
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_ushort),
+        ctypes.POINTER(ctypes.c_ushort),
+    )
+    assert kernel32.IsWow64Process2.restype is ctypes.c_int
+    assert kernel32.GetCurrentProcess.argtypes == []
+    assert kernel32.GetCurrentProcess.restype is ctypes.c_void_p
+    assert kernel32.GetNativeSystemInfo.calls == 0
+
+
+def test_the_native_machine_output_wins_over_the_process_machine(monkeypatch):
+    kernel32 = _FakeKernel32(0x8664, 0xAA64)
+    monkeypatch.setattr(
+        ctypes, "WinDLL", lambda *_args, **_kwargs: kernel32, raising=False
+    )
+
+    assert _native_machine_win32() == "ARM64"
+
+
+def test_a_failed_native_machine_query_does_not_use_the_compatibility_answer(
+    monkeypatch,
+):
+    kernel32 = _FakeKernel32(0x8664, 0xAA64, succeeds=False)
+    monkeypatch.setattr(
+        ctypes, "WinDLL", lambda *_args, **_kwargs: kernel32, raising=False
+    )
+
+    assert _native_machine_win32() == ""
+    assert kernel32.GetNativeSystemInfo.calls == 0
+
+
+def test_a_native_machine_loader_error_is_nonfatal_and_logged(monkeypatch, caplog):
+    def fail(*_args, **_kwargs):
+        raise OSError("kernel32 unavailable")
+
+    monkeypatch.setattr(ctypes, "WinDLL", fail, raising=False)
+    caplog.set_level("DEBUG", logger="linkedin_mcp_server.session_state")
+
+    assert _native_machine_win32() == ""
+    assert "the kernel did not name the architecture" in caplog.text
+
+
+@pytest.mark.parametrize(("architecture", "expected"), ((0, "x86"), (9, "AMD64")))
+def test_old_windows_keeps_x86_and_amd64_without_wmi(
+    monkeypatch, architecture, expected
+):
+    def write_architecture(info_pointer):
+        ctypes.cast(info_pointer, ctypes.POINTER(ctypes.c_ushort))[0] = architecture
+
+    class LegacyKernel32:
+        def __init__(self):
+            self.GetCurrentProcess = _FakeKernelFunction(lambda: 1)
+            self.GetNativeSystemInfo = _FakeKernelFunction(write_architecture)
+
+    kernel32 = LegacyKernel32()
+    monkeypatch.setattr(
+        ctypes, "WinDLL", lambda *_args, **_kwargs: kernel32, raising=False
+    )
+
+    assert _native_machine_win32() == expected
+    assert kernel32.GetNativeSystemInfo.argtypes is not None
+    assert kernel32.GetNativeSystemInfo.restype is None
+    assert kernel32.GetNativeSystemInfo.calls == 1
+
+
+def test_the_native_machine_precedes_a_compatibility_environment(monkeypatch):
+    # An x64 process emulated on ARM64 can receive AMD64 in its environment,
+    # while the old WMI query returned ARM64. The native-machine output has to
+    # remain authoritative or the runtime profile silently moves directories.
+    _windows_runtime(monkeypatch)
+    _refuse_uname(monkeypatch)
+    monkeypatch.delenv("PROCESSOR_ARCHITEW6432", raising=False)
+    monkeypatch.setenv("PROCESSOR_ARCHITECTURE", "AMD64")
+    kernel32 = _FakeKernel32(0x8664, 0xAA64)
+    monkeypatch.setattr(
+        ctypes, "WinDLL", lambda *_args, **_kwargs: kernel32, raising=False
+    )
+
+    assert get_runtime_id() == "windows-arm64-host"
 
 
 def _seed_session(profile_dir, *, machine_id: str = "4663753") -> None:
