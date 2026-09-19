@@ -96,6 +96,21 @@ class _DropObservedListener:
         return _DropObservedSocket(connection, self._dropped_at), address
 
 
+class _PublicationObservedEvent:
+    """Timestamp the signal after the connection is published."""
+
+    def __init__(self, event: threading.Event) -> None:
+        self._event = event
+        self.published_at: float | None = None
+
+    def set(self) -> None:
+        self.published_at = time.monotonic()
+        self._event.set()
+
+    def wait(self, timeout: float | None = None) -> bool:
+        return self._event.wait(timeout)
+
+
 class TestAuthorization:
     def test_the_record_reaches_the_child_that_presented_the_nonce(
         self, listener: ControlListener
@@ -192,6 +207,8 @@ class TestAuthorization:
         raw_listener = listener._listener
         assert raw_listener is not None
         listener._listener = cast(Any, _DropObservedListener(raw_listener, dropped_at))
+        publication = _PublicationObservedEvent(listener._attached)
+        listener._attached = cast(Any, publication)
         try:
             began = time.monotonic()
             deadline = began + daemon_election._PREPARED_READ_SECONDS
@@ -201,9 +218,11 @@ class TestAuthorization:
             # allowances into a shape production never runs.
             listener.start_accepting(nonce=_NONCE, timeout=30.0)
             listener.attached_within(timeout=max(deadline - time.monotonic(), 0.0))
-            listener.send(_RECORD)
 
-            assert child.readline() == _RECORD
+            assert publication.published_at is not None
+            assert publication.published_at <= deadline, (
+                "the owner was published after its production window"
+            )
             assert len(dropped_at) == len(silent), (
                 "the owner was reached before every silent peer was dropped"
             )
@@ -226,6 +245,9 @@ class TestAuthorization:
                 f"only {fast_intervals} of {len(intervals)} silent peers were "
                 "refused at the production allowance's pace"
             )
+
+            listener.send(_RECORD)
+            assert child.readline() == _RECORD
         finally:
             for peer in silent:
                 peer.close()
