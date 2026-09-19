@@ -136,6 +136,8 @@ jobs:
         run: >-
           uv run pytest
           tests/test_daemon_election.py::TestAtomicStartupCommit
+          tests/test_daemon_election.py::TestElectionSettlement
+          tests/test_daemon_election.py::TestOwnerBootstrapOrdering
           tests/test_daemon_election.py::TestPublishingLast
           tests/test_daemon_election.py::TestRealOwner::test_an_owner_is_started_and_answers
           tests/test_daemon_election.py::TestRealOwner::test_a_crashed_owner_is_replaced
