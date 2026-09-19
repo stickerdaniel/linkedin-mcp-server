@@ -256,8 +256,8 @@ jobs:
 
       - run: uv cache prune --ci
 
-  # Everything here coordinates or protects state through the operating system
-  # rather than through Python, so each platform runs a different
+  # Everything here coordinates, protects or queries state through the operating
+  # system rather than through Python, so each platform runs a different
   # implementation: the lease locks with flock or with LockFileEx, and
   # owner-only storage is a permission bit or an access control list. The
   # Ubuntu job above executes neither Windows path. Serial by choice: the lease
@@ -307,6 +307,7 @@ jobs:
           tests/test_profile_lease.py
           tests/test_profile_lease_integration.py
           tests/test_private_state.py
+          tests/test_session_state.py::test_the_native_machine_api_answers_on_windows
           tests/test_daemon_lock.py
           tests/test_process_tree.py
           tests/test_greenlet_runtime.py

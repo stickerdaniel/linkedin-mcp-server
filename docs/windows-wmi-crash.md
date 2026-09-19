@@ -114,8 +114,9 @@ against it, including dependencies: 0 calls during imports, 0 calls from
 ## Alternatives
 
 Avoiding the query does not mean the architecture is unobtainable. Windows
-answers it without WMI through `GetNativeSystemInfo`, which this project now
-uses when the environment is silent, and through `IsWow64Process2`, which
-reports the process and native machines separately. Neither is a drop-in
-replacement for the WMI reply under emulation; see the decision record for
-which pairing is established and which is not.
+answers it without WMI through `IsWow64Process2`, whose separate native-machine
+output preserves ARM64 under x86 and x64 emulation. This project uses that
+output before consulting the compatibility environment. On Windows versions
+too old to export that API, `GetNativeSystemInfo` remains a fallback for x86
+and AMD64 only; see
+the decision record for the residual boundary.

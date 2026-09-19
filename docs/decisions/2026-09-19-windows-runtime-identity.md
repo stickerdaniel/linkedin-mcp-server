@@ -6,8 +6,9 @@
 The runtime id names a directory holding a browser runtime profile, and every
 frontend and every daemon owner asks for it while starting.
 
-On Windows it is built from `sys.platform` and from `PROCESSOR_ARCHITEW6432`,
-`PROCESSOR_ARCHITECTURE`, or `GetNativeSystemInfo`, in that order. Not from
+On Windows it is built from `sys.platform` and the native-machine output of
+`IsWow64Process2`, followed by `PROCESSOR_ARCHITEW6432` and
+`PROCESSOR_ARCHITECTURE` only when the native API cannot answer. Not from
 `platform.system()` or `platform.machine()`: both of those are
 `platform.uname()`, and Windows `uname()` has no `os.uname()` to read, so it
 fills every blank itself with `win32_ver()` and `_get_machine_win32()`, a WMI
@@ -22,31 +23,34 @@ being avoided, so asking in order to decide whether to avoid asking defeats
 it. A first attempt at this fix avoided only `platform.machine()` and still
 crashed for that reason.
 
-## Why the kernel is asked last, and asked at all
+## Why the kernel is asked first
 
 `platform._get_machine_win32` queries WMI *first* and reads the two variables
-only when that fails. So a process whose environment lacks them — a service or
-an MCP host that sanitises what it passes down — used to be given an
-architecture by the query. Answering `unknown` there would rename the
-directory holding that installation's runtime profile, and the session inside
-it would stop being found. `GetNativeSystemInfo` closes that gap without WMI:
-`Win32_Processor.Architecture` and `SYSTEM_INFO.wProcessorArchitecture` are one
-enumeration, so the table CPython indexes with the WMI reply reads the kernel's
-answer unchanged.
+only when that fails. The replacement has to preserve that authority as well as
+avoid WMI: under x64 emulation on ARM64, `PROCESSOR_ARCHITECTURE` can say AMD64
+while `Win32_Processor.Architecture` said ARM64. Reading the environment first
+would silently abandon the existing ARM64 runtime profile.
 
-It is asked last rather than first so that no process which already had an
-answer gets a new one. That is every ordinary Windows process.
+`IsWow64Process2` supplies the native machine separately from the process
+compatibility architecture. Its `IMAGE_FILE_MACHINE` values are mapped to the
+spellings CPython 3.12 used for the WMI enumeration. The environment remains a
+fallback when the native API cannot answer.
+
+On Windows versions where `IsWow64Process2` is unavailable, the fallback reads
+`GetNativeSystemInfo` only for x86 and AMD64. Those Windows releases predate
+Windows on ARM64; other answers become `unknown` rather than extending a
+compatibility result into a claim about the native machine.
 
 ## What this preserves, and what it does not
 
-For the architectures Windows actually reports, the environment spelling and
-the WMI spelling normalise to the same name, WOW64 included, because
-`PROCESSOR_ARCHITEW6432` carries what the query would have said.
+For ordinary processes, the native API and the old WMI spelling normalise to
+the same name. Under x86 or x64 emulation on ARM64, the `nativeMachine` output
+wins over both the `processMachine` output and a compatibility architecture in
+the environment.
 
-One case is not established: an x64 process under emulation on an ARM64 host,
-where the environment says `AMD64`. `GetNativeSystemInfo` is documented to
-report `AMD64` there too, for compatibility, while what the WMI query returned
-has not been measured. If that pairing ever needs to be exact,
-`IsWow64Process2` reports the native machine separately and is also WMI-free.
-Nothing here should be read as a promise that every emulation combination
-produces the identity it produced before.
+The residual boundary is failure of the native API. On Windows older than
+`IsWow64Process2`, `GetNativeSystemInfo` preserves x86 and AMD64 identities and
+other architectures fall through to the environment or `unknown`. Those
+releases predate Windows on ARM64. On a newer system where the API exists but
+fails, the environment remains the last available answer and may itself
+contain a compatibility architecture.
