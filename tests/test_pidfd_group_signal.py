@@ -7,11 +7,11 @@ process cleanup backend.
 from __future__ import annotations
 
 import errno
+import json
 import os
 import signal
 import subprocess
 import sys
-import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import cast
@@ -27,11 +27,43 @@ pytestmark = pytest.mark.skipif(
 # https://github.com/torvalds/linux/blob/master/include/uapi/linux/pidfd.h
 _PIDFD_SIGNAL_PROCESS_GROUP = 1 << 2
 _UNSUPPORTED_PIDFD_FLAG = 1 << 30
+_PidfdOpen = Callable[[int], int]
 _PidfdSender = Callable[[int, int, None, int], None]
-_pidfd_open = cast(Callable[[int], int], getattr(os, "pidfd_open", None))
-_pidfd_send_signal = cast(_PidfdSender, getattr(signal, "pidfd_send_signal", None))
+_pidfd_open = cast(_PidfdOpen | None, getattr(os, "pidfd_open", None))
+_pidfd_send_signal = cast(
+    _PidfdSender | None,
+    getattr(signal, "pidfd_send_signal", None),
+)
+_UNAVAILABLE_ERRNOS = {errno.ENOSYS, errno.EPERM}
 
-_MEMBER = r"""
+_SUBREAPER_PROBE = rf"""
+import ctypes
+import errno
+import json
+import os
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+PIDFD_SIGNAL_PROCESS_GROUP = {_PIDFD_SIGNAL_PROCESS_GROUP}
+PR_SET_CHILD_SUBREAPER = 36
+UNAVAILABLE = {{errno.ENOSYS, errno.EPERM}}
+
+pidfd_open = getattr(os, "pidfd_open", None)
+pidfd_send_signal = getattr(signal, "pidfd_send_signal", None)
+if pidfd_open is None or pidfd_send_signal is None:
+    print(json.dumps({{"status": "skip", "reason": "Python has no pidfd API"}}))
+    raise SystemExit(0)
+
+libc = ctypes.CDLL(None, use_errno=True)
+if libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
+    error = ctypes.get_errno()
+    raise OSError(error, os.strerror(error))
+
+member_code = r'''
 import os
 import signal
 import sys
@@ -49,9 +81,8 @@ signal.signal(signal.SIGUSR1, handle)
 ready.write_text(str(os.getpid()))
 while True:
     time.sleep(60)
-"""
-
-_LEADER = r"""
+'''
+leader_code = r'''
 import subprocess
 import sys
 
@@ -63,21 +94,196 @@ member = subprocess.Popen(
 )
 print(member.pid, flush=True)
 sys.stdin.read(1)
+'''
+
+
+def unavailable(exc):
+    return isinstance(exc, OSError) and exc.errno in UNAVAILABLE
+
+
+def open_pidfd(pid):
+    try:
+        return pidfd_open(pid)
+    except OSError as exc:
+        if unavailable(exc):
+            print(json.dumps({{"status": "skip", "reason": f"pidfd_open: {{exc}}"}}))
+            raise SystemExit(0)
+        raise
+
+
+def send(pidfd, sent, flags):
+    try:
+        pidfd_send_signal(pidfd, sent, None, flags)
+    except OSError as exc:
+        if unavailable(exc):
+            print(
+                json.dumps(
+                    {{"status": "skip", "reason": f"pidfd_send_signal: {{exc}}"}}
+                )
+            )
+            raise SystemExit(0)
+        if exc.errno == errno.ESRCH:
+            return "gone"
+        if flags == PIDFD_SIGNAL_PROCESS_GROUP and exc.errno == errno.EINVAL:
+            return "unsupported"
+        raise
+    return "sent"
+
+
+def wait_for(path):
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            value = path.read_text()
+        except FileNotFoundError:
+            time.sleep(0.01)
+            continue
+        if value:
+            return int(value)
+    raise RuntimeError(f"timed out waiting for {{path.name}}")
+
+
+preflight_pidfd = open_pidfd(os.getpid())
+try:
+    if send(preflight_pidfd, 0, 0) != "sent":
+        raise RuntimeError("the current process disappeared during pidfd preflight")
+finally:
+    os.close(preflight_pidfd)
+
+leader = None
+leader_pidfd = -1
+member_pid = -1
+member_pidfd = -1
+reaped_member = False
+closed_fds = []
+try:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        ready = root / "member-ready"
+        signaled = root / "member-signaled"
+        leader = subprocess.Popen(
+            [sys.executable, "-c", leader_code, member_code, str(ready), str(signaled)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        leader_pidfd = open_pidfd(leader.pid)
+        member_pid = int(leader.stdout.readline())
+        if wait_for(ready) != member_pid:
+            raise RuntimeError("the ready marker named another process")
+        if leader.poll() is not None:
+            raise RuntimeError("the leader exited before attribution")
+        if os.getpgid(leader.pid) != leader.pid:
+            raise RuntimeError("the leader does not own its process group")
+        if os.getpgid(member_pid) != leader.pid:
+            raise RuntimeError("the member is outside the leader's group")
+
+        support = send(leader_pidfd, 0, PIDFD_SIGNAL_PROCESS_GROUP)
+        if support == "unsupported":
+            print(json.dumps({{"status": "skip", "reason": "group flag unsupported"}}))
+            raise SystemExit(0)
+        member_pidfd = open_pidfd(member_pid)
+        if send(member_pidfd, 0, PIDFD_SIGNAL_PROCESS_GROUP) != "gone":
+            raise RuntimeError("a member pidfd was accepted as group attribution")
+
+        leader.stdin.write("x")
+        leader.stdin.flush()
+        if leader.wait(timeout=10) != 0:
+            raise RuntimeError("the leader did not exit cleanly")
+        if os.getpgid(member_pid) != leader.pid:
+            raise RuntimeError("the group changed after leader reaping")
+
+        if send(leader_pidfd, signal.SIGUSR1, PIDFD_SIGNAL_PROCESS_GROUP) != "sent":
+            raise RuntimeError("the retained leader pidfd did not signal its group")
+        if wait_for(signaled) != member_pid:
+            raise RuntimeError("another process handled the group signal")
+
+        waited, status = os.waitpid(member_pid, 0)
+        reaped_member = True
+        if waited != member_pid or os.waitstatus_to_exitcode(status) != 0:
+            raise RuntimeError("the subreaper did not collect the signaled member")
+        if send(leader_pidfd, 0, PIDFD_SIGNAL_PROCESS_GROUP) != "gone":
+            raise RuntimeError("the reaped empty group did not return ESRCH")
+
+        print(
+            json.dumps(
+                {{
+                    "status": "passed",
+                    "leader": leader.pid,
+                    "member": member_pid,
+                    "reaped_member": reaped_member,
+                }}
+            )
+        )
+finally:
+    if leader is not None and leader.poll() is None:
+        if leader_pidfd >= 0:
+            try:
+                pidfd_send_signal(leader_pidfd, signal.SIGKILL, None, 0)
+            except OSError as exc:
+                if exc.errno != errno.ESRCH:
+                    raise
+        leader.wait(timeout=10)
+    if member_pidfd >= 0 and not reaped_member:
+        try:
+            pidfd_send_signal(member_pidfd, signal.SIGKILL, None, 0)
+        except OSError as exc:
+            if exc.errno != errno.ESRCH:
+                raise
+        try:
+            waited, _status = os.waitpid(member_pid, 0)
+            reaped_member = waited == member_pid
+        except ChildProcessError:
+            pass
+    for descriptor in (member_pidfd, leader_pidfd):
+        if descriptor < 0:
+            continue
+        os.close(descriptor)
+        try:
+            os.fstat(descriptor)
+        except OSError as exc:
+            if exc.errno != errno.EBADF:
+                raise
+            closed_fds.append(descriptor)
+        else:
+            raise RuntimeError("pidfd remained open")
 """
+
+
+def _require_pidfd_api(
+    opener: _PidfdOpen | None = _pidfd_open,
+    sender: _PidfdSender | None = _pidfd_send_signal,
+) -> tuple[_PidfdOpen, _PidfdSender]:
+    if opener is None or sender is None:
+        pytest.skip("Python has no pidfd_open and pidfd_send_signal API")
+    return opener, sender
+
+
+def _open_pidfd(pid: int, *, opener: _PidfdOpen | None = _pidfd_open) -> int:
+    opener, _sender = _require_pidfd_api(opener, _pidfd_send_signal)
+    try:
+        return opener(pid)
+    except OSError as exc:
+        if exc.errno in _UNAVAILABLE_ERRNOS:
+            pytest.skip(f"pidfd_open is unavailable: {exc}")
+        raise
 
 
 def _send_group_signal(
     pidfd: int,
     sent: int,
     *,
-    sender: _PidfdSender | None = None,
+    sender: _PidfdSender | None = _pidfd_send_signal,
 ) -> str:
-    """Classify the two non-fatal kernel answers without a numeric fallback."""
-    if sender is None:
-        sender = _pidfd_send_signal
+    """Classify non-fatal kernel answers without a numeric fallback."""
+    _opener, sender = _require_pidfd_api(_pidfd_open, sender)
     try:
         sender(pidfd, sent, None, _PIDFD_SIGNAL_PROCESS_GROUP)
     except OSError as exc:
+        if exc.errno in _UNAVAILABLE_ERRNOS:
+            pytest.skip(f"pidfd_send_signal is unavailable: {exc}")
         if exc.errno == errno.EINVAL:
             return "unsupported"
         if exc.errno == errno.ESRCH:
@@ -86,29 +292,33 @@ def _send_group_signal(
     return "sent"
 
 
-def _wait_for(path: Path, timeout: float = 10.0) -> str:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            value = path.read_text()
-        except FileNotFoundError:
-            time.sleep(0.01)
-            continue
-        if value:
-            return value
-    pytest.fail(f"timed out waiting for {path.name}")
-
-
-def _alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    return True
-
-
 def test_process_group_flag_matches_the_linux_uapi():
     assert _PIDFD_SIGNAL_PROCESS_GROUP == 4
+
+
+def test_missing_python_pidfd_apis_skip():
+    with pytest.raises(pytest.skip.Exception):
+        _require_pidfd_api(None, _pidfd_send_signal)
+    with pytest.raises(pytest.skip.Exception):
+        _require_pidfd_api(_pidfd_open, None)
+
+
+@pytest.mark.parametrize("failure", [errno.ENOSYS, errno.EPERM])
+def test_pidfd_open_platform_refusals_skip(failure: int):
+    def unavailable(_pid: int) -> int:
+        raise OSError(failure, os.strerror(failure))
+
+    with pytest.raises(pytest.skip.Exception):
+        _open_pidfd(17, opener=unavailable)
+
+
+@pytest.mark.parametrize("failure", [errno.ENOSYS, errno.EPERM])
+def test_pidfd_signal_platform_refusals_skip(failure: int):
+    def unavailable(_pidfd: int, _sent: int, _info: None, _flags: int) -> None:
+        raise OSError(failure, os.strerror(failure))
+
+    with pytest.raises(pytest.skip.Exception):
+        _send_group_signal(17, signal.SIGKILL, sender=unavailable)
 
 
 def test_einval_is_unsupported_without_numeric_fallback(
@@ -141,85 +351,38 @@ def test_esrch_is_gone_without_numeric_fallback():
     assert calls == [(17, signal.SIGKILL, None, 4)]
 
 
+def test_probe_has_no_numeric_signal_cleanup():
+    assert "os.kill(" not in _SUBREAPER_PROBE
+    assert "os.killpg(" not in _SUBREAPER_PROBE
+
+
 def test_python_passes_nonzero_pidfd_flags_to_linux():
-    pidfd = _pidfd_open(os.getpid())
+    pidfd = _open_pidfd(os.getpid())
+    _opener, sender = _require_pidfd_api()
     try:
         with pytest.raises(OSError) as raised:
-            _pidfd_send_signal(pidfd, 0, None, _UNSUPPORTED_PIDFD_FLAG)
+            sender(pidfd, 0, None, _UNSUPPORTED_PIDFD_FLAG)
     finally:
         os.close(pidfd)
 
+    if raised.value.errno in _UNAVAILABLE_ERRNOS:
+        pytest.skip(f"pidfd_send_signal is unavailable: {raised.value}")
     assert raised.value.errno == errno.EINVAL
 
 
 def test_retained_leader_pidfd_signals_its_group_after_reaping(tmp_path: Path):
-    ready = tmp_path / "member-ready"
-    signaled = tmp_path / "member-signaled"
-    leader = subprocess.Popen(
-        [sys.executable, "-c", _LEADER, _MEMBER, str(ready), str(signaled)],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+    result = subprocess.run(
+        [sys.executable, "-c", _SUBREAPER_PROBE],
+        cwd=tmp_path,
+        capture_output=True,
         text=True,
-        start_new_session=True,
+        timeout=30,
     )
-    assert leader.stdin is not None
-    assert leader.stdout is not None
-    assert leader.stderr is not None
-    pidfd = -1
-    member_pid = -1
-    member_pidfd = -1
-    try:
-        member_pid = int(leader.stdout.readline())
-        assert int(_wait_for(ready)) == member_pid
-        assert leader.poll() is None
-        assert os.getpgid(leader.pid) == leader.pid
-        assert os.getpgid(member_pid) == leader.pid
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout.splitlines()[-1])
+    if report["status"] == "skip":
+        pytest.skip(report["reason"])
 
-        # Capture the identity-bearing descriptor while attribution is certain.
-        pidfd = _pidfd_open(leader.pid)
-        support = _send_group_signal(pidfd, 0)
-        if support == "unsupported":
-            pytest.skip("kernel does not support PIDFD_SIGNAL_PROCESS_GROUP")
-        assert support == "sent"
-
-        # A member pidfd is not valid attribution for this operation. This also
-        # distinguishes the group flag from ordinary per-process signaling.
-        member_pidfd = _pidfd_open(member_pid)
-        with pytest.raises(OSError) as misattributed:
-            _pidfd_send_signal(
-                member_pidfd,
-                0,
-                None,
-                _PIDFD_SIGNAL_PROCESS_GROUP,
-            )
-        assert misattributed.value.errno == errno.ESRCH
-        os.close(member_pidfd)
-        member_pidfd = -1
-
-        leader.stdin.write("x")
-        leader.stdin.flush()
-        assert leader.wait(timeout=10) == 0
-        assert _alive(member_pid), "the group disappeared with its reaped leader"
-        assert os.getpgid(member_pid) == leader.pid
-
-        assert _send_group_signal(pidfd, signal.SIGUSR1) == "sent"
-        assert int(_wait_for(signaled)) == member_pid
-
-        deadline = time.monotonic() + 10
-        while _send_group_signal(pidfd, 0) != "gone":
-            assert time.monotonic() < deadline, "the empty group never returned ESRCH"
-            time.sleep(0.01)
-    finally:
-        if member_pidfd >= 0:
-            os.close(member_pidfd)
-        if pidfd >= 0:
-            os.close(pidfd)
-            with pytest.raises(OSError) as closed:
-                os.fstat(pidfd)
-            assert closed.value.errno == errno.EBADF
-        if leader.poll() is None:
-            leader.kill()
-            leader.wait(timeout=10)
-        if member_pid >= 0 and _alive(member_pid):
-            os.kill(member_pid, signal.SIGKILL)
+    assert report["status"] == "passed"
+    assert report["leader"] != report["member"]
+    assert report["reaped_member"] is True

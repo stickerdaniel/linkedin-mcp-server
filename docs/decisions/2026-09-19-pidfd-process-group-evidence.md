@@ -6,22 +6,30 @@ production backend and does not change cleanup behavior on Linux or macOS.
 
 ## L1: synthetic native group
 
-`tests/test_pidfd_group_signal.py` creates a private Linux session whose leader
-spawns one member. The test opens the leader pidfd while the leader is alive and
-its identity as the group leader is directly observable. It then reaps the
+`tests/test_pidfd_group_signal.py` starts a dedicated Linux helper, makes it a
+child subreaper with `PR_SET_CHILD_SUBREAPER`, and creates a private session
+whose leader spawns one member. The helper opens both pidfds while the processes
+are alive and their identities are directly observable. It then reaps the
 leader, proves that the member still belongs to that group, and sends `SIGUSR1`
-through the retained pidfd with `PIDFD_SIGNAL_PROCESS_GROUP`. The member's signal
-handler supplies independent delivery evidence. The same test checks that a
-member pidfd is rejected, an empty group returns `ESRCH`, and every pidfd is
-closed.
+through the retained leader pidfd with `PIDFD_SIGNAL_PROCESS_GROUP`. The
+member's signal handler supplies independent delivery evidence.
+
+The subreaper explicitly collects the reparented member with `waitpid` before
+the test expects the retained leader pidfd to report `ESRCH` for the empty
+group. The member pidfd remains open until cleanup finishes. Every cleanup
+signal uses `pidfd_send_signal(member_pidfd, SIGKILL, None, 0)`; `ESRCH` means
+the member is already gone. No numeric PID or PGID signal is used. Both pidfds
+are closed and checked for `EBADF` before the helper exits.
 
 The flag is `1UL << 2` in Linux
 [`include/uapi/linux/pidfd.h`](https://github.com/torvalds/linux/blob/master/include/uapi/linux/pidfd.h).
 The test pins its numeric value and probes the operation against the private
-group. `EINVAL` means that the running kernel does not support the operation;
-the probe skips and never substitutes numeric `killpg`. A separate call with an
-unknown nonzero bit checks that the supported Python API passes flags to Linux
-rather than accepting and discarding them.
+group. `EINVAL` means that the running kernel does not support the group flag;
+the probe skips and never substitutes numeric `killpg`. Missing Python APIs and
+`ENOSYS` or `EPERM` from `pidfd_open` or `pidfd_send_signal` are platform
+unavailability and also skip. A separate call with an unknown nonzero bit checks
+that the available Python API passes flags to Linux rather than accepting and
+discarding them.
 
 ## Evidence not claimed
 
