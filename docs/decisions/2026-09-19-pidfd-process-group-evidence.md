@@ -24,12 +24,16 @@ are closed and checked for `EBADF` before the helper exits.
 The flag is `1UL << 2` in Linux
 [`include/uapi/linux/pidfd.h`](https://github.com/torvalds/linux/blob/master/include/uapi/linux/pidfd.h).
 The test pins its numeric value and probes the operation against the private
-group. `EINVAL` means that the running kernel does not support the group flag;
-the probe skips and never substitutes numeric `killpg`. Missing Python APIs and
-`ENOSYS` or `EPERM` from `pidfd_open` or `pidfd_send_signal` are platform
-unavailability and also skip. A separate call with an unknown nonzero bit checks
-that the available Python API passes flags to Linux rather than accepting and
-discarding them.
+group. The member pidfd is opened before this probe, so every result after
+spawn already has identity-stable cleanup. `EINVAL` means that the running
+kernel does not support the group flag; flag-specific `ENOSYS` or `EPERM` means
+the group operation is unavailable. Those paths skip only after the leader and
+member have both been pidfd-signaled as needed, explicitly reaped, and their
+pidfds closed. Deterministic fault injection exercises all three paths. Missing
+Python APIs and failures of the flags-zero preflight skip before any group is
+spawned. No skip substitutes numeric `killpg`. A separate call with an unknown
+nonzero bit checks that the available Python API passes flags to Linux rather
+than accepting and discarding them.
 
 ## Evidence not claimed
 

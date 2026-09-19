@@ -111,17 +111,21 @@ def open_pidfd(pid):
         raise
 
 
+group_fault = os.environ.get("LINKEDIN_MCP_TEST_PIDFD_GROUP_FAULT")
+group_fault_used = False
+
+
 def send(pidfd, sent, flags):
+    global group_fault_used
     try:
+        if flags == PIDFD_SIGNAL_PROCESS_GROUP and group_fault and not group_fault_used:
+            group_fault_used = True
+            injected = getattr(errno, group_fault)
+            raise OSError(injected, os.strerror(injected))
         pidfd_send_signal(pidfd, sent, None, flags)
     except OSError as exc:
         if unavailable(exc):
-            print(
-                json.dumps(
-                    {{"status": "skip", "reason": f"pidfd_send_signal: {{exc}}"}}
-                )
-            )
-            raise SystemExit(0)
+            return "unavailable"
         if exc.errno == errno.ESRCH:
             return "gone"
         if flags == PIDFD_SIGNAL_PROCESS_GROUP and exc.errno == errno.EINVAL:
@@ -145,17 +149,28 @@ def wait_for(path):
 
 preflight_pidfd = open_pidfd(os.getpid())
 try:
-    if send(preflight_pidfd, 0, 0) != "sent":
+    preflight = send(preflight_pidfd, 0, 0)
+    if preflight == "unavailable":
+        print(json.dumps({{"status": "skip", "reason": "pidfd signal unavailable"}}))
+        raise SystemExit(0)
+    if preflight != "sent":
         raise RuntimeError("the current process disappeared during pidfd preflight")
 finally:
     os.close(preflight_pidfd)
+
+
+class ProbeSkipped(Exception):
+    pass
+
 
 leader = None
 leader_pidfd = -1
 member_pid = -1
 member_pidfd = -1
+reaped_leader = False
 reaped_member = False
 closed_fds = []
+report = None
 try:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
@@ -180,11 +195,12 @@ try:
         if os.getpgid(member_pid) != leader.pid:
             raise RuntimeError("the member is outside the leader's group")
 
+        member_pidfd = open_pidfd(member_pid)
         support = send(leader_pidfd, 0, PIDFD_SIGNAL_PROCESS_GROUP)
         if support == "unsupported":
-            print(json.dumps({{"status": "skip", "reason": "group flag unsupported"}}))
-            raise SystemExit(0)
-        member_pidfd = open_pidfd(member_pid)
+            raise ProbeSkipped("group flag unsupported")
+        if support == "unavailable":
+            raise ProbeSkipped("group signal unavailable")
         if send(member_pidfd, 0, PIDFD_SIGNAL_PROCESS_GROUP) != "gone":
             raise RuntimeError("a member pidfd was accepted as group attribution")
 
@@ -192,6 +208,7 @@ try:
         leader.stdin.flush()
         if leader.wait(timeout=10) != 0:
             raise RuntimeError("the leader did not exit cleanly")
+        reaped_leader = True
         if os.getpgid(member_pid) != leader.pid:
             raise RuntimeError("the group changed after leader reaping")
 
@@ -207,16 +224,9 @@ try:
         if send(leader_pidfd, 0, PIDFD_SIGNAL_PROCESS_GROUP) != "gone":
             raise RuntimeError("the reaped empty group did not return ESRCH")
 
-        print(
-            json.dumps(
-                {{
-                    "status": "passed",
-                    "leader": leader.pid,
-                    "member": member_pid,
-                    "reaped_member": reaped_member,
-                }}
-            )
-        )
+        report = {{"status": "passed"}}
+except ProbeSkipped as exc:
+    report = {{"status": "skip", "reason": str(exc)}}
 finally:
     if leader is not None and leader.poll() is None:
         if leader_pidfd >= 0:
@@ -226,6 +236,9 @@ finally:
                 if exc.errno != errno.ESRCH:
                     raise
         leader.wait(timeout=10)
+        reaped_leader = True
+    elif leader is not None:
+        reaped_leader = True
     if member_pidfd >= 0 and not reaped_member:
         try:
             pidfd_send_signal(member_pidfd, signal.SIGKILL, None, 0)
@@ -249,6 +262,23 @@ finally:
             closed_fds.append(descriptor)
         else:
             raise RuntimeError("pidfd remained open")
+
+if leader is not None and not reaped_leader:
+    raise RuntimeError("the helper left its leader unreaped")
+if member_pid >= 0 and not reaped_member:
+    raise RuntimeError("the helper left its member unreaped")
+if report is None:
+    raise RuntimeError("the helper produced no result")
+report.update(
+    {{
+        "leader": leader.pid if leader is not None else -1,
+        "member": member_pid,
+        "reaped_leader": reaped_leader,
+        "reaped_member": reaped_member,
+        "closed_fds": len(closed_fds),
+    }}
+)
+print(json.dumps(report))
 """
 
 
@@ -370,19 +400,41 @@ def test_python_passes_nonzero_pidfd_flags_to_linux():
     assert raised.value.errno == errno.EINVAL
 
 
-def test_retained_leader_pidfd_signals_its_group_after_reaping(tmp_path: Path):
+def _run_probe(tmp_path: Path, fault: str | None = None) -> dict[str, object]:
+    environment = os.environ.copy()
+    if fault is not None:
+        environment["LINKEDIN_MCP_TEST_PIDFD_GROUP_FAULT"] = fault
     result = subprocess.run(
         [sys.executable, "-c", _SUBREAPER_PROBE],
         cwd=tmp_path,
         capture_output=True,
         text=True,
         timeout=30,
+        env=environment,
     )
     assert result.returncode == 0, result.stderr
-    report = json.loads(result.stdout.splitlines()[-1])
+    return cast(dict[str, object], json.loads(result.stdout.splitlines()[-1]))
+
+
+def _assert_probe_reaped_every_process(report: dict[str, object]) -> None:
+    assert report["leader"] != report["member"]
+    assert report["reaped_leader"] is True
+    assert report["reaped_member"] is True
+    assert report["closed_fds"] == 2
+
+
+def test_retained_leader_pidfd_signals_its_group_after_reaping(tmp_path: Path):
+    report = _run_probe(tmp_path)
+    _assert_probe_reaped_every_process(report)
     if report["status"] == "skip":
-        pytest.skip(report["reason"])
+        pytest.skip(cast(str, report["reason"]))
 
     assert report["status"] == "passed"
-    assert report["leader"] != report["member"]
-    assert report["reaped_member"] is True
+
+
+@pytest.mark.parametrize("fault", ["EINVAL", "ENOSYS", "EPERM"])
+def test_group_probe_skip_reaps_every_spawned_process(tmp_path: Path, fault: str):
+    report = _run_probe(tmp_path, fault)
+
+    assert report["status"] == "skip"
+    _assert_probe_reaped_every_process(report)
