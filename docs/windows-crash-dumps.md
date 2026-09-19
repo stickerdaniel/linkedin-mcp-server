@@ -40,6 +40,12 @@ default and each one alone is enough to produce nothing:
 The `Arm a crash dump` and `Register a postmortem debugger` steps in
 `.github/workflows/election-soak.yml` do all three.
 
+`procdump` is downloaded at run time and then registered as the debugger
+Windows starts on any unhandled exception, so the step checks its Authenticode
+signature is valid and from Microsoft before running it. Not a pinned hash:
+Sysinternals republishes the same URL, so a hash would fail on every refresh
+while proving no more than the signature does.
+
 ## Capture
 
 Dispatch `election-soak` with enough rounds that a crash is likely; at the rate

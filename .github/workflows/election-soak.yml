@@ -92,6 +92,21 @@ jobs:
           Expand-Archive -Path $zip -DestinationPath $tools -Force
           $exe = Join-Path $tools 'procdump64.exe'
           if (-not (Test-Path $exe)) { $exe = Join-Path $tools 'procdump.exe' }
+
+          # This binary is fetched at run time and then registered as the
+          # debugger Windows starts on any unhandled exception, so what it is
+          # matters. Authenticode rather than a pinned hash: Sysinternals
+          # republishes the same URL, which would make a hash fail on every
+          # refresh while proving nothing more than this does.
+          $sig = Get-AuthenticodeSignature $exe
+          if ($sig.Status -ne 'Valid') {
+            throw "procdump signature is $($sig.Status)"
+          }
+          if ($sig.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') {
+            throw "procdump signed by $($sig.SignerCertificate.Subject)"
+          }
+          Write-Host "procdump signed by $($sig.SignerCertificate.Subject)"
+
           & $exe -accepteula -ma -i $folder
           if ($LASTEXITCODE -ne 0) {
             throw "procdump -i failed with exit code $LASTEXITCODE"
