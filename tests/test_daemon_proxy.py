@@ -1491,6 +1491,7 @@ class _DiscoveryFailsAfterMutation(FastMCPTransport):
 class _FailsListingAfterMutation:
     def __init__(self, session: Any, transport: _DiscoveryFailsAfterMutation) -> None:
         self._session = session
+        self._list_tools = session.list_tools
         self._transport = transport
         self._called = False
 
@@ -1499,6 +1500,7 @@ class _FailsListingAfterMutation:
 
     async def call_tool(self, *args: Any, **kwargs: Any):
         self._called = True
+        self._session.list_tools = self.list_tools
         return await self._session.call_tool(*args, **kwargs)
 
     async def send_request(self, request: Any, *args: Any, **kwargs: Any):
@@ -1510,7 +1512,7 @@ class _FailsListingAfterMutation:
         if self._called and self._transport._ran:
             self._transport.discovery_attempts += 1
             raise httpx.ConnectError("the owner left after answering the call")
-        return await self._session.list_tools(*args, **kwargs)
+        return await self._list_tools(*args, **kwargs)
 
 
 class _RecordsCallRequest(FastMCPTransport):
@@ -1682,7 +1684,10 @@ class TestRecoveringThroughTheWholeProxy:
             result = await client.call_tool("send_connection_request", {})
 
         assert result.data == "sent"
-        assert ran == ["sent"], "schema discovery repeated a completed mutation"
+        assert ran == ["sent"], (
+            "schema discovery repeated a completed mutation "
+            f"(elections={elections()}, discovery_attempts={before.discovery_attempts})"
+        )
         assert elections() == 0, "schema discovery stood a replacement owner up"
         assert before.discovery_attempts == 0
 
