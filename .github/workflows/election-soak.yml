@@ -49,20 +49,113 @@ jobs:
 
       - run: uv sync --group dev
 
-      # Minidumps, written from outside the failing process. Everything #838
-      # has been given so far came from `faulthandler` inside a process that
-      # was already access-violating, and twice it stopped before the frame
-      # that matters.
+      # Minidumps, because `faulthandler` cannot name a thread that holds no
+      # Python thread state. `DontShowUI` is the load-bearing setting here: the
+      # registration below makes ProcDump the capture route and LocalDumps is
+      # skipped while an automatic debugger is configured, but a fault still
+      # must not wait for a click. See docs/windows-crash-dumps.md.
       - name: Arm a crash dump
         shell: pwsh
         run: |
           $folder = Join-Path $env:RUNNER_TEMP 'crash-dumps'
           New-Item -ItemType Directory -Force -Path $folder | Out-Null
-          $key = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps'
+
+          $wer = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting'
+          New-Item -Path $wer -Force | Out-Null
+          Set-ItemProperty -Path $wer -Name Disabled -Value 0 -Type DWord
+          # No dialog: a crash that waits for a click would hang the job
+          # instead of failing it.
+          Set-ItemProperty -Path $wer -Name DontShowUI -Value 1 -Type DWord
+
+          $key = Join-Path $wer 'LocalDumps'
           New-Item -Path $key -Force | Out-Null
           Set-ItemProperty -Path $key -Name DumpFolder -Value $folder -Type ExpandString
           Set-ItemProperty -Path $key -Name DumpCount -Value 16 -Type DWord
           Set-ItemProperty -Path $key -Name DumpType -Value 1 -Type DWord
+
+          Set-Service -Name WerSvc -StartupType Manual
+          Get-Service WerSvc | Format-List Name, Status, StartType
+
+      # The process that dies is a grandchild, so nothing here can attach to
+      # it in advance; the debugger has to be the one Windows starts after a
+      # process dies. `AeDebug` is also taken when WER does not answer, which
+      # is the failure this covers. See docs/windows-crash-dumps.md.
+      - name: Register a postmortem debugger
+        shell: pwsh
+        run: |
+          $folder = Join-Path $env:RUNNER_TEMP 'crash-dumps'
+          $tools = Join-Path $env:RUNNER_TEMP 'procdump'
+          New-Item -ItemType Directory -Force -Path $tools | Out-Null
+          $zip = Join-Path $tools 'Procdump.zip'
+          Invoke-WebRequest -UseBasicParsing `
+            -Uri 'https://download.sysinternals.com/files/Procdump.zip' `
+            -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $tools -Force
+          $exe = Join-Path $tools 'procdump64.exe'
+          if (-not (Test-Path $exe)) { $exe = Join-Path $tools 'procdump.exe' }
+
+          # This binary is fetched at run time and then registered as the
+          # debugger Windows starts on any unhandled exception, so what it is
+          # matters. Authenticode rather than a pinned hash: Sysinternals
+          # republishes the same URL, so a pin breaks on every refresh. It buys
+          # publisher trust, not the exact artifact; the version is printed
+          # below so a capture stays attributable.
+          function Test-MicrosoftOrganization {
+            param(
+              [System.Security.Cryptography.X509Certificates.X500DistinguishedName]
+              $SubjectName
+            )
+
+            $organizations = @()
+            foreach ($rdn in $SubjectName.EnumerateRelativeDistinguishedNames()) {
+              if ($rdn.HasMultipleElements) {
+                return $false
+              }
+              if ($rdn.GetSingleElementType().Value -eq '2.5.4.10') {
+                $organizations += $rdn.GetSingleElementValue()
+              }
+            }
+            return $organizations.Count -eq 1 -and
+              [string]::Equals(
+                $organizations[0],
+                'Microsoft Corporation',
+                [System.StringComparison]::Ordinal
+              )
+          }
+
+          $microsoft = [System.Security.Cryptography.X509Certificates.X500DistinguishedName]::new(
+            'CN=Sysinternals, O=Microsoft Corporation, C=US'
+          )
+          $lookalike = [System.Security.Cryptography.X509Certificates.X500DistinguishedName]::new(
+            'CN="O=Microsoft Corporation", O=Contoso Ltd, C=US'
+          )
+          $multiValued = [System.Security.Cryptography.X509Certificates.X500DistinguishedName]::new(
+            'CN=Tool+O=Contoso Ltd, O=Microsoft Corporation, C=US'
+          )
+          if (-not (Test-MicrosoftOrganization $microsoft) -or
+              (Test-MicrosoftOrganization $lookalike) -or
+              (Test-MicrosoftOrganization $multiValued)) {
+            throw 'procdump organization check failed its self-test'
+          }
+
+          $sig = Get-AuthenticodeSignature $exe
+          if ($sig.Status -ne 'Valid') {
+            throw "procdump signature is $($sig.Status)"
+          }
+          if (-not (Test-MicrosoftOrganization $sig.SignerCertificate.SubjectName)) {
+            throw "procdump signed by $($sig.SignerCertificate.Subject)"
+          }
+          Write-Host "procdump signed by $($sig.SignerCertificate.Subject)"
+          Get-Item $exe | Select-Object -ExpandProperty VersionInfo |
+            Format-List FileVersion, ProductVersion
+          Get-FileHash -Algorithm SHA256 $exe | Format-List Hash
+
+          & $exe -accepteula -ma -i $folder
+          if ($LASTEXITCODE -ne 0) {
+            throw "procdump -i failed with exit code $LASTEXITCODE"
+          }
+          Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AeDebug' |
+            Format-List Debugger, Auto
 
       # A soak whose test was skipped reports the same green as a soak that
       # held, and would be read as grounds to lift the skip. So the predicate
@@ -107,6 +200,22 @@ jobs:
             uv run pytest "$TARGET" -q -x
             echo "::endgroup::"
           done
+
+      # The upload below cannot tell a run that never crashed from a run whose
+      # dump mechanisms all stayed silent; both report "no files were found".
+      # So the folder and the system's own record of the fault are printed.
+      - name: Report what the dump folder holds
+        if: always()
+        shell: pwsh
+        run: |
+          $folder = Join-Path $env:RUNNER_TEMP 'crash-dumps'
+          Get-ChildItem -Path $folder -Force -ErrorAction SilentlyContinue |
+            Select-Object Name, Length, LastWriteTime |
+            Format-Table -AutoSize
+          Get-WinEvent -MaxEvents 10 -ErrorAction SilentlyContinue -FilterHashtable @{
+            LogName = 'Application'
+            ProviderName = 'Application Error', 'Windows Error Reporting'
+          } | Select-Object TimeCreated, ProviderName, Message | Format-List
 
       - name: Upload the crash dump
         if: failure()

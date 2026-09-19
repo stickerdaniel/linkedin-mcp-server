@@ -1428,6 +1428,7 @@ class TestFailingFast:
 _INSPECT_OWNER = """
 import faulthandler
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -1437,6 +1438,29 @@ from pathlib import Path
 # stderr, and the assertion could only report the number. This turns the next
 # one into a stack that names where it happened.
 faulthandler.enable()
+
+# A native crash here reaches no debugger while `SEM_NOGPFAULTERRORBOX` is in
+# the process error mode: `UnhandledExceptionFilter` returns at once, so there
+# is no dump, no `AeDebug` and no event-log entry, and the process just exits
+# carrying the 0xC0000005 this test reports. The bit is inherited, not set
+# here. Clear only that one and leave the rest, `SEM_FAILCRITICALERRORS`
+# included. See docs/windows-crash-dumps.md.
+#
+# Only under the soak variable, because clearing the bit turns crash reporting
+# back on and the no-dialog setting that makes that safe is armed by the soak
+# workflow alone. Nineteen ordinary tests run this same program through
+# `_run_frontend`, and the Windows CI job that runs several of them does not
+# set `DontShowUI`; leaving them on the default keeps a fault there exiting
+# rather than waiting for someone to click.
+if sys.platform == "win32" and os.environ.get("LINKEDIN_MCP_ELECTION_SOAK"):
+    import ctypes
+
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _kernel32.GetErrorMode.restype = ctypes.c_uint
+    _kernel32.SetErrorMode.argtypes = [ctypes.c_uint]
+    _kernel32.SetErrorMode.restype = ctypes.c_uint
+    _SEM_NOGPFAULTERRORBOX = 0x0002
+    _kernel32.SetErrorMode(_kernel32.GetErrorMode() & ~_SEM_NOGPFAULTERRORBOX)
 
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon_election import obtain_owner
