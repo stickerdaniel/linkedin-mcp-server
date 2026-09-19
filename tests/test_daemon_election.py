@@ -2959,7 +2959,8 @@ class TestSpawnCleanupBoundary:
             listeners.append(listener)
             return listener
 
-        def refuse(_stream: object) -> object:
+        def refuse(_stream: object, *, handshake_nonce: str) -> object:
+            assert handshake_nonce
             raise RuntimeError("can't start new thread")
 
         def stop(pid: int, **_kwargs: object) -> bool:
@@ -3249,6 +3250,78 @@ class TestAtomicStartupCommit:
 
         assert message in caplog.text
         assert secret not in caplog.text
+
+    @pytest.mark.parametrize(
+        ("version", "nonce", "path"),
+        [
+            ("2", _HANDSHAKE_NONCE, "/tmp/daemon.log"),
+            (daemon_owner.BOOTSTRAP_LOG_HINT_VERSION, "wrong-nonce", "/tmp/daemon.log"),
+            (
+                daemon_owner.BOOTSTRAP_LOG_HINT_VERSION,
+                _HANDSHAKE_NONCE,
+                "relative/daemon.log",
+            ),
+            (
+                daemon_owner.BOOTSTRAP_LOG_HINT_VERSION,
+                _HANDSHAKE_NONCE,
+                "/tmp/not-daemon.log",
+            ),
+            (
+                daemon_owner.BOOTSTRAP_LOG_HINT_VERSION,
+                _HANDSHAKE_NONCE,
+                "/tmp/\x1b/daemon.log",
+            ),
+            (
+                daemon_owner.BOOTSTRAP_LOG_HINT_VERSION,
+                _HANDSHAKE_NONCE,
+                "/"
+                + "x" * daemon_owner.BOOTSTRAP_LOG_HINT_MAX_PATH_BYTES
+                + "/daemon.log",
+            ),
+        ],
+    )
+    def test_invalid_log_hints_fall_back_to_the_legacy_diagnosis(
+        self,
+        version: str,
+        nonce: str,
+        path: str,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        stream = io.BytesIO(
+            (
+                f"{daemon_owner.BOOTSTRAP_PREFIX} "
+                f"{daemon_owner.BOOTSTRAP_ATTACHED}\n"
+                f"{daemon_owner.BOOTSTRAP_LOG_HINT_PREFIX} "
+                f"{version} {nonce} {path}\n"
+            ).encode()
+        )
+
+        election_module._report_child_failure(
+            election_module._BootstrapReport(stream, handshake_nonce=_HANDSHAKE_NONCE)
+        )
+
+        assert "The daemon could not start; inspect the daemon log" in caplog.text
+        assert "inspect the daemon log at" not in caplog.text
+
+    def test_log_hint_requires_a_complete_bounded_record(
+        self, caplog: pytest.LogCaptureFixture
+    ):
+        path = "/tmp/daemon.log"
+        stream = io.BytesIO(
+            (
+                f"{daemon_owner.BOOTSTRAP_PREFIX} "
+                f"{daemon_owner.BOOTSTRAP_ATTACHED}\n"
+                f"{daemon_owner.BOOTSTRAP_LOG_HINT_PREFIX} "
+                f"{daemon_owner.BOOTSTRAP_LOG_HINT_VERSION} "
+                f"{_HANDSHAKE_NONCE} {path}"
+            ).encode()
+        )
+
+        election_module._report_child_failure(
+            election_module._BootstrapReport(stream, handshake_nonce=_HANDSHAKE_NONCE)
+        )
+
+        assert "inspect the daemon log at" not in caplog.text
 
     def test_a_blocked_bootstrap_pipe_cannot_pin_fallback(
         self, monkeypatch: pytest.MonkeyPatch
@@ -3726,6 +3799,61 @@ class TestAtomicStartupCommit:
 
         assert outcome is election_module._Attempt.STARTED
         assert calls == [(profile.parent, None)]
+
+    @_POSIX_ONLY
+    @pytest.mark.real_control_peer
+    def test_attached_child_failure_reports_the_actual_log_path(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        profile = _profile(tmp_path)
+        auth_root = profile.parent
+        home = tmp_path / "home"
+        monkeypatch.setattr(daemon_descriptor_module, "_account_home", lambda: home)
+        log_path = daemon_owner.daemon_log_path(auth_root)
+        bootstrap = tmp_path / "failing_owner.py"
+        bootstrap.write_text(
+            "import sys\n"
+            "from pathlib import Path\n"
+            "from linkedin_mcp_server import daemon_descriptor, daemon_owner\n"
+            "from linkedin_mcp_server.daemon_lock import DaemonLockError\n"
+            "daemon_descriptor._account_home = lambda: Path(sys.argv[1])\n"
+            "def fail(*args, **kwargs):\n"
+            "    raise DaemonLockError('cannot adopt')\n"
+            "daemon_owner._take_lock = fail\n"
+            "raise SystemExit(daemon_owner.main([]))\n"
+        )
+        children: list[subprocess.Popen[Any]] = []
+        real = subprocess.Popen
+
+        def capture(command: list[str], **kwargs: Any) -> subprocess.Popen[Any]:
+            if command[-2:] == ["-m", "linkedin_mcp_server.daemon_owner"]:
+                command = [command[0], str(bootstrap), str(home)]
+            child = real(command, **kwargs)
+            children.append(child)
+            return child
+
+        monkeypatch.setattr(election_module.subprocess, "Popen", capture)
+        monkeypatch.setattr(
+            election_module.daemon_owner,
+            "daemon_log_path",
+            lambda _root: pytest.fail("the parent derived the daemon log path"),
+        )
+        try:
+            outcome = election_module._start_owner(
+                auth_root, profile, _config(profile), timeout=5.0
+            )
+
+            assert outcome is election_module._Attempt.ABORTED
+            assert log_path.is_file(), "the child did not attach its diagnostic log"
+            assert repr(str(log_path)) in caplog.text
+        finally:
+            for child in children:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait(timeout=30)
 
     @_POSIX_ONLY
     @pytest.mark.real_control_peer

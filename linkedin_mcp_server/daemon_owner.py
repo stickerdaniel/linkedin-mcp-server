@@ -108,13 +108,16 @@ ABORTED = "aborted"
 RETRY = "retry"
 UNCERTAIN = "uncertain"
 
-#: Fixed bootstrap records carried on standard error before the daemon log is
-#: available. They contain no configuration values or exception text.
+#: Bounded bootstrap records carried on the original standard error. Stage
+#: records contain no values; the post-attach hint carries only its nonce and log path.
 BOOTSTRAP_PREFIX = "daemon-bootstrap:"
 BOOTSTRAP_CONFIGURATION = "configuration"
 BOOTSTRAP_STATE = "state"
 BOOTSTRAP_LOG = "log"
 BOOTSTRAP_ATTACHED = "attached"
+BOOTSTRAP_LOG_HINT_PREFIX = "daemon-bootstrap-log:"
+BOOTSTRAP_LOG_HINT_VERSION = "1"
+BOOTSTRAP_LOG_HINT_MAX_PATH_BYTES = 2048
 
 #: Where the owner serves MCP. Fixed rather than configurable: the frontend
 #: reads it out of the descriptor, and the only thing a second value would do is
@@ -1244,19 +1247,40 @@ def _forget_superseded_tokens(auth_root: Path) -> None:
 
 
 class _BootstrapDiagnostics:
-    """One fixed diagnostic record before the daemon log can be used."""
+    """Bounded startup diagnostics kept separate from the daemon log."""
 
     def __init__(self, stream: TextIO | None) -> None:
         self._stream = stream
 
     def report(self, code: str) -> None:
+        self._write((f"{BOOTSTRAP_PREFIX} {code}\n",))
+
+    def attached(self, log_path: Path, handshake_nonce: str) -> None:
+        """Preserve the legacy record, then optionally identify the opened log."""
+        records = [f"{BOOTSTRAP_PREFIX} {BOOTSTRAP_ATTACHED}\n"]
+        candidate = str(log_path)
+        encoded = candidate.encode("utf-8", "surrogatepass")
+        if (
+            log_path.is_absolute()
+            and log_path.name == _LOG_FILE
+            and len(encoded) <= BOOTSTRAP_LOG_HINT_MAX_PATH_BYTES
+            and all(character.isprintable() for character in candidate)
+        ):
+            records.append(
+                f"{BOOTSTRAP_LOG_HINT_PREFIX} {BOOTSTRAP_LOG_HINT_VERSION} "
+                f"{handshake_nonce} {candidate}\n"
+            )
+        self._write(records)
+
+    def _write(self, records: tuple[str, ...] | list[str]) -> None:
         stream, self._stream = self._stream, None
         if stream is None:
             return
         try:
-            stream.write(f"{BOOTSTRAP_PREFIX} {code}\n")
-            stream.flush()
-        except (OSError, ValueError):
+            for record in records:
+                stream.write(record)
+                stream.flush()
+        except (OSError, UnicodeError, ValueError):
             pass
         finally:
             with contextlib.suppress(OSError, ValueError):
@@ -1520,7 +1544,7 @@ def main(argv: list[str] | None = None) -> int:
         handshake.close()
         _close_owned_control(control)
         return 1
-    bootstrap.report(BOOTSTRAP_ATTACHED)
+    bootstrap.attached(log_path, handover.handshake_nonce)
 
     lock: DaemonLock | None = None
     try:

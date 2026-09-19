@@ -828,6 +828,9 @@ class TestRefusing:
             def report(self, code: str) -> None:
                 events.append(f"diagnostic:{code}")
 
+            def attached(self, _log_path: Path, _nonce: str) -> None:
+                events.append(f"diagnostic:{daemon_owner.BOOTSTRAP_ATTACHED}")
+
             def close(self) -> None:
                 events.append("bootstrap-closed")
 
@@ -878,6 +881,38 @@ class TestRefusing:
             "handshake-closed",
         ]
 
+    def test_attached_bootstrap_keeps_legacy_record_before_versioned_hint(
+        self, tmp_path: Path
+    ):
+        from linkedin_mcp_server import daemon_owner
+
+        class RecordingStream:
+            def __init__(self) -> None:
+                self.data = ""
+                self.closed = False
+
+            def write(self, data: str) -> int:
+                self.data += data
+                return len(data)
+
+            def flush(self) -> None:
+                pass
+
+            def close(self) -> None:
+                self.closed = True
+
+        stream = RecordingStream()
+        log_path = (tmp_path / "daemon.log").absolute()
+
+        daemon_owner._BootstrapDiagnostics(cast(Any, stream)).attached(log_path, _NONCE)
+
+        assert stream.data.splitlines() == [
+            f"{daemon_owner.BOOTSTRAP_PREFIX} {daemon_owner.BOOTSTRAP_ATTACHED}",
+            f"{daemon_owner.BOOTSTRAP_LOG_HINT_PREFIX} "
+            f"{daemon_owner.BOOTSTRAP_LOG_HINT_VERSION} {_NONCE} {log_path}",
+        ]
+        assert stream.closed
+
     def test_log_attachment_closes_bootstrap_with_an_actionable_record(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
@@ -893,6 +928,9 @@ class TestRefusing:
 
             def report(self, code: str) -> None:
                 events.append(f"diagnostic:{code}")
+
+            def attached(self, _log_path: Path, _nonce: str) -> None:
+                events.append(f"diagnostic:{daemon_owner.BOOTSTRAP_ATTACHED}")
 
             def close(self) -> None:
                 pass
