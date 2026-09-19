@@ -689,39 +689,63 @@ class _Started(enum.Enum):
     UNCERTAIN = "uncertain"
 
 
-class _BootstrapReport:
-    """Collect one bounded, fixed diagnostic from the child's bootstrap pipe."""
+@dataclass(frozen=True)
+class _BootstrapDiagnosis:
+    code: str | None
+    log_path: str | None = None
 
-    def __init__(self, stream: BinaryIO | None) -> None:
-        self._result: queue.Queue[str | None] = queue.Queue(maxsize=1)
+
+class _BootstrapReport:
+    """Collect bounded diagnostics from the child's bootstrap pipe."""
+
+    _CAPTURE_BYTES = 4096
+    _READ_BYTES = 512
+
+    def __init__(
+        self, stream: BinaryIO | None, handshake_nonce: str | None = None
+    ) -> None:
+        self._result: queue.Queue[_BootstrapDiagnosis | None] = queue.Queue(maxsize=1)
         if stream is None:
             self._result.put(None)
             return
 
         def collect() -> None:
             code: str | None = None
-            remaining = 4096
+            log_path: str | None = None
+            remaining = self._CAPTURE_BYTES
+            pending = bytearray()
+            overflowed = False
             try:
                 with stream:
-                    while line := stream.readline(512):
+                    while chunk := stream.readline(self._READ_BYTES):
                         if remaining <= 0:
                             continue
-                        sample = line[:remaining]
+                        sample = chunk[:remaining]
                         remaining -= len(sample)
-                        text = sample.decode("ascii", "ignore").strip()
-                        prefix = f"{daemon_owner.BOOTSTRAP_PREFIX} "
-                        if text.startswith(prefix):
-                            candidate = text.removeprefix(prefix)
-                            if candidate in {
-                                daemon_owner.BOOTSTRAP_CONFIGURATION,
-                                daemon_owner.BOOTSTRAP_STATE,
-                                daemon_owner.BOOTSTRAP_LOG,
-                                daemon_owner.BOOTSTRAP_ATTACHED,
-                            }:
-                                code = candidate
+                        if overflowed:
+                            if sample.endswith(b"\n"):
+                                overflowed = False
+                            continue
+                        pending.extend(sample)
+                        if len(sample) < len(chunk) or (
+                            remaining <= 0 and not sample.endswith(b"\n")
+                        ):
+                            pending.clear()
+                            overflowed = True
+                            continue
+                        if not sample.endswith(b"\n"):
+                            continue
+                        code, candidate = self._parse_line(
+                            bytes(pending),
+                            code=code,
+                            handshake_nonce=handshake_nonce,
+                        )
+                        if candidate is not None and log_path is None:
+                            log_path = candidate
+                        pending.clear()
             except OSError:
                 pass
-            self._result.put(code)
+            self._result.put(_BootstrapDiagnosis(code, log_path))
 
         threading.Thread(
             target=collect,
@@ -729,8 +753,48 @@ class _BootstrapReport:
             daemon=True,
         ).start()
 
-    def read(self, *, timeout: float = _FAILURE_VERDICT_SECONDS) -> str | None:
-        """Return the fixed record without letting diagnostics pin fallback."""
+    @staticmethod
+    def _parse_line(
+        raw: bytes, *, code: str | None, handshake_nonce: str | None
+    ) -> tuple[str | None, str | None]:
+        try:
+            text = raw.removesuffix(b"\n").removesuffix(b"\r").decode("utf-8")
+        except UnicodeError:
+            return code, None
+        prefix = f"{daemon_owner.BOOTSTRAP_PREFIX} "
+        if text.startswith(prefix):
+            candidate = text.removeprefix(prefix)
+            if candidate in {
+                daemon_owner.BOOTSTRAP_CONFIGURATION,
+                daemon_owner.BOOTSTRAP_STATE,
+                daemon_owner.BOOTSTRAP_LOG,
+                daemon_owner.BOOTSTRAP_ATTACHED,
+            }:
+                return candidate, None
+            return code, None
+        fields = text.split(" ", 3)
+        if len(fields) != 4 or fields[0] != daemon_owner.BOOTSTRAP_LOG_HINT_PREFIX:
+            return code, None
+        _, version, nonce, candidate = fields
+        encoded = candidate.encode("utf-8")
+        if (
+            version != daemon_owner.BOOTSTRAP_LOG_HINT_VERSION
+            or handshake_nonce is None
+            or nonce != handshake_nonce
+            or len(encoded) > daemon_owner.BOOTSTRAP_LOG_HINT_MAX_PATH_BYTES
+            or not candidate
+            or any(not character.isprintable() for character in candidate)
+        ):
+            return code, None
+        path = Path(candidate)
+        if not path.is_absolute() or path.name != "daemon.log":
+            return code, None
+        return code, candidate
+
+    def read(
+        self, *, timeout: float = _FAILURE_VERDICT_SECONDS
+    ) -> _BootstrapDiagnosis | None:
+        """Return collected records without letting diagnostics pin fallback."""
         try:
             return self._result.get(timeout=max(timeout, 0.0))
         except queue.Empty:
@@ -739,7 +803,8 @@ class _BootstrapReport:
 
 def _report_child_failure(report: _BootstrapReport) -> None:
     """Log the most actionable safe diagnosis available from the child."""
-    code = report.read()
+    diagnosis = report.read()
+    code = None if diagnosis is None else diagnosis.code
     if code == daemon_owner.BOOTSTRAP_CONFIGURATION:
         logger.warning("The daemon rejected its startup configuration")
     elif code == daemon_owner.BOOTSTRAP_STATE:
@@ -747,7 +812,13 @@ def _report_child_failure(report: _BootstrapReport) -> None:
     elif code == daemon_owner.BOOTSTRAP_LOG:
         logger.warning("The daemon log could not be opened")
     elif code == daemon_owner.BOOTSTRAP_ATTACHED:
-        logger.warning("The daemon could not start; inspect the daemon log")
+        if diagnosis is not None and diagnosis.log_path is not None:
+            logger.warning(
+                "The daemon could not start; inspect the daemon log at %r",
+                diagnosis.log_path,
+            )
+        else:
+            logger.warning("The daemon could not start; inspect the daemon log")
     else:
         logger.warning("The daemon stopped before its diagnostic log became available")
 
@@ -877,7 +948,9 @@ def _spawn(
         # and a host that has run out of them would otherwise leave this child
         # running with nothing holding it, waiting out its handover timeout for
         # a configuration record no one is left to send.
-        bootstrap = _BootstrapReport(getattr(child, "stderr", None))
+        bootstrap = _BootstrapReport(
+            getattr(child, "stderr", None), handshake_nonce=handshake_nonce
+        )
     except BaseException:
         _stop_child(child, windows_job=windows_job, assigned=False)
         control.close()
