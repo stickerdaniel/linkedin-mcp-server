@@ -549,9 +549,13 @@ class TestIdentifierAllowlist:
         with pytest.raises(InvalidReferenceError):
             normalize_company_identifier(value)
 
-    def test_a_person_identifier_takes_no_period(self):
+    @pytest.mark.parametrize(
+        "value",
+        ["foo.bar", "/in/foo.bar/", "https://www.linkedin.com/in/foo.bar"],
+    )
+    def test_a_person_identifier_takes_no_period(self, value: str):
         with pytest.raises(InvalidReferenceError):
-            normalize_person_identifier("foo.bar")
+            normalize_person_identifier(value)
 
     @pytest.mark.parametrize(
         "value", ["williamhgates", "felix-krueckel", "андрей", "a_b"]
