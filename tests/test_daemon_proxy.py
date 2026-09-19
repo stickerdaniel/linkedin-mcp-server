@@ -323,6 +323,33 @@ class TestCallingTheOwner:
         assert seen_progress == [(7.0, 10.0, "forwarded")]
         assert monitor_calls == 1
 
+    async def test_the_clients_progress_handler_reaches_send_request(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        owner = FastMCP("owner")
+
+        @owner.tool
+        async def report() -> str:
+            return "sent"
+
+        transport = _RecordsCallRequest(owner)
+        _reach_owners_in_process(monkeypatch, lambda _url: transport)
+        client = _backend(_attachment(tmp_path), tmp_path).open_client(timeout=1.0)
+        seen: list[tuple[float, float | None, str | None]] = []
+
+        async def record(
+            progress: float, total: float | None, message: str | None
+        ) -> None:
+            seen.append((progress, total, message))
+
+        async with client:
+            client._progress_handler = record
+            result = await client.call_tool_mcp("report", {})
+
+        assert result.isError is False
+        assert transport.progress_callback is record
+        assert seen == [(7.0, 10.0, "forwarded")]
+
     def test_the_sdk_boundary_keeps_the_expected_signature(self, tmp_path: Path):
         from fastmcp.client.mixins.tools import ClientToolsMixin
         from mcp import ClientSession
@@ -343,13 +370,32 @@ class TestCallingTheOwner:
                 "meta",
             ]
         )
-        assert list(inspect.signature(ClientSession.send_request).parameters) == [
+        for name, parameter in boundary.parameters.items():
+            assert parameter.kind is upstream.parameters[name].kind
+            assert parameter.default == upstream.parameters[name].default
+
+        send_request = inspect.signature(ClientSession.send_request)
+        assert list(send_request.parameters) == [
             "self",
             "request",
             "result_type",
             "request_read_timeout_seconds",
             "metadata",
             "progress_callback",
+        ]
+        assert all(
+            parameter.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+            for parameter in send_request.parameters.values()
+        )
+        assert [
+            parameter.default for parameter in send_request.parameters.values()
+        ] == [
+            inspect.Parameter.empty,
+            inspect.Parameter.empty,
+            inspect.Parameter.empty,
+            None,
+            None,
+            None,
         ]
         assert mt.ClientRequest.model_fields["root"].annotation is not None
         assert mt.CallToolRequestParams.model_fields["meta"].alias == "_meta"
@@ -1506,6 +1552,7 @@ class _FailsListingAfterMutation:
     async def send_request(self, request: Any, *args: Any, **kwargs: Any):
         if isinstance(request.root, mt.CallToolRequest):
             self._called = True
+            self._session.list_tools = self.list_tools
         return await self._session.send_request(request, *args, **kwargs)
 
     async def list_tools(self, *args: Any, **kwargs: Any):
