@@ -50,9 +50,10 @@ jobs:
       - run: uv sync --group dev
 
       # Minidumps, because `faulthandler` cannot name a thread that holds no
-      # Python thread state. `Disabled=0` is not redundant: the runner image
-      # ships WER off, and a disabled WER never consults LocalDumps at all.
-      # See docs/windows-crash-dumps.md.
+      # Python thread state. `DontShowUI` is the load-bearing setting here: the
+      # registration below makes ProcDump the capture route and LocalDumps is
+      # skipped while an automatic debugger is configured, but a fault still
+      # must not wait for a click. See docs/windows-crash-dumps.md.
       - name: Arm a crash dump
         shell: pwsh
         run: |
@@ -96,8 +97,9 @@ jobs:
           # This binary is fetched at run time and then registered as the
           # debugger Windows starts on any unhandled exception, so what it is
           # matters. Authenticode rather than a pinned hash: Sysinternals
-          # republishes the same URL, which would make a hash fail on every
-          # refresh while proving nothing more than this does.
+          # republishes the same URL, so a pin breaks on every refresh. It buys
+          # publisher trust, not the exact artifact; the version is printed
+          # below so a capture stays attributable.
           $sig = Get-AuthenticodeSignature $exe
           if ($sig.Status -ne 'Valid') {
             throw "procdump signature is $($sig.Status)"
@@ -106,6 +108,9 @@ jobs:
             throw "procdump signed by $($sig.SignerCertificate.Subject)"
           }
           Write-Host "procdump signed by $($sig.SignerCertificate.Subject)"
+          Get-Item $exe | Select-Object -ExpandProperty VersionInfo |
+            Format-List FileVersion, ProductVersion
+          Get-FileHash -Algorithm SHA256 $exe | Format-List Hash
 
           & $exe -accepteula -ma -i $folder
           if ($LASTEXITCODE -ne 0) {

@@ -18,33 +18,47 @@ stack can.
 
 ## Prerequisites
 
-Three things have to be true before a dump can exist. Two of them were false by
-default and each one alone is enough to produce nothing:
+**`SEM_NOGPFAULTERRORBOX` must be clear in the faulting process.** This is the
+one that mattered. While it is set, `UnhandledExceptionFilter` returns at once:
+no Windows Error Reporting, no `AeDebug` debugger, no `Application Error` event,
+and the process exits carrying the exception code. Measured as `0x0003` in the
+test frontend, inherited from somewhere above pytest; nothing in this repository
+sets it. `tests/test_daemon_election.py` clears that one bit and leaves the
+rest, and only under `LINKEDIN_MCP_ELECTION_SOAK`, because clearing it turns
+crash reporting back on and only the soak workflow arms the no-dialog setting
+that makes that safe.
 
-- **`SEM_NOGPFAULTERRORBOX` must be clear in the faulting process.** While it is
-  set, `UnhandledExceptionFilter` returns at once: no Windows Error Reporting,
-  no `AeDebug` debugger, no `Application Error` event, and the process exits
-  carrying the exception code. Measured as `0x0003` in the test frontend,
-  inherited from somewhere above pytest; nothing in this repository sets it.
-  `tests/test_daemon_election.py` clears that one bit and leaves the rest.
-- **WER must be enabled.** The runner image ships it disabled, and a disabled
-  WER never consults `LocalDumps` at all. Run 35367449209 caught the access
-  violation with `LocalDumps` armed and still uploaded nothing.
-- **A postmortem debugger must be registered**, because the process that dies is
-  a grandchild: the test starts eight frontends and each starts a daemon of its
-  own, so no workflow step can attach to the one that will fault, and which one
-  it is only becomes known once it is gone. `procdump -i` registers under
-  `AeDebug`, which Windows takes on an unhandled exception whether or not WER
-  answers.
+**A postmortem debugger must be registered**, because the process that dies is a
+grandchild: the test starts eight frontends and each starts a daemon of its own,
+so no workflow step can attach to the one that will fault, and which one it is
+only becomes known once it is gone. `procdump -i` registers under `AeDebug`,
+which Windows takes on an unhandled exception.
 
-The `Arm a crash dump` and `Register a postmortem debugger` steps in
-`.github/workflows/election-soak.yml` do all three.
+That registration is the capture route, not one of two. Microsoft documents
+that LocalDumps is skipped when an automatic debugger is configured, so the
+`Arm a crash dump` step's `DumpFolder`, `DumpCount` and `DumpType` do not
+describe what actually lands: ProcDump is installed with `-ma` and writes
+full-memory dumps, which are large and should be treated as potentially
+sensitive rather than assumed to hold only stacks. Keep that step anyway — it
+sets `DontShowUI`, which is what keeps a fault from waiting for a click, and it
+is the fallback if the registration is ever removed.
+
+One observation worth recording without over-reading it: run 35367449209 caught
+the access violation with LocalDumps armed and uploaded nothing. WER was
+disabled on that runner, but the process error mode was also suppressing crash
+reporting, so that run does not isolate which of the two was responsible.
 
 `procdump` is downloaded at run time and then registered as the debugger
 Windows starts on any unhandled exception, so the step checks its Authenticode
-signature is valid and from Microsoft before running it. Not a pinned hash:
-Sysinternals republishes the same URL, so a hash would fail on every refresh
-while proving no more than the signature does.
+signature is valid and from Microsoft before running it.
+
+That is publisher trust, not artifact pinning, and the two are not equivalent.
+A digest would reject any changed bytes; the signature check accepts whatever
+Microsoft signs next, including a version that behaves differently from the one
+that collected a given dump. The trade is deliberate — Sysinternals republishes
+the same URL, so a pin breaks the workflow on every refresh — but if a capture
+ever has to be reproduced exactly, record the accepted executable's version and
+digest from the run that produced it.
 
 ## Capture
 

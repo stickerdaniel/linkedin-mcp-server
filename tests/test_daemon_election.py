@@ -1428,6 +1428,7 @@ class TestFailingFast:
 _INSPECT_OWNER = """
 import faulthandler
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -1444,7 +1445,14 @@ faulthandler.enable()
 # carrying the 0xC0000005 this test reports. The bit is inherited, not set
 # here. Clear only that one and leave the rest, `SEM_FAILCRITICALERRORS`
 # included. See docs/windows-crash-dumps.md.
-if sys.platform == "win32":
+#
+# Only under the soak variable, because clearing the bit turns crash reporting
+# back on and the no-dialog setting that makes that safe is armed by the soak
+# workflow alone. Nineteen ordinary tests run this same program through
+# `_run_frontend`, and the Windows CI job that runs several of them does not
+# set `DontShowUI`; leaving them on the default keeps a fault there exiting
+# rather than waiting for someone to click.
+if sys.platform == "win32" and os.environ.get("LINKEDIN_MCP_ELECTION_SOAK"):
     import ctypes
 
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
