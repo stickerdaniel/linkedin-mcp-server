@@ -1576,12 +1576,17 @@ class TestTwoStageInstall:
     ):
         from linkedin_mcp_server import bootstrap
 
+        loop = asyncio.get_running_loop()
+        clock = [loop.time()]
+        monkeypatch.setattr(loop, "time", lambda: clock[0])
+
         async def progressing_setup(
             *, activity_callback: Callable[[], None], **_kwargs: object
         ) -> None:
             for _ in range(3):
-                await asyncio.sleep(0.04)
+                clock[0] += 0.04
                 activity_callback()
+                await asyncio.sleep(0)
 
         monkeypatch.setattr(bootstrap, "_browser_setup_ready", lambda: False)
         monkeypatch.setattr(bootstrap, "_run_browser_setup", progressing_setup)
@@ -1857,6 +1862,8 @@ class TestTwoStageInstall:
 
         blocked = threading.Event()
         release = threading.Event()
+        loop = asyncio.get_running_loop()
+        clock = [loop.time()]
 
         def slow_mkdir(path: Path) -> None:
             blocked.set()
@@ -1865,21 +1872,29 @@ class TestTwoStageInstall:
         async def install_must_not_start(*args: object, **kwargs: object) -> None:
             pytest.fail("the deadline should expire during cache preparation")
 
+        monkeypatch.setattr(loop, "time", lambda: clock[0])
         monkeypatch.setattr(bootstrap, "secure_mkdir", slow_mkdir)
         monkeypatch.setattr(
             bootstrap, "_run_patchright_install", install_must_not_start
         )
         monkeypatch.setattr(bootstrap, "_BACKGROUND_BROWSER_SETUP_SECONDS", 0.01)
 
-        started = asyncio.get_running_loop().time()
+        setup = asyncio.create_task(bootstrap._run_background_browser_setup())
+        fallback = threading.Timer(1.0, release.set)
+        fallback.start()
         try:
+            assert await asyncio.to_thread(blocked.wait, 5), (
+                "cache preparation did not enter its worker thread"
+            )
+            started = time.monotonic()
+            clock[0] += 0.01
             with pytest.raises(BrowserSetupFailedError, match="background deadline"):
-                await bootstrap._run_background_browser_setup()
+                await setup
         finally:
             release.set()
+            fallback.cancel()
 
-        assert blocked.is_set()
-        assert asyncio.get_running_loop().time() - started < 0.1
+        assert time.monotonic() - started < 0.1
 
     async def test_setup_filesystem_work_uses_a_daemon_thread(self, monkeypatch):
         from linkedin_mcp_server import bootstrap
