@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import datetime
 import logging
 from collections.abc import Awaitable
 from dataclasses import dataclass
@@ -45,8 +46,13 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import mcp.types as mt
+from fastmcp.client.progress import ProgressHandler
+from fastmcp.client.telemetry import client_span
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
+from fastmcp.telemetry import inject_trace_context
 from fastmcp.tools import ToolResult
+from fastmcp.utilities.timeout import normalize_timeout_to_timedelta
+from opentelemetry.trace import Status, StatusCode
 
 from linkedin_mcp_server import daemon_owner
 from linkedin_mcp_server.daemon_auth import a_repeat_could_change_something
@@ -447,10 +453,70 @@ def _tells_which_owner_failed() -> type:
                 super().list_prompts_mcp(*args, **kwargs), nothing_was_sent=True
             )
 
-        async def call_tool_mcp(self, *args: Any, **kwargs: Any) -> Any:
-            return await self._saying_which_owner(
-                super().call_tool_mcp(*args, **kwargs), nothing_was_sent=None
-            )
+        async def call_tool_mcp(
+            self,
+            name: str,
+            arguments: dict[str, Any],
+            progress_handler: ProgressHandler | None = None,
+            timeout: datetime.timedelta | float | int | None = None,
+            meta: dict[str, Any] | None = None,
+        ) -> mt.CallToolResult:
+            """Call the owner without discovering its schema after it answers.
+
+            ``ClientSession.call_tool`` validates a successful result by listing
+            tools when this fresh session has no cached output schema. A failure in
+            that second request replaces an answer to a call that may already have
+            changed LinkedIn, and its ``ConnectError`` then looks safe to repeat.
+            The owner already validates declared output schemas before answering;
+            this boundary only needs the protocol result it received.
+            """
+
+            async def send_request() -> mt.CallToolResult:
+                with client_span(
+                    f"tools/call {name}",
+                    "tools/call",
+                    name,
+                    session_id=self.transport.get_session_id(),
+                    tool_name=name,
+                ) as span:
+                    logger.debug("[%s] called call_tool: %s", self.name, name)
+                    propagated_meta = inject_trace_context(meta)
+                    request_meta = (
+                        mt.RequestParams.Meta(**propagated_meta)
+                        if propagated_meta
+                        else None
+                    )
+                    result = await self._await_with_session_monitoring(
+                        self.session.send_request(
+                            mt.ClientRequest(
+                                mt.CallToolRequest(
+                                    params=mt.CallToolRequestParams(
+                                        name=name,
+                                        arguments=arguments,
+                                        _meta=request_meta,
+                                    )
+                                )
+                            ),
+                            mt.CallToolResult,
+                            request_read_timeout_seconds=(
+                                normalize_timeout_to_timedelta(timeout)
+                            ),
+                            progress_callback=(
+                                progress_handler or self._progress_handler
+                            ),
+                        )
+                    )
+                    if result.isError and span.is_recording():
+                        span.set_attribute("error.type", "tool_error")
+                        description = ""
+                        if result.content and isinstance(
+                            result.content[0], mt.TextContent
+                        ):
+                            description = result.content[0].text
+                        span.set_status(Status(StatusCode.ERROR, description))
+                    return result
+
+            return await self._saying_which_owner(send_request(), nothing_was_sent=None)
 
     return TellsWhichOwnerFailed
 
