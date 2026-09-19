@@ -1438,6 +1438,36 @@ from pathlib import Path
 # one into a stack that names where it happened.
 faulthandler.enable()
 
+# `faulthandler` has been read out in full and cannot name this fault: the
+# thread that access-violates holds no Python thread state, so the report
+# prints every thread as `Thread 0x...` and none as `Current thread 0x...`.
+# Only a native stack can say what it was, and three armed soaks produced no
+# dump at all: no file from WER, none from the `AeDebug` debugger, and not one
+# `Application Error` in the event log.
+#
+# That combination has one cause. `UnhandledExceptionFilter` consults neither
+# when `SEM_NOGPFAULTERRORBOX` is in the process error mode; it returns
+# straight away and the process exits carrying the exception code, which is
+# the 0xC0000005 this test reports. The error mode is inherited, so whatever
+# upstream of pytest set it is in force here. Clear that one bit, leaving the
+# rest as found, and print what it was: the value says whether this was the
+# reason, and the run after it can finally produce a dump.
+if sys.platform == "win32":
+    import ctypes
+
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _kernel32.GetErrorMode.restype = ctypes.c_uint
+    _kernel32.SetErrorMode.argtypes = [ctypes.c_uint]
+    _kernel32.SetErrorMode.restype = ctypes.c_uint
+    _SEM_NOGPFAULTERRORBOX = 0x0002
+    _before = _kernel32.GetErrorMode()
+    _kernel32.SetErrorMode(_before & ~_SEM_NOGPFAULTERRORBOX)
+    print(
+        f"error mode {_before:#06x} -> {_kernel32.GetErrorMode():#06x}",
+        file=sys.stderr,
+        flush=True,
+    )
+
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon_election import obtain_owner
 from linkedin_mcp_server.daemon_lock import DaemonLock
