@@ -50,6 +50,23 @@ def reconcile_search_references(
     return out
 
 
+def label_similar_jobs(references: list[Reference], job_id: str) -> list[Reference]:
+    """Mark every job a posting links to, other than itself, as a similar job.
+
+    Compared by id rather than by where the link sits, so the posting's own
+    apply link keeps the section's context and the "More jobs" cards do not
+    read as the posting.
+    """
+    own_url = f"/jobs/view/{job_id}/"
+    out: list[Reference] = []
+    for ref in references:
+        if ref["kind"] == "job" and ref["url"] != own_url:
+            ref = Reference(**ref)
+            ref["context"] = "similar job"
+        out.append(ref)
+    return out
+
+
 def lost_keywords_section_error(asked: str, landed: str) -> dict[str, str]:
     """The ``section_errors`` entry for a search that is not the one asked for.
 
