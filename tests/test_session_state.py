@@ -286,12 +286,9 @@ def _windows_runtime(monkeypatch) -> None:
 def _refuse_uname(monkeypatch) -> None:
     """Fail the test if the runtime id reaches WMI.
 
-    `platform.system()` and `platform.machine()` are both `platform.uname()`,
-    and on Windows `uname()` fills its blanks with `win32_ver()` and
-    `_get_machine_win32()`, a WMI query each. Refusing the funnel catches
-    either route in, which a check on one of the two names would not: the
-    first version of this fix avoided `platform.machine()` and still crashed,
-    because it asked `platform.system()` first.
+    Refusing ``platform.uname`` catches both routes in, which a check on one of
+    ``platform.system()`` or ``platform.machine()`` would not.
+    See ``docs/decisions/2026-09-19-windows-runtime-identity.md``.
     """
 
     def refuse(*args: object, **kwargs: object) -> object:

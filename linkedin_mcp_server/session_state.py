@@ -156,34 +156,14 @@ def _platform_names() -> tuple[str, str]:
     """Name the OS and the processor architecture, never over WMI.
 
     ``platform.system()`` and ``platform.machine()`` are both
-    ``platform.uname()``, and on Windows ``uname()`` has no ``os.uname()`` to
-    read, so it fills every blank itself: ``win32_ver()`` and
-    ``_get_machine_win32()``, a WMI query each. Either call pays for both.
+    ``platform.uname()``, which on Windows runs two WMI queries, and a WMI
+    query can take a CPython 3.12 process down with it (#838). Windows is
+    therefore decided from ``sys.platform``: asking in order to decide whether
+    to avoid asking would defeat it, and a first attempt that avoided only
+    ``platform.machine()`` still crashed for that reason. There is deliberately
+    no fallback past ``PROCESSOR_ARCHITECTURE``.
 
-    On CPython 3.12 a WMI query can take the process down with it (#838).
-    ``_wmi.exec_query`` hands a ``CreateThread`` worker a pointer to a struct
-    on its own stack, waits 1000ms for COM and 100ms for the connection, and
-    on timeout closes the handles and returns anyway; the worker is still
-    running and reads through the frame that just went away. Captured as
-    ``EXCEPTION_ACCESS_VIOLATION_READ`` at ``mov rcx, qword [rsi + 0x8]`` in
-    ``_wmi.pyd``, with ``rsi`` pointing into a thread stack. That worker has no
-    Python thread state, which is why every ``faulthandler`` report of this
-    named every thread except the one that faulted. GH-130727 fixed it upstream
-    by copying the struct into the worker; that is in 3.13 and 3.14 and was
-    never backported to 3.12, which is exactly the version split #838 shows.
-
-    Eight frontends electing at once, each spawning an owner, is enough load to
-    reach those timeouts, and every one of those processes asks for this id.
-
-    So Windows is decided from ``sys.platform``, not from ``platform.system()``:
-    asking is the thing being avoided, and asking to find out whether to avoid
-    asking would defeat it. The architecture then comes from the two variables
-    ``platform`` itself falls back to, and ``_normalize_arch`` maps their values
-    onto what a WMI reply maps onto — ``AMD64`` and ``ARM64`` either way — so
-    the id, which names a directory, does not move. Windows sets
-    ``PROCESSOR_ARCHITECTURE`` in every process environment; there is
-    deliberately no fallback past it, because the only one left would be the
-    query this exists to avoid.
+    See ``docs/decisions/2026-09-19-windows-runtime-identity.md``.
     """
     if sys.platform != "win32":
         return platform.system(), platform.machine()
