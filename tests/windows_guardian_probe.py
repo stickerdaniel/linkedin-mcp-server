@@ -139,6 +139,57 @@ def _owner(
         project_job.Close()
 
 
+def sample_pre_crash_contention(
+    *,
+    try_acquire: Callable[[], bool],
+    release: Callable[[], None],
+    clock_ns: Callable[[], int] = time.perf_counter_ns,
+) -> dict[str, int | bool]:
+    attempted_ns = clock_ns()
+    acquired = try_acquire()
+    sample = {"attempted_ns": attempted_ns, "acquired": acquired}
+    if acquired:
+        release()
+        raise RuntimeError("the profile fence was free before the owner crash")
+    return sample
+
+
+def terminate_wait_close_handles(
+    handles: list[Any],
+    *,
+    is_active: Callable[[Any], bool],
+    terminate: Callable[[Any], None],
+    wait: Callable[[Any], None],
+    close: Callable[[Any], None],
+) -> None:
+    first_error: BaseException | None = None
+    for handle in handles:
+        active = True
+        try:
+            active = is_active(handle)
+        except BaseException as exc:
+            if first_error is None:
+                first_error = exc
+        if active:
+            try:
+                terminate(handle)
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+        try:
+            wait(handle)
+        except BaseException as exc:
+            if first_error is None:
+                first_error = exc
+        try:
+            close(handle)
+        except BaseException as exc:
+            if first_error is None:
+                first_error = exc
+    if first_error is not None:
+        raise first_error
+
+
 def terminate_drain_and_release(
     result: dict[str, Any],
     *,
@@ -264,16 +315,6 @@ def _is_active(handle: Any) -> bool:
     raise RuntimeError(f"WaitForSingleObject returned {result}")
 
 
-def _kill(pid: int) -> None:
-    subprocess.run(
-        ["taskkill", "/PID", str(pid), "/T", "/F"],
-        check=False,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-
-
 def _launch_owner(
     scenario: str,
     root: Path,
@@ -329,8 +370,8 @@ def _run_probe(scenario: str, root: Path) -> dict[str, Any]:
     owner_gate: subprocess.Popen[bytes] | None = None
     owner_handle = None
     descendant_handles: list[Any] = []
-    known_pids: set[int] = set()
     contender: ProfileLease | None = None
+    pre_crash_contention: dict[str, int | bool] | None = None
     try:
         guardian_ready_name = _new_event_name("guardian-ready")
         guardian_armed_name = _new_event_name("guardian-armed")
@@ -359,7 +400,6 @@ def _run_probe(scenario: str, root: Path) -> dict[str, Any]:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
-            known_pids.add(guardian.pid)
             _wait(
                 guardian_ready,
                 _DEADLINE_SECONDS,
@@ -372,7 +412,6 @@ def _run_probe(scenario: str, root: Path) -> dict[str, Any]:
         owner_gate = _launch_owner(
             scenario, root, project_job, project_job.name, owner_ready_name
         )
-        known_pids.add(owner_gate.pid)
         _wait(owner_ready, _DEADLINE_SECONDS, "the owner did not become ready")
         if guardian_armed is not None:
             _wait(
@@ -383,14 +422,15 @@ def _run_probe(scenario: str, root: Path) -> dict[str, Any]:
         metadata = _read_json(root / "owner.json")
         owner_pid = int(metadata["owner_pid"])
         descendant_pids = [int(pid) for pid in metadata["descendant_pids"]]
-        known_pids.update([owner_pid, *descendant_pids])
         owner_handle = _process_handle(
             owner_pid, win32con.PROCESS_TERMINATE | win32con.SYNCHRONIZE
         )
         descendant_handles = [
             _process_handle(
                 pid,
-                win32con.SYNCHRONIZE | win32con.PROCESS_QUERY_LIMITED_INFORMATION,
+                win32con.PROCESS_TERMINATE
+                | win32con.PROCESS_QUERY_LIMITED_INFORMATION
+                | win32con.SYNCHRONIZE,
             )
             for pid in descendant_pids
         ]
@@ -414,12 +454,17 @@ def _run_probe(scenario: str, root: Path) -> dict[str, Any]:
             if not guardian_outside_owner_job:
                 raise RuntimeError("the guardian joined the project owner Job")
 
+        contender = ProfileLease(root / "auth")
+        pre_crash_contention = sample_pre_crash_contention(
+            try_acquire=contender.try_acquire,
+            release=contender.release,
+        )
+
         # The owner now holds the only project-Job handle. Keeping this observer
         # handle would suppress kill-on-close and invalidate the baseline.
         project_job.close()
         project_job = None
 
-        contender = ProfileLease(root / "auth")
         terminated_ns = time.perf_counter_ns()
         win32api.TerminateProcess(owner_handle, 196)
         deadline = time.monotonic() + _DEADLINE_SECONDS
@@ -454,6 +499,7 @@ def _run_probe(scenario: str, root: Path) -> dict[str, Any]:
             "active_descendants_at_lease_acquire": active_at_acquire,
             "descendant_count": len(descendant_handles),
             "guardian_outside_owner_job": guardian_outside_owner_job,
+            "pre_crash_contention": pre_crash_contention,
         }
         if guardian is not None:
             guardian_stdout, guardian_stderr = guardian.communicate(
@@ -469,25 +515,40 @@ def _run_probe(scenario: str, root: Path) -> dict[str, Any]:
     finally:
         if contender is not None:
             contender.release()
-        for handle in descendant_handles:
-            with contextlib.suppress(Exception):
-                handle.Close()
-        if owner_handle is not None:
-            with contextlib.suppress(Exception):
-                owner_handle.Close()
-        if owner_gate is not None and owner_gate.poll() is None:
-            with contextlib.suppress(Exception):
-                owner_gate.kill()
-                owner_gate.wait(timeout=5)
-        if guardian is not None and guardian.poll() is None:
-            with contextlib.suppress(Exception):
-                guardian.kill()
-                guardian.wait(timeout=5)
         if project_job is not None and not project_job.closed:
             with contextlib.suppress(Exception):
-                project_job.close()
-        for pid in known_pids:
-            _kill(pid)
+                project_job.terminate()
+            if owner_gate is not None:
+                with contextlib.suppress(Exception):
+                    owner_gate.wait(timeout=5)
+            with contextlib.suppress(Exception):
+                project_job.wait_until_empty(timeout=5)
+            if not project_job.closed:
+                with contextlib.suppress(Exception):
+                    project_job.close()
+        if owner_gate is not None:
+            with contextlib.suppress(Exception):
+                if owner_gate.poll() is None:
+                    owner_gate.kill()
+                owner_gate.wait(timeout=5)
+        if guardian is not None:
+            with contextlib.suppress(Exception):
+                if guardian.poll() is None:
+                    guardian.kill()
+                guardian.wait(timeout=5)
+        process_handles = [*descendant_handles]
+        if owner_handle is not None:
+            process_handles.append(owner_handle)
+        with contextlib.suppress(Exception):
+            terminate_wait_close_handles(
+                process_handles,
+                is_active=_is_active,
+                terminate=lambda handle: win32api.TerminateProcess(handle, 198),
+                wait=lambda handle: _wait(
+                    handle, 5, "a retained process did not terminate"
+                ),
+                close=lambda handle: handle.Close(),
+            )
         owner_ready.Close()
         if guardian_ready is not None:
             guardian_ready.Close()
