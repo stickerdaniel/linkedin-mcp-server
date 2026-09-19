@@ -278,8 +278,11 @@ def test_published_json_retries_a_windows_share_violation() -> None:
     assert sleeps == [0.01]
 
 
+@pytest.mark.parametrize("harness_returncode", [1, 0])
 def test_failed_probe_path_requires_harness_termination_exit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    harness_returncode: int,
 ) -> None:
     events: list[str] = []
 
@@ -314,7 +317,7 @@ def test_failed_probe_path_requires_harness_termination_exit(
 
         def terminate(self) -> None:
             events.append("harness terminate")
-            process.returncode = 1
+            process.returncode = harness_returncode
 
         def wait_until_empty(self, *, timeout: float) -> None:
             events.append(f"harness drain {timeout}")
@@ -364,9 +367,14 @@ def test_failed_probe_path_requires_harness_termination_exit(
         sys.modules[__name__], "await_fail_closed_guardian", await_failure
     )
 
-    assert _run_probe(tmp_path, "candidate-query-error") == {
-        "scenario": "candidate-query-error"
-    }
+    if harness_returncode == 1:
+        assert _run_probe(tmp_path, "candidate-query-error") == {
+            "scenario": "candidate-query-error"
+        }
+    else:
+        with pytest.raises(AssertionError):
+            _run_probe(tmp_path, "candidate-query-error")
+
     assert events == [
         "assign",
         "release True nonce",
