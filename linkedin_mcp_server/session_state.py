@@ -144,10 +144,45 @@ def profile_exists(profile_dir: Path | None = None) -> bool:
 
 def get_runtime_id() -> str:
     """Return a deterministic identity for the current browser runtime."""
-    os_name = _normalize_os(platform.system())
-    arch = _normalize_arch(platform.machine())
+    system = platform.system()
+    os_name = _normalize_os(system)
+    arch = _normalize_arch(_machine(system))
     runtime_kind = "container" if _is_container_runtime() else "host"
     return f"{os_name}-{arch}-{runtime_kind}"
+
+
+def _machine(system: str) -> str:
+    """Name the processor architecture, without asking Windows over WMI.
+
+    ``platform.machine()`` on Windows runs a WMI query, and on CPython 3.12
+    that query can take the process down with it (#838). ``_wmi.exec_query``
+    hands a ``CreateThread`` worker a pointer to a struct on its own stack and
+    then gives up waiting after 1000ms for COM and 100ms for the connection;
+    the caller returns, its frame goes away, and the worker that is still
+    running reads through it. Captured: ``EXCEPTION_ACCESS_VIOLATION_READ`` at
+    ``mov rcx, qword [rsi + 0x8]`` in ``_wmi.pyd``, on a thread with no Python
+    thread state at all, which is why every ``faulthandler`` report of it named
+    every thread except the one that faulted. GH-130727 fixed it by copying the
+    struct into the worker; that landed in 3.13 and 3.14 and was never
+    backported to 3.12, which is exactly the version split #838 shows.
+
+    Eight frontends electing at once is enough load to reach those timeouts,
+    and every frontend and every owner asks for this id.
+
+    The two variables are the ones ``platform`` itself falls back to when the
+    query fails, so this is its own answer by a route that cannot crash, and
+    ``_normalize_arch`` maps their values onto what the WMI reply maps onto:
+    ``AMD64`` and ``ARM64`` either way. The id names a directory, so it must
+    not move, and this is the reason it does not. Asking is still worth it if
+    both are empty, which is the one case where the two could disagree.
+    """
+    if system != "Windows":
+        return platform.machine()
+    return (
+        os.environ.get("PROCESSOR_ARCHITEW6432", "")
+        or os.environ.get("PROCESSOR_ARCHITECTURE", "")
+        or platform.machine()
+    )
 
 
 def _normalize_os(system: str) -> str:

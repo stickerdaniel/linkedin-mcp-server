@@ -271,6 +271,66 @@ def test_get_runtime_id_ignores_other_containers_on_the_host(monkeypatch):
     assert get_runtime_id() == "linux-amd64-host"
 
 
+def _windows_runtime(monkeypatch) -> None:
+    """Put the runtime id on the Windows branch, off a container."""
+    monkeypatch.setattr(
+        "linkedin_mcp_server.session_state.platform.system", lambda: "Windows"
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.session_state._is_container_runtime", lambda: False
+    )
+
+
+def test_the_windows_runtime_id_never_asks_wmi_for_the_architecture(monkeypatch):
+    # #838. `platform.machine()` on Windows runs a WMI query, and CPython 3.12
+    # ships a `_wmi` whose worker thread reads the caller's stack frame after
+    # the caller has given up waiting and returned. Captured as an access
+    # violation in `_wmi.pyd` that killed one of eight frontends mid-election.
+    # Reaching that call at all is the defect, so this refuses it outright
+    # rather than asserting on the value it returns.
+    _windows_runtime(monkeypatch)
+    monkeypatch.delenv("PROCESSOR_ARCHITEW6432", raising=False)
+    monkeypatch.setenv("PROCESSOR_ARCHITECTURE", "AMD64")
+
+    def refuse() -> str:
+        raise AssertionError("the runtime id asked WMI for the architecture")
+
+    monkeypatch.setattr("linkedin_mcp_server.session_state.platform.machine", refuse)
+
+    assert get_runtime_id() == "windows-amd64-host"
+
+
+def test_a_wow64_windows_frontend_reports_the_native_architecture(monkeypatch):
+    # A 32-bit process on ARM64 is told `x86` by PROCESSOR_ARCHITECTURE and the
+    # truth by PROCESSOR_ARCHITEW6432. Taking the first would give that process
+    # a different runtime id from every other one on the same machine, and the
+    # id names a directory.
+    _windows_runtime(monkeypatch)
+    monkeypatch.setenv("PROCESSOR_ARCHITEW6432", "ARM64")
+    monkeypatch.setenv("PROCESSOR_ARCHITECTURE", "x86")
+
+    def refuse() -> str:
+        raise AssertionError("the runtime id asked WMI for the architecture")
+
+    monkeypatch.setattr("linkedin_mcp_server.session_state.platform.machine", refuse)
+
+    assert get_runtime_id() == "windows-arm64-host"
+
+
+def test_an_unnamed_windows_architecture_still_asks(monkeypatch):
+    # Both variables empty is the one case where the environment and the query
+    # can disagree, so there the query is still worth making: "unknown" would
+    # move the id of a runtime that has a perfectly good answer available.
+    _windows_runtime(monkeypatch)
+    monkeypatch.setenv("PROCESSOR_ARCHITEW6432", "")
+    monkeypatch.setenv("PROCESSOR_ARCHITECTURE", "")
+    monkeypatch.setattr(
+        "linkedin_mcp_server.session_state.platform.machine", lambda: "AMD64"
+    )
+
+    assert get_runtime_id() == "windows-amd64-host"
+
+
 def _seed_session(profile_dir, *, machine_id: str = "4663753") -> None:
     """Write the four artifacts a live source session consists of."""
     profile_dir.mkdir(parents=True, exist_ok=True)
