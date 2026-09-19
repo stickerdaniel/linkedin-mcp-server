@@ -94,16 +94,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 3.12.4 exactly, because it is the declared floor and the one version
-        # where private state creation on Windows became possible at all.
-        # 3.13 and 3.14 carry the eight-client election stress, which #996
-        # skipped on every Windows 3.12 after 3.12.10 crashed a frontend with
-        # 0xC0000005 while 3.12.4, 3.13 and 3.14 all passed. That incident is
-        # also why no version here may be dropped on the argument that a middle
-        # release can only fail where an endpoint already does: in this
-        # subsystem one demonstrably did. What is gone is the floating `3.12`
-        # entry, which resolved to the crashing interpreter and whose election
-        # coverage #996 had already skipped away.
+        # 3.12.4 exactly, because it is the declared floor, the one version
+        # where private state creation on Windows became possible at all, and it
+        # carries the eight-client election stress again. 3.12.10 historically
+        # crashed a frontend with 0xC0000005 while 3.12.4, 3.13 and 3.14 passed.
+        # That incident is why no version here may be dropped on the argument
+        # that a middle release can only fail where an endpoint already does: in
+        # this subsystem one demonstrably did. The floating `3.12` entry remains
+        # absent so product CI does not silently move between patch releases.
         python-version: ["3.12.4", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
