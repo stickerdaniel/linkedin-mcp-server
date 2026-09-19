@@ -193,7 +193,11 @@ class _DescriptorInspector:
         self._auth_root = auth_root
         self._profile = profile
         self._config = config
-        self._pending: queue.Queue[OwnerLookup | BaseException] | None = None
+        self._generation = 0
+        self._required_generation = 0
+        self._pending: tuple[int, queue.Queue[OwnerLookup | BaseException]] | None = (
+            None
+        )
         self._settled = threading.Event()
 
     @property
@@ -209,19 +213,27 @@ class _DescriptorInspector:
         """
         return self._settled.is_set()
 
+    def require_fresh_inspection(self) -> None:
+        """Reject any inspection that began before this point."""
+        self._required_generation = self._generation + 1
+
     def inspect_until(self, *, timeout: float) -> OwnerLookup:
         """Wait within one budget without abandoning a blocked native reader."""
-        pending = self._begin()
-        try:
-            value = pending.get(timeout=max(timeout, 0.0))
-        except queue.Empty:
-            raise _DescriptorReadTimeout(
-                "Daemon descriptor state could not be read in time"
-            ) from None
-        self._pending = None
-        if isinstance(value, BaseException):
-            raise value
-        return value
+        deadline = time.monotonic() + max(timeout, 0.0)
+        generation, pending = self._begin()
+        while True:
+            try:
+                value = pending.get(timeout=max(deadline - time.monotonic(), 0.0))
+            except queue.Empty:
+                raise _DescriptorReadTimeout(
+                    "Daemon descriptor state could not be read in time"
+                ) from None
+            self._pending = None
+            if generation >= self._required_generation:
+                if isinstance(value, BaseException):
+                    raise value
+                return value
+            generation, pending = self._begin()
 
     def settle_within(self, *, timeout: float) -> bool:
         """Wait for the inspection in flight to finish, without consuming it.
@@ -235,12 +247,15 @@ class _DescriptorInspector:
         self._begin()
         return self._settled.wait(max(timeout, 0.0))
 
-    def _begin(self) -> queue.Queue[OwnerLookup | BaseException]:
+    def _begin(self) -> tuple[int, queue.Queue[OwnerLookup | BaseException]]:
         pending = self._pending
         if pending is not None:
             return pending
+        self._generation += 1
+        generation = self._generation
         result: queue.Queue[OwnerLookup | BaseException] = queue.Queue(maxsize=1)
-        self._pending = result
+        pending = (generation, result)
+        self._pending = pending
 
         def inspect() -> None:
             try:
@@ -263,7 +278,7 @@ class _DescriptorInspector:
             name="daemon-descriptor-read",
             daemon=True,
         ).start()
-        return result
+        return pending
 
 
 def _names_an_ignored_instance(lookup: OwnerLookup, ignored: AbstractSet[str]) -> bool:

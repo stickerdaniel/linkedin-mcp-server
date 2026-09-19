@@ -359,6 +359,7 @@ def obtain_owner(
             start_retry_seconds = _owner_start_delay_after(starts, start_retry_seconds)
             next_start = now + start_retry_seconds
             try:
+                inspector.require_fresh_inspection()
                 attempt = _start_owner(
                     auth_root,
                     profile,
@@ -405,9 +406,6 @@ def obtain_owner(
             )
         if attempt is _Attempt.STARTED:
             started = True
-            # A timed-out inspection may still be resolving a descriptor that this
-            # child just replaced. The committed generation needs one fresh read.
-            inspector = _DescriptorInspector(auth_root, profile, config)
 
         # A STARTED attempt returned only after this process atomically published
         # its prepared generation, so this re-read normally succeeds at once.
