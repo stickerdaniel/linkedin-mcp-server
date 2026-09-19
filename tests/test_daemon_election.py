@@ -826,6 +826,56 @@ class TestFailingFast:
         assert lookup.state is OwnerState.ABSENT
         assert inspections == 1
 
+    def test_aborted_start_discards_an_inspection_begun_before_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        profile = _profile(tmp_path)
+        config = _config(profile)
+        first_read_started = threading.Event()
+        release_first_read = threading.Event()
+        real_inspect = daemon_module._inspect
+        inspections = 0
+
+        def inspect(*args: object) -> OwnerLookup:
+            nonlocal inspections
+            inspections += 1
+            if inspections == 1:
+                first_read_started.set()
+                release_first_read.wait()
+                return OwnerLookup(state=OwnerState.ABSENT)
+            return real_inspect(*cast(Any, args))
+
+        def start(
+            auth_root: Path,
+            started_profile: Path,
+            started_config: AppConfig,
+            *,
+            inspector: daemon_module._DescriptorInspector,
+            **_kwargs: object,
+        ) -> _Attempt:
+            assert first_read_started.is_set()
+            _publish_stale_owner(auth_root, started_profile, started_config)
+            release_first_read.set()
+            assert inspector.settle_within(timeout=1.0)
+            return _Attempt.ABORTED
+
+        monkeypatch.setattr(daemon_module, "_inspect", inspect)
+        monkeypatch.setattr(daemon_module, "_DESCRIPTOR_READ_SECONDS", 0.01)
+        monkeypatch.setattr(election_module, "_start_owner", start)
+        try:
+            outcome = obtain_owner(
+                profile.parent,
+                profile,
+                config,
+                deadline_seconds=1.0,
+                connect=lambda attachment: Reach.ANSWERED,
+            )
+        finally:
+            release_first_read.set()
+
+        assert outcome.attachment_lookup.state is OwnerState.ATTACHABLE
+        assert inspections == 2
+
     def test_successful_commit_gets_a_fresh_descriptor_inspection(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):

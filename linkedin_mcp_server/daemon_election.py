@@ -359,6 +359,7 @@ def obtain_owner(
             start_retry_seconds = _owner_start_delay_after(starts, start_retry_seconds)
             next_start = now + start_retry_seconds
             try:
+                inspector.require_fresh_inspection()
                 attempt = _start_owner(
                     auth_root,
                     profile,
