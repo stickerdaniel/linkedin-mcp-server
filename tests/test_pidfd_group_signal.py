@@ -101,21 +101,34 @@ member = subprocess.Popen(
     stderr=subprocess.DEVNULL,
 )
 print(member.pid, flush=True)
-sys.stdin.read(1)
+command = sys.stdin.readline()
+if command != "release\n":
+    member.terminate()
+    member.wait(timeout=10)
+    print(f"cleaned {{member.pid}}", flush=True)
 '''
+
+
+class ProbeSkipped(Exception):
+    pass
 
 
 def unavailable(exc):
     return isinstance(exc, OSError) and exc.errno in UNAVAILABLE
 
 
-def open_pidfd(pid):
+member_open_fault = os.environ.get("LINKEDIN_MCP_TEST_PIDFD_MEMBER_OPEN_FAULT")
+
+
+def open_pidfd(pid, role):
     try:
+        if role == "member" and member_open_fault:
+            injected = getattr(errno, member_open_fault)
+            raise OSError(injected, os.strerror(injected))
         return pidfd_open(pid)
     except OSError as exc:
         if unavailable(exc):
-            print(json.dumps({{"status": "skip", "reason": f"pidfd_open: {{exc}}"}}))
-            raise SystemExit(0)
+            raise ProbeSkipped(f"pidfd_open {{role}}: {{exc}}") from exc
         raise
 
 
@@ -155,7 +168,11 @@ def wait_for(path):
     raise RuntimeError(f"timed out waiting for {{path.name}}")
 
 
-preflight_pidfd = open_pidfd(os.getpid())
+try:
+    preflight_pidfd = open_pidfd(os.getpid(), "preflight")
+except ProbeSkipped as exc:
+    print(json.dumps({{"status": "skip", "reason": str(exc)}}))
+    raise SystemExit(0)
 try:
     preflight = send(preflight_pidfd, 0, 0)
     if preflight == "unavailable":
@@ -167,16 +184,13 @@ finally:
     os.close(preflight_pidfd)
 
 
-class ProbeSkipped(Exception):
-    pass
-
-
 leader = None
 leader_pidfd = -1
 member_pid = -1
 member_pidfd = -1
 reaped_leader = False
 reaped_member = False
+leader_cleanup_confirmed = False
 closed_fds = []
 report = None
 try:
@@ -192,7 +206,6 @@ try:
             text=True,
             start_new_session=True,
         )
-        leader_pidfd = open_pidfd(leader.pid)
         member_pid = int(leader.stdout.readline())
         if wait_for(ready) != member_pid:
             raise RuntimeError("the ready marker named another process")
@@ -203,7 +216,8 @@ try:
         if os.getpgid(member_pid) != leader.pid:
             raise RuntimeError("the member is outside the leader's group")
 
-        member_pidfd = open_pidfd(member_pid)
+        leader_pidfd = open_pidfd(leader.pid, "leader")
+        member_pidfd = open_pidfd(member_pid, "member")
         support = send(leader_pidfd, 0, PIDFD_SIGNAL_PROCESS_GROUP)
         if support == "unsupported":
             raise ProbeSkipped("group flag unsupported")
@@ -212,7 +226,7 @@ try:
         if send(member_pidfd, 0, PIDFD_SIGNAL_PROCESS_GROUP) != "gone":
             raise RuntimeError("a member pidfd was accepted as group attribution")
 
-        leader.stdin.write("x")
+        leader.stdin.write("release\n")
         leader.stdin.flush()
         if leader.wait(timeout=10) != 0:
             raise RuntimeError("the leader did not exit cleanly")
@@ -237,7 +251,21 @@ except ProbeSkipped as exc:
     report = {{"status": "skip", "reason": str(exc)}}
 finally:
     if leader is not None and leader.poll() is None:
-        if leader_pidfd >= 0:
+        if member_pid >= 0 and member_pidfd < 0:
+            cleanup_mode = os.environ.get(
+                "LINKEDIN_MCP_TEST_PIDFD_LEADER_CLEANUP", "command"
+            )
+            if cleanup_mode == "eof":
+                leader.stdin.close()
+            else:
+                leader.stdin.write("cleanup\n")
+                leader.stdin.flush()
+            confirmation = leader.stdout.readline().strip()
+            leader_cleanup_confirmed = confirmation == f"cleaned {{member_pid}}"
+            if not leader_cleanup_confirmed:
+                raise RuntimeError("the leader did not confirm member cleanup")
+            reaped_member = True
+        elif leader_pidfd >= 0:
             try:
                 pidfd_send_signal(leader_pidfd, signal.SIGKILL, None, 0)
             except OSError as exc:
@@ -283,6 +311,7 @@ report.update(
         "member": member_pid,
         "reaped_leader": reaped_leader,
         "reaped_member": reaped_member,
+        "leader_cleanup_confirmed": leader_cleanup_confirmed,
         "closed_fds": len(closed_fds),
         "member_cleanup_pidfd_calls": sum(
             call == (member_pidfd, signal.SIGKILL, 0) for call in pidfd_signal_calls
@@ -402,10 +431,19 @@ def test_python_passes_nonzero_pidfd_flags_to_linux():
     assert raised.value.errno == errno.EINVAL
 
 
-def _run_probe(tmp_path: Path, fault: str | None = None) -> dict[str, object]:
+def _run_probe(
+    tmp_path: Path,
+    fault: str | None = None,
+    *,
+    member_open_fault: str | None = None,
+    leader_cleanup: str = "command",
+) -> dict[str, object]:
     environment = os.environ.copy()
     if fault is not None:
         environment["LINKEDIN_MCP_TEST_PIDFD_GROUP_FAULT"] = fault
+    if member_open_fault is not None:
+        environment["LINKEDIN_MCP_TEST_PIDFD_MEMBER_OPEN_FAULT"] = member_open_fault
+        environment["LINKEDIN_MCP_TEST_PIDFD_LEADER_CLEANUP"] = leader_cleanup
     result = subprocess.run(
         [sys.executable, "-c", _SUBREAPER_PROBE],
         cwd=tmp_path,
@@ -441,3 +479,24 @@ def test_group_probe_skip_reaps_every_spawned_process(tmp_path: Path, fault: str
     assert report["status"] == "skip"
     _assert_probe_reaped_every_process(report)
     assert report["member_cleanup_pidfd_calls"] == 1
+
+
+@pytest.mark.parametrize("fault", ["ENOSYS", "EPERM"])
+@pytest.mark.parametrize("leader_cleanup", ["command", "eof"])
+def test_member_pidfd_open_failure_uses_leader_cleanup_contract(
+    tmp_path: Path,
+    fault: str,
+    leader_cleanup: str,
+):
+    report = _run_probe(
+        tmp_path,
+        member_open_fault=fault,
+        leader_cleanup=leader_cleanup,
+    )
+
+    assert report["status"] == "skip"
+    assert report["reaped_leader"] is True
+    assert report["reaped_member"] is True
+    assert report["leader_cleanup_confirmed"] is True
+    assert report["closed_fds"] == 1
+    assert report["member_cleanup_pidfd_calls"] == 0

@@ -16,10 +16,20 @@ member's signal handler supplies independent delivery evidence.
 
 The subreaper explicitly collects the reparented member with `waitpid` before
 the test expects the retained leader pidfd to report `ESRCH` for the empty
-group. The member pidfd remains open until cleanup finishes. Every cleanup
-signal uses `pidfd_send_signal(member_pidfd, SIGKILL, None, 0)`; `ESRCH` means
-the member is already gone. No numeric PID or PGID signal is used. Both pidfds
-are closed and checked for `EBADF` before the helper exits.
+group. Once opened, the member pidfd remains open until cleanup finishes and
+cleanup uses `pidfd_send_signal(member_pidfd, SIGKILL, None, 0)`; `ESRCH` means
+the member is already gone. Both pidfds are closed and checked for `EBADF`
+before the helper exits.
+
+There is one earlier boundary where no member pidfd exists: opening it can itself
+return `ENOSYS` or `EPERM`. The still-live leader therefore owns a separate
+stdin contract. `release` is used only by the normal evidence path and lets the
+member outlive the leader. Any cleanup command or pipe EOF instead makes the
+leader terminate and wait for its direct `Popen` child, report that completion,
+and only then exit. The helper waits for that leader. This keeps member identity
+anchored by its unreaped direct parent and also covers abrupt helper death,
+without adding a numeric `os.kill` or `os.killpg` fallback. Fault injection
+exercises both explicit cleanup and EOF for each errno.
 
 The probe uses `1UL << 2`, defined by Linux
 [`include/uapi/linux/pidfd.h`](https://github.com/torvalds/linux/blob/master/include/uapi/linux/pidfd.h),
