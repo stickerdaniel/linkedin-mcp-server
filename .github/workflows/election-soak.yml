@@ -100,11 +100,49 @@ jobs:
           # republishes the same URL, so a pin breaks on every refresh. It buys
           # publisher trust, not the exact artifact; the version is printed
           # below so a capture stays attributable.
+          function Test-MicrosoftOrganization {
+            param(
+              [System.Security.Cryptography.X509Certificates.X500DistinguishedName]
+              $SubjectName
+            )
+
+            $organizations = @()
+            foreach ($rdn in $SubjectName.EnumerateRelativeDistinguishedNames()) {
+              if ($rdn.HasMultipleElements) {
+                return $false
+              }
+              if ($rdn.GetSingleElementType().Value -eq '2.5.4.10') {
+                $organizations += $rdn.GetSingleElementValue()
+              }
+            }
+            return $organizations.Count -eq 1 -and
+              [string]::Equals(
+                $organizations[0],
+                'Microsoft Corporation',
+                [System.StringComparison]::Ordinal
+              )
+          }
+
+          $microsoft = [System.Security.Cryptography.X509Certificates.X500DistinguishedName]::new(
+            'CN=Sysinternals, O=Microsoft Corporation, C=US'
+          )
+          $lookalike = [System.Security.Cryptography.X509Certificates.X500DistinguishedName]::new(
+            'CN="O=Microsoft Corporation", O=Contoso Ltd, C=US'
+          )
+          $multiValued = [System.Security.Cryptography.X509Certificates.X500DistinguishedName]::new(
+            'CN=Tool+O=Contoso Ltd, O=Microsoft Corporation, C=US'
+          )
+          if (-not (Test-MicrosoftOrganization $microsoft) -or
+              (Test-MicrosoftOrganization $lookalike) -or
+              (Test-MicrosoftOrganization $multiValued)) {
+            throw 'procdump organization check failed its self-test'
+          }
+
           $sig = Get-AuthenticodeSignature $exe
           if ($sig.Status -ne 'Valid') {
             throw "procdump signature is $($sig.Status)"
           }
-          if ($sig.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') {
+          if (-not (Test-MicrosoftOrganization $sig.SignerCertificate.SubjectName)) {
             throw "procdump signed by $($sig.SignerCertificate.Subject)"
           }
           Write-Host "procdump signed by $($sig.SignerCertificate.Subject)"
