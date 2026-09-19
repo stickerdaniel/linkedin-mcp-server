@@ -120,6 +120,18 @@
       "description": "Search LinkedIn posts/content globally by keyword (the 'Posts' tab) with an optional recency filter (past-24h/past-week/past-month); returns unordered candidate permalinks in references"
     },
     {
+      "name": "react_to_post",
+      "description": "React to one LinkedIn post permalink as the authenticated user, with one of like, celebrate, support, love, insightful or funny; publicly attributed and takes no confirmation flag, but refuses to click a reaction control this account has already pressed, because that click removes the reaction rather than changing it"
+    },
+    {
+      "name": "comment_on_post",
+      "description": "Publish a comment on one LinkedIn post permalink with explicit confirmation; newlines are allowed and every other control character is rejected before a browser is touched, and the comment is confirmed by finding the submitted text rendered on the post"
+    },
+    {
+      "name": "repost_post",
+      "description": "Reshare one LinkedIn post permalink to the authenticated user's own feed with explicit confirmation, bare or with optional commentary above it; refuses when LinkedIn's repost menu is not the two items this tool knows how to index by position"
+    },
+    {
       "name": "close_session",
       "description": "Properly close browser session and clean up resources"
     }

@@ -19,7 +19,8 @@ replacement owner instead of keeping an address it captured at startup.
 module is about surviving it. ``@latest`` is the documented install, so the first
 client to launch after an upgrade stands the old owner down, and every proxy
 already attached to it would otherwise be dead until its own process restarts.
-Reproduced end to end before any of this existed: a proxy serving 19 tools was
+Reproduced end to end before any of this existed: a proxy serving the 19 tools of
+the time (the inventory has grown since; the count is incidental) was
 asked nothing, its owner was told to stand down the way a newer build does
 (``daemon_election._ask_to_stand_down``), and the next listing failed with
 ``McpError: Client failed to connect``. Idle exit and a crashed owner end the

@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 from fastmcp.tools import FunctionTool
 
 from linkedin_mcp_server.callbacks import MCPContextProgressCallback
@@ -25,6 +26,10 @@ async def get_tool_fn(
     return cast(FunctionTool, tool).fn
 
 
+POST_PERMALINK = "/feed/update/urn:li:ugcPost:123/"
+POST_URL = f"https://www.linkedin.com{POST_PERMALINK}"
+
+
 def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     """Create a mock LinkedInExtractor that returns the given result."""
     mock = MagicMock()
@@ -43,6 +48,9 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.get_my_profile = AsyncMock(return_value=scrape_result)
     mock.search_companies = AsyncMock(return_value=scrape_result)
     mock.search_posts = AsyncMock(return_value=scrape_result)
+    mock.react_to_post = AsyncMock(return_value=scrape_result)
+    mock.comment_on_post = AsyncMock(return_value=scrape_result)
+    mock.repost_post = AsyncMock(return_value=scrape_result)
     mock.get_company_employees = AsyncMock(return_value=scrape_result)
     mock.extract_page = AsyncMock(
         return_value=ExtractedSection(text="some text", references=[])
@@ -1097,6 +1105,172 @@ class TestGetSidebarProfilesTool:
             await tool_fn("test-user", mock_context, extractor=mock_extractor)
 
 
+class TestPostEngagementTools:
+    """The tool layer for react, comment and repost.
+
+    What matters at this layer is what happens *before* a browser: the text
+    refusals and the reference repair are answered without a session, so a bad
+    argument comes back as a correction rather than as a login attempt.
+    """
+
+    @staticmethod
+    async def _tool(name: str):
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+        return await get_tool_fn(mcp, name)
+
+    async def test_react_forwards_the_reaction_it_was_asked_for(self, mock_context):
+        expected = {"url": POST_URL, "status": "reacted", "acted": True}
+        mock_extractor = _make_mock_extractor(expected)
+
+        tool_fn = await self._tool("react_to_post")
+        result = await tool_fn(
+            POST_PERMALINK, mock_context, reaction="celebrate", extractor=mock_extractor
+        )
+
+        assert result["status"] == "reacted"
+        mock_extractor.react_to_post.assert_awaited_once_with(
+            POST_PERMALINK, reaction="celebrate"
+        )
+
+    async def test_react_defaults_to_the_like_control(self, mock_context):
+        mock_extractor = _make_mock_extractor({"url": POST_URL, "status": "reacted"})
+
+        tool_fn = await self._tool("react_to_post")
+        await tool_fn(POST_PERMALINK, mock_context, extractor=mock_extractor)
+
+        mock_extractor.react_to_post.assert_awaited_once_with(
+            POST_PERMALINK, reaction="like"
+        )
+
+    async def test_comment_forwards_its_confirmation_flag(self, mock_context):
+        mock_extractor = _make_mock_extractor({"url": POST_URL, "status": "commented"})
+
+        tool_fn = await self._tool("comment_on_post")
+        await tool_fn(
+            POST_PERMALINK, "Nicely put", False, mock_context, extractor=mock_extractor
+        )
+
+        mock_extractor.comment_on_post.assert_awaited_once_with(
+            POST_PERMALINK, "Nicely put", confirm_comment=False
+        )
+
+    @pytest.mark.parametrize("comment", ["   ", "a\tb", "text\x7f"])
+    async def test_unusable_comment_text_never_reaches_the_extractor(
+        self, mock_context, comment: str
+    ):
+        mock_extractor = _make_mock_extractor({})
+
+        tool_fn = await self._tool("comment_on_post")
+        result = await tool_fn(
+            POST_PERMALINK, comment, True, mock_context, extractor=mock_extractor
+        )
+
+        assert result["status"] == "invalid_text"
+        assert result["acted"] is False
+        mock_extractor.comment_on_post.assert_not_awaited()
+
+    async def test_a_multiline_comment_is_accepted(self, mock_context):
+        mock_extractor = _make_mock_extractor({"url": POST_URL, "status": "commented"})
+
+        tool_fn = await self._tool("comment_on_post")
+        await tool_fn(
+            POST_PERMALINK,
+            "First thought\n\nSecond thought",
+            True,
+            mock_context,
+            extractor=mock_extractor,
+        )
+
+        mock_extractor.comment_on_post.assert_awaited_once()
+
+    async def test_repost_forwards_its_optional_commentary(self, mock_context):
+        mock_extractor = _make_mock_extractor({"url": POST_URL, "status": "reposted"})
+
+        tool_fn = await self._tool("repost_post")
+        await tool_fn(
+            POST_PERMALINK,
+            True,
+            mock_context,
+            commentary="Worth a read",
+            extractor=mock_extractor,
+        )
+
+        mock_extractor.repost_post.assert_awaited_once_with(
+            POST_PERMALINK, confirm_repost=True, commentary="Worth a read"
+        )
+
+    async def test_a_bare_repost_sends_no_commentary(self, mock_context):
+        mock_extractor = _make_mock_extractor({"url": POST_URL, "status": "reposted"})
+
+        tool_fn = await self._tool("repost_post")
+        await tool_fn(POST_PERMALINK, True, mock_context, extractor=mock_extractor)
+
+        mock_extractor.repost_post.assert_awaited_once_with(
+            POST_PERMALINK, confirm_repost=True, commentary=None
+        )
+
+    async def test_unusable_commentary_never_reaches_the_extractor(self, mock_context):
+        mock_extractor = _make_mock_extractor({})
+
+        tool_fn = await self._tool("repost_post")
+        result = await tool_fn(
+            POST_PERMALINK,
+            True,
+            mock_context,
+            commentary="  ",
+            extractor=mock_extractor,
+        )
+
+        assert result["status"] == "invalid_text"
+        mock_extractor.repost_post.assert_not_awaited()
+
+    @pytest.mark.parametrize("tool", ["comment_on_post", "repost_post"])
+    async def test_an_unusable_permalink_is_a_tool_error(self, mock_context, tool: str):
+        # The refusal builder normalizes the permalink, so an unusable one
+        # raises inside the `try` and reaches the caller as a named correction
+        # rather than being masked.
+        mock_extractor = _make_mock_extractor({})
+        tool_fn = await self._tool(tool)
+
+        with pytest.raises(ToolError):
+            if tool == "comment_on_post":
+                await tool_fn(
+                    "/in/williamhgates",
+                    "hello",
+                    True,
+                    mock_context,
+                    extractor=mock_extractor,
+                )
+            else:
+                await tool_fn(
+                    "/in/williamhgates",
+                    True,
+                    mock_context,
+                    commentary="hello",
+                    extractor=mock_extractor,
+                )
+
+    async def test_every_write_tool_is_marked_destructive(self):
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        for name in ("react_to_post", "comment_on_post", "repost_post"):
+            tool = await mcp.get_tool(name)
+            assert tool is not None
+            # What makes an MCP client prompt before running one of these.
+            assert tool.annotations is not None
+            assert tool.annotations.destructiveHint is True
+        search = await mcp.get_tool("search_posts")
+        assert search is not None
+        assert search.annotations is not None
+        assert search.annotations.readOnlyHint is True
+
+
 class TestMessagingTools:
     async def test_get_inbox_success(self, mock_context):
         expected = {
@@ -1956,6 +2130,9 @@ class TestToolTimeouts:
             "send_message",
             "get_feed",
             "search_posts",
+            "react_to_post",
+            "comment_on_post",
+            "repost_post",
             "close_session",
         )
 
@@ -1989,6 +2166,9 @@ class TestToolTimeouts:
             "send_message",
             "get_feed",
             "search_posts",
+            "react_to_post",
+            "comment_on_post",
+            "repost_post",
             "close_session",
         )
 

@@ -799,7 +799,7 @@ class TestServingTheOwnersTools:
                 await client.list_tools()
 
     async def test_progress_from_the_owner_reaches_the_clients_handler(self):
-        # Eighteen of the nineteen tools report progress (`close_session` is the
+        # Twenty-one of the twenty-two tools report progress (`close_session` is the
         # exception), and a long scrape with no progress looks indistinguishable
         # from a hung one. A plain Client in the factory drops these silently.
         owner = FastMCP("owner")

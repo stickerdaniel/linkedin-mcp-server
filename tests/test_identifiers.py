@@ -22,6 +22,7 @@ from linkedin_mcp_server.scraping.identifiers import (
     normalize_opaque_id,
     normalize_person_identifier,
     normalize_profile_urn,
+    normalize_post_reference,
     normalize_thread_id,
     person_profile_url,
 )
@@ -266,6 +267,101 @@ class TestNormalizeCompanyIdentifier:
     def test_refuses_a_value_that_cannot_name_a_company(self, value: str):
         with pytest.raises(LinkedInScraperException):
             normalize_company_identifier(value)
+
+
+class TestNormalizePostReference:
+    """A post reference, which returns a URL rather than an identifier.
+
+    The two permalink shapes are not interchangeable and neither derives from
+    the other, so each is canonicalized in place. What matters most here is the
+    refusals: these feed the three tools that write publicly, and a reference
+    resolving to the wrong post is a comment or a repost on someone else's
+    content.
+    """
+
+    POST = "https://www.linkedin.com/feed/update/urn:li:ugcPost:7506667649444237313/"
+    SLUG = "varunbhartiya_aec-ai-ugcPost-7506667649444237313-g3b0"
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "/feed/update/urn:li:ugcPost:7506667649444237313/",
+            "/feed/update/urn:li:ugcPost:7506667649444237313",
+            "https://www.linkedin.com/feed/update/urn:li:ugcPost:7506667649444237313/",
+            "https://de.linkedin.com/feed/update/urn:li:ugcPost:7506667649444237313/",
+            "linkedin.com/feed/update/urn:li:ugcPost:7506667649444237313/",
+            "urn:li:ugcPost:7506667649444237313",
+            # A URN retyped in lowercase. The path segment is case-sensitive to
+            # LinkedIn, so this is repaired rather than passed through to a 404.
+            "urn:li:ugcpost:7506667649444237313",
+        ],
+    )
+    def test_every_update_shape_reaches_the_same_permalink(self, value: str):
+        assert normalize_post_reference(value) == self.POST
+
+    @pytest.mark.parametrize("kind", ["ugcPost", "share", "activity"])
+    def test_all_three_post_urn_kinds_resolve(self, kind: str):
+        assert normalize_post_reference(f"urn:li:{kind}:7506667649444237313") == (
+            f"https://www.linkedin.com/feed/update/urn:li:{kind}:7506667649444237313/"
+        )
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            f"/posts/{SLUG}",
+            f"https://www.linkedin.com/posts/{SLUG}",
+            f"https://de.linkedin.com/posts/{SLUG}?utm_source=share",
+            f"https://m.linkedin.com/posts/{SLUG}#comments",
+        ],
+    )
+    def test_every_slug_shape_reaches_the_same_permalink(self, value: str):
+        assert normalize_post_reference(value) == (
+            f"https://www.linkedin.com/posts/{self.SLUG}"
+        )
+
+    def test_the_slug_is_not_rewritten_as_a_urn(self):
+        # The slug carries an author segment and a hash LinkedIn issued, neither
+        # of which can be reconstructed, so the two forms stay distinct.
+        assert normalize_post_reference(f"/posts/{self.SLUG}") != self.POST
+
+    @pytest.mark.parametrize("value", [POST, f"https://www.linkedin.com/posts/{SLUG}"])
+    def test_it_is_idempotent(self, value: str):
+        assert normalize_post_reference(normalize_post_reference(value)) == value
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "",
+            "   ",
+            # Names something other than a post.
+            "urn:li:comment:7506667649444237313",
+            "urn:li:comment:(urn:li:ugcPost:7506667649444237313,4455)",
+            "urn:li:fsd_profile:ACoAAB",
+            "/in/williamhgates",
+            "/company/microsoft",
+            "/jobs/view/4252026496/",
+            # A post route with nothing usable after it.
+            "/feed/update/",
+            "/feed/update/urn:li:ugcPost:notanumber/",
+            "/feed/update/7506667649444237313/",
+            "/posts/",
+            "/posts/not-a-slug",
+            "/posts/missing-the-kind-7506667649444237313-g3b0",
+            # Not LinkedIn at all, and a lookalike host.
+            f"https://evil.example/posts/{SLUG}",
+            f"https://linkedin.com.evil.example/posts/{SLUG}",
+            # Retargeting, which a browser resolves before the request.
+            "/feed/update/../../in/williamhgates",
+            "/feed/update/urn:li:ugcPost:1/../../../in/bob",
+        ],
+    )
+    def test_anything_that_cannot_name_one_post_is_refused(self, value: str):
+        with pytest.raises(InvalidReferenceError):
+            normalize_post_reference(value)
+
+    def test_a_short_link_says_so_rather_than_guessing(self):
+        with pytest.raises(InvalidReferenceError, match="shortened"):
+            normalize_post_reference("https://lnkd.in/abc123")
 
 
 class TestNormalizeOpaqueId:

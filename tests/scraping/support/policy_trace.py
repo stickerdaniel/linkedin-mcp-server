@@ -596,6 +596,21 @@ def semantic_program_id(program: str) -> str:
     compact = " ".join(program.split())
     checks = (
         ("performance.timeOrigin", "document_origin"),
+        # The post-engagement programs come first because two of them would
+        # otherwise be claimed by a marker further down: the insert shares
+        # `document.execCommand('insertText'` with the message composer's
+        # write, and both are legitimate uses of the same insertion path.
+        ("hasRepostOpener", "post_action_signals"),
+        ("__linkedinMcpPost =", "post_root_owner"),
+        ("return 'already_pressed'", "post_react_toggle"),
+        ("const target = owned[arg.index]", "post_reaction_pick"),
+        ("labels: controls", "post_reaction_flyout"),
+        ("const opener = pinned.opener", "post_repost_open"),
+        ("return {menus: 1, items:", "post_repost_menu"),
+        ("const target = items[arg.index]", "post_repost_pick"),
+        ("editor.__linkedinMcpOwnedText = arg.text", "post_text_insert"),
+        ("return 'ambiguous_submit'", "post_text_submit"),
+        ("return smallest.length;", "post_text_units"),
         ("MAX_HEADING_CONTAINERS", "root_content"),
         ("SIDEBAR_SECTIONS", "sidebar_profiles"),
         ("showAllUrls", "sidebar_profiles"),

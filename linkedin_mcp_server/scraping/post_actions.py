@@ -1,0 +1,1162 @@
+"""Engagement actions taken on one loaded LinkedIn post.
+
+Three writes live here: a reaction, a comment and a repost. They share one
+hard problem, which is why they share a module: *which* post is being acted
+on. A permalink page renders the post, every comment on it, and often a
+reshared post inside it, and each of those carries its own action controls.
+Acting on the wrong one is not a failed scrape, it is a public write on
+somebody else's content, so every flow below anchors on the post the caller
+named before it touches anything.
+
+The anchor is the numeric entity id, which both permalink shapes carry:
+``/feed/update/urn:li:ugcPost:7506667649444237313/`` holds it in the URN and
+``/posts/name_words-ugcPost-7506667649444237313-g3b0`` holds it in the slug.
+That id is matched against the URN-bearing ``data-`` attributes LinkedIn puts
+on a post container, and the *outermost* single match is the root post. Two
+matches or none is a refusal rather than a guess.
+
+Per the AGENTS.md Scraping Rules nothing here reads a label value. The
+controls are told apart by which ARIA attribute they carry, which is a fact
+about the control rather than about the language the page is in:
+
+- the reaction toggle is the ``button[aria-pressed]`` in the bar, and its
+  value is also the answer to "has this account already reacted";
+- the repost menu opener is the ``button[aria-expanded]`` in the bar, the
+  same inverse-of-aria-label trick the profile More menu uses;
+- the comment editor is the ``[role="textbox"][contenteditable="true"]``
+  inside the root post.
+
+Two positional assumptions remain, both guarded by an exact count so a
+layout change refuses instead of clicking the wrong thing. They are named at
+their call sites: ``_REACTION_ORDER`` for the reaction flyout and
+``_REPOST_MENU_ITEMS`` for the repost menu.
+
+What the tests here can and cannot prove is worth stating plainly, because
+AGENTS.md draws the line: ``tests/test_post_actions_dom.py`` drives synthetic
+containers, so it is a claim about this algorithm and not a claim about
+LinkedIn's markup. The attribute *names* below are the standing risk, and a
+rename turns every flow into a documented refusal rather than a misfire.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import asyncio
+import logging
+import re
+
+from patchright.async_api import ElementHandle, TimeoutError as PlaywrightTimeoutError
+
+from linkedin_mcp_server.scraping.contracts import post_action_result
+from linkedin_mcp_server.scraping.identifiers import normalize_post_reference
+from linkedin_mcp_server.scraping.navigation import PageNavigator
+from linkedin_mcp_server.scraping.session import ScrapingSession
+
+logger = logging.getLogger(__name__)
+
+# LinkedIn's reaction flyout, in the order it renders. Selection is by index
+# because the only other discriminator is the label, which is the one thing
+# this project never reads. The order has been stable for years and is the
+# same in every locale, since it is the product's own ranking rather than
+# anything translated.
+#
+# The exact-count guard below is what makes the assumption safe to hold: if
+# LinkedIn adds a seventh reaction or drops one, the count stops being six and
+# every specific-reaction request refuses instead of silently landing one
+# position off. A wrong reaction is public and attributed, so refusing is the
+# cheaper failure.
+_REACTION_ORDER = ("like", "celebrate", "support", "love", "insightful", "funny")
+
+# The repost menu, in the order it renders: the immediate repost first, the
+# one that opens a composer second. Same guard as the reactions — exactly two
+# items or the flow refuses, because index 0 posts immediately and getting it
+# wrong publishes to the actor's own feed.
+_REPOST_MENU_ITEMS = 2
+
+# The band a social action bar's button count falls in. The bar holds react,
+# comment, repost and send, so three is the floor once a layout drops one and
+# eight is loose enough for an overflow control. The band exists to stop the
+# ancestor walk from climbing out of the bar and into the comments container,
+# which also holds many buttons and one `aria-pressed` toggle per comment.
+_BAR_BUTTONS_MIN = 3
+_BAR_BUTTONS_MAX = 8
+
+# How long a control gets to appear after the interaction that reveals it.
+_FLYOUT_TIMEOUT = 4000
+_EDITOR_TIMEOUT = 5000
+# How long a submitted comment or repost has to show up in the DOM. Longer
+# than the flyout waits because this one covers a round trip to LinkedIn.
+_CONFIRM_TIMEOUT = 12000
+_CONFIRM_POLL = 0.25
+
+_EDITOR_SELECTOR = '[role="textbox"][contenteditable="true"]'
+_DIALOG_SELECTOR = 'dialog[open], [role="dialog"]'
+
+# The numeric entity id inside either permalink shape. Both are produced by
+# `normalize_post_reference`, so this reads its output rather than a caller's
+# input and can be strict about the shape.
+_URN_ID = re.compile(r"/feed/update/urn:li:(?:ugcPost|share|activity):([0-9]+)/")
+_SLUG_ID = re.compile(r"/posts/[A-Za-z0-9_-]*?-(?:ugcPost|activity|share)-([0-9]+)-")
+
+# Attributes LinkedIn has been observed to hang a post URN on. Presence and
+# value-contains only; no class names, per the Scraping Rules. This list is
+# the module's single point of DOM dependence and the thing to check first
+# when every action starts answering `post_not_found`.
+_URN_ATTRIBUTES = (
+    "data-urn",
+    "data-id",
+    "data-activity-urn",
+    "data-entity-urn",
+    "data-chameleon-result-urn",
+)
+
+_VISIBLE_FN_JS = r"""
+function visible(element) {
+  if (!(element instanceof Element) || !element.isConnected) return false;
+  const style = window.getComputedStyle(element);
+  if (style.visibility === 'hidden' || style.display === 'none') return false;
+  if (element.getAttribute('aria-hidden') === 'true') return false;
+  return element.getClientRects().length > 0;
+}
+"""
+
+# Locate the one post container the caller named, by entity id.
+#
+# The id is matched at the *end* of a post URN and nowhere else, which is not
+# fussiness. A substring search finds the post's id inside its own comments:
+# a comment URN is `urn:li:comment:(urn:li:ugcPost:<postId>,<commentId>)` and a
+# social-detail URN wraps the post the same way, so `includes(':' + postId)`
+# makes every comment on the post a candidate root. Anchoring on the kind and
+# the end of the value leaves only URNs that *are* the post.
+#
+# `outermost` handles the other direction: LinkedIn hangs the same URN on a
+# container and again on something inside it, so several elements legitimately
+# name one post. Two *outermost* matches mean the id appears in two
+# independent places, which is what a reshare of the post produces, and
+# nothing in the id says which one the caller meant. That refuses.
+#
+# The known blind spot is a kind mismatch. One post has both a `ugcPost` and
+# an `activity` URN, with *different* numbers, and this matches the number the
+# permalink carried. Where LinkedIn's container names the other one, every
+# action answers `post_not_found` rather than acting on the wrong post.
+_FIND_POST_ROOT_FN_JS = (
+    r"""
+function findPostRoot(postId) {
+  const main = document.querySelector('main');
+  if (!main) return null;
+  const digits = String(postId).replace(/[^0-9]/g, '');
+  if (!digits) return null;
+  const pattern = new RegExp('urn:li:(?:ugcPost|share|activity):' + digits + '$');
+  const attributes = """
+    + repr(list(_URN_ATTRIBUTES)).replace("'", '"')
+    + r""";
+  const selector = attributes.map(name => '[' + name + ']').join(',');
+  const matches = [];
+  for (const element of main.querySelectorAll(selector)) {
+    for (const name of attributes) {
+      const value = element.getAttribute(name);
+      if (value && pattern.test(value.trim())) {
+        matches.push(element);
+        break;
+      }
+    }
+  }
+  const outermost = matches.filter(
+    element => !matches.some(other => other !== element && other.contains(element))
+  );
+  return outermost.length === 1 ? outermost[0] : null;
+}
+"""
+)
+
+# Locate the root post's own social action bar inside its container.
+#
+# The first visible `aria-pressed` button in DOM order is the post's reaction
+# toggle: the post's bar renders before its comments, and every comment's own
+# toggle therefore comes later. From there the walk climbs to the smallest
+# ancestor that looks like a bar, and `aria-expanded` has to be present in it
+# — that is the repost opener, and a comment's action row has no equivalent,
+# so requiring it is what keeps a comment row from ever qualifying.
+_FIND_ACTION_BAR_FN_JS = (
+    r"""
+function findActionBar(root) {
+  const toggles = Array.from(root.querySelectorAll('button[aria-pressed]'))
+    .filter(visible);
+  if (toggles.length === 0) return null;
+  const toggle = toggles[0];
+  let element = toggle.parentElement;
+  while (element && root.contains(element)) {
+    const buttons = element.querySelectorAll('button');
+    if (buttons.length >= """
+    + str(_BAR_BUTTONS_MIN)
+    + r""") {
+      if (
+        buttons.length <= """
+    + str(_BAR_BUTTONS_MAX)
+    + r""" &&
+        element.querySelector('button[aria-expanded]')
+      ) {
+        return {bar: element, toggle};
+      }
+      return null;
+    }
+    element = element.parentElement;
+  }
+  return null;
+}
+"""
+)
+
+# Everything a flow needs to decide what to do, read in one pass.
+#
+# `counts` is every visible control's text, carried as opaque strings that are
+# only ever compared to the same list read earlier for inequality. Nothing
+# parses them, and that is the point: a reaction or repost count renders with
+# locale digit grouping and an abbreviation suffix, so reading a number out of
+# one would be the text dependency the Scraping Rules forbid, while noticing
+# that the list is no longer identical is not. `barText` is carried for
+# diagnostics only and no decision reads it.
+POST_ACTION_SIGNALS_JS = (
+    r"""
+((postId) => {
+"""
+    + _VISIBLE_FN_JS
+    + _FIND_POST_ROOT_FN_JS
+    + _FIND_ACTION_BAR_FN_JS
+    + r"""
+  const main = document.querySelector('main');
+  if (!main) return {hasMain: false};
+  const root = findPostRoot(postId);
+  if (!root) return {hasMain: true, hasRoot: false};
+  const found = findActionBar(root);
+  const editors = Array.from(root.querySelectorAll(
+    '[role="textbox"][contenteditable="true"]'
+  )).filter(visible);
+  const counts = Array.from(root.querySelectorAll('button, a'))
+    .filter(visible)
+    .map(element => (element.innerText || '').trim());
+  return {
+    hasMain: true,
+    hasRoot: true,
+    hasBar: !!found,
+    barButtonCount: found ? found.bar.querySelectorAll('button').length : 0,
+    reactPressed: found
+      ? (found.toggle.getAttribute('aria-pressed') || '').toLowerCase() === 'true'
+      : null,
+    reactDisabled: found
+      ? found.toggle.disabled ||
+        (found.toggle.getAttribute('aria-disabled') || '').toLowerCase() === 'true'
+      : null,
+    hasRepostOpener: found
+      ? !!found.bar.querySelector('button[aria-expanded]')
+      : false,
+    editorCount: editors.length,
+    barText: found ? (found.bar.innerText || '') : '',
+    counts,
+  };
+})
+"""
+)
+
+# Pin the root post and its controls on the node itself, so every later step
+# is scoped to one subtree that cannot drift. Same technique as the message
+# composer's `__linkedinMcpComposer`, and for the same reason: a re-query
+# between steps can land on a different post after the feed rerenders.
+PIN_POST_ROOT_JS = (
+    r"""
+((postId) => {
+"""
+    + _VISIBLE_FN_JS
+    + _FIND_POST_ROOT_FN_JS
+    + _FIND_ACTION_BAR_FN_JS
+    + r"""
+  const root = findPostRoot(postId);
+  if (!root) return null;
+  const found = findActionBar(root);
+  if (!found) return null;
+  root.__linkedinMcpPost = {
+    postId: String(postId),
+    bar: found.bar,
+    toggle: found.toggle,
+    opener: found.bar.querySelector('button[aria-expanded]'),
+  };
+  return root;
+})
+"""
+)
+
+# Click the pinned reaction toggle. Re-verifies the pin and the pressed state
+# inside the same tick as the click: a toggle already pressed would *remove*
+# the reaction, which is the one way this flow could undo something the
+# account meant to keep.
+CLICK_REACT_TOGGLE_JS = r"""
+((arg) => {
+  const pinned = arg.root?.__linkedinMcpPost;
+  if (!pinned || !arg.root.isConnected) return 'unpinned';
+  const toggle = pinned.toggle;
+  if (!toggle.isConnected || !arg.root.contains(toggle)) return 'unpinned';
+  if (
+    toggle.disabled ||
+    (toggle.getAttribute('aria-disabled') || '').toLowerCase() === 'true'
+  ) {
+    return 'disabled';
+  }
+  if ((toggle.getAttribute('aria-pressed') || '').toLowerCase() === 'true') {
+    return 'already_pressed';
+  }
+  toggle.click();
+  return 'clicked';
+})
+"""
+
+# Read the reaction flyout that hovering the toggle opens.
+#
+# Searched document-wide because the flyout is portal-mounted outside the post
+# container, then narrowed to the *smallest* container holding exactly the
+# expected number of labelled, visible controls. `aria-label` presence is
+# required on each one and its value is never read — that is what makes this
+# work identically on a German page.
+READ_REACTION_FLYOUT_JS = (
+    r"""
+((expected) => {
+"""
+    + _VISIBLE_FN_JS
+    + r"""
+  const controls = Array.from(document.querySelectorAll(
+    'button[aria-label], [role="menuitem"][aria-label]'
+  )).filter(visible);
+  const containers = new Set();
+  for (const control of controls) {
+    let element = control.parentElement;
+    while (element) {
+      containers.add(element);
+      element = element.parentElement;
+    }
+  }
+  const matching = Array.from(containers).filter(container => {
+    const owned = controls.filter(control => container.contains(control));
+    return owned.length === expected;
+  });
+  if (matching.length === 0) return {count: 0};
+  const smallest = matching.filter(
+    container => !matching.some(other => other !== container && container.contains(other))
+  );
+  if (smallest.length !== 1) return {count: -1};
+  return {
+    count: expected,
+    labels: controls
+      .filter(control => smallest[0].contains(control))
+      .map(control => !!control.getAttribute('aria-label')),
+  };
+})
+"""
+)
+
+# Click one reaction by index, re-deriving the flyout in the same tick and
+# refusing unless the count still matches. See _REACTION_ORDER for why the
+# count is the whole safety argument here.
+CLICK_REACTION_JS = (
+    r"""
+((arg) => {
+"""
+    + _VISIBLE_FN_JS
+    + r"""
+  const controls = Array.from(document.querySelectorAll(
+    'button[aria-label], [role="menuitem"][aria-label]'
+  )).filter(visible);
+  const containers = new Set();
+  for (const control of controls) {
+    let element = control.parentElement;
+    while (element) {
+      containers.add(element);
+      element = element.parentElement;
+    }
+  }
+  const matching = Array.from(containers).filter(container => {
+    const owned = controls.filter(control => container.contains(control));
+    return owned.length === arg.expected;
+  });
+  const smallest = matching.filter(
+    container => !matching.some(other => other !== container && container.contains(other))
+  );
+  if (smallest.length !== 1) return false;
+  const owned = controls.filter(control => smallest[0].contains(control));
+  if (owned.length !== arg.expected) return false;
+  const target = owned[arg.index];
+  if (!target || !target.isConnected) return false;
+  target.click();
+  return true;
+})
+"""
+)
+
+# Open the repost menu from the pinned `aria-expanded` opener.
+OPEN_REPOST_MENU_JS = r"""
+((arg) => {
+  const pinned = arg.root?.__linkedinMcpPost;
+  if (!pinned || !arg.root.isConnected) return 'unpinned';
+  const opener = pinned.opener;
+  if (!opener || !opener.isConnected || !arg.root.contains(opener)) return 'unpinned';
+  if (
+    opener.disabled ||
+    (opener.getAttribute('aria-disabled') || '').toLowerCase() === 'true'
+  ) {
+    return 'disabled';
+  }
+  opener.click();
+  return 'clicked';
+})
+"""
+
+# Read, then click, one item of the open repost menu. The menu is portal
+# mounted, so it is found by role rather than by containment in the post.
+READ_REPOST_MENU_JS = (
+    r"""
+(() => {
+"""
+    + _VISIBLE_FN_JS
+    + r"""
+  const menus = Array.from(document.querySelectorAll('[role="menu"]')).filter(visible);
+  if (menus.length !== 1) return {menus: menus.length, items: 0};
+  const items = Array.from(menus[0].querySelectorAll(
+    '[role="menuitem"], button'
+  )).filter(visible);
+  return {menus: 1, items: items.length};
+})
+"""
+)
+
+CLICK_REPOST_MENU_ITEM_JS = (
+    r"""
+((arg) => {
+"""
+    + _VISIBLE_FN_JS
+    + r"""
+  const menus = Array.from(document.querySelectorAll('[role="menu"]')).filter(visible);
+  if (menus.length !== 1) return false;
+  const items = Array.from(menus[0].querySelectorAll(
+    '[role="menuitem"], button'
+  )).filter(visible);
+  if (items.length !== arg.expected) return false;
+  const target = items[arg.index];
+  if (!target || !target.isConnected) return false;
+  target.click();
+  return true;
+})
+"""
+)
+
+# Pin one editor and the single submit button that belongs to its form, then
+# insert the text. `insertText` rather than `fill` keeps the input path the
+# same one the message composer uses, which is the path LinkedIn's editor
+# listens to; a direct `textContent` write leaves the editor's own state
+# thinking it is still empty and the submit button disabled.
+INSERT_TEXT_JS = (
+    r"""
+((arg) => {
+"""
+    + _VISIBLE_FN_JS
+    + r"""
+  const scope = arg.scope || document;
+  const editors = Array.from(
+    scope.querySelectorAll('[role="textbox"][contenteditable="true"]')
+  ).filter(visible);
+  if (editors.length !== 1) return 'ambiguous_editor';
+  const editor = editors[0];
+  if ((editor.innerText || '').trim()) return 'draft_present';
+  editor.focus();
+  if (document.activeElement !== editor) return 'not_focusable';
+  const inserted = document.execCommand('insertText', false, arg.text);
+  if (!inserted) return 'insert_failed';
+  if ((editor.innerText || editor.textContent || '') !== arg.text) {
+    return 'text_mismatch';
+  }
+  editor.__linkedinMcpOwnedText = arg.text;
+  return 'inserted';
+})
+"""
+)
+
+# Submit the pinned editor by clicking the one enabled submit control in its
+# nearest form-like ancestor. Exactly one, or it refuses: a second candidate
+# is how a click lands on something other than the submit for this editor.
+SUBMIT_EDITOR_JS = (
+    r"""
+((arg) => {
+"""
+    + _VISIBLE_FN_JS
+    + r"""
+  const scope = arg.scope || document;
+  const editors = Array.from(
+    scope.querySelectorAll('[role="textbox"][contenteditable="true"]')
+  ).filter(visible);
+  if (editors.length !== 1) return 'ambiguous_editor';
+  const editor = editors[0];
+  if (editor.__linkedinMcpOwnedText !== arg.text) return 'not_owned';
+  let owner = editor.parentElement;
+  while (owner && !owner.matches('form, dialog, [role="dialog"]')) {
+    owner = owner.parentElement;
+  }
+  owner = owner || scope;
+  const buttons = Array.from(
+    owner.querySelectorAll('button[type="submit"], button')
+  ).filter(button =>
+    visible(button) &&
+    !button.disabled &&
+    (button.getAttribute('aria-disabled') || '').toLowerCase() !== 'true' &&
+    !button.hasAttribute('aria-expanded') &&
+    !button.hasAttribute('aria-pressed')
+  );
+  const submits = buttons.filter(button => button.type === 'submit');
+  const candidates = submits.length > 0 ? submits : buttons;
+  if (candidates.length !== 1) return 'ambiguous_submit';
+  candidates[0].click();
+  return 'submitted';
+})
+"""
+)
+
+# Whether the submitted text is now rendered inside the post as a unit that
+# was not there before. `baseline` is the count of matching units taken just
+# before the submit, so an identical earlier comment cannot be mistaken for
+# this one.
+COUNT_TEXT_UNITS_JS = (
+    r"""
+((arg) => {
+"""
+    + _VISIBLE_FN_JS
+    + r"""
+  const root = arg.root;
+  if (!root || !root.isConnected) return -1;
+  const elements = Array.from(root.querySelectorAll('*')).filter(visible);
+  const matches = elements.filter(
+    element => (element.innerText || '').trim() === arg.text
+  );
+  const smallest = matches.filter(
+    element => !matches.some(other => other !== element && element.contains(other))
+  );
+  return smallest.length;
+})
+"""
+)
+
+
+def _entity_id(permalink: str) -> str | None:
+    """The numeric post id carried by a canonical permalink."""
+    for pattern in (_URN_ID, _SLUG_ID):
+        if match := pattern.search(permalink):
+            return match.group(1)
+    return None
+
+
+class PostActions:
+    """React to, comment on and repost one LinkedIn post."""
+
+    def __init__(self, session: ScrapingSession, navigator: PageNavigator):
+        self._session = session
+        self._navigator = navigator
+
+    async def _open_post(
+        self, post: str
+    ) -> tuple[str, str, dict[str, Any]] | dict[str, Any]:
+        """Navigate to a post permalink and read its action signals.
+
+        Returns ``(permalink, post_id, signals)`` when the page resolved to
+        exactly one post with a usable action bar, or a refusal result. The two
+        are told apart by ``isinstance(..., dict)`` at each call site, which is
+        unambiguous because the success case is a tuple.
+        """
+        permalink = normalize_post_reference(post)
+        post_id = _entity_id(permalink)
+        if post_id is None:
+            # Unreachable through `normalize_post_reference`, which only
+            # returns the two shapes both patterns read. Kept because the
+            # alternative to a refusal here is a DOM search for `:None`.
+            return post_action_result(
+                permalink,
+                "post_not_found",
+                "Could not read a post id from that permalink.",
+            )
+
+        await self._navigator._navigate_to_page(permalink)
+        await self._session.check_rate_limit()
+
+        signals = await self._read_signals(post_id)
+        if not signals.get("hasMain"):
+            return post_action_result(
+                permalink,
+                "post_unavailable",
+                "That permalink did not load a post page.",
+            )
+        if not signals.get("hasRoot"):
+            return post_action_result(
+                permalink,
+                "post_not_found",
+                "Could not find exactly one post matching that permalink on the "
+                "page. The post may be deleted, restricted to an audience this "
+                "account is not in, or rendered twice as a reshare.",
+            )
+        if not signals.get("hasBar"):
+            return post_action_result(
+                permalink,
+                "actions_unavailable",
+                "That post rendered without a usable action bar, so this "
+                "account may not be allowed to engage with it.",
+            )
+        return permalink, post_id, signals
+
+    async def _read_signals(self, post_id: str) -> dict[str, Any]:
+        """Read the locale-independent structural signals for one post."""
+        data = await self._session.page.evaluate(POST_ACTION_SIGNALS_JS, post_id)
+        return data if isinstance(data, dict) else {"hasMain": False}
+
+    async def _pin_root(self, post_id: str) -> ElementHandle | None:
+        """Pin the root post node and its controls, or ``None``.
+
+        ``as_element`` is what distinguishes a pinned node from the program
+        answering null, and it is also what makes the result an
+        ``ElementHandle``, so the reaction path can hover a control inside it
+        without going back through a selector that could match a comment.
+        """
+        handle = await self._session.page.evaluate_handle(PIN_POST_ROOT_JS, arg=post_id)
+        element = handle.as_element()
+        if element is None:
+            await handle.dispose()
+            return None
+        return element
+
+    async def react_to_post(
+        self,
+        post: str,
+        *,
+        reaction: str = "like",
+    ) -> dict[str, Any]:
+        """Add a reaction to a post, without ever removing an existing one."""
+        if reaction not in _REACTION_ORDER:
+            return post_action_result(
+                "",
+                "invalid_reaction",
+                f"reaction must be one of {', '.join(_REACTION_ORDER)}.",
+                reaction=reaction,
+            )
+
+        opened = await self._open_post(post)
+        if isinstance(opened, dict):
+            return opened
+        permalink, post_id, signals = opened
+
+        if signals.get("reactPressed"):
+            # Clicking a pressed toggle retracts the reaction. A caller asking
+            # for a reaction never means that, so this is a success-shaped
+            # no-op rather than a toggle.
+            return post_action_result(
+                permalink,
+                "already_reacted",
+                "This account has already reacted to that post. Reacting again "
+                "would remove the reaction, so nothing was clicked.",
+                reaction=reaction,
+            )
+        if signals.get("reactDisabled"):
+            return post_action_result(
+                permalink,
+                "actions_unavailable",
+                "The reaction control is disabled on that post.",
+                reaction=reaction,
+            )
+
+        root = await self._pin_root(post_id)
+        if root is None:
+            return post_action_result(
+                permalink,
+                "post_not_found",
+                "The post changed while it was being read; nothing was clicked.",
+                reaction=reaction,
+            )
+        try:
+            if reaction == "like":
+                return await self._react_default(root, permalink, post_id, reaction)
+            return await self._react_specific(root, permalink, post_id, reaction)
+        finally:
+            await root.dispose()
+
+    async def _react_default(
+        self,
+        root: ElementHandle,
+        permalink: str,
+        post_id: str,
+        reaction: str,
+    ) -> dict[str, Any]:
+        """Click the reaction toggle itself, which is the default reaction."""
+        outcome = await self._session.page.evaluate(
+            CLICK_REACT_TOGGLE_JS, {"root": root}
+        )
+        if outcome != "clicked":
+            return post_action_result(
+                permalink,
+                "already_reacted" if outcome == "already_pressed" else "react_failed",
+                {
+                    "already_pressed": "This account has already reacted to that post.",
+                    "disabled": "The reaction control is disabled on that post.",
+                    "unpinned": "The post changed while it was being acted on.",
+                }.get(str(outcome), "Could not click the reaction control."),
+                reaction=reaction,
+            )
+        return await self._confirm_reaction(permalink, post_id, reaction)
+
+    async def _react_specific(
+        self,
+        root: ElementHandle,
+        permalink: str,
+        post_id: str,
+        reaction: str,
+    ) -> dict[str, Any]:
+        """Open the reaction flyout and pick one reaction by index."""
+        # Hovered through the pinned handle rather than a fresh selector. A
+        # `main button[aria-pressed]` query would also match every comment's
+        # own toggle, and the first one in the document is only the post's
+        # while the post happens to render above its comments.
+        toggle = (
+            await root.evaluate_handle("node => node.__linkedinMcpPost.toggle")
+        ).as_element()
+        if toggle is None:
+            return post_action_result(
+                permalink,
+                "post_not_found",
+                "The post changed while it was being acted on.",
+                reaction=reaction,
+            )
+        try:
+            await toggle.hover(timeout=_FLYOUT_TIMEOUT)
+        except Exception:
+            logger.debug("Reaction flyout hover failed", exc_info=True)
+            return post_action_result(
+                permalink,
+                "reaction_picker_unavailable",
+                "Could not open the reaction picker.",
+                reaction=reaction,
+            )
+        finally:
+            await toggle.dispose()
+
+        flyout = await self._wait_for_flyout()
+        if flyout is None:
+            return post_action_result(
+                permalink,
+                "reaction_picker_unavailable",
+                "The reaction picker did not open, so no reaction was set. Ask "
+                'for "like" instead to click the default control directly.',
+                reaction=reaction,
+            )
+        if flyout != len(_REACTION_ORDER):
+            return post_action_result(
+                permalink,
+                "reaction_picker_changed",
+                f"The reaction picker offered {flyout} controls rather than "
+                f"{len(_REACTION_ORDER)}, so the position of "
+                f'"{reaction}" cannot be trusted and nothing was clicked.',
+                reaction=reaction,
+            )
+
+        clicked = await self._session.page.evaluate(
+            CLICK_REACTION_JS,
+            {
+                "expected": len(_REACTION_ORDER),
+                "index": _REACTION_ORDER.index(reaction),
+            },
+        )
+        if not clicked:
+            return post_action_result(
+                permalink,
+                "react_failed",
+                "The reaction picker changed before the reaction was clicked.",
+                reaction=reaction,
+            )
+        return await self._confirm_reaction(permalink, post_id, reaction)
+
+    async def _wait_for_flyout(self) -> int | None:
+        """The control count of the reaction flyout once it renders."""
+        deadline = _FLYOUT_TIMEOUT / 1000
+        waited = 0.0
+        last: int | None = None
+        while waited < deadline:
+            data = await self._session.page.evaluate(
+                READ_REACTION_FLYOUT_JS, len(_REACTION_ORDER)
+            )
+            if isinstance(data, dict):
+                count = int(data.get("count") or 0)
+                if count == len(_REACTION_ORDER):
+                    return count
+                last = count if count else last
+            await asyncio.sleep(_CONFIRM_POLL)
+            waited += _CONFIRM_POLL
+        return last
+
+    async def _confirm_reaction(
+        self,
+        permalink: str,
+        post_id: str,
+        reaction: str,
+    ) -> dict[str, Any]:
+        """Confirm a reaction by the toggle's own pressed state."""
+        deadline = _CONFIRM_TIMEOUT / 1000
+        waited = 0.0
+        while waited < deadline:
+            signals = await self._read_signals(post_id)
+            if signals.get("reactPressed"):
+                return post_action_result(
+                    permalink,
+                    "reacted",
+                    f'Reacted with "{reaction}".',
+                    acted=True,
+                    retry_safe=False,
+                    reaction=reaction,
+                )
+            await asyncio.sleep(_CONFIRM_POLL)
+            waited += _CONFIRM_POLL
+        return post_action_result(
+            permalink,
+            "react_unconfirmed",
+            "The reaction was clicked but the control never reported itself as "
+            "pressed. Check the post before retrying: a retry may remove a "
+            "reaction that did land.",
+            retry_safe=False,
+            reaction=reaction,
+        )
+
+    async def comment_on_post(
+        self,
+        post: str,
+        comment: str,
+        *,
+        confirm_comment: bool,
+    ) -> dict[str, Any]:
+        """Publish a comment on a post, gated on explicit confirmation."""
+        opened = await self._open_post(post)
+        if isinstance(opened, dict):
+            return opened
+        permalink, post_id, signals = opened
+
+        editor = await self._wait_for_editor(post_id)
+        if editor != 1:
+            return post_action_result(
+                permalink,
+                "comment_box_unavailable" if editor == 0 else "comment_box_ambiguous",
+                "No single comment editor is available on that post. Comments "
+                "may be turned off, or restricted to the author's connections."
+                if editor == 0
+                else f"Found {editor} comment editors on that post, so none was used.",
+            )
+
+        if not confirm_comment:
+            return post_action_result(
+                permalink,
+                "confirmation_required",
+                "Set confirm_comment=true to publish this comment. The post was "
+                "loaded and a comment editor was found; nothing was typed.",
+            )
+
+        root = await self._pin_root(post_id)
+        if root is None:
+            return post_action_result(
+                permalink,
+                "post_not_found",
+                "The post changed while it was being read; nothing was typed.",
+            )
+        try:
+            return await self._write_and_submit(
+                root,
+                permalink,
+                comment,
+                scoped_to_root=True,
+                success_status="commented",
+                unconfirmed_status="comment_unconfirmed",
+                noun="comment",
+            )
+        finally:
+            await root.dispose()
+
+    async def _wait_for_editor(self, post_id: str) -> int:
+        """How many comment editors the post shows, once it has settled."""
+        deadline = _EDITOR_TIMEOUT / 1000
+        waited = 0.0
+        count = 0
+        while waited < deadline:
+            signals = await self._read_signals(post_id)
+            count = int(signals.get("editorCount") or 0)
+            if count == 1:
+                return 1
+            await asyncio.sleep(_CONFIRM_POLL)
+            waited += _CONFIRM_POLL
+        return count
+
+    async def repost_post(
+        self,
+        post: str,
+        *,
+        confirm_repost: bool,
+        commentary: str | None = None,
+    ) -> dict[str, Any]:
+        """Repost a post, with or without commentary, gated on confirmation."""
+        opened = await self._open_post(post)
+        if isinstance(opened, dict):
+            return opened
+        permalink, post_id, signals = opened
+
+        if not signals.get("hasRepostOpener"):
+            return post_action_result(
+                permalink,
+                "repost_unavailable",
+                "That post has no repost control, so this account may not be "
+                "allowed to reshare it.",
+            )
+
+        if not confirm_repost:
+            return post_action_result(
+                permalink,
+                "confirmation_required",
+                "Set confirm_repost=true to publish this repost. The post was "
+                "loaded and a repost control was found; no menu was opened.",
+            )
+
+        root = await self._pin_root(post_id)
+        if root is None:
+            return post_action_result(
+                permalink,
+                "post_not_found",
+                "The post changed while it was being read; nothing was clicked.",
+            )
+        try:
+            opened_menu = await self._session.page.evaluate(
+                OPEN_REPOST_MENU_JS, {"root": root}
+            )
+            if opened_menu != "clicked":
+                return post_action_result(
+                    permalink,
+                    "repost_unavailable",
+                    "Could not open the repost menu."
+                    if opened_menu != "disabled"
+                    else "The repost control is disabled on that post.",
+                )
+
+            items = await self._wait_for_repost_menu()
+            if items != _REPOST_MENU_ITEMS:
+                await self._dismiss_overlay()
+                return post_action_result(
+                    permalink,
+                    "repost_menu_changed",
+                    f"The repost menu offered {items} items rather than "
+                    f"{_REPOST_MENU_ITEMS}, so which one reposts immediately "
+                    "cannot be trusted and nothing was clicked.",
+                )
+
+            index = 1 if commentary is not None else 0
+            clicked = await self._session.page.evaluate(
+                CLICK_REPOST_MENU_ITEM_JS,
+                {"expected": _REPOST_MENU_ITEMS, "index": index},
+            )
+            if not clicked:
+                await self._dismiss_overlay()
+                return post_action_result(
+                    permalink,
+                    "repost_failed",
+                    "The repost menu changed before an item was clicked.",
+                )
+
+            if commentary is None:
+                return await self._confirm_repost(
+                    permalink, post_id, list(signals.get("counts") or [])
+                )
+            return await self._write_and_submit(
+                root,
+                permalink,
+                commentary,
+                scoped_to_root=False,
+                success_status="reposted",
+                unconfirmed_status="repost_unconfirmed",
+                noun="repost",
+            )
+        finally:
+            await root.dispose()
+
+    async def _wait_for_repost_menu(self) -> int:
+        """How many items the open repost menu holds."""
+        deadline = _FLYOUT_TIMEOUT / 1000
+        waited = 0.0
+        items = 0
+        while waited < deadline:
+            data = await self._session.page.evaluate(READ_REPOST_MENU_JS)
+            if isinstance(data, dict) and data.get("menus") == 1:
+                items = int(data.get("items") or 0)
+                if items == _REPOST_MENU_ITEMS:
+                    return items
+            await asyncio.sleep(_CONFIRM_POLL)
+            waited += _CONFIRM_POLL
+        return items
+
+    async def _write_and_submit(
+        self,
+        root: ElementHandle,
+        permalink: str,
+        text: str,
+        *,
+        scoped_to_root: bool,
+        success_status: str,
+        unconfirmed_status: str,
+        noun: str,
+    ) -> dict[str, Any]:
+        """Type text into the one available editor and submit it.
+
+        ``scoped_to_root`` is the difference between a comment, whose editor
+        lives inside the post, and a repost commentary, whose editor lives in
+        a portal-mounted dialog outside it.
+        """
+        page = self._session.page
+        if not scoped_to_root:
+            try:
+                await page.locator(_DIALOG_SELECTOR).first.wait_for(
+                    state="visible", timeout=_EDITOR_TIMEOUT
+                )
+            except Exception:
+                return post_action_result(
+                    permalink,
+                    "repost_composer_unavailable",
+                    "The repost composer did not open, so nothing was typed.",
+                )
+
+        scope: Any = root if scoped_to_root else None
+        baseline = await page.evaluate(
+            COUNT_TEXT_UNITS_JS, {"root": root, "text": text.strip()}
+        )
+
+        inserted = await page.evaluate(INSERT_TEXT_JS, {"scope": scope, "text": text})
+        if inserted != "inserted":
+            if not scoped_to_root:
+                await self._dismiss_overlay()
+            return post_action_result(
+                permalink,
+                "draft_present" if inserted == "draft_present" else "write_failed",
+                {
+                    "ambiguous_editor": f"Could not find exactly one {noun} editor.",
+                    "draft_present": f"The {noun} editor already holds a draft, "
+                    "which was left untouched.",
+                    "not_focusable": f"The {noun} editor could not take focus.",
+                    "insert_failed": f"The {noun} text could not be inserted.",
+                    "text_mismatch": f"The {noun} editor did not hold the exact "
+                    "text after insertion.",
+                }.get(str(inserted), f"Could not write the {noun}."),
+            )
+
+        submitted = await page.evaluate(
+            SUBMIT_EDITOR_JS, {"scope": scope, "text": text}
+        )
+        if submitted != "submitted":
+            if not scoped_to_root:
+                await self._dismiss_overlay()
+            return post_action_result(
+                permalink,
+                "submit_unavailable",
+                {
+                    "ambiguous_editor": f"Could not find exactly one {noun} editor "
+                    "at submit time.",
+                    "not_owned": f"The {noun} editor no longer held this text.",
+                    "ambiguous_submit": "Found more than one enabled submit "
+                    f"control for the {noun}, so none was clicked.",
+                }.get(str(submitted), f"Could not submit the {noun}."),
+                retry_safe=True,
+            )
+
+        return await self._confirm_text(
+            root,
+            permalink,
+            text,
+            baseline=int(baseline) if isinstance(baseline, int) else 0,
+            success_status=success_status,
+            unconfirmed_status=unconfirmed_status,
+            noun=noun,
+        )
+
+    async def _confirm_text(
+        self,
+        root: ElementHandle,
+        permalink: str,
+        text: str,
+        *,
+        baseline: int,
+        success_status: str,
+        unconfirmed_status: str,
+        noun: str,
+    ) -> dict[str, Any]:
+        """Confirm submitted text by a new matching unit inside the post."""
+        deadline = _CONFIRM_TIMEOUT / 1000
+        waited = 0.0
+        while waited < deadline:
+            count = await self._session.page.evaluate(
+                COUNT_TEXT_UNITS_JS, {"root": root, "text": text.strip()}
+            )
+            if isinstance(count, int) and count > baseline:
+                return post_action_result(
+                    permalink,
+                    success_status,
+                    f"The {noun} was published and is rendered on the post.",
+                    acted=True,
+                    retry_safe=False,
+                )
+            await asyncio.sleep(_CONFIRM_POLL)
+            waited += _CONFIRM_POLL
+        return post_action_result(
+            permalink,
+            unconfirmed_status,
+            f"The {noun} was submitted but never appeared on the post. Check the "
+            f"post before retrying, as a retry may publish it twice.",
+            retry_safe=False,
+        )
+
+    async def _confirm_repost(
+        self,
+        permalink: str,
+        post_id: str,
+        baseline: list[str],
+    ) -> dict[str, Any]:
+        """Confirm a bare repost by the post's own control text changing.
+
+        The comparison is string inequality against the strings read before
+        the click, never a parsed number: a count renders with locale digit
+        grouping and an abbreviation suffix, so reading a value out of one
+        would be the text dependency this project refuses, while noticing
+        that it is no longer the same string is not.
+        """
+        deadline = _CONFIRM_TIMEOUT / 1000
+        waited = 0.0
+        while waited < deadline:
+            signals = await self._read_signals(post_id)
+            counts = signals.get("counts")
+            if counts and counts != baseline:
+                return post_action_result(
+                    permalink,
+                    "reposted",
+                    "The repost was published and the post's own counts changed.",
+                    acted=True,
+                    retry_safe=False,
+                )
+            await asyncio.sleep(_CONFIRM_POLL)
+            waited += _CONFIRM_POLL
+        return post_action_result(
+            permalink,
+            "repost_unconfirmed",
+            "The repost was clicked but the post's counts never changed. Check "
+            "your own activity before retrying, as a retry may repost twice.",
+            retry_safe=False,
+        )
+
+    async def _dismiss_overlay(self) -> None:
+        """Close any open menu or dialog with Escape."""
+        try:
+            await self._session.page.keyboard.press("Escape")
+            await self._session.page.wait_for_selector(
+                _DIALOG_SELECTOR, state="hidden", timeout=2000
+            )
+        except PlaywrightTimeoutError:
+            pass
+        except Exception:
+            logger.debug("Overlay dismissal failed", exc_info=True)

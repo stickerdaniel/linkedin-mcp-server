@@ -41,6 +41,7 @@ from .support.policy_trace import ScriptedPage, TraceRecorder
 
 
 TOOL_DELEGATES = {
+    "comment_on_post": "comment_on_post",
     "connect_with_person": "connect_with_person",
     "get_company_employees": "get_company_employees",
     "get_company_posts": "extract_page",
@@ -53,6 +54,8 @@ TOOL_DELEGATES = {
     "get_person_profile": "scrape_person",
     "get_saved_jobs": "get_saved_jobs",
     "get_sidebar_profiles": "get_sidebar_profiles",
+    "react_to_post": "react_to_post",
+    "repost_post": "repost_post",
     "search_companies": "search_companies",
     "search_conversations": "search_conversations",
     "search_jobs": "search_jobs",
@@ -96,6 +99,7 @@ async def test_constructor_export_and_dependency_use_the_same_facade(monkeypatch
         "_jobs",
         "_message_sender",
         "_person",
+        "_post_actions",
         "_posts",
     }
     assert set(vars(extractor)) == expected_state
