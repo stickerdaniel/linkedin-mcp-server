@@ -4,10 +4,28 @@ import re
 
 from linkedin_mcp_server.scraping.text import (
     DETAIL_CAPTURE_EN_US,
+    JOB_SEARCH_EN_US,
     strip_conversation_chrome,
     strip_linkedin_noise,
     truncate_linkedin_noise,
 )
+
+
+class TestJobSearchText:
+    def test_a_page_opening_with_the_heading_shows_no_match(self):
+        """Measured text of LinkedIn's substitute for an empty search."""
+        assert JOB_SEARCH_EN_US.shows_no_match(
+            "\n  Jobs you may be interested in\nJump to active job details\n"
+            "MLOps Engineer (H/F/X)"
+        )
+
+    def test_a_result_page_naming_the_heading_later_is_a_result_page(self):
+        assert not JOB_SEARCH_EN_US.shows_no_match(
+            "founder's associate in France\n28 results\nJobs you may be interested in"
+        )
+
+    def test_empty_text_is_not_a_no_match_page(self):
+        assert not JOB_SEARCH_EN_US.shows_no_match("")
 
 
 class TestDetailCaptureText:
