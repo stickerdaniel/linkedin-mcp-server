@@ -882,18 +882,47 @@ class TestFailingFast:
         profile = _profile(tmp_path)
         config = _config(profile)
         blocked = threading.Event()
+        published = threading.Event()
         release = threading.Event()
+        reader_lock = threading.Lock()
         real_inspect = daemon_module._inspect
+        real_inspect_until = daemon_module._DescriptorInspector.inspect_until
         inspections = 0
+        active_readers = 0
+        max_active_readers = 0
+        first_inspector: daemon_module._DescriptorInspector | None = None
 
         def inspect(*args: object) -> OwnerLookup:
-            nonlocal inspections
-            inspections += 1
-            if inspections == 1:
-                blocked.set()
-                release.wait()
-                return OwnerLookup(state=OwnerState.ABSENT)
-            return real_inspect(*cast(Any, args))
+            nonlocal inspections, active_readers, max_active_readers
+            with reader_lock:
+                inspections += 1
+                inspection = inspections
+                active_readers += 1
+                max_active_readers = max(max_active_readers, active_readers)
+                if active_readers > 1:
+                    release.set()
+            try:
+                if inspection == 1:
+                    blocked.set()
+                    release.wait()
+                    return OwnerLookup(state=OwnerState.ABSENT)
+                return real_inspect(*cast(Any, args))
+            finally:
+                with reader_lock:
+                    active_readers -= 1
+
+        # The retained inspector releases its old reader before the post-publish
+        # lookup. A replacement instead starts a second native reader, whose entry
+        # above releases the first and records the overlap rather than deadlocking.
+        def inspect_until(
+            self: daemon_module._DescriptorInspector, *, timeout: float
+        ) -> OwnerLookup:
+            nonlocal first_inspector
+            if first_inspector is None:
+                first_inspector = self
+            elif published.is_set() and self is first_inspector:
+                release.set()
+            return real_inspect_until(self, timeout=timeout)
 
         def start(
             auth_root: Path,
@@ -902,9 +931,13 @@ class TestFailingFast:
             **_kwargs: object,
         ) -> _Attempt:
             _publish_stale_owner(auth_root, started_profile, started_config)
+            published.set()
             return _Attempt.STARTED
 
         monkeypatch.setattr(daemon_module, "_inspect", inspect)
+        monkeypatch.setattr(
+            daemon_module._DescriptorInspector, "inspect_until", inspect_until
+        )
         monkeypatch.setattr(daemon_module, "_DESCRIPTOR_READ_SECONDS", 0.01)
         monkeypatch.setattr(election_module, "_start_owner", start)
         try:
@@ -921,6 +954,7 @@ class TestFailingFast:
         assert blocked.is_set()
         assert outcome.worth_connecting
         assert inspections == 2
+        assert max_active_readers == 1
 
     def test_a_posix_election_never_waits_for_an_exclusion(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
