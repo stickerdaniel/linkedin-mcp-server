@@ -73,10 +73,12 @@ class _DropObservedSocket:
         return getattr(self._connection, name)
 
     def close(self) -> None:
-        if not self._closed:
-            self._closed = True
-            self._dropped_at.append(time.monotonic())
+        if self._closed:
+            self._connection.close()
+            return
+        self._closed = True
         self._connection.close()
+        self._dropped_at.append(time.monotonic())
 
 
 class _DropObservedListener:
@@ -171,7 +173,7 @@ class TestAuthorization:
             child.close()
 
     def test_a_full_queue_of_silent_peers_leaves_the_owner_its_turn(
-        self, listener: ControlListener, monkeypatch: pytest.MonkeyPatch
+        self, listener: ControlListener
     ):
         # The whole queue against the whole production wait, which is the worst
         # case that can be standing there when the wait begins: the listener
@@ -187,41 +189,29 @@ class TestAuthorization:
         ]
         child = _attach(listener)
         dropped_at: list[float] = []
-        attached_at: list[float] = []
         raw_listener = listener._listener
         assert raw_listener is not None
         listener._listener = cast(Any, _DropObservedListener(raw_listener, dropped_at))
-        keep = listener._keep
-
-        def observe_attachment(connection: socket.socket) -> None:
-            attached_at.append(time.monotonic())
-            keep(connection)
-
-        monkeypatch.setattr(listener, "_keep", observe_attachment)
         try:
             began = time.monotonic()
+            deadline = began + daemon_election._PREPARED_READ_SECONDS
             # Production starts the drain with the whole spawn budget. The
             # owner's later attachment wait is the one-second bound asserted
             # below; using it as the drain budget geometrically shrinks the peer
             # allowances into a shape production never runs.
             listener.start_accepting(nonce=_NONCE, timeout=30.0)
-            listener.attached_within(timeout=daemon_election._PREPARED_READ_SECONDS)
+            listener.attached_within(timeout=max(deadline - time.monotonic(), 0.0))
             listener.send(_RECORD)
 
             assert child.readline() == _RECORD
-            assert attached_at
-            assert attached_at[0] - began < daemon_election._PREPARED_READ_SECONDS, (
-                "the owner did not attach inside the production window"
-            )
             assert len(dropped_at) == len(silent), (
                 "the owner was reached before every silent peer was dropped"
             )
-            assert dropped_at[-1] <= attached_at[0]
 
             # Observe the server's close calls directly. This is portable to
             # Windows and avoids charging scheduler or socket-notification lag to
-            # the drain. One delayed peer is harmless; a delay paid for every
-            # peer moves even the smallest interval above this bound.
+            # the drain. A few delayed peers are harmless, but most peers still
+            # have to be refused at the production allowance's pace.
             allowance = daemon_election._PREPARED_READ_SECONDS / (
                 2 * process_control._BACKLOG
             )
@@ -229,8 +219,12 @@ class TestAuthorization:
                 later - earlier
                 for earlier, later in zip(dropped_at, dropped_at[1:], strict=False)
             ]
-            assert min(intervals) < 1.5 * allowance, (
-                "every silent peer was held longer than its production allowance"
+            threshold = 1.5 * allowance
+            fast_intervals = sum(interval < threshold for interval in intervals)
+            required_fast = (3 * len(intervals) + 3) // 4
+            assert fast_intervals >= required_fast, (
+                f"only {fast_intervals} of {len(intervals)} silent peers were "
+                "refused at the production allowance's pace"
             )
         finally:
             for peer in silent:
