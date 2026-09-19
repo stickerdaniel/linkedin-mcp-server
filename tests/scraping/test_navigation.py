@@ -729,3 +729,71 @@ class TestNavigationFailureCrossesTheToolBoundaryClean:
         # The raw error must not survive as a cause either: the handlers
         # downstream print the whole chain.
         assert excinfo.value.__cause__ is None
+
+
+def _no_prompt_no_barrier():
+    """The ordinary failure path: nothing to resolve, nothing to re-authenticate."""
+    return (
+        patch(
+            "linkedin_mcp_server.scraping.navigation.resolve_remember_me_prompt",
+            new_callable=AsyncMock,
+            return_value=False,
+        ),
+        patch(
+            "linkedin_mcp_server.scraping.navigation.detect_auth_barrier",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+    )
+
+
+class TestHumanizeAfterNavigation:
+    async def test_a_landed_page_gets_cursor_entropy_before_it_is_read(self, mock_page):
+        """After the load and before the auth check, so a frozen cursor is
+        never what the next read sees."""
+        navigator = PageNavigator(ScrapingSession(mock_page))
+        order: list[str] = []
+
+        async def humanize(page):
+            assert page is mock_page
+            order.append("humanize")
+
+        async def barrier(page):
+            order.append("barrier")
+            return None
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.navigation.humanize_after_nav",
+                new=humanize,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.navigation.detect_auth_barrier_quick",
+                new=barrier,
+            ),
+        ):
+            await navigator._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+        assert order == ["humanize", "barrier"]
+
+    async def test_a_failed_navigation_is_not_humanized(self, mock_page):
+        navigator = PageNavigator(ScrapingSession(mock_page))
+        mock_page.goto = AsyncMock(side_effect=Exception("net::ERR_ABORTED"))
+        prompt, barrier = _no_prompt_no_barrier()
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.navigation.humanize_after_nav",
+                new_callable=AsyncMock,
+            ) as humanize,
+            prompt,
+            barrier,
+            pytest.raises(Exception, match="ERR_ABORTED"),
+        ):
+            await navigator._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+        humanize.assert_not_awaited()

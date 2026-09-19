@@ -19,8 +19,10 @@ from linkedin_mcp_server.scraping.capture import (
 )
 from linkedin_mcp_server.scraping.contracts import (
     RATE_LIMITED_SECTION_TEXT,
+    FilterValidationError,
     rate_limited_section_error,
 )
+from linkedin_mcp_server.scraping.facets import FacetResolver
 from linkedin_mcp_server.scraping.fields import PERSON_SECTIONS, _person_section_specs
 from linkedin_mcp_server.scraping.identifiers import (
     normalize_person_identifier,
@@ -187,11 +189,13 @@ class PersonScraper:
         navigator: PageNavigator,
         capture: SectionCapture,
         profile_page: ProfilePageReader,
+        facets: FacetResolver,
     ):
         self._session = session
         self._navigator = navigator
         self._capture = capture
         self._profile_page = profile_page
+        self._facets = facets
 
     async def scrape_person(
         self,
@@ -239,7 +243,7 @@ class PersonScraper:
         try:
             for i, spec in enumerate(requested_ordered):
                 if i > 0:
-                    await self._session.delay(NAV_DELAY)
+                    await self._session.pace(NAV_DELAY)
 
                 section_name = spec.name
                 url = base_url + spec.suffix
@@ -416,7 +420,7 @@ class PersonScraper:
                 continue
 
             if not first_show_all:
-                await self._session.delay(NAV_DELAY)
+                await self._session.pace(NAV_DELAY)
             first_show_all = False
 
             try:
@@ -477,7 +481,12 @@ class PersonScraper:
 
         Args:
             keywords: Free-text query ("software engineer", "recruiter at Google").
-            location: Optional location filter ("New York", "Remote").
+            location: Optional location filter, a free-text country or city name
+                ("Egypt", "United Arab Emirates", "Amsterdam"). It is resolved to
+                LinkedIn's numeric geo id via the site's own location dropdown
+                (see ``FacetResolver.resolve_geo_urn``); a name the dropdown
+                does not recognize raises ``FilterValidationError`` rather than
+                silently returning worldwide results.
             network: Optional connection-degree filter. Each element is one of
                 ``"F"`` (1st-degree), ``"S"`` (2nd-degree), ``"O"`` (3rd-degree
                 and beyond). Example: ``["F"]`` to only return 1st-degree
@@ -495,11 +504,24 @@ class PersonScraper:
         Returns:
             {url, sections: {name: text}}
         """
+        geo_id: str | None = None
+        if location:
+            # LinkedIn ignores a free-text location=; resolve it to the numeric
+            # geoUrn its own dropdown produces, or fail loudly rather than
+            # silently returning an unfiltered (worldwide) result set.
+            geo_id = await self._facets.resolve_geo_urn(location)
+            if not geo_id:
+                raise FilterValidationError(
+                    f"Could not resolve location {location!r} to a LinkedIn "
+                    f"region. Use a country or city name as it appears in "
+                    f"LinkedIn's location dropdown."
+                )
+
         # Builds before it navigates, and the builder refuses a filter
         # LinkedIn would swallow, so an invalid token costs no page load.
         url = build_people_search_url(
             keywords,
-            location=location,
+            geo_id=geo_id,
             network=network,
             current_company=current_company,
         )

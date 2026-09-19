@@ -17,6 +17,7 @@ from linkedin_mcp_server.scraping.contracts import (
     rate_limited_section_error as rate_limited_section_error,
 )
 from linkedin_mcp_server.scraping.conversations import ConversationReader
+from linkedin_mcp_server.scraping.facets import FacetResolver
 from linkedin_mcp_server.scraping.feed import FeedScraper
 from linkedin_mcp_server.scraping.job_pages import JobPageReader
 from linkedin_mcp_server.scraping.jobs import JobScraper
@@ -49,7 +50,8 @@ class LinkedInExtractor:
             session,
             lambda: message_sender._read_profile_message_target(),
         )
-        person = PersonScraper(session, navigator, capture, profile_page)
+        facets = FacetResolver(session, navigator, capture)
+        person = PersonScraper(session, navigator, capture, profile_page, facets)
 
         self._content = content
         self._capture = capture
@@ -63,7 +65,7 @@ class LinkedInExtractor:
             lambda username: self.scrape_person(username, {"main_profile"}),
         )
         job_pages = JobPageReader(session, navigator, content)
-        self._jobs = JobScraper(navigator, capture, job_pages)
+        self._jobs = JobScraper(session, navigator, capture, job_pages)
         self._posts = PostSearch(capture)
         self._conversations = ConversationReader(
             session, navigator, content, profile_page
