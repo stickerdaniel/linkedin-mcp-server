@@ -95,6 +95,41 @@ JOB_IDS_JS = (
 }"""
 )
 
+# The same scope as `JOB_IDS_JS`, since a pane job is not a result either. A
+# card is the largest element around a job link that holds no other job, found
+# by counting ids and not by class, so the classic `<li>` and the redesigned
+# card are both found. Only the label is text, and it comes from the locale
+# table.
+PROMOTED_JOB_IDS_JS = (
+    r"""(opts) => {
+    const {selector, label} = opts;
+"""
+    + _RAIL_PICK_JS
+    + r"""
+    const scope = pickRail() || document;
+    const cardOf = (node) => {
+        let card = node;
+        while (card.parentElement && card.parentElement !== scope
+               && card.parentElement !== document.body
+               && idsIn(card.parentElement) === 1) {
+            card = card.parentElement;
+        }
+        return card;
+    };
+    const seen = new Set();
+    const promoted = [];
+    for (const node of scope.querySelectorAll(selector)) {
+        const id = idOf(node);
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        const lines = (cardOf(node).innerText || '').split('\n')
+            .map((line) => line.trim());
+        if (lines.includes(label)) promoted.push(id);
+    }
+    return promoted;
+}"""
+)
+
 
 @dataclass(frozen=True, slots=True)
 class JobPageCapture:
@@ -197,6 +232,20 @@ class JobPageReader:
                 self._session.page.url,
             )
         return result["ids"]
+
+    async def _extract_promoted_job_ids(self, label: str) -> list[str]:
+        """Ids of the results rail's cards that carry ``label`` as a line.
+
+        Raises when the page answers with anything but a list, so a caller
+        treating this as best effort cannot mistake a failed read for a page
+        without promoted jobs.
+        """
+        result = await self._session.page.evaluate(
+            PROMOTED_JOB_IDS_JS, {"selector": _JOB_CARD_SELECTOR, "label": label}
+        )
+        if not isinstance(result, list):
+            raise TypeError(f"Promoted job ids read returned {type(result).__name__}")
+        return [job_id for job_id in result if isinstance(job_id, str)]
 
     async def _extract_search_page(
         self,

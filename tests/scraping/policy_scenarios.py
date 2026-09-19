@@ -378,9 +378,10 @@ async def _job_search_scenario(route: str = "/jobs/search/") -> dict[str, Any]:
             for index in range(20)
         ],
     ]
-    page.script("evaluate:root_content", _root("Python jobs", references))
+    page.script("evaluate:root_content", _root("Python jobs\n500+ results", references))
     page.script("evaluate:job_total_pages", None)
     page.script("evaluate:job_ids", {"ids": ids, "scoped": True})
+    page.script("evaluate:job_promoted_ids", ["102"])
     extractor = _extractor(page)
     async with boundaries(recorder, clock):
         with recorder.context("search_jobs", "search_results"):
@@ -423,6 +424,8 @@ async def _job_search_upgrade_scenario() -> dict[str, Any]:
         {"ids": ["101"], "scoped": True},
         {"ids": ["101"], "scoped": True},
     )
+    # Read for the first page only: the stopping page has no new ids to flag.
+    page.script("evaluate:job_promoted_ids", [])
     extractor = _extractor(page)
     async with boundaries(recorder, clock):
         with recorder.context("search_jobs", "search_results"):

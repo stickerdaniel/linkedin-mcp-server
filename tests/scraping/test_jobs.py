@@ -1694,6 +1694,324 @@ class TestSearchJobs:
         assert result["job_ids"] == []
         assert result["sections"]["search_results"] == "No matching jobs found"
 
+    async def test_recommendations_in_place_of_results_are_not_results(self, mock_page):
+        """A search matching nothing gets unrelated postings on the same URL.
+
+        Route, keywords and offset all survive, and the cards are real job
+        links, so the postings came back as `job_ids` with nothing to say
+        they were not matches, and a second page repeated them.
+        """
+        scraper = _scraper(mock_page)
+        recommendations = extracted(
+            "Jobs you may be interested in\nJump to active job details\n"
+            "MLOps Engineer (H/F/X)\nShadow"
+        )
+        with (
+            patch.object(
+                scraper._pages,
+                "_extract_search_page",
+                side_effect=self._navigating(mock_page, [recommendations] * 2),
+            ) as mock_extract,
+            patch.object(
+                scraper._pages,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["4458422026", "4458003726"],
+            ) as mock_ids,
+            patch.object(
+                scraper._pages,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await scraper.search_jobs("founder's associate", max_pages=2)
+
+        assert result["job_ids"] == []
+        assert result["sections"] == {}
+        assert "references" not in result
+        error = result["section_errors"]["search_results"]
+        assert error["error_type"] == "no_matching_jobs"
+        assert "founder's associate" in error["error_message"]
+        mock_ids.assert_not_awaited()
+        assert mock_extract.await_count == 1
+
+    async def test_recommendations_after_real_results_end_the_list(self, mock_page):
+        """Past a page of matches, the substitute page is just the end.
+
+        The matches already read are the whole answer, so they are returned
+        without an error, and the recommendations are not appended to them.
+        """
+        scraper = _scraper(mock_page)
+        pages = [
+            extracted("python in France\n1 result\nPython Developer"),
+            extracted("Jobs you may be interested in\nMLOps Engineer (H/F/X)"),
+        ]
+        with (
+            patch.object(
+                scraper._pages,
+                "_extract_search_page",
+                side_effect=self._navigating(mock_page, pages),
+            ) as mock_extract,
+            patch.object(
+                scraper._pages,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["111"],
+            ) as mock_ids,
+            patch.object(
+                scraper._pages,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await scraper.search_jobs("python", max_pages=3)
+
+        assert result["job_ids"] == ["111"]
+        assert result["sections"]["search_results"] == (
+            "python in France\n1 result\nPython Developer"
+        )
+        assert "section_errors" not in result
+        assert mock_ids.await_count == 1
+        assert mock_extract.await_count == 2
+
+    async def test_the_advertised_total_comes_from_the_first_page(self, mock_page):
+        """Every page prints a count, and only the first answers the search.
+
+        LinkedIn's "500+" is a lower bound, so it is reported as one.
+        """
+        scraper = _scraper(mock_page)
+        pages = [
+            extracted("python in France\n500+ results\nPython Developer"),
+            extracted("python in France\n28 results\nData Engineer"),
+        ]
+        with (
+            patch.object(
+                scraper._pages,
+                "_extract_search_page",
+                side_effect=self._navigating(mock_page, pages),
+            ),
+            patch.object(
+                scraper._pages,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                side_effect=[["111"], ["222"]],
+            ),
+            patch.object(
+                scraper._pages,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await scraper.search_jobs("python", max_pages=2)
+
+        assert result["job_ids"] == ["111", "222"]
+        assert result["total"] == {"count": 500, "exact": False}
+
+    async def test_a_page_without_a_count_reports_no_total(self, mock_page):
+        scraper = _scraper(mock_page)
+        with (
+            patch.object(
+                scraper._pages,
+                "_extract_search_page",
+                side_effect=self._navigating(mock_page, [extracted("Job 1")]),
+            ),
+            patch.object(
+                scraper._pages,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["111"],
+            ),
+            patch.object(
+                scraper._pages,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await scraper.search_jobs("python", max_pages=1)
+
+        assert "total" not in result
+
+    async def test_promoted_ids_are_the_flagged_results_in_order(self, mock_page):
+        """Only ids the search returned, whatever else the read reports."""
+        scraper = _scraper(mock_page)
+        with (
+            patch.object(
+                scraper._pages,
+                "_extract_search_page",
+                side_effect=self._navigating(
+                    mock_page, [extracted("Page 1"), extracted("Page 2")]
+                ),
+            ),
+            patch.object(
+                scraper._pages,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                side_effect=[["111", "333"], ["222"]],
+            ),
+            patch.object(
+                scraper._pages,
+                "_extract_promoted_job_ids",
+                new_callable=AsyncMock,
+                side_effect=[["999", "111"], ["222"]],
+            ) as mock_promoted,
+            patch.object(
+                scraper._pages,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await scraper.search_jobs("python", max_pages=2)
+
+        assert result["job_ids"] == ["111", "333", "222"]
+        assert result["promoted_job_ids"] == ["111", "222"]
+        mock_promoted.assert_awaited_with("Promoted")
+
+    async def test_no_promoted_results_is_an_empty_list(self, mock_page):
+        scraper = _scraper(mock_page)
+        with (
+            patch.object(
+                scraper._pages,
+                "_extract_search_page",
+                side_effect=self._navigating(mock_page, [extracted("Page 1")]),
+            ),
+            patch.object(
+                scraper._pages,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["111"],
+            ),
+            patch.object(
+                scraper._pages,
+                "_extract_promoted_job_ids",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch.object(
+                scraper._pages,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await scraper.search_jobs("python", max_pages=1)
+
+        assert result["promoted_job_ids"] == []
+
+    async def test_a_failed_promoted_read_keeps_the_results(self, mock_page):
+        """An empty list would claim nothing was promoted, so the key goes."""
+        scraper = _scraper(mock_page)
+        with (
+            patch.object(
+                scraper._pages,
+                "_extract_search_page",
+                side_effect=self._navigating(mock_page, [extracted("Page 1")]),
+            ),
+            patch.object(
+                scraper._pages,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["111"],
+            ),
+            patch.object(
+                scraper._pages,
+                "_extract_promoted_job_ids",
+                new_callable=AsyncMock,
+                side_effect=PatchrightError("Execution context was destroyed"),
+            ),
+            patch.object(
+                scraper._pages,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await scraper.search_jobs("python", max_pages=1)
+
+        assert result["job_ids"] == ["111"]
+        assert result["sections"]["search_results"] == "Page 1"
+        assert "promoted_job_ids" not in result
+
+    async def test_a_failed_promoted_read_on_a_later_page_drops_the_key(
+        self, mock_page
+    ):
+        """A list covering only the pages that answered reads as complete.
+
+        The failed page's jobs would then pass for jobs nobody promoted.
+        """
+        scraper = _scraper(mock_page)
+        with (
+            patch.object(
+                scraper._pages,
+                "_extract_search_page",
+                side_effect=self._navigating(
+                    mock_page, [extracted("Page 1"), extracted("Page 2")]
+                ),
+            ),
+            patch.object(
+                scraper._pages,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                side_effect=[["111"], ["222"]],
+            ),
+            patch.object(
+                scraper._pages,
+                "_extract_promoted_job_ids",
+                new_callable=AsyncMock,
+                side_effect=[
+                    ["111"],
+                    PatchrightError("Execution context was destroyed"),
+                ],
+            ) as mock_promoted,
+            patch.object(
+                scraper._pages,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await scraper.search_jobs("python", max_pages=2)
+
+        assert result["job_ids"] == ["111", "222"]
+        assert mock_promoted.await_count == 2
+        assert "promoted_job_ids" not in result
+
     async def test_a_login_redirect_raises_an_auth_error(self, mock_page):
         """A login wall reached mid-search is an expired session.
 

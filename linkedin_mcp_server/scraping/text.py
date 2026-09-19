@@ -253,3 +253,61 @@ _SIDEBAR_CHROME_STRINGS: dict[str, SidebarChromeTable] = {
 # collect nothing here, which is why the sidebar is the one workflow whose
 # coverage has to be stated per locale rather than assumed.
 SIDEBAR_CHROME_EN = _SIDEBAR_CHROME_STRINGS["en"]
+
+
+@dataclass(frozen=True)
+class JobSearchTextTable:
+    """Visible-text policy for reading a job search results page."""
+
+    # Headings LinkedIn puts over unrelated postings when a search matches
+    # nothing. That page keeps the search's route and query and its cards are
+    # ordinary job links, so the heading is the only thing separating it from
+    # a result page.
+    no_match_headings: tuple[str, ...]
+    # The result count, matched as a whole line with named groups `count` and
+    # `plus`. It sits in a bare element with no attribute to find it by.
+    result_count_pattern: re.Pattern[str]
+    # A sponsored card's own line. The detail pane says "Promoted by hirer",
+    # which a whole-line match leaves alone.
+    promoted_label: str
+
+    def shows_no_match(self, text: str) -> bool:
+        """Whether a search page's text opens with a no-match heading.
+
+        The first line only: a real result page opens with "<keywords> in
+        <location>", and a posting further down could carry the same words.
+        """
+        first = next((line.strip() for line in text.splitlines() if line.strip()), "")
+        return first in self.no_match_headings
+
+    def result_count(self, text: str) -> tuple[int, bool] | None:
+        """The advertised number of results, and whether it is exact.
+
+        Only the first lines are searched, where both layouts print it: under
+        the heading on the classic page, first on the redesigned one. "500+"
+        is a lower bound, not a count.
+        """
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        for line in lines[:_RESULT_COUNT_LINES]:
+            match = self.result_count_pattern.fullmatch(line)
+            if match:
+                count = int(match.group("count").replace(",", ""))
+                return count, match.group("plus") is None
+        return None
+
+
+_RESULT_COUNT_LINES = 3
+
+_JOB_SEARCH_TEXT: dict[str, JobSearchTextTable] = {
+    "en-US": JobSearchTextTable(
+        no_match_headings=("Jobs you may be interested in",),
+        result_count_pattern=re.compile(
+            r"(?P<count>[0-9]{1,3}(?:,[0-9]{3})*)(?P<plus>\+)? results?"
+        ),
+        promoted_label="Promoted",
+    ),
+}
+
+# Same locale contract as `DETAIL_CAPTURE_EN_US`. A heading the table does not
+# know reads as a result page, which is how every search was read before.
+JOB_SEARCH_EN_US = _JOB_SEARCH_TEXT["en-US"]
