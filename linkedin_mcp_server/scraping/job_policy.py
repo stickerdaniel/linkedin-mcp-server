@@ -69,6 +69,23 @@ def lost_keywords_section_error(asked: str, landed: str) -> dict[str, str]:
     }
 
 
+def no_matching_jobs_section_error(keywords: str) -> dict[str, str]:
+    """The ``section_errors`` entry for a search LinkedIn found nothing for.
+
+    LinkedIn answers it with unrelated postings on the same route and query,
+    and those came back as `job_ids`. They are dropped, and the empty list is
+    explained, because an empty list alone also describes a page that did not
+    render.
+    """
+    return {
+        "error_type": "no_matching_jobs",
+        "error_message": (
+            f"LinkedIn found no jobs matching {keywords!r} and showed unrelated "
+            "recommendations instead, so none are returned."
+        ),
+    }
+
+
 def dropped_offset_section_error(offset: int, landed: str) -> dict[str, str]:
     """The ``section_errors`` entry for a list that cannot be paged further.
 

@@ -31,12 +31,14 @@ from linkedin_mcp_server.scraping.job_policy import (
     dropped_filters_section_error,
     dropped_offset_section_error,
     lost_keywords_section_error,
+    no_matching_jobs_section_error,
     reconcile_search_references,
 )
 from linkedin_mcp_server.scraping.link_metadata import Reference, dedupe_references
 from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.search_urls import build_job_search_url
 from linkedin_mcp_server.scraping.session import NAV_DELAY
+from linkedin_mcp_server.scraping.text import JOB_SEARCH_EN_US, JobSearchTextTable
 
 logger = logging.getLogger(__name__)
 
@@ -57,10 +59,12 @@ class JobScraper:
         navigator: PageNavigator,
         capture: SectionCapture,
         pages: JobPageReader,
+        search_text: JobSearchTextTable = JOB_SEARCH_EN_US,
     ):
         self._navigator = navigator
         self._capture = capture
         self._pages = pages
+        self._search_text = search_text
 
     async def scrape_job(self, job_id: str) -> dict[str, Any]:
         """Scrape a single job posting.
@@ -309,6 +313,9 @@ class JobScraper:
                 # LinkedIn merely renamed would return nothing at all.
                 landed_query = parse_qs(parsed_url.query)
                 asked = parse_qs(urlparse(base_url).query)
+                is_no_match = bool(extracted.text) and self._search_text.shows_no_match(
+                    extracted.text
+                )
                 asked_keywords = asked.get("keywords", [""])[0]
                 landed_keywords = landed_query.get("keywords", [""])[0]
                 if asked_keywords and landed_keywords != asked_keywords:
@@ -333,7 +340,7 @@ class JobScraper:
                     for name in asked
                     if name not in ("keywords", "start") and not landed_query.get(name)
                 )
-                if lost:
+                if lost and not is_no_match:
                     logger.debug(
                         "Search filters %s did not survive navigation to %s",
                         lost,
@@ -360,6 +367,23 @@ class JobScraper:
                     # The route and query survived, so this is a real empty
                     # result rather than a redirect that silently replaced the
                     # search. Do not read ids from a DOM that supplied no text.
+                    break
+
+                if is_no_match:
+                    # LinkedIn's substitute for zero results keeps the route
+                    # and the query, so every check above passes, and its
+                    # cards are real job links. Read as a result page it
+                    # returned unrelated postings as `job_ids`, and a second
+                    # page served the same ones again. After a page of real
+                    # results it only means the list has ended.
+                    logger.debug(
+                        "Search page %d shows recommendations, not results",
+                        page_num + 1,
+                    )
+                    if not all_job_ids:
+                        section_errors["search_results"] = (
+                            no_matching_jobs_section_error(keywords)
+                        )
                     break
 
                 # Read total pages from pagination state (once only, best-effort)

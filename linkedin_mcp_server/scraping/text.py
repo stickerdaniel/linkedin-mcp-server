@@ -253,3 +253,32 @@ _SIDEBAR_CHROME_STRINGS: dict[str, SidebarChromeTable] = {
 # collect nothing here, which is why the sidebar is the one workflow whose
 # coverage has to be stated per locale rather than assumed.
 SIDEBAR_CHROME_EN = _SIDEBAR_CHROME_STRINGS["en"]
+
+
+@dataclass(frozen=True)
+class JobSearchTextTable:
+    """Visible-text policy for reading a job search results page."""
+
+    # Headings LinkedIn puts over unrelated postings when a search matches
+    # nothing. That page keeps the search's route and query and its cards are
+    # ordinary job links, so the heading is the only thing separating it from
+    # a result page.
+    no_match_headings: tuple[str, ...]
+
+    def shows_no_match(self, text: str) -> bool:
+        """Whether a search page's text opens with a no-match heading.
+
+        The first line only: a real result page opens with "<keywords> in
+        <location>", and a posting further down could carry the same words.
+        """
+        first = next((line.strip() for line in text.splitlines() if line.strip()), "")
+        return first in self.no_match_headings
+
+
+_JOB_SEARCH_TEXT: dict[str, JobSearchTextTable] = {
+    "en-US": JobSearchTextTable(no_match_headings=("Jobs you may be interested in",)),
+}
+
+# Same locale contract as `DETAIL_CAPTURE_EN_US`. A heading the table does not
+# know reads as a result page, which is how every search was read before.
+JOB_SEARCH_EN_US = _JOB_SEARCH_TEXT["en-US"]

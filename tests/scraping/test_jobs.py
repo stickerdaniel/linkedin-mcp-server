@@ -1694,6 +1694,151 @@ class TestSearchJobs:
         assert result["job_ids"] == []
         assert result["sections"]["search_results"] == "No matching jobs found"
 
+    async def test_recommendations_in_place_of_results_are_not_results(self, mock_page):
+        """A search matching nothing gets unrelated postings on the same URL.
+
+        Route, keywords and offset all survive, and the cards are real job
+        links, so the postings came back as `job_ids` with nothing to say
+        they were not matches, and a second page repeated them.
+        """
+        scraper = _scraper(mock_page)
+        recommendations = extracted(
+            "Jobs you may be interested in\nJump to active job details\n"
+            "MLOps Engineer (H/F/X)\nShadow"
+        )
+        with (
+            patch.object(
+                scraper._pages,
+                "_extract_search_page",
+                side_effect=self._navigating(mock_page, [recommendations] * 2),
+            ) as mock_extract,
+            patch.object(
+                scraper._pages,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["4458422026", "4458003726"],
+            ) as mock_ids,
+            patch.object(
+                scraper._pages,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await scraper.search_jobs("founder's associate", max_pages=2)
+
+        assert result["job_ids"] == []
+        assert result["sections"] == {}
+        assert "references" not in result
+        error = result["section_errors"]["search_results"]
+        assert error["error_type"] == "no_matching_jobs"
+        assert "founder's associate" in error["error_message"]
+        mock_ids.assert_not_awaited()
+        assert mock_extract.await_count == 1
+
+    async def test_recommendations_after_real_results_end_the_list(self, mock_page):
+        """Past a page of matches, the substitute page is just the end.
+
+        The matches already read are the whole answer, so they are returned
+        without an error, and the recommendations are not appended to them.
+        """
+        scraper = _scraper(mock_page)
+        pages = [
+            extracted("python in France\n1 result\nPython Developer"),
+            extracted("Jobs you may be interested in\nMLOps Engineer (H/F/X)"),
+        ]
+        with (
+            patch.object(
+                scraper._pages,
+                "_extract_search_page",
+                side_effect=self._navigating(mock_page, pages),
+            ) as mock_extract,
+            patch.object(
+                scraper._pages,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["111"],
+            ) as mock_ids,
+            patch.object(
+                scraper._pages,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await scraper.search_jobs("python", max_pages=3)
+
+        assert result["job_ids"] == ["111"]
+        assert result["sections"]["search_results"] == (
+            "python in France\n1 result\nPython Developer"
+        )
+        assert "section_errors" not in result
+        assert mock_ids.await_count == 1
+        assert mock_extract.await_count == 2
+
+    async def test_discarded_recommendations_do_not_warn_about_filters(self, mock_page):
+        """A dropped filter on the discarded substitute page changes no result."""
+        scraper = _scraper(mock_page)
+        pages = iter(
+            [
+                extracted("python in Berlin\n1 result\nPython Developer"),
+                extracted("Jobs you may be interested in\nMLOps Engineer (H/F/X)"),
+            ]
+        )
+        calls = 0
+
+        async def navigate_page(url, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                navigate(mock_page, url)
+            else:
+                navigate(
+                    mock_page,
+                    "https://www.linkedin.com/jobs/search/?keywords=python&start=1",
+                )
+            return captured(mock_page, next(pages))
+
+        with (
+            patch.object(
+                scraper._pages,
+                "_extract_search_page",
+                side_effect=navigate_page,
+            ),
+            patch.object(
+                scraper._pages,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["111"],
+            ) as mock_ids,
+            patch.object(
+                scraper._pages,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await scraper.search_jobs("python", location="Berlin", max_pages=2)
+
+        assert result["job_ids"] == ["111"]
+        assert result["sections"]["search_results"] == (
+            "python in Berlin\n1 result\nPython Developer"
+        )
+        assert "section_errors" not in result
+        assert mock_ids.await_count == 1
+
     async def test_a_login_redirect_raises_an_auth_error(self, mock_page):
         """A login wall reached mid-search is an expired session.
 
