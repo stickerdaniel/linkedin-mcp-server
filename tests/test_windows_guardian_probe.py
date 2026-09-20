@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import json
 import os
 import subprocess
@@ -1575,7 +1576,71 @@ def test_browser_gate_opens_only_after_armed_observation() -> None:
     ]
 
 
-def test_conjunction_requires_the_inherited_file_identity() -> None:
+def test_by_handle_file_information_matches_win32_layout() -> None:
+    fields = probe._ByHandleFileInformation._fields_
+    assert [name for name, _field_type in fields] == [
+        "dwFileAttributes",
+        "ftCreationTime",
+        "ftLastAccessTime",
+        "ftLastWriteTime",
+        "dwVolumeSerialNumber",
+        "nFileSizeHigh",
+        "nFileSizeLow",
+        "nNumberOfLinks",
+        "nFileIndexHigh",
+        "nFileIndexLow",
+    ]
+
+    cursor = 0
+    maximum_alignment = 1
+    expected_offsets: dict[str, int] = {}
+    for name, field_type in fields:
+        alignment = ctypes.alignment(field_type)
+        maximum_alignment = max(maximum_alignment, alignment)
+        cursor = (cursor + alignment - 1) // alignment * alignment
+        expected_offsets[name] = cursor
+        cursor += ctypes.sizeof(field_type)
+    expected_size = (
+        (cursor + maximum_alignment - 1) // maximum_alignment * maximum_alignment
+    )
+
+    assert expected_offsets == {
+        "dwFileAttributes": 0,
+        "ftCreationTime": 4,
+        "ftLastAccessTime": 12,
+        "ftLastWriteTime": 20,
+        "dwVolumeSerialNumber": 28,
+        "nFileSizeHigh": 32,
+        "nFileSizeLow": 36,
+        "nNumberOfLinks": 40,
+        "nFileIndexHigh": 44,
+        "nFileIndexLow": 48,
+    }
+    assert {
+        name: getattr(probe._ByHandleFileInformation, name).offset
+        for name, _field_type in fields
+    } == expected_offsets
+    assert expected_size == 52
+    assert ctypes.sizeof(probe._ByHandleFileInformation) == expected_size
+
+
+def test_file_identity_uses_complete_file_information_fields() -> None:
+    info = probe._ByHandleFileInformation()
+    info.ftCreationTime.dwLowDateTime = 11
+    info.ftLastAccessTime.dwLowDateTime = 22
+    info.ftLastWriteTime.dwLowDateTime = 33
+    info.dwVolumeSerialNumber = 0xAABBCCDD
+    info.nFileIndexHigh = 0x11223344
+    info.nFileIndexLow = 0x55667788
+
+    assert probe._identity_from_file_information(info) == (
+        0xAABBCCDD,
+        0x11223344,
+        0x55667788,
+    )
+
+
+def test_conjunction_requires_self_open_post_lock_identity() -> None:
     require_same_file_identity((1, 2, 3), [1, 2, 3])
     with pytest.raises(RuntimeError, match="same file identity"):
         require_same_file_identity((1, 2, 3), [1, 2, 4])

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ctypes
 import faulthandler
 import importlib
 import json
@@ -25,6 +26,33 @@ _WAIT_ABANDONED = 128
 _WAIT_TIMEOUT = 258
 # Win32 MUTEX_MODIFY_STATE; pywin32 does not export it from win32con.
 _MUTEX_MODIFY_STATE = 0x0001
+
+
+class _FileTime(ctypes.Structure):
+    _fields_ = [
+        ("dwLowDateTime", ctypes.c_uint32),
+        ("dwHighDateTime", ctypes.c_uint32),
+    ]
+
+
+class _ByHandleFileInformation(ctypes.Structure):
+    _fields_ = [
+        ("dwFileAttributes", ctypes.c_uint32),
+        ("ftCreationTime", _FileTime),
+        ("ftLastAccessTime", _FileTime),
+        ("ftLastWriteTime", _FileTime),
+        ("dwVolumeSerialNumber", ctypes.c_uint32),
+        ("nFileSizeHigh", ctypes.c_uint32),
+        ("nFileSizeLow", ctypes.c_uint32),
+        ("nNumberOfLinks", ctypes.c_uint32),
+        ("nFileIndexHigh", ctypes.c_uint32),
+        ("nFileIndexLow", ctypes.c_uint32),
+    ]
+
+
+_get_file_information_by_handle: Any | None = None
+_get_file_information_last_error: Callable[[], int] | None = None
+_get_file_information_error: Callable[[int], BaseException] | None = None
 
 
 def _phase(name: str) -> None:
@@ -1275,39 +1303,54 @@ def probe_conjunction_regions(fd: int) -> tuple[bool, bool]:
         unlock(fd, 0)
 
 
-def file_identity(fd: int) -> tuple[int, int, int]:
-    """Read the stable Windows identity of an open file descriptor."""
-    import ctypes
-    import msvcrt
-    from ctypes import wintypes
+def _file_information_api() -> tuple[
+    Any, Callable[[], int], Callable[[int], BaseException]
+]:
+    global _get_file_information_by_handle
+    global _get_file_information_error
+    global _get_file_information_last_error
 
-    class ByHandleFileInformation(ctypes.Structure):
-        _fields_ = [
-            ("dwFileAttributes", wintypes.DWORD),
-            ("ftCreationTimeLow", wintypes.DWORD),
-            ("ftCreationTimeHigh", wintypes.DWORD),
-            ("dwVolumeSerialNumber", wintypes.DWORD),
-            ("nFileSizeHigh", wintypes.DWORD),
-            ("nFileSizeLow", wintypes.DWORD),
-            ("nNumberOfLinks", wintypes.DWORD),
-            ("nFileIndexHigh", wintypes.DWORD),
-            ("nFileIndexLow", wintypes.DWORD),
+    if _get_file_information_by_handle is None:
+        kernel32 = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
+        get_info = kernel32.GetFileInformationByHandle
+        get_info.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(_ByHandleFileInformation),
         ]
+        get_info.restype = ctypes.c_int32
+        _get_file_information_by_handle = get_info
+        _get_file_information_last_error = getattr(ctypes, "get_last_error")
+        _get_file_information_error = getattr(ctypes, "WinError")
+    assert _get_file_information_last_error is not None
+    assert _get_file_information_error is not None
+    return (
+        _get_file_information_by_handle,
+        _get_file_information_last_error,
+        _get_file_information_error,
+    )
 
-    kernel32 = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
-    get_info = kernel32.GetFileInformationByHandle
-    get_info.argtypes = [wintypes.HANDLE, ctypes.POINTER(ByHandleFileInformation)]
-    get_info.restype = wintypes.BOOL
-    info = ByHandleFileInformation()
-    handle = getattr(msvcrt, "get_osfhandle")(fd)
-    _phase("get-file-information-by-handle")
-    if not get_info(handle, ctypes.byref(info)):
-        raise getattr(ctypes, "WinError")(getattr(ctypes, "get_last_error")())
+
+def _identity_from_file_information(
+    info: _ByHandleFileInformation,
+) -> tuple[int, int, int]:
     return (
         int(info.dwVolumeSerialNumber),
         int(info.nFileIndexHigh),
         int(info.nFileIndexLow),
     )
+
+
+def file_identity(fd: int) -> tuple[int, int, int]:
+    """Read the stable Windows identity of an open file descriptor."""
+    import msvcrt
+
+    get_info, get_last_error, win_error = _file_information_api()
+    info = _ByHandleFileInformation()
+    handle = getattr(msvcrt, "get_osfhandle")(fd)
+    _phase("get-file-information-by-handle")
+    if not get_info(handle, ctypes.byref(info)):
+        raise win_error(get_last_error())
+    return _identity_from_file_information(info)
 
 
 def require_same_file_identity(
