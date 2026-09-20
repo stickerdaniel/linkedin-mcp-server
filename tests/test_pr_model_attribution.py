@@ -34,6 +34,7 @@ def _workflow() -> dict[str, Any]:
             "for review in Claude Code."
         ),
         "Generated with GPT-5.6 for implementation and testing in T3 Code.",
+        "Generated with GPT-5.6 for research and preparation for deployment in T3 Code.",
     ],
 )
 def test_accepts_supported_attribution_forms(line: str) -> None:
@@ -59,6 +60,18 @@ def test_accepts_trailing_blank_lines() -> None:
         ),
         "Generated with GPT-5.6 in Claude Code.",
         "Generated with GPT-5.6 for implementation.",
+        (
+            "Generated with Claude Sonnet 4.5 for implementation and GPT-5.6 for "
+            "in Claude Code."
+        ),
+        (
+            "Generated with Claude Sonnet 4.5 for implementation and  for review "
+            "in Claude Code."
+        ),
+        (
+            "Generated with Claude Sonnet 4.5 for implementation and GPT-5.6 for "
+            "review and Codex for in Claude Code."
+        ),
         "Generated with <model> for <job> in <harness>.",
         "Generated with [model] for [job] in [harness].",
         "",
@@ -103,20 +116,42 @@ def test_template_ends_with_editable_attribution_placeholder() -> None:
 
 def test_workflow_checks_attribution_in_required_job() -> None:
     workflow = _workflow()
-    trigger_types = workflow["on"]["pull_request"]["types"]
+    trigger_types = workflow["on"]["pull_request_target"]["types"]
     job = workflow["jobs"]["check-bot-coauthors"]
-    steps = {step.get("name"): step for step in job["steps"]}
+    ordered_steps = job["steps"]
+    steps = {step.get("name"): step for step in ordered_steps}
 
-    assert "edited" in trigger_types
-    assert steps["Check PR model attribution"]["run"] == (
-        "python scripts/check_pr_model_attribution.py"
+    assert "pull_request" not in workflow["on"]
+    assert trigger_types == ["opened", "synchronize", "reopened", "edited"]
+    assert workflow["permissions"] == {"contents": "read"}
+    assert workflow["concurrency"]["group"] == (
+        "${{ github.workflow }}-${{ github.event.pull_request.number }}"
     )
-    assert steps["Check PR model attribution"]["if"] == (
+
+    checkout = steps["Check out trusted base"]
+    assert checkout["with"]["ref"] == "${{ github.event.pull_request.base.sha }}"
+    assert checkout["with"]["persist-credentials"] is False
+    assert checkout["with"]["fetch-depth"] == 0
+
+    validator = steps["Check PR model attribution"]
+    fetch = steps["Fetch PR head"]
+    assert validator["run"] == "python scripts/check_pr_model_attribution.py"
+    assert validator["if"] == (
         "github.event.pull_request.user.login != 'dependabot[bot]' && "
         "github.event.pull_request.user.login != 'renovate[bot]'"
     )
-    assert "Check for bot Co-Authored-By lines" in steps
-    assert "Check for bot commit authors" in steps
+    assert ordered_steps.index(validator) < ordered_steps.index(fetch)
+    assert fetch["env"]["PR_NUMBER"] == "${{ github.event.pull_request.number }}"
+    assert "refs/pull/${PR_NUMBER}/head" in fetch["run"]
+    assert "git checkout" not in fetch["run"]
+
+    for name in ("Check for bot Co-Authored-By lines", "Check for bot commit authors"):
+        assert steps[name]["env"]["BASE_SHA"] == (
+            "${{ github.event.pull_request.base.sha }}"
+        )
+        assert steps[name]["env"]["HEAD_SHA"] == (
+            "${{ github.event.pull_request.head.sha }}"
+        )
 
 
 def test_failure_emits_actionable_github_annotation(

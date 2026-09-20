@@ -21,6 +21,23 @@ _ERROR = (
 )
 
 
+def _has_valid_model_jobs(attribution: str) -> bool:
+    model, separator, jobs = attribution.partition(" for ")
+    if not separator or not model.strip():
+        return False
+
+    while True:
+        next_for = f"{jobs} ".find(" for ")
+        if next_for == -1:
+            return bool(jobs.strip())
+        next_pair = jobs.rfind(" and ", 0, next_for)
+        if next_pair == -1:
+            return bool(jobs.strip())
+        if not jobs[:next_pair].strip() or not jobs[next_pair + 5 : next_for].strip():
+            return False
+        jobs = jobs[next_for + 5 :]
+
+
 def is_valid_attribution(line: str) -> bool:
     """Return whether a line follows the required attribution grammar."""
     if not line.startswith(_PREFIX) or not line.endswith("."):
@@ -29,11 +46,7 @@ def is_valid_attribution(line: str) -> bool:
         return False
 
     attribution, separator, harness = line[len(_PREFIX) : -1].rpartition(" in ")
-    if not separator or not harness.strip():
-        return False
-
-    model, separator, job = attribution.partition(" for ")
-    return bool(separator and model.strip() and job.strip())
+    return bool(separator and harness.strip() and _has_valid_model_jobs(attribution))
 
 
 def has_model_attribution(body: str | None) -> bool:

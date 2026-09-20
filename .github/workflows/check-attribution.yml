@@ -4,14 +4,17 @@ on:
   # Every pull request, not only those targeting main: a stacked pull request
   # is based on the branch below it, and a trailer that slips through there
   # reaches main when the stack merges.
-  pull_request:
+  pull_request_target:
     types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
 
 # One run per branch, for the same reason as CI: restacking pushes every branch
 # in the stack, and the trailers this reads are a property of the head commit,
 # so a superseded run answers a question nobody is asking any more.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 # Coding agents sign their work either with a Co-Authored-By trailer or by
@@ -31,20 +34,32 @@ jobs:
   check-bot-coauthors:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - name: Check out trusted base
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
+          ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Check PR model attribution
         if: github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.user.login != 'renovate[bot]'
         run: python scripts/check_pr_model_attribution.py
 
+      - name: Fetch PR head
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          case "$PR_NUMBER" in
+            ''|*[!0-9]*) echo "Invalid pull request number"; exit 1 ;;
+          esac
+          git fetch --no-tags origin "refs/pull/${PR_NUMBER}/head"
+
       - name: Check for bot Co-Authored-By lines
         env:
-          BASE_REF: ${{ github.base_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          COMMITS=$(git log --format='%H' "origin/${BASE_REF}..${HEAD_SHA}" 2>/dev/null || true)
+          COMMITS=$(git log --format='%H' "${BASE_SHA}..${HEAD_SHA}" 2>/dev/null || true)
 
           if [ -z "$COMMITS" ]; then
             echo "No commits to check"
@@ -75,14 +90,14 @@ jobs:
 
       - name: Check for bot commit authors
         env:
-          BASE_REF: ${{ github.base_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           # Some agents (Copilot's cloud agent, Jules, Devin) claim the author
           # or committer field instead of adding a trailer, so the check above
           # cannot see them. Written to a file rather than piped so the loop
           # runs in this shell and its result survives.
-          git log --format='%H %ae %ce' "origin/${BASE_REF}..${HEAD_SHA}" > /tmp/authors.txt 2>/dev/null || true
+          git log --format='%H %ae %ce' "${BASE_SHA}..${HEAD_SHA}" > /tmp/authors.txt 2>/dev/null || true
 
           FOUND=0
           while read -r sha author committer; do
