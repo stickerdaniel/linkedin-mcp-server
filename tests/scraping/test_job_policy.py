@@ -1,5 +1,9 @@
 """Tests for the routing and reference policy of the job list workflows."""
 
+from urllib.parse import quote
+
+import pytest
+
 from linkedin_mcp_server.scraping.job_policy import (
     dropped_filters_section_error,
     employer_apply_url,
@@ -187,3 +191,35 @@ class TestEmployerApplyUrl:
     def test_what_is_not_a_web_address_answers_none(self):
         assert employer_apply_url("about:blank") is None
         assert employer_apply_url("chrome-error://chromewebdata/") is None
+
+    @pytest.mark.parametrize(
+        "host",
+        [
+            "127.0.0.1:8000",
+            "localhost:8000",
+            "[::1]",
+            "[::ffff:127.0.0.1]",
+            "169.254.169.254",
+            "10.1.2.3",
+            "192.168.0.1",
+            "172.16.0.1",
+            "box.local",
+            "printer.internal",
+            "intranet",
+            # The loopback written so that `ipaddress` will not read it but
+            # the browser still resolves it.
+            "0177.0.0.1",
+            "0x7f.0.0.1",
+            "2130706433",
+        ],
+    )
+    def test_an_address_that_never_leaves_this_host_is_not_an_employer(self, host):
+        """A posting cannot send the browser at whatever the host can reach."""
+        assert employer_apply_url(f"http://{host}/x") is None
+
+    def test_the_interstitial_does_not_launder_one(self):
+        href = "https://www.linkedin.com/safety/go/?url=" + quote(
+            "http://169.254.169.254/latest/meta-data/", safe=""
+        )
+
+        assert employer_apply_url(href) is None
