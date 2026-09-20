@@ -1186,23 +1186,39 @@ def conjunction_admission(
     """Acquire A then transient B, retaining A only on full admission."""
     if try_lock is None or unlock is None:
         try_lock, unlock = _region_api()
+
+    def rescue_close() -> None:
+        try:
+            close(fd)
+        except BaseException:
+            pass
+
+    def rollback_a(first_error: BaseException | None) -> None:
+        try:
+            unlock(fd, 0)
+        except BaseException as unlock_error:
+            rescue_close()
+            raise first_error or unlock_error
+        if first_error is not None:
+            raise first_error
+
     if not try_lock(fd, 0):
         return False
     try:
         acquired_b = try_lock(fd, 1)
-    except BaseException:
-        unlock(fd, 0)
-        raise
+    except BaseException as lock_error:
+        rollback_a(lock_error)
+        raise AssertionError("A rollback unexpectedly returned")
     if not acquired_b:
-        unlock(fd, 0)
+        rollback_a(None)
         return False
     try:
         unlock(fd, 1)
-    except BaseException:
+    except BaseException as unlock_error:
         # Closing is the only safe rescue when the offset-specific unlock failed:
         # it releases both regions and prevents a caller from treating A as held.
-        close(fd)
-        raise
+        rescue_close()
+        raise unlock_error
     return True
 
 
@@ -1293,6 +1309,63 @@ def zero_proven_release_sequence(
     release_b()
 
 
+def conjunction_guardian_shutdown(
+    result: dict[str, Any],
+    *,
+    active_descendants: Callable[[], int],
+    terminate_job: Callable[[], None],
+    query_job: Callable[[], int],
+    wait_for_retry: Callable[[], None],
+    monotonic: Callable[[], float] = time.monotonic,
+) -> None:
+    result["terminate_attempted"] = True
+    terminate_job()
+    result["terminate_completed"] = True
+    deadline = monotonic() + _DEADLINE_SECONDS
+    result["query_samples"] = []
+    while True:
+        active = query_job()
+        living = active_descendants()
+        result["query_samples"].append(
+            {"active_processes": active, "active_descendants": living}
+        )
+        if active == 0 and living == 0:
+            result["zero_proven"] = True
+            return
+        if monotonic() >= deadline:
+            result["query_timeout"] = True
+            raise TimeoutError("browser Job did not drain before its deadline")
+        wait_for_retry()
+
+
+def run_guardian_fail_closed(
+    *,
+    shutdown: Callable[[], None],
+    publish_failure: Callable[[BaseException], None],
+    hold_failure: Callable[[], None],
+    release_b: Callable[[], None],
+) -> bool:
+    """Run shutdown while reserving B release for the proven-success caller."""
+    _ = release_b
+    try:
+        shutdown()
+    except BaseException as exc:
+        try:
+            publish_failure(exc)
+        finally:
+            hold_failure()
+        raise RuntimeError("the failed conjunction proof resumed unexpectedly") from exc
+    return True
+
+
+def wait_on_unsignaled_throttle(
+    throttle: Any,
+    *,
+    wait: Callable[[Any, int], Any],
+) -> None:
+    wait(throttle, 1)
+
+
 def _inherited_fd(raw_handle: int) -> int:
     import msvcrt
 
@@ -1348,6 +1421,21 @@ def _actor(
             _signal(ready_event)
             _actor_wait(pause_event)
 
+        if mode == "region-probe":
+            acquired_a = try_lock(fd, 0)
+            acquired_b = False
+            if acquired_a:
+                try:
+                    acquired_b = try_lock(fd, 1)
+                    if acquired_b:
+                        unlock(fd, 1)
+                finally:
+                    unlock(fd, 0)
+            result.update({"acquired_a": acquired_a, "acquired_b": acquired_b})
+            _atomic_json(result_file, result)
+            _signal(ready_event)
+            return 0
+
         if mode == "attempt":
             acquired = conjunction_admission(fd, try_lock=try_lock, unlock=unlock)
             result["acquired"] = acquired
@@ -1366,16 +1454,21 @@ def _actor(
             return 0
 
         offset = int(options["offset"])
-        if not try_lock(fd, offset):
-            result["contention"] = True
-            _atomic_json(result_file, result)
-            _signal(ready_event)
-            return 0
-        locked_offset = offset
-
         if mode == "guardian-publish":
-            alive = _is_active(process_handle)
-            result["owner_alive_after_b"] = alive
+            acquired_b = False
+            owner_alive_after_b: bool | None = None
+
+            def acquire_b() -> bool:
+                nonlocal acquired_b, locked_offset
+                acquired_b = try_lock(fd, offset)
+                if acquired_b:
+                    locked_offset = offset
+                return acquired_b
+
+            def owner_alive() -> bool:
+                nonlocal owner_alive_after_b
+                owner_alive_after_b = _is_active(process_handle)
+                return owner_alive_after_b
 
             def release_b() -> None:
                 nonlocal locked_offset
@@ -1389,88 +1482,128 @@ def _actor(
                     _signal(armed_event)
 
             armed = guardian_publication_sequence(
-                acquire_b=lambda: True,
-                owner_alive=lambda: alive,
+                acquire_b=acquire_b,
+                owner_alive=owner_alive,
                 release_b=release_b,
                 publish_armed=publish_armed,
             )
+            result["contention"] = not acquired_b
+            result["owner_alive_after_b"] = owner_alive_after_b
             result["armed"] = armed
+            result["job_authority"] = job is not None
+            result["browser_authority"] = False
             _atomic_json(result_file, result)
             _signal(ready_event)
             if armed and options.get("hold_event"):
                 _actor_wait(options["hold_event"])
             return 0
 
+        if not try_lock(fd, offset):
+            result["contention"] = True
+            _atomic_json(result_file, result)
+            _signal(ready_event)
+            return 0
+        locked_offset = offset
+
         if mode == "guardian-drain":
             identity_name = options.get("identity_mutex")
             identity = win32event.CreateMutex(None, True, identity_name)
             result["identity_mutex"] = identity_name
+            result["fault"] = options.get("fault", "none")
             _atomic_json(result_file, result)
             _signal(ready_event)
             _wait(process_handle, _DEADLINE_SECONDS, "owner did not exit")
-            fault = options.get("fault", "none")
-            if fault == "terminate-error":
-                result["error"] = "terminate-error"
-            else:
+            descendant_handles = [
+                win32api.OpenProcess(win32con.SYNCHRONIZE, False, int(pid))
+                for pid in options["descendant_pids"]
+            ]
+            throttle = win32event.CreateEvent(None, False, False, None)
+            timeout_clock = iter([0.0, _DEADLINE_SECONDS + 1.0])
+
+            def mark_fault(operation: str) -> None:
+                result["fault_operation"] = operation
+                result["fault_injected"] = result["fault"]
+
+            def terminate_job() -> None:
+                if result["fault"] == "terminate-error":
+                    mark_fault("terminate")
+                    raise OSError("injected browser Job termination failure")
                 win32job.TerminateJobObject(job, 201)
-                if fault == "query-error":
-                    result["error"] = "query-error"
-                elif fault == "drain-timeout":
-                    result["error"] = "drain-timeout"
-                else:
-                    descendant_handles = [
-                        win32api.OpenProcess(win32con.SYNCHRONIZE, False, int(pid))
-                        for pid in options["descendant_pids"]
-                    ]
-                    deadline = time.monotonic() + _DEADLINE_SECONDS
-                    while True:
-                        active = int(
-                            win32job.QueryInformationJobObject(
-                                job, win32job.JobObjectBasicAccountingInformation
-                            )["ActiveProcesses"]
+
+            def query_job() -> int:
+                if result["fault"] == "query-error":
+                    mark_fault("query")
+                    raise OSError("injected browser Job query failure")
+                active = int(
+                    win32job.QueryInformationJobObject(
+                        job, win32job.JobObjectBasicAccountingInformation
+                    )["ActiveProcesses"]
+                )
+                if result["fault"] == "drain-timeout":
+                    mark_fault("deadline")
+                    return max(1, active)
+                return active
+
+            def release_b() -> None:
+                nonlocal locked_offset
+                unlock(fd, offset)
+                locked_offset = None
+
+            def publish_failure(exc: BaseException) -> None:
+                result["error_type"] = type(exc).__name__
+                result["error"] = f"{type(exc).__name__}: {exc}"
+                _atomic_json(result_file, result)
+                _signal(options["fault_event"])
+
+            def hold_failure() -> None:
+                threading.Event().wait()
+
+            run_guardian_fail_closed(
+                shutdown=lambda: conjunction_guardian_shutdown(
+                    result,
+                    active_descendants=lambda: sum(
+                        _is_active(handle) for handle in descendant_handles
+                    ),
+                    terminate_job=terminate_job,
+                    query_job=query_job,
+                    wait_for_retry=lambda: wait_on_unsignaled_throttle(
+                        throttle, wait=win32event.WaitForSingleObject
+                    ),
+                    monotonic=(
+                        lambda: (
+                            next(timeout_clock)
+                            if result["fault"] == "drain-timeout"
+                            else time.monotonic()
                         )
-                        if active == 0 and not any(
-                            _is_active(handle) for handle in descendant_handles
-                        ):
-                            break
-                        if time.monotonic() >= deadline:
-                            raise TimeoutError("browser Job did not drain")
-                        win32event.WaitForSingleObject(process_handle, 1)
+                    ),
+                ),
+                publish_failure=publish_failure,
+                hold_failure=hold_failure,
+                release_b=release_b,
+            )
+            throttle.Close()
 
-                    def publish_zero() -> None:
-                        result["zero_proven"] = True
-                        _atomic_json(result_file, result)
-                        _signal(options["zero_event"])
+            def publish_zero() -> None:
+                _atomic_json(result_file, result)
+                _signal(options["zero_event"])
 
-                    def close_retained_job() -> None:
-                        nonlocal job
-                        retained_job = job
-                        if retained_job is None:
-                            raise RuntimeError("guardian lost its browser Job handle")
-                        retained_job.Close()
-                        job = None
+            def close_retained_job() -> None:
+                nonlocal job
+                retained_job = job
+                if retained_job is None:
+                    raise RuntimeError("guardian lost its browser Job handle")
+                retained_job.Close()
+                job = None
 
-                    def release_b() -> None:
-                        nonlocal locked_offset
-                        unlock(fd, offset)
-                        locked_offset = None
-
-                    zero_proven_release_sequence(
-                        publish_zero=publish_zero,
-                        wait_allow_release=lambda: _actor_wait(
-                            options["allow_release_event"]
-                        ),
-                        close_job=close_retained_job,
-                        release_b=release_b,
-                    )
-                    win32event.ReleaseMutex(identity)
-                    identity.Close()
-                    return 0
-            _atomic_json(result_file, result)
-            fault_event = options.get("fault_event")
-            if fault_event:
-                _signal(fault_event)
-            threading.Event().wait()
+            zero_proven_release_sequence(
+                publish_zero=publish_zero,
+                wait_allow_release=lambda: _actor_wait(options["allow_release_event"]),
+                close_job=close_retained_job,
+                release_b=release_b,
+            )
+            win32event.ReleaseMutex(identity)
+            identity.Close()
+            return 0
 
         if mode == "owner-watch":
             _atomic_json(result_file, result)
@@ -1486,19 +1619,25 @@ def _actor(
                 for pid in options["descendant_pids"]
             ]
             deadline = time.monotonic() + _DEADLINE_SECONDS
-            while True:
-                active = int(
-                    win32job.QueryInformationJobObject(
-                        job, win32job.JobObjectBasicAccountingInformation
-                    )["ActiveProcesses"]
-                )
-                if active == 0 and not any(
-                    _is_active(handle) for handle in descendant_handles
-                ):
-                    break
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("owner could not drain browser Job")
-                win32event.WaitForSingleObject(process_handle, 1)
+            throttle = win32event.CreateEvent(None, False, False, None)
+            try:
+                while True:
+                    active = int(
+                        win32job.QueryInformationJobObject(
+                            job, win32job.JobObjectBasicAccountingInformation
+                        )["ActiveProcesses"]
+                    )
+                    if active == 0 and not any(
+                        _is_active(handle) for handle in descendant_handles
+                    ):
+                        break
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("owner could not drain browser Job")
+                    wait_on_unsignaled_throttle(
+                        throttle, wait=win32event.WaitForSingleObject
+                    )
+            finally:
+                throttle.Close()
             result["zero_proven"] = True
             _atomic_json(result_file, result)
             _signal(options["zero_event"])
@@ -1602,7 +1741,14 @@ def _probe_fd(path: Path) -> int:
 
 def _attempt_here(path: Path) -> tuple[bool, int]:
     fd = _probe_fd(path)
-    acquired = conjunction_admission(fd)
+    try:
+        acquired = conjunction_admission(fd)
+    except BaseException:
+        # Admission may already have closed the descriptor as its lock rescue.
+        # A second close is harmless here, but its EBADF must not hide that cause.
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        raise
     return acquired, fd
 
 
@@ -1782,6 +1928,27 @@ def _run_conjunction_probe(scenario: str, root: Path) -> dict[str, Any]:
             _region_api()[1](successor_fd, 0)
             os.close(successor_fd)
             retained_fds.remove(successor_fd)
+
+            conflict_owner, conflict_owner_file, conflict_owner_ready = spawn(
+                "hold", "conflict-owner", {"offset": 0}
+            )
+            wait_result(conflict_owner_file, conflict_owner_ready)
+            b_holder, b_holder_file, b_holder_ready = spawn(
+                "hold", "conflict-b-holder", {"offset": 1}
+            )
+            b_holder_result = wait_result(b_holder_file, b_holder_ready)
+            conflict_owner_handle = int(getattr(conflict_owner, "_handle"))
+            conflict, conflict_file, conflict_ready = spawn(
+                "guardian-publish",
+                "conflict-guardian",
+                {"offset": 1, "owner_handle": conflict_owner_handle},
+                [conflict_owner_handle],
+            )
+            conflict_result = wait_result(conflict_file, conflict_ready)
+            conflict.wait(timeout=_DEADLINE_SECONDS)
+            _terminate_process(b_holder)
+            _terminate_process(conflict_owner)
+            require_same_file_identity(identity, b_holder_result["file_identity"])
             return {
                 "scenario": scenario,
                 "file_identity": identity,
@@ -1793,6 +1960,13 @@ def _run_conjunction_probe(scenario: str, root: Path) -> dict[str, Any]:
                 "late_successor_admitted": successor,
                 "late_guardian_armed": late_result.get("armed", False),
                 "late_guardian_contention": late_result.get("contention", False),
+                "conflict_guardian_contention": conflict_result["contention"],
+                "conflict_guardian_armed": conflict_result["armed"],
+                "conflict_guardian_job_authority": conflict_result["job_authority"],
+                "conflict_guardian_browser_authority": conflict_result[
+                    "browser_authority"
+                ],
+                "conflict_guardian_returncode": conflict.returncode,
             }
 
         browser_job = process_tree.WindowsJob.named("conjunction-browser")
@@ -1941,16 +2115,25 @@ def _run_conjunction_probe(scenario: str, root: Path) -> dict[str, Any]:
         guardian_result = read_published_json(
             guardian_file, deadline=time.monotonic() + 5
         )
-        blocked_fd = _probe_fd(lock_path)
-        acquired_a, acquired_b = probe_conjunction_regions(blocked_fd)
-        os.close(blocked_fd)
+        probe_process, probe_file, probe_ready = spawn(
+            "region-probe", f"external-{fault}", {}
+        )
+        probe_result = wait_result(probe_file, probe_ready)
+        probe_process.wait(timeout=_DEADLINE_SECONDS)
         identity_owned = observe_guardian_identity(identity_mutex)
         measurement = {
             "scenario": scenario,
             "file_identity": identity,
             "fault": fault,
+            "guardian_error_type": guardian_result["error_type"],
             "guardian_error": guardian_result["error"],
-            "a_acquired_b_blocked": acquired_a and not acquired_b,
+            "fault_operation": guardian_result["fault_operation"],
+            "terminate_attempted": guardian_result["terminate_attempted"],
+            "terminate_completed": guardian_result.get("terminate_completed", False),
+            "query_samples": guardian_result.get("query_samples", []),
+            "query_timeout": guardian_result.get("query_timeout", False),
+            "external_probe_acquired_a": probe_result["acquired_a"],
+            "external_probe_acquired_b": probe_result["acquired_b"],
             "guardian_alive": guardian.poll() is None,
             "identity_mutex_owned": identity_owned["identity_mutex_owned"],
         }
@@ -2054,6 +2237,7 @@ def _parse_args() -> argparse.Namespace:
         choices=(
             "hold",
             "attempt",
+            "region-probe",
             "guardian-publish",
             "guardian-drain",
             "owner-watch",

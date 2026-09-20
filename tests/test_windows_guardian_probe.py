@@ -19,6 +19,7 @@ from linkedin_mcp_server.profile_lease import ProfileLease
 from windows_guardian_probe import (
     active_guardian_loss_wait_handles,
     conjunction_admission,
+    conjunction_guardian_shutdown,
     guardian_loss_measurement,
     guardian_publication_sequence,
     guardian_shutdown_sequence,
@@ -27,11 +28,13 @@ from windows_guardian_probe import (
     read_published_json,
     remaining_wait_milliseconds,
     require_same_file_identity,
+    run_guardian_fail_closed,
     sample_guardian_loss_progress,
     sample_lease_acquisition,
     sample_pre_crash_contention,
     starter_termination_measurement,
     terminate_wait_close_handles,
+    wait_on_unsignaled_throttle,
     zero_proven_release_sequence,
 )
 
@@ -884,6 +887,98 @@ def test_conjunction_admission_closes_fd_when_b_unlock_fails() -> None:
     assert events == ["lock 7 0", "lock 7 1", "unlock 7 1", "close 7"]
 
 
+def test_b_lock_error_preserves_first_error_when_a_rollback_and_close_fail() -> None:
+    events: list[str] = []
+    lock_error = OSError("B lock failed")
+
+    def try_lock(_fd: int, offset: int) -> bool:
+        events.append(f"lock {offset}")
+        if offset == 1:
+            raise lock_error
+        return True
+
+    def unlock(_fd: int, offset: int) -> None:
+        events.append(f"unlock {offset}")
+        raise OSError("A unlock failed")
+
+    def close(_fd: int) -> None:
+        events.append("close")
+        raise OSError("close failed")
+
+    with pytest.raises(OSError) as raised:
+        conjunction_admission(7, try_lock=try_lock, unlock=unlock, close=close)
+
+    assert raised.value is lock_error
+    assert events == ["lock 0", "lock 1", "unlock 0", "close"]
+
+
+def test_b_contention_reports_a_unlock_error_and_attempts_close() -> None:
+    events: list[str] = []
+    unlock_error = OSError("A unlock failed")
+
+    def unlock(_fd: int, offset: int) -> None:
+        events.append(f"unlock {offset}")
+        raise unlock_error
+
+    with pytest.raises(OSError) as raised:
+        conjunction_admission(
+            7,
+            try_lock=lambda _fd, offset: offset == 0,
+            unlock=unlock,
+            close=lambda _fd: (
+                events.append("close") or (_ for _ in ()).throw(OSError("close failed"))
+            ),
+        )
+
+    assert raised.value is unlock_error
+    assert events == ["unlock 0", "close"]
+
+
+def test_b_unlock_error_survives_a_close_error() -> None:
+    events: list[str] = []
+    unlock_error = OSError("B unlock failed")
+
+    with pytest.raises(OSError) as raised:
+        conjunction_admission(
+            7,
+            try_lock=lambda _fd, _offset: True,
+            unlock=lambda _fd, offset: (
+                events.append(f"unlock {offset}") or (_ for _ in ()).throw(unlock_error)
+            ),
+            close=lambda _fd: (
+                events.append("close") or (_ for _ in ()).throw(OSError("close failed"))
+            ),
+        )
+
+    assert raised.value is unlock_error
+    assert events == ["unlock 1", "close"]
+
+
+def test_attempt_here_preserves_admission_error_when_fd_was_rescue_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_error = OSError("admission failed")
+    closes: list[int] = []
+    monkeypatch.setattr(probe, "_probe_fd", lambda _path: 7)
+    monkeypatch.setattr(
+        probe,
+        "conjunction_admission",
+        lambda _fd: (_ for _ in ()).throw(first_error),
+    )
+
+    def close(fd: int) -> None:
+        closes.append(fd)
+        raise OSError("already closed")
+
+    monkeypatch.setattr(os, "close", close)
+
+    with pytest.raises(OSError) as raised:
+        probe._attempt_here(Path("profile.lock"))
+
+    assert raised.value is first_error
+    assert closes == [7]
+
+
 def test_conjunction_requires_the_inherited_file_identity() -> None:
     require_same_file_identity((1, 2, 3), [1, 2, 3])
     with pytest.raises(RuntimeError, match="same file identity"):
@@ -902,6 +997,18 @@ def test_guardian_arms_only_after_b_and_a_live_owner() -> None:
     assert events == ["B", "owner", "ARMED"]
 
 
+def test_guardian_never_checks_owner_or_arms_when_b_is_contended() -> None:
+    events: list[str] = []
+
+    assert not guardian_publication_sequence(
+        acquire_b=lambda: events.append("B contended") or False,
+        owner_alive=lambda: events.append("owner") or True,
+        release_b=lambda: events.append("release B"),
+        publish_armed=lambda: events.append("ARMED"),
+    )
+    assert events == ["B contended"]
+
+
 def test_late_guardian_never_arms_after_owner_exit() -> None:
     events: list[str] = []
 
@@ -912,6 +1019,75 @@ def test_late_guardian_never_arms_after_owner_exit() -> None:
         publish_armed=lambda: events.append("ARMED"),
     )
     assert events == ["B", "owner dead", "release B"]
+
+
+def test_real_guardian_exception_publishes_and_holds_without_releasing_b() -> None:
+    events: list[str] = []
+    failure = OSError("real termination failure")
+
+    with pytest.raises(RuntimeError, match="resumed") as raised:
+        run_guardian_fail_closed(
+            shutdown=lambda: (_ for _ in ()).throw(failure),
+            publish_failure=lambda exc: events.append(
+                f"publish {type(exc).__name__}: {exc}"
+            ),
+            hold_failure=lambda: events.append("hold"),
+            release_b=lambda: events.append("release B"),
+        )
+
+    assert raised.value.__cause__ is failure
+    assert events == ["publish OSError: real termination failure", "hold"]
+
+
+def test_conjunction_shutdown_uses_unsignaled_throttle_until_real_zero() -> None:
+    active = iter([2, 0])
+    descendants = iter([2, 0])
+    throttle = object()
+    events: list[str] = []
+    result: dict[str, Any] = {}
+
+    conjunction_guardian_shutdown(
+        result,
+        active_descendants=lambda: next(descendants),
+        terminate_job=lambda: events.append("terminate"),
+        query_job=lambda: next(active),
+        wait_for_retry=lambda: wait_on_unsignaled_throttle(
+            throttle,
+            wait=lambda waitable, milliseconds: events.append(
+                f"wait {waitable is throttle} {milliseconds}"
+            ),
+        ),
+        monotonic=lambda: 0.0,
+    )
+
+    assert events == ["terminate", "wait True 1"]
+    assert result["terminate_attempted"] is True
+    assert result["terminate_completed"] is True
+    assert result["query_samples"] == [
+        {"active_processes": 2, "active_descendants": 2},
+        {"active_processes": 0, "active_descendants": 0},
+    ]
+    assert result["zero_proven"] is True
+
+
+def test_conjunction_shutdown_timeout_comes_from_query_deadline_loop() -> None:
+    result: dict[str, Any] = {}
+    events: list[str] = []
+    clock = iter([0.0, 31.0])
+
+    with pytest.raises(TimeoutError, match="did not drain"):
+        conjunction_guardian_shutdown(
+            result,
+            active_descendants=lambda: 0,
+            terminate_job=lambda: events.append("terminate"),
+            query_job=lambda: events.append("query") or 1,
+            wait_for_retry=lambda: events.append("wait"),
+            monotonic=lambda: next(clock),
+        )
+
+    assert events == ["terminate", "query"]
+    assert result["query_timeout"] is True
+    assert result["query_samples"] == [{"active_processes": 1, "active_descendants": 0}]
 
 
 def test_b_remains_held_between_zero_proven_and_release_permission() -> None:
@@ -1132,6 +1308,11 @@ def test_conjunction_publication(tmp_path: Path) -> None:
     assert measurement["browser_started_after_armed"] is True
     assert measurement["late_successor_admitted"] is True
     assert measurement["late_guardian_armed"] is False
+    assert measurement["conflict_guardian_contention"] is True
+    assert measurement["conflict_guardian_armed"] is False
+    assert measurement["conflict_guardian_job_authority"] is False
+    assert measurement["conflict_guardian_browser_authority"] is False
+    assert measurement["conflict_guardian_returncode"] == 0
 
 
 @_WINDOWS_ONLY
@@ -1165,16 +1346,53 @@ def test_conjunction_guardian_loss_clean_close(tmp_path: Path) -> None:
 
 @_WINDOWS_ONLY
 @pytest.mark.parametrize(
-    "fault",
-    ["terminate-error", "query-error", "drain-timeout"],
+    ("fault", "error_type", "error", "operation"),
+    [
+        (
+            "terminate-error",
+            "OSError",
+            "OSError: injected browser Job termination failure",
+            "terminate",
+        ),
+        (
+            "query-error",
+            "OSError",
+            "OSError: injected browser Job query failure",
+            "query",
+        ),
+        (
+            "drain-timeout",
+            "TimeoutError",
+            "TimeoutError: browser Job did not drain before its deadline",
+            "deadline",
+        ),
+    ],
 )
-def test_conjunction_owner_loss_failure_holds_b(tmp_path: Path, fault: str) -> None:
+def test_conjunction_owner_loss_failure_holds_b(
+    tmp_path: Path,
+    fault: str,
+    error_type: str,
+    error: str,
+    operation: str,
+) -> None:
     measurement = _run_probe(tmp_path, f"conjunction-owner-loss-{fault}")
     _record_measurement(measurement)
 
     assert measurement["fault"] == fault
-    assert measurement["guardian_error"] == fault
-    assert measurement["a_acquired_b_blocked"] is True
+    assert measurement["guardian_error_type"] == error_type
+    assert measurement["guardian_error"] == error
+    assert measurement["fault_operation"] == operation
+    assert measurement["terminate_attempted"] is True
+    assert measurement["terminate_completed"] is (fault != "terminate-error")
+    assert measurement["external_probe_acquired_a"] is True
+    assert measurement["external_probe_acquired_b"] is False
     assert measurement["guardian_alive"] is True
     assert measurement["identity_mutex_owned"] is True
     assert measurement["acquired_after_harness_drain"] is True
+    if fault == "drain-timeout":
+        assert measurement["query_timeout"] is True
+        assert measurement["query_samples"]
+    elif fault == "query-error":
+        assert measurement["query_samples"] == []
+    else:
+        assert measurement["query_samples"] == []
