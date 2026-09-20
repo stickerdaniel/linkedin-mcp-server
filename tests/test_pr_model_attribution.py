@@ -33,8 +33,13 @@ def _workflow() -> dict[str, Any]:
             "Generated with Claude Sonnet 4.5 for implementation and GPT-5.6 "
             "for review in Claude Code."
         ),
-        "Generated with GPT-5.6 for implementation and testing in T3 Code.",
-        "Generated with GPT-5.6 for research and preparation for deployment in T3 Code.",
+        "Generated with GPT-5.6 Sol for planning, implementation, review in T3 Code.",
+        "Generated with GPT-5.6 Sol for implementation/testing in T3 Code.",
+        "Generated with GPT-5.6 Sol for security review for CI in T3 Code.",
+        (
+            "Generated with Claude Sonnet 4.5 for implementation and GPT-5.6 for "
+            "review and Codex for testing in T3 Code."
+        ),
     ],
 )
 def test_accepts_supported_attribution_forms(line: str) -> None:
@@ -60,6 +65,11 @@ def test_accepts_trailing_blank_lines() -> None:
         ),
         "Generated with GPT-5.6 in Claude Code.",
         "Generated with GPT-5.6 for implementation.",
+        "Generated with GPT-5.6 for implementation and testing in T3 Code.",
+        (
+            "Generated with Claude Sonnet 4.5 for implementation and GPT-5.6 for "
+            "review and Codex in T3 Code."
+        ),
         (
             "Generated with Claude Sonnet 4.5 for implementation and GPT-5.6 for "
             "in Claude Code."
@@ -171,8 +181,10 @@ def test_failure_emits_actionable_github_annotation(
     output = capsys.readouterr().out
     assert output.startswith("::error title=PR model attribution required::")
     assert "final non-empty PR body line" in output
+    assert 'Use commas or "/" between jobs for one model' in output
     assert (
-        "Generated with Claude Sonnet 4.5 for implementation in Claude Code." in output
+        "Generated with Claude Sonnet 4.5 for implementation, testing in Claude Code."
+        in output
     )
     assert (
         "Generated with Claude Sonnet 4.5 for implementation and GPT-5.6 for review "

@@ -15,27 +15,19 @@ _PREFIX = "Generated with "
 _PLACEHOLDER_RE = re.compile(r"<[^>]*>|\[[^]]*]")
 _ERROR = (
     "Model attribution is required as the final non-empty PR body line. "
-    'Examples: "Generated with Claude Sonnet 4.5 for implementation in Claude Code." '
-    'or "Generated with Claude Sonnet 4.5 for implementation and GPT-5.6 for '
-    'review in Claude Code."'
+    'Use commas or "/" between jobs for one model; "and" separates model/job pairs. '
+    'Examples: "Generated with Claude Sonnet 4.5 for implementation, testing in '
+    'Claude Code." or "Generated with Claude Sonnet 4.5 for implementation and '
+    'GPT-5.6 for review in Claude Code."'
 )
 
 
 def _has_valid_model_jobs(attribution: str) -> bool:
-    model, separator, jobs = attribution.partition(" for ")
-    if not separator or not model.strip():
-        return False
-
-    while True:
-        next_for = f"{jobs} ".find(" for ")
-        if next_for == -1:
-            return bool(jobs.strip())
-        next_pair = jobs.rfind(" and ", 0, next_for)
-        if next_pair == -1:
-            return bool(jobs.strip())
-        if not jobs[:next_pair].strip() or not jobs[next_pair + 5 : next_for].strip():
+    for model_job in attribution.split(" and "):
+        model, separator, job = model_job.partition(" for ")
+        if not separator or not model.strip() or not job.strip():
             return False
-        jobs = jobs[next_for + 5 :]
+    return True
 
 
 def is_valid_attribution(line: str) -> bool:
