@@ -1276,7 +1276,7 @@ def probe_conjunction_regions(fd: int) -> tuple[bool, bool]:
 
 
 def file_identity(fd: int) -> tuple[int, int, int]:
-    """Read the stable Windows file identity carried by an inherited handle."""
+    """Read the stable Windows identity of an open file descriptor."""
     import ctypes
     import msvcrt
     from ctypes import wintypes

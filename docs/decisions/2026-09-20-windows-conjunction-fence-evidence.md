@@ -26,12 +26,13 @@ The probe uses local `LockFileEx` and `UnlockFileEx` bindings with
 length of one byte. Only `ERROR_LOCK_VIOLATION` is contention. Every other
 Win32 error propagates.
 
-The owner and guardian inherit handles to the same open `profile.lock` file
-object, but each process invokes `LockFileEx` for its own region. Handle
-inheritance is used for stable identity and opening only; it is not treated as
-lock-ownership transfer. `GetFileInformationByHandle` records and compares the
-volume serial and file index before a scenario proceeds. A later path-only open
-is not accepted as identity evidence.
+Every actor opens `profile.lock` itself under the private parent root controlled
+by the harness. It first acquires its intended A or B region. Only after that
+lock succeeds does it compare the descriptor's volume serial and file index
+with the identity recorded by the parent, then verify that the descriptor still
+names the current path entry. An identity or path mismatch strictly unlocks and
+closes the descriptor and cannot publish success. No file or CRT handle is
+inherited; only stable process handles cross into actors.
 
 The native scenarios use named events, process handles and process-object waits
 for readiness and exit ordering. Timestamps, where retained by older scenarios,
@@ -61,7 +62,8 @@ The matrix covers these claims:
 ## Hypotheses awaiting native evidence
 
 Darwin can collect, compile, lint and exercise the platform-independent ordering
-contracts, but cannot execute these Windows locks, Jobs or inherited handles.
+contracts, but cannot execute these Windows locks, Jobs or process-handle
+inheritance.
 The conjunction candidate remains a hypothesis until every native Windows
 matrix version passes all scenarios and publishes its measurements. A failing
 scenario falsifies the candidate; it is not permission to weaken the assertion.
@@ -69,10 +71,10 @@ scenario falsifies the candidate; it is not permission to weaken the assertion.
 Even green native runs do not establish a production admission algorithm,
 TOCTOU freedom, production Job handoff, guardian respawn, frontend or launch-gate
 integration, simultaneous owner and guardian death, Direct/Login/Import paths,
-old-client behavior, or rename/recreate safety beyond the measured inherited
-file-identity handoff. Simultaneous owner and guardian death remains explicitly
-unsafe and unmeasured. No production module or workflow changes in this evidence
-step.
+old-client behavior, or general rename/recreate safety outside the measured
+private harness root. The post-lock identity checks do not establish production
+TOCTOU freedom. Simultaneous owner and guardian death remains explicitly unsafe
+and unmeasured. No production module or workflow changes in this evidence step.
 
 ## Production boundary
 
