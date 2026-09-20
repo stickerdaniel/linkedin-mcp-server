@@ -12,6 +12,8 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SCRIPT = _REPO_ROOT / "scripts" / "check_pr_model_attribution.py"
 _WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "check-attribution.yml"
 _TEMPLATE = _REPO_ROOT / ".github" / "pull_request_template.md"
+_AGENT_GUIDE = _REPO_ROOT / "AGENTS.md"
+_CONTRIBUTING = _REPO_ROOT / "CONTRIBUTING.md"
 _SPEC = importlib.util.spec_from_file_location("check_pr_model_attribution", _SCRIPT)
 assert _SPEC is not None and _SPEC.loader is not None
 attribution = importlib.util.module_from_spec(_SPEC)
@@ -28,7 +30,11 @@ def _workflow() -> dict[str, Any]:
 @pytest.mark.parametrize(
     "line",
     [
+        "Generated with Claude Opus 5.",
+        "Generated with GPT-5.6 Sol.",
+        "Generated with Gemini 3 Pro Preview.",
         "Generated with Claude Sonnet 4.5 for implementation in Claude Code.",
+        ("Generated with Claude Opus 5 for implementation in Claude Code via T3 Code."),
         (
             "Generated with Claude Sonnet 4.5 for implementation and GPT-5.6 "
             "for review in Claude Code."
@@ -65,6 +71,10 @@ def test_accepts_trailing_blank_lines() -> None:
         ),
         "Generated with GPT-5.6 in Claude Code.",
         "Generated with GPT-5.6 for implementation.",
+        "Generated with GPT-5.6 and Claude Opus 5.",
+        "Generated with .",
+        "Generated with <model>.",
+        "Generated with [model].",
         "Generated with GPT-5.6 for implementation and testing in T3 Code.",
         (
             "Generated with Claude Sonnet 4.5 for implementation and GPT-5.6 for "
@@ -121,7 +131,21 @@ def test_template_ends_with_editable_attribution_placeholder() -> None:
     ]
 
     assert lines[-1] == "Generated with [model] for [job] in [harness]."
+    assert "Generated with <model>." in lines[-2]
+    assert "coding-agent runtime" in lines[-2]
+    assert "in Claude Code via T3 Code" in lines[-2]
     assert not attribution.is_valid_attribution(lines[-1])
+
+
+def test_guides_require_only_the_model_and_recommend_provenance() -> None:
+    agent_guide = _AGENT_GUIDE.read_text(encoding="utf-8")
+    contributing = _CONTRIBUTING.read_text(encoding="utf-8")
+
+    assert "CI accepts `Generated with <model>.` as the minimum" in agent_guide
+    assert "coding-agent runtime that invokes the model and tools" in agent_guide
+    assert "in Claude Code via T3 Code" in agent_guide
+    assert "the model before merge" in contributing
+    assert "job and coding-agent harness are preferred" in contributing
 
 
 def test_workflow_checks_attribution_in_required_job() -> None:
@@ -181,12 +205,10 @@ def test_failure_emits_actionable_github_annotation(
     output = capsys.readouterr().out
     assert output.startswith("::error title=PR model attribution required::")
     assert "final non-empty PR body line" in output
-    assert 'Use commas or "/" between jobs for one model' in output
+    assert "Model-only is the minimum" in output
+    assert "Detailed attribution with the job, coding-agent harness" in output
+    assert "Generated with Claude Opus 5." in output
     assert (
-        "Generated with Claude Sonnet 4.5 for implementation, testing in Claude Code."
+        "Generated with Claude Opus 5 for implementation in Claude Code via T3 Code."
         in output
     )
-    assert (
-        "Generated with Claude Sonnet 4.5 for implementation and GPT-5.6 for review "
-        "in Claude Code."
-    ) in output

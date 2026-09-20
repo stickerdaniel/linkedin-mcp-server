@@ -13,12 +13,14 @@ from typing import Any
 
 _PREFIX = "Generated with "
 _PLACEHOLDER_RE = re.compile(r"<[^>]*>|\[[^]]*]")
+_RESERVED_MINIMAL_PARTS = (" for ", " in ", " and ")
 _ERROR = (
     "Model attribution is required as the final non-empty PR body line. "
-    'Use commas or "/" between jobs for one model; "and" separates model/job pairs. '
-    'Examples: "Generated with Claude Sonnet 4.5 for implementation, testing in '
-    'Claude Code." or "Generated with Claude Sonnet 4.5 for implementation and '
-    'GPT-5.6 for review in Claude Code."'
+    'Model-only is the minimum: "Generated with Claude Opus 5." '
+    "Detailed attribution with the job, coding-agent harness, and optional "
+    'host is recommended: "Generated with Claude Opus 5 for implementation in '
+    'Claude Code via T3 Code." Use commas or "/" between jobs for one model; '
+    '"and" separates model/job pairs.'
 )
 
 
@@ -37,8 +39,14 @@ def is_valid_attribution(line: str) -> bool:
     if _PLACEHOLDER_RE.search(line):
         return False
 
-    attribution, separator, harness = line[len(_PREFIX) : -1].rpartition(" in ")
-    return bool(separator and harness.strip() and _has_valid_model_jobs(attribution))
+    attribution = line[len(_PREFIX) : -1]
+    model_jobs, separator, harness = attribution.rpartition(" in ")
+    if separator:
+        return bool(harness.strip() and _has_valid_model_jobs(model_jobs))
+    return bool(
+        attribution.strip()
+        and not any(part in attribution for part in _RESERVED_MINIMAL_PARTS)
+    )
 
 
 def has_model_attribution(body: str | None) -> bool:
