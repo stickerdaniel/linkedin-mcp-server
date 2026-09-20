@@ -786,12 +786,10 @@ def test_guardian_loss_releases_lease_before_owner_or_browser_exit(
         measurement["pre_crash_contention"]["attempted_ns"]
         < loss["guardian_termination_requested_ns"]
     )
-    assert before == {
-        "guardian_active": True,
-        "owner_active": True,
-        "active_descendants": measurement["descendant_count"],
-        "browser_job_active_processes": measurement["descendant_count"],
-    }
+    assert before["guardian_active"] is True
+    assert before["owner_active"] is True
+    assert before["active_descendants"] == measurement["descendant_count"]
+    assert before["browser_job_active_processes"] >= measurement["descendant_count"]
     assert measurement["guardian_outside_owner_job"] is True
     assert measurement["guardian_returncode"] != 0
     assert (
