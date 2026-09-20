@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ipaddress import IPv6Address, ip_address
 from typing import Literal
 from urllib.parse import parse_qs, urlparse
 
@@ -262,16 +263,58 @@ ApplyType = Literal["easy_apply", "external", "applied", "closed", "unknown"]
 SAFETY_REDIRECT_PATH = "/safety/go"
 
 
+# Name suffixes reserved for a host's own network, which no registry serves.
+_PRIVATE_SUFFIXES = (".localhost", ".local", ".internal", ".home.arpa")
+
+
+def _reaches_the_public_internet(host: str) -> bool:
+    """Whether an apply destination names somewhere outside this host.
+
+    The destination of an external Apply is chosen by whoever posted the job,
+    and the server loads it in the browser to follow its redirects. A loopback,
+    link-local or private-range address would turn that into a request against
+    whatever the host or its container can reach, on a stranger's word. None of
+    those is an employer's site, so they answer as no address at all.
+
+    Judged on the address as written, which is what this module can see. A
+    public name that resolves into private space is the browser's resolution to
+    make and is not caught here, and neither is a redirect into one: a route
+    sees only the first request of a redirect (measured, `test_job_apply_dom`).
+    What bounds the rest is that a destination is only ever loaded, never read:
+    the tool answers with an address, so a page fetched this way returns
+    nothing to its caller.
+    """
+    name = host.rstrip(".").lower()
+    try:
+        address = ip_address(name)
+    except ValueError:
+        # Not a literal `ipaddress` accepts. A name's rightmost label is never
+        # all digits, so one that is belongs to an address written the long way
+        # round (`0177.0.0.1`, `0x7f.0.0.1`), which the browser still resolves
+        # to the loopback.
+        label = name.rpartition(".")[2]
+        if not label or label.isdigit():
+            return False
+        # A single-label name has no public registry behind it.
+        return "." in name and not name.endswith(_PRIVATE_SUFFIXES)
+    if isinstance(address, IPv6Address) and address.ipv4_mapped:
+        address = address.ipv4_mapped
+    return address.is_global
+
+
 def employer_apply_url(href: str) -> str | None:
     """The employer's address an apply link leads to, or None.
 
     The interstitial answers with its destination, and any other address off
     LinkedIn answers as itself. A LinkedIn page that is not the interstitial is
     not the employer's site, so it answers None rather than passing for one.
+    An address that never leaves this host is refused the same way.
     """
     parsed = urlparse(href)
     host = parsed.hostname
     if parsed.scheme not in ("http", "https") or not host:
+        return None
+    if not _reaches_the_public_internet(host):
         return None
     if host != "linkedin.com" and not host.endswith(".linkedin.com"):
         return href

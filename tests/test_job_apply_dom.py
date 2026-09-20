@@ -5,7 +5,10 @@ The unit suite mocks ``page.evaluate``, so the programs behind
 against synthetic postings in headless chromium, with the navigation stubbed.
 LinkedIn's addresses are answered by a route and the employer's short link by a
 loopback server, because a route sees only the first request of a redirect and
-would let the second one out. The markup carries the attributes measured on
+would let the second one out. That server answers to a public name mapped onto
+the loopback by the browser's own resolver, because a destination written as a
+loopback address is refused before it is ever loaded. The markup carries the
+attributes measured on
 2026-09-14 and none of LinkedIn's classes, so it is a claim about which signals
 are read, not about LinkedIn's layout.
 
@@ -40,7 +43,10 @@ pytestmark = [
 ]
 
 JOB_URL = "https://www.linkedin.com/jobs/view/123/"
-LOOPBACK = "http://127.0.0.1:"
+#: The employer's site. A name rather than `127.0.0.1`, which the apply policy
+#: refuses; the browser is told to resolve it to the loopback server below.
+EMPLOYER_HOST = "employer.example"
+EMPLOYER_ORIGIN = f"http://{EMPLOYER_HOST}:"
 
 EASY_APPLY = (
     '<a href="https://www.linkedin.com/jobs/view/123/apply/?openSDUIApplyFlow=true"'
@@ -75,7 +81,7 @@ def employer():
     server = ThreadingHTTPServer(("127.0.0.1", 0), _EmployerSite)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
-        yield f"{LOOPBACK}{server.server_address[1]}"
+        yield f"{EMPLOYER_ORIGIN}{server.server_address[1]}"
     finally:
         server.shutdown()
         server.server_close()
@@ -135,7 +141,7 @@ def requested() -> list[str]:
 async def dom_page(requested):
     async def answer(route):
         requested.append(route.request.url)
-        if route.request.url.startswith(LOOPBACK):
+        if route.request.url.startswith(EMPLOYER_ORIGIN):
             await route.continue_()
         else:
             await route.fulfill(status=200, content_type="text/html", body="<p>ok</p>")
@@ -143,7 +149,9 @@ async def dom_page(requested):
     async with async_playwright() as playwright:
         try:
             browser = await playwright.chromium.launch(
-                channel="chromium", headless=True
+                channel="chromium",
+                headless=True,
+                args=[f"--host-resolver-rules=MAP {EMPLOYER_HOST} 127.0.0.1"],
             )
             context = await browser.new_context()
             page = await context.new_page()
@@ -216,6 +224,14 @@ async def test_an_apply_below_the_description_belongs_to_another_posting(dom_pag
 
     assert await read(dom_page, html) == JobApplyRead("unknown")
     assert await dom_page.evaluate("() => window.clicked === true") is False
+
+
+async def test_a_destination_inside_this_host_is_never_loaded(dom_page, requested):
+    """A posting naming the loopback answers external, and nothing is fetched."""
+    html = posting(EXTERNAL, script=click_opens_dialog(safety("http://127.0.0.1:9/x")))
+
+    assert await read(dom_page, html) == JobApplyRead("external")
+    assert not any("127.0.0.1" in url for url in requested)
 
 
 async def test_an_applied_posting_is_not_clicked(dom_page):
