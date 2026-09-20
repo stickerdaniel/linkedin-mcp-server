@@ -136,14 +136,57 @@ PROMOTED_JOB_IDS_JS = (
 }"""
 )
 
+# This posting's own external Apply, and nothing else's. The description
+# heading is the boundary the state lines already use: above it sits this
+# posting's control area, below it the "More jobs" cards, each carrying an
+# Apply of its own. Unscoped, a posting with no control of its own would be
+# called external on a neighbour's button and then click it, which LinkedIn
+# counts as an apply on the neighbour. Easy Apply needs no boundary, being
+# found by a URL only this posting's control can carry.
+#
+# Without the heading there is no boundary and the whole `main` is read rather
+# than nothing: a posting whose description has not rendered yet still has its
+# Apply, and refusing to look would answer `unknown` for it.
+_EXTERNAL_APPLY_JS = r"""
+    const heading = [...main.querySelectorAll('*')].find(
+        (el) => (el.textContent || '').trim() === descriptionHeading
+    );
+    const above = (el) => !heading || Boolean(
+        heading.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_PRECEDING
+    );
+    const externalButton = [...main.querySelectorAll('button')].find(
+        (el) => above(el) && (el.innerText || '').trim() === externalLabel
+    ) || null;
+"""
+
+# The attribute that ties the click to the button the read chose. Set in the
+# breath before the click and never earlier, so that a re-render between the
+# two fails the click rather than moving it onto another posting's control.
+EXTERNAL_APPLY_MARK = "data-mcp-external-apply"
+
+MARK_EXTERNAL_APPLY_JS = (
+    """(opts) => {
+    const {externalLabel, descriptionHeading} = opts;
+    const main = document.querySelector('main');
+    if (!main) return false;
+"""
+    + _EXTERNAL_APPLY_JS
+    + f"""    if (externalButton) {{
+        externalButton.setAttribute('{EXTERNAL_APPLY_MARK}', '');
+    }}
+    return Boolean(externalButton);
+}}"""
+)
+
 # This posting's apply control and state, once they render. Easy Apply is found
 # by its URL, an anchor into the posting's own `/apply/` route that the "More
 # jobs" cards, each linking its own posting, cannot match. The external button
-# and the state lines are text from the locale table, and the state lines are
-# read above the description only. Measured on 2026-09-14: Easy Apply is an
+# and the state lines are text from the locale table, and both are read above
+# the description only. Measured on 2026-09-14: Easy Apply is an
 # `<a href=".../jobs/view/<id>/apply/?openSDUIApplyFlow=true">`, the external
 # control a `<button>` with no href whose text is the label.
-APPLY_SIGNALS_JS = r"""(opts) => {
+APPLY_SIGNALS_JS = (
+    r"""(opts) => {
     const {applyPath, externalLabel, descriptionHeading, closedLines, appliedPattern} = opts;
     const main = document.querySelector('main');
     if (!main) return null;
@@ -154,19 +197,21 @@ APPLY_SIGNALS_JS = r"""(opts) => {
             return '';
         }
     };
-    const lines = (main.innerText || '').split('\n').map((line) => line.trim());
+"""
+    + _EXTERNAL_APPLY_JS
+    + r"""    const lines = (main.innerText || '').split('\n').map((line) => line.trim());
     const end = lines.indexOf(descriptionHeading);
     const top = end === -1 ? [] : lines.slice(0, end);
     const applied = new RegExp(appliedPattern);
     return {
         easy_apply: [...main.querySelectorAll('a[href]')]
             .some((anchor) => pathOf(anchor) === applyPath),
-        external: [...main.querySelectorAll('button')]
-            .some((button) => (button.innerText || '').trim() === externalLabel),
+        external: Boolean(externalButton),
         applied: top.some((line) => applied.test(line)),
         closed: top.some((line) => closedLines.includes(line)),
     };
 }"""
+)
 
 APPLY_READY_JS = (
     "(opts) => {\n    const signals = (" + APPLY_SIGNALS_JS + ")(opts);\n"
@@ -326,17 +371,19 @@ class JobPageReader:
             await self._navigator._raise_if_auth_barrier(url)
             return JobApplyRead("unknown")
 
-        destination = await self._click_external_apply(text.external_apply_label)
+        destination = await self._click_external_apply(text)
         if destination is None:
             return JobApplyRead("external")
         return JobApplyRead("external", await self._follow_to_employer(destination))
 
-    async def _click_external_apply(self, label: str) -> str | None:
-        """Click the external Apply and read the employer's address it reveals.
+    async def _click_external_apply(self, text: JobApplyTextTable) -> str | None:
+        """Click this posting's external Apply and read the address it reveals.
 
-        Whichever answers: a dialog carrying the interstitial link, or a tab
-        LinkedIn opens, whose first address is read and which is closed
-        without waiting for it to load.
+        The button clicked is the one the read chose, found again by the same
+        boundary and clicked through a mark, so a "More jobs" card carrying the
+        same word cannot take the click. Whichever answers is read: a dialog
+        carrying the interstitial link, or a tab LinkedIn opens, whose first
+        address is read and which is closed without waiting for it to load.
         """
         page = self._session.page
         opened: list[Page] = []
@@ -346,9 +393,16 @@ class JobPageReader:
 
         page.context.on("page", record)
         try:
-            button = page.locator("main button").filter(
-                has_text=re.compile(rf"^\s*{re.escape(label)}\s*$")
+            marked = await page.evaluate(
+                MARK_EXTERNAL_APPLY_JS,
+                {
+                    "externalLabel": text.external_apply_label,
+                    "descriptionHeading": text.description_heading,
+                },
             )
+            if not marked:
+                return None
+            button = page.locator(f"main button[{EXTERNAL_APPLY_MARK}]")
             await button.first.click(timeout=5000)
             deadline = self._session.monotonic() + _APPLY_ANSWER_TIMEOUT
             while self._session.monotonic() < deadline:

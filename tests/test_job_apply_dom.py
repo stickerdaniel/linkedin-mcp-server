@@ -208,6 +208,16 @@ async def test_an_outbound_link_outside_a_dialog_is_not_the_answer(dom_page):
     assert await read(dom_page, html) == JobApplyRead("external")
 
 
+async def test_an_apply_below_the_description_belongs_to_another_posting(dom_page):
+    """A "More jobs" card's Apply is neither this posting's type nor clicked."""
+    html = posting(
+        "", below=EXTERNAL, script=click_opens_dialog(safety("https://acme.example/"))
+    )
+
+    assert await read(dom_page, html) == JobApplyRead("unknown")
+    assert await dom_page.evaluate("() => window.clicked === true") is False
+
+
 async def test_an_applied_posting_is_not_clicked(dom_page):
     html = posting(
         EXTERNAL,

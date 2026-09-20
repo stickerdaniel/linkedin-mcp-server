@@ -72,7 +72,7 @@
       "call": "get_job_apply_url",
       "kind": "wait_for_function",
       "operation": "job_apply_ready",
-      "program_digest": "a2a939c4f65a",
+      "program_digest": "4a3de4357979",
       "timeout_ms": 10000.0
     },
     {
@@ -88,7 +88,7 @@
       "call": "get_job_apply_url",
       "kind": "evaluate",
       "operation": "job_apply_signals",
-      "program_digest": "7d6da0cbbbeb"
+      "program_digest": "02ddb083876f"
     }
   ],
   "result": {
