@@ -22,6 +22,8 @@ from windows_guardian_probe import (
     observe_guardian_identity,
     observe_named_job_objects,
     read_published_json,
+    remaining_wait_milliseconds,
+    sample_guardian_loss_progress,
     sample_lease_acquisition,
     sample_pre_crash_contention,
     starter_termination_measurement,
@@ -250,14 +252,17 @@ def test_guardian_loss_requires_exit_before_live_acquisition() -> None:
     assert guardian_loss_measurement(
         termination_requested_ns=10,
         guardian_exit_observed_ns=11,
-        lease_observed_ns=12,
-        owner_active=True,
+        lease_acquired_ns=12,
+        lease_observed_ns=13,
+        owner_active_before_job_query=True,
+        owner_active_after_job_query=True,
         active_descendants=2,
         browser_job_active_processes=2,
     ) == {
         "guardian_termination_requested_ns": 10,
         "guardian_exit_observed_ns": 11,
-        "lease_observed_ns": 12,
+        "lease_acquired_ns": 12,
+        "lease_observed_ns": 13,
         "owner_active_at_lease_observation": True,
         "active_descendants_at_lease_observation": 2,
         "browser_job_active_processes_at_lease_observation": 2,
@@ -265,9 +270,22 @@ def test_guardian_loss_requires_exit_before_live_acquisition() -> None:
     with pytest.raises(RuntimeError, match="before guardian exit"):
         guardian_loss_measurement(
             termination_requested_ns=10,
-            guardian_exit_observed_ns=12,
-            lease_observed_ns=11,
-            owner_active=True,
+            guardian_exit_observed_ns=13,
+            lease_acquired_ns=11,
+            lease_observed_ns=12,
+            owner_active_before_job_query=True,
+            owner_active_after_job_query=True,
+            active_descendants=2,
+            browser_job_active_processes=2,
+        )
+    with pytest.raises(RuntimeError, match="timestamp is inconsistent"):
+        guardian_loss_measurement(
+            termination_requested_ns=10,
+            guardian_exit_observed_ns=11,
+            lease_acquired_ns=14,
+            lease_observed_ns=13,
+            owner_active_before_job_query=True,
+            owner_active_after_job_query=True,
             active_descendants=2,
             browser_job_active_processes=2,
         )
@@ -275,29 +293,85 @@ def test_guardian_loss_requires_exit_before_live_acquisition() -> None:
         guardian_loss_measurement(
             termination_requested_ns=10,
             guardian_exit_observed_ns=11,
-            lease_observed_ns=12,
-            owner_active=False,
+            lease_acquired_ns=12,
+            lease_observed_ns=13,
+            owner_active_before_job_query=True,
+            owner_active_after_job_query=False,
             active_descendants=2,
             browser_job_active_processes=2,
         )
-    with pytest.raises(RuntimeError, match="all descendants exited"):
-        guardian_loss_measurement(
+
+
+def test_guardian_loss_samples_liveness_after_lease_signal() -> None:
+    events: list[str] = []
+    lease_was_observed = False
+    ticks = iter([11, 13])
+
+    def lease_signaled() -> bool:
+        nonlocal lease_was_observed
+        events.append("lease signal")
+        lease_was_observed = True
+        return True
+
+    def after_lease(label: str, value: int | bool) -> int | bool:
+        assert lease_was_observed
+        events.append(label)
+        return value
+
+    measurement = sample_guardian_loss_progress(
+        {},
+        termination_requested_ns=10,
+        lease_acquired_ns=lambda: int(after_lease("lease timestamp", 12)),
+        guardian_active=lambda: events.append("guardian") or False,
+        lease_signaled=lease_signaled,
+        owner_active=lambda: bool(after_lease("owner", True)),
+        active_descendants=lambda: int(after_lease("descendants", 2)),
+        browser_job_active_processes=lambda: int(after_lease("browser job", 2)),
+        clock_ns=lambda: next(ticks),
+    )
+
+    assert events == [
+        "guardian",
+        "lease signal",
+        "owner",
+        "descendants",
+        "browser job",
+        "owner",
+        "lease timestamp",
+    ]
+    assert measurement is not None
+    assert measurement["lease_acquired_ns"] == 12
+    assert measurement["lease_observed_ns"] == 13
+
+
+def test_guardian_loss_rechecks_owner_after_browser_job_query() -> None:
+    owner_active = True
+
+    def query_browser_job() -> int:
+        nonlocal owner_active
+        owner_active = False
+        return 2
+
+    with pytest.raises(RuntimeError, match="owner exited"):
+        sample_guardian_loss_progress(
+            {
+                "guardian_exit_observed_ns": 11,
+                "lease_observed_ns": 13,
+            },
             termination_requested_ns=10,
-            guardian_exit_observed_ns=11,
-            lease_observed_ns=12,
-            owner_active=True,
-            active_descendants=0,
-            browser_job_active_processes=2,
+            lease_acquired_ns=lambda: 12,
+            guardian_active=lambda: False,
+            lease_signaled=lambda: True,
+            owner_active=lambda: owner_active,
+            active_descendants=lambda: 2,
+            browser_job_active_processes=query_browser_job,
         )
-    with pytest.raises(RuntimeError, match="browser Job drained"):
-        guardian_loss_measurement(
-            termination_requested_ns=10,
-            guardian_exit_observed_ns=11,
-            lease_observed_ns=12,
-            owner_active=True,
-            active_descendants=2,
-            browser_job_active_processes=0,
-        )
+
+
+def test_guardian_loss_wait_deadline_is_checked_before_waiting() -> None:
+    assert remaining_wait_milliseconds(10.0, monotonic=lambda: 9.5) == 500
+    with pytest.raises(TimeoutError, match="deadline expired"):
+        remaining_wait_milliseconds(10.0, monotonic=lambda: 10.0)
 
 
 def test_guardian_identity_requires_an_owned_mutex(
@@ -723,6 +797,11 @@ def test_guardian_loss_releases_lease_before_owner_or_browser_exit(
     assert (
         loss["guardian_termination_requested_ns"]
         < loss["guardian_exit_observed_ns"]
+        <= loss["lease_observed_ns"]
+    )
+    assert (
+        loss["guardian_termination_requested_ns"]
+        < loss["lease_acquired_ns"]
         <= loss["lease_observed_ns"]
     )
     assert loss["owner_active_at_lease_observation"] is True

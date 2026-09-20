@@ -145,8 +145,10 @@ def guardian_loss_measurement(
     *,
     termination_requested_ns: int,
     guardian_exit_observed_ns: int,
+    lease_acquired_ns: int,
     lease_observed_ns: int,
-    owner_active: bool,
+    owner_active_before_job_query: bool,
+    owner_active_after_job_query: bool,
     active_descendants: int,
     browser_job_active_processes: int,
 ) -> dict[str, int | bool]:
@@ -154,7 +156,9 @@ def guardian_loss_measurement(
         raise RuntimeError("guardian exit did not follow its termination request")
     if lease_observed_ns < guardian_exit_observed_ns:
         raise RuntimeError("lease acquisition was observed before guardian exit")
-    if not owner_active:
+    if not termination_requested_ns < lease_acquired_ns <= lease_observed_ns:
+        raise RuntimeError("the lease acquisition timestamp is inconsistent")
+    if not owner_active_before_job_query or not owner_active_after_job_query:
         raise RuntimeError("the owner exited before guardian-loss lease acquisition")
     if active_descendants <= 0:
         raise RuntimeError("all descendants exited before guardian-loss acquisition")
@@ -163,13 +167,60 @@ def guardian_loss_measurement(
     return {
         "guardian_termination_requested_ns": termination_requested_ns,
         "guardian_exit_observed_ns": guardian_exit_observed_ns,
+        "lease_acquired_ns": lease_acquired_ns,
         "lease_observed_ns": lease_observed_ns,
-        "owner_active_at_lease_observation": owner_active,
+        "owner_active_at_lease_observation": owner_active_after_job_query,
         "active_descendants_at_lease_observation": active_descendants,
         "browser_job_active_processes_at_lease_observation": (
             browser_job_active_processes
         ),
     }
+
+
+def sample_guardian_loss_progress(
+    observation: dict[str, int],
+    *,
+    termination_requested_ns: int,
+    lease_acquired_ns: Callable[[], int],
+    guardian_active: Callable[[], bool],
+    lease_signaled: Callable[[], bool],
+    owner_active: Callable[[], bool],
+    active_descendants: Callable[[], int],
+    browser_job_active_processes: Callable[[], int],
+    clock_ns: Callable[[], int] = time.perf_counter_ns,
+) -> dict[str, int | bool] | None:
+    if "guardian_exit_observed_ns" not in observation and not guardian_active():
+        observation["guardian_exit_observed_ns"] = clock_ns()
+    if "lease_observed_ns" not in observation and lease_signaled():
+        observation["lease_observed_ns"] = clock_ns()
+    if not {"guardian_exit_observed_ns", "lease_observed_ns"} <= observation.keys():
+        return None
+
+    owner_active_before_job_query = owner_active()
+    living_descendants = active_descendants()
+    browser_active = browser_job_active_processes()
+    owner_active_after_job_query = owner_active()
+    return guardian_loss_measurement(
+        termination_requested_ns=termination_requested_ns,
+        guardian_exit_observed_ns=observation["guardian_exit_observed_ns"],
+        lease_acquired_ns=lease_acquired_ns(),
+        lease_observed_ns=observation["lease_observed_ns"],
+        owner_active_before_job_query=owner_active_before_job_query,
+        owner_active_after_job_query=owner_active_after_job_query,
+        active_descendants=living_descendants,
+        browser_job_active_processes=browser_active,
+    )
+
+
+def remaining_wait_milliseconds(
+    deadline: float,
+    *,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> int:
+    remaining = deadline - monotonic()
+    if remaining <= 0:
+        raise TimeoutError("the guardian-loss observation deadline expired")
+    return max(1, int(remaining * 1000))
 
 
 def _owner(
@@ -815,19 +866,25 @@ def _run_probe(scenario: str, root: Path) -> dict[str, Any]:
             guardian_termination_requested_ns = time.perf_counter_ns()
             win32api.TerminateProcess(guardian_handle, 195)
             deadline = time.monotonic() + _DEADLINE_SECONDS
-            guardian_exit_observed_ns = None
-            lease_observed_ns = None
-            guardian_loss_samples: list[dict[str, int | bool]] = []
+            guardian_loss_observation: dict[str, int] = {}
             loss_measurement = None
+
+            def observed_lease_acquired_ns() -> int:
+                if "error" in lease_observation:
+                    raise RuntimeError(
+                        "the lease acquisition observation failed"
+                    ) from (lease_observation["error"])
+                return int(lease_observation["lease_acquired_ns"])
+
             while loss_measurement is None:
                 wait_handles: list[Any] = []
-                if guardian_exit_observed_ns is None:
+                if "guardian_exit_observed_ns" not in guardian_loss_observation:
                     wait_handles.append(guardian_handle)
-                if lease_observed_ns is None:
+                if "lease_observed_ns" not in guardian_loss_observation:
                     wait_handles.append(lease_acquired_event)
                 wait_handles.append(owner_handle)
                 wait_handles.extend(descendant_handles)
-                remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+                remaining_ms = remaining_wait_milliseconds(deadline)
                 wait_result = win32event.WaitForMultipleObjects(
                     wait_handles, False, remaining_ms
                 )
@@ -840,56 +897,20 @@ def _run_probe(scenario: str, root: Path) -> dict[str, Any]:
                 ):
                     raise RuntimeError(f"WaitForMultipleObjects returned {wait_result}")
 
-                sampled_ns = time.perf_counter_ns()
-                guardian_active = _is_active(guardian_handle)
-                owner_active = _is_active(owner_handle)
-                active_descendants = sum(
-                    _is_active(handle) for handle in descendant_handles
+                loss_measurement = sample_guardian_loss_progress(
+                    guardian_loss_observation,
+                    termination_requested_ns=guardian_termination_requested_ns,
+                    lease_acquired_ns=observed_lease_acquired_ns,
+                    guardian_active=lambda: _is_active(guardian_handle),
+                    lease_signaled=lambda: not _is_active(lease_acquired_event),
+                    owner_active=lambda: _is_active(owner_handle),
+                    active_descendants=lambda: sum(
+                        _is_active(handle) for handle in descendant_handles
+                    ),
+                    browser_job_active_processes=lambda: (
+                        _query_named_job_active_processes(browser_job_name)
+                    ),
                 )
-                browser_active = _query_named_job_active_processes(browser_job_name)
-                lease_signaled = not _is_active(lease_acquired_event)
-                guardian_loss_samples.append(
-                    {
-                        "sampled_ns": sampled_ns,
-                        "guardian_active": guardian_active,
-                        "owner_active": owner_active,
-                        "active_descendants": active_descendants,
-                        "browser_job_active_processes": browser_active,
-                        "lease_signaled": lease_signaled,
-                    }
-                )
-                if not owner_active:
-                    raise RuntimeError(
-                        "the owner exited before guardian-loss acquisition"
-                    )
-                if active_descendants <= 0:
-                    raise RuntimeError(
-                        "all descendants exited before guardian-loss acquisition"
-                    )
-                if browser_active <= 0:
-                    raise RuntimeError(
-                        "the browser Job drained before guardian-loss acquisition"
-                    )
-                if not guardian_active and guardian_exit_observed_ns is None:
-                    guardian_exit_observed_ns = sampled_ns
-                if lease_signaled and lease_observed_ns is None:
-                    if "error" in lease_observation:
-                        raise RuntimeError(
-                            "the lease acquisition observation failed"
-                        ) from (lease_observation["error"])
-                    lease_observed_ns = sampled_ns
-                if (
-                    guardian_exit_observed_ns is not None
-                    and lease_observed_ns is not None
-                ):
-                    loss_measurement = guardian_loss_measurement(
-                        termination_requested_ns=guardian_termination_requested_ns,
-                        guardian_exit_observed_ns=guardian_exit_observed_ns,
-                        lease_observed_ns=lease_observed_ns,
-                        owner_active=owner_active,
-                        active_descendants=active_descendants,
-                        browser_job_active_processes=browser_active,
-                    )
 
             guardian_stdout, guardian_stderr = guardian.communicate(
                 timeout=_DEADLINE_SECONDS
@@ -918,7 +939,7 @@ def _run_probe(scenario: str, root: Path) -> dict[str, Any]:
                     "browser_job_active_processes": browser_active_before,
                 },
                 "guardian_loss": loss_measurement,
-                "guardian_loss_samples": guardian_loss_samples,
+                "guardian_loss_samples": [loss_measurement],
                 "guardian_returncode": guardian.returncode,
             }
 

@@ -2,7 +2,7 @@
 
 - Date: 2026-09-19
 - Issue: [#808](https://github.com/stickerdaniel/linkedin-mcp-server/issues/808)
-- Status: Candidate topology falsified; production implementation stopped
+- Status: guardian-loss native evidence pending; production implementation stopped
 
 No production guardian or profile fence is selected. The merged #1025 evidence
 harness runs in the native Windows daemon matrix on Python 3.12.4, 3.13 and 3.14
@@ -43,10 +43,11 @@ errors fail the probe and are never interpreted as zero or exit. The observer
 never retains a browser-Job handle, so it cannot manufacture safety by delaying
 kill-on-close.
 
-This scenario is expected to falsify the candidate topology: after guardian
-exit, the real contender can acquire the lease while the owner and at least one
-browser descendant remain active and the browser Job still reports active
-processes. That is the unsafe observation rather than a desired contract.
+The candidate premise will be falsified if native CI observes that, after
+guardian exit, the real contender acquires the lease while the owner and at
+least one browser descendant remain active and the browser Job still reports
+active processes. That unsafe window is the observation under test, not a
+claimed result or a desired contract.
 
 ## Measurement boundary
 
