@@ -18,26 +18,36 @@ from linkedin_mcp_server import process_tree
 from linkedin_mcp_server.profile_lease import ProfileLease
 from windows_guardian_probe import (
     active_guardian_loss_wait_handles,
+    conjunction_admission,
     guardian_loss_measurement,
+    guardian_publication_sequence,
     guardian_shutdown_sequence,
     observe_guardian_identity,
     observe_named_job_objects,
     read_published_json,
     remaining_wait_milliseconds,
+    require_same_file_identity,
     sample_guardian_loss_progress,
     sample_lease_acquisition,
     sample_pre_crash_contention,
     starter_termination_measurement,
     terminate_wait_close_handles,
+    zero_proven_release_sequence,
 )
 
 _WINDOWS_ONLY = pytest.mark.skipif(os.name != "nt", reason="Windows Job Objects")
 _PROBE = Path(__file__).with_name("windows_guardian_probe.py")
 _REPO_ROOT = Path(__file__).resolve().parents[1]
+_CONJUNCTION_FAIL_CLOSED_SCENARIOS = {
+    "conjunction-owner-loss-terminate-error",
+    "conjunction-owner-loss-query-error",
+    "conjunction-owner-loss-drain-timeout",
+}
 _FAIL_CLOSED_SCENARIOS = {
     "candidate-terminate-error",
     "candidate-query-error",
     "candidate-drain-timeout",
+    *_CONJUNCTION_FAIL_CLOSED_SCENARIOS,
 }
 
 
@@ -135,10 +145,52 @@ def await_fail_closed_guardian(
     raise TimeoutError("the guardian did not report its injected failure")
 
 
+def await_fail_closed_conjunction(
+    process: Any,
+    harness: Any,
+    root: Path,
+    result_event: Any,
+    *,
+    timeout: float,
+) -> dict[str, Any]:
+    probe._wait(result_event, timeout, "the conjunction failure was not published")
+    if process.poll() is not None:
+        stdout, stderr = process.communicate()
+        raise AssertionError(
+            "the failed conjunction probe exited before harness cleanup: "
+            f"stdout={stdout!r} stderr={stderr!r}"
+        )
+    measurement = read_published_json(
+        root / "conjunction-result.json", deadline=time.monotonic() + 5
+    )
+    harness.terminate()
+    try:
+        process.wait(timeout=30)
+    finally:
+        harness.wait_until_empty(timeout=30)
+
+    fd = os.open(root / "auth" / "profile.lock", os.O_RDWR)
+    try:
+        acquired_after_drain = conjunction_admission(fd)
+        if acquired_after_drain:
+            probe._region_api()[1](fd, 0)
+    finally:
+        os.close(fd)
+    measurement["acquired_after_harness_drain"] = acquired_after_drain
+    return measurement
+
+
 def _run_probe(tmp_path: Path, scenario: str) -> dict[str, Any]:
     root = tmp_path / scenario
     harness = process_tree.WindowsJob.anonymous()
     nonce = process_tree.release_nonce()
+    result_event = None
+    environment = None
+    if scenario in _CONJUNCTION_FAIL_CLOSED_SCENARIOS:
+        _win32api, _win32con, win32event, _win32job = probe._windows_modules()
+        result_event_name = probe._new_event_name("conjunction-result")
+        result_event = win32event.CreateEvent(None, True, False, result_event_name)
+        environment = {**os.environ, "CONJUNCTION_RESULT_EVENT": result_event_name}
     process = subprocess.Popen(
         process_tree.windows_gate_command(
             [
@@ -154,6 +206,7 @@ def _run_probe(tmp_path: Path, scenario: str) -> dict[str, Any]:
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        env=environment,
     )
     assigned = False
     measurement = None
@@ -165,7 +218,14 @@ def _run_probe(tmp_path: Path, scenario: str) -> dict[str, Any]:
         if process.stdin is None:
             raise RuntimeError("the probe harness has no release stream")
         process_tree.release_windows_gate(process.stdin, nonce)
-        if scenario in _FAIL_CLOSED_SCENARIOS:
+        if scenario in _CONJUNCTION_FAIL_CLOSED_SCENARIOS:
+            if result_event is None:
+                raise RuntimeError("the conjunction result event was not created")
+            measurement = await_fail_closed_conjunction(
+                process, harness, root, result_event, timeout=20
+            )
+            stdout, stderr = process.communicate()
+        elif scenario in _FAIL_CLOSED_SCENARIOS:
             measurement = await_fail_closed_guardian(process, harness, root, timeout=20)
             stdout, stderr = process.communicate()
         else:
@@ -186,6 +246,8 @@ def _run_probe(tmp_path: Path, scenario: str) -> dict[str, Any]:
         if process.poll() is None:
             process.kill()
             process.wait(timeout=30)
+        if result_event is not None:
+            result_event.Close()
     expected_returncode = 1 if scenario in _FAIL_CLOSED_SCENARIOS else 0
     assert process.returncode == expected_returncode, stderr.decode("utf-8", "replace")
     if measurement is not None:
@@ -780,6 +842,96 @@ def test_guardian_failure_never_releases_an_unproven_fence(
         assert failure_key in result
 
 
+def test_conjunction_admission_acquires_a_then_b_and_retains_a() -> None:
+    events: list[str] = []
+
+    assert conjunction_admission(
+        7,
+        try_lock=lambda fd, offset: events.append(f"lock {fd} {offset}") or True,
+        unlock=lambda fd, offset: events.append(f"unlock {fd} {offset}"),
+    )
+
+    assert events == ["lock 7 0", "lock 7 1", "unlock 7 1"]
+
+
+def test_conjunction_admission_rolls_a_back_when_b_is_contended() -> None:
+    events: list[str] = []
+
+    assert not conjunction_admission(
+        7,
+        try_lock=lambda fd, offset: events.append(f"lock {fd} {offset}") or offset == 0,
+        unlock=lambda fd, offset: events.append(f"unlock {fd} {offset}"),
+    )
+
+    assert events == ["lock 7 0", "lock 7 1", "unlock 7 0"]
+
+
+def test_conjunction_admission_closes_fd_when_b_unlock_fails() -> None:
+    events: list[str] = []
+
+    def unlock(fd: int, offset: int) -> None:
+        events.append(f"unlock {fd} {offset}")
+        raise OSError("injected B unlock failure")
+
+    with pytest.raises(OSError, match="injected B unlock failure"):
+        conjunction_admission(
+            7,
+            try_lock=lambda fd, offset: events.append(f"lock {fd} {offset}") or True,
+            unlock=unlock,
+            close=lambda fd: events.append(f"close {fd}"),
+        )
+
+    assert events == ["lock 7 0", "lock 7 1", "unlock 7 1", "close 7"]
+
+
+def test_conjunction_requires_the_inherited_file_identity() -> None:
+    require_same_file_identity((1, 2, 3), [1, 2, 3])
+    with pytest.raises(RuntimeError, match="same file identity"):
+        require_same_file_identity((1, 2, 3), [1, 2, 4])
+
+
+def test_guardian_arms_only_after_b_and_a_live_owner() -> None:
+    events: list[str] = []
+
+    assert guardian_publication_sequence(
+        acquire_b=lambda: events.append("B") or True,
+        owner_alive=lambda: events.append("owner") or True,
+        release_b=lambda: events.append("release B"),
+        publish_armed=lambda: events.append("ARMED"),
+    )
+    assert events == ["B", "owner", "ARMED"]
+
+
+def test_late_guardian_never_arms_after_owner_exit() -> None:
+    events: list[str] = []
+
+    assert not guardian_publication_sequence(
+        acquire_b=lambda: events.append("B") or True,
+        owner_alive=lambda: events.append("owner dead") or False,
+        release_b=lambda: events.append("release B"),
+        publish_armed=lambda: events.append("ARMED"),
+    )
+    assert events == ["B", "owner dead", "release B"]
+
+
+def test_b_remains_held_between_zero_proven_and_release_permission() -> None:
+    events: list[str] = []
+
+    zero_proven_release_sequence(
+        publish_zero=lambda: events.append("ZERO_PROVEN"),
+        wait_allow_release=lambda: events.append("ALLOW_B_RELEASE"),
+        close_job=lambda: events.append("close job"),
+        release_b=lambda: events.append("release B"),
+    )
+
+    assert events == [
+        "ZERO_PROVEN",
+        "ALLOW_B_RELEASE",
+        "close job",
+        "release B",
+    ]
+
+
 @_WINDOWS_ONLY
 def test_native_owner_crash_releases_lease_before_job_descendants_exit(
     tmp_path: Path,
@@ -952,3 +1104,77 @@ def test_external_guardian_holds_fence_until_browser_job_is_empty(
     assert "project_owner_query_error" not in guardian
     assert "project_owner_query_timeout" not in guardian
     assert measurement["lease_acquired_ns"] >= guardian["zero_observed_ns"]
+
+
+@_WINDOWS_ONLY
+def test_conjunction_lock_regions(tmp_path: Path) -> None:
+    measurement = _run_probe(tmp_path, "conjunction-lock-regions")
+    _record_measurement(measurement)
+
+    assert measurement["owner_identity"] == measurement["file_identity"]
+    assert measurement["guardian_identity"] == measurement["file_identity"]
+    assert measurement["blocked_by_a"] is True
+    assert measurement["a_acquired_b_blocked_after_owner_exit"] is True
+    assert measurement["c_acquired"] is True
+    assert measurement["d_blocked_after_b_unlock"] is True
+    assert measurement["d_acquired_after_c_close"] is True
+
+
+@_WINDOWS_ONLY
+def test_conjunction_publication(tmp_path: Path) -> None:
+    measurement = _run_probe(tmp_path, "conjunction-publication")
+    _record_measurement(measurement)
+
+    assert measurement["owner_identity"] == measurement["file_identity"]
+    assert measurement["guardian_identity"] == measurement["file_identity"]
+    assert measurement["armed"] is True
+    assert measurement["b_probe_blocked"] is True
+    assert measurement["browser_started_after_armed"] is True
+    assert measurement["late_successor_admitted"] is True
+    assert measurement["late_guardian_armed"] is False
+
+
+@_WINDOWS_ONLY
+def test_conjunction_owner_loss(tmp_path: Path) -> None:
+    measurement = _run_probe(tmp_path, "conjunction-owner-loss")
+    _record_measurement(measurement)
+
+    assert measurement["owner_identity"] == measurement["file_identity"]
+    assert measurement["guardian_identity"] == measurement["file_identity"]
+    assert measurement["prearmed_rejected"] is True
+    assert measurement["zero_proven"] is True
+    assert measurement["job_active_at_zero"] == 0
+    assert measurement["a_acquired_b_blocked_before_release"] is True
+    assert measurement["acquired_after_b_release"] is True
+
+
+@_WINDOWS_ONLY
+def test_conjunction_guardian_loss_clean_close(tmp_path: Path) -> None:
+    measurement = _run_probe(tmp_path, "conjunction-guardian-loss-clean-close")
+    _record_measurement(measurement)
+
+    assert measurement["post_exit_attempts_rejected"] is True
+    assert measurement["active_processes_before_owner_drain"] > 0
+    assert measurement["live_descendants_before_owner_drain"] > 0
+    assert measurement["owner_observed_guardian_exit"] is True
+    assert measurement["zero_proven"] is True
+    assert measurement["blocked_while_a_held_at_zero"] is True
+    assert measurement["acquired_after_owner_release"] is True
+    assert measurement["respawn_claimed"] is False
+
+
+@_WINDOWS_ONLY
+@pytest.mark.parametrize(
+    "fault",
+    ["terminate-error", "query-error", "drain-timeout"],
+)
+def test_conjunction_owner_loss_failure_holds_b(tmp_path: Path, fault: str) -> None:
+    measurement = _run_probe(tmp_path, f"conjunction-owner-loss-{fault}")
+    _record_measurement(measurement)
+
+    assert measurement["fault"] == fault
+    assert measurement["guardian_error"] == fault
+    assert measurement["a_acquired_b_blocked"] is True
+    assert measurement["guardian_alive"] is True
+    assert measurement["identity_mutex_owned"] is True
+    assert measurement["acquired_after_harness_drain"] is True
