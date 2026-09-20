@@ -17,6 +17,7 @@ import windows_guardian_probe as probe
 from linkedin_mcp_server import process_tree
 from linkedin_mcp_server.profile_lease import ProfileLease
 from windows_guardian_probe import (
+    acquire_actor_region,
     active_guardian_loss_wait_handles,
     conjunction_admission,
     conjunction_guardian_shutdown,
@@ -27,6 +28,7 @@ from windows_guardian_probe import (
     observe_guardian_identity,
     observe_named_job_objects,
     open_descendant_handles_before_terminate,
+    query_control_job_membership,
     read_published_json,
     remaining_wait_milliseconds,
     require_same_file_identity,
@@ -1284,6 +1286,142 @@ def test_retry_retries_failed_rescue_close_without_masking_lock_error() -> None:
     assert closes == [7, 7]
 
 
+def test_actor_locks_before_checking_identity_and_current_path() -> None:
+    events: list[str] = ["open path"]
+    descriptor = probe._ActorFd(7, close=lambda _fd: events.append("close"))
+
+    assert acquire_actor_region(
+        descriptor,
+        Path("profile.lock"),
+        [1, 2, 3],
+        1,
+        try_lock=lambda _fd, _offset: events.append("lock B") or True,
+        unlock=lambda _fd, _offset: events.append("unlock B"),
+        identity=lambda _fd: events.append("identity") or (1, 2, 3),
+        still_at=lambda _fd, _path: events.append("path current") or True,
+    )
+    assert events == ["open path", "lock B", "identity", "path current"]
+
+
+def test_actor_identity_mismatch_unlocks_and_closes_without_publication() -> None:
+    events: list[str] = ["open path"]
+    descriptor = probe._ActorFd(7, close=lambda _fd: events.append("close"))
+
+    with pytest.raises(RuntimeError, match="same file identity"):
+        acquire_actor_region(
+            descriptor,
+            Path("profile.lock"),
+            [1, 2, 3],
+            1,
+            try_lock=lambda _fd, _offset: events.append("lock B") or True,
+            unlock=lambda _fd, _offset: events.append("unlock B"),
+            identity=lambda _fd: events.append("identity") or (1, 2, 4),
+            still_at=lambda _fd, _path: events.append("path current") or True,
+        )
+
+    assert descriptor.fd == -1
+    assert events == ["open path", "lock B", "identity", "unlock B", "close"]
+    assert "publish ARMED" not in events
+
+
+def test_real_self_handle_is_used_for_job_membership_and_closed() -> None:
+    events: list[str] = []
+
+    class Handle:
+        def Close(self) -> None:
+            events.append("close real self")
+
+    real_self = Handle()
+
+    class Win32Api:
+        @staticmethod
+        def GetCurrentProcess() -> str:
+            events.append("get pseudo")
+            return "pseudo"
+
+        @staticmethod
+        def DuplicateHandle(*args: Any) -> Handle:
+            events.append(f"duplicate {args}")
+            return real_self
+
+    class Win32Con:
+        DUPLICATE_SAME_ACCESS = 2
+
+    class Win32Job:
+        @staticmethod
+        def IsProcessInJob(process: Any, job: str) -> bool:
+            events.append(f"query {process is real_self} {process} {job}")
+            assert process != "pseudo"
+            return False
+
+    assert query_control_job_membership(
+        "browser-job",
+        "owner-handle",
+        win32api=Win32Api,
+        win32con=Win32Con,
+        win32job=Win32Job,
+    ) == (False, False)
+    assert events[-1] == "close real self"
+    assert "query True" in events[-3]
+
+
+def test_terminate_process_uses_popen_handle_without_pid_reopen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handle = object()
+    events: list[str] = []
+    active = iter([True, False])
+
+    class Process:
+        _handle = handle
+
+        @property
+        def pid(self) -> int:
+            pytest.fail("PID was consulted")
+
+        def wait(self, *, timeout: float) -> int:
+            events.append(f"popen wait {timeout}")
+            return 203
+
+    class Win32Api:
+        @staticmethod
+        def OpenProcess(*_args: Any) -> None:
+            pytest.fail("OpenProcess was called")
+
+        @staticmethod
+        def TerminateProcess(observed: Any, code: int) -> None:
+            assert observed is handle
+            events.append(f"terminate {code}")
+
+    monkeypatch.setattr(
+        probe,
+        "_windows_modules",
+        lambda: (Win32Api, object(), object(), object()),
+    )
+    monkeypatch.setattr(
+        probe,
+        "_is_active",
+        lambda observed: events.append(f"active {observed is handle}") or next(active),
+    )
+    monkeypatch.setattr(
+        probe,
+        "_wait",
+        lambda observed, timeout, message: events.append(
+            f"wait {observed is handle} {timeout} {message}"
+        ),
+    )
+
+    probe._terminate_process(Process())
+
+    assert events == [
+        "active True",
+        "terminate 203",
+        "wait True 30.0 process did not terminate",
+        "active True",
+        "popen wait 30.0",
+    ]
+
+
 def test_actor_duplicates_every_inherited_handle_and_closes_parent_copies() -> None:
     events: list[str] = []
 
@@ -1369,9 +1507,10 @@ def test_actor_never_inherits_internal_source_handles_directly(
         DUPLICATE_SAME_ACCESS = 2
 
     def launch(arguments: list[str], handles: list[int]) -> str:
-        events.append(f"launch {arguments[-4:]} {handles}")
-        assert handles == [107, 108]
-        assert "107" in arguments
+        events.append(f"launch {arguments[-5:]} {handles}")
+        assert handles == [108]
+        assert "profile.lock" in arguments
+        assert "[1, 2, 3]" in arguments
         assert '"owner_handle": 108' in arguments[-1]
         return "process"
 
@@ -1385,7 +1524,8 @@ def test_actor_never_inherits_internal_source_handles_directly(
     assert (
         probe._spawn_actor(
             "guardian-publish",
-            7,
+            Path("profile.lock"),
+            [1, 2, 3],
             "ready",
             Path("result.json"),
             {"owner_handle": 8},
@@ -1393,8 +1533,8 @@ def test_actor_never_inherits_internal_source_handles_directly(
         )
         == "process"
     )
-    assert all(" [7, 8]" not in event for event in events)
-    assert events[-2:] == ["close 107", "close 108"]
+    assert all(" 7 " not in event for event in events)
+    assert events[-1:] == ["close 108"]
 
 
 def test_owner_watch_opens_descendant_handles_before_terminating_job() -> None:

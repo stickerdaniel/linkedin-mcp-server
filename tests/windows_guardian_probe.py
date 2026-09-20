@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import faulthandler
 import importlib
 import json
 import os
@@ -24,6 +25,10 @@ _WAIT_ABANDONED = 128
 _WAIT_TIMEOUT = 258
 # Win32 MUTEX_MODIFY_STATE; pywin32 does not export it from win32con.
 _MUTEX_MODIFY_STATE = 0x0001
+
+
+def _phase(name: str) -> None:
+    print(f"windows-guardian-probe phase={name}", file=sys.stderr, flush=True)
 
 
 def _atomic_json(path: Path, value: Any) -> None:
@@ -616,6 +621,37 @@ def _guardian(
         raise RuntimeError("the fail-closed guardian resumed unexpectedly") from exc
 
 
+def query_control_job_membership(
+    job: Any,
+    watched_process: Any | None,
+    *,
+    win32api: Any,
+    win32con: Any,
+    win32job: Any,
+) -> tuple[bool, bool | None]:
+    _phase("duplicate-real-self-process-handle")
+    pseudo = win32api.GetCurrentProcess()
+    real_self = win32api.DuplicateHandle(
+        pseudo,
+        pseudo,
+        pseudo,
+        0,
+        False,
+        win32con.DUPLICATE_SAME_ACCESS,
+    )
+    try:
+        _phase("query-self-browser-job-membership")
+        current = bool(win32job.IsProcessInJob(real_self, job))
+        watched = None
+        if watched_process is not None:
+            _phase("query-watched-browser-job-membership")
+            watched = bool(win32job.IsProcessInJob(watched_process, job))
+        return current, watched
+    finally:
+        _phase("close-real-self-process-handle")
+        real_self.Close()
+
+
 def _process_handle(pid: int, access: int) -> Any:
     win32api, _win32con, _win32event, _win32job = _windows_modules()
     return win32api.OpenProcess(access, False, pid)
@@ -1158,6 +1194,7 @@ def _region_api() -> tuple[Callable[[int, int], bool], Callable[[int, int], None
     def try_lock(fd: int, offset: int) -> bool:
         overlapped = Overlapped()
         overlapped.Offset = offset
+        _phase(f"lock-file-region-{offset}")
         if lock_file_ex(
             handle(fd), 0x00000001 | 0x00000002, 0, 1, 0, ctypes.byref(overlapped)
         ):
@@ -1170,6 +1207,7 @@ def _region_api() -> tuple[Callable[[int, int], bool], Callable[[int, int], None
     def unlock(fd: int, offset: int) -> None:
         overlapped = Overlapped()
         overlapped.Offset = offset
+        _phase(f"unlock-file-region-{offset}")
         if not unlock_file_ex(handle(fd), 0, 1, 0, ctypes.byref(overlapped)):
             raise getattr(ctypes, "WinError")(getattr(ctypes, "get_last_error")())
 
@@ -1262,6 +1300,7 @@ def file_identity(fd: int) -> tuple[int, int, int]:
     get_info.restype = wintypes.BOOL
     info = ByHandleFileInformation()
     handle = getattr(msvcrt, "get_osfhandle")(fd)
+    _phase("get-file-information-by-handle")
     if not get_info(handle, ctypes.byref(info)):
         raise getattr(ctypes, "WinError")(getattr(ctypes, "get_last_error")())
     return (
@@ -1277,6 +1316,25 @@ def require_same_file_identity(
 ) -> None:
     if tuple(expected) != tuple(observed):
         raise RuntimeError("owner and guardian do not reference the same file identity")
+
+
+def require_locked_actor_identity(
+    fd: int,
+    path: Path,
+    expected: tuple[int, int, int] | list[int],
+    *,
+    identity: Callable[[int], tuple[int, int, int]] = file_identity,
+    still_at: Callable[[int, Path], bool] | None = None,
+) -> None:
+    if still_at is None:
+        from linkedin_mcp_server.common_utils import is_still_at
+
+        still_at = is_still_at
+    require_same_file_identity(expected, identity(fd))
+    # The probe root is private to its harness. Under that protected-parent
+    # premise, the post-lock path check closes the separate-open split election.
+    if not still_at(fd, path):
+        raise RuntimeError("locked profile file is no longer at its expected path")
 
 
 def guardian_publication_sequence(
@@ -1366,12 +1424,6 @@ def wait_on_unsignaled_throttle(
     wait(throttle, 1)
 
 
-def _inherited_fd(raw_handle: int) -> int:
-    import msvcrt
-
-    return int(getattr(msvcrt, "open_osfhandle")(raw_handle, os.O_RDWR))
-
-
 def _actor_event(name: str, access: int) -> Any:
     _win32api, _win32con, win32event, _win32job = _windows_modules()
     return win32event.OpenEvent(access, False, name)
@@ -1401,6 +1453,40 @@ class _ActorFd:
         self.fd = -1
 
 
+def acquire_actor_region(
+    descriptor: _ActorFd,
+    path: Path,
+    expected_identity: list[int],
+    offset: int,
+    *,
+    try_lock: Callable[[int, int], bool],
+    unlock: Callable[[int, int], None],
+    identity: Callable[[int], tuple[int, int, int]] = file_identity,
+    still_at: Callable[[int, Path], bool] | None = None,
+) -> bool:
+    if not try_lock(descriptor.fd, offset):
+        return False
+    try:
+        require_locked_actor_identity(
+            descriptor.fd,
+            path,
+            expected_identity,
+            identity=identity,
+            still_at=still_at,
+        )
+    except BaseException as first_error:
+        try:
+            unlock(descriptor.fd, offset)
+        except BaseException:
+            pass
+        try:
+            descriptor.close()
+        except BaseException:
+            pass
+        raise first_error
+    return True
+
+
 def _actor_admission(
     descriptor: _ActorFd,
     *,
@@ -1427,13 +1513,14 @@ def _finish_actor_fd(descriptor: _ActorFd, first_error: BaseException | None) ->
 
 def _actor(
     mode: str,
-    raw_fd_handle: int,
+    lock_path: Path,
+    expected_identity: list[int],
     ready_event: str,
     result_file: Path,
     options: dict[str, Any],
 ) -> int:
     win32api, win32con, win32event, win32job = _windows_modules()
-    descriptor = _ActorFd(_inherited_fd(raw_fd_handle) if raw_fd_handle else -1)
+    descriptor = _ActorFd(_probe_fd(lock_path))
     fd = descriptor.fd
     try_lock, unlock = _region_api()
     result: dict[str, Any] = {"mode": mode}
@@ -1443,8 +1530,6 @@ def _actor(
     locked_offset: int | None = None
     first_error: BaseException | None = None
     try:
-        if fd >= 0:
-            result["file_identity"] = list(file_identity(fd))
         job_name = options.get("job_name")
         if job_name:
             job = win32job.OpenJobObject(
@@ -1457,10 +1542,15 @@ def _actor(
         elif guardian_handle:
             process_handle = guardian_handle
         if job is not None and process_handle:
-            current_in_browser_job = bool(
-                win32job.IsProcessInJob(win32api.GetCurrentProcess(), job)
+            current_in_browser_job, watched_in_browser_job = (
+                query_control_job_membership(
+                    job,
+                    process_handle,
+                    win32api=win32api,
+                    win32con=win32con,
+                    win32job=win32job,
+                )
             )
-            watched_in_browser_job = bool(win32job.IsProcessInJob(process_handle, job))
             result["current_process_in_browser_job"] = current_in_browser_job
             result["watched_process_in_browser_job"] = watched_in_browser_job
             if current_in_browser_job or watched_in_browser_job:
@@ -1476,6 +1566,8 @@ def _actor(
             acquired_b = False
             if acquired_a:
                 try:
+                    require_locked_actor_identity(fd, lock_path, expected_identity)
+                    result["file_identity"] = list(file_identity(fd))
                     acquired_b = try_lock(fd, 1)
                     if acquired_b:
                         unlock(fd, 1)
@@ -1491,6 +1583,8 @@ def _actor(
             result["acquired"] = acquired
             if acquired:
                 locked_offset = 0
+                require_locked_actor_identity(fd, lock_path, expected_identity)
+                result["file_identity"] = list(file_identity(fd))
                 hold_event = options.get("hold_event")
                 _atomic_json(result_file, result)
                 _signal(ready_event)
@@ -1510,9 +1604,17 @@ def _actor(
 
             def acquire_b() -> bool:
                 nonlocal acquired_b, locked_offset
-                acquired_b = try_lock(fd, offset)
+                acquired_b = acquire_actor_region(
+                    descriptor,
+                    lock_path,
+                    expected_identity,
+                    offset,
+                    try_lock=try_lock,
+                    unlock=unlock,
+                )
                 if acquired_b:
                     locked_offset = offset
+                    result["file_identity"] = list(file_identity(fd))
                 return acquired_b
 
             def owner_alive() -> bool:
@@ -1548,12 +1650,20 @@ def _actor(
                 _actor_wait(options["hold_event"])
             return 0
 
-        if not try_lock(fd, offset):
+        if not acquire_actor_region(
+            descriptor,
+            lock_path,
+            expected_identity,
+            offset,
+            try_lock=try_lock,
+            unlock=unlock,
+        ):
             result["contention"] = True
             _atomic_json(result_file, result)
             _signal(ready_event)
             return 0
         locked_offset = offset
+        result["file_identity"] = list(file_identity(fd))
 
         if mode == "guardian-drain":
             identity_name = options.get("identity_mutex")
@@ -1858,8 +1968,10 @@ def spawn_with_duplicated_handles[T](
 def _spawn_inheriting(
     arguments: list[str], handles: list[int]
 ) -> subprocess.Popen[bytes]:
-    startup = getattr(subprocess, "STARTUPINFO")()
-    startup.lpAttributeList = {"handle_list": handles}
+    startup = None
+    if handles:
+        startup = getattr(subprocess, "STARTUPINFO")()
+        startup.lpAttributeList = {"handle_list": handles}
     return subprocess.Popen(
         arguments,
         cwd=_REPO_ROOT,
@@ -1878,17 +1990,18 @@ def _new_event(win32event: Any, label: str) -> tuple[str, Any]:
 
 def _spawn_actor(
     mode: str,
-    fd_handle: int,
+    lock_path: Path,
+    expected_identity: list[int],
     ready_name: str,
     result_file: Path,
     options: dict[str, Any],
     extra_handles: list[int] | None = None,
 ) -> subprocess.Popen[bytes]:
     win32api, win32con, _win32event, _win32job = _windows_modules()
-    sources = [fd_handle] if fd_handle else []
-    sources.extend(extra_handles or [])
+    sources = list(extra_handles or [])
 
     def duplicate(source: int) -> Any:
+        _phase("duplicate-inherited-process-handle")
         current = win32api.GetCurrentProcess()
         return win32api.DuplicateHandle(
             current,
@@ -1910,7 +2023,8 @@ def _spawn_actor(
             str(Path(__file__).resolve()),
             "actor",
             mode,
-            str(mapping.get(fd_handle, 0)),
+            str(lock_path),
+            json.dumps(expected_identity),
             ready_name,
             str(result_file),
             json.dumps(inherited_options),
@@ -1925,23 +2039,26 @@ def _spawn_actor(
     )
 
 
-def _terminate_process(process: subprocess.Popen[bytes]) -> None:
-    win32api, win32con, _win32event, _win32job = _windows_modules()
-    handle = win32api.OpenProcess(
-        win32con.PROCESS_TERMINATE | win32con.SYNCHRONIZE, False, process.pid
-    )
-    try:
-        if _is_active(handle):
-            win32api.TerminateProcess(handle, 203)
-        _wait(handle, _DEADLINE_SECONDS, "process did not terminate")
-    finally:
-        handle.Close()
+def _terminate_process(process: Any) -> None:
+    win32api, _win32con, _win32event, _win32job = _windows_modules()
+    handle = getattr(process, "_handle", None)
+    if handle is None:
+        raise RuntimeError("Windows Popen exposed no stable process handle")
+    _phase("check-process-before-terminate")
+    if _is_active(handle):
+        _phase("terminate-process-stable-handle")
+        win32api.TerminateProcess(handle, 203)
+    _phase("wait-process-stable-handle")
+    _wait(handle, _DEADLINE_SECONDS, "process did not terminate")
+    if _is_active(handle):
+        raise RuntimeError("process remained active after stable-handle wait")
     process.wait(timeout=_DEADLINE_SECONDS)
 
 
 def _probe_fd(path: Path) -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
-    return os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    return os.open(path, os.O_RDWR | os.O_CREAT | cloexec, 0o600)
 
 
 def _attempt_here(path: Path) -> tuple[bool, int]:
@@ -1965,9 +2082,6 @@ def _run_conjunction_probe(scenario: str, root: Path) -> dict[str, Any]:
     root.mkdir(parents=True, exist_ok=True)
     lock_path = root / "auth" / "profile.lock"
     base_fd = _probe_fd(lock_path)
-    import msvcrt
-
-    base_handle = int(getattr(msvcrt, "get_osfhandle")(base_fd))
     events: list[Any] = []
     processes: list[subprocess.Popen[bytes]] = []
     jobs: list[Any] = []
@@ -1988,7 +2102,13 @@ def _run_conjunction_probe(scenario: str, root: Path) -> dict[str, Any]:
         ready_name, ready = event(f"{label}-ready")
         result_file = root / f"{label}.json"
         process = _spawn_actor(
-            mode, base_handle, ready_name, result_file, options, extra_handles
+            mode,
+            lock_path,
+            identity,
+            ready_name,
+            result_file,
+            options,
+            extra_handles,
         )
         processes.append(process)
         actors_by_result[result_file] = process
@@ -2253,10 +2373,12 @@ def _run_conjunction_probe(scenario: str, root: Path) -> dict[str, Any]:
         jobs.append(browser_job)
         if browser_job.name is None:
             raise RuntimeError("browser Job has no name")
-        outer_in_browser_job = bool(
-            win32job.IsProcessInJob(
-                win32api.GetCurrentProcess(), browser_job.job_handle
-            )
+        outer_in_browser_job, _watched = query_control_job_membership(
+            browser_job.job_handle,
+            None,
+            win32api=win32api,
+            win32con=win32con,
+            win32job=win32job,
         )
         if outer_in_browser_job:
             raise RuntimeError("outer probe entered the browser Job")
@@ -2547,7 +2669,8 @@ def _parse_args() -> argparse.Namespace:
             "owner-watch",
         ),
     )
-    actor.add_argument("raw_fd_handle", type=int)
+    actor.add_argument("lock_path", type=Path)
+    actor.add_argument("expected_identity", type=json.loads)
     actor.add_argument("ready_event")
     actor.add_argument("result_file", type=Path)
     actor.add_argument("options", type=json.loads)
@@ -2559,6 +2682,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    faulthandler.enable()
     args = _parse_args()
     if os.name != "nt":
         raise SystemExit("this probe requires native Windows Job Objects")
@@ -2573,7 +2697,8 @@ def main() -> int:
     if args.role == "actor":
         return _actor(
             args.mode,
-            args.raw_fd_handle,
+            args.lock_path,
+            args.expected_identity,
             args.ready_event,
             args.result_file,
             args.options,
