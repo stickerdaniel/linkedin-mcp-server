@@ -49,6 +49,7 @@ from linkedin_mcp_server.scraping.post_actions import (
     COUNT_TEXT_UNITS_JS,
     OWN_EDITOR_JS,
     PIN_EDITOR_JS,
+    PIN_VISIBLE_DIALOG_JS,
     OPEN_REPOST_MENU_JS,
     PIN_POST_ROOT_JS,
     POST_ACTION_SIGNALS_JS,
@@ -435,6 +436,25 @@ def repost_menu(labels: Labels, *, count: int = 2) -> str:
     return f'<div role="menu">{items}</div>'
 
 
+def composer_dialog(labels: Labels) -> str:
+    """A portal-mounted commentary composer sitting beside the post.
+
+    The permalink page already has a comment box, so an unscoped editor pin
+    sees two textboxes. The dialog pin exists so the commentary path types
+    into this one instead of the post's.
+    """
+    return f"""
+<dialog open role="dialog">
+  <div role="textbox" contenteditable="true"
+    aria-label="{labels.repost_thoughts}"></div>
+  <button type="submit" aria-label="{labels.submit}"
+    onclick="document.body.setAttribute('data-clicked','composer-submit');
+             return false;"
+    >{labels.submit}</button>
+</dialog>
+"""
+
+
 def _page_html(*blocks: str) -> str:
     return f"<html><body><main>{''.join(blocks)}</main></body></html>"
 
@@ -520,6 +540,16 @@ class TestFindingTheRootPost:
         await _in_every_locale(
             dom_page, plain_post, (True, True, 4, True, False, 1), read
         )
+
+    async def test_repost_counts_ignore_controls_outside_the_bar(
+        self, dom_page
+    ) -> None:
+        async def read(page, html):
+            return len((await _signals(page, html))["counts"])
+
+        # The bar holds four buttons and no extra anchors. The comment thread
+        # and editor hold more, so a root-wide scan would return a larger list.
+        await _in_every_locale(dom_page, plain_post, 4, read)
 
     async def test_a_different_activity_id_resolves_by_unique_structure(
         self, dom_page
@@ -808,6 +838,76 @@ class TestPinningTheEditor:
             dom_page,
             lambda labels: post(labels, editor=False),
             "ambiguous_editor",
+            read,
+        )
+
+
+class TestPinningTheDialog:
+    """The commentary composer is a dialog, not the post's comment box."""
+
+    async def test_the_one_visible_dialog_is_pinned(self, dom_page) -> None:
+        async def read(page, html):
+            await page.set_content(_page_html(html))
+            handle = await page.evaluate_handle(PIN_VISIBLE_DIALOG_JS)
+            return handle.as_element() is not None
+
+        await _in_every_locale(
+            dom_page,
+            lambda labels: post(labels) + composer_dialog(labels),
+            True,
+            read,
+        )
+
+    async def test_two_visible_dialogs_pin_nothing(self, dom_page) -> None:
+        async def read(page, html):
+            await page.set_content(_page_html(html))
+            handle = await page.evaluate_handle(PIN_VISIBLE_DIALOG_JS)
+            return handle.as_element() is None
+
+        await _in_every_locale(
+            dom_page,
+            lambda labels: (
+                post(labels) + composer_dialog(labels) + composer_dialog(labels)
+            ),
+            True,
+            read,
+        )
+
+    async def test_an_unscoped_pin_is_ambiguous_when_the_post_has_a_comment_box(
+        self, dom_page
+    ) -> None:
+        async def read(page, html):
+            await page.set_content(_page_html(html))
+            pinned = await page.evaluate_handle(PIN_EDITOR_JS, arg={"scope": None})
+            return await (await pinned.get_property("status")).json_value()
+
+        await _in_every_locale(
+            dom_page,
+            lambda labels: post(labels) + composer_dialog(labels),
+            "ambiguous_editor",
+            read,
+        )
+
+    async def test_a_dialog_scoped_pin_takes_the_composer_not_the_comment_box(
+        self, dom_page
+    ) -> None:
+        async def read(page, html):
+            await page.set_content(_page_html(html))
+            dialog = await page.evaluate_handle(PIN_VISIBLE_DIALOG_JS)
+            pinned = await page.evaluate_handle(
+                PIN_EDITOR_JS, arg={"scope": dialog.as_element()}
+            )
+            status = await (await pinned.get_property("status")).json_value()
+            editor = (await pinned.get_property("editor")).as_element()
+            in_dialog = await editor.evaluate(
+                "node => Boolean(node.closest('dialog, [role=\"dialog\"]'))"
+            )
+            return (status, in_dialog)
+
+        await _in_every_locale(
+            dom_page,
+            lambda labels: post(labels) + composer_dialog(labels),
+            ("pinned", True),
             read,
         )
 

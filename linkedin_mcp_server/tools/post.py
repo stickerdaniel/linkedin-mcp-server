@@ -194,7 +194,12 @@ def register_post_tools(
 
             result = await extractor.react_to_post(post, reaction=reaction)
 
-            await ctx.report_progress(progress=100, total=100, message="Complete")
+            try:
+                await ctx.report_progress(progress=100, total=100, message="Complete")
+            except BaseException:
+                if result.get("retry_safe") is False:
+                    logger.warning(POST_ACTION_INTERRUPTED_WARNING)
+                raise
 
             return result
 

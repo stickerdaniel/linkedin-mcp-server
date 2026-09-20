@@ -35,7 +35,7 @@ a page-owning collaborator.
 | `message_sender` | `MessageSender` | `page-owning` |
 | `navigation` | `PageNavigator`, `WaitUntil` | `page-owning` |
 | `person` | `PersonScraper` | `page-owning` |
-| `post_actions` | `CLEAR_EDITOR_JS`, `CLICK_REACTION_JS`, `CLICK_REACT_TOGGLE_JS`, `CLICK_REPOST_MENU_ITEM_JS`, `COUNT_TEXT_UNITS_JS`, `OPEN_REPOST_MENU_JS`, `OWN_EDITOR_JS`, `PIN_EDITOR_JS`, `PIN_POST_ROOT_JS`, `POST_ACTION_SIGNALS_JS`, `PostActions`, `READ_REACTION_FLYOUT_JS`, `READ_REPOST_MENU_JS`, `SUBMIT_EDITOR_JS` | `page-owning` |
+| `post_actions` | `CLEAR_EDITOR_JS`, `CLICK_REACTION_JS`, `CLICK_REACT_TOGGLE_JS`, `CLICK_REPOST_MENU_ITEM_JS`, `COUNT_TEXT_UNITS_JS`, `OPEN_REPOST_MENU_JS`, `OWN_EDITOR_JS`, `PIN_EDITOR_JS`, `PIN_POST_ROOT_JS`, `PIN_VISIBLE_DIALOG_JS`, `POST_ACTION_SIGNALS_JS`, `PostActions`, `READ_REACTION_FLYOUT_JS`, `READ_REPOST_MENU_JS`, `SUBMIT_EDITOR_JS` | `page-owning` |
 | `posts` | `PostSearch` | `browser-free` |
 | `profile_page` | `MessageTarget`, `MessageTargetResolution`, `ProfilePageReader`, `ReadMessageTarget` | `page-owning` |
 | `search_urls` | `CONTENT_DATE_POSTED_MAP`, `EXPERIENCE_LEVEL_MAP`, `JOB_DATE_POSTED_MAP`, `JOB_TYPE_MAP`, `NETWORK_TOKENS`, `SORT_BY_MAP`, `WORK_TYPE_MAP`, `build_company_search_url()`, `build_content_search_url()`, `build_job_search_url()`, `build_people_search_url()` | `browser-free` |

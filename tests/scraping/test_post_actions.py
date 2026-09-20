@@ -184,6 +184,7 @@ class FakePage:
         pinned: bool = True,
         editor: FakeEditor | None = None,
         editor_status: str = "pinned",
+        dialog_pinned: bool = True,
         **answers: Any,
     ):
         self.url = POST_URL
@@ -197,6 +198,8 @@ class FakePage:
         self.handle = FakeHandle(pinned=pinned)
         self.editor = editor if editor is not None else FakeEditor()
         self._editor_status = editor_status
+        self._dialog_pinned = dialog_pinned
+        self.pin_editor_scope: Any = None
         self.keyboard = MagicMock()
         self.keyboard.press = AsyncMock(side_effect=self._press)
         self.keyboard.type = AsyncMock(side_effect=self._type)
@@ -237,8 +240,13 @@ class FakePage:
         # Keyword-only, matching the strict double in
         # `tests/scraping/support/policy_trace.py`: a positional argument there
         # is an undeclared call, so production has to pass this one by name.
+        if script is post_actions.PIN_VISIBLE_DIALOG_JS:
+            self.calls.append("pin_dialog")
+            self.dialog_handle = FakeHandle(pinned=self._dialog_pinned)
+            return self.dialog_handle
         if script is post_actions.PIN_EDITOR_JS:
             self.calls.append("pin_editor")
+            self.pin_editor_scope = None if arg is None else arg.get("scope")
             status = self._editor_status
             self.pinned_editor = FakePinnedEditor(
                 status, self.editor if status == "pinned" else None
@@ -676,7 +684,11 @@ class TestRepost:
         self,
     ) -> None:
         page = FakePage(
-            signals=[signals(counts=["12", "3"]), signals(counts=["12", "4"])],
+            signals=[
+                signals(counts=["12", "3"]),
+                signals(counts=["12", "3"]),
+                signals(counts=["12", "4"]),
+            ],
             open_repost="clicked",
             repost_menu={"menus": 1, "items": 2},
             pick_repost=True,
@@ -715,9 +727,37 @@ class TestRepost:
         assert result["acted"] is False
         assert "pick_repost" not in page.calls
 
-    async def test_commentary_takes_the_second_item_and_verifies_the_text(self) -> None:
+    async def test_commentary_pins_the_dialog_and_confirms_on_count_change(
+        self,
+    ) -> None:
         page = FakePage(
-            signals=signals(),
+            signals=[
+                signals(counts=["12", "3"]),
+                signals(counts=["12", "3"]),
+                signals(counts=["12", "4"]),
+            ],
+            open_repost="clicked",
+            repost_menu={"menus": 1, "items": 2},
+            pick_repost=True,
+            submit="submitted",
+        )
+        with navigated():
+            result = await actions(page).repost_post(
+                PERMALINK, confirm_repost=True, commentary="Worth a read"
+            )
+        assert result["status"] == "reposted"
+        assert result["acted"] is True
+        assert result["retry_safe"] is False
+        assert page.picked_repost == {"expected": 2, "index": 1}
+        assert page.pin_editor_scope is page.dialog_handle
+        assert "units" not in page.calls
+        assert "pin_dialog" in page.calls
+
+    async def test_commentary_does_not_treat_text_in_the_source_post_as_proof(
+        self,
+    ) -> None:
+        page = FakePage(
+            signals=signals(counts=["12", "3"]),
             open_repost="clicked",
             repost_menu={"menus": 1, "items": 2},
             pick_repost=True,
@@ -728,9 +768,26 @@ class TestRepost:
             result = await actions(page).repost_post(
                 PERMALINK, confirm_repost=True, commentary="Worth a read"
             )
-        assert result["status"] == "reposted"
-        assert result["acted"] is True
-        assert page.picked_repost == {"expected": 2, "index": 1}
+        assert result["status"] == "repost_unconfirmed"
+        assert result["acted"] is False
+        assert result["retry_safe"] is False
+        assert "units" not in page.calls
+
+    async def test_two_visible_dialogs_type_nothing(self) -> None:
+        page = FakePage(
+            signals=signals(),
+            open_repost="clicked",
+            repost_menu={"menus": 1, "items": 2},
+            pick_repost=True,
+            dialog_pinned=False,
+        )
+        with navigated():
+            result = await actions(page).repost_post(
+                PERMALINK, confirm_repost=True, commentary="Worth a read"
+            )
+        assert result["status"] == "repost_composer_unavailable"
+        assert "type" not in page.calls
+        assert "pin_editor" not in page.calls
 
     async def test_a_composer_that_never_opens_types_nothing(self) -> None:
         page = FakePage(

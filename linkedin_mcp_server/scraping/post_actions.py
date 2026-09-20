@@ -26,7 +26,9 @@ about the control rather than about the language the page is in:
 - the repost menu opener is the ``button[aria-expanded]`` in the bar, the
   same inverse-of-aria-label trick the profile More menu uses;
 - the comment editor is the ``[role="textbox"][contenteditable="true"]``
-  inside the root post.
+  inside the root post;
+- a repost-with-commentary editor lives in a portal-mounted dialog, not in
+  the post, so pin and submit are scoped to that one visible dialog.
 
 Two positional assumptions remain, both guarded by an exact count so a
 layout change refuses instead of clicking the wrong thing. They are named at
@@ -245,12 +247,16 @@ function findActionBar(root) {
 
 # Everything a flow needs to decide what to do, read in one pass.
 #
-# `counts` is every visible control's text, carried as opaque strings that are
-# only ever compared to the same list read earlier for inequality. Nothing
-# parses them, and that is the point: a reaction or repost count renders with
-# locale digit grouping and an abbreviation suffix, so reading a number out of
-# one would be the text dependency the Scraping Rules forbid, while noticing
-# that the list is no longer identical is not. `barText` is carried for
+# `counts` is every visible control's text *in the action bar*, carried as
+# opaque strings that are only ever compared to the same list read earlier
+# for inequality. Nothing parses them, and that is the point: a reaction or
+# repost count renders with locale digit grouping and an abbreviation suffix,
+# so reading a number out of one would be the text dependency the Scraping
+# Rules forbid, while noticing that the list is no longer identical is not.
+# The bar is the bound because a permalink also holds author links, follow
+# controls and comment-row buttons; those changing during the confirm window
+# is not evidence a reshare landed. Residual: another member reacting or
+# commenting can still change a bar button's text. `barText` is carried for
 # diagnostics only and no decision reads it.
 POST_ACTION_SIGNALS_JS = (
     r"""
@@ -268,9 +274,11 @@ POST_ACTION_SIGNALS_JS = (
   const editors = Array.from(root.querySelectorAll(
     '[role="textbox"][contenteditable="true"]'
   )).filter(visible);
-  const counts = Array.from(root.querySelectorAll('button, a'))
-    .filter(visible)
-    .map(element => (element.innerText || '').trim());
+  const counts = found
+    ? Array.from(found.bar.querySelectorAll('button, a'))
+        .filter(visible)
+        .map(element => (element.innerText || '').trim())
+    : [];
   return {
     hasMain: true,
     hasRoot: true,
@@ -494,6 +502,24 @@ CLICK_REPOST_MENU_ITEM_JS = (
 # drawn. A comment "typed" that way is a draft the page does not know about.
 # The message composer accepts `execCommand`; the comment box does not, so the
 # two paths differ on purpose.
+# The commentary composer is portal-mounted. Pinning it by the same rule as
+# the comment editor — exactly one visible dialog, or refuse — is what keeps
+# a permalink page's in-post comment box from being typed into instead.
+PIN_VISIBLE_DIALOG_JS = (
+    r"""
+(() => {
+"""
+    + _VISIBLE_FN_JS
+    + r"""
+  const dialogs = Array.from(
+    document.querySelectorAll('dialog[open], [role="dialog"]')
+  ).filter(visible);
+  if (dialogs.length !== 1) return null;
+  return dialogs[0];
+})
+"""
+)
+
 PIN_EDITOR_JS = (
     r"""
 ((arg) => {
@@ -1049,6 +1075,8 @@ class PostActions:
                     "cannot be trusted and nothing was clicked.",
                 )
 
+            if commentary is None:
+                baseline = await self._bar_counts(post_id)
             index = 1 if commentary is not None else 0
             clicked = await self._session.page.evaluate(
                 CLICK_REPOST_MENU_ITEM_JS,
@@ -1063,9 +1091,7 @@ class PostActions:
                 )
 
             if commentary is None:
-                return await self._confirm_repost(
-                    permalink, post_id, list(signals.get("counts") or [])
-                )
+                return await self._confirm_repost(permalink, post_id, baseline)
             return await self._write_and_submit(
                 root,
                 permalink,
@@ -1074,6 +1100,7 @@ class PostActions:
                 success_status="reposted",
                 unconfirmed_status="repost_unconfirmed",
                 noun="repost",
+                post_id=post_id,
             )
         finally:
             await root.dispose()
@@ -1103,14 +1130,20 @@ class PostActions:
         success_status: str,
         unconfirmed_status: str,
         noun: str,
+        post_id: str | None = None,
     ) -> dict[str, Any]:
         """Type text into the one available editor and submit it.
 
         ``scoped_to_root`` is the difference between a comment, whose editor
         lives inside the post, and a repost commentary, whose editor lives in
-        a portal-mounted dialog outside it.
+        a portal-mounted dialog outside it. Commentary is confirmed the same
+        way a bare repost is: the source post's own count strings change.
+        Matching text inside that post is not evidence — the commentary
+        publishes to the actor's feed, and the permalink page still has a
+        comment box that would satisfy a text count without a reshare.
         """
         page = self._session.page
+        dialog: Any = None
         if not scoped_to_root:
             try:
                 await page.locator(_DIALOG_SELECTOR).first.wait_for(
@@ -1122,84 +1155,107 @@ class PostActions:
                     "repost_composer_unavailable",
                     "The repost composer did not open, so nothing was typed.",
                 )
+            dialog = await page.evaluate_handle(PIN_VISIBLE_DIALOG_JS)
+            if dialog.as_element() is None:
+                await dialog.dispose()
+                dialog = None
+                return post_action_result(
+                    permalink,
+                    "repost_composer_unavailable",
+                    "Could not find exactly one visible composer dialog, so "
+                    "nothing was typed.",
+                )
 
-        scope: Any = root if scoped_to_root else None
-        baseline = await page.evaluate(
-            COUNT_TEXT_UNITS_JS, {"root": root, "text": text.strip()}
-        )
+        try:
+            scope: Any = root if scoped_to_root else dialog
+            baseline = 0
+            if scoped_to_root:
+                counted = await page.evaluate(
+                    COUNT_TEXT_UNITS_JS, {"root": root, "text": text.strip()}
+                )
+                baseline = int(counted) if isinstance(counted, int) else 0
 
-        pinned = await page.evaluate_handle(PIN_EDITOR_JS, arg={"scope": scope})
-        status = str(await (await pinned.get_property("status")).json_value())
-        editor = (await pinned.get_property("editor")).as_element()
-        # The wrapper object is finished with once its two properties are read;
-        # the element handle read out of it survives its disposal.
-        await pinned.dispose()
-        if status != "pinned" or editor is None:
-            if not scoped_to_root:
-                await self._dismiss_overlay()
-            return post_action_result(
-                permalink,
-                "draft_present" if status == "draft_present" else "write_failed",
-                {
-                    "ambiguous_editor": f"Could not find exactly one {noun} editor.",
-                    "draft_present": f"The {noun} editor already holds a draft, "
-                    "which was left untouched.",
-                }.get(status, f"Could not write the {noun}."),
-            )
+            pinned = await page.evaluate_handle(PIN_EDITOR_JS, arg={"scope": scope})
+            status = str(await (await pinned.get_property("status")).json_value())
+            editor = (await pinned.get_property("editor")).as_element()
+            # The wrapper object is finished with once its two properties are read;
+            # the element handle read out of it survives its disposal.
+            await pinned.dispose()
+            if status != "pinned" or editor is None:
+                if not scoped_to_root:
+                    await self._dismiss_overlay()
+                return post_action_result(
+                    permalink,
+                    "draft_present" if status == "draft_present" else "write_failed",
+                    {
+                        "ambiguous_editor": f"Could not find exactly one {noun} editor.",
+                        "draft_present": f"The {noun} editor already holds a draft, "
+                        "which was left untouched.",
+                    }.get(status, f"Could not write the {noun}."),
+                )
 
-        typed = await self._type_text(editor, text)
-        if typed != "typed":
-            if not scoped_to_root:
-                await self._dismiss_overlay()
-            return post_action_result(
-                permalink,
-                "write_failed",
-                {
-                    "not_focusable": f"The {noun} editor could not take focus.",
-                    "text_mismatch": f"The {noun} editor did not hold the exact "
-                    "text after typing, so it was cleared and nothing was "
-                    "submitted.",
-                }.get(typed, f"Could not write the {noun}."),
-            )
+            typed = await self._type_text(editor, text)
+            if typed != "typed":
+                if not scoped_to_root:
+                    await self._dismiss_overlay()
+                return post_action_result(
+                    permalink,
+                    "write_failed",
+                    {
+                        "not_focusable": f"The {noun} editor could not take focus.",
+                        "text_mismatch": f"The {noun} editor did not hold the exact "
+                        "text after typing, so it was cleared and nothing was "
+                        "submitted.",
+                    }.get(typed, f"Could not write the {noun}."),
+                )
 
-        submitted = await self._submit_editor(scope, text)
-        if submitted != "submitted":
-            # Nothing was clicked on either of these two, so the typed text is
-            # this server's to take back, and taking it back is what keeps the
-            # `retry_safe` below true: a draft left behind would meet the next
-            # attempt as `draft_present` and refuse it. The other statuses
-            # describe an editor that is no longer identifiable as the one that
-            # was typed into, and clearing something unidentified is worse than
-            # leaving it.
-            if submitted in ("no_submit_control", "ambiguous_submit"):
-                await page.evaluate(CLEAR_EDITOR_JS, {"editor": editor})
-            if not scoped_to_root:
-                await self._dismiss_overlay()
-            return post_action_result(
-                permalink,
-                "submit_unavailable",
-                {
-                    "ambiguous_editor": f"Could not find exactly one {noun} editor "
-                    "at submit time.",
-                    "not_owned": f"The {noun} editor no longer held this text.",
-                    "ambiguous_submit": "Found more than one enabled submit "
-                    f"control for the {noun}, so none was clicked.",
-                    "no_submit_control": f"The {noun} text was typed but no submit "
-                    "control ever appeared, so nothing was clicked and the text "
-                    "was removed from the editor.",
-                }.get(str(submitted), f"Could not submit the {noun}."),
-                retry_safe=True,
-            )
+            if scoped_to_root:
+                submitted = await self._submit_editor(scope, text)
+            else:
+                baseline_counts = await self._bar_counts(str(post_id))
+                submitted = await self._submit_editor(scope, text)
+            if submitted != "submitted":
+                # Nothing was clicked on either of these two, so the typed text is
+                # this server's to take back, and taking it back is what keeps the
+                # `retry_safe` below true: a draft left behind would meet the next
+                # attempt as `draft_present` and refuse it. The other statuses
+                # describe an editor that is no longer identifiable as the one that
+                # was typed into, and clearing something unidentified is worse than
+                # leaving it.
+                if submitted in ("no_submit_control", "ambiguous_submit"):
+                    await page.evaluate(CLEAR_EDITOR_JS, {"editor": editor})
+                if not scoped_to_root:
+                    await self._dismiss_overlay()
+                return post_action_result(
+                    permalink,
+                    "submit_unavailable",
+                    {
+                        "ambiguous_editor": f"Could not find exactly one {noun} editor "
+                        "at submit time.",
+                        "not_owned": f"The {noun} editor no longer held this text.",
+                        "ambiguous_submit": "Found more than one enabled submit "
+                        f"control for the {noun}, so none was clicked.",
+                        "no_submit_control": f"The {noun} text was typed but no submit "
+                        "control ever appeared, so nothing was clicked and the text "
+                        "was removed from the editor.",
+                    }.get(str(submitted), f"Could not submit the {noun}."),
+                    retry_safe=True,
+                )
 
-        return await self._confirm_text(
-            root,
-            permalink,
-            text,
-            baseline=int(baseline) if isinstance(baseline, int) else 0,
-            success_status=success_status,
-            unconfirmed_status=unconfirmed_status,
-            noun=noun,
-        )
+            if scoped_to_root:
+                return await self._confirm_text(
+                    root,
+                    permalink,
+                    text,
+                    baseline=baseline,
+                    success_status=success_status,
+                    unconfirmed_status=unconfirmed_status,
+                    noun=noun,
+                )
+            return await self._confirm_repost(permalink, str(post_id), baseline_counts)
+        finally:
+            if dialog is not None:
+                await dialog.dispose()
 
     async def _type_text(self, editor: ElementHandle, text: str) -> str:
         """Type into a pinned editor with real key events.
@@ -1294,13 +1350,21 @@ class PostActions:
             retry_safe=False,
         )
 
+    async def _bar_counts(self, post_id: str) -> list[str]:
+        """The action-bar control texts, captured immediately before a write."""
+        return list((await self._read_signals(post_id)).get("counts") or [])
+
     async def _confirm_repost(
         self,
         permalink: str,
         post_id: str,
         baseline: list[str],
     ) -> dict[str, Any]:
-        """Confirm a bare repost by the post's own control text changing.
+        """Confirm a repost by the post's own control text changing.
+
+        Used for both the immediate reshare and the commentary composer, because
+        the published commentary lives on the actor's feed rather than inside
+        the source post.
 
         The comparison is string inequality against the strings read before
         the click, never a parsed number: a count renders with locale digit

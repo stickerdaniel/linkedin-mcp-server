@@ -1146,6 +1146,7 @@ async def _repost_post_scenario() -> dict[str, Any]:
     _script_post_surface(
         page,
         _post_signals(counts=["12", "3"]),
+        _post_signals(counts=["12", "3"]),
         _post_signals(counts=["12", "4"]),
     )
     page.script("evaluate:post_repost_open", "clicked")

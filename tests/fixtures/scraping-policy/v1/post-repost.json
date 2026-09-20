@@ -73,7 +73,7 @@
       "call": "repost_post",
       "kind": "evaluate",
       "operation": "post_action_signals",
-      "program_digest": "75adec9213e4",
+      "program_digest": "0a12cc3ea757",
       "section": "post"
     },
     {
@@ -111,6 +111,14 @@
       "section": "post"
     },
     {
+      "arg": "7506667649444237313",
+      "call": "repost_post",
+      "kind": "evaluate",
+      "operation": "post_action_signals",
+      "program_digest": "0a12cc3ea757",
+      "section": "post"
+    },
+    {
       "arg": {
         "expected": 2,
         "index": 0
@@ -126,7 +134,7 @@
       "call": "repost_post",
       "kind": "evaluate",
       "operation": "post_action_signals",
-      "program_digest": "75adec9213e4",
+      "program_digest": "0a12cc3ea757",
       "section": "post"
     },
     {

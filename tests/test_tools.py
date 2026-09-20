@@ -10,6 +10,7 @@ from fastmcp.tools import FunctionTool
 
 from linkedin_mcp_server.callbacks import MCPContextProgressCallback
 from linkedin_mcp_server.scraping.contracts import (
+    POST_ACTION_INTERRUPTED_WARNING,
     RATE_LIMITED_SECTION_TEXT,
     SEND_INTERRUPTED_WARNING,
 )
@@ -1269,6 +1270,41 @@ class TestPostEngagementTools:
         assert search is not None
         assert search.annotations is not None
         assert search.annotations.readOnlyHint is True
+
+    @pytest.mark.parametrize(
+        ("result", "warns"),
+        [
+            ({"status": "reacted", "acted": True, "retry_safe": False}, True),
+            ({"status": "already_reacted", "acted": False, "retry_safe": True}, False),
+        ],
+        ids=["reacted", "refused"],
+    )
+    async def test_cancelled_react_completion_notification_warns(
+        self, mock_context, caplog, result, warns
+    ):
+        mock_extractor = _make_mock_extractor({})
+        mock_extractor.react_to_post = AsyncMock(
+            return_value={"url": POST_URL, **result}
+        )
+        mock_context.report_progress = AsyncMock(
+            side_effect=[None, asyncio.CancelledError()]
+        )
+
+        tool_fn = await self._tool("react_to_post")
+        with (
+            patch(
+                "linkedin_mcp_server.tools.post.get_ready_extractor",
+                new_callable=AsyncMock,
+                return_value=mock_extractor,
+            ),
+            caplog.at_level(logging.WARNING, logger="linkedin_mcp_server.tools.post"),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await tool_fn(POST_PERMALINK, mock_context)
+
+        mock_extractor.react_to_post.assert_awaited_once()
+        warnings = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+        assert (POST_ACTION_INTERRUPTED_WARNING in warnings) is warns, warnings
 
 
 class TestMessagingTools:

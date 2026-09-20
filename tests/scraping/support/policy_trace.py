@@ -643,6 +643,7 @@ def semantic_program_id(program: str) -> str:
         ("const target = items[arg.index]", "post_repost_pick"),
         ("element => element === document.activeElement", "post_editor_focus"),
         ("element => element.innerText || ''", "post_editor_text"),
+        ("if (dialogs.length !== 1) return null", "post_dialog_pin"),
         ("return {status: 'pinned', editor: editor}", "post_editor_pin"),
         ("arg.editor.__linkedinMcpOwnedText = arg.text", "post_editor_own"),
         ("range.selectNodeContents(editor)", "post_editor_clear"),
