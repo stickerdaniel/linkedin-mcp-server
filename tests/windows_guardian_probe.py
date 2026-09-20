@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ctypes
+import faulthandler
 import importlib
 import json
 import os
@@ -24,6 +26,37 @@ _WAIT_ABANDONED = 128
 _WAIT_TIMEOUT = 258
 # Win32 MUTEX_MODIFY_STATE; pywin32 does not export it from win32con.
 _MUTEX_MODIFY_STATE = 0x0001
+
+
+class _FileTime(ctypes.Structure):
+    _fields_ = [
+        ("dwLowDateTime", ctypes.c_uint32),
+        ("dwHighDateTime", ctypes.c_uint32),
+    ]
+
+
+class _ByHandleFileInformation(ctypes.Structure):
+    _fields_ = [
+        ("dwFileAttributes", ctypes.c_uint32),
+        ("ftCreationTime", _FileTime),
+        ("ftLastAccessTime", _FileTime),
+        ("ftLastWriteTime", _FileTime),
+        ("dwVolumeSerialNumber", ctypes.c_uint32),
+        ("nFileSizeHigh", ctypes.c_uint32),
+        ("nFileSizeLow", ctypes.c_uint32),
+        ("nNumberOfLinks", ctypes.c_uint32),
+        ("nFileIndexHigh", ctypes.c_uint32),
+        ("nFileIndexLow", ctypes.c_uint32),
+    ]
+
+
+_get_file_information_by_handle: Any | None = None
+_get_file_information_last_error: Callable[[], int] | None = None
+_get_file_information_error: Callable[[int], BaseException] | None = None
+
+
+def _phase(name: str) -> None:
+    print(f"windows-guardian-probe phase={name}", file=sys.stderr, flush=True)
 
 
 def _atomic_json(path: Path, value: Any) -> None:
@@ -616,6 +649,37 @@ def _guardian(
         raise RuntimeError("the fail-closed guardian resumed unexpectedly") from exc
 
 
+def query_control_job_membership(
+    job: Any,
+    watched_process: Any | None,
+    *,
+    win32api: Any,
+    win32con: Any,
+    win32job: Any,
+) -> tuple[bool, bool | None]:
+    _phase("duplicate-real-self-process-handle")
+    pseudo = win32api.GetCurrentProcess()
+    real_self = win32api.DuplicateHandle(
+        pseudo,
+        pseudo,
+        pseudo,
+        0,
+        False,
+        win32con.DUPLICATE_SAME_ACCESS,
+    )
+    try:
+        _phase("query-self-browser-job-membership")
+        current = bool(win32job.IsProcessInJob(real_self, job))
+        watched = None
+        if watched_process is not None:
+            _phase("query-watched-browser-job-membership")
+            watched = bool(win32job.IsProcessInJob(watched_process, job))
+        return current, watched
+    finally:
+        _phase("close-real-self-process-handle")
+        real_self.Close()
+
+
 def _process_handle(pid: int, access: int) -> Any:
     win32api, _win32con, _win32event, _win32job = _windows_modules()
     return win32api.OpenProcess(access, False, pid)
@@ -1115,6 +1179,1482 @@ def _run_probe(scenario: str, root: Path) -> dict[str, Any]:
             guardian_armed.Close()
 
 
+def _region_api() -> tuple[Callable[[int, int], bool], Callable[[int, int], None]]:
+    """Return probe-local one-byte LockFileEx helpers."""
+    import ctypes
+    from ctypes import wintypes
+
+    class Overlapped(ctypes.Structure):
+        _fields_ = [
+            ("Internal", ctypes.c_size_t),
+            ("InternalHigh", ctypes.c_size_t),
+            ("Offset", wintypes.DWORD),
+            ("OffsetHigh", wintypes.DWORD),
+            ("hEvent", wintypes.HANDLE),
+        ]
+
+    kernel32 = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
+    lock_file_ex = kernel32.LockFileEx
+    lock_file_ex.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.POINTER(Overlapped),
+    ]
+    lock_file_ex.restype = wintypes.BOOL
+    unlock_file_ex = kernel32.UnlockFileEx
+    unlock_file_ex.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.POINTER(Overlapped),
+    ]
+    unlock_file_ex.restype = wintypes.BOOL
+
+    def handle(fd: int) -> int:
+        import msvcrt
+
+        return int(getattr(msvcrt, "get_osfhandle")(fd))
+
+    def try_lock(fd: int, offset: int) -> bool:
+        overlapped = Overlapped()
+        overlapped.Offset = offset
+        _phase(f"lock-file-region-{offset}")
+        if lock_file_ex(
+            handle(fd), 0x00000001 | 0x00000002, 0, 1, 0, ctypes.byref(overlapped)
+        ):
+            return True
+        error = getattr(ctypes, "get_last_error")()
+        if error == 33:  # ERROR_LOCK_VIOLATION
+            return False
+        raise getattr(ctypes, "WinError")(error)
+
+    def unlock(fd: int, offset: int) -> None:
+        overlapped = Overlapped()
+        overlapped.Offset = offset
+        _phase(f"unlock-file-region-{offset}")
+        if not unlock_file_ex(handle(fd), 0, 1, 0, ctypes.byref(overlapped)):
+            raise getattr(ctypes, "WinError")(getattr(ctypes, "get_last_error")())
+
+    return try_lock, unlock
+
+
+def conjunction_admission(
+    fd: int,
+    *,
+    try_lock: Callable[[int, int], bool] | None = None,
+    unlock: Callable[[int, int], None] | None = None,
+    close: Callable[[int], None] = os.close,
+) -> bool:
+    """Acquire A then transient B, retaining A only on full admission."""
+    if try_lock is None or unlock is None:
+        try_lock, unlock = _region_api()
+
+    def rescue_close() -> None:
+        try:
+            close(fd)
+        except BaseException:
+            pass
+
+    def rollback_a(first_error: BaseException | None) -> None:
+        try:
+            unlock(fd, 0)
+        except BaseException as unlock_error:
+            rescue_close()
+            raise first_error or unlock_error
+        if first_error is not None:
+            raise first_error
+
+    if not try_lock(fd, 0):
+        return False
+    try:
+        acquired_b = try_lock(fd, 1)
+    except BaseException as lock_error:
+        rollback_a(lock_error)
+        raise AssertionError("A rollback unexpectedly returned")
+    if not acquired_b:
+        rollback_a(None)
+        return False
+    try:
+        unlock(fd, 1)
+    except BaseException as unlock_error:
+        # Closing is the only safe rescue when the offset-specific unlock failed:
+        # it releases both regions and prevents a caller from treating A as held.
+        rescue_close()
+        raise unlock_error
+    return True
+
+
+def probe_conjunction_regions(fd: int) -> tuple[bool, bool]:
+    """Try A then B and release every acquired region before returning."""
+    try_lock, unlock = _region_api()
+    acquired_a = try_lock(fd, 0)
+    if not acquired_a:
+        return False, False
+    try:
+        acquired_b = try_lock(fd, 1)
+        if acquired_b:
+            unlock(fd, 1)
+        return True, acquired_b
+    finally:
+        unlock(fd, 0)
+
+
+def _file_information_api() -> tuple[
+    Any, Callable[[], int], Callable[[int], BaseException]
+]:
+    global _get_file_information_by_handle
+    global _get_file_information_error
+    global _get_file_information_last_error
+
+    if _get_file_information_by_handle is None:
+        kernel32 = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
+        get_info = kernel32.GetFileInformationByHandle
+        get_info.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(_ByHandleFileInformation),
+        ]
+        get_info.restype = ctypes.c_int32
+        _get_file_information_by_handle = get_info
+        _get_file_information_last_error = getattr(ctypes, "get_last_error")
+        _get_file_information_error = getattr(ctypes, "WinError")
+    assert _get_file_information_last_error is not None
+    assert _get_file_information_error is not None
+    return (
+        _get_file_information_by_handle,
+        _get_file_information_last_error,
+        _get_file_information_error,
+    )
+
+
+def _identity_from_file_information(
+    info: _ByHandleFileInformation,
+) -> tuple[int, int, int]:
+    return (
+        int(info.dwVolumeSerialNumber),
+        int(info.nFileIndexHigh),
+        int(info.nFileIndexLow),
+    )
+
+
+def file_identity(fd: int) -> tuple[int, int, int]:
+    """Read the stable Windows identity of an open file descriptor."""
+    import msvcrt
+
+    get_info, get_last_error, win_error = _file_information_api()
+    info = _ByHandleFileInformation()
+    handle = getattr(msvcrt, "get_osfhandle")(fd)
+    _phase("get-file-information-by-handle")
+    if not get_info(handle, ctypes.byref(info)):
+        raise win_error(get_last_error())
+    return _identity_from_file_information(info)
+
+
+def require_same_file_identity(
+    expected: tuple[int, int, int] | list[int],
+    observed: tuple[int, int, int] | list[int],
+) -> None:
+    if tuple(expected) != tuple(observed):
+        raise RuntimeError("owner and guardian do not reference the same file identity")
+
+
+def require_locked_actor_identity(
+    fd: int,
+    path: Path,
+    expected: tuple[int, int, int] | list[int],
+    *,
+    identity: Callable[[int], tuple[int, int, int]] = file_identity,
+    still_at: Callable[[int, Path], bool] | None = None,
+) -> None:
+    if still_at is None:
+        from linkedin_mcp_server.common_utils import is_still_at
+
+        still_at = is_still_at
+    require_same_file_identity(expected, identity(fd))
+    # The probe root is private to its harness. Under that protected-parent
+    # premise, the post-lock path check closes the separate-open split election.
+    if not still_at(fd, path):
+        raise RuntimeError("locked profile file is no longer at its expected path")
+
+
+def guardian_publication_sequence(
+    *,
+    acquire_b: Callable[[], bool],
+    owner_alive: Callable[[], bool],
+    release_b: Callable[[], None],
+    publish_armed: Callable[[], None],
+) -> bool:
+    """Publish only after this process owns B and rechecks the owner handle."""
+    if not acquire_b():
+        return False
+    if not owner_alive():
+        release_b()
+        return False
+    publish_armed()
+    return True
+
+
+def zero_proven_release_sequence(
+    *,
+    publish_zero: Callable[[], None],
+    wait_allow_release: Callable[[], None],
+    close_job: Callable[[], None],
+    release_b: Callable[[], None],
+) -> None:
+    publish_zero()
+    wait_allow_release()
+    close_job()
+    release_b()
+
+
+def conjunction_guardian_shutdown(
+    result: dict[str, Any],
+    *,
+    active_descendants: Callable[[], int],
+    terminate_job: Callable[[], None],
+    query_job: Callable[[], int],
+    wait_for_retry: Callable[[], None],
+    monotonic: Callable[[], float] = time.monotonic,
+) -> None:
+    result["terminate_attempted"] = True
+    terminate_job()
+    result["terminate_completed"] = True
+    deadline = monotonic() + _DEADLINE_SECONDS
+    result["query_samples"] = []
+    while True:
+        active = query_job()
+        living = active_descendants()
+        result["query_samples"].append(
+            {"active_processes": active, "active_descendants": living}
+        )
+        if active == 0 and living == 0:
+            result["zero_proven"] = True
+            return
+        if monotonic() >= deadline:
+            result["query_timeout"] = True
+            raise TimeoutError("browser Job did not drain before its deadline")
+        wait_for_retry()
+
+
+def run_guardian_fail_closed(
+    *,
+    shutdown: Callable[[], None],
+    publish_failure: Callable[[BaseException], None],
+    hold_failure: Callable[[], None],
+    release_b: Callable[[], None],
+) -> bool:
+    """Run shutdown while reserving B release for the proven-success caller."""
+    _ = release_b
+    try:
+        shutdown()
+    except BaseException as exc:
+        try:
+            publish_failure(exc)
+        finally:
+            hold_failure()
+        raise RuntimeError("the failed conjunction proof resumed unexpectedly") from exc
+    return True
+
+
+def wait_on_unsignaled_throttle(
+    throttle: Any,
+    *,
+    wait: Callable[[Any, int], Any],
+) -> None:
+    wait(throttle, 1)
+
+
+def _actor_event(name: str, access: int) -> Any:
+    _win32api, _win32con, win32event, _win32job = _windows_modules()
+    return win32event.OpenEvent(access, False, name)
+
+
+def _actor_wait(name: str) -> None:
+    _win32api, win32con, _win32event, _win32job = _windows_modules()
+    handle = _actor_event(name, win32con.SYNCHRONIZE)
+    try:
+        _wait(handle, _DEADLINE_SECONDS, f"event {name} was not signaled")
+    finally:
+        handle.Close()
+
+
+class _ActorFd:
+    def __init__(self, fd: int, *, close: Callable[[int], None] = os.close) -> None:
+        self.fd = fd
+        self._close = close
+
+    def close(self, fd: int | None = None) -> None:
+        if self.fd < 0:
+            return
+        if fd is not None and fd != self.fd:
+            raise RuntimeError("actor close targeted a different descriptor")
+        current = self.fd
+        self._close(current)
+        self.fd = -1
+
+
+def acquire_actor_region(
+    descriptor: _ActorFd,
+    path: Path,
+    expected_identity: list[int],
+    offset: int,
+    *,
+    try_lock: Callable[[int, int], bool],
+    unlock: Callable[[int, int], None],
+    identity: Callable[[int], tuple[int, int, int]] = file_identity,
+    still_at: Callable[[int, Path], bool] | None = None,
+) -> bool:
+    if not try_lock(descriptor.fd, offset):
+        return False
+    try:
+        require_locked_actor_identity(
+            descriptor.fd,
+            path,
+            expected_identity,
+            identity=identity,
+            still_at=still_at,
+        )
+    except BaseException as first_error:
+        try:
+            unlock(descriptor.fd, offset)
+        except BaseException:
+            pass
+        try:
+            descriptor.close()
+        except BaseException:
+            pass
+        raise first_error
+    return True
+
+
+def _actor_admission(
+    descriptor: _ActorFd,
+    *,
+    try_lock: Callable[[int, int], bool],
+    unlock: Callable[[int, int], None],
+) -> bool:
+    return conjunction_admission(
+        descriptor.fd,
+        try_lock=try_lock,
+        unlock=unlock,
+        close=descriptor.close,
+    )
+
+
+def _finish_actor_fd(descriptor: _ActorFd, first_error: BaseException | None) -> None:
+    try:
+        descriptor.close()
+    except BaseException as close_error:
+        if first_error is None:
+            raise close_error
+    if first_error is not None:
+        raise first_error
+
+
+def _actor(
+    mode: str,
+    lock_path: Path,
+    expected_identity: list[int],
+    ready_event: str,
+    result_file: Path,
+    options: dict[str, Any],
+) -> int:
+    win32api, win32con, win32event, win32job = _windows_modules()
+    descriptor = _ActorFd(_probe_fd(lock_path))
+    fd = descriptor.fd
+    try_lock, unlock = _region_api()
+    result: dict[str, Any] = {"mode": mode}
+    job = None
+    process_handle = None
+    descendant_handles: list[Any] = []
+    locked_offset: int | None = None
+    first_error: BaseException | None = None
+    try:
+        job_name = options.get("job_name")
+        if job_name:
+            job = win32job.OpenJobObject(
+                win32job.JOB_OBJECT_ALL_ACCESS, False, job_name
+            )
+        owner_handle = int(options.get("owner_handle", 0))
+        guardian_handle = int(options.get("guardian_handle", 0))
+        if owner_handle:
+            process_handle = owner_handle
+        elif guardian_handle:
+            process_handle = guardian_handle
+        if job is not None and process_handle:
+            current_in_browser_job, watched_in_browser_job = (
+                query_control_job_membership(
+                    job,
+                    process_handle,
+                    win32api=win32api,
+                    win32con=win32con,
+                    win32job=win32job,
+                )
+            )
+            result["current_process_in_browser_job"] = current_in_browser_job
+            result["watched_process_in_browser_job"] = watched_in_browser_job
+            if current_in_browser_job or watched_in_browser_job:
+                raise RuntimeError("control process entered the browser Job")
+
+        pause_event = options.get("pause_event")
+        if pause_event:
+            _signal(ready_event)
+            _actor_wait(pause_event)
+
+        if mode == "region-probe":
+            acquired_a = try_lock(fd, 0)
+            acquired_b = False
+            if acquired_a:
+                try:
+                    require_locked_actor_identity(fd, lock_path, expected_identity)
+                    result["file_identity"] = list(file_identity(fd))
+                    acquired_b = try_lock(fd, 1)
+                    if acquired_b:
+                        unlock(fd, 1)
+                finally:
+                    unlock(fd, 0)
+            result.update({"acquired_a": acquired_a, "acquired_b": acquired_b})
+            _atomic_json(result_file, result)
+            _signal(ready_event)
+            return 0
+
+        if mode == "attempt":
+            acquired = _actor_admission(descriptor, try_lock=try_lock, unlock=unlock)
+            result["acquired"] = acquired
+            if acquired:
+                locked_offset = 0
+                require_locked_actor_identity(fd, lock_path, expected_identity)
+                result["file_identity"] = list(file_identity(fd))
+                hold_event = options.get("hold_event")
+                _atomic_json(result_file, result)
+                _signal(ready_event)
+                if hold_event:
+                    _actor_wait(hold_event)
+                unlock(fd, 0)
+                locked_offset = None
+            else:
+                _atomic_json(result_file, result)
+                _signal(ready_event)
+            return 0
+
+        offset = int(options["offset"])
+        if mode == "guardian-publish":
+            acquired_b = False
+            owner_alive_after_b: bool | None = None
+
+            def acquire_b() -> bool:
+                nonlocal acquired_b, locked_offset
+                acquired_b = acquire_actor_region(
+                    descriptor,
+                    lock_path,
+                    expected_identity,
+                    offset,
+                    try_lock=try_lock,
+                    unlock=unlock,
+                )
+                if acquired_b:
+                    locked_offset = offset
+                    result["file_identity"] = list(file_identity(fd))
+                return acquired_b
+
+            def owner_alive() -> bool:
+                nonlocal owner_alive_after_b
+                owner_alive_after_b = _is_active(process_handle)
+                return owner_alive_after_b
+
+            def release_b() -> None:
+                nonlocal locked_offset
+                unlock(fd, offset)
+                locked_offset = None
+
+            def publish_armed() -> None:
+                result["armed"] = True
+                armed_event = options.get("armed_event")
+                if armed_event:
+                    _signal(armed_event)
+
+            armed = guardian_publication_sequence(
+                acquire_b=acquire_b,
+                owner_alive=owner_alive,
+                release_b=release_b,
+                publish_armed=publish_armed,
+            )
+            result["contention"] = not acquired_b
+            result["owner_alive_after_b"] = owner_alive_after_b
+            result["armed"] = armed
+            result["job_authority"] = job is not None
+            result["browser_authority"] = False
+            _atomic_json(result_file, result)
+            _signal(ready_event)
+            if armed and options.get("hold_event"):
+                _actor_wait(options["hold_event"])
+            return 0
+
+        if not acquire_actor_region(
+            descriptor,
+            lock_path,
+            expected_identity,
+            offset,
+            try_lock=try_lock,
+            unlock=unlock,
+        ):
+            result["contention"] = True
+            _atomic_json(result_file, result)
+            _signal(ready_event)
+            return 0
+        locked_offset = offset
+        result["file_identity"] = list(file_identity(fd))
+
+        if mode == "guardian-drain":
+            identity_name = options.get("identity_mutex")
+            identity = win32event.CreateMutex(None, True, identity_name)
+            result["identity_mutex"] = identity_name
+            result["fault"] = options.get("fault", "none")
+            _atomic_json(result_file, result)
+            _signal(ready_event)
+            _wait(process_handle, _DEADLINE_SECONDS, "owner did not exit")
+            descendant_handles = [
+                win32api.OpenProcess(win32con.SYNCHRONIZE, False, int(pid))
+                for pid in options["descendant_pids"]
+            ]
+            throttle = win32event.CreateEvent(None, False, False, None)
+            timeout_clock = iter([0.0, _DEADLINE_SECONDS + 1.0])
+
+            def mark_fault(operation: str) -> None:
+                result["fault_operation"] = operation
+                result["fault_injected"] = result["fault"]
+
+            def terminate_job() -> None:
+                if result["fault"] == "terminate-error":
+                    mark_fault("terminate")
+                    raise OSError("injected browser Job termination failure")
+                win32job.TerminateJobObject(job, 201)
+
+            def query_job() -> int:
+                if result["fault"] == "query-error":
+                    mark_fault("query")
+                    raise OSError("injected browser Job query failure")
+                active = int(
+                    win32job.QueryInformationJobObject(
+                        job, win32job.JobObjectBasicAccountingInformation
+                    )["ActiveProcesses"]
+                )
+                if result["fault"] == "drain-timeout":
+                    mark_fault("deadline")
+                    return max(1, active)
+                return active
+
+            def release_b() -> None:
+                nonlocal locked_offset
+                unlock(fd, offset)
+                locked_offset = None
+
+            def publish_failure(exc: BaseException) -> None:
+                result["error_type"] = type(exc).__name__
+                result["error"] = f"{type(exc).__name__}: {exc}"
+                _atomic_json(result_file, result)
+                _signal(options["fault_event"])
+
+            def hold_failure() -> None:
+                threading.Event().wait()
+
+            run_guardian_fail_closed(
+                shutdown=lambda: conjunction_guardian_shutdown(
+                    result,
+                    active_descendants=lambda: sum(
+                        _is_active(handle) for handle in descendant_handles
+                    ),
+                    terminate_job=terminate_job,
+                    query_job=query_job,
+                    wait_for_retry=lambda: wait_on_unsignaled_throttle(
+                        throttle, wait=win32event.WaitForSingleObject
+                    ),
+                    monotonic=(
+                        lambda: (
+                            next(timeout_clock)
+                            if result["fault"] == "drain-timeout"
+                            else time.monotonic()
+                        )
+                    ),
+                ),
+                publish_failure=publish_failure,
+                hold_failure=hold_failure,
+                release_b=release_b,
+            )
+            throttle.Close()
+
+            def publish_zero() -> None:
+                _atomic_json(result_file, result)
+                _signal(options["zero_event"])
+
+            def close_retained_job() -> None:
+                nonlocal job
+                retained_job = job
+                if retained_job is None:
+                    raise RuntimeError("guardian lost its browser Job handle")
+                retained_job.Close()
+                job = None
+
+            zero_proven_release_sequence(
+                publish_zero=publish_zero,
+                wait_allow_release=lambda: _actor_wait(options["allow_release_event"]),
+                close_job=close_retained_job,
+                release_b=release_b,
+            )
+            win32event.ReleaseMutex(identity)
+            identity.Close()
+            return 0
+
+        if mode == "owner-watch":
+            _atomic_json(result_file, result)
+            _signal(ready_event)
+            _wait(process_handle, _DEADLINE_SECONDS, "guardian did not exit")
+            result["guardian_exit_observed"] = True
+            _atomic_json(result_file, result)
+            _signal(options["guardian_exit_event"])
+            _actor_wait(options["begin_drain_event"])
+            descendant_handles = open_descendant_handles_before_terminate(
+                open_handles=lambda: [
+                    win32api.OpenProcess(win32con.SYNCHRONIZE, False, int(pid))
+                    for pid in options["descendant_pids"]
+                ],
+                terminate_job=lambda: win32job.TerminateJobObject(job, 202),
+            )
+            deadline = time.monotonic() + _DEADLINE_SECONDS
+            throttle = win32event.CreateEvent(None, False, False, None)
+            try:
+                while True:
+                    active = int(
+                        win32job.QueryInformationJobObject(
+                            job, win32job.JobObjectBasicAccountingInformation
+                        )["ActiveProcesses"]
+                    )
+                    if active == 0 and not any(
+                        _is_active(handle) for handle in descendant_handles
+                    ):
+                        break
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("owner could not drain browser Job")
+                    wait_on_unsignaled_throttle(
+                        throttle, wait=win32event.WaitForSingleObject
+                    )
+            finally:
+                throttle.Close()
+            result["zero_proven"] = True
+            _atomic_json(result_file, result)
+            _signal(options["zero_event"])
+            _actor_wait(options["allow_a_release_event"])
+            unlock(fd, offset)
+            locked_offset = None
+            return 0
+
+        _atomic_json(result_file, result)
+        _signal(ready_event)
+        hold_event = options.get("hold_event")
+        if hold_event:
+            _actor_wait(hold_event)
+        else:
+            threading.Event().wait()
+        return 0
+    except BaseException as exc:
+        first_error = exc
+    finally:
+        for handle in descendant_handles:
+            try:
+                handle.Close()
+            except BaseException as exc:
+                first_error = first_error or exc
+        if locked_offset is not None:
+            try:
+                unlock(fd, locked_offset)
+            except BaseException as exc:
+                first_error = first_error or exc
+        if job is not None:
+            try:
+                job.Close()
+            except BaseException as exc:
+                first_error = first_error or exc
+        if process_handle:
+            try:
+                win32api.CloseHandle(process_handle)
+            except BaseException as exc:
+                first_error = first_error or exc
+        _finish_actor_fd(descriptor, first_error)
+    raise AssertionError("actor exception cleanup returned without raising")
+
+
+def close_preserving_error(
+    close: Callable[[], None], first_error: BaseException | None
+) -> None:
+    try:
+        close()
+    except BaseException as close_error:
+        if first_error is None:
+            raise close_error
+    if first_error is not None:
+        raise first_error
+
+
+def retry_lock_rundown[T](
+    attempt: Callable[[], T | None],
+    *,
+    deadline: float,
+    wait_for_retry: Callable[[], None],
+    monotonic: Callable[[], float] = time.monotonic,
+) -> tuple[T, int, float]:
+    started = monotonic()
+    attempts = 0
+    while True:
+        attempts += 1
+        result = attempt()
+        if result is not None:
+            return result, attempts, monotonic() - started
+        if monotonic() >= deadline:
+            raise TimeoutError(
+                "Windows lock rundown did not complete before its deadline"
+            )
+        wait_for_retry()
+
+
+def retry_admission_after_drain(
+    *,
+    open_fd: Callable[[], int],
+    try_admission: Callable[[int, Callable[[int], None]], bool],
+    release_a: Callable[[int], None],
+    close_fd: Callable[[int], None],
+    deadline: float,
+    wait_for_retry: Callable[[], None],
+    monotonic: Callable[[], float] = time.monotonic,
+) -> tuple[bool, int, float]:
+    def attempt() -> bool | None:
+        descriptor = _ActorFd(open_fd(), close=close_fd)
+        first_error: BaseException | None = None
+        try:
+            if not try_admission(descriptor.fd, descriptor.close):
+                return None
+            release_a(descriptor.fd)
+            return True
+        except BaseException as exc:
+            first_error = exc
+        finally:
+            _finish_actor_fd(descriptor, first_error)
+        raise AssertionError("retry admission cleanup returned without raising")
+
+    return retry_lock_rundown(
+        attempt,
+        deadline=deadline,
+        wait_for_retry=wait_for_retry,
+        monotonic=monotonic,
+    )
+
+
+def open_descendant_handles_before_terminate[T](
+    *,
+    open_handles: Callable[[], list[T]],
+    terminate_job: Callable[[], None],
+) -> list[T]:
+    handles = open_handles()
+    terminate_job()
+    return handles
+
+
+def observe_browser_publication_order(
+    *,
+    browser_started: Callable[[], bool],
+    observe_armed: Callable[[], None],
+    release_gate: Callable[[], None],
+    observe_browser_start: Callable[[], None],
+) -> bool:
+    if browser_started():
+        raise RuntimeError("browser started before guardian publication")
+    observe_armed()
+    if browser_started():
+        raise RuntimeError("browser started before its gate was released")
+    release_gate()
+    observe_browser_start()
+    return True
+
+
+def spawn_with_duplicated_handles[T](
+    sources: list[int],
+    *,
+    build_arguments: Callable[[dict[int, int]], list[str]],
+    duplicate: Callable[[int], Any],
+    launch: Callable[[list[str], list[int]], T],
+    close_duplicate: Callable[[Any], None],
+) -> T:
+    duplicates: list[Any] = []
+    first_error: BaseException | None = None
+    try:
+        mapping: dict[int, int] = {}
+        for source in dict.fromkeys(sources):
+            duplicated = duplicate(source)
+            duplicates.append(duplicated)
+            mapping[source] = int(duplicated)
+        return launch(build_arguments(mapping), list(mapping.values()))
+    except BaseException as exc:
+        first_error = exc
+    finally:
+        for duplicated in duplicates:
+            try:
+                close_duplicate(duplicated)
+            except BaseException as exc:
+                first_error = first_error or exc
+        if first_error is not None:
+            raise first_error
+    raise AssertionError("duplicated-handle launch returned no process")
+
+
+def _spawn_inheriting(
+    arguments: list[str], handles: list[int]
+) -> subprocess.Popen[bytes]:
+    startup = None
+    if handles:
+        startup = getattr(subprocess, "STARTUPINFO")()
+        startup.lpAttributeList = {"handle_list": handles}
+    return subprocess.Popen(
+        arguments,
+        cwd=_REPO_ROOT,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        close_fds=True,
+        startupinfo=startup,
+    )
+
+
+def _new_event(win32event: Any, label: str) -> tuple[str, Any]:
+    name = _new_event_name(label)
+    return name, win32event.CreateEvent(None, True, False, name)
+
+
+def _spawn_actor(
+    mode: str,
+    lock_path: Path,
+    expected_identity: list[int],
+    ready_name: str,
+    result_file: Path,
+    options: dict[str, Any],
+    extra_handles: list[int] | None = None,
+) -> subprocess.Popen[bytes]:
+    win32api, win32con, _win32event, _win32job = _windows_modules()
+    sources = list(extra_handles or [])
+
+    def duplicate(source: int) -> Any:
+        _phase("duplicate-inherited-process-handle")
+        current = win32api.GetCurrentProcess()
+        return win32api.DuplicateHandle(
+            current,
+            source,
+            current,
+            0,
+            True,
+            win32con.DUPLICATE_SAME_ACCESS,
+        )
+
+    def build_arguments(mapping: dict[int, int]) -> list[str]:
+        inherited_options = dict(options)
+        for key in ("owner_handle", "guardian_handle"):
+            source = int(inherited_options.get(key, 0))
+            if source:
+                inherited_options[key] = mapping[source]
+        return [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "actor",
+            mode,
+            str(lock_path),
+            json.dumps(expected_identity),
+            ready_name,
+            str(result_file),
+            json.dumps(inherited_options),
+        ]
+
+    return spawn_with_duplicated_handles(
+        sources,
+        build_arguments=build_arguments,
+        duplicate=duplicate,
+        launch=_spawn_inheriting,
+        close_duplicate=lambda handle: handle.Close(),
+    )
+
+
+def _terminate_process(process: Any) -> None:
+    win32api, _win32con, _win32event, _win32job = _windows_modules()
+    handle = getattr(process, "_handle", None)
+    if handle is None:
+        raise RuntimeError("Windows Popen exposed no stable process handle")
+    _phase("check-process-before-terminate")
+    if _is_active(handle):
+        _phase("terminate-process-stable-handle")
+        win32api.TerminateProcess(handle, 203)
+    _phase("wait-process-stable-handle")
+    _wait(handle, _DEADLINE_SECONDS, "process did not terminate")
+    if _is_active(handle):
+        raise RuntimeError("process remained active after stable-handle wait")
+    process.wait(timeout=_DEADLINE_SECONDS)
+
+
+def _probe_fd(path: Path) -> int:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    return os.open(path, os.O_RDWR | os.O_CREAT | cloexec, 0o600)
+
+
+def _attempt_here(path: Path) -> tuple[bool, int]:
+    fd = _probe_fd(path)
+    try:
+        acquired = conjunction_admission(fd)
+    except BaseException:
+        # Admission may already have closed the descriptor as its lock rescue.
+        # A second close is harmless here, but its EBADF must not hide that cause.
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        raise
+    return acquired, fd
+
+
+def _run_conjunction_probe(scenario: str, root: Path) -> dict[str, Any]:
+    """Run native conjunction scenarios under the caller's outer harness Job."""
+    from linkedin_mcp_server import process_tree
+
+    win32api, win32con, win32event, win32job = _windows_modules()
+    root.mkdir(parents=True, exist_ok=True)
+    lock_path = root / "auth" / "profile.lock"
+    base_fd = _probe_fd(lock_path)
+    events: list[Any] = []
+    processes: list[subprocess.Popen[bytes]] = []
+    jobs: list[Any] = []
+    retained_fds: list[int] = []
+    actors_by_result: dict[Path, subprocess.Popen[bytes]] = {}
+
+    def event(label: str) -> tuple[str, Any]:
+        name, handle = _new_event(win32event, label)
+        events.append(handle)
+        return name, handle
+
+    def spawn(
+        mode: str,
+        label: str,
+        options: dict[str, Any],
+        extra_handles: list[int] | None = None,
+    ) -> tuple[subprocess.Popen[bytes], Path, Any]:
+        ready_name, ready = event(f"{label}-ready")
+        result_file = root / f"{label}.json"
+        process = _spawn_actor(
+            mode,
+            lock_path,
+            identity,
+            ready_name,
+            result_file,
+            options,
+            extra_handles,
+        )
+        processes.append(process)
+        actors_by_result[result_file] = process
+        return process, result_file, ready
+
+    def wait_result(path: Path, ready: Any) -> dict[str, Any]:
+        try:
+            _wait(ready, _DEADLINE_SECONDS, f"{path.name} was not ready")
+        except BaseException as exc:
+            process = actors_by_result[path]
+            returncode = process.poll()
+            stdout = b""
+            stderr = b""
+            if returncode is not None:
+                stdout, stderr = process.communicate()
+            raise RuntimeError(
+                f"{path.name} was not ready: phase=before-ready "
+                f"returncode={returncode!r} stdout={stdout!r} stderr={stderr!r}"
+            ) from exc
+        return read_published_json(path, deadline=time.monotonic() + 5)
+
+    def signal(handle: Any) -> None:
+        win32event.SetEvent(handle)
+
+    def descendants(
+        job: Any, count: int = 4
+    ) -> tuple[list[subprocess.Popen[bytes]], list[int]]:
+        children: list[subprocess.Popen[bytes]] = []
+        pids: list[int] = []
+        for _ in range(count):
+            child = subprocess.Popen(
+                [sys.executable, "-c", "import threading; threading.Event().wait()"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            job.assign_popen(child)
+            children.append(child)
+            processes.append(child)
+            pids.append(child.pid)
+        return children, pids
+
+    try:
+        identity = list(file_identity(base_fd))
+        if scenario == "conjunction-lock-regions":
+            owner, owner_file, owner_ready = spawn("hold", "owner", {"offset": 0})
+            guardian, guardian_file, guardian_ready = spawn(
+                "hold", "guardian", {"offset": 1}
+            )
+            owner_result = wait_result(owner_file, owner_ready)
+            guardian_result = wait_result(guardian_file, guardian_ready)
+            require_same_file_identity(identity, owner_result["file_identity"])
+            require_same_file_identity(identity, guardian_result["file_identity"])
+            first, first_fd = _attempt_here(lock_path)
+            os.close(first_fd)
+            _terminate_process(owner)
+            throttle = win32event.CreateEvent(None, False, False, None)
+            rundown_error: BaseException | None = None
+            try:
+
+                def observe_b_contention() -> tuple[bool, bool] | None:
+                    second_fd = _probe_fd(lock_path)
+                    try:
+                        second_a, second_b = probe_conjunction_regions(second_fd)
+                    finally:
+                        os.close(second_fd)
+                    if not second_a:
+                        return None
+                    if second_b:
+                        raise RuntimeError("B was not held after owner exit")
+                    return second_a, second_b
+
+                (second_a, second_b), owner_rundown_attempts, owner_rundown_seconds = (
+                    retry_lock_rundown(
+                        observe_b_contention,
+                        deadline=time.monotonic() + _DEADLINE_SECONDS,
+                        wait_for_retry=lambda: wait_on_unsignaled_throttle(
+                            throttle, wait=win32event.WaitForSingleObject
+                        ),
+                    )
+                )
+                _terminate_process(guardian)
+
+                def acquire_after_guardian_exit() -> int | None:
+                    acquired, acquired_fd = _attempt_here(lock_path)
+                    if acquired:
+                        return acquired_fd
+                    os.close(acquired_fd)
+                    return None
+
+                third_fd, guardian_rundown_attempts, guardian_rundown_seconds = (
+                    retry_lock_rundown(
+                        acquire_after_guardian_exit,
+                        deadline=time.monotonic() + _DEADLINE_SECONDS,
+                        wait_for_retry=lambda: wait_on_unsignaled_throttle(
+                            throttle, wait=win32event.WaitForSingleObject
+                        ),
+                    )
+                )
+            except BaseException as exc:
+                rundown_error = exc
+            finally:
+                close_preserving_error(throttle.Close, rundown_error)
+            third = True
+            retained_fds.append(third_fd)
+            d1_process, d1_file, d1_ready = spawn("attempt", "d-held-a", {})
+            d1_result = wait_result(d1_file, d1_ready)
+            d1_process.wait(timeout=_DEADLINE_SECONDS)
+            _region_api()[1](third_fd, 0)
+            os.close(third_fd)
+            retained_fds.remove(third_fd)
+            d2_process, d2_file, d2_ready = spawn("attempt", "d-after-close", {})
+            d2_result = wait_result(d2_file, d2_ready)
+            d2_process.wait(timeout=_DEADLINE_SECONDS)
+            return {
+                "scenario": scenario,
+                "file_identity": identity,
+                "owner_identity": owner_result["file_identity"],
+                "guardian_identity": guardian_result["file_identity"],
+                "blocked_by_a": not first,
+                "a_acquired_b_blocked_after_owner_exit": second_a and not second_b,
+                "a_released_after_b_contention": True,
+                "owner_rundown_attempts": owner_rundown_attempts,
+                "owner_rundown_seconds": owner_rundown_seconds,
+                "guardian_rundown_attempts": guardian_rundown_attempts,
+                "guardian_rundown_seconds": guardian_rundown_seconds,
+                "c_acquired": third,
+                "d_blocked_after_b_unlock": not d1_result["acquired"],
+                "d_acquired_after_c_close": d2_result["acquired"],
+            }
+
+        if scenario == "conjunction-publication":
+            owner, owner_file, owner_ready = spawn("hold", "owner", {"offset": 0})
+            owner_result = wait_result(owner_file, owner_ready)
+            owner_process_handle = int(getattr(owner, "_handle"))
+            browser_gate_name, browser_gate = event("browser-gate")
+            browser_started_name, browser_started = event("browser-started")
+            browser = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(Path(__file__).resolve()),
+                    "gate",
+                    browser_gate_name,
+                    browser_started_name,
+                ],
+                cwd=_REPO_ROOT,
+            )
+            processes.append(browser)
+            stop_name, stop_event = event("guardian-stop")
+            armed_name, armed_event = event("guardian-armed")
+            guardian, guardian_file, guardian_ready = spawn(
+                "guardian-publish",
+                "guardian",
+                {
+                    "offset": 1,
+                    "owner_handle": owner_process_handle,
+                    "armed_event": armed_name,
+                    "hold_event": stop_name,
+                },
+                [owner_process_handle],
+            )
+            guardian_result = wait_result(guardian_file, guardian_ready)
+            require_same_file_identity(identity, owner_result["file_identity"])
+            require_same_file_identity(identity, guardian_result["file_identity"])
+
+            def browser_has_started() -> bool:
+                state = win32event.WaitForSingleObject(browser_started, 0)
+                if state == _WAIT_OBJECT_0:
+                    return True
+                if state == _WAIT_TIMEOUT:
+                    return False
+                raise RuntimeError(f"browser start event returned {state}")
+
+            browser_started_after_armed = observe_browser_publication_order(
+                browser_started=browser_has_started,
+                observe_armed=lambda: _wait(
+                    armed_event, _DEADLINE_SECONDS, "guardian did not arm"
+                ),
+                release_gate=lambda: signal(browser_gate),
+                observe_browser_start=lambda: _wait(
+                    browser_started, _DEADLINE_SECONDS, "browser did not start"
+                ),
+            )
+            b_fd = _probe_fd(lock_path)
+            b_blocked = not _region_api()[0](b_fd, 1)
+            os.close(b_fd)
+            signal(stop_event)
+            guardian.wait(timeout=_DEADLINE_SECONDS)
+            _terminate_process(owner)
+
+            pause_name, pause_event = event("late-pause")
+            late_owner, late_owner_file, late_owner_ready = spawn(
+                "hold", "late-owner", {"offset": 0}
+            )
+            wait_result(late_owner_file, late_owner_ready)
+            late_owner_handle = int(getattr(late_owner, "_handle"))
+            late, late_file, late_ready = spawn(
+                "guardian-publish",
+                "late-guardian",
+                {
+                    "offset": 1,
+                    "owner_handle": late_owner_handle,
+                    "pause_event": pause_name,
+                },
+                [late_owner_handle],
+            )
+            _wait(late_ready, _DEADLINE_SECONDS, "late guardian did not pause")
+            _terminate_process(late_owner)
+            successor, successor_fd = _attempt_here(lock_path)
+            if not successor:
+                os.close(successor_fd)
+                raise RuntimeError("successor could not pass A+B")
+            retained_fds.append(successor_fd)
+            signal(pause_event)
+            late.wait(timeout=_DEADLINE_SECONDS)
+            late_result = read_published_json(late_file, deadline=time.monotonic() + 5)
+            _region_api()[1](successor_fd, 0)
+            os.close(successor_fd)
+            retained_fds.remove(successor_fd)
+
+            conflict_owner, conflict_owner_file, conflict_owner_ready = spawn(
+                "hold", "conflict-owner", {"offset": 0}
+            )
+            wait_result(conflict_owner_file, conflict_owner_ready)
+            b_holder, b_holder_file, b_holder_ready = spawn(
+                "hold", "conflict-b-holder", {"offset": 1}
+            )
+            b_holder_result = wait_result(b_holder_file, b_holder_ready)
+            conflict_owner_handle = int(getattr(conflict_owner, "_handle"))
+            conflict, conflict_file, conflict_ready = spawn(
+                "guardian-publish",
+                "conflict-guardian",
+                {"offset": 1, "owner_handle": conflict_owner_handle},
+                [conflict_owner_handle],
+            )
+            conflict_result = wait_result(conflict_file, conflict_ready)
+            conflict.wait(timeout=_DEADLINE_SECONDS)
+            _terminate_process(b_holder)
+            _terminate_process(conflict_owner)
+            require_same_file_identity(identity, b_holder_result["file_identity"])
+            return {
+                "scenario": scenario,
+                "file_identity": identity,
+                "owner_identity": owner_result["file_identity"],
+                "guardian_identity": guardian_result["file_identity"],
+                "armed": guardian_result["armed"],
+                "b_probe_blocked": b_blocked,
+                "browser_started_after_armed": browser_started_after_armed,
+                "late_successor_admitted": successor,
+                "late_guardian_armed": late_result.get("armed", False),
+                "late_guardian_contention": late_result.get("contention", False),
+                "conflict_guardian_contention": conflict_result["contention"],
+                "conflict_guardian_armed": conflict_result["armed"],
+                "conflict_guardian_job_authority": conflict_result["job_authority"],
+                "conflict_guardian_browser_authority": conflict_result[
+                    "browser_authority"
+                ],
+                "conflict_guardian_returncode": conflict.returncode,
+            }
+
+        browser_job = process_tree.WindowsJob.named("conjunction-browser")
+        jobs.append(browser_job)
+        if browser_job.name is None:
+            raise RuntimeError("browser Job has no name")
+        outer_in_browser_job, _watched = query_control_job_membership(
+            browser_job.job_handle,
+            None,
+            win32api=win32api,
+            win32con=win32con,
+            win32job=win32job,
+        )
+        if outer_in_browser_job:
+            raise RuntimeError("outer probe entered the browser Job")
+        _children, descendant_pids = descendants(browser_job)
+
+        if scenario == "conjunction-guardian-loss-clean-close":
+            guardian, guardian_file, guardian_ready = spawn(
+                "hold",
+                "guardian",
+                {"offset": 1, "job_name": browser_job.name},
+            )
+            guardian_result = wait_result(guardian_file, guardian_ready)
+            guardian_handle = int(getattr(guardian, "_handle"))
+            guardian_exit_name, guardian_exit_event = event("guardian-exit-observed")
+            begin_drain_name, begin_drain_event = event("begin-owner-drain")
+            zero_name, zero_event = event("owner-zero-proven")
+            allow_a_name, allow_a_event = event("allow-a-release")
+            owner, owner_file, owner_ready = spawn(
+                "owner-watch",
+                "owner",
+                {
+                    "offset": 0,
+                    "job_name": browser_job.name,
+                    "guardian_handle": guardian_handle,
+                    "descendant_pids": descendant_pids,
+                    "guardian_exit_event": guardian_exit_name,
+                    "begin_drain_event": begin_drain_name,
+                    "zero_event": zero_name,
+                    "allow_a_release_event": allow_a_name,
+                },
+                [guardian_handle],
+            )
+            owner_result = wait_result(owner_file, owner_ready)
+            require_same_file_identity(identity, guardian_result["file_identity"])
+            require_same_file_identity(identity, owner_result["file_identity"])
+            browser_job.close()
+            _terminate_process(guardian)
+            _wait(
+                guardian_exit_event,
+                _DEADLINE_SECONDS,
+                "owner did not observe guardian exit",
+            )
+            attempts_after_exit = []
+            for _ in range(3):
+                acquired, fd = _attempt_here(lock_path)
+                attempts_after_exit.append(acquired)
+                if acquired:
+                    _region_api()[1](fd, 0)
+                os.close(fd)
+            active_before_drain = _query_named_job_active_processes(browser_job.name)
+            descendants_before_drain = sum(child.poll() is None for child in _children)
+            signal(begin_drain_event)
+            _wait(zero_event, _DEADLINE_SECONDS, "owner did not prove browser zero")
+            blocked_at_zero, zero_fd = _attempt_here(lock_path)
+            if blocked_at_zero:
+                _region_api()[1](zero_fd, 0)
+            os.close(zero_fd)
+            signal(allow_a_event)
+            owner.wait(timeout=_DEADLINE_SECONDS)
+            final, final_fd = _attempt_here(lock_path)
+            if final:
+                _region_api()[1](final_fd, 0)
+            os.close(final_fd)
+            owner_result = read_published_json(
+                owner_file, deadline=time.monotonic() + 5
+            )
+            return {
+                "scenario": scenario,
+                "file_identity": identity,
+                "guardian_identity": guardian_result["file_identity"],
+                "outer_in_browser_job": outer_in_browser_job,
+                "owner_in_browser_job": owner_result["current_process_in_browser_job"],
+                "guardian_in_browser_job": owner_result[
+                    "watched_process_in_browser_job"
+                ],
+                "post_exit_attempts_rejected": not any(attempts_after_exit),
+                "active_processes_before_owner_drain": active_before_drain,
+                "live_descendants_before_owner_drain": descendants_before_drain,
+                "owner_observed_guardian_exit": owner_result["guardian_exit_observed"],
+                "zero_proven": owner_result["zero_proven"],
+                "blocked_while_a_held_at_zero": not blocked_at_zero,
+                "acquired_after_owner_release": final,
+                "respawn_claimed": False,
+            }
+
+        owner, owner_file, owner_ready = spawn(
+            "hold",
+            "owner",
+            {"offset": 0, "job_name": browser_job.name},
+        )
+        owner_result = wait_result(owner_file, owner_ready)
+        owner_handle = int(getattr(owner, "_handle"))
+        zero_name, zero_event = event("zero-proven")
+        allow_name, allow_event = event("allow-b-release")
+        fault_name, fault_event = event("guardian-fault")
+        fault = scenario.removeprefix("conjunction-owner-loss-")
+        if scenario == "conjunction-owner-loss":
+            fault = "none"
+        identity_mutex = f"Local\\linkedin-mcp-conjunction-{secrets.token_hex(16)}"
+        guardian, guardian_file, guardian_ready = spawn(
+            "guardian-drain",
+            "guardian",
+            {
+                "offset": 1,
+                "job_name": browser_job.name,
+                "owner_handle": owner_handle,
+                "descendant_pids": descendant_pids,
+                "zero_event": zero_name,
+                "allow_release_event": allow_name,
+                "fault_event": fault_name,
+                "fault": fault,
+                "identity_mutex": identity_mutex,
+            },
+            [owner_handle],
+        )
+        guardian_result = wait_result(guardian_file, guardian_ready)
+        require_same_file_identity(identity, owner_result["file_identity"])
+        require_same_file_identity(identity, guardian_result["file_identity"])
+        browser_job.close()
+        pre, pre_fd = _attempt_here(lock_path)
+        os.close(pre_fd)
+        _terminate_process(owner)
+        if fault == "none":
+            _wait(zero_event, _DEADLINE_SECONDS, "guardian did not prove zero")
+            before_fd = _probe_fd(lock_path)
+            before_a, before_b = probe_conjunction_regions(before_fd)
+            os.close(before_fd)
+            active_at_zero = _query_named_job_active_processes(browser_job.name)
+            signal(allow_event)
+            guardian.wait(timeout=_DEADLINE_SECONDS)
+            after, after_fd = _attempt_here(lock_path)
+            if after:
+                _region_api()[1](after_fd, 0)
+            os.close(after_fd)
+            return {
+                "scenario": scenario,
+                "file_identity": identity,
+                "owner_identity": owner_result["file_identity"],
+                "guardian_identity": guardian_result["file_identity"],
+                "outer_in_browser_job": outer_in_browser_job,
+                "owner_in_browser_job": guardian_result[
+                    "watched_process_in_browser_job"
+                ],
+                "guardian_in_browser_job": guardian_result[
+                    "current_process_in_browser_job"
+                ],
+                "prearmed_rejected": not pre,
+                "zero_proven": True,
+                "job_active_at_zero": active_at_zero,
+                "a_acquired_b_blocked_before_release": before_a and not before_b,
+                "acquired_after_b_release": after,
+            }
+
+        _wait(fault_event, _DEADLINE_SECONDS, "guardian did not publish its fault")
+        guardian_result = read_published_json(
+            guardian_file, deadline=time.monotonic() + 5
+        )
+        probe_process, probe_file, probe_ready = spawn(
+            "region-probe", f"external-{fault}", {}
+        )
+        probe_result = wait_result(probe_file, probe_ready)
+        probe_process.wait(timeout=_DEADLINE_SECONDS)
+        identity_owned = observe_guardian_identity(identity_mutex)
+        measurement = {
+            "scenario": scenario,
+            "file_identity": identity,
+            "outer_in_browser_job": outer_in_browser_job,
+            "owner_in_browser_job": guardian_result["watched_process_in_browser_job"],
+            "guardian_in_browser_job": guardian_result[
+                "current_process_in_browser_job"
+            ],
+            "fault": fault,
+            "guardian_error_type": guardian_result["error_type"],
+            "guardian_error": guardian_result["error"],
+            "fault_operation": guardian_result["fault_operation"],
+            "terminate_attempted": guardian_result["terminate_attempted"],
+            "terminate_completed": guardian_result.get("terminate_completed", False),
+            "query_samples": guardian_result.get("query_samples", []),
+            "query_timeout": guardian_result.get("query_timeout", False),
+            "external_probe_acquired_a": probe_result["acquired_a"],
+            "external_probe_acquired_b": probe_result["acquired_b"],
+            "guardian_alive": guardian.poll() is None,
+            "identity_mutex_owned": identity_owned["identity_mutex_owned"],
+        }
+        _atomic_json(root / "conjunction-result.json", measurement)
+        result_event = os.environ.get("CONJUNCTION_RESULT_EVENT")
+        if result_event is None:
+            raise RuntimeError("the fail-closed scenario has no result event")
+        _signal(result_event)
+        # Only the already-assigned outer harness Job may break this failed proof.
+        threading.Event().wait()
+        raise RuntimeError("the failed conjunction proof resumed unexpectedly")
+    finally:
+        first_error: BaseException | None = None
+        for fd in retained_fds:
+            try:
+                os.close(fd)
+            except BaseException as exc:
+                first_error = first_error or exc
+        for process in reversed(processes):
+            try:
+                if process.poll() is None:
+                    _terminate_process(process)
+            except BaseException as exc:
+                first_error = first_error or exc
+        for job in jobs:
+            try:
+                if not job.closed:
+                    job.terminate()
+                    job.wait_until_empty(timeout=_DEADLINE_SECONDS)
+                    if not job.closed:
+                        job.close()
+            except BaseException as exc:
+                first_error = first_error or exc
+        for handle in events:
+            try:
+                handle.Close()
+            except BaseException as exc:
+                first_error = first_error or exc
+        try:
+            os.close(base_fd)
+        except BaseException as exc:
+            first_error = first_error or exc
+        if first_error is not None:
+            raise first_error
+
+
+def _gate(wait_event: str, started_event: str) -> int:
+    _actor_wait(wait_event)
+    _signal(started_event)
+    return 0
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="role", required=True)
@@ -1129,6 +2669,13 @@ def _parse_args() -> argparse.Namespace:
             "candidate-terminate-error",
             "candidate-query-error",
             "candidate-drain-timeout",
+            "conjunction-lock-regions",
+            "conjunction-publication",
+            "conjunction-owner-loss",
+            "conjunction-guardian-loss-clean-close",
+            "conjunction-owner-loss-terminate-error",
+            "conjunction-owner-loss-query-error",
+            "conjunction-owner-loss-drain-timeout",
         ),
     )
     run.add_argument("root", type=Path)
@@ -1152,16 +2699,55 @@ def _parse_args() -> argparse.Namespace:
     guardian.add_argument(
         "fault", choices=("none", "terminate-error", "query-error", "drain-timeout")
     )
+
+    actor = subparsers.add_parser("actor")
+    actor.add_argument(
+        "mode",
+        choices=(
+            "hold",
+            "attempt",
+            "region-probe",
+            "guardian-publish",
+            "guardian-drain",
+            "owner-watch",
+        ),
+    )
+    actor.add_argument("lock_path", type=Path)
+    actor.add_argument("expected_identity", type=json.loads)
+    actor.add_argument("ready_event")
+    actor.add_argument("result_file", type=Path)
+    actor.add_argument("options", type=json.loads)
+
+    gate = subparsers.add_parser("gate")
+    gate.add_argument("wait_event")
+    gate.add_argument("started_event")
     return parser.parse_args()
 
 
 def main() -> int:
+    faulthandler.enable()
     args = _parse_args()
     if os.name != "nt":
         raise SystemExit("this probe requires native Windows Job Objects")
     if args.role == "run":
-        print(json.dumps(_run_probe(args.scenario, args.root)), flush=True)
+        runner = (
+            _run_conjunction_probe
+            if args.scenario.startswith("conjunction-")
+            else _run_probe
+        )
+        print(json.dumps(runner(args.scenario, args.root)), flush=True)
         return 0
+    if args.role == "actor":
+        return _actor(
+            args.mode,
+            args.lock_path,
+            args.expected_identity,
+            args.ready_event,
+            args.result_file,
+            args.options,
+        )
+    if args.role == "gate":
+        return _gate(args.wait_event, args.started_event)
     if args.role == "owner":
         return _owner(
             args.scenario,
