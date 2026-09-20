@@ -27,6 +27,41 @@ class TestJobSearchText:
     def test_empty_text_is_not_a_no_match_page(self):
         assert not JOB_SEARCH_EN_US.shows_no_match("")
 
+    def test_the_result_count_under_the_heading_is_exact(self):
+        """Classic layout, measured: the count is the second line."""
+        assert JOB_SEARCH_EN_US.result_count(
+            "founder's associate in France\n28 results\nSet alert"
+        ) == (28, True)
+
+    def test_a_count_with_a_plus_is_a_lower_bound(self):
+        """Redesigned layout, measured: the count is the first line."""
+        assert JOB_SEARCH_EN_US.result_count("99+ results\n\nGreater Paris") == (
+            99,
+            False,
+        )
+        assert JOB_SEARCH_EN_US.result_count("qwzxvbnk in France\n4,000+ results") == (
+            4000,
+            False,
+        )
+
+    def test_a_single_result_is_counted(self):
+        assert JOB_SEARCH_EN_US.result_count("python in France\n1 result") == (1, True)
+
+    def test_a_count_below_the_first_lines_is_not_the_count(self):
+        """A posting could say "25 results" as a whole line further down."""
+        assert (
+            JOB_SEARCH_EN_US.result_count(
+                "python in France\nSet alert\nJump to active job details\n25 results"
+            )
+            is None
+        )
+
+    def test_a_count_inside_a_longer_line_is_not_the_count(self):
+        assert JOB_SEARCH_EN_US.result_count("Drove 28 results for clients") is None
+
+    def test_the_promoted_label_is_the_cards_own_line(self):
+        assert JOB_SEARCH_EN_US.promoted_label == "Promoted"
+
 
 class TestDetailCaptureText:
     def test_en_us_table_preserves_detail_capture_policy(self):

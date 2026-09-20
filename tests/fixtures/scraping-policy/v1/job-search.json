@@ -152,6 +152,17 @@
       "operation": "job_ids",
       "program_digest": "a9a17a1764bd",
       "section": "search_results"
+    },
+    {
+      "arg": {
+        "label": "Promoted",
+        "selector": "a[href*=\"/jobs/view/\"], [componentkey^=\"job-card-component-ref-\"]"
+      },
+      "call": "search_jobs",
+      "kind": "evaluate",
+      "operation": "job_promoted_ids",
+      "program_digest": "ac55501ae773",
+      "section": "search_results"
     }
   ],
   "result": {
@@ -172,6 +183,9 @@
       "114",
       "115",
       "116"
+    ],
+    "promoted_job_ids": [
+      "102"
     ],
     "references": {
       "search_results": [
@@ -244,7 +258,11 @@
       ]
     },
     "sections": {
-      "search_results": "Python jobs"
+      "search_results": "Python jobs\n500+ results"
+    },
+    "total": {
+      "count": 500,
+      "exact": false
     },
     "url": "https://www.linkedin.com/jobs/search/?keywords=python"
   },

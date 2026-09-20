@@ -154,6 +154,17 @@
       "section": "search_results"
     },
     {
+      "arg": {
+        "label": "Promoted",
+        "selector": "a[href*=\"/jobs/view/\"], [componentkey^=\"job-card-component-ref-\"]"
+      },
+      "call": "search_jobs",
+      "kind": "evaluate",
+      "operation": "job_promoted_ids",
+      "program_digest": "ac55501ae773",
+      "section": "search_results"
+    },
+    {
       "call": "search_jobs",
       "kind": "sleep",
       "reason": "sleep",
@@ -304,6 +315,7 @@
     "job_ids": [
       "101"
     ],
+    "promoted_job_ids": [],
     "references": {
       "search_results": [
         {
