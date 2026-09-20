@@ -548,6 +548,44 @@ class TestBuildReferences:
             }
         ]
 
+    def test_every_more_jobs_card_on_a_posting_is_kept(self):
+        """Each card is one anchor around its whole content, measured live.
+
+        That text is too long to be a label, and a job without a label was
+        dropped. The dozen cards also sit below everything else on the page,
+        past a cap of 8 references.
+        """
+        header: list[RawReference] = [
+            {"href": "https://www.linkedin.com/company/acme/", "text": "Acme"},
+            {"href": "https://www.linkedin.com/jobs/view/100/", "text": "Easy Apply"},
+            {"href": "https://www.linkedin.com/in/recruiter/", "text": "Recruiter"},
+        ]
+        cards: list[RawReference] = [
+            {
+                "href": (
+                    "https://www.linkedin.com/jobs/search-results/?keywords=Data"
+                    f"&currentJobId={4458959200 + index}"
+                ),
+                "text": (
+                    "Product Manager Data H/F NEXTON Paris (On-site) 3 school "
+                    "alumni work here Promoted · Posted 2 weeks ago 2 weeks ago · "
+                    "Easy Apply"
+                ),
+            }
+            for index in range(12)
+        ]
+
+        references = build_references(header + cards, "job_posting")
+
+        assert references[3:] == [
+            {
+                "kind": "job",
+                "url": f"/jobs/view/{4458959200 + index}/",
+                "context": "job posting",
+            }
+            for index in range(12)
+        ]
+
     def test_uses_person_detail_section_contexts(self):
         """certifications, skills and projects joined PERSON_SECTIONS after
         this table was written, so their references carried no context while
@@ -871,6 +909,37 @@ class TestClassifyLink:
         assert classify_link("https://www.linkedin.com/jobs/view/1967281839/") == (
             "job",
             "/jobs/view/1967281839/",
+        )
+
+    def test_a_search_link_selecting_a_job_is_that_job(self):
+        """The "More jobs" cards on a posting link here, never to the job.
+
+        Measured href shape, trimmed of its tracking parameters.
+        """
+        assert classify_link(
+            "https://www.linkedin.com/jobs/search-results/"
+            "?keywords=Product+Owner&origin=JobSearchOrigin_JOB_DETAILS_SIMILAR_JOBS_CARD"
+            "&currentJobId=4458959237&originToLandingJobPostings=4458959237"
+        ) == ("job", "/jobs/view/4458959237/")
+        assert classify_link(
+            "https://www.linkedin.com/jobs/search/?currentJobId=4458959237"
+        ) == ("job", "/jobs/view/4458959237/")
+
+    def test_a_search_link_without_a_selected_job_is_not_a_job(self):
+        """The module's "See more jobs like this" link is a search, not a job."""
+        assert (
+            classify_link(
+                "https://www.linkedin.com/jobs/search-results/"
+                "?keywords=Product+Owner&origin=JobSearchOrigin_JOB_DETAILS_SIMILAR_JOBS_SEE_MORE"
+            )
+            is None
+        )
+        assert (
+            classify_link(
+                "https://www.linkedin.com/jobs/search-results/"
+                "?currentJobId=%D9%A4%D9%A2%D9%A5"
+            )
+            is None
         )
 
     def test_messaging_thread_url(self):

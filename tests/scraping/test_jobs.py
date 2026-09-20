@@ -119,6 +119,40 @@ class TestScrapeJob:
         assert result["sections"] == {}
         assert "references" not in result
 
+    async def test_jobs_a_posting_links_to_are_labelled_similar(self, mock_page):
+        """The posting's own link and its "More jobs" cards are both jobs.
+
+        Only the context tells a caller which one is the posting it asked for.
+        """
+        scraper = _scraper(mock_page)
+        with patch.object(
+            scraper._capture,
+            "capture",
+            new_callable=AsyncMock,
+            return_value=extracted(
+                "Job: Software Engineer\nMore jobs\nData Engineer",
+                [
+                    {
+                        "kind": "job",
+                        "url": "/jobs/view/12345/",
+                        "text": "Easy Apply",
+                        "context": "job posting",
+                    },
+                    {
+                        "kind": "job",
+                        "url": "/jobs/view/67890/",
+                        "context": "job posting",
+                    },
+                ],
+            ),
+        ):
+            result = await scraper.scrape_job("12345")
+
+        assert [ref.get("context") for ref in result["references"]["job_posting"]] == [
+            "job posting",
+            "similar job",
+        ]
+
 
 class TestSearchJobs:
     """Tests for search_jobs with job ID extraction and pagination."""
