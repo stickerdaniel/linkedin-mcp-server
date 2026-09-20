@@ -17,6 +17,7 @@ import windows_guardian_probe as probe
 from linkedin_mcp_server import process_tree
 from linkedin_mcp_server.profile_lease import ProfileLease
 from windows_guardian_probe import (
+    active_guardian_loss_wait_handles,
     guardian_loss_measurement,
     guardian_shutdown_sequence,
     observe_guardian_identity,
@@ -372,6 +373,36 @@ def test_guardian_loss_wait_deadline_is_checked_before_waiting() -> None:
     assert remaining_wait_milliseconds(10.0, monotonic=lambda: 9.5) == 500
     with pytest.raises(TimeoutError, match="deadline expired"):
         remaining_wait_milliseconds(10.0, monotonic=lambda: 10.0)
+
+
+def test_guardian_loss_wait_excludes_exited_descendants() -> None:
+    owner = object()
+    exited = object()
+    survivor = object()
+
+    assert active_guardian_loss_wait_handles(
+        owner,
+        [exited, survivor],
+        is_active=lambda handle: handle in {owner, survivor},
+    ) == [owner, survivor]
+
+
+def test_guardian_loss_wait_requires_owner_and_descendant_survivors() -> None:
+    owner = object()
+    descendant = object()
+
+    with pytest.raises(RuntimeError, match="owner exited"):
+        active_guardian_loss_wait_handles(
+            owner,
+            [descendant],
+            is_active=lambda handle: handle is descendant,
+        )
+    with pytest.raises(RuntimeError, match="all descendants exited"):
+        active_guardian_loss_wait_handles(
+            owner,
+            [descendant],
+            is_active=lambda handle: handle is owner,
+        )
 
 
 def test_guardian_identity_requires_an_owned_mutex(

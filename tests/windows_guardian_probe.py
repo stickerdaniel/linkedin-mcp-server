@@ -223,6 +223,20 @@ def remaining_wait_milliseconds(
     return max(1, int(remaining * 1000))
 
 
+def active_guardian_loss_wait_handles(
+    owner_handle: Any,
+    descendant_handles: list[Any],
+    *,
+    is_active: Callable[[Any], bool],
+) -> list[Any]:
+    if not is_active(owner_handle):
+        raise RuntimeError("the owner exited before guardian-loss lease acquisition")
+    active_descendants = [handle for handle in descendant_handles if is_active(handle)]
+    if not active_descendants:
+        raise RuntimeError("all descendants exited before guardian-loss acquisition")
+    return [owner_handle, *active_descendants]
+
+
 def _owner(
     scenario: str,
     auth_root: Path,
@@ -882,8 +896,13 @@ def _run_probe(scenario: str, root: Path) -> dict[str, Any]:
                     wait_handles.append(guardian_handle)
                 if "lease_observed_ns" not in guardian_loss_observation:
                     wait_handles.append(lease_acquired_event)
-                wait_handles.append(owner_handle)
-                wait_handles.extend(descendant_handles)
+                wait_handles.extend(
+                    active_guardian_loss_wait_handles(
+                        owner_handle,
+                        descendant_handles,
+                        is_active=_is_active,
+                    )
+                )
                 remaining_ms = remaining_wait_milliseconds(deadline)
                 wait_result = win32event.WaitForMultipleObjects(
                     wait_handles, False, remaining_ms
