@@ -5,6 +5,7 @@ on:
   # is based on the branch below it, and a trailer that slips through there
   # reaches main when the stack merges.
   pull_request:
+    types: [opened, synchronize, reopened, edited]
 
 # One run per branch, for the same reason as CI: restacking pushes every branch
 # in the stack, and the trailers this reads are a property of the head commit,
@@ -33,6 +34,10 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0
+
+      - name: Check PR model attribution
+        if: github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.user.login != 'renovate[bot]'
+        run: python scripts/check_pr_model_attribution.py
 
       - name: Check for bot Co-Authored-By lines
         env:
