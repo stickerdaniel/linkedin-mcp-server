@@ -1386,6 +1386,45 @@ def _actor_wait(name: str) -> None:
         handle.Close()
 
 
+class _ActorFd:
+    def __init__(self, fd: int, *, close: Callable[[int], None] = os.close) -> None:
+        self.fd = fd
+        self._close = close
+
+    def close(self, fd: int | None = None) -> None:
+        if self.fd < 0:
+            return
+        if fd is not None and fd != self.fd:
+            raise RuntimeError("actor close targeted a different descriptor")
+        current = self.fd
+        self._close(current)
+        self.fd = -1
+
+
+def _actor_admission(
+    descriptor: _ActorFd,
+    *,
+    try_lock: Callable[[int, int], bool],
+    unlock: Callable[[int, int], None],
+) -> bool:
+    return conjunction_admission(
+        descriptor.fd,
+        try_lock=try_lock,
+        unlock=unlock,
+        close=descriptor.close,
+    )
+
+
+def _finish_actor_fd(descriptor: _ActorFd, first_error: BaseException | None) -> None:
+    try:
+        descriptor.close()
+    except BaseException as close_error:
+        if first_error is None:
+            raise close_error
+    if first_error is not None:
+        raise first_error
+
+
 def _actor(
     mode: str,
     raw_fd_handle: int,
@@ -1394,13 +1433,15 @@ def _actor(
     options: dict[str, Any],
 ) -> int:
     win32api, win32con, win32event, win32job = _windows_modules()
-    fd = _inherited_fd(raw_fd_handle) if raw_fd_handle else -1
+    descriptor = _ActorFd(_inherited_fd(raw_fd_handle) if raw_fd_handle else -1)
+    fd = descriptor.fd
     try_lock, unlock = _region_api()
     result: dict[str, Any] = {"mode": mode}
     job = None
     process_handle = None
     descendant_handles: list[Any] = []
     locked_offset: int | None = None
+    first_error: BaseException | None = None
     try:
         if fd >= 0:
             result["file_identity"] = list(file_identity(fd))
@@ -1437,7 +1478,7 @@ def _actor(
             return 0
 
         if mode == "attempt":
-            acquired = conjunction_admission(fd, try_lock=try_lock, unlock=unlock)
+            acquired = _actor_admission(descriptor, try_lock=try_lock, unlock=unlock)
             result["acquired"] = acquired
             if acquired:
                 locked_offset = 0
@@ -1654,17 +1695,31 @@ def _actor(
         else:
             threading.Event().wait()
         return 0
+    except BaseException as exc:
+        first_error = exc
     finally:
         for handle in descendant_handles:
-            handle.Close()
+            try:
+                handle.Close()
+            except BaseException as exc:
+                first_error = first_error or exc
         if locked_offset is not None:
-            unlock(fd, locked_offset)
+            try:
+                unlock(fd, locked_offset)
+            except BaseException as exc:
+                first_error = first_error or exc
         if job is not None:
-            job.Close()
+            try:
+                job.Close()
+            except BaseException as exc:
+                first_error = first_error or exc
         if process_handle:
-            win32api.CloseHandle(process_handle)
-        if fd >= 0:
-            os.close(fd)
+            try:
+                win32api.CloseHandle(process_handle)
+            except BaseException as exc:
+                first_error = first_error or exc
+        _finish_actor_fd(descriptor, first_error)
+    raise AssertionError("actor exception cleanup returned without raising")
 
 
 def _spawn_inheriting(

@@ -954,6 +954,104 @@ def test_b_unlock_error_survives_a_close_error() -> None:
     assert events == ["unlock 1", "close"]
 
 
+def _consume_actor_admission(
+    *,
+    try_lock: Any,
+    unlock: Any,
+    close: Any,
+) -> None:
+    descriptor = probe._ActorFd(7, close=close)
+    first_error: BaseException | None = None
+    try:
+        probe._actor_admission(
+            descriptor,
+            try_lock=try_lock,
+            unlock=unlock,
+        )
+    except BaseException as exc:
+        first_error = exc
+    finally:
+        probe._finish_actor_fd(descriptor, first_error)
+
+
+def test_actor_preserves_b_unlock_error_without_a_second_close() -> None:
+    error = OSError("B unlock failed")
+    closes: list[int] = []
+
+    with pytest.raises(OSError) as raised:
+        _consume_actor_admission(
+            try_lock=lambda _fd, _offset: True,
+            unlock=lambda _fd, offset: (
+                (_ for _ in ()).throw(error) if offset == 1 else None
+            ),
+            close=closes.append,
+        )
+
+    assert raised.value is error
+    assert str(raised.value) == "B unlock failed"
+    assert closes == [7]
+
+
+def test_actor_preserves_b_lock_error_when_a_unlock_also_fails() -> None:
+    lock_error = OSError("B lock failed")
+    closes: list[int] = []
+
+    def try_lock(_fd: int, offset: int) -> bool:
+        if offset == 1:
+            raise lock_error
+        return True
+
+    with pytest.raises(OSError) as raised:
+        _consume_actor_admission(
+            try_lock=try_lock,
+            unlock=lambda _fd, _offset: (_ for _ in ()).throw(
+                OSError("A unlock failed")
+            ),
+            close=closes.append,
+        )
+
+    assert raised.value is lock_error
+    assert str(raised.value) == "B lock failed"
+    assert closes == [7]
+
+
+def test_actor_preserves_a_unlock_error_after_b_contention() -> None:
+    unlock_error = OSError("A unlock failed")
+    closes: list[int] = []
+
+    with pytest.raises(OSError) as raised:
+        _consume_actor_admission(
+            try_lock=lambda _fd, offset: offset == 0,
+            unlock=lambda _fd, _offset: (_ for _ in ()).throw(unlock_error),
+            close=closes.append,
+        )
+
+    assert raised.value is unlock_error
+    assert str(raised.value) == "A unlock failed"
+    assert closes == [7]
+
+
+def test_actor_retries_failed_rescue_close_during_final_cleanup() -> None:
+    unlock_error = OSError("B unlock failed")
+    closes: list[int] = []
+
+    def close(fd: int) -> None:
+        closes.append(fd)
+        if len(closes) == 1:
+            raise OSError("rescue close failed")
+
+    with pytest.raises(OSError) as raised:
+        _consume_actor_admission(
+            try_lock=lambda _fd, _offset: True,
+            unlock=lambda _fd, _offset: (_ for _ in ()).throw(unlock_error),
+            close=close,
+        )
+
+    assert raised.value is unlock_error
+    assert str(raised.value) == "B unlock failed"
+    assert closes == [7, 7]
+
+
 def test_attempt_here_preserves_admission_error_when_fd_was_rescue_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
