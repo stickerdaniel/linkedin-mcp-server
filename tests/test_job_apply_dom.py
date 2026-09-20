@@ -216,7 +216,13 @@ async def test_an_applied_posting_is_not_clicked(dom_page):
     )
 
     assert await read(dom_page, html) == JobApplyRead("applied")
-    assert await dom_page.evaluate("() => window.clicked === true") is False
+    # The page script sets window.clicked in the main world. evaluate defaults
+    # to isolated_context=True, where that variable is always undefined and the
+    # assertion cannot fail, so this one reads the world the click writes to.
+    assert (
+        await dom_page.evaluate("() => window.clicked === true", isolated_context=False)
+        is False
+    )
 
 
 async def test_a_closed_posting_is_its_state(dom_page):
