@@ -1784,6 +1784,61 @@ class TestSearchJobs:
         assert mock_ids.await_count == 1
         assert mock_extract.await_count == 2
 
+    async def test_discarded_recommendations_do_not_warn_about_filters(self, mock_page):
+        """A dropped filter on the discarded substitute page changes no result."""
+        scraper = _scraper(mock_page)
+        pages = iter(
+            [
+                extracted("python in Berlin\n1 result\nPython Developer"),
+                extracted("Jobs you may be interested in\nMLOps Engineer (H/F/X)"),
+            ]
+        )
+        calls = 0
+
+        async def navigate_page(url, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                navigate(mock_page, url)
+            else:
+                navigate(
+                    mock_page,
+                    "https://www.linkedin.com/jobs/search/?keywords=python&start=1",
+                )
+            return captured(mock_page, next(pages))
+
+        with (
+            patch.object(
+                scraper._pages,
+                "_extract_search_page",
+                side_effect=navigate_page,
+            ),
+            patch.object(
+                scraper._pages,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["111"],
+            ) as mock_ids,
+            patch.object(
+                scraper._pages,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await scraper.search_jobs("python", location="Berlin", max_pages=2)
+
+        assert result["job_ids"] == ["111"]
+        assert result["sections"]["search_results"] == (
+            "python in Berlin\n1 result\nPython Developer"
+        )
+        assert "section_errors" not in result
+        assert mock_ids.await_count == 1
+
     async def test_a_login_redirect_raises_an_auth_error(self, mock_page):
         """A login wall reached mid-search is an expired session.
 

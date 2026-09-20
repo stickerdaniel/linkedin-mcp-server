@@ -313,6 +313,9 @@ class JobScraper:
                 # LinkedIn merely renamed would return nothing at all.
                 landed_query = parse_qs(parsed_url.query)
                 asked = parse_qs(urlparse(base_url).query)
+                is_no_match = bool(extracted.text) and self._search_text.shows_no_match(
+                    extracted.text
+                )
                 asked_keywords = asked.get("keywords", [""])[0]
                 landed_keywords = landed_query.get("keywords", [""])[0]
                 if asked_keywords and landed_keywords != asked_keywords:
@@ -337,7 +340,7 @@ class JobScraper:
                     for name in asked
                     if name not in ("keywords", "start") and not landed_query.get(name)
                 )
-                if lost:
+                if lost and not is_no_match:
                     logger.debug(
                         "Search filters %s did not survive navigation to %s",
                         lost,
@@ -366,7 +369,7 @@ class JobScraper:
                     # search. Do not read ids from a DOM that supplied no text.
                     break
 
-                if self._search_text.shows_no_match(extracted.text):
+                if is_no_match:
                     # LinkedIn's substitute for zero results keeps the route
                     # and the query, so every check above passes, and its
                     # cards are real job links. Read as a result page it
