@@ -183,7 +183,7 @@ def await_fail_closed_conjunction(
         acquired_after_drain, attempts, rundown_seconds = (
             probe.retry_admission_after_drain(
                 open_fd=lambda: os.open(root / "auth" / "profile.lock", os.O_RDWR),
-                try_admission=conjunction_admission,
+                try_admission=lambda fd, close: conjunction_admission(fd, close=close),
                 release_a=lambda fd: probe._region_api()[1](fd, 0),
                 close_fd=os.close,
                 deadline=time.monotonic() + 10,
@@ -1133,7 +1133,9 @@ def test_post_harness_admission_retries_until_a_and_b_are_available() -> None:
 
     acquired, attempts, duration = probe.retry_admission_after_drain(
         open_fd=lambda: next(opened),
-        try_admission=lambda fd: events.append(f"admit {fd}") or next(admissions),
+        try_admission=lambda fd, _close: (
+            events.append(f"admit {fd}") or next(admissions)
+        ),
         release_a=lambda fd: events.append(f"release A {fd}"),
         close_fd=lambda fd: events.append(f"close {fd}"),
         deadline=2.0,
@@ -1155,6 +1157,131 @@ def test_post_harness_admission_retries_until_a_and_b_are_available() -> None:
         "release A 12",
         "close 12",
     ]
+
+
+def _retry_admission_failure(
+    *,
+    try_admission: Any,
+    release_a: Any = lambda _fd: None,
+    close_fd: Any,
+) -> None:
+    probe.retry_admission_after_drain(
+        open_fd=lambda: 7,
+        try_admission=try_admission,
+        release_a=release_a,
+        close_fd=close_fd,
+        deadline=2.0,
+        wait_for_retry=lambda: pytest.fail("non-contention error was retried"),
+        monotonic=lambda: 1.0,
+    )
+
+
+def test_retry_preserves_b_unlock_error_without_double_close() -> None:
+    error = OSError("B unlock failed")
+    closes: list[int] = []
+
+    with pytest.raises(OSError) as raised:
+        _retry_admission_failure(
+            try_admission=lambda fd, close: conjunction_admission(
+                fd,
+                try_lock=lambda _fd, _offset: True,
+                unlock=lambda _fd, _offset: (_ for _ in ()).throw(error),
+                close=close,
+            ),
+            close_fd=closes.append,
+        )
+
+    assert raised.value is error
+    assert str(raised.value) == "B unlock failed"
+    assert closes == [7]
+
+
+def test_retry_preserves_b_lock_error_when_a_unlock_also_fails() -> None:
+    lock_error = OSError("B lock failed")
+    closes: list[int] = []
+
+    def try_lock(_fd: int, offset: int) -> bool:
+        if offset == 1:
+            raise lock_error
+        return True
+
+    with pytest.raises(OSError) as raised:
+        _retry_admission_failure(
+            try_admission=lambda fd, close: conjunction_admission(
+                fd,
+                try_lock=try_lock,
+                unlock=lambda _fd, _offset: (_ for _ in ()).throw(
+                    OSError("A unlock failed")
+                ),
+                close=close,
+            ),
+            close_fd=closes.append,
+        )
+
+    assert raised.value is lock_error
+    assert str(raised.value) == "B lock failed"
+    assert closes == [7]
+
+
+def test_retry_preserves_a_unlock_error_after_b_contention() -> None:
+    unlock_error = OSError("A unlock failed")
+    closes: list[int] = []
+
+    with pytest.raises(OSError) as raised:
+        _retry_admission_failure(
+            try_admission=lambda fd, close: conjunction_admission(
+                fd,
+                try_lock=lambda _fd, offset: offset == 0,
+                unlock=lambda _fd, _offset: (_ for _ in ()).throw(unlock_error),
+                close=close,
+            ),
+            close_fd=closes.append,
+        )
+
+    assert raised.value is unlock_error
+    assert str(raised.value) == "A unlock failed"
+    assert closes == [7]
+
+
+def test_retry_preserves_release_a_error() -> None:
+    release_error = OSError("release A failed")
+    closes: list[int] = []
+
+    with pytest.raises(OSError) as raised:
+        _retry_admission_failure(
+            try_admission=lambda _fd, _close: True,
+            release_a=lambda _fd: (_ for _ in ()).throw(release_error),
+            close_fd=closes.append,
+        )
+
+    assert raised.value is release_error
+    assert str(raised.value) == "release A failed"
+    assert closes == [7]
+
+
+def test_retry_retries_failed_rescue_close_without_masking_lock_error() -> None:
+    unlock_error = OSError("B unlock failed")
+    closes: list[int] = []
+
+    def close(fd: int) -> None:
+        closes.append(fd)
+        if len(closes) == 1:
+            raise OSError("rescue close failed")
+
+    with pytest.raises(OSError) as raised:
+        _retry_admission_failure(
+            try_admission=lambda fd, tracked_close: conjunction_admission(
+                fd,
+                try_lock=lambda _fd, _offset: True,
+                unlock=lambda _fd, _offset: (_ for _ in ()).throw(unlock_error),
+                close=tracked_close,
+            ),
+            close_fd=close,
+        )
+
+    assert raised.value is unlock_error
+    assert str(raised.value) == "B unlock failed"
+    assert closes == [7, 7]
 
 
 def test_actor_duplicates_every_inherited_handle_and_closes_parent_copies() -> None:

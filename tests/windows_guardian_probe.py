@@ -1769,7 +1769,7 @@ def retry_lock_rundown[T](
 def retry_admission_after_drain(
     *,
     open_fd: Callable[[], int],
-    try_admission: Callable[[int], bool],
+    try_admission: Callable[[int, Callable[[int], None]], bool],
     release_a: Callable[[int], None],
     close_fd: Callable[[int], None],
     deadline: float,
@@ -1777,14 +1777,18 @@ def retry_admission_after_drain(
     monotonic: Callable[[], float] = time.monotonic,
 ) -> tuple[bool, int, float]:
     def attempt() -> bool | None:
-        fd = open_fd()
+        descriptor = _ActorFd(open_fd(), close=close_fd)
+        first_error: BaseException | None = None
         try:
-            if not try_admission(fd):
+            if not try_admission(descriptor.fd, descriptor.close):
                 return None
-            release_a(fd)
+            release_a(descriptor.fd)
             return True
+        except BaseException as exc:
+            first_error = exc
         finally:
-            close_fd(fd)
+            _finish_actor_fd(descriptor, first_error)
+        raise AssertionError("retry admission cleanup returned without raising")
 
     return retry_lock_rundown(
         attempt,
