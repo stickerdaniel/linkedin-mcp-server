@@ -120,6 +120,13 @@ def dropped_offset_section_error(offset: int, landed: str) -> dict[str, str]:
     }
 
 
+# The two filters the redesigned route reads out of the query's words instead
+# of its parameters. Every other filter it drops (`f_JT`, `f_E`, `f_EA`,
+# `sortBy`) has no such second home, so naming the keywords for one of those
+# would offer a repair that does not exist.
+_KEYWORD_FILTERS = frozenset({"location", "f_WT"})
+
+
 def dropped_filters_section_error(names: list[str], landed: str) -> dict[str, str]:
     """The ``section_errors`` entry for filters LinkedIn did not keep.
 
@@ -133,13 +140,16 @@ def dropped_filters_section_error(names: list[str], landed: str) -> dict[str, st
     The redesigned route keeps only the keywords, `f_TPR` and `start`, and
     reads a location and a work type from the words of the query instead, so
     there the message says where they go. Measured: "remote forward deployed
-    engineer in France" returned remote postings in France.
+    engineer in France" returned remote postings in France. Only when one of
+    those two is what was dropped: the route drops the rest as well, and a
+    search that lost its job type is told to rewrite keywords that cannot
+    carry one.
     """
     message = (
         f"LinkedIn did not keep {', '.join(names)} (landed on {landed}), "
         "so the results are broader than the search asked for."
     )
-    if route(landed)[1] == "/jobs/search-results":
+    if route(landed)[1] == "/jobs/search-results" and _KEYWORD_FILTERS & set(names):
         message += (
             " Its redesigned search reads location and work type from the "
             'keywords instead, as in "remote python developer in France".'

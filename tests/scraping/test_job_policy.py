@@ -139,3 +139,13 @@ class TestDroppedFiltersSectionError:
         )
 
         assert self.HINT not in error["error_message"]
+
+    def test_filters_the_keywords_cannot_carry_get_no_hint(self):
+        """A job type the redesign dropped is not recovered by rewording."""
+        error = dropped_filters_section_error(
+            ["f_E", "f_JT"],
+            "https://www.linkedin.com/jobs/search-results/?keywords=python",
+        )
+
+        assert "f_E, f_JT" in error["error_message"]
+        assert self.HINT not in error["error_message"]
