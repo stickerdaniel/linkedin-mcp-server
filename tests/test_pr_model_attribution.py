@@ -128,21 +128,26 @@ def test_workflow_checks_attribution_in_required_job() -> None:
         "${{ github.workflow }}-${{ github.event.pull_request.number }}"
     )
 
-    checkout = steps["Check out trusted base"]
-    assert checkout["with"]["ref"] == "${{ github.event.pull_request.base.sha }}"
+    checkout = steps["Check out trusted workflow revision"]
+    assert checkout["with"]["ref"] == "${{ github.workflow_sha }}"
+    assert checkout["with"]["ref"] != "${{ github.event.pull_request.base.sha }}"
     assert checkout["with"]["persist-credentials"] is False
-    assert checkout["with"]["fetch-depth"] == 0
+    assert checkout["with"]["fetch-depth"] == 1
 
     validator = steps["Check PR model attribution"]
-    fetch = steps["Fetch PR head"]
+    fetch = steps["Fetch PR commits"]
     assert validator["run"] == "python scripts/check_pr_model_attribution.py"
     assert validator["if"] == (
         "github.event.pull_request.user.login != 'dependabot[bot]' && "
         "github.event.pull_request.user.login != 'renovate[bot]'"
     )
     assert ordered_steps.index(validator) < ordered_steps.index(fetch)
+    assert fetch["env"]["BASE_REF"] == "${{ github.event.pull_request.base.ref }}"
     assert fetch["env"]["PR_NUMBER"] == "${{ github.event.pull_request.number }}"
-    assert "refs/pull/${PR_NUMBER}/head" in fetch["run"]
+    assert 'case "$PR_NUMBER"' in fetch["run"]
+    assert 'git check-ref-format "refs/heads/${BASE_REF}"' in fetch["run"]
+    assert '"refs/heads/${BASE_REF}"' in fetch["run"]
+    assert '"refs/pull/${PR_NUMBER}/head"' in fetch["run"]
     assert "git checkout" not in fetch["run"]
 
     for name in ("Check for bot Co-Authored-By lines", "Check for bot commit authors"):

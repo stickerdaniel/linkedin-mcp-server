@@ -34,25 +34,29 @@ jobs:
   check-bot-coauthors:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out trusted base
+      - name: Check out trusted workflow revision
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
-          fetch-depth: 0
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 1
           persist-credentials: false
 
       - name: Check PR model attribution
         if: github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.user.login != 'renovate[bot]'
         run: python scripts/check_pr_model_attribution.py
 
-      - name: Fetch PR head
+      - name: Fetch PR commits
         env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           case "$PR_NUMBER" in
             ''|*[!0-9]*) echo "Invalid pull request number"; exit 1 ;;
           esac
-          git fetch --no-tags origin "refs/pull/${PR_NUMBER}/head"
+          git check-ref-format "refs/heads/${BASE_REF}"
+          git fetch --no-tags origin \
+            "refs/heads/${BASE_REF}" \
+            "refs/pull/${PR_NUMBER}/head"
 
       - name: Check for bot Co-Authored-By lines
         env:
