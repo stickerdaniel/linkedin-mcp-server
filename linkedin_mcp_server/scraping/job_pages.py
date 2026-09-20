@@ -150,10 +150,21 @@ PROMOTED_JOB_IDS_JS = (
 # Without the heading there is no boundary and the whole `main` is read rather
 # than nothing: a posting whose description has not rendered yet still has its
 # Apply, and refusing to look would answer `unknown` for it.
+#
+# The heading is found by walking text nodes rather than asking every element
+# for its text. Both find it; the walk visits fewer nodes and copies none of
+# them, and `textContent` on every element of a posting copies that posting
+# once per level of nesting. That is worth the difference because the readiness
+# poll runs this program on every frame for up to ten seconds.
 _EXTERNAL_APPLY_JS = r"""
-    const heading = [...main.querySelectorAll('*')].find(
-        (el) => (el.textContent || '').trim() === descriptionHeading
-    );
+    const walk = document.createTreeWalker(main, NodeFilter.SHOW_TEXT);
+    let heading = null;
+    while (walk.nextNode()) {
+        if ((walk.currentNode.nodeValue || '').trim() === descriptionHeading) {
+            heading = walk.currentNode;
+            break;
+        }
+    }
     const above = (el) => !heading || Boolean(
         heading.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_PRECEDING
     );
