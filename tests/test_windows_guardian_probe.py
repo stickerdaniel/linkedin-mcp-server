@@ -23,15 +23,19 @@ from windows_guardian_probe import (
     guardian_loss_measurement,
     guardian_publication_sequence,
     guardian_shutdown_sequence,
+    observe_browser_publication_order,
     observe_guardian_identity,
     observe_named_job_objects,
+    open_descendant_handles_before_terminate,
     read_published_json,
     remaining_wait_milliseconds,
     require_same_file_identity,
+    retry_lock_rundown,
     run_guardian_fail_closed,
     sample_guardian_loss_progress,
     sample_lease_acquisition,
     sample_pre_crash_contention,
+    spawn_with_duplicated_handles,
     starter_termination_measurement,
     terminate_wait_close_handles,
     wait_on_unsignaled_throttle,
@@ -172,14 +176,29 @@ def await_fail_closed_conjunction(
     finally:
         harness.wait_until_empty(timeout=30)
 
-    fd = os.open(root / "auth" / "profile.lock", os.O_RDWR)
+    _win32api, _win32con, win32event, _win32job = probe._windows_modules()
+    throttle = win32event.CreateEvent(None, False, False, None)
+    rundown_error: BaseException | None = None
     try:
-        acquired_after_drain = conjunction_admission(fd)
-        if acquired_after_drain:
-            probe._region_api()[1](fd, 0)
+        acquired_after_drain, attempts, rundown_seconds = (
+            probe.retry_admission_after_drain(
+                open_fd=lambda: os.open(root / "auth" / "profile.lock", os.O_RDWR),
+                try_admission=conjunction_admission,
+                release_a=lambda fd: probe._region_api()[1](fd, 0),
+                close_fd=os.close,
+                deadline=time.monotonic() + 10,
+                wait_for_retry=lambda: probe.wait_on_unsignaled_throttle(
+                    throttle, wait=win32event.WaitForSingleObject
+                ),
+            )
+        )
+    except BaseException as exc:
+        rundown_error = exc
     finally:
-        os.close(fd)
+        probe.close_preserving_error(throttle.Close, rundown_error)
     measurement["acquired_after_harness_drain"] = acquired_after_drain
+    measurement["post_harness_rundown_attempts"] = attempts
+    measurement["post_harness_rundown_seconds"] = rundown_seconds
     return measurement
 
 
@@ -1077,6 +1096,218 @@ def test_attempt_here_preserves_admission_error_when_fd_was_rescue_closed(
     assert closes == [7]
 
 
+def test_lock_rundown_retries_only_contention_and_measures_progress() -> None:
+    attempts = iter([None, None, "acquired"])
+    waits: list[str] = []
+    clock = iter([10.0, 10.1, 10.2, 10.3])
+
+    result, attempt_count, duration = retry_lock_rundown(
+        lambda: next(attempts),
+        deadline=20.0,
+        wait_for_retry=lambda: waits.append("wait"),
+        monotonic=lambda: next(clock),
+    )
+
+    assert result == "acquired"
+    assert attempt_count == 3
+    assert duration == pytest.approx(0.3)
+    assert waits == ["wait", "wait"]
+
+    failure = OSError("non-contention LockFileEx error")
+    with pytest.raises(OSError) as raised:
+        retry_lock_rundown(
+            lambda: (_ for _ in ()).throw(failure),
+            deadline=20.0,
+            wait_for_retry=lambda: waits.append("unexpected wait"),
+            monotonic=lambda: 10.0,
+        )
+    assert raised.value is failure
+    assert "unexpected wait" not in waits
+
+
+def test_post_harness_admission_retries_until_a_and_b_are_available() -> None:
+    admissions = iter([False, False, True])
+    opened = iter([10, 11, 12])
+    events: list[str] = []
+    clock = iter([1.0, 1.1, 1.2, 1.3])
+
+    acquired, attempts, duration = probe.retry_admission_after_drain(
+        open_fd=lambda: next(opened),
+        try_admission=lambda fd: events.append(f"admit {fd}") or next(admissions),
+        release_a=lambda fd: events.append(f"release A {fd}"),
+        close_fd=lambda fd: events.append(f"close {fd}"),
+        deadline=2.0,
+        wait_for_retry=lambda: events.append("wait"),
+        monotonic=lambda: next(clock),
+    )
+
+    assert acquired is True
+    assert attempts == 3
+    assert duration == pytest.approx(0.3)
+    assert events == [
+        "admit 10",
+        "close 10",
+        "wait",
+        "admit 11",
+        "close 11",
+        "wait",
+        "admit 12",
+        "release A 12",
+        "close 12",
+    ]
+
+
+def test_actor_duplicates_every_inherited_handle_and_closes_parent_copies() -> None:
+    events: list[str] = []
+
+    class Duplicate:
+        def __init__(self, source: int) -> None:
+            self.source = source
+
+        def __int__(self) -> int:
+            return self.source + 100
+
+    def duplicate(source: int) -> Duplicate:
+        events.append(f"duplicate {source}")
+        return Duplicate(source)
+
+    def build(mapping: dict[int, int]) -> list[str]:
+        events.append(f"build {mapping}")
+        return [str(mapping[7]), str(mapping[8])]
+
+    def launch(arguments: list[str], handles: list[int]) -> str:
+        events.append(f"launch {arguments} {handles}")
+        assert handles == [107, 108]
+        assert 7 not in handles and 8 not in handles
+        return "process"
+
+    assert (
+        spawn_with_duplicated_handles(
+            [7, 8],
+            build_arguments=build,
+            duplicate=duplicate,
+            launch=launch,
+            close_duplicate=lambda handle: events.append(
+                f"close duplicate {int(handle)}"
+            ),
+        )
+        == "process"
+    )
+    assert events == [
+        "duplicate 7",
+        "duplicate 8",
+        "build {7: 107, 8: 108}",
+        "launch ['107', '108'] [107, 108]",
+        "close duplicate 107",
+        "close duplicate 108",
+    ]
+
+
+def test_actor_never_inherits_internal_source_handles_directly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class Duplicate:
+        def __init__(self, value: int) -> None:
+            self.value = value
+
+        def __int__(self) -> int:
+            return self.value
+
+        def Close(self) -> None:
+            events.append(f"close {self.value}")
+
+    class Win32Api:
+        @staticmethod
+        def GetCurrentProcess() -> str:
+            return "current"
+
+        @staticmethod
+        def DuplicateHandle(
+            source_process: str,
+            source: int,
+            target_process: str,
+            access: int,
+            inheritable: bool,
+            options: int,
+        ) -> Duplicate:
+            events.append(
+                f"duplicate {source_process} {source} {target_process} "
+                f"{access} {inheritable} {options}"
+            )
+            return Duplicate(source + 100)
+
+    class Win32Con:
+        DUPLICATE_SAME_ACCESS = 2
+
+    def launch(arguments: list[str], handles: list[int]) -> str:
+        events.append(f"launch {arguments[-4:]} {handles}")
+        assert handles == [107, 108]
+        assert "107" in arguments
+        assert '"owner_handle": 108' in arguments[-1]
+        return "process"
+
+    monkeypatch.setattr(
+        probe,
+        "_windows_modules",
+        lambda: (Win32Api, Win32Con, object(), object()),
+    )
+    monkeypatch.setattr(probe, "_spawn_inheriting", launch)
+
+    assert (
+        probe._spawn_actor(
+            "guardian-publish",
+            7,
+            "ready",
+            Path("result.json"),
+            {"owner_handle": 8},
+            [8],
+        )
+        == "process"
+    )
+    assert all(" [7, 8]" not in event for event in events)
+    assert events[-2:] == ["close 107", "close 108"]
+
+
+def test_owner_watch_opens_descendant_handles_before_terminating_job() -> None:
+    events: list[str] = []
+
+    assert open_descendant_handles_before_terminate(
+        open_handles=lambda: events.append("open handles") or ["one", "two"],
+        terminate_job=lambda: events.append("terminate job"),
+    ) == ["one", "two"]
+    assert events == ["open handles", "terminate job"]
+
+
+def test_browser_gate_opens_only_after_armed_observation() -> None:
+    events: list[str] = []
+    started = False
+
+    def browser_started() -> bool:
+        events.append("check started")
+        return started
+
+    def release_gate() -> None:
+        nonlocal started
+        events.append("release gate")
+        started = True
+
+    assert observe_browser_publication_order(
+        browser_started=browser_started,
+        observe_armed=lambda: events.append("observe ARMED"),
+        release_gate=release_gate,
+        observe_browser_start=lambda: events.append("observe browser start"),
+    )
+    assert events == [
+        "check started",
+        "observe ARMED",
+        "check started",
+        "release gate",
+        "observe browser start",
+    ]
+
+
 def test_conjunction_requires_the_inherited_file_identity() -> None:
     require_same_file_identity((1, 2, 3), [1, 2, 3])
     with pytest.raises(RuntimeError, match="same file identity"):
@@ -1389,6 +1620,11 @@ def test_conjunction_lock_regions(tmp_path: Path) -> None:
     assert measurement["guardian_identity"] == measurement["file_identity"]
     assert measurement["blocked_by_a"] is True
     assert measurement["a_acquired_b_blocked_after_owner_exit"] is True
+    assert measurement["a_released_after_b_contention"] is True
+    assert measurement["owner_rundown_attempts"] >= 1
+    assert measurement["owner_rundown_seconds"] >= 0
+    assert measurement["guardian_rundown_attempts"] >= 1
+    assert measurement["guardian_rundown_seconds"] >= 0
     assert measurement["c_acquired"] is True
     assert measurement["d_blocked_after_b_unlock"] is True
     assert measurement["d_acquired_after_c_close"] is True
@@ -1420,6 +1656,9 @@ def test_conjunction_owner_loss(tmp_path: Path) -> None:
 
     assert measurement["owner_identity"] == measurement["file_identity"]
     assert measurement["guardian_identity"] == measurement["file_identity"]
+    assert measurement["outer_in_browser_job"] is False
+    assert measurement["owner_in_browser_job"] is False
+    assert measurement["guardian_in_browser_job"] is False
     assert measurement["prearmed_rejected"] is True
     assert measurement["zero_proven"] is True
     assert measurement["job_active_at_zero"] == 0
@@ -1432,6 +1671,9 @@ def test_conjunction_guardian_loss_clean_close(tmp_path: Path) -> None:
     measurement = _run_probe(tmp_path, "conjunction-guardian-loss-clean-close")
     _record_measurement(measurement)
 
+    assert measurement["outer_in_browser_job"] is False
+    assert measurement["owner_in_browser_job"] is False
+    assert measurement["guardian_in_browser_job"] is False
     assert measurement["post_exit_attempts_rejected"] is True
     assert measurement["active_processes_before_owner_drain"] > 0
     assert measurement["live_descendants_before_owner_drain"] > 0
@@ -1476,6 +1718,9 @@ def test_conjunction_owner_loss_failure_holds_b(
     measurement = _run_probe(tmp_path, f"conjunction-owner-loss-{fault}")
     _record_measurement(measurement)
 
+    assert measurement["outer_in_browser_job"] is False
+    assert measurement["owner_in_browser_job"] is False
+    assert measurement["guardian_in_browser_job"] is False
     assert measurement["fault"] == fault
     assert measurement["guardian_error_type"] == error_type
     assert measurement["guardian_error"] == error
@@ -1487,6 +1732,8 @@ def test_conjunction_owner_loss_failure_holds_b(
     assert measurement["guardian_alive"] is True
     assert measurement["identity_mutex_owned"] is True
     assert measurement["acquired_after_harness_drain"] is True
+    assert measurement["post_harness_rundown_attempts"] >= 1
+    assert measurement["post_harness_rundown_seconds"] >= 0
     if fault == "drain-timeout":
         assert measurement["query_timeout"] is True
         assert measurement["query_samples"]

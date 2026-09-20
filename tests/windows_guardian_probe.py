@@ -1456,6 +1456,15 @@ def _actor(
             process_handle = owner_handle
         elif guardian_handle:
             process_handle = guardian_handle
+        if job is not None and process_handle:
+            current_in_browser_job = bool(
+                win32job.IsProcessInJob(win32api.GetCurrentProcess(), job)
+            )
+            watched_in_browser_job = bool(win32job.IsProcessInJob(process_handle, job))
+            result["current_process_in_browser_job"] = current_in_browser_job
+            result["watched_process_in_browser_job"] = watched_in_browser_job
+            if current_in_browser_job or watched_in_browser_job:
+                raise RuntimeError("control process entered the browser Job")
 
         pause_event = options.get("pause_event")
         if pause_event:
@@ -1654,11 +1663,13 @@ def _actor(
             _atomic_json(result_file, result)
             _signal(options["guardian_exit_event"])
             _actor_wait(options["begin_drain_event"])
-            win32job.TerminateJobObject(job, 202)
-            descendant_handles = [
-                win32api.OpenProcess(win32con.SYNCHRONIZE, False, int(pid))
-                for pid in options["descendant_pids"]
-            ]
+            descendant_handles = open_descendant_handles_before_terminate(
+                open_handles=lambda: [
+                    win32api.OpenProcess(win32con.SYNCHRONIZE, False, int(pid))
+                    for pid in options["descendant_pids"]
+                ],
+                terminate_job=lambda: win32job.TerminateJobObject(job, 202),
+            )
             deadline = time.monotonic() + _DEADLINE_SECONDS
             throttle = win32event.CreateEvent(None, False, False, None)
             try:
@@ -1722,27 +1733,138 @@ def _actor(
     raise AssertionError("actor exception cleanup returned without raising")
 
 
+def close_preserving_error(
+    close: Callable[[], None], first_error: BaseException | None
+) -> None:
+    try:
+        close()
+    except BaseException as close_error:
+        if first_error is None:
+            raise close_error
+    if first_error is not None:
+        raise first_error
+
+
+def retry_lock_rundown[T](
+    attempt: Callable[[], T | None],
+    *,
+    deadline: float,
+    wait_for_retry: Callable[[], None],
+    monotonic: Callable[[], float] = time.monotonic,
+) -> tuple[T, int, float]:
+    started = monotonic()
+    attempts = 0
+    while True:
+        attempts += 1
+        result = attempt()
+        if result is not None:
+            return result, attempts, monotonic() - started
+        if monotonic() >= deadline:
+            raise TimeoutError(
+                "Windows lock rundown did not complete before its deadline"
+            )
+        wait_for_retry()
+
+
+def retry_admission_after_drain(
+    *,
+    open_fd: Callable[[], int],
+    try_admission: Callable[[int], bool],
+    release_a: Callable[[int], None],
+    close_fd: Callable[[int], None],
+    deadline: float,
+    wait_for_retry: Callable[[], None],
+    monotonic: Callable[[], float] = time.monotonic,
+) -> tuple[bool, int, float]:
+    def attempt() -> bool | None:
+        fd = open_fd()
+        try:
+            if not try_admission(fd):
+                return None
+            release_a(fd)
+            return True
+        finally:
+            close_fd(fd)
+
+    return retry_lock_rundown(
+        attempt,
+        deadline=deadline,
+        wait_for_retry=wait_for_retry,
+        monotonic=monotonic,
+    )
+
+
+def open_descendant_handles_before_terminate[T](
+    *,
+    open_handles: Callable[[], list[T]],
+    terminate_job: Callable[[], None],
+) -> list[T]:
+    handles = open_handles()
+    terminate_job()
+    return handles
+
+
+def observe_browser_publication_order(
+    *,
+    browser_started: Callable[[], bool],
+    observe_armed: Callable[[], None],
+    release_gate: Callable[[], None],
+    observe_browser_start: Callable[[], None],
+) -> bool:
+    if browser_started():
+        raise RuntimeError("browser started before guardian publication")
+    observe_armed()
+    if browser_started():
+        raise RuntimeError("browser started before its gate was released")
+    release_gate()
+    observe_browser_start()
+    return True
+
+
+def spawn_with_duplicated_handles[T](
+    sources: list[int],
+    *,
+    build_arguments: Callable[[dict[int, int]], list[str]],
+    duplicate: Callable[[int], Any],
+    launch: Callable[[list[str], list[int]], T],
+    close_duplicate: Callable[[Any], None],
+) -> T:
+    duplicates: list[Any] = []
+    first_error: BaseException | None = None
+    try:
+        mapping: dict[int, int] = {}
+        for source in dict.fromkeys(sources):
+            duplicated = duplicate(source)
+            duplicates.append(duplicated)
+            mapping[source] = int(duplicated)
+        return launch(build_arguments(mapping), list(mapping.values()))
+    except BaseException as exc:
+        first_error = exc
+    finally:
+        for duplicated in duplicates:
+            try:
+                close_duplicate(duplicated)
+            except BaseException as exc:
+                first_error = first_error or exc
+        if first_error is not None:
+            raise first_error
+    raise AssertionError("duplicated-handle launch returned no process")
+
+
 def _spawn_inheriting(
     arguments: list[str], handles: list[int]
 ) -> subprocess.Popen[bytes]:
     startup = getattr(subprocess, "STARTUPINFO")()
     startup.lpAttributeList = {"handle_list": handles}
-    set_handle_inheritable = getattr(os, "set_handle_inheritable")
-    for handle in handles:
-        set_handle_inheritable(handle, True)
-    try:
-        return subprocess.Popen(
-            arguments,
-            cwd=_REPO_ROOT,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            close_fds=True,
-            startupinfo=startup,
-        )
-    finally:
-        for handle in handles:
-            set_handle_inheritable(handle, False)
+    return subprocess.Popen(
+        arguments,
+        cwd=_REPO_ROOT,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        close_fds=True,
+        startupinfo=startup,
+    )
 
 
 def _new_event(win32event: Any, label: str) -> tuple[str, Any]:
@@ -1758,20 +1880,44 @@ def _spawn_actor(
     options: dict[str, Any],
     extra_handles: list[int] | None = None,
 ) -> subprocess.Popen[bytes]:
-    handles = [fd_handle] if fd_handle else []
-    handles.extend(extra_handles or [])
-    return _spawn_inheriting(
-        [
+    win32api, win32con, _win32event, _win32job = _windows_modules()
+    sources = [fd_handle] if fd_handle else []
+    sources.extend(extra_handles or [])
+
+    def duplicate(source: int) -> Any:
+        current = win32api.GetCurrentProcess()
+        return win32api.DuplicateHandle(
+            current,
+            source,
+            current,
+            0,
+            True,
+            win32con.DUPLICATE_SAME_ACCESS,
+        )
+
+    def build_arguments(mapping: dict[int, int]) -> list[str]:
+        inherited_options = dict(options)
+        for key in ("owner_handle", "guardian_handle"):
+            source = int(inherited_options.get(key, 0))
+            if source:
+                inherited_options[key] = mapping[source]
+        return [
             sys.executable,
             str(Path(__file__).resolve()),
             "actor",
             mode,
-            str(fd_handle),
+            str(mapping.get(fd_handle, 0)),
             ready_name,
             str(result_file),
-            json.dumps(options),
-        ],
-        handles,
+            json.dumps(inherited_options),
+        ]
+
+    return spawn_with_duplicated_handles(
+        sources,
+        build_arguments=build_arguments,
+        duplicate=duplicate,
+        launch=_spawn_inheriting,
+        close_duplicate=lambda handle: handle.Close(),
     )
 
 
@@ -1822,6 +1968,7 @@ def _run_conjunction_probe(scenario: str, root: Path) -> dict[str, Any]:
     processes: list[subprocess.Popen[bytes]] = []
     jobs: list[Any] = []
     retained_fds: list[int] = []
+    actors_by_result: dict[Path, subprocess.Popen[bytes]] = {}
 
     def event(label: str) -> tuple[str, Any]:
         name, handle = _new_event(win32event, label)
@@ -1840,10 +1987,23 @@ def _run_conjunction_probe(scenario: str, root: Path) -> dict[str, Any]:
             mode, base_handle, ready_name, result_file, options, extra_handles
         )
         processes.append(process)
+        actors_by_result[result_file] = process
         return process, result_file, ready
 
     def wait_result(path: Path, ready: Any) -> dict[str, Any]:
-        _wait(ready, _DEADLINE_SECONDS, f"{path.name} was not ready")
+        try:
+            _wait(ready, _DEADLINE_SECONDS, f"{path.name} was not ready")
+        except BaseException as exc:
+            process = actors_by_result[path]
+            returncode = process.poll()
+            stdout = b""
+            stderr = b""
+            if returncode is not None:
+                stdout, stderr = process.communicate()
+            raise RuntimeError(
+                f"{path.name} was not ready: phase=before-ready "
+                f"returncode={returncode!r} stdout={stdout!r} stderr={stderr!r}"
+            ) from exc
         return read_published_json(path, deadline=time.monotonic() + 5)
 
     def signal(handle: Any) -> None:
@@ -1881,14 +2041,54 @@ def _run_conjunction_probe(scenario: str, root: Path) -> dict[str, Any]:
             first, first_fd = _attempt_here(lock_path)
             os.close(first_fd)
             _terminate_process(owner)
-            second_fd = _probe_fd(lock_path)
-            second_a, second_b = probe_conjunction_regions(second_fd)
-            os.close(second_fd)
-            _terminate_process(guardian)
-            third, third_fd = _attempt_here(lock_path)
-            if not third:
-                os.close(third_fd)
-                raise RuntimeError("C did not acquire A+B after guardian exit")
+            throttle = win32event.CreateEvent(None, False, False, None)
+            rundown_error: BaseException | None = None
+            try:
+
+                def observe_b_contention() -> tuple[bool, bool] | None:
+                    second_fd = _probe_fd(lock_path)
+                    try:
+                        second_a, second_b = probe_conjunction_regions(second_fd)
+                    finally:
+                        os.close(second_fd)
+                    if not second_a:
+                        return None
+                    if second_b:
+                        raise RuntimeError("B was not held after owner exit")
+                    return second_a, second_b
+
+                (second_a, second_b), owner_rundown_attempts, owner_rundown_seconds = (
+                    retry_lock_rundown(
+                        observe_b_contention,
+                        deadline=time.monotonic() + _DEADLINE_SECONDS,
+                        wait_for_retry=lambda: wait_on_unsignaled_throttle(
+                            throttle, wait=win32event.WaitForSingleObject
+                        ),
+                    )
+                )
+                _terminate_process(guardian)
+
+                def acquire_after_guardian_exit() -> int | None:
+                    acquired, acquired_fd = _attempt_here(lock_path)
+                    if acquired:
+                        return acquired_fd
+                    os.close(acquired_fd)
+                    return None
+
+                third_fd, guardian_rundown_attempts, guardian_rundown_seconds = (
+                    retry_lock_rundown(
+                        acquire_after_guardian_exit,
+                        deadline=time.monotonic() + _DEADLINE_SECONDS,
+                        wait_for_retry=lambda: wait_on_unsignaled_throttle(
+                            throttle, wait=win32event.WaitForSingleObject
+                        ),
+                    )
+                )
+            except BaseException as exc:
+                rundown_error = exc
+            finally:
+                close_preserving_error(throttle.Close, rundown_error)
+            third = True
             retained_fds.append(third_fd)
             d1_process, d1_file, d1_ready = spawn("attempt", "d-held-a", {})
             d1_result = wait_result(d1_file, d1_ready)
@@ -1906,6 +2106,11 @@ def _run_conjunction_probe(scenario: str, root: Path) -> dict[str, Any]:
                 "guardian_identity": guardian_result["file_identity"],
                 "blocked_by_a": not first,
                 "a_acquired_b_blocked_after_owner_exit": second_a and not second_b,
+                "a_released_after_b_contention": True,
+                "owner_rundown_attempts": owner_rundown_attempts,
+                "owner_rundown_seconds": owner_rundown_seconds,
+                "guardian_rundown_attempts": guardian_rundown_attempts,
+                "guardian_rundown_seconds": guardian_rundown_seconds,
                 "c_acquired": third,
                 "d_blocked_after_b_unlock": not d1_result["acquired"],
                 "d_acquired_after_c_close": d2_result["acquired"],
@@ -1915,6 +2120,19 @@ def _run_conjunction_probe(scenario: str, root: Path) -> dict[str, Any]:
             owner, owner_file, owner_ready = spawn("hold", "owner", {"offset": 0})
             owner_result = wait_result(owner_file, owner_ready)
             owner_process_handle = int(getattr(owner, "_handle"))
+            browser_gate_name, browser_gate = event("browser-gate")
+            browser_started_name, browser_started = event("browser-started")
+            browser = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(Path(__file__).resolve()),
+                    "gate",
+                    browser_gate_name,
+                    browser_started_name,
+                ],
+                cwd=_REPO_ROOT,
+            )
+            processes.append(browser)
             stop_name, stop_event = event("guardian-stop")
             armed_name, armed_event = event("guardian-armed")
             guardian, guardian_file, guardian_ready = spawn(
@@ -1931,25 +2149,28 @@ def _run_conjunction_probe(scenario: str, root: Path) -> dict[str, Any]:
             guardian_result = wait_result(guardian_file, guardian_ready)
             require_same_file_identity(identity, owner_result["file_identity"])
             require_same_file_identity(identity, guardian_result["file_identity"])
-            _wait(armed_event, _DEADLINE_SECONDS, "guardian did not arm")
+
+            def browser_has_started() -> bool:
+                state = win32event.WaitForSingleObject(browser_started, 0)
+                if state == _WAIT_OBJECT_0:
+                    return True
+                if state == _WAIT_TIMEOUT:
+                    return False
+                raise RuntimeError(f"browser start event returned {state}")
+
+            browser_started_after_armed = observe_browser_publication_order(
+                browser_started=browser_has_started,
+                observe_armed=lambda: _wait(
+                    armed_event, _DEADLINE_SECONDS, "guardian did not arm"
+                ),
+                release_gate=lambda: signal(browser_gate),
+                observe_browser_start=lambda: _wait(
+                    browser_started, _DEADLINE_SECONDS, "browser did not start"
+                ),
+            )
             b_fd = _probe_fd(lock_path)
             b_blocked = not _region_api()[0](b_fd, 1)
             os.close(b_fd)
-            browser_gate_name, browser_gate = event("browser-gate")
-            browser_started_name, browser_started = event("browser-started")
-            browser = subprocess.Popen(
-                [
-                    sys.executable,
-                    str(Path(__file__).resolve()),
-                    "gate",
-                    browser_gate_name,
-                    browser_started_name,
-                ],
-                cwd=_REPO_ROOT,
-            )
-            processes.append(browser)
-            signal(browser_gate)
-            _wait(browser_started, _DEADLINE_SECONDS, "browser did not start")
             signal(stop_event)
             guardian.wait(timeout=_DEADLINE_SECONDS)
             _terminate_process(owner)
@@ -2011,7 +2232,7 @@ def _run_conjunction_probe(scenario: str, root: Path) -> dict[str, Any]:
                 "guardian_identity": guardian_result["file_identity"],
                 "armed": guardian_result["armed"],
                 "b_probe_blocked": b_blocked,
-                "browser_started_after_armed": True,
+                "browser_started_after_armed": browser_started_after_armed,
                 "late_successor_admitted": successor,
                 "late_guardian_armed": late_result.get("armed", False),
                 "late_guardian_contention": late_result.get("contention", False),
@@ -2028,6 +2249,13 @@ def _run_conjunction_probe(scenario: str, root: Path) -> dict[str, Any]:
         jobs.append(browser_job)
         if browser_job.name is None:
             raise RuntimeError("browser Job has no name")
+        outer_in_browser_job = bool(
+            win32job.IsProcessInJob(
+                win32api.GetCurrentProcess(), browser_job.job_handle
+            )
+        )
+        if outer_in_browser_job:
+            raise RuntimeError("outer probe entered the browser Job")
         _children, descendant_pids = descendants(browser_job)
 
         if scenario == "conjunction-guardian-loss-clean-close":
@@ -2095,6 +2323,11 @@ def _run_conjunction_probe(scenario: str, root: Path) -> dict[str, Any]:
                 "scenario": scenario,
                 "file_identity": identity,
                 "guardian_identity": guardian_result["file_identity"],
+                "outer_in_browser_job": outer_in_browser_job,
+                "owner_in_browser_job": owner_result["current_process_in_browser_job"],
+                "guardian_in_browser_job": owner_result[
+                    "watched_process_in_browser_job"
+                ],
                 "post_exit_attempts_rejected": not any(attempts_after_exit),
                 "active_processes_before_owner_drain": active_before_drain,
                 "live_descendants_before_owner_drain": descendants_before_drain,
@@ -2159,6 +2392,13 @@ def _run_conjunction_probe(scenario: str, root: Path) -> dict[str, Any]:
                 "file_identity": identity,
                 "owner_identity": owner_result["file_identity"],
                 "guardian_identity": guardian_result["file_identity"],
+                "outer_in_browser_job": outer_in_browser_job,
+                "owner_in_browser_job": guardian_result[
+                    "watched_process_in_browser_job"
+                ],
+                "guardian_in_browser_job": guardian_result[
+                    "current_process_in_browser_job"
+                ],
                 "prearmed_rejected": not pre,
                 "zero_proven": True,
                 "job_active_at_zero": active_at_zero,
@@ -2179,6 +2419,11 @@ def _run_conjunction_probe(scenario: str, root: Path) -> dict[str, Any]:
         measurement = {
             "scenario": scenario,
             "file_identity": identity,
+            "outer_in_browser_job": outer_in_browser_job,
+            "owner_in_browser_job": guardian_result["watched_process_in_browser_job"],
+            "guardian_in_browser_job": guardian_result[
+                "current_process_in_browser_job"
+            ],
             "fault": fault,
             "guardian_error_type": guardian_result["error_type"],
             "guardian_error": guardian_result["error"],
