@@ -10,10 +10,12 @@ from __future__ import annotations
 
 from contextlib import suppress
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 import asyncio
 import logging
 import re
+import socket
 import time
 
 from patchright.async_api import Page
@@ -40,6 +42,7 @@ from linkedin_mcp_server.scraping.job_policy import (
     SCROLL_DEADLINE_MAX,
     ApplyType,
     employer_apply_url,
+    reaches_the_public_internet,
     route,
     same_job_search,
 )
@@ -242,6 +245,29 @@ _APPLY_POLL = 0.25
 _EMPLOYER_LOAD_TIMEOUT = 30.0
 
 
+# The browser resolves a destination's name itself, so an address
+# `reaches_the_public_internet` refuses can still be reached through a public
+# name pointing at it. This asks the resolver the same question first.
+#
+# Not resolving is not evidence, so it loads: a configured proxy resolves for
+# the browser, and this process may hold no DNS for that name at all. What
+# stays uncovered is a name that answers one thing here and another in the
+# browser, which nothing on this side can settle, and the cost of that is a
+# request the caller never sees the body of.
+async def _resolves_off_this_host(destination: str) -> bool:
+    """Whether every address ``destination``'s name answers with is public."""
+    host = urlparse(destination).hostname
+    if not host:
+        return False
+    loop = asyncio.get_running_loop()
+    try:
+        answers = await loop.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except (OSError, UnicodeError):
+        return True
+    # A sockaddr's first element is the address; the annotation widens it.
+    return all(reaches_the_public_internet(str(answer[4][0])) for answer in answers)
+
+
 @dataclass(frozen=True, slots=True)
 class JobApplyRead:
     """How one posting takes applications, and where the employer's form is."""
@@ -421,14 +447,19 @@ class JobPageReader:
                 with suppress(Exception):
                     await tab.close()
 
-    async def _follow_to_employer(self, destination: str) -> str:
+    async def _follow_to_employer(self, destination: str) -> str | None:
         """The address the employer's link settles on, loaded in this page.
 
         Short links are common, Greenhouse's `grnh.se` among them, and name the
         hiring system only once they redirect. A load that fails or stops short
         answers with where it got, or with the link itself when that is not an
-        employer's address.
+        employer's address. A destination that resolves back into this host is
+        not loaded at all and answers None, which reads to the caller as a
+        posting whose link could not be read.
         """
+        if not await _resolves_off_this_host(destination):
+            logger.debug("Refused an apply destination resolving into this host")
+            return None
         page = self._session.page
         try:
             await page.goto(

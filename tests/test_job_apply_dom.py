@@ -22,6 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import AsyncMock, patch
 from urllib.parse import quote
 
+import asyncio
 import threading
 
 import pytest
@@ -232,6 +233,25 @@ async def test_a_destination_inside_this_host_is_never_loaded(dom_page, requeste
 
     assert await read(dom_page, html) == JobApplyRead("external")
     assert not any("127.0.0.1" in url for url in requested)
+
+
+async def test_a_name_resolving_into_this_host_is_never_loaded(
+    dom_page, requested, monkeypatch
+):
+    """A public name pointing at the loopback is refused by the resolver."""
+
+    async def answers_loopback(host, port, **kwargs):
+        return [(None, None, None, "", ("127.0.0.1", 0))]
+
+    monkeypatch.setattr(
+        asyncio.get_running_loop(), "getaddrinfo", answers_loopback, raising=False
+    )
+    html = posting(
+        EXTERNAL, script=click_opens_dialog(safety("https://jobs.acme.example/x"))
+    )
+
+    assert await read(dom_page, html) == JobApplyRead("external")
+    assert not any("jobs.acme.example" in url for url in requested)
 
 
 async def test_an_applied_posting_is_not_clicked(dom_page):

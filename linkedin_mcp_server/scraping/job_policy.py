@@ -267,7 +267,7 @@ SAFETY_REDIRECT_PATH = "/safety/go"
 _PRIVATE_SUFFIXES = (".localhost", ".local", ".internal", ".home.arpa")
 
 
-def _reaches_the_public_internet(host: str) -> bool:
+def reaches_the_public_internet(host: str) -> bool:
     """Whether an apply destination names somewhere outside this host.
 
     The destination of an external Apply is chosen by whoever posted the job,
@@ -314,7 +314,7 @@ def employer_apply_url(href: str) -> str | None:
     host = parsed.hostname
     if parsed.scheme not in ("http", "https") or not host:
         return None
-    if not _reaches_the_public_internet(host):
+    if not reaches_the_public_internet(host):
         return None
     if host != "linkedin.com" and not host.endswith(".linkedin.com"):
         return href
