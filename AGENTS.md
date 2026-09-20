@@ -256,14 +256,8 @@ for that.
 
 Always read [`CONTRIBUTING.md`](CONTRIBUTING.md) before filing an issue or working on this repository.
 
-- Write a short synthetic prompt that would reproduce the PR diff if given to a fresh Claude Code session. Don't copy the user's first message — distill the conversation into a single instruction that captures the full scope of changes. This tells the maintainer what was intended, which is often more useful than reviewing the full diff. Use a Markdown blockquote under a `## Synthetic prompt` heading, followed by the model attribution:
-  ```
-  ## Synthetic prompt
-
-  > Add `skills` and `projects` sections to `get_person_profile`, following the certifications PR pattern. Update fields, tests, docs, and manifest.
-
-  Generated with <model name and version>
-  ```
+- Write a short synthetic prompt that would reproduce the PR diff if given to a fresh Claude Code session. Don't copy the user's first message — distill the conversation into a single instruction that captures the full scope of changes. This tells the maintainer what was intended, which is often more useful than reviewing the full diff. Use a Markdown blockquote under a `## Synthetic prompt` heading.
+- The final non-empty line of every PR body must disclose every model used, the job each model performed, and the harness. Use `Generated with <model> for <job> in <harness>.` for one model or `Generated with <model 1> for <job 1> and <model 2> for <job 2> in <harness>.` for multiple models. `and` separates model/job pairs exclusively; list multiple jobs for one model with commas or `/`. This disclosure is required before merge.
 - When implementing a new feature/fix:
   1. Packet: before filing or commenting on a GitHub issue, read [.agents/skills/issue-packet/SKILL.md](.agents/skills/issue-packet/SKILL.md).
   2. Branch from `main`: `feature/issue-number-short-description`
