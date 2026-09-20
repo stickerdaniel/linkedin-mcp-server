@@ -13,7 +13,7 @@ from typing import Any
 
 _PREFIX = "Generated with "
 _PLACEHOLDER_RE = re.compile(r"<[^>]*>|\[[^]]*]")
-_RESERVED_MINIMAL_PARTS = (" for ", " in ", " and ")
+_RESERVED_MINIMAL_PARTS = (" for ", " in ", " and ", " via ")
 _ERROR = (
     "Model attribution is required as the final non-empty PR body line. "
     'Model-only is the minimum: "Generated with Claude Opus 5." '
@@ -32,6 +32,13 @@ def _has_valid_model_jobs(attribution: str) -> bool:
     return True
 
 
+def _has_valid_harness(value: str) -> bool:
+    if value.startswith("via "):
+        return False
+    parts = value.split(" via ")
+    return len(parts) <= 2 and all(part.strip() for part in parts)
+
+
 def is_valid_attribution(line: str) -> bool:
     """Return whether a line follows the required attribution grammar."""
     if not line.startswith(_PREFIX) or not line.endswith("."):
@@ -42,7 +49,7 @@ def is_valid_attribution(line: str) -> bool:
     attribution = line[len(_PREFIX) : -1]
     model_jobs, separator, harness = attribution.rpartition(" in ")
     if separator:
-        return bool(harness.strip() and _has_valid_model_jobs(model_jobs))
+        return _has_valid_harness(harness) and _has_valid_model_jobs(model_jobs)
     return bool(
         attribution.strip()
         and not any(part in attribution for part in _RESERVED_MINIMAL_PARTS)

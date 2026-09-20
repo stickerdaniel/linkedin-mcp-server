@@ -72,6 +72,13 @@ def test_accepts_trailing_blank_lines() -> None:
         "Generated with GPT-5.6 in Claude Code.",
         "Generated with GPT-5.6 for implementation.",
         "Generated with GPT-5.6 and Claude Opus 5.",
+        "Generated with GPT-5.6 via T3 Code.",
+        "Generated with GPT-5.6 for implementation in via T3 Code.",
+        "Generated with GPT-5.6 for implementation in Claude Code via .",
+        (
+            "Generated with GPT-5.6 for implementation in Claude Code via T3 Code "
+            "via another wrapper."
+        ),
         "Generated with .",
         "Generated with <model>.",
         "Generated with [model].",
