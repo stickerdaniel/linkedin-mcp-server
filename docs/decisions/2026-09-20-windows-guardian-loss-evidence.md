@@ -52,7 +52,8 @@ Each run observed all of the following:
 
 1. The real contender was rejected before guardian termination.
 2. The guardian exited after the stable-handle termination request.
-3. The contender acquired the real `ProfileLease` after guardian exit.
+3. The contender's acquisition was observed after guardian exit, and its
+   acquisition timestamp followed the termination request.
 4. The owner and at least one tracked browser descendant were still alive at
    that acquisition observation.
 5. The browser Job still reported active processes.
