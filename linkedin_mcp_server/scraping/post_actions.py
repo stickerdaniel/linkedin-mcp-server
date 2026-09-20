@@ -11,9 +11,11 @@ named before it touches anything.
 The anchor is the numeric entity id, which both permalink shapes carry:
 ``/feed/update/urn:li:ugcPost:7506667649444237313/`` holds it in the URN and
 ``/posts/name_words-ugcPost-7506667649444237313-g3b0`` holds it in the slug.
-That id is matched against the URN-bearing ``data-`` attributes LinkedIn puts
-on a post container, and the *outermost* single match is the root post. Two
-matches or none is a refusal rather than a guess.
+That id is first matched against the URN-bearing ``data-`` attributes LinkedIn
+puts on a post container. LinkedIn can render the same entity under a different
+activity id, so a permalink-page fallback accepts the *outermost* single
+URN-bearing container only when it has a complete social action bar. Two
+structurally valid roots or none is a refusal rather than a guess.
 
 Per the AGENTS.md Scraping Rules nothing here reads a label value. The
 controls are told apart by which ARIA attribute they carry, which is a fact
@@ -90,6 +92,13 @@ _EDITOR_TIMEOUT = 5000
 _CONFIRM_TIMEOUT = 12000
 _CONFIRM_POLL = 0.25
 
+# Per-character delay while typing into an editor, and how long the submit
+# control gets to render once the text is in. The delay is not politeness: the
+# editor's submit button is drawn by a handler reacting to input, and that
+# handler is the thing being waited for here.
+_TYPE_DELAY = 12
+_SUBMIT_TIMEOUT = 4000
+
 _EDITOR_SELECTOR = '[role="textbox"][contenteditable="true"]'
 _DIALOG_SELECTOR = 'dialog[open], [role="dialog"]'
 
@@ -136,10 +145,11 @@ function visible(element) {
 # independent places, which is what a reshare of the post produces, and
 # nothing in the id says which one the caller meant. That refuses.
 #
-# The known blind spot is a kind mismatch. One post has both a `ugcPost` and
-# an `activity` URN, with *different* numbers, and this matches the number the
-# permalink carried. Where LinkedIn's container names the other one, every
-# action answers `post_not_found` rather than acting on the wrong post.
+# One post has both a `ugcPost` and an `activity` URN, with different numbers.
+# The permalink may carry the former while LinkedIn's container names only the
+# latter. When the exact match is absent, the fallback below accepts one
+# outermost bare post URN only if it owns a complete action bar. Requiring
+# exactly one keeps a page with another post or independent reshare ambiguous.
 _FIND_POST_ROOT_FN_JS = (
     r"""
 function findPostRoot(postId) {
@@ -165,43 +175,68 @@ function findPostRoot(postId) {
   const outermost = matches.filter(
     element => !matches.some(other => other !== element && other.contains(element))
   );
-  return outermost.length === 1 ? outermost[0] : null;
+  if (outermost.length === 1) return outermost[0];
+  if (outermost.length > 1) return null;
+
+  const barePostUrn = /^urn:li:(?:ugcPost|share|activity):[0-9]+$/;
+  const structural = [];
+  for (const element of main.querySelectorAll(selector)) {
+    for (const name of attributes) {
+      const value = element.getAttribute(name);
+      if (value && barePostUrn.test(value.trim())) {
+        structural.push(element);
+        break;
+      }
+    }
+  }
+  const structuralOutermost = structural.filter(
+    element => !structural.some(
+      other => other !== element && other.contains(element)
+    )
+  );
+  const valid = structuralOutermost.filter(
+    element => visible(element) && findActionBar(element) !== null
+  );
+  return valid.length === 1 ? valid[0] : null;
 }
 """
 )
 
 # Locate the root post's own social action bar inside its container.
 #
-# The first visible `aria-pressed` button in DOM order is the post's reaction
-# toggle: the post's bar renders before its comments, and every comment's own
-# toggle therefore comes later. From there the walk climbs to the smallest
-# ancestor that looks like a bar, and `aria-expanded` has to be present in it
-# — that is the repost opener, and a comment's action row has no equivalent,
-# so requiring it is what keeps a comment row from ever qualifying.
+# Every visible `aria-pressed` button is tried in DOM order. LinkedIn also puts
+# `aria-pressed` on the author's Follow control, so assuming the first one is
+# the reaction toggle makes every real permalink refuse. For each candidate,
+# the walk climbs to the smallest ancestor that looks like a bar, and
+# `aria-expanded` has to be present in it — that is the repost opener, and a
+# comment's action row has no equivalent, so requiring it is what keeps a
+# comment row from ever qualifying. A candidate whose walk reaches a container
+# wider than a bar is abandoned; later toggles still get their own walk.
 _FIND_ACTION_BAR_FN_JS = (
     r"""
 function findActionBar(root) {
   const toggles = Array.from(root.querySelectorAll('button[aria-pressed]'))
     .filter(visible);
   if (toggles.length === 0) return null;
-  const toggle = toggles[0];
-  let element = toggle.parentElement;
-  while (element && root.contains(element)) {
-    const buttons = element.querySelectorAll('button');
-    if (buttons.length >= """
+  for (const toggle of toggles) {
+    let element = toggle.parentElement;
+    while (element && root.contains(element)) {
+      const buttons = element.querySelectorAll('button');
+      if (buttons.length >= """
     + str(_BAR_BUTTONS_MIN)
     + r""") {
-      if (
-        buttons.length <= """
+        if (
+          buttons.length <= """
     + str(_BAR_BUTTONS_MAX)
     + r""" &&
-        element.querySelector('button[aria-expanded]')
-      ) {
-        return {bar: element, toggle};
+          element.querySelector('button[aria-expanded]')
+        ) {
+          return {bar: element, toggle};
+        }
+        break;
       }
-      return null;
+      element = element.parentElement;
     }
-    element = element.parentElement;
   }
   return null;
 }
@@ -447,12 +482,19 @@ CLICK_REPOST_MENU_ITEM_JS = (
 """
 )
 
-# Pin one editor and the single submit button that belongs to its form, then
-# insert the text. `insertText` rather than `fill` keeps the input path the
-# same one the message composer uses, which is the path LinkedIn's editor
-# listens to; a direct `textContent` write leaves the editor's own state
-# thinking it is still empty and the submit button disabled.
-INSERT_TEXT_JS = (
+# Pin the one empty editor in scope and hand it back for the caller to type
+# into. Finding it is all this does: the text arrives through real key events
+# in `_type_text`, not from here.
+#
+# Nothing is written from JavaScript, and that is a measured requirement rather
+# than a preference. `document.execCommand('insertText')` does put the
+# characters in the element and does leave `innerText` reading back exactly
+# right, so every check available from inside the page passes — while
+# LinkedIn's own editor state never updates and its submit button is never
+# drawn. A comment "typed" that way is a draft the page does not know about.
+# The message composer accepts `execCommand`; the comment box does not, so the
+# two paths differ on purpose.
+PIN_EDITOR_JS = (
     r"""
 ((arg) => {
 """
@@ -462,25 +504,59 @@ INSERT_TEXT_JS = (
   const editors = Array.from(
     scope.querySelectorAll('[role="textbox"][contenteditable="true"]')
   ).filter(visible);
-  if (editors.length !== 1) return 'ambiguous_editor';
+  if (editors.length !== 1) return {status: 'ambiguous_editor', editor: null};
   const editor = editors[0];
-  if ((editor.innerText || '').trim()) return 'draft_present';
-  editor.focus();
-  if (document.activeElement !== editor) return 'not_focusable';
-  const inserted = document.execCommand('insertText', false, arg.text);
-  if (!inserted) return 'insert_failed';
-  if ((editor.innerText || editor.textContent || '') !== arg.text) {
-    return 'text_mismatch';
-  }
-  editor.__linkedinMcpOwnedText = arg.text;
-  return 'inserted';
+  if ((editor.innerText || '').trim()) return {status: 'draft_present', editor: null};
+  return {status: 'pinned', editor: editor};
 })
 """
 )
 
-# Submit the pinned editor by clicking the one enabled submit control in its
-# nearest form-like ancestor. Exactly one, or it refuses: a second candidate
-# is how a click lands on something other than the submit for this editor.
+# Record that this editor holds text this server typed, so the submit step can
+# refuse an editor that changed underneath it.
+OWN_EDITOR_JS = r"""
+((arg) => {
+  arg.editor.__linkedinMcpOwnedText = arg.text;
+  return true;
+})
+"""
+
+# Empty an editor this server typed into, used when the typed text did not come
+# back verbatim. Leaving a half-written draft in a live comment box is a visible
+# side effect of a refusal, so a refusal cleans up after itself.
+CLEAR_EDITOR_JS = r"""
+((arg) => {
+  const editor = arg.editor;
+  if (!editor || !editor.isConnected) return false;
+  editor.focus();
+  const range = document.createRange();
+  range.selectNodeContents(editor);
+  const selection = window.getSelection();
+  selection.removeAllRanges();
+  selection.addRange(range);
+  document.execCommand('delete', false, null);
+  return (editor.innerText || '').trim() === '';
+})
+"""
+
+# Submit the pinned editor by clicking the one enabled `type="submit"` control
+# in its nearest form-like ancestor. Exactly one, or it refuses.
+#
+# `type="submit"` is required and never relaxed to "the only button left". That
+# fallback is not a weaker version of this rule, it is a different and much
+# worse one: measured against a live comment box, the buttons LinkedIn renders
+# beside an untouched editor are an emoji trigger and a photo attachment, the
+# emoji one is dropped for its `aria-expanded`, and the photo one is therefore
+# a lone candidate that reads as unambiguous. It was clicked, it opened a file
+# picker, and nothing was ever published. A button this code cannot identify
+# as a submit is not a submit; refusing costs a retry, while guessing clicks
+# an unknown control on a page where controls publish things.
+#
+# The submit control is also absent until the editor holds text LinkedIn
+# believes a human entered, which is why `_type_text` uses real key events.
+# Zero candidates is reported apart from two, because the two failures have
+# nothing in common: zero means the editor never registered the text, while
+# two means the form holds a control this rule cannot tell from the submit.
 SUBMIT_EDITOR_JS = (
     r"""
 ((arg) => {
@@ -508,8 +584,8 @@ SUBMIT_EDITOR_JS = (
     !button.hasAttribute('aria-expanded') &&
     !button.hasAttribute('aria-pressed')
   );
-  const submits = buttons.filter(button => button.type === 'submit');
-  const candidates = submits.length > 0 ? submits : buttons;
+  const candidates = buttons.filter(button => button.type === 'submit');
+  if (candidates.length === 0) return 'no_submit_control';
   if (candidates.length !== 1) return 'ambiguous_submit';
   candidates[0].click();
   return 'submitted';
@@ -521,6 +597,24 @@ SUBMIT_EDITOR_JS = (
 # was not there before. `baseline` is the count of matching units taken just
 # before the submit, so an identical earlier comment cannot be mistaken for
 # this one.
+#
+# Editable subtrees are excluded, and that exclusion is the whole difference
+# between a reading and a tautology. The editor holding the draft is a
+# descendant of the post, and its own `innerText` is exactly the text that was
+# typed into it, so a count that includes it rises from 0 to 1 on the
+# insertion alone — before any submit, and just as high when the submit
+# clicked the wrong control or LinkedIn refused the comment outright. Measured
+# against a live post: the count reached 1 with nothing published and no
+# comment node in the DOM. Only text LinkedIn rendered back is evidence.
+#
+# Ancestors of an editor are excluded for the same reason and not the same way,
+# which is why `closest` alone was not enough. A composer whose other controls
+# are icons contributes no text of its own, so the wrapping form's `innerText`
+# *is* the draft, and dropping only the editor promotes the form to the match
+# the editor used to be. Caught by the empty-aria fixture, where the button
+# labels carry no text; in a locale whose buttons are worded, the same markup
+# hides it. Nothing is lost by the wider rule: a comment LinkedIn rendered is a
+# sibling of the composer, never an ancestor of one.
 COUNT_TEXT_UNITS_JS = (
     r"""
 ((arg) => {
@@ -529,7 +623,12 @@ COUNT_TEXT_UNITS_JS = (
     + r"""
   const root = arg.root;
   if (!root || !root.isConnected) return -1;
-  const elements = Array.from(root.querySelectorAll('*')).filter(visible);
+  const EDITABLE = '[contenteditable=""], [contenteditable="true"]';
+  const editable = element =>
+    element.closest(EDITABLE) !== null || element.querySelector(EDITABLE) !== null;
+  const elements = Array.from(root.querySelectorAll('*')).filter(
+    element => visible(element) && !editable(element)
+  );
   const matches = elements.filter(
     element => (element.innerText || '').trim() === arg.text
   );
@@ -1029,28 +1128,51 @@ class PostActions:
             COUNT_TEXT_UNITS_JS, {"root": root, "text": text.strip()}
         )
 
-        inserted = await page.evaluate(INSERT_TEXT_JS, {"scope": scope, "text": text})
-        if inserted != "inserted":
+        pinned = await page.evaluate_handle(PIN_EDITOR_JS, arg={"scope": scope})
+        status = str(await (await pinned.get_property("status")).json_value())
+        editor = (await pinned.get_property("editor")).as_element()
+        # The wrapper object is finished with once its two properties are read;
+        # the element handle read out of it survives its disposal.
+        await pinned.dispose()
+        if status != "pinned" or editor is None:
             if not scoped_to_root:
                 await self._dismiss_overlay()
             return post_action_result(
                 permalink,
-                "draft_present" if inserted == "draft_present" else "write_failed",
+                "draft_present" if status == "draft_present" else "write_failed",
                 {
                     "ambiguous_editor": f"Could not find exactly one {noun} editor.",
                     "draft_present": f"The {noun} editor already holds a draft, "
                     "which was left untouched.",
-                    "not_focusable": f"The {noun} editor could not take focus.",
-                    "insert_failed": f"The {noun} text could not be inserted.",
-                    "text_mismatch": f"The {noun} editor did not hold the exact "
-                    "text after insertion.",
-                }.get(str(inserted), f"Could not write the {noun}."),
+                }.get(status, f"Could not write the {noun}."),
             )
 
-        submitted = await page.evaluate(
-            SUBMIT_EDITOR_JS, {"scope": scope, "text": text}
-        )
+        typed = await self._type_text(editor, text)
+        if typed != "typed":
+            if not scoped_to_root:
+                await self._dismiss_overlay()
+            return post_action_result(
+                permalink,
+                "write_failed",
+                {
+                    "not_focusable": f"The {noun} editor could not take focus.",
+                    "text_mismatch": f"The {noun} editor did not hold the exact "
+                    "text after typing, so it was cleared and nothing was "
+                    "submitted.",
+                }.get(typed, f"Could not write the {noun}."),
+            )
+
+        submitted = await self._submit_editor(scope, text)
         if submitted != "submitted":
+            # Nothing was clicked on either of these two, so the typed text is
+            # this server's to take back, and taking it back is what keeps the
+            # `retry_safe` below true: a draft left behind would meet the next
+            # attempt as `draft_present` and refuse it. The other statuses
+            # describe an editor that is no longer identifiable as the one that
+            # was typed into, and clearing something unidentified is worse than
+            # leaving it.
+            if submitted in ("no_submit_control", "ambiguous_submit"):
+                await page.evaluate(CLEAR_EDITOR_JS, {"editor": editor})
             if not scoped_to_root:
                 await self._dismiss_overlay()
             return post_action_result(
@@ -1062,6 +1184,9 @@ class PostActions:
                     "not_owned": f"The {noun} editor no longer held this text.",
                     "ambiguous_submit": "Found more than one enabled submit "
                     f"control for the {noun}, so none was clicked.",
+                    "no_submit_control": f"The {noun} text was typed but no submit "
+                    "control ever appeared, so nothing was clicked and the text "
+                    "was removed from the editor.",
                 }.get(str(submitted), f"Could not submit the {noun}."),
                 retry_safe=True,
             )
@@ -1075,6 +1200,63 @@ class PostActions:
             unconfirmed_status=unconfirmed_status,
             noun=noun,
         )
+
+    async def _type_text(self, editor: ElementHandle, text: str) -> str:
+        """Type into a pinned editor with real key events.
+
+        The click is a real mouse click rather than a scripted ``focus()``
+        because the editor is activated by the event, and the characters arrive
+        as key events because the submit control is drawn by a handler listening
+        for them. A newline is sent as ``Shift+Enter``: a bare ``Enter`` in a
+        comment box is a submit on some layouts, which would publish partial
+        text mid-typing and defeat every guard after this point.
+
+        The text is read back and compared before anything can be submitted,
+        which is what catches an autocomplete popup turning a typed ``@name``
+        into a mention or eating the keystrokes that follow it.
+        """
+        page = self._session.page
+        await editor.click()
+        if not await editor.evaluate("element => element === document.activeElement"):
+            return "not_focusable"
+
+        for index, line in enumerate(text.split("\n")):
+            if index:
+                await page.keyboard.press("Shift+Enter")
+            if line:
+                await page.keyboard.type(line, delay=_TYPE_DELAY)
+
+        actual = str(await editor.evaluate("element => element.innerText || ''"))
+        if actual.replace("\r\n", "\n").strip() != text.strip():
+            await page.evaluate(CLEAR_EDITOR_JS, {"editor": editor})
+            return "text_mismatch"
+
+        await page.evaluate(OWN_EDITOR_JS, {"editor": editor, "text": text})
+        return "typed"
+
+    async def _submit_editor(self, scope: Any, text: str) -> str:
+        """Click the editor's submit control once it exists.
+
+        The control is absent until LinkedIn has processed the typed text, so a
+        single read would report ``no_submit_control`` for a comment that is
+        about to become submittable. Only that one status is retried: an
+        ambiguous editor or a lost ownership marker will not improve by waiting,
+        and re-reading them would hide a page that changed underneath.
+        """
+        deadline = _SUBMIT_TIMEOUT / 1000
+        waited = 0.0
+        result = "no_submit_control"
+        while waited < deadline:
+            result = str(
+                await self._session.page.evaluate(
+                    SUBMIT_EDITOR_JS, {"scope": scope, "text": text}
+                )
+            )
+            if result != "no_submit_control":
+                return result
+            await asyncio.sleep(_CONFIRM_POLL)
+            waited += _CONFIRM_POLL
+        return result
 
     async def _confirm_text(
         self,

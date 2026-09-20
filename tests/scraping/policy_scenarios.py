@@ -58,8 +58,11 @@ _COMMON_ALLOWED = {
     "evaluate",
     "evaluate_handle",
     "handle.as_element",
+    "handle.click",
     "handle.dispose",
     "handle.evaluate",
+    "handle.get_property",
+    "handle.json_value",
     "keyboard.press",
     "keyboard.type",
     "listener.add",
@@ -1053,6 +1056,26 @@ def _script_post_surface(page: ScriptedPage, *signals: dict[str, Any]) -> None:
     page.script("handle-1.dispose", None)
 
 
+def _script_post_editor(
+    page: ScriptedPage, text: str, *, handle: str = "handle-2"
+) -> None:
+    """Script the editor pin and the keystrokes that fill it.
+
+    The read-back answers with the text that was asked for, which is what the
+    trace then pins as an ordering: the editor is clicked and focused before any
+    key event, and the text is verified before a submit is reachable. Nothing
+    here is written from JavaScript, because a live comment box does not draw a
+    submit control for text that arrived that way.
+    """
+    page.script("evaluate_handle:post_editor_pin", True)
+    page.script(f"{handle}.get_property:status", False)
+    page.script(f"{handle}:status.json_value", "pinned")
+    page.script(f"{handle}.get_property:editor", True)
+    page.script(f"{handle}:editor.evaluate:post_editor_focus", True)
+    page.script(f"{handle}:editor.evaluate:post_editor_text", text)
+    page.script("evaluate:post_editor_own", True)
+
+
 async def _react_to_post_scenario() -> dict[str, Any]:
     """The default reaction: one click on the toggle, confirmed by its state.
 
@@ -1091,7 +1114,7 @@ async def _comment_on_post_scenario() -> dict[str, Any]:
     # Zero matching units before the submit, one after, which is the whole
     # confirmation contract: an identical earlier comment cannot stand in.
     page.script("evaluate:post_text_units", 0, 1)
-    page.script("evaluate:post_text_insert", "inserted")
+    _script_post_editor(page, "Policy comment")
     page.script("evaluate:post_text_submit", "submitted")
     extractor = _extractor(page)
     async with boundaries(recorder, clock):

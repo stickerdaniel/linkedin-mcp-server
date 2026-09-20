@@ -45,8 +45,10 @@ from linkedin_mcp_server.scraping.post_actions import (
     CLICK_REACT_TOGGLE_JS,
     CLICK_REACTION_JS,
     CLICK_REPOST_MENU_ITEM_JS,
+    CLEAR_EDITOR_JS,
     COUNT_TEXT_UNITS_JS,
-    INSERT_TEXT_JS,
+    OWN_EDITOR_JS,
+    PIN_EDITOR_JS,
     OPEN_REPOST_MENU_JS,
     PIN_POST_ROOT_JS,
     POST_ACTION_SIGNALS_JS,
@@ -65,6 +67,7 @@ pytestmark = [
 POST_ID = "7506667649444237313"
 POST_URN = f"urn:li:ugcPost:{POST_ID}"
 OTHER_URN = "urn:li:ugcPost:7000000000000000001"
+ACTIVITY_URN = "urn:li:activity:7506667700000000000"
 # A comment on the post. Its URN embeds the post's own id, which is why the
 # root search anchors on the end of the value instead of searching for it.
 COMMENT_URN = f"urn:li:comment:({POST_URN},4455667788)"
@@ -96,6 +99,8 @@ class Labels:
     repost_thoughts: str
     submit: str
     reply: str
+    emoji: str
+    photo: str
 
 
 ENGLISH = Labels(
@@ -114,6 +119,8 @@ ENGLISH = Labels(
     repost_thoughts="Repost with your thoughts",
     submit="Post comment",
     reply="Reply to this comment",
+    emoji="Open Emoji Keyboard",
+    photo="Add a photo",
 )
 
 GERMAN = Labels(
@@ -132,6 +139,8 @@ GERMAN = Labels(
     repost_thoughts="Mit eigenem Beitrag teilen",
     submit="Kommentar veröffentlichen",
     reply="Auf diesen Kommentar antworten",
+    emoji="Emoji-Tastatur öffnen",
+    photo="Foto hinzufügen",
 )
 
 # No verb anywhere, in any language: these are identifiers. Whatever still
@@ -153,6 +162,8 @@ OPAQUE = Labels(
     repost_thoughts="f3c7d1",
     submit="a0b4e6",
     reply="b8f2c9",
+    emoji="c1d5f8",
+    photo="d3e7a2",
 )
 
 # Attribute presence and attribute truthiness are different contracts. Every
@@ -174,6 +185,8 @@ EMPTY_ARIA = Labels(
     repost_thoughts="",
     submit="",
     reply="",
+    emoji="",
+    photo="",
 )
 
 LOCALES = (ENGLISH, GERMAN, OPAQUE, EMPTY_ARIA)
@@ -232,15 +245,46 @@ def comment_thread(labels: Labels) -> str:
     return f'<section class="comments">{rows}</section>'
 
 
-def comment_editor(labels: Labels, *, draft: str = "") -> str:
-    return f"""
-  <form class="comment-form">
-    <div role="textbox" contenteditable="true"
-      aria-label="{labels.comment}">{draft}</div>
+def comment_editor(
+    labels: Labels, *, draft: str = "", submit: bool = True, detours: bool = True
+) -> str:
+    """The comment box, with the controls LinkedIn renders beside the editor.
+
+    ``detours`` are the emoji trigger and the photo attachment, and they are
+    here because omitting them is what let a wrong rule look right: the emoji
+    one is dropped for its ``aria-expanded`` and the photo one is then the only
+    enabled button left in the form. ``submit=False`` is the state a live
+    comment box is actually in before it has text — the submit control does not
+    exist yet — which is the state where that lone photo button was clicked.
+    """
+    extras = (
+        f"""
+    <button type="button" aria-expanded="false" aria-label="{labels.emoji}"
+      onclick="document.body.setAttribute('data-clicked','comment-emoji')"
+      >{labels.emoji}</button>
+    <button type="button" aria-label="{labels.photo}"
+      onclick="document.body.setAttribute('data-clicked','comment-photo')"
+      ></button>
+"""
+        if detours
+        else ""
+    )
+    submit_control = (
+        f"""
     <button type="submit" aria-label="{labels.submit}"
       onclick="document.body.setAttribute('data-clicked','comment-submit');
                return false;"
       >{labels.submit}</button>
+"""
+        if submit
+        else ""
+    )
+    return f"""
+  <form class="comment-form">
+    <div role="textbox" contenteditable="true"
+      aria-label="{labels.comment}">{draft}</div>
+    {extras}
+    {submit_control}
   </form>
 """
 
@@ -254,10 +298,17 @@ def post(
     editor: bool = True,
     comments: bool = True,
     draft: str = "",
+    submit: bool = True,
+    detours: bool = True,
 ) -> str:
     """One post container, the way a permalink page renders it."""
     return f"""
 <div class="update" data-urn="{urn}">
+  <div class="actor">
+    <button type="button" aria-pressed="false">Follow</button>
+    <button type="button" aria-expanded="false">More</button>
+    {"".join('<button type="button">actor control</button>' for _ in range(7))}
+  </div>
   <div data-id="{urn}">
     <h2>Varun Bhartiya</h2>
     <p>Post body text</p>
@@ -265,7 +316,7 @@ def post(
   <div data-urn="{SOCIAL_URN}">
     {action_bar(labels, pressed=pressed, opener=opener)}
   </div>
-  {comment_editor(labels, draft=draft) if editor else ""}
+  {comment_editor(labels, draft=draft, submit=submit, detours=detours) if editor else ""}
   {comment_thread(labels) if comments else ""}
 </div>
 """
@@ -273,6 +324,18 @@ def post(
 
 def plain_post(labels: Labels) -> str:
     return post(labels)
+
+
+def post_with_activity_urn(labels: Labels) -> str:
+    """The permalink's ugcPost id and rendered activity id can differ."""
+    return post(labels, urn=ACTIVITY_URN)
+
+
+def two_posts_without_the_permalink_id(labels: Labels) -> str:
+    """A structural fallback cannot choose between two unrelated posts."""
+    return post(labels, urn=ACTIVITY_URN) + post(
+        labels, urn=OTHER_URN, editor=False, comments=False
+    )
 
 
 def post_already_reacted(labels: Labels) -> str:
@@ -456,6 +519,25 @@ class TestFindingTheRootPost:
         # walk stopped at the bar.
         await _in_every_locale(
             dom_page, plain_post, (True, True, 4, True, False, 1), read
+        )
+
+    async def test_a_different_activity_id_resolves_by_unique_structure(
+        self, dom_page
+    ) -> None:
+        async def read(page, html):
+            signals = await _signals(page, html)
+            return (signals["hasRoot"], signals["hasBar"], signals["barButtonCount"])
+
+        await _in_every_locale(dom_page, post_with_activity_urn, (True, True, 4), read)
+
+    async def test_two_structural_fallback_candidates_are_refused(
+        self, dom_page
+    ) -> None:
+        async def read(page, html):
+            return (await _signals(page, html))["hasRoot"]
+
+        await _in_every_locale(
+            dom_page, two_posts_without_the_permalink_id, False, read
         )
 
     async def test_a_comment_urn_embedding_the_post_id_is_not_the_post(
@@ -668,36 +750,46 @@ class TestReposting:
         )
 
 
-class TestWritingText:
-    """Insertion and submission, scoped to the post that was pinned."""
+async def _typed(page, html, text: str):
+    """Pin the post and its editor, then type into it the way production does.
 
-    async def test_text_is_inserted_into_the_one_editor_in_the_post(
-        self, dom_page
-    ) -> None:
+    Real key events rather than a scripted write, because that is the whole
+    difference measured against a live comment box: text written from
+    JavaScript reads back correctly and still leaves LinkedIn's editor state
+    empty, so its submit control is never drawn.
+    """
+    root = await _pinned(page, html)
+    pinned = await page.evaluate_handle(PIN_EDITOR_JS, arg={"scope": root})
+    editor = (await pinned.get_property("editor")).as_element()
+    if editor is not None:
+        await editor.click()
+        await page.keyboard.type(text)
+        await page.evaluate(OWN_EDITOR_JS, {"editor": editor, "text": text})
+    return root, editor
+
+
+class TestPinningTheEditor:
+    """Finding the one editor to type into, scoped to the pinned post."""
+
+    async def test_the_one_editor_in_the_post_is_pinned(self, dom_page) -> None:
         async def read(page, html):
-            handle = await _pinned(page, html)
-            outcome = await page.evaluate(
-                INSERT_TEXT_JS, {"scope": handle, "text": "Well put, thanks"}
-            )
-            held = await handle.evaluate(
-                "node => node.querySelector('[role=\"textbox\"]').innerText"
-            )
-            return (outcome, held)
+            root = await _pinned(page, html)
+            pinned = await page.evaluate_handle(PIN_EDITOR_JS, arg={"scope": root})
+            status = await (await pinned.get_property("status")).json_value()
+            editor = (await pinned.get_property("editor")).as_element()
+            return (status, editor is not None)
 
-        await _in_every_locale(
-            dom_page, plain_post, ("inserted", "Well put, thanks"), read
-        )
+        await _in_every_locale(dom_page, plain_post, ("pinned", True), read)
 
     async def test_an_existing_draft_is_left_untouched(self, dom_page) -> None:
         async def read(page, html):
-            handle = await _pinned(page, html)
-            outcome = await page.evaluate(
-                INSERT_TEXT_JS, {"scope": handle, "text": "Well put, thanks"}
-            )
-            held = await handle.evaluate(
+            root = await _pinned(page, html)
+            pinned = await page.evaluate_handle(PIN_EDITOR_JS, arg={"scope": root})
+            status = await (await pinned.get_property("status")).json_value()
+            held = await root.evaluate(
                 "node => node.querySelector('[role=\"textbox\"]').innerText"
             )
-            return (outcome, held)
+            return (status, held)
 
         await _in_every_locale(
             dom_page,
@@ -708,10 +800,9 @@ class TestWritingText:
 
     async def test_a_post_with_no_editor_refuses(self, dom_page) -> None:
         async def read(page, html):
-            handle = await _pinned(page, html)
-            return await page.evaluate(
-                INSERT_TEXT_JS, {"scope": handle, "text": "anything"}
-            )
+            root = await _pinned(page, html)
+            pinned = await page.evaluate_handle(PIN_EDITOR_JS, arg={"scope": root})
+            return await (await pinned.get_property("status")).json_value()
 
         await _in_every_locale(
             dom_page,
@@ -720,31 +811,35 @@ class TestWritingText:
             read,
         )
 
-    async def test_submitting_clicks_the_editors_own_submit(self, dom_page) -> None:
+
+class TestWritingText:
+    """Typing and submission, scoped to the post that was pinned."""
+
+    async def test_typing_lands_in_the_editor_and_submitting_clicks_its_submit(
+        self, dom_page
+    ) -> None:
         async def read(page, html):
-            handle = await _pinned(page, html)
-            await page.evaluate(
-                INSERT_TEXT_JS, {"scope": handle, "text": "Well put, thanks"}
-            )
+            root, editor = await _typed(page, html, "Well put, thanks")
+            held = await editor.evaluate("node => node.innerText")
             outcome = await page.evaluate(
-                SUBMIT_EDITOR_JS, {"scope": handle, "text": "Well put, thanks"}
+                SUBMIT_EDITOR_JS, {"scope": root, "text": "Well put, thanks"}
             )
-            return (outcome, await _clicked(page))
+            return (held, outcome, await _clicked(page))
 
         await _in_every_locale(
-            dom_page, plain_post, ("submitted", "comment-submit"), read
+            dom_page,
+            plain_post,
+            ("Well put, thanks", "submitted", "comment-submit"),
+            read,
         )
 
     async def test_submitting_text_the_editor_does_not_hold_refuses(
         self, dom_page
     ) -> None:
         async def read(page, html):
-            handle = await _pinned(page, html)
-            await page.evaluate(
-                INSERT_TEXT_JS, {"scope": handle, "text": "Well put, thanks"}
-            )
+            root, _ = await _typed(page, html, "Well put, thanks")
             outcome = await page.evaluate(
-                SUBMIT_EDITOR_JS, {"scope": handle, "text": "something else"}
+                SUBMIT_EDITOR_JS, {"scope": root, "text": "something else"}
             )
             return (outcome, await _clicked(page))
 
@@ -752,9 +847,9 @@ class TestWritingText:
 
     async def test_two_submit_candidates_click_nothing(self, dom_page) -> None:
         def build(labels: Labels) -> str:
-            # A second enabled control inside the same form, carrying neither
+            # A second control carrying `type="submit"` and neither
             # aria-expanded nor aria-pressed, so nothing distinguishes it from
-            # the submit except its existence.
+            # the real one except its existence.
             return post(labels).replace(
                 "</form>",
                 f'<button type="submit" aria-label="{labels.submit}">'
@@ -762,14 +857,48 @@ class TestWritingText:
             )
 
         async def read(page, html):
-            handle = await _pinned(page, html)
-            await page.evaluate(INSERT_TEXT_JS, {"scope": handle, "text": "hello"})
+            root, _ = await _typed(page, html, "hello")
             outcome = await page.evaluate(
-                SUBMIT_EDITOR_JS, {"scope": handle, "text": "hello"}
+                SUBMIT_EDITOR_JS, {"scope": root, "text": "hello"}
             )
             return (outcome, await _clicked(page))
 
         await _in_every_locale(dom_page, build, ("ambiguous_submit", None), read)
+
+    async def test_a_form_with_no_submit_control_clicks_no_other_button(
+        self, dom_page
+    ) -> None:
+        # The live failure this exists for. Before a comment box has text
+        # LinkedIn renders no submit control, and the buttons that are there
+        # are an emoji trigger and a photo attachment. The emoji one is dropped
+        # for its aria-expanded, leaving the photo one looking unambiguous; the
+        # earlier rule relaxed to "the only enabled button" and clicked it,
+        # which opened a file picker and published nothing while the tool
+        # reported the comment as posted. No label can separate those two
+        # buttons in every locale, so the only safe answer is to click neither.
+        async def read(page, html):
+            root, _ = await _typed(page, html, "hello")
+            outcome = await page.evaluate(
+                SUBMIT_EDITOR_JS, {"scope": root, "text": "hello"}
+            )
+            return (outcome, await _clicked(page))
+
+        await _in_every_locale(
+            dom_page,
+            lambda labels: post(labels, submit=False),
+            ("no_submit_control", None),
+            read,
+        )
+
+    async def test_a_cleared_editor_holds_nothing(self, dom_page) -> None:
+        async def read(page, html):
+            _, editor = await _typed(page, html, "typed then withdrawn")
+            emptied = await page.evaluate(CLEAR_EDITOR_JS, {"editor": editor})
+            # Trimmed, because emptying a contenteditable leaves the block break
+            # behind: innerText reads "\n" for a box with nothing typed in it.
+            return (emptied, await editor.evaluate("node => node.innerText.trim()"))
+
+        await _in_every_locale(dom_page, plain_post, (True, ""), read)
 
 
 class TestCountingRenderedText:
@@ -808,3 +937,43 @@ class TestCountingRenderedText:
         # Two is what makes the pre-submit baseline meaningful: a duplicate of
         # an existing comment is only confirmed by the count going up.
         await _in_every_locale(dom_page, build, 2, read)
+
+    async def test_the_draft_in_the_editor_is_not_counted(self, dom_page) -> None:
+        # The bug this file exists to prevent from coming back. The editor is a
+        # descendant of the post and its innerText is exactly the text that was
+        # typed, so counting it makes the confirmation compare the draft against
+        # itself: the count rises on the typing alone and reports a comment as
+        # published whether the submit landed, clicked the wrong control, or was
+        # rejected outright. Measured against a live post, which returned 1 with
+        # nothing published and no comment node anywhere in the DOM.
+        async def read(page, html):
+            root, editor = await _typed(page, html, "Well put, thanks")
+            return (
+                await editor.evaluate("node => node.innerText"),
+                await page.evaluate(
+                    COUNT_TEXT_UNITS_JS, {"root": root, "text": "Well put, thanks"}
+                ),
+            )
+
+        # The text is demonstrably in the editor, and the count is still zero.
+        await _in_every_locale(dom_page, plain_post, ("Well put, thanks", 0), read)
+
+    async def test_a_comment_rendered_after_the_draft_counts_once(
+        self, dom_page
+    ) -> None:
+        # The other direction, so the exclusion above is not passing by refusing
+        # everything: with the same text in the editor, a comment LinkedIn
+        # rendered back does count, and that is the transition `acted` reports.
+        async def read(page, html):
+            root, _ = await _typed(page, html, "Well put, thanks")
+            await root.evaluate(
+                "node => node.querySelector('.comments').insertAdjacentHTML("
+                "'beforeend',"
+                '\'<article data-id="urn:li:comment:x">'
+                "<p>Well put, thanks</p></article>')"
+            )
+            return await page.evaluate(
+                COUNT_TEXT_UNITS_JS, {"root": root, "text": "Well put, thanks"}
+            )
+
+        await _in_every_locale(dom_page, plain_post, 1, read)

@@ -31,6 +31,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   clicking. The asymmetry is the point: a missed reaction costs nothing, while
   the wrong index publishes to the user's own feed. Never widen either guard to
   "at least N" and never fall back to the nearest match.
+- **A write is confirmed by something only LinkedIn could have produced.**
+ [Read the evidence rule](docs/decisions/2026-09-18-evidence-of-a-write.md).
+ Text this server typed is not evidence that it was published: the comment
+ editor sits *inside* the post, so a naive count of matching text rises on the
+ typing alone and confirms a comment that was never sent. Nor is a click this
+ server chose to make: a submit control is identified by `type="submit"` and
+ never by elimination, because a comment box with no text yet offers a photo
+ button as the only enabled candidate. Both mistakes shipped together and
+ reported two comments published on posts that had none.
 - **Detection must be locale-independent.** Classification logic — connection state, action availability, button identity — must rely on URL patterns (`/preload/custom-invite/?vanityName=USER`, `/in/USER/edit/intro/`, `/messaging/compose/`), attribute *presence* (`aria-label` exists, `aria-expanded` exists, `aria-disabled` exists), or structural counts — never on text values like "Connect", "Follow", "Message", "1st", "Pending". The verb in an `aria-label` is locale-dependent; whether the attribute exists is not. Where text is genuinely the only signal, guard it behind an explicit per-locale table and document the limitation in code.
 
 ## Browser Identity Rules
@@ -170,9 +179,12 @@ Optional additional keys:
 by `post_action_result` in `scraping/contracts.py`.
 
 - **`acted` is a reading, not a receipt.** It says the structural transition
-  this server looks for was observed — a reaction control reporting itself
-  pressed, submitted text found rendered. It never claims LinkedIn kept the
-  action or showed it to anybody.
+ this server looks for was observed — a reaction control reporting itself
+ pressed, submitted text found rendered *outside every editable region* and not
+ present there before. It never claims LinkedIn kept the action or showed it to
+ anybody. The one way this field has actually been wrong was a reading that
+ could not fail: see the [evidence
+ rule](docs/decisions/2026-09-18-evidence-of-a-write.md).
 - **`retry_safe` is the only field a retry may be keyed on, and it is false from
   the moment a click that could land is dispatched** — not from the moment one
   is confirmed. Two of the three actions are public content published under the

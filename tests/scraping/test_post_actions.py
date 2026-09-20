@@ -42,7 +42,8 @@ PROGRAMS = {
     "open_repost": post_actions.OPEN_REPOST_MENU_JS,
     "repost_menu": post_actions.READ_REPOST_MENU_JS,
     "pick_repost": post_actions.CLICK_REPOST_MENU_ITEM_JS,
-    "insert": post_actions.INSERT_TEXT_JS,
+    "own": post_actions.OWN_EDITOR_JS,
+    "clear": post_actions.CLEAR_EDITOR_JS,
     "submit": post_actions.SUBMIT_EDITOR_JS,
     "units": post_actions.COUNT_TEXT_UNITS_JS,
 }
@@ -105,6 +106,69 @@ class FakeHandle:
         self.disposed = True
 
 
+class FakeEditor:
+    """An editor that holds what the keyboard actually typed into it.
+
+    Scripting the read-back instead would make every text check in the flow
+    agree with itself by construction. Here the keystrokes accumulate and the
+    read-back reports them, so ``drops`` can model the thing this guard exists
+    for: an autocomplete popup swallowing part of what was typed.
+    """
+
+    def __init__(self, *, focusable: bool = True, drops: str = ""):
+        self.focusable = focusable
+        self.drops = drops
+        self.text = ""
+        self.clicked = False
+
+    async def click(self) -> None:
+        self.clicked = True
+
+    async def evaluate(self, script: str) -> Any:
+        if "activeElement" in script:
+            # Focus follows the real click, never a bare selector match.
+            return self.clicked and self.focusable
+        if "innerText" in script:
+            return self.text
+        raise AssertionError(f"unexpected editor program: {script}")
+
+    def type(self, chunk: str) -> None:
+        self.text += chunk.replace(self.drops, "") if self.drops else chunk
+
+
+class FakeProperty:
+    """One property of a returned JS object, read as a value or an element."""
+
+    def __init__(self, *, value: Any = None, element: Any = None):
+        self._value = value
+        self._element = element
+
+    async def json_value(self) -> Any:
+        return self._value
+
+    def as_element(self) -> Any:
+        return self._element
+
+
+class FakePinnedEditor:
+    """The ``{status, editor}`` handle the editor pin program returns."""
+
+    def __init__(self, status: str, editor: FakeEditor | None):
+        self._status = status
+        self._editor = editor
+        self.disposed = False
+
+    async def dispose(self) -> None:
+        self.disposed = True
+
+    async def get_property(self, name: str) -> FakeProperty:
+        if name == "status":
+            return FakeProperty(value=self._status)
+        if name == "editor":
+            return FakeProperty(element=self._editor)
+        raise AssertionError(f"unexpected property: {name}")
+
+
 class FakePage:
     """A page double that answers each extractor program from a script.
 
@@ -114,7 +178,14 @@ class FakePage:
     clicked.
     """
 
-    def __init__(self, *, pinned: bool = True, **answers: Any):
+    def __init__(
+        self,
+        *,
+        pinned: bool = True,
+        editor: FakeEditor | None = None,
+        editor_status: str = "pinned",
+        **answers: Any,
+    ):
         self.url = POST_URL
         self.calls: list[str] = []
         self._answers = {name: answers.get(name) for name in PROGRAMS}
@@ -124,10 +195,22 @@ class FakePage:
         }
         self._last: dict[str, Any] = {}
         self.handle = FakeHandle(pinned=pinned)
+        self.editor = editor if editor is not None else FakeEditor()
+        self._editor_status = editor_status
         self.keyboard = MagicMock()
-        self.keyboard.press = AsyncMock()
+        self.keyboard.press = AsyncMock(side_effect=self._press)
+        self.keyboard.type = AsyncMock(side_effect=self._type)
         self.wait_for_selector = AsyncMock()
         self.dialog_wait = AsyncMock()
+
+    async def _type(self, text: str, delay: int | None = None) -> None:
+        self.calls.append("type")
+        self.editor.type(text)
+
+    async def _press(self, key: str) -> None:
+        self.calls.append(f"press:{key}")
+        if key == "Shift+Enter":
+            self.editor.type("\n")
 
     async def evaluate(self, script: str, *args: Any) -> Any:
         for name, program in PROGRAMS.items():
@@ -154,6 +237,13 @@ class FakePage:
         # Keyword-only, matching the strict double in
         # `tests/scraping/support/policy_trace.py`: a positional argument there
         # is an undeclared call, so production has to pass this one by name.
+        if script is post_actions.PIN_EDITOR_JS:
+            self.calls.append("pin_editor")
+            status = self._editor_status
+            self.pinned_editor = FakePinnedEditor(
+                status, self.editor if status == "pinned" else None
+            )
+            return self.pinned_editor
         assert script is post_actions.PIN_POST_ROOT_JS
         assert arg == POST_ID
         self.calls.append("pin")
@@ -355,7 +445,7 @@ class TestComment:
         assert result["status"] == "confirmation_required"
         assert result["acted"] is False
         assert result["retry_safe"] is True
-        assert "insert" not in page.calls
+        assert "type" not in page.calls
         assert "submit" not in page.calls
         assert "pin" not in page.calls
 
@@ -366,7 +456,7 @@ class TestComment:
                 PERMALINK, "hello", confirm_comment=True
             )
         assert result["status"] == "comment_box_unavailable"
-        assert "insert" not in page.calls
+        assert "type" not in page.calls
 
     async def test_two_comment_editors_refuse_rather_than_guess(self) -> None:
         page = FakePage(signals=signals(editors=2))
@@ -375,13 +465,12 @@ class TestComment:
                 PERMALINK, "hello", confirm_comment=True
             )
         assert result["status"] == "comment_box_ambiguous"
-        assert "insert" not in page.calls
+        assert "type" not in page.calls
 
     async def test_a_confirmed_comment_is_typed_submitted_and_verified(self) -> None:
         page = FakePage(
             signals=signals(editors=1),
             units=[0, 1],
-            insert="inserted",
             submit="submitted",
         )
         with navigated():
@@ -391,15 +480,84 @@ class TestComment:
         assert result["status"] == "commented"
         assert result["acted"] is True
         assert result["retry_safe"] is False
-        assert page.calls.count("insert") == 1
         assert page.calls.count("submit") == 1
         assert page.handle.disposed
+
+    async def test_the_text_arrives_as_keystrokes_in_a_clicked_editor(self) -> None:
+        # Both halves of this are load-bearing against a live comment box and
+        # neither is cosmetic. A scripted `focus()` leaves the box inactive, and
+        # text written from JavaScript reads back correctly while LinkedIn's own
+        # editor state stays empty and its submit control is never drawn. The
+        # only path measured to produce a submittable comment is a real click
+        # followed by real key events.
+        page = FakePage(
+            signals=signals(editors=1),
+            units=[0, 1],
+            submit="submitted",
+        )
+        with navigated():
+            result = await actions(page).comment_on_post(
+                PERMALINK, "Great write-up", confirm_comment=True
+            )
+        assert result["status"] == "commented"
+        assert page.editor.clicked
+        assert page.editor.text == "Great write-up"
+        assert page.calls.index("type") < page.calls.index("submit")
+        # The wrapper object handle is released once its properties are read.
+        assert page.pinned_editor.disposed
+
+    async def test_a_newline_is_shift_entered_rather_than_entered(self) -> None:
+        # A bare Enter in a comment box is a submit on some layouts, which would
+        # publish the first line and orphan the rest. The keystroke is the
+        # contract here, not the resulting text.
+        page = FakePage(
+            signals=signals(editors=1),
+            units=[0, 1],
+            submit="submitted",
+        )
+        with navigated():
+            await actions(page).comment_on_post(
+                PERMALINK, "First line\nSecond line", confirm_comment=True
+            )
+        assert "press:Shift+Enter" in page.calls
+        assert "press:Enter" not in page.calls
+        assert page.editor.text == "First line\nSecond line"
+
+    async def test_text_that_does_not_arrive_verbatim_is_cleared_unsent(self) -> None:
+        # An autocomplete popup eating keystrokes is the live version of this.
+        # What must not happen is a submit of whatever did land.
+        page = FakePage(
+            signals=signals(editors=1),
+            units=0,
+            editor=FakeEditor(drops="write-up"),
+        )
+        with navigated():
+            result = await actions(page).comment_on_post(
+                PERMALINK, "Great write-up", confirm_comment=True
+            )
+        assert result["status"] == "write_failed"
+        assert result["acted"] is False
+        assert "submit" not in page.calls
+        assert "clear" in page.calls
+
+    async def test_an_editor_that_will_not_focus_is_not_typed_into(self) -> None:
+        page = FakePage(
+            signals=signals(editors=1),
+            units=0,
+            editor=FakeEditor(focusable=False),
+        )
+        with navigated():
+            result = await actions(page).comment_on_post(
+                PERMALINK, "hello", confirm_comment=True
+            )
+        assert result["status"] == "write_failed"
+        assert "type" not in page.calls
+        assert "submit" not in page.calls
 
     async def test_text_that_never_appears_is_unconfirmed_and_unsafe(self) -> None:
         page = FakePage(
             signals=signals(editors=1),
             units=0,
-            insert="inserted",
             submit="submitted",
         )
         with navigated():
@@ -418,7 +576,6 @@ class TestComment:
         page = FakePage(
             signals=signals(editors=1),
             units=1,
-            insert="inserted",
             submit="submitted",
         )
         with navigated():
@@ -427,11 +584,27 @@ class TestComment:
             )
         assert result["status"] == "comment_unconfirmed"
 
+    async def test_the_baseline_is_read_before_anything_is_typed(self) -> None:
+        # The editor holding the draft is a descendant of the post, so a count
+        # taken after typing includes it and the confirmation compares the
+        # draft against itself. Measured live: that comparison passed on a post
+        # where nothing was published.
+        page = FakePage(
+            signals=signals(editors=1),
+            units=[0, 1],
+            submit="submitted",
+        )
+        with navigated():
+            await actions(page).comment_on_post(
+                PERMALINK, "Great write-up", confirm_comment=True
+            )
+        assert page.calls.index("units") < page.calls.index("type")
+
     async def test_an_existing_draft_is_left_untouched(self) -> None:
         page = FakePage(
             signals=signals(editors=1),
             units=0,
-            insert="draft_present",
+            editor_status="draft_present",
         )
         with navigated():
             result = await actions(page).comment_on_post(
@@ -439,13 +612,14 @@ class TestComment:
             )
         assert result["status"] == "draft_present"
         assert result["retry_safe"] is True
+        assert "type" not in page.calls
         assert "submit" not in page.calls
+        assert "clear" not in page.calls
 
     async def test_two_submit_candidates_refuse_and_stay_retry_safe(self) -> None:
         page = FakePage(
             signals=signals(editors=1),
             units=0,
-            insert="inserted",
             submit="ambiguous_submit",
         )
         with navigated():
@@ -454,8 +628,29 @@ class TestComment:
             )
         assert result["status"] == "submit_unavailable"
         assert result["acted"] is False
-        # Nothing was dispatched, so calling again cannot double-publish.
+        # Nothing was dispatched, so calling again cannot double-publish, and
+        # the typed text is taken back so the retry is not met by its own draft.
         assert result["retry_safe"] is True
+        assert "clear" in page.calls
+
+    async def test_a_submit_control_that_never_renders_clicks_nothing(self) -> None:
+        # The old rule here relaxed to "the only enabled button left" when no
+        # `type="submit"` was found. On a live comment box that button was the
+        # photo attachment: it was clicked, it opened a file picker, and the
+        # comment was never published while the tool reported success.
+        page = FakePage(
+            signals=signals(editors=1),
+            units=0,
+            submit="no_submit_control",
+        )
+        with navigated():
+            result = await actions(page).comment_on_post(
+                PERMALINK, "hello", confirm_comment=True
+            )
+        assert result["status"] == "submit_unavailable"
+        assert result["acted"] is False
+        assert result["retry_safe"] is True
+        assert "clear" in page.calls
 
 
 class TestRepost:
@@ -527,7 +722,6 @@ class TestRepost:
             repost_menu={"menus": 1, "items": 2},
             pick_repost=True,
             units=[0, 1],
-            insert="inserted",
             submit="submitted",
         )
         with navigated():
@@ -551,7 +745,7 @@ class TestRepost:
                 PERMALINK, confirm_repost=True, commentary="Worth a read"
             )
         assert result["status"] == "repost_composer_unavailable"
-        assert "insert" not in page.calls
+        assert "type" not in page.calls
 
     async def test_a_disabled_repost_control_refuses(self) -> None:
         page = FakePage(signals=signals(), open_repost="disabled")
