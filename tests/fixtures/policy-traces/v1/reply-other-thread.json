@@ -1,0 +1,94 @@
+{
+  "call": {
+    "arguments": {
+      "confirm_send": false,
+      "message": "New text",
+      "thread_id": "2-policy-thread=="
+    },
+    "method": "reply_to_conversation"
+  },
+  "events": [
+    {
+      "call": "reply_to_conversation",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "section": "message"
+    },
+    {
+      "call": "reply_to_conversation",
+      "extra": {
+        "target_url": "https://www.linkedin.com/messaging/thread/2-policy-thread%3D%3D/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "section": "message"
+    },
+    {
+      "call": "reply_to_conversation",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/messaging/thread/2-other-thread/",
+      "requested_url": "https://www.linkedin.com/messaging/thread/2-policy-thread%3D%3D/",
+      "section": "message",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "reply_to_conversation",
+      "description": "goto https://www.linkedin.com/messaging/thread/2-policy-thread%3D%3D/",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "message"
+    },
+    {
+      "call": "reply_to_conversation",
+      "extra": {
+        "target_url": "https://www.linkedin.com/messaging/thread/2-policy-thread%3D%3D/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "section": "message"
+    },
+    {
+      "call": "reply_to_conversation",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "section": "message"
+    },
+    {
+      "call": "reply_to_conversation",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "section": "message"
+    },
+    {
+      "call": "reply_to_conversation",
+      "kind": "boundary.rate_limit",
+      "section": "message"
+    },
+    {
+      "call": "reply_to_conversation",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "section": "message",
+      "selector": "main",
+      "state": "visible",
+      "timeout_ms": null
+    }
+  ],
+  "result": {
+    "message": "LinkedIn did not open the requested thread. Check the thread_id against get_inbox or search_conversations.",
+    "participant": null,
+    "recipient_selected": false,
+    "retry_safe": true,
+    "sent": false,
+    "status": "recipient_resolution_failed",
+    "thread_id": "2-policy-thread==",
+    "url": "https://www.linkedin.com/messaging/thread/2-other-thread/"
+  },
+  "scenario": "reply_to_conversation__other_thread",
+  "schema_version": 1
+}

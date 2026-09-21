@@ -72,6 +72,10 @@
         "coroutine": true,
         "signature": "(self, username: 'str', requested: 'set[str]', callbacks: 'ProgressCallback | None' = None, max_scrolls: 'int | None' = None, *, main_profile_already_loaded: 'bool' = False, allow_self_alias: 'bool' = False) -> 'dict[str, Any]'"
       },
+      "reply_to_conversation": {
+        "coroutine": true,
+        "signature": "(self, thread_id: 'str', message: 'str', *, confirm_send: 'bool') -> 'dict[str, Any]'"
+      },
       "search_companies": {
         "coroutine": true,
         "signature": "(self, keywords: 'str') -> 'dict[str, Any]'"
@@ -111,6 +115,7 @@
       "read_company",
       "read_job",
       "read_person",
+      "reply_to_conversation",
       "search_companies",
       "search_conversations",
       "search_jobs",
@@ -498,6 +503,35 @@
           },
           "required": [
             "linkedin_username"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "reply_to_conversation": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "confirm_send": {
+              "description": "Must be True to send. False is a dry run that verifies\nthe thread and composer, types nothing, and says who the reply\nwould go to.",
+              "type": "boolean"
+            },
+            "message": {
+              "description": "Message text, read as send_message reads it: LF, CRLF and\nCR all end a line, empty lines are kept, and the whole message\nis trimmed. Tab, other control characters, DEL, U+0085, U+2028\nand U+2029 are refused.",
+              "type": "string"
+            },
+            "thread_id": {
+              "description": "LinkedIn messaging thread ID, or a /messaging/thread/<id>/\nreference as another tool returned it",
+              "type": "string"
+            }
+          },
+          "required": [
+            "thread_id",
+            "message",
+            "confirm_send"
           ],
           "type": "object"
         },
