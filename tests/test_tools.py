@@ -1016,7 +1016,7 @@ class TestJobTools:
 
     async def test_get_saved_jobs(self, mock_context):
         expected = {
-            "url": "https://www.linkedin.com/my-items/saved-jobs/",
+            "url": "https://www.linkedin.com/jobs-tracker/?stage=saved",
             "sections": {"saved_jobs": "Saved Job 1\nSaved Job 2"},
             "job_ids": ["111", "222"],
         }
@@ -1031,7 +1031,9 @@ class TestJobTools:
         result = await tool_fn(mock_context, max_pages=2, extractor=mock_extractor)
         assert "saved_jobs" in result["sections"]
         assert result["job_ids"] == ["111", "222"]
-        mock_extractor.get_saved_jobs.assert_awaited_once_with(max_pages=2)
+        mock_extractor.get_saved_jobs.assert_awaited_once_with(
+            max_pages=2, stage="saved"
+        )
 
 
 class TestGetSidebarProfilesTool:

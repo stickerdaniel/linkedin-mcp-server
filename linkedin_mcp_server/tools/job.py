@@ -16,6 +16,7 @@ from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.scraping.identifiers import normalize_job_id
+from linkedin_mcp_server.scraping.job_policy import JobsTrackerStage
 
 logger = logging.getLogger(__name__)
 
@@ -183,16 +184,20 @@ def register_job_tools(
     async def get_saved_jobs(
         ctx: Context,
         max_pages: Annotated[int, Field(ge=1, le=10)] = 3,
+        stage: JobsTrackerStage = "saved",
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
-        List job postings saved by the authenticated LinkedIn user.
+        List the authenticated user's jobs at one stage of LinkedIn's job tracker.
 
         Returns job_ids that can be passed to get_job_details for full info.
 
         Args:
             ctx: FastMCP context for progress reporting
-            max_pages: Maximum number of saved-jobs pages to load (1-10, default 3)
+            max_pages: Maximum number of tracker pages to load (1-10, default 3)
+            stage: Tracker tab: saved (default), in_progress, applied or
+                archived. applied lists Easy Apply submissions and external
+                applications the user confirmed to LinkedIn.
 
         Returns:
             Dict with url, sections (name -> raw text), job_ids (list of
@@ -202,13 +207,13 @@ def register_job_tools(
             extractor = extractor or await get_ready_extractor(
                 ctx, tool_name="get_saved_jobs"
             )
-            logger.info("Fetching saved jobs (max_pages=%d)", max_pages)
+            logger.info("Fetching %s jobs (max_pages=%d)", stage, max_pages)
 
             await ctx.report_progress(
                 progress=0, total=100, message="Loading saved jobs"
             )
 
-            result = await extractor.get_saved_jobs(max_pages=max_pages)
+            result = await extractor.get_saved_jobs(max_pages=max_pages, stage=stage)
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 

@@ -32,6 +32,7 @@ from linkedin_mcp_server.scraping.job_policy import (
     SCROLL_BUDGET_TOTAL,
     SCROLL_DEADLINE_MAX,
     SEARCH_TIMEOUT_FRACTION,
+    JobsTrackerStage,
     dropped_filters_section_error,
     dropped_offset_section_error,
     label_similar_jobs,
@@ -515,19 +516,23 @@ class JobScraper:
             result["section_errors"] = section_errors
         return result
 
-    async def get_saved_jobs(self, max_pages: int = 3) -> dict[str, Any]:
-        """List the authenticated user's saved job postings.
+    async def get_saved_jobs(
+        self, max_pages: int = 3, stage: JobsTrackerStage = "saved"
+    ) -> dict[str, Any]:
+        """List the authenticated user's jobs at one job-tracker stage.
 
-        Navigates to ``/my-items/saved-jobs/``, extracts innerText and job IDs
-        from each page, and paginates with ``?start=`` offsets (10 per step).
+        Navigates to ``/jobs-tracker/?stage=<stage>``, extracts innerText and
+        job IDs from each page, and paginates with ``&start=`` offsets (10 per
+        step).
 
         Args:
             max_pages: Maximum pages to load (1-10, default 3)
+            stage: Tracker tab to read: saved, in_progress, applied, archived
 
         Returns:
             {url, sections: {saved_jobs: text}, job_ids: [str]}
         """
-        base_url = SAVED_JOBS_URL
+        base_url = f"{SAVED_JOBS_URL}?stage={stage}"
         all_job_ids: list[str] = []
         seen_ids: set[str] = set()
         page_texts: list[str] = []
@@ -547,7 +552,7 @@ class JobScraper:
             url = (
                 base_url
                 if page_num == 0
-                else f"{base_url}?start={page_num * SAVED_JOBS_PAGE_SIZE}"
+                else f"{base_url}&start={page_num * SAVED_JOBS_PAGE_SIZE}"
             )
 
             try:
@@ -573,16 +578,15 @@ class JobScraper:
                 # /jobs/view/ anchor would come back as the account's saved
                 # jobs.
                 #
-                # Both destinations, because LinkedIn now answers
-                # /my-items/saved-jobs/ with a redirect to /jobs-tracker/ and
-                # drops the query on the way. Measured on 2026-08-21 against
-                # an authenticated profile, for the bare URL and for
-                # ?start=10 alike. The old route is kept because the redirect
-                # is a rollout and the server still navigates to it.
+                # The stage too: a tracker that dropped it shows another tab,
+                # and applied jobs would come back as saved ones. No
+                # parameter is the saved tab.
                 parsed_url = urlparse(capture.landed_url)
+                landed_stage = parse_qs(parsed_url.query).get("stage", ["saved"])[0]
                 if (
                     parsed_url.netloc != "www.linkedin.com"
                     or parsed_url.path.rstrip("/") not in SAVED_JOBS_PATHS
+                    or landed_stage != stage
                 ):
                     logger.debug(
                         "Unexpected page URL after saved-jobs extraction: %s "
@@ -627,11 +631,9 @@ class JobScraper:
                 # appends the whole list to itself under `saved_jobs` before
                 # the no-new-ids branch stops the loop. Measured on
                 # 2026-08-21: `/jobs-tracker/?start=10` lands on
-                # `/jobs-tracker/`, and so does the old route, so the offset
-                # is gone from the list rather than from one address for it.
-                # Judged from where the page landed and not from that
-                # measurement, so an account still served the old route keeps
-                # paginating.
+                # `/jobs-tracker/`. Judged from where the page landed and not
+                # from that measurement, so paging works again wherever
+                # LinkedIn keeps the offset.
                 # Read here rather than taken from the capture: the page-count
                 # read above is a whole navigation's worth of opportunity for
                 # the address to move, and the capture predates it.
