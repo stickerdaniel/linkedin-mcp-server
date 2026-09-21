@@ -117,7 +117,10 @@ class _PermalinkResponseListener:
             # avoids: a re-created closure removes nothing).
             self._page.remove_listener("response", self._handle_response)
         except Exception:
-            pass
+            logger.debug(
+                "Failed to remove permalink response listener",
+                exc_info=True,
+            )
 
     def _handle_response(self, response: Any) -> None:
         if not self._armed:

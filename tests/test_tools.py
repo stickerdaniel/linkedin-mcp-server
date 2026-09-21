@@ -1481,6 +1481,32 @@ class TestFeedTools:
         assert "/posts/alice_hello-ugcPost-1-xx" in urls
         assert "/feed/update/urn:li:activity:1234567890/" in urls
 
+    async def test_get_feed_suppresses_references_without_readable_text(
+        self, mock_context
+    ):
+        mock_extractor = MagicMock()
+        mock_extractor.extract_feed = AsyncMock(
+            return_value=ExtractedSection(
+                text="",
+                references=[
+                    {
+                        "kind": "feed_post",
+                        "url": "/posts/orphan-ugcPost-1-xx",
+                        "context": "feed",
+                    }
+                ],
+            )
+        )
+
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_feed")
+        result = await tool_fn(mock_context, extractor=mock_extractor)
+        assert result == {"url": "https://www.linkedin.com/feed/", "sections": {}}
+
     async def test_get_feed_rate_limited_surfaces_section_error(self, mock_context):
         """Rate-limit sentinel becomes a typed section_errors entry."""
         mock_extractor = MagicMock()

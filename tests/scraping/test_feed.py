@@ -15,8 +15,13 @@ import pytest
 from fastmcp import FastMCP
 
 from linkedin_mcp_server.core.exceptions import AuthenticationError
+from linkedin_mcp_server.scraping import feed as feed_module
+from linkedin_mcp_server.scraping import session as session_module
 from linkedin_mcp_server.scraping.content import PageContentReader
-from linkedin_mcp_server.scraping.contracts import ExtractedSection
+from linkedin_mcp_server.scraping.contracts import (
+    RATE_LIMITED_SECTION_TEXT,
+    ExtractedSection,
+)
 from linkedin_mcp_server.scraping.feed import FeedScraper
 from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.session import ScrapingSession
@@ -72,7 +77,7 @@ class TestFeedListenerLifecycle:
     around it, and the scroll loop needs a full browser to reach at all.
     """
 
-    async def test_the_removed_listener_is_the_object_that_was_registered(self):
+    async def test_the_removed_listener_is_the_object_that_was_registered(self, caplog):
         page = _ListenerPage()
         scraper = _scraper(page)
 
@@ -86,7 +91,10 @@ class TestFeedListenerLifecycle:
             assert num_posts == 3
             return ExtractedSection(text="Feed content", references=[])
 
-        with patch.object(scraper, "_extract_feed_body", body):
+        with (
+            patch.object(scraper, "_extract_feed_body", body),
+            caplog.at_level(logging.DEBUG, logger=feed_module.__name__),
+        ):
             result = await scraper._extract_feed_once(3)
 
         assert result.text == "Feed content"
@@ -95,8 +103,9 @@ class TestFeedListenerLifecycle:
         assert page.removed[0] is page.added[0]
         # Nothing is left listening on the page the caller keeps using.
         assert page.subscribed == []
+        assert "Failed to remove feed response listener" not in caplog.text
 
-    async def test_the_reads_are_drained_even_when_the_removal_raises(self):
+    async def test_the_reads_are_drained_even_when_the_removal_raises(self, caplog):
         page = _ListenerPage(removal_error=RuntimeError("listener already gone"))
         scraper = _scraper(page)
         reads: list[asyncio.Task[None]] = []
@@ -116,12 +125,22 @@ class TestFeedListenerLifecycle:
             reads.append(task)
             return ExtractedSection(text="Feed content", references=[])
 
-        with patch.object(scraper, "_extract_feed_body", body):
+        with (
+            patch.object(scraper, "_extract_feed_body", body),
+            caplog.at_level(logging.DEBUG, logger=feed_module.__name__),
+        ):
             result = await scraper._extract_feed_once(1)
 
         # The removal failure is swallowed rather than replacing the result.
         assert result.text == "Feed content"
         assert page.removed
+        records = [
+            record
+            for record in caplog.records
+            if record.message == "Failed to remove feed response listener"
+        ]
+        assert len(records) == 1
+        assert records[0].exc_info is not None
         # And the drain still ran: the read's failure is consumed here instead
         # of resurfacing from the loop long after the feed call returned.
         assert reads[0]._log_traceback is False
@@ -235,6 +254,193 @@ class TestFeedScrollCeiling:
         # requested count is still nowhere near when the loop gives up.
         assert len(result.references) == self._CEILING
         assert len(result.references) < self._NUM_POSTS
+        page.assert_clean()
+
+
+class TestFeedScrollRecovery:
+    """Response-read progress contracts inside the feed scroll loop."""
+
+    @staticmethod
+    def _response(recorder: TraceRecorder, slug: str, **kwargs) -> ScriptedResponse:
+        return ScriptedResponse(
+            recorder,
+            "https://www.linkedin.com/feed/",
+            f'{{"postSlugUrl":"https://www.linkedin.com/posts/{slug}"}}'.encode(),
+            **kwargs,
+        )
+
+    async def test_a_timed_out_read_is_recovered_as_later_progress(self):
+        recorder = TraceRecorder(
+            "feed-in-loop-drain-recovery",
+            _COMMON_ALLOWED | {"response.body.start", "response.body.finish"},
+        )
+        clock = FakeClock(recorder)
+        release = asyncio.Event()
+        response = self._response(
+            recorder,
+            "delayed-ugcPost-1234567890-example",
+            release=release,
+        )
+        page = _page(recorder).script("evaluate:root_content", _root("Feed content"))
+        page.script("mouse.wheel", lambda: page.emit("response", response))
+        scraper = _scraper(page)
+        delay_calls = 0
+        real_wait = asyncio.wait
+        real_monotonic = time.monotonic
+        waits: list[tuple[float | None, int]] = []
+
+        async def delay(_session: ScrapingSession, seconds: float) -> None:
+            nonlocal delay_calls
+            delay_calls += 1
+            if delay_calls == 2:
+                release.set()
+            await clock.sleep(seconds)
+
+        async def observing_wait(pending, *, timeout=None):
+            done, still = await real_wait(pending, timeout=timeout)
+            waits.append((timeout, len(still)))
+            return done, still
+
+        begun = time.monotonic()
+        async with boundaries(recorder, clock):
+            with (
+                patch.object(ScrapingSession, "delay", delay),
+                patch.object(feed_module.asyncio, "wait", observing_wait),
+                patch.object(session_module.time, "monotonic", real_monotonic),
+                recorder.context("extract_feed", "feed"),
+            ):
+                result = await asyncio.wait_for(
+                    scraper.extract_feed(num_posts=1), timeout=3.0
+                )
+        elapsed = time.monotonic() - begun
+
+        assert waits[0] == (1.0, 1)
+        assert any(timeout == 1.0 and pending == 0 for timeout, pending in waits[1:])
+        assert elapsed >= 0.9, elapsed
+        assert [ref["url"] for ref in result.references] == [
+            "/posts/delayed-ugcPost-1234567890-example"
+        ]
+        assert (
+            len([event for event in recorder.events if event["kind"] == "mouse.wheel"])
+            == 1
+        )
+        page.assert_clean()
+
+    async def test_an_unexpected_read_failure_warns_without_losing_valid_progress(
+        self, caplog
+    ):
+        class DecodeFailure(bytes):
+            def decode(self, *_args, **_kwargs):
+                raise RuntimeError("payload decode exploded")
+
+        recorder = TraceRecorder(
+            "feed-unexpected-read-failure",
+            _COMMON_ALLOWED | {"response.body.start", "response.body.finish"},
+        )
+        clock = FakeClock(recorder)
+        broken = ScriptedResponse(
+            recorder,
+            "https://www.linkedin.com/feed/",
+            DecodeFailure(b"payload"),
+        )
+        valid = self._response(recorder, "valid-ugcPost-1234567890-example")
+        page = _page(recorder).script("evaluate:root_content", _root("Feed content"))
+        page.script(
+            "mouse.wheel",
+            lambda: (page.emit("response", broken), page.emit("response", valid)),
+        )
+        scraper = _scraper(page)
+
+        async with boundaries(recorder, clock):
+            with (
+                caplog.at_level(logging.WARNING, logger=feed_module.__name__),
+                recorder.context("extract_feed", "feed"),
+            ):
+                result = await scraper.extract_feed(num_posts=1)
+
+        records = [
+            record
+            for record in caplog.records
+            if record.message.startswith("Unhandled error in feed _read task:")
+        ]
+        assert len(records) == 1
+        assert "payload decode exploded" in records[0].message
+        assert [ref["url"] for ref in result.references] == [
+            "/posts/valid-ugcPost-1234567890-example"
+        ]
+        page.assert_clean()
+
+    async def test_duplicate_urls_do_not_satisfy_the_target_or_reset_staleness(self):
+        recorder = TraceRecorder(
+            "feed-duplicate-progress",
+            _COMMON_ALLOWED | {"response.body.start", "response.body.finish"},
+        )
+        clock = FakeClock(recorder)
+        duplicate = self._response(recorder, "same-ugcPost-1234567890-example")
+        page = _page(recorder).script("evaluate:root_content", _root("Feed content"))
+        page.script(
+            "mouse.wheel",
+            *[lambda: page.emit("response", duplicate) for _ in range(4)],
+        )
+        scraper = _scraper(page)
+
+        async with boundaries(recorder, clock):
+            with recorder.context("extract_feed", "feed"):
+                result = await scraper.extract_feed(num_posts=2)
+
+        wheels = [event for event in recorder.events if event["kind"] == "mouse.wheel"]
+        assert len(wheels) == 4
+        assert [ref["url"] for ref in result.references] == [
+            "/posts/same-ugcPost-1234567890-example"
+        ]
+        page.assert_clean()
+
+
+class TestFeedOutputBoundaries:
+    """Text governs whether captured references are meaningful output."""
+
+    @pytest.mark.parametrize(
+        ("raw", "expected_text", "reference_count", "warns"),
+        [
+            ("", "", 0, False),
+            (" \n ", "", 1, False),
+            (
+                "More profiles for you\nAbout\nAccessibility\nTalent Solutions",
+                RATE_LIMITED_SECTION_TEXT,
+                0,
+                True,
+            ),
+            ("Readable feed content", "Readable feed content", 1, False),
+        ],
+        ids=("exact-empty", "whitespace", "chrome-only", "readable"),
+    )
+    async def test_text_and_reference_boundaries(
+        self, raw, expected_text, reference_count, warns, caplog
+    ):
+        recorder = TraceRecorder(
+            f"feed-output-{reference_count}-{warns}", _COMMON_ALLOWED
+        )
+        clock = FakeClock(recorder)
+        page = _page(recorder).script("evaluate:root_content", _root(raw))
+        scraper = _scraper(page)
+        captured = ["https://www.linkedin.com/posts/output-ugcPost-1234567890-example"]
+
+        async with boundaries(recorder, clock):
+            with (
+                caplog.at_level(logging.WARNING, logger=feed_module.__name__),
+                recorder.context("extract_feed", "feed"),
+            ):
+                result = await scraper._extract_feed_body(
+                    "https://www.linkedin.com/feed/",
+                    1,
+                    captured,
+                    [],
+                )
+
+        assert result.text == expected_text
+        assert len(result.references) == reference_count
+        warning = "returned only LinkedIn chrome (likely rate-limited)"
+        assert (warning in caplog.text) is warns
         page.assert_clean()
 
 

@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import asyncio
 
 import pytest
+from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 
 from linkedin_mcp_server.core.exceptions import (
@@ -241,6 +242,58 @@ class TestGetReadyExtractor:
             mock_handle.assert_awaited_once()
             # First arg should be the AuthenticationError
             assert isinstance(mock_handle.call_args[0][0], AuthenticationError)
+
+    async def test_registered_feed_tool_routes_exact_auth_error_to_recovery(self):
+        """The registered MCP boundary awaits the real recovery policy."""
+        from linkedin_mcp_server.tools import feed as feed_tools
+
+        challenged = AuthenticationError("feed session challenged")
+        extractor = MagicMock()
+        extractor.extract_feed = AsyncMock(side_effect=challenged)
+        mcp = FastMCP("feed-auth-recovery")
+        feed_tools.register_feed_tools(mcp)
+
+        with (
+            patch.object(
+                feed_tools,
+                "get_ready_extractor",
+                new_callable=AsyncMock,
+                return_value=extractor,
+            ),
+            patch.object(
+                feed_tools,
+                "handle_auth_error",
+                new=AsyncMock(wraps=handle_auth_error),
+            ) as routed,
+            patch(
+                "linkedin_mcp_server.dependencies.get_runtime_policy",
+                return_value="managed",
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.current_login_generation",
+                return_value="challenged-generation",
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.close_browser",
+                new_callable=AsyncMock,
+            ) as close,
+            patch(
+                "linkedin_mcp_server.dependencies.invalidate_auth_and_trigger_relogin",
+                new_callable=AsyncMock,
+                side_effect=AuthenticationStartedError("login opened"),
+            ) as relogin,
+        ):
+            async with Client(mcp) as client:
+                with pytest.raises(ToolError, match="login opened"):
+                    await client.call_tool("get_feed", {"num_posts": 1})
+
+        extractor.extract_feed.assert_awaited_once_with(num_posts=1)
+        routed.assert_awaited_once()
+        routed_call = routed.await_args
+        assert routed_call is not None
+        assert routed_call.args[0] is challenged
+        close.assert_awaited_once()
+        relogin.assert_awaited_once()
 
 
 class TestAnOwnerGoesQuiescentInsteadOfLoggingIn:
