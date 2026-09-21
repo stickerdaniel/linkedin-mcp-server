@@ -110,7 +110,7 @@ class JobApplyTextTable:
     description_heading: str
     # Whole lines a posting shows once it stops taking applications.
     closed_lines: tuple[str, ...]
-    # The line a posting shows once this account has applied. Anchored at both
+    # A line a posting shows once this account has applied. Anchored at both
     # ends, because titles such as "Applied AI Engineer" open with the word.
     applied_pattern: re.Pattern[str]
 
@@ -119,15 +119,24 @@ _JOB_APPLY_TEXT: dict[str, JobApplyTextTable] = {
     "en-US": JobApplyTextTable(
         external_apply_label="Apply",
         description_heading="About the job",
-        closed_lines=("No longer accepting applications",),
-        applied_pattern=re.compile(r"^Applied \d+ \w+ ago$"),
+        closed_lines=(
+            "No longer accepting applications",
+            "Not currently accepting applications",
+        ),
+        applied_pattern=re.compile(
+            r"^(?:Application submitted|Applied \d+ ?[a-z]+ ago)$"
+        ),
     ),
 }
 
 # Same locale contract as `DETAIL_CAPTURE_EN_US`. The label and the heading were
-# measured on 2026-09-14 against an external and an Easy Apply posting. The
-# closed and applied lines were not, for want of such a posting: one showing
-# other words reads as `unknown` rather than as open.
+# measured on 2026-09-14 against an external and an Easy Apply posting. On
+# 2026-09-21 an applied posting that was still open read "Application status",
+# "Application submitted", "2 days ago" and no "Applied N days ago" line, and
+# two closed postings read one closed line each. "Applied 3 days ago" and
+# "Applied 5mo ago" are the classic posting's and the job tracker's forms of
+# the same state. A posting showing other words reads as `unknown` rather than
+# as open.
 JOB_APPLY_EN_US = _JOB_APPLY_TEXT["en-US"]
 
 # Patterns that mark the start of LinkedIn page chrome (sidebar/footer).

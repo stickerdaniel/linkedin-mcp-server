@@ -61,10 +61,11 @@
     },
     {
       "arg": {
-        "appliedPattern": "^Applied \\d+ \\w+ ago$",
+        "appliedPattern": "^(?:Application submitted|Applied \\d+ ?[a-z]+ ago)$",
         "applyPath": "/jobs/view/123/apply",
         "closedLines": [
-          "No longer accepting applications"
+          "No longer accepting applications",
+          "Not currently accepting applications"
         ],
         "descriptionHeading": "About the job",
         "externalLabel": "Apply"
@@ -77,10 +78,11 @@
     },
     {
       "arg": {
-        "appliedPattern": "^Applied \\d+ \\w+ ago$",
+        "appliedPattern": "^(?:Application submitted|Applied \\d+ ?[a-z]+ ago)$",
         "applyPath": "/jobs/view/123/apply",
         "closedLines": [
-          "No longer accepting applications"
+          "No longer accepting applications",
+          "Not currently accepting applications"
         ],
         "descriptionHeading": "About the job",
         "externalLabel": "Apply"

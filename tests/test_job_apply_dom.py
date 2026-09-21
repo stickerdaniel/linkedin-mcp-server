@@ -254,10 +254,18 @@ async def test_a_name_resolving_into_this_host_is_never_loaded(
     assert not any("jobs.acme.example" in url for url in requested)
 
 
-async def test_an_applied_posting_is_not_clicked(dom_page):
+@pytest.mark.parametrize(
+    "state",
+    [
+        "<p>Application status</p><p>Application submitted</p><p>2 days ago</p>",
+        "<p>Applied 3 days ago</p>",
+        "<p>Applied 5mo ago</p>",
+    ],
+)
+async def test_an_applied_posting_is_not_clicked(dom_page, state):
     html = posting(
         EXTERNAL,
-        state="<p>Applied 3 days ago</p>",
+        state=state,
         script=click_opens_dialog(safety("https://acme.example/")),
     )
 
@@ -271,8 +279,11 @@ async def test_an_applied_posting_is_not_clicked(dom_page):
     )
 
 
-async def test_a_closed_posting_is_its_state(dom_page):
-    html = posting("", state="<p>No longer accepting applications</p>")
+@pytest.mark.parametrize(
+    "line", ["No longer accepting applications", "Not currently accepting applications"]
+)
+async def test_a_closed_posting_is_its_state(dom_page, line):
+    html = posting("", state=f"<p>{line}</p>")
 
     assert await read(dom_page, html) == JobApplyRead("closed")
 
