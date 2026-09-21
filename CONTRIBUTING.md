@@ -159,8 +159,9 @@ when the reviewed policy change is intentional.
 2. Create a branch: `feature/<issue-number>-<short-description>` or `fix/<issue-number>-<short-description>`
 3. Implement, test, and update docs (see checklists above)
 4. Open a PR — AI agents review first, then manual review
-5. Complete the model attribution line supplied by the PR template; CI requires
-   it before merge
+5. Complete the model attribution line supplied by the PR template. CI requires
+   the model before merge; the job and coding-agent harness are preferred
+   provenance, with an outer host or wrapper optionally added as `via <host>`
 6. PRs are squash-merged into `main`, so the PR title becomes the commit
    subject; commits inside a PR are for review only
 
