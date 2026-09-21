@@ -11,7 +11,10 @@ import pytest
 from patchright.async_api import Error as PatchrightError
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
-from linkedin_mcp_server.core.exceptions import AuthenticationError
+from linkedin_mcp_server.core.exceptions import (
+    AuthenticationError,
+    LinkedInScraperException,
+)
 from linkedin_mcp_server.scraping import jobs as jobs_module
 from linkedin_mcp_server.scraping.capture import CapturePlan, SectionCapture
 from linkedin_mcp_server.scraping.content import PageContentReader
@@ -152,6 +155,147 @@ class TestScrapeJob:
             "job posting",
             "similar job",
         ]
+
+
+class TestSaveJob:
+    async def test_save_job_already_saved(self, mock_page):
+        scraper = _scraper(mock_page)
+        with (
+            patch.object(scraper._pages, "open_job_posting", new_callable=AsyncMock),
+            patch.object(
+                scraper._pages,
+                "save_control_state",
+                new_callable=AsyncMock,
+                return_value="saved",
+            ),
+            patch.object(
+                scraper._pages, "click_save_control", new_callable=AsyncMock
+            ) as click_save,
+        ):
+            result = await scraper.save_job("12345")
+
+        assert result == {
+            "url": "https://www.linkedin.com/jobs/view/12345/",
+            "job_id": "12345",
+            "saved": True,
+            "already_saved": True,
+        }
+        click_save.assert_not_awaited()
+
+    async def test_save_job_clicks_save(self, mock_page):
+        scraper = _scraper(mock_page)
+        with (
+            patch.object(
+                scraper._pages, "open_job_posting", new_callable=AsyncMock
+            ) as open_posting,
+            patch.object(
+                scraper._pages,
+                "save_control_state",
+                new_callable=AsyncMock,
+                side_effect=["unsaved", "saved"],
+            ) as save_state,
+            patch.object(
+                scraper._pages,
+                "click_save_control",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as click_save,
+            patch(
+                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await scraper.save_job("12345")
+
+        assert result == {
+            "url": "https://www.linkedin.com/jobs/view/12345/",
+            "job_id": "12345",
+            "saved": True,
+            "already_saved": False,
+        }
+        open_posting.assert_awaited_once_with(
+            "https://www.linkedin.com/jobs/view/12345/"
+        )
+        click_save.assert_awaited_once_with("unsaved")
+        assert save_state.await_count == 2
+
+    async def test_save_job_raises_when_click_does_not_stick(self, mock_page):
+        """A dispatched click that leaves the control unsaved is a failure.
+
+        The click helper returns True the moment .click() goes out; LinkedIn
+        can swallow it. Reporting saved here would make callers treat the job
+        as persisted when it is not.
+        """
+        scraper = _scraper(mock_page)
+        with (
+            patch.object(scraper._pages, "open_job_posting", new_callable=AsyncMock),
+            patch.object(
+                scraper._pages,
+                "save_control_state",
+                new_callable=AsyncMock,
+                side_effect=["unsaved", "unsaved"],
+            ),
+            patch.object(
+                scraper._pages,
+                "click_save_control",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+            pytest.raises(
+                LinkedInScraperException, match="did not switch to its saved state"
+            ),
+        ):
+            await scraper.save_job("12345")
+
+    async def test_save_job_normalizes_a_job_reference(self, mock_page):
+        """A full job URL is accepted and reduced to the numeric id."""
+        scraper = _scraper(mock_page)
+        with (
+            patch.object(
+                scraper._pages, "open_job_posting", new_callable=AsyncMock
+            ) as open_posting,
+            patch.object(
+                scraper._pages,
+                "save_control_state",
+                new_callable=AsyncMock,
+                return_value="saved",
+            ),
+        ):
+            result = await scraper.save_job("/jobs/view/4252026496/")
+
+        assert result == {
+            "url": "https://www.linkedin.com/jobs/view/4252026496/",
+            "job_id": "4252026496",
+            "saved": True,
+            "already_saved": True,
+        }
+        open_posting.assert_awaited_once_with(
+            "https://www.linkedin.com/jobs/view/4252026496/"
+        )
+
+    async def test_save_job_raises_when_save_button_missing(self, mock_page):
+        scraper = _scraper(mock_page)
+        with (
+            patch.object(scraper._pages, "open_job_posting", new_callable=AsyncMock),
+            patch.object(
+                scraper._pages,
+                "save_control_state",
+                new_callable=AsyncMock,
+                return_value="unsaved",
+            ),
+            patch.object(
+                scraper._pages,
+                "click_save_control",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            pytest.raises(LinkedInScraperException, match="Save button"),
+        ):
+            await scraper.save_job("12345")
 
 
 class TestSearchJobs:

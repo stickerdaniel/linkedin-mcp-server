@@ -9,7 +9,10 @@ import asyncio
 import pytest
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
-from linkedin_mcp_server.core.exceptions import AuthenticationError
+from linkedin_mcp_server.core.exceptions import (
+    AuthenticationError,
+    LinkedInScraperException,
+)
 from linkedin_mcp_server.scraping import job_pages as job_pages_module
 from linkedin_mcp_server.scraping.content import PageContentReader
 from linkedin_mcp_server.scraping.contracts import ExtractedSection
@@ -1375,3 +1378,84 @@ class TestExtractJobIds:
             assert await reader._extract_job_ids(scoped=True) == ["101", "999"]
 
         assert "No results rail" in caplog.text
+
+
+class TestOpenJobPosting:
+    async def test_navigates_and_clears_what_a_click_would_land_on(self, mock_page):
+        reader = _reader(mock_page)
+        with (
+            patch.object(
+                PageNavigator, "_navigate_to_page", new_callable=AsyncMock
+            ) as navigate,
+            patch(
+                "linkedin_mcp_server.scraping.job_pages.detect_rate_limit",
+                new_callable=AsyncMock,
+            ) as detect,
+            patch(
+                "linkedin_mcp_server.scraping.job_pages.handle_modal_close",
+                new_callable=AsyncMock,
+            ) as close_modal,
+        ):
+            await reader.open_job_posting("https://www.linkedin.com/jobs/view/12345/")
+
+        navigate.assert_awaited_once_with("https://www.linkedin.com/jobs/view/12345/")
+        detect.assert_awaited_once_with(mock_page)
+        close_modal.assert_awaited_once_with(mock_page)
+
+
+class TestSaveControl:
+    async def test_state_uses_active_locale(self, mock_page):
+        reader = _reader(mock_page)
+        mock_page.evaluate = AsyncMock(side_effect=["en-US", "saved"])
+
+        result = await reader.save_control_state()
+
+        assert result == "saved"
+        assert mock_page.evaluate.await_args_list[1].args[1] == {
+            "labels": {"saved": "Saved", "unsaved": "Save"}
+        }
+
+    async def test_state_rejects_unknown_locale(self, mock_page):
+        reader = _reader(mock_page)
+        mock_page.evaluate = AsyncMock(return_value="de-DE")
+
+        with pytest.raises(
+            LinkedInScraperException, match="not supported for browser locale"
+        ):
+            await reader.save_control_state()
+
+    async def test_state_rejects_an_ambiguous_control(self, mock_page):
+        """Two matching controls make the read null, and null is not a state.
+
+        Returning either one would be the reader guessing which Save button
+        the caller meant.
+        """
+        reader = _reader(mock_page)
+        mock_page.evaluate = AsyncMock(side_effect=["en", None])
+
+        with pytest.raises(
+            LinkedInScraperException, match="Could not uniquely identify"
+        ):
+            await reader.save_control_state()
+
+    async def test_click_targets_the_expected_state_label(self, mock_page):
+        reader = _reader(mock_page)
+        mock_page.evaluate = AsyncMock(side_effect=["en", True])
+
+        assert await reader.click_save_control("saved") is True
+        assert mock_page.evaluate.await_args_list[1].args[1] == {
+            "expectedLabel": "Saved"
+        }
+
+    async def test_click_reports_a_failed_evaluation(self, mock_page):
+        """A destroyed context is a false answer, not an exception.
+
+        The caller reads the state again before deciding, and a raise here
+        would turn a click that never landed into a section diagnostic.
+        """
+        reader = _reader(mock_page)
+        mock_page.evaluate = AsyncMock(
+            side_effect=["en", RuntimeError("Execution context was destroyed")]
+        )
+
+        assert await reader.click_save_control("unsaved") is False

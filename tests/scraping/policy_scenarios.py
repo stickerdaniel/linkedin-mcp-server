@@ -504,6 +504,32 @@ async def _saved_jobs_scenario() -> dict[str, Any]:
     )
 
 
+async def _job_save_scenario(*, already_saved: bool = False) -> dict[str, Any]:
+    name = (
+        "save_job__already_saved"
+        if already_saved
+        else "save_job__clicks_unsaved_control"
+    )
+    recorder = TraceRecorder(name, _COMMON_ALLOWED)
+    clock = FakeClock(recorder)
+    page = _page(recorder)
+    if already_saved:
+        page.script("evaluate:browser_locale", "en-US").script(
+            "evaluate:job_save_state", "saved"
+        )
+    else:
+        page.script("evaluate:browser_locale", "en-US", "en-US", "en-US").script(
+            "evaluate:job_save_state", "unsaved", "saved"
+        ).script("evaluate:job_save_click", True)
+    extractor = _extractor(page)
+    arguments = {"job_id": "123"}
+    async with boundaries(recorder, clock):
+        with recorder.context("save_job"):
+            result = await extractor.save_job(**arguments)
+    page.assert_clean()
+    return recorder.trace({"method": "save_job", "arguments": arguments}, result)
+
+
 async def _feed_stale_scenario() -> dict[str, Any]:
     name = "extract_feed__stale_stop"
     recorder = TraceRecorder(name, _COMMON_ALLOWED)
@@ -1030,6 +1056,7 @@ TOOL_FACADE_METHODS = {
     "get_my_profile",
     "get_saved_jobs",
     "get_sidebar_profiles",
+    "save_job",
     "scrape_company",
     "scrape_job",
     "scrape_person",
@@ -1069,6 +1096,8 @@ async def build_policy_traces() -> dict[str, dict[str, Any]]:
         ),
         "job-search-metadata-upgrade.json": await _job_search_upgrade_scenario(),
         "saved-jobs.json": await _saved_jobs_scenario(),
+        "save-job.json": await _job_save_scenario(),
+        "save-job-already-saved.json": await _job_save_scenario(already_saved=True),
         "feed-stale.json": await _feed_stale_scenario(),
         "feed-response-success.json": await _feed_response_scenario(body_failure=False),
         "feed-response-failure.json": await _feed_response_scenario(body_failure=True),

@@ -44,8 +44,8 @@ instances, clear profiles, or replace the user's browser session.
 - Jobs: `search_jobs`, `get_saved_jobs`, and `get_job_details`.
 - Content: `get_feed` and `search_posts`.
 - Messages: `get_inbox`, `get_conversation`, and `search_conversations`.
-- Writes: `send_message` and `connect_with_person`, subject to the explicit
-  authorization rules above.
+- Writes: `send_message`, `connect_with_person`, and `save_job`, subject to the
+  explicit authorization rules above.
 - Cleanup: use `close_session` only when the user asks to end the managed
   browser session or when the current LinkedIn task is finished and no follow-up
   call is expected.

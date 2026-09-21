@@ -1,0 +1,94 @@
+{
+  "call": {
+    "arguments": {
+      "job_id": "123"
+    },
+    "method": "save_job"
+  },
+  "events": [
+    {
+      "call": "save_job",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add"
+    },
+    {
+      "call": "save_job",
+      "extra": {
+        "target_url": "https://www.linkedin.com/jobs/view/123/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto"
+    },
+    {
+      "call": "save_job",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/jobs/view/123/",
+      "requested_url": "https://www.linkedin.com/jobs/view/123/",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "save_job",
+      "description": "goto https://www.linkedin.com/jobs/view/123/",
+      "kind": "boundary.stabilize",
+      "result": null
+    },
+    {
+      "call": "save_job",
+      "extra": {
+        "target_url": "https://www.linkedin.com/jobs/view/123/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto"
+    },
+    {
+      "call": "save_job",
+      "kind": "boundary.auth_quick",
+      "result": null
+    },
+    {
+      "call": "save_job",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove"
+    },
+    {
+      "call": "save_job",
+      "kind": "boundary.rate_limit"
+    },
+    {
+      "call": "save_job",
+      "dismissed": false,
+      "kind": "boundary.modal"
+    },
+    {
+      "call": "save_job",
+      "kind": "evaluate",
+      "operation": "browser_locale",
+      "program_digest": "77274072586e"
+    },
+    {
+      "arg": {
+        "labels": {
+          "saved": "Saved",
+          "unsaved": "Save"
+        }
+      },
+      "call": "save_job",
+      "kind": "evaluate",
+      "operation": "job_save_state",
+      "program_digest": "b0a91fe3de78"
+    }
+  ],
+  "result": {
+    "already_saved": true,
+    "job_id": "123",
+    "saved": true,
+    "url": "https://www.linkedin.com/jobs/view/123/"
+  },
+  "scenario": "save_job__already_saved",
+  "schema_version": 1
+}
