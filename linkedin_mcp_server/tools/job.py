@@ -50,6 +50,9 @@ def register_job_tools(
             section_errors.job_posting.error_type "description_missing" means
             the captured text lacks the expected "About the job" heading.
             The text is kept but may be incomplete; calling again may return more.
+            A posting that shows it was applied to or has closed also carries
+            apply: {type: "applied" | "closed"}; no apply key means neither
+            was read, not that the posting is open.
         """
         try:
             job_id = normalize_job_id(job_id)
