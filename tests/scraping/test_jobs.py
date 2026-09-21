@@ -2198,6 +2198,84 @@ class TestSearchJobs:
         assert mock_promoted.await_count == 2
         assert "promoted_job_ids" not in result
 
+    async def test_reads_the_requested_stage(self, mock_page):
+        scraper = _scraper(mock_page)
+        urls_visited: list[str] = []
+        navigate = self._navigating(mock_page, [extracted("Applied Job 1")])
+
+        async def mock_extract(url, *args, **kwargs):
+            urls_visited.append(url)
+            return await navigate(url)
+
+        with (
+            patch.object(
+                scraper._pages, "_extract_saved_jobs_page", side_effect=mock_extract
+            ),
+            patch.object(
+                scraper._pages,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["111"],
+            ),
+            patch.object(
+                scraper._pages,
+                "_get_total_list_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await scraper.get_saved_jobs(max_pages=1, stage="applied")
+
+        assert urls_visited == ["https://www.linkedin.com/jobs-tracker/?stage=applied"]
+        assert result["job_ids"] == ["111"]
+
+    async def test_a_dropped_stage_is_reported_not_returned(self, mock_page):
+        """A tracker that lost ``?stage=`` shows the saved tab.
+
+        Returning it would hand saved jobs back as applied ones.
+        """
+        scraper = _scraper(mock_page)
+        with (
+            patch.object(
+                scraper._pages,
+                "_extract_saved_jobs_page",
+                side_effect=self._navigating(
+                    mock_page,
+                    [extracted("Saved Job 1")],
+                    lands_on="https://www.linkedin.com/jobs-tracker/",
+                ),
+            ),
+            patch.object(
+                scraper._pages,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["111"],
+            ) as mock_ids,
+            patch.object(
+                scraper._pages,
+                "_get_total_list_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch.object(
+                scraper._navigator, "_raise_if_auth_barrier", new_callable=AsyncMock
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await scraper.get_saved_jobs(max_pages=1, stage="applied")
+
+        assert result["job_ids"] == []
+        assert result["sections"] == {}
+        assert "saved_jobs" in result["section_errors"]
+        mock_ids.assert_not_awaited()
+
     async def test_a_login_redirect_raises_an_auth_error(self, mock_page):
         """A login wall reached mid-search is an expired session.
 
@@ -2467,7 +2545,7 @@ class TestGetSavedJobs:
 
     @pytest.fixture(autouse=True)
     def _set_saved_jobs_url(self, mock_page):
-        mock_page.url = "https://www.linkedin.com/my-items/saved-jobs/"
+        mock_page.url = "https://www.linkedin.com/jobs-tracker/?stage=saved"
 
     @staticmethod
     def _navigating(mock_page, texts, *, lands_on=None):
@@ -2515,7 +2593,7 @@ class TestGetSavedJobs:
 
         assert result["job_ids"] == ["111", "222"]
         assert "saved_jobs" in result["sections"]
-        assert result["url"] == "https://www.linkedin.com/my-items/saved-jobs/"
+        assert result["url"] == "https://www.linkedin.com/jobs-tracker/?stage=saved"
 
     async def test_a_foreign_host_is_not_the_saved_jobs_list(self, mock_page):
         """A substring test accepts any origin serving this path.
@@ -2668,9 +2746,9 @@ class TestGetSavedJobs:
 
         assert result["job_ids"] == ["100", "200", "300", "400"]
         assert urls_visited == [
-            "https://www.linkedin.com/my-items/saved-jobs/",
-            "https://www.linkedin.com/my-items/saved-jobs/?start=10",
-            "https://www.linkedin.com/my-items/saved-jobs/?start=20",
+            "https://www.linkedin.com/jobs-tracker/?stage=saved",
+            "https://www.linkedin.com/jobs-tracker/?stage=saved&start=10",
+            "https://www.linkedin.com/jobs-tracker/?stage=saved&start=20",
         ]
 
     async def test_early_stop_no_new_ids(self, mock_page):
@@ -2969,14 +3047,11 @@ class TestGetSavedJobs:
         assert result["sections"]["saved_jobs"] == "first page"
         assert result["section_errors"]["saved_jobs"]["error_type"] == "rate_limit"
 
-    async def test_the_jobs_tracker_redirect_is_the_list(self, mock_page):
-        """LinkedIn answers the saved-jobs URL with a redirect now.
+    async def test_the_tracker_without_a_stage_is_the_saved_list(self, mock_page):
+        """``/jobs-tracker/`` with no ``?stage=`` shows the saved tab.
 
-        Measured on 2026-08-21 against an authenticated profile:
-        ``/my-items/saved-jobs/`` lands on ``/jobs-tracker/``, and the query
-        is dropped on the way, for ``?start=10`` as well. Refusing that
-        destination makes every call return an empty list for every account,
-        which is indistinguishable from having nothing saved.
+        Refusing it would return an empty list whenever LinkedIn drops the
+        parameter, which reads as having nothing saved.
         """
         mock_page.url = "https://www.linkedin.com/jobs-tracker/"
         scraper = _scraper(mock_page)
