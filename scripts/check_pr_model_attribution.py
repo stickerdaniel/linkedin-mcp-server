@@ -16,18 +16,23 @@ _PLACEHOLDER_RE = re.compile(r"<[^>]*>|\[[^]]*]")
 _RESERVED_MINIMAL_PARTS = (" for ", " in ", " and ", " via ")
 _ERROR = (
     "Model attribution is required as the final non-empty PR body line. "
-    'Model-only is the minimum: "Generated with Claude Opus 5." '
-    "Detailed attribution with the job, coding-agent harness, and optional "
-    'host is recommended: "Generated with Claude Opus 5 for implementation in '
-    'Claude Code via T3 Code." Use commas or "/" between jobs for one model; '
-    '"and" separates model/job pairs.'
+    'Model-only is the minimum, with an optional final period: "Generated with '
+    'Claude Opus 5" or "Generated with Claude Opus 5." Detailed attribution '
+    "with the job, coding-agent harness, optional host, and final period is "
+    'recommended: "Generated with Claude Opus 5 for implementation in Claude '
+    'Code via T3 Code." Use commas or "/" between jobs for one model; "and" '
+    "separates model/job pairs."
 )
+
+
+def _has_model_name(value: str) -> bool:
+    return bool(value.strip()) and any(character.isalnum() for character in value)
 
 
 def _has_valid_model_jobs(attribution: str) -> bool:
     for model_job in attribution.split(" and "):
         model, separator, job = model_job.partition(" for ")
-        if not separator or not model.strip() or not job.strip():
+        if not separator or not _has_model_name(model) or not job.strip():
             return False
     return True
 
@@ -41,18 +46,20 @@ def _has_valid_harness(value: str) -> bool:
 
 def is_valid_attribution(line: str) -> bool:
     """Return whether a line follows the required attribution grammar."""
-    if not line.startswith(_PREFIX) or not line.endswith("."):
-        return False
-    if _PLACEHOLDER_RE.search(line):
+    if not line.startswith(_PREFIX) or _PLACEHOLDER_RE.search(line):
         return False
 
-    attribution = line[len(_PREFIX) : -1]
+    has_final_period = line.endswith(".")
+    attribution = line[len(_PREFIX) : -1] if has_final_period else line[len(_PREFIX) :]
     model_jobs, separator, harness = attribution.rpartition(" in ")
     if separator:
-        return _has_valid_harness(harness) and _has_valid_model_jobs(model_jobs)
-    return bool(
-        attribution.strip()
-        and not any(part in attribution for part in _RESERVED_MINIMAL_PARTS)
+        return (
+            has_final_period
+            and _has_valid_harness(harness)
+            and _has_valid_model_jobs(model_jobs)
+        )
+    return _has_model_name(attribution) and not any(
+        part in attribution for part in _RESERVED_MINIMAL_PARTS
     )
 
 
