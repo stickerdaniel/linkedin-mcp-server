@@ -99,7 +99,7 @@ def safety(destination: str) -> str:
 def click_opens_dialog(href: str) -> str:
     return f"""
     document.querySelector('main button').addEventListener('click', () => {{
-        window.clicked = true;
+        document.body.dataset.clicked = 'true';
         const dialog = document.createElement('dialog');
         dialog.innerHTML = '<a href="https://www.linkedin.com/in/me/">Me</a>'
             + '<a target="_blank" href="{href}">Continue</a>';
@@ -107,6 +107,16 @@ def click_opens_dialog(href: str) -> str:
         dialog.showModal();
     }});
     """
+
+
+async def clicked(page) -> bool:
+    """Whether the page's Apply handler ran.
+
+    The handler records it on the DOM rather than in a global: a page script
+    runs in the main world while ``evaluate`` defaults to an isolated one,
+    where the page's globals always read undefined. Both worlds share the DOM.
+    """
+    return await page.evaluate("() => document.body.dataset.clicked === 'true'")
 
 
 def click_opens_tab(href: str) -> str:
@@ -224,7 +234,7 @@ async def test_an_apply_below_the_description_belongs_to_another_posting(dom_pag
     )
 
     assert await read(dom_page, html) == JobApplyRead("unknown")
-    assert await dom_page.evaluate("() => window.clicked === true") is False
+    assert not await clicked(dom_page)
 
 
 async def test_a_destination_inside_this_host_is_never_loaded(dom_page, requested):
@@ -270,13 +280,7 @@ async def test_an_applied_posting_is_not_clicked(dom_page, state):
     )
 
     assert await read(dom_page, html) == JobApplyRead("applied")
-    # The page script sets window.clicked in the main world. evaluate defaults
-    # to isolated_context=True, where that variable is always undefined and the
-    # assertion cannot fail, so this one reads the world the click writes to.
-    assert (
-        await dom_page.evaluate("() => window.clicked === true", isolated_context=False)
-        is False
-    )
+    assert not await clicked(dom_page)
 
 
 @pytest.mark.parametrize(
