@@ -2242,6 +2242,425 @@ def require_successful_actor_completion(
         )
 
 
+def classify_breakaway_result(
+    *,
+    process_created: bool,
+    memberships: dict[str, bool] | None,
+    error_code: int | None,
+) -> str:
+    if not process_created:
+        if error_code is None:
+            raise RuntimeError("a failed breakaway creation has no Win32 error")
+        return "could-not-start"
+    if memberships is None:
+        raise RuntimeError("a created breakaway process has no membership witness")
+    if set(memberships) != {"inner", "outer"}:
+        raise RuntimeError("breakaway membership must identify inner and outer Jobs")
+    if not memberships["inner"] and memberships["outer"]:
+        return "inner-only-breakaway"
+    if not memberships["inner"] and not memberships["outer"]:
+        return "all-known-jobs-breakaway"
+    if memberships["inner"] and memberships["outer"]:
+        return "retained-in-inner-and-outer"
+    return "retained-in-inner-only"
+
+
+def membership_matrix(
+    *,
+    inner: bool,
+    outer: bool,
+) -> dict[str, bool]:
+    return {"inner": inner, "outer": outer}
+
+
+def topology_runner(scenario: str) -> str:
+    if scenario.startswith("job-topology-"):
+        return "job-topology"
+    if scenario.startswith("conjunction-"):
+        return "conjunction"
+    if scenario.startswith("falsification-"):
+        return "region-falsification"
+    return "crash-fence"
+
+
+def _win32_error_code(exc: BaseException) -> int:
+    code = getattr(exc, "winerror", None)
+    if isinstance(code, int):
+        return code
+    if exc.args and isinstance(exc.args[0], int):
+        return int(exc.args[0])
+    raise RuntimeError("the Win32 failure exposed no numeric error code") from exc
+
+
+def _configure_topology_job(job: Any, *, breakaway: bool, win32job: Any) -> None:
+    if not breakaway:
+        return
+    limits = win32job.QueryInformationJobObject(
+        job, win32job.JobObjectExtendedLimitInformation
+    )
+    limits["BasicLimitInformation"]["LimitFlags"] |= (
+        win32job.JOB_OBJECT_LIMIT_BREAKAWAY_OK
+    )
+    win32job.SetInformationJobObject(
+        job, win32job.JobObjectExtendedLimitInformation, limits
+    )
+
+
+def _duplicate_real_self(win32api: Any, win32con: Any) -> Any:
+    pseudo = win32api.GetCurrentProcess()
+    return win32api.DuplicateHandle(
+        pseudo,
+        pseudo,
+        pseudo,
+        0,
+        False,
+        win32con.DUPLICATE_SAME_ACCESS,
+    )
+
+
+def _known_memberships(
+    process_handle: Any,
+    *,
+    inner_job: Any,
+    outer_job: Any,
+    win32job: Any,
+) -> dict[str, bool]:
+    return membership_matrix(
+        inner=bool(win32job.IsProcessInJob(process_handle, inner_job)),
+        outer=bool(win32job.IsProcessInJob(process_handle, outer_job)),
+    )
+
+
+def _popen_handle(process: subprocess.Popen[bytes]) -> Any:
+    handle = getattr(process, "_handle", None)
+    if handle is None:
+        raise RuntimeError("Windows Popen exposed no stable process handle")
+    return handle
+
+
+def _spawn_topology_holder(
+    ready_event: str,
+    release_event: str,
+    *,
+    creationflags: int = 0,
+) -> subprocess.Popen[bytes]:
+    return subprocess.Popen(
+        [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "topology-holder",
+            ready_event,
+            release_event,
+        ],
+        cwd=_REPO_ROOT,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        creationflags=creationflags,
+    )
+
+
+def _topology_actor(
+    scenario: str,
+    outer_job_name: str,
+    start_event: str,
+    result_file: Path,
+) -> int:
+    win32api, win32con, win32event, win32job = _windows_modules()
+    _actor_wait(start_event)
+    outer_job = win32job.OpenJobObject(
+        win32job.JOB_OBJECT_ALL_ACCESS, False, outer_job_name
+    )
+    inner_job = None
+    self_handle = _duplicate_real_self(win32api, win32con)
+    events: list[Any] = []
+    processes: list[subprocess.Popen[bytes]] = []
+    first_error: BaseException | None = None
+
+    def event(label: str) -> tuple[str, Any]:
+        name, handle = _new_event(win32event, label)
+        events.append(handle)
+        return name, handle
+
+    def spawn_holder(
+        label: str, *, creationflags: int = 0
+    ) -> tuple[subprocess.Popen[bytes], Any]:
+        ready_name, ready = event(f"{label}-ready")
+        release_name, release = event(f"{label}-release")
+        process = _spawn_topology_holder(
+            ready_name, release_name, creationflags=creationflags
+        )
+        processes.append(process)
+        return process, (ready, release)
+
+    def wait_ready(process: subprocess.Popen[bytes], ready: Any, phase: str) -> None:
+        try:
+            _wait(ready, _DEADLINE_SECONDS, f"{phase} did not become ready")
+        except BaseException as exc:
+            stdout, stderr = (
+                process.communicate() if process.poll() is not None else (b"", b"")
+            )
+            raise RuntimeError(
+                f"topology actor failed before ready: phase={phase} "
+                f"returncode={process.poll()!r} stdout={stdout!r} stderr={stderr!r}"
+            ) from exc
+
+    try:
+        actor_before = membership_matrix(
+            inner=False,
+            outer=bool(win32job.IsProcessInJob(self_handle, outer_job)),
+        )
+        if not actor_before["outer"]:
+            raise RuntimeError("topology actor was outside the outer harness Job")
+
+        if scenario == "job-topology-common-ancestor-loss":
+            common_name = _new_event_name("common-ancestor-job")
+            inner_job = win32job.CreateJobObject(None, common_name)
+            _configure_topology_job(inner_job, breakaway=False, win32job=win32job)
+            candidates: dict[str, subprocess.Popen[bytes]] = {}
+            controls: dict[str, tuple[Any, Any]] = {}
+            for label in ("owner", "guardian", "browser-descendant"):
+                process, control = spawn_holder(label)
+                candidates[label] = process
+                controls[label] = control
+                win32job.AssignProcessToJobObject(inner_job, _popen_handle(process))
+                wait_ready(process, control[0], label)
+            before = {
+                label: _known_memberships(
+                    _popen_handle(process),
+                    inner_job=inner_job,
+                    outer_job=outer_job,
+                    win32job=win32job,
+                )
+                for label, process in candidates.items()
+            }
+            terminated_ns = time.perf_counter_ns()
+            win32job.TerminateJobObject(inner_job, 204)
+            exits: dict[str, int] = {}
+            exit_codes: dict[str, int] = {}
+            for label, process in candidates.items():
+                _wait(
+                    _popen_handle(process),
+                    _DEADLINE_SECONDS,
+                    f"{label} survived common ancestor",
+                )
+                exits[label] = time.perf_counter_ns()
+                exit_codes[label] = process.wait(timeout=_DEADLINE_SECONDS)
+            after = {
+                label: {
+                    "active": _is_active(_popen_handle(process)),
+                    "memberships": _known_memberships(
+                        _popen_handle(process),
+                        inner_job=inner_job,
+                        outer_job=outer_job,
+                        win32job=win32job,
+                    ),
+                }
+                for label, process in candidates.items()
+            }
+            result = {
+                "scenario": scenario,
+                "topology": "disposable-common-ancestor",
+                "actor_memberships_before": actor_before,
+                "memberships_before_termination": before,
+                "common_ancestor_termination_requested_ns": terminated_ns,
+                "exit_observed_ns": exits,
+                "exit_codes": exit_codes,
+                "memberships_after_termination": after,
+                "browser_descendant_drained": not after["browser-descendant"]["active"],
+                "structural_counterexample": not after["owner"]["active"]
+                and not after["guardian"]["active"],
+            }
+            _atomic_json(result_file, result)
+            return 0
+
+        inner_name = _new_event_name("topology-inner-job")
+        inner_job = win32job.CreateJobObject(None, inner_name)
+        breakaway_enabled = scenario == "job-topology-breakaway"
+        _configure_topology_job(
+            inner_job, breakaway=breakaway_enabled, win32job=win32job
+        )
+        assignment_error = None
+        try:
+            win32job.AssignProcessToJobObject(inner_job, self_handle)
+            assignment_succeeded = True
+        except BaseException as exc:
+            assignment_succeeded = False
+            assignment_error = _win32_error_code(exc)
+        actor_after = _known_memberships(
+            self_handle,
+            inner_job=inner_job,
+            outer_job=outer_job,
+            win32job=win32job,
+        )
+
+        if scenario == "job-topology-self-assignment":
+            child, (child_ready, child_release) = spawn_holder("post-assignment-child")
+            wait_ready(child, child_ready, "post-assignment-child")
+            child_memberships = _known_memberships(
+                _popen_handle(child),
+                inner_job=inner_job,
+                outer_job=outer_job,
+                win32job=win32job,
+            )
+            result = {
+                "scenario": scenario,
+                "topology": "outer-harness-then-inner-self-assignment",
+                "actor_memberships_before_assignment": actor_before,
+                "self_assignment_succeeded": assignment_succeeded,
+                "self_assignment_error": assignment_error,
+                "actor_memberships_after_assignment": actor_after,
+                "post_assignment_child": {
+                    "created": True,
+                    "memberships": child_memberships,
+                },
+            }
+            _atomic_json(result_file, result)
+            win32event.SetEvent(child_release)
+            require_successful_actor_completion(child, "post-assignment-child")
+            return 0
+
+        ordinary, (ordinary_ready, ordinary_release) = spawn_holder("ordinary-child")
+        wait_ready(ordinary, ordinary_ready, "ordinary-child")
+        ordinary_memberships = _known_memberships(
+            _popen_handle(ordinary),
+            inner_job=inner_job,
+            outer_job=outer_job,
+            win32job=win32job,
+        )
+        guardian = None
+        guardian_controls = None
+        creation_error = None
+        try:
+            guardian, guardian_controls = spawn_holder(
+                "guardian-candidate",
+                creationflags=getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB"),
+            )
+            wait_ready(guardian, guardian_controls[0], "guardian-candidate")
+        except BaseException as exc:
+            creation_error = _win32_error_code(exc)
+        guardian_memberships = (
+            _known_memberships(
+                _popen_handle(guardian),
+                inner_job=inner_job,
+                outer_job=outer_job,
+                win32job=win32job,
+            )
+            if guardian is not None
+            else None
+        )
+        classification = classify_breakaway_result(
+            process_created=guardian is not None,
+            memberships=guardian_memberships,
+            error_code=creation_error,
+        )
+        result = {
+            "scenario": scenario,
+            "topology": "outer-harness-with-experimental-inner-breakaway",
+            "inner_breakaway_enabled": breakaway_enabled,
+            "actor_memberships_before_assignment": actor_before,
+            "owner_assignment_succeeded": assignment_succeeded,
+            "owner_assignment_error": assignment_error,
+            "owner_memberships_after_assignment": actor_after,
+            "ordinary_child": {
+                "created": True,
+                "memberships": ordinary_memberships,
+            },
+            "guardian_candidate": {
+                "created": guardian is not None,
+                "creation_error": creation_error,
+                "memberships": guardian_memberships,
+                "classification": classification,
+            },
+        }
+        _atomic_json(result_file, result)
+        win32event.SetEvent(ordinary_release)
+        require_successful_actor_completion(ordinary, "ordinary-child")
+        if guardian is not None and guardian_controls is not None:
+            win32event.SetEvent(guardian_controls[1])
+            require_successful_actor_completion(guardian, "guardian-candidate")
+        return 0
+    except BaseException as exc:
+        first_error = exc
+    finally:
+        for process in reversed(processes):
+            try:
+                if process.poll() is None:
+                    _terminate_process(process)
+            except BaseException as exc:
+                first_error = first_error or exc
+        for handle in events:
+            try:
+                handle.Close()
+            except BaseException as exc:
+                first_error = first_error or exc
+        for handle in (self_handle, inner_job, outer_job):
+            if handle is None:
+                continue
+            try:
+                handle.Close()
+            except BaseException as exc:
+                first_error = first_error or exc
+        if first_error is not None:
+            raise first_error
+    raise AssertionError("topology actor cleanup returned without raising")
+
+
+def _topology_holder(ready_event: str, release_event: str) -> int:
+    _signal(ready_event)
+    _actor_wait(release_event)
+    return 0
+
+
+def _run_job_topology_probe(scenario: str, root: Path) -> dict[str, Any]:
+    _win32api, _win32con, win32event, win32job = _windows_modules()
+    root.mkdir(parents=True, exist_ok=True)
+    outer_job_name = _read_json(root / "outer-job.json")["name"]
+    outer_job = win32job.OpenJobObject(win32job.JOB_OBJECT_QUERY, False, outer_job_name)
+    start_name, start_event = _new_event(win32event, "topology-start")
+    result_file = root / "topology-result.json"
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "topology-actor",
+            scenario,
+            outer_job_name,
+            start_name,
+            str(result_file),
+        ],
+        cwd=_REPO_ROOT,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        actor_in_outer_before_start = bool(
+            win32job.IsProcessInJob(_popen_handle(process), outer_job)
+        )
+        if not actor_in_outer_before_start:
+            raise RuntimeError("topology actor was not in the outer Job before start")
+        win32event.SetEvent(start_event)
+        require_successful_actor_completion(process, scenario)
+        result = read_published_json(result_file, deadline=time.monotonic() + 5)
+        result["actor_in_outer_before_start_gate"] = actor_in_outer_before_start
+        return result
+    finally:
+        active_exception = sys.exception()
+        first_error: BaseException | None = None
+        if process.poll() is None:
+            try:
+                _terminate_process(process)
+            except BaseException as exc:
+                first_error = exc
+        for handle in (start_event, outer_job):
+            try:
+                handle.Close()
+            except BaseException as exc:
+                first_error = first_error or exc
+        raise_cleanup_error_unless_unwinding(first_error, active_exception)
+
+
 def _run_region_falsification_probe(scenario: str, root: Path) -> dict[str, Any]:
     """Measure static region assignments against a byte-zero-only entrant."""
     from linkedin_mcp_server import process_tree
@@ -3282,6 +3701,10 @@ def _parse_args() -> argparse.Namespace:
             "falsification-inverted-pre-arm",
             "falsification-inverted-post-disarm-mutation",
             "falsification-inverted-exclusive-mutation",
+            "job-topology-self-assignment",
+            "job-topology-breakaway",
+            "job-topology-breakaway-denied",
+            "job-topology-common-ancestor-loss",
         ),
     )
     run.add_argument("root", type=Path)
@@ -3325,6 +3748,16 @@ def _parse_args() -> argparse.Namespace:
     actor.add_argument("result_file", type=Path)
     actor.add_argument("options", type=json.loads)
 
+    topology_actor = subparsers.add_parser("topology-actor")
+    topology_actor.add_argument("scenario")
+    topology_actor.add_argument("outer_job_name")
+    topology_actor.add_argument("start_event")
+    topology_actor.add_argument("result_file", type=Path)
+
+    topology_holder = subparsers.add_parser("topology-holder")
+    topology_holder.add_argument("ready_event")
+    topology_holder.add_argument("release_event")
+
     gate = subparsers.add_parser("gate")
     gate.add_argument("wait_event")
     gate.add_argument("started_event")
@@ -3337,14 +3770,24 @@ def main() -> int:
     if os.name != "nt":
         raise SystemExit("this probe requires native Windows Job Objects")
     if args.role == "run":
-        if args.scenario.startswith("conjunction-"):
-            runner = _run_conjunction_probe
-        elif args.scenario.startswith("falsification-"):
-            runner = _run_region_falsification_probe
-        else:
-            runner = _run_probe
+        runner_name = topology_runner(args.scenario)
+        runner = {
+            "job-topology": _run_job_topology_probe,
+            "conjunction": _run_conjunction_probe,
+            "region-falsification": _run_region_falsification_probe,
+            "crash-fence": _run_probe,
+        }[runner_name]
         print(json.dumps(runner(args.scenario, args.root)), flush=True)
         return 0
+    if args.role == "topology-actor":
+        return _topology_actor(
+            args.scenario,
+            args.outer_job_name,
+            args.start_event,
+            args.result_file,
+        )
+    if args.role == "topology-holder":
+        return _topology_holder(args.ready_event, args.release_event)
     if args.role == "actor":
         return _actor(
             args.mode,

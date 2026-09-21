@@ -20,6 +20,7 @@ from linkedin_mcp_server.profile_lease import ProfileLease
 from windows_guardian_probe import (
     acquire_actor_region,
     active_guardian_loss_wait_handles,
+    classify_breakaway_result,
     conjunction_admission,
     conjunction_guardian_shutdown,
     guardian_loss_measurement,
@@ -46,6 +47,7 @@ from windows_guardian_probe import (
     spawn_with_duplicated_handles,
     starter_termination_measurement,
     terminate_wait_close_handles,
+    topology_runner,
     wait_on_unsignaled_throttle,
     zero_proven_release_sequence,
 )
@@ -212,7 +214,19 @@ def await_fail_closed_conjunction(
 
 def _run_probe(tmp_path: Path, scenario: str) -> dict[str, Any]:
     root = tmp_path / scenario
-    harness = process_tree.WindowsJob.anonymous()
+    topology = scenario.startswith("job-topology-")
+    harness = (
+        process_tree.WindowsJob.named("topology-outer")
+        if topology
+        else process_tree.WindowsJob.anonymous()
+    )
+    if topology:
+        root.mkdir(parents=True)
+        if harness.name is None:
+            raise RuntimeError("the topology harness Job has no name")
+        (root / "outer-job.json").write_text(
+            json.dumps({"name": harness.name}), encoding="utf-8"
+        )
     nonce = process_tree.release_nonce()
     result_event = None
     environment = None
@@ -1888,6 +1902,155 @@ def test_b_remains_held_between_zero_proven_and_release_permission() -> None:
         "close job",
         "release B",
     ]
+
+
+def test_breakaway_classification_distinguishes_inner_from_all_known_jobs() -> None:
+    assert (
+        classify_breakaway_result(
+            process_created=True,
+            memberships={"inner": False, "outer": True},
+            error_code=None,
+        )
+        == "inner-only-breakaway"
+    )
+    assert (
+        classify_breakaway_result(
+            process_created=True,
+            memberships={"inner": False, "outer": False},
+            error_code=None,
+        )
+        == "all-known-jobs-breakaway"
+    )
+    assert (
+        classify_breakaway_result(
+            process_created=True,
+            memberships={"inner": True, "outer": True},
+            error_code=None,
+        )
+        == "retained-in-inner-and-outer"
+    )
+    assert (
+        classify_breakaway_result(
+            process_created=False,
+            memberships=None,
+            error_code=5,
+        )
+        == "could-not-start"
+    )
+
+
+def test_breakaway_classification_requires_complete_membership_and_error_evidence() -> (
+    None
+):
+    with pytest.raises(RuntimeError, match="inner and outer"):
+        classify_breakaway_result(
+            process_created=True,
+            memberships={"inner": False},
+            error_code=None,
+        )
+    with pytest.raises(RuntimeError, match="no Win32 error"):
+        classify_breakaway_result(
+            process_created=False,
+            memberships=None,
+            error_code=None,
+        )
+
+
+def test_topology_scenarios_route_without_changing_existing_probe_families() -> None:
+    assert topology_runner("job-topology-breakaway") == "job-topology"
+    assert topology_runner("conjunction-owner-loss") == "conjunction"
+    assert topology_runner("falsification-original-owner-loss") == (
+        "region-falsification"
+    )
+    assert topology_runner("baseline") == "crash-fence"
+
+
+def test_win32_error_extraction_preserves_the_primary_failure() -> None:
+    class Win32Failure(OSError):
+        winerror = 5
+
+    failure = Win32Failure("assignment denied")
+    assert probe._win32_error_code(failure) == 5
+    with pytest.raises(RuntimeError) as raised:
+        probe._win32_error_code(OSError("missing code"))
+    assert raised.value.__cause__ is not None
+
+
+@_WINDOWS_ONLY
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "job-topology-self-assignment",
+        "job-topology-breakaway",
+        "job-topology-breakaway-denied",
+        "job-topology-common-ancestor-loss",
+    ],
+)
+def test_job_topology_scenarios_are_native_only(tmp_path: Path, scenario: str) -> None:
+    measurement = _run_probe(tmp_path, scenario)
+    _record_measurement(measurement)
+
+    assert measurement["scenario"] == scenario
+    assert measurement["actor_in_outer_before_start_gate"] is True
+
+    if scenario == "job-topology-self-assignment":
+        before = measurement["actor_memberships_before_assignment"]
+        after = measurement["actor_memberships_after_assignment"]
+        child = measurement["post_assignment_child"]
+        assert before == {"inner": False, "outer": True}
+        assert child["created"] is True
+        assert child["memberships"]["outer"] is True
+        if measurement["self_assignment_succeeded"]:
+            assert measurement["self_assignment_error"] is None
+            assert after == {"inner": True, "outer": True}
+            assert child["memberships"]["inner"] is True
+        else:
+            assert isinstance(measurement["self_assignment_error"], int)
+            assert after == {"inner": False, "outer": True}
+            assert child["memberships"]["inner"] is False
+        return
+
+    if scenario == "job-topology-common-ancestor-loss":
+        before = measurement["memberships_before_termination"]
+        after = measurement["memberships_after_termination"]
+        assert set(before) == {"owner", "guardian", "browser-descendant"}
+        assert all(
+            memberships == {"inner": True, "outer": True}
+            for memberships in before.values()
+        )
+        assert all(not actor["active"] for actor in after.values())
+        assert all(
+            observed_ns > measurement["common_ancestor_termination_requested_ns"]
+            for observed_ns in measurement["exit_observed_ns"].values()
+        )
+        assert measurement["browser_descendant_drained"] is True
+        assert measurement["structural_counterexample"] is True
+        return
+
+    owner = measurement["owner_memberships_after_assignment"]
+    ordinary = measurement["ordinary_child"]
+    guardian = measurement["guardian_candidate"]
+    assert measurement["owner_assignment_succeeded"] is True
+    assert owner == {"inner": True, "outer": True}
+    assert ordinary == {
+        "created": True,
+        "memberships": {"inner": True, "outer": True},
+    }
+    assert guardian["classification"] == classify_breakaway_result(
+        process_created=guardian["created"],
+        memberships=guardian["memberships"],
+        error_code=guardian["creation_error"],
+    )
+    if guardian["created"]:
+        assert guardian["creation_error"] is None
+    else:
+        assert isinstance(guardian["creation_error"], int)
+    if scenario == "job-topology-breakaway-denied":
+        assert guardian["classification"] in {
+            "could-not-start",
+            "retained-in-inner-and-outer",
+            "retained-in-inner-only",
+        }
 
 
 @_WINDOWS_ONLY
