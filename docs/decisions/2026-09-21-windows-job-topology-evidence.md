@@ -24,13 +24,16 @@ stable process handles to order and observe four topologies:
    membership are distinct reported outcomes and cannot be classified as a
    successful breakaway.
 4. Owner, guardian and dummy browser-descendant processes are placed under one
-   disposable common ancestor Job. Terminating that Job observes all retained
-   process handles and descendant drain.
+   disposable common ancestor Job. With release events still withheld, every
+   retained process object must be active immediately before termination, then
+   signal with the exact common-ancestor exit code 204. Post-exit membership
+   queries are diagnostic because Windows may no longer answer them.
 
-The outer harness remains the final cleanup authority. Subprocesses are
-registered immediately after creation, cleanup is bounded, and cleanup errors
-do not replace the primary failure. Timestamps are diagnostics; named events
-and process-object handles establish ordering.
+The outer harness remains the final cleanup authority, including failures while
+preparing or starting the probe. Subprocesses are registered immediately after
+creation, cleanup is bounded, and cleanup errors do not replace the primary
+failure. Timestamps are diagnostics; named events, pre-termination membership
+and stable process-object exit codes establish ordering and causality.
 
 ## Initial result
 

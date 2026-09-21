@@ -21,6 +21,8 @@ from windows_guardian_probe import (
     acquire_actor_region,
     active_guardian_loss_wait_handles,
     classify_breakaway_result,
+    classify_post_exit_membership,
+    create_topology_process,
     conjunction_admission,
     conjunction_guardian_shutdown,
     guardian_loss_measurement,
@@ -35,9 +37,11 @@ from windows_guardian_probe import (
     raise_cleanup_error_unless_unwinding,
     read_published_json,
     remaining_wait_milliseconds,
+    require_accepted_breakaway_result,
     require_publication_witnesses,
     require_same_file_identity,
     require_successful_actor_completion,
+    require_topology_actor_ready,
     retry_contended_publication,
     retry_lock_rundown,
     run_guardian_fail_closed,
@@ -46,6 +50,7 @@ from windows_guardian_probe import (
     sample_pre_crash_contention,
     spawn_with_duplicated_handles,
     starter_termination_measurement,
+    terminate_common_ancestor,
     terminate_wait_close_handles,
     topology_runner,
     wait_on_unsignaled_throttle,
@@ -212,7 +217,9 @@ def await_fail_closed_conjunction(
     return measurement
 
 
-def _run_probe(tmp_path: Path, scenario: str) -> dict[str, Any]:
+def _prepare_probe_harness(
+    tmp_path: Path, scenario: str
+) -> tuple[Path, Any, Any, subprocess.Popen[bytes], str]:
     root = tmp_path / scenario
     topology = scenario.startswith("job-topology-")
     harness = (
@@ -220,37 +227,58 @@ def _run_probe(tmp_path: Path, scenario: str) -> dict[str, Any]:
         if topology
         else process_tree.WindowsJob.anonymous()
     )
-    if topology:
-        root.mkdir(parents=True)
-        if harness.name is None:
-            raise RuntimeError("the topology harness Job has no name")
-        (root / "outer-job.json").write_text(
-            json.dumps({"name": harness.name}), encoding="utf-8"
-        )
-    nonce = process_tree.release_nonce()
     result_event = None
-    environment = None
-    if scenario in _CONJUNCTION_FAIL_CLOSED_SCENARIOS:
-        _win32api, _win32con, win32event, _win32job = probe._windows_modules()
-        result_event_name = probe._new_event_name("conjunction-result")
-        result_event = win32event.CreateEvent(None, True, False, result_event_name)
-        environment = {**os.environ, "CONJUNCTION_RESULT_EVENT": result_event_name}
-    process = subprocess.Popen(
-        process_tree.windows_gate_command(
-            [
-                sys.executable,
-                str(_PROBE),
-                "run",
-                scenario,
-                str(root),
-            ],
-            nonce,
-        ),
-        cwd=_REPO_ROOT,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=environment,
+    try:
+        if topology:
+            root.mkdir(parents=True)
+            if harness.name is None:
+                raise RuntimeError("the topology harness Job has no name")
+            (root / "outer-job.json").write_text(
+                json.dumps({"name": harness.name}), encoding="utf-8"
+            )
+        nonce = process_tree.release_nonce()
+        environment = None
+        if scenario in _CONJUNCTION_FAIL_CLOSED_SCENARIOS:
+            _win32api, _win32con, win32event, _win32job = probe._windows_modules()
+            result_event_name = probe._new_event_name("conjunction-result")
+            result_event = win32event.CreateEvent(None, True, False, result_event_name)
+            environment = {**os.environ, "CONJUNCTION_RESULT_EVENT": result_event_name}
+        process = subprocess.Popen(
+            process_tree.windows_gate_command(
+                [
+                    sys.executable,
+                    str(_PROBE),
+                    "run",
+                    scenario,
+                    str(root),
+                ],
+                nonce,
+            ),
+            cwd=_REPO_ROOT,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=environment,
+        )
+        return root, harness, result_event, process, nonce
+    except BaseException:
+        first_error = sys.exception()
+        if result_event is not None:
+            try:
+                result_event.Close()
+            except BaseException:
+                pass
+        try:
+            harness.close()
+        except BaseException:
+            pass
+        assert first_error is not None
+        raise first_error
+
+
+def _run_probe(tmp_path: Path, scenario: str) -> dict[str, Any]:
+    root, harness, result_event, process, nonce = _prepare_probe_harness(
+        tmp_path, scenario
     )
     assigned = False
     measurement = None
@@ -681,6 +709,37 @@ def test_failed_probe_path_requires_harness_termination_exit(
         "harness drain 30",
         "communicate",
     ]
+
+
+def test_named_harness_setup_failure_closes_and_preserves_primary_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[str] = []
+    setup_error = OSError("metadata write failed")
+
+    class Harness:
+        name = "outer"
+
+        def close(self) -> None:
+            events.append("close harness")
+            raise OSError("cleanup failed")
+
+    monkeypatch.setattr(
+        process_tree.WindowsJob,
+        "named",
+        classmethod(lambda _cls, _label: Harness()),
+    )
+    monkeypatch.setattr(
+        Path,
+        "write_text",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(setup_error),
+    )
+
+    with pytest.raises(OSError) as raised:
+        _prepare_probe_harness(tmp_path, "job-topology-breakaway")
+
+    assert raised.value is setup_error
+    assert events == ["close harness"]
 
 
 def test_harness_timeout_terminates_and_drains_the_outer_job() -> None:
@@ -1165,6 +1224,137 @@ def test_actor_completion_rejects_nonzero_exit_with_diagnostics() -> None:
         "actor failed: phase=post-entry returncode=7 "
         "stdout=b'actor stdout' stderr=b'actor stderr'"
     )
+
+
+def test_started_topology_actor_pre_ready_failure_is_not_creation_denial() -> None:
+    class Process:
+        returncode = 9
+
+        def poll(self) -> int:
+            return self.returncode
+
+        def communicate(self) -> tuple[bytes, bytes]:
+            return b"started", b"failed before ready"
+
+    with pytest.raises(RuntimeError) as raised:
+        require_topology_actor_ready(
+            Process(),
+            "guardian-candidate",
+            wait_ready=lambda: (_ for _ in ()).throw(TimeoutError("not ready")),
+        )
+
+    assert str(raised.value) == (
+        "topology actor failed before ready: phase=guardian-candidate "
+        "returncode=9 stdout=b'started' stderr=b'failed before ready'"
+    )
+
+
+def test_topology_creation_classifies_only_popen_failure() -> None:
+    events: list[str] = []
+
+    class CreationDenied(OSError):
+        winerror = 5
+
+    process, error = create_topology_process(
+        lambda: events.append("Popen") or (_ for _ in ()).throw(CreationDenied()),
+        register=lambda _process: events.append("register"),
+        phase="guardian-candidate-creation",
+    )
+
+    assert process is None
+    assert error == {
+        "operation": "Popen",
+        "phase": "guardian-candidate-creation",
+        "win32_error": 5,
+    }
+    assert events == ["Popen"]
+
+
+def test_topology_creation_registers_before_actor_readiness() -> None:
+    process = object()
+    events: list[str] = []
+
+    created, error = create_topology_process(
+        lambda: events.append("Popen") or process,
+        register=lambda observed: events.append(f"register {observed is process}"),
+        phase="guardian-candidate-creation",
+    )
+    events.append("readiness failed")
+
+    assert created is process
+    assert error is None
+    assert events == ["Popen", "register True", "readiness failed"]
+
+
+def test_event_setup_failure_is_not_a_creation_refusal() -> None:
+    events: list[str] = []
+
+    def setup_event() -> None:
+        events.append("event setup")
+        raise OSError("event unavailable")
+
+    with pytest.raises(OSError, match="event unavailable"):
+        setup_event()
+        create_topology_process(
+            lambda: events.append("Popen") or object(),
+            register=lambda _process: events.append("register"),
+            phase="guardian-candidate-creation",
+        )
+
+    assert events == ["event setup"]
+
+
+def test_common_ancestor_requires_live_actors_and_exact_exit_codes() -> None:
+    actors = {"owner": object(), "guardian": object(), "browser-descendant": object()}
+    events: list[str] = []
+
+    assert terminate_common_ancestor(
+        actors,
+        is_active=lambda actor: (
+            events.append(
+                f"active {next(label for label, value in actors.items() if value is actor)}"
+            )
+            or True
+        ),
+        terminate=lambda: events.append("terminate"),
+        wait=lambda actor: events.append(
+            f"wait {next(label for label, value in actors.items() if value is actor)}"
+        ),
+        exit_code=lambda _actor: 204,
+    ) == {label: 204 for label in actors}
+    assert events[:4] == [
+        "active owner",
+        "active guardian",
+        "active browser-descendant",
+        "terminate",
+    ]
+
+    with pytest.raises(RuntimeError, match="guardian exited before"):
+        terminate_common_ancestor(
+            actors,
+            is_active=lambda actor: actor is not actors["guardian"],
+            terminate=lambda: pytest.fail("premature actor exit reached termination"),
+            wait=lambda _actor: None,
+            exit_code=lambda _actor: 204,
+        )
+
+    with pytest.raises(RuntimeError, match="not common-ancestor code 204"):
+        terminate_common_ancestor(
+            actors,
+            is_active=lambda _actor: True,
+            terminate=lambda: None,
+            wait=lambda _actor: None,
+            exit_code=lambda actor: 7 if actor is actors["owner"] else 204,
+        )
+
+
+def test_post_exit_membership_failure_remains_diagnostic() -> None:
+    assert classify_post_exit_membership(
+        lambda: (_ for _ in ()).throw(OSError("process object no longer queryable"))
+    ) == {
+        "status": "error",
+        "error": "OSError: process object no longer queryable",
+    }
 
 
 def test_contended_publication_rejects_owner_expiry_after_entry() -> None:
@@ -1939,6 +2129,102 @@ def test_breakaway_classification_distinguishes_inner_from_all_known_jobs() -> N
     )
 
 
+def test_breakaway_acceptance_is_independent_of_complete_classification() -> None:
+    assert (
+        require_accepted_breakaway_result(
+            "job-topology-breakaway",
+            inner_breakaway_enabled=True,
+            process_created=True,
+            memberships={"inner": False, "outer": True},
+            creation_error=None,
+        )
+        == "inner-only-breakaway"
+    )
+    assert (
+        require_accepted_breakaway_result(
+            "job-topology-breakaway-denied",
+            inner_breakaway_enabled=False,
+            process_created=False,
+            memberships=None,
+            creation_error={
+                "operation": "Popen",
+                "phase": "guardian-candidate-creation",
+                "win32_error": 5,
+            },
+        )
+        == "could-not-start"
+    )
+    assert (
+        require_accepted_breakaway_result(
+            "job-topology-breakaway-denied",
+            inner_breakaway_enabled=False,
+            process_created=True,
+            memberships={"inner": True, "outer": True},
+            creation_error=None,
+        )
+        == "retained-in-inner-and-outer"
+    )
+
+
+@pytest.mark.parametrize(
+    ("scenario", "enabled", "memberships", "message"),
+    [
+        (
+            "job-topology-breakaway",
+            True,
+            {"inner": False, "outer": False},
+            "escaped every known harness Job",
+        ),
+        (
+            "job-topology-breakaway-denied",
+            False,
+            {"inner": True, "outer": False},
+            "retained the inner Job but escaped the outer Job",
+        ),
+        (
+            "job-topology-breakaway-denied",
+            False,
+            {"inner": False, "outer": True},
+            "not accepted for this scenario",
+        ),
+    ],
+)
+def test_breakaway_acceptance_rejects_invalid_harness_outcomes(
+    scenario: str, enabled: bool, memberships: dict[str, bool], message: str
+) -> None:
+    with pytest.raises(RuntimeError, match=message):
+        require_accepted_breakaway_result(
+            scenario,
+            inner_breakaway_enabled=enabled,
+            process_created=True,
+            memberships=memberships,
+            creation_error=None,
+        )
+
+
+def test_breakaway_acceptance_rejects_configuration_and_fake_refusal() -> None:
+    with pytest.raises(RuntimeError, match="does not match"):
+        require_accepted_breakaway_result(
+            "job-topology-breakaway",
+            inner_breakaway_enabled=False,
+            process_created=True,
+            memberships={"inner": False, "outer": True},
+            creation_error=None,
+        )
+    with pytest.raises(RuntimeError, match="did not come from Popen"):
+        require_accepted_breakaway_result(
+            "job-topology-breakaway-denied",
+            inner_breakaway_enabled=False,
+            process_created=False,
+            memberships=None,
+            creation_error={
+                "operation": "event-setup",
+                "phase": "guardian-candidate-creation",
+                "win32_error": 5,
+            },
+        )
+
+
 def test_breakaway_classification_requires_complete_membership_and_error_evidence() -> (
     None
 ):
@@ -2012,13 +2298,18 @@ def test_job_topology_scenarios_are_native_only(tmp_path: Path, scenario: str) -
 
     if scenario == "job-topology-common-ancestor-loss":
         before = measurement["memberships_before_termination"]
-        after = measurement["memberships_after_termination"]
+        after = measurement["post_exit_observations"]
         assert set(before) == {"owner", "guardian", "browser-descendant"}
         assert all(
             memberships == {"inner": True, "outer": True}
             for memberships in before.values()
         )
         assert all(not actor["active"] for actor in after.values())
+        assert all(code == 204 for code in measurement["exit_codes"].values())
+        assert all(
+            actor["membership_diagnostic"]["status"] in {"success", "error"}
+            for actor in after.values()
+        )
         assert all(
             observed_ns > measurement["common_ancestor_termination_requested_ns"]
             for observed_ns in measurement["exit_observed_ns"].values()
@@ -2036,21 +2327,18 @@ def test_job_topology_scenarios_are_native_only(tmp_path: Path, scenario: str) -
         "created": True,
         "memberships": {"inner": True, "outer": True},
     }
-    assert guardian["classification"] == classify_breakaway_result(
+    assert guardian["classification"] == require_accepted_breakaway_result(
+        scenario,
+        inner_breakaway_enabled=measurement["inner_breakaway_enabled"],
         process_created=guardian["created"],
         memberships=guardian["memberships"],
-        error_code=guardian["creation_error"],
+        creation_error=guardian["creation_error"],
     )
     if guardian["created"]:
         assert guardian["creation_error"] is None
     else:
-        assert isinstance(guardian["creation_error"], int)
-    if scenario == "job-topology-breakaway-denied":
-        assert guardian["classification"] in {
-            "could-not-start",
-            "retained-in-inner-and-outer",
-            "retained-in-inner-only",
-        }
+        assert guardian["creation_error"]["operation"] == "Popen"
+        assert isinstance(guardian["creation_error"]["win32_error"], int)
 
 
 @_WINDOWS_ONLY

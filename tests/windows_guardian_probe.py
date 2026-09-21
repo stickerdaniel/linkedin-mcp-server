@@ -2224,6 +2224,24 @@ def _attempt_here(path: Path) -> tuple[bool, int]:
     return acquired, fd
 
 
+def require_topology_actor_ready(
+    process: Any,
+    phase: str,
+    *,
+    wait_ready: Callable[[], None],
+) -> None:
+    try:
+        wait_ready()
+    except BaseException as exc:
+        stdout, stderr = (
+            process.communicate() if process.poll() is not None else (b"", b"")
+        )
+        raise RuntimeError(
+            f"topology actor failed before ready: phase={phase} "
+            f"returncode={process.poll()!r} stdout={stdout!r} stderr={stderr!r}"
+        ) from exc
+
+
 def require_successful_actor_completion(
     process: Any,
     phase: str,
@@ -2263,6 +2281,95 @@ def classify_breakaway_result(
     if memberships["inner"] and memberships["outer"]:
         return "retained-in-inner-and-outer"
     return "retained-in-inner-only"
+
+
+def require_accepted_breakaway_result(
+    scenario: str,
+    *,
+    inner_breakaway_enabled: bool,
+    process_created: bool,
+    memberships: dict[str, bool] | None,
+    creation_error: dict[str, int | str] | None,
+) -> str:
+    expected_breakaway = scenario == "job-topology-breakaway"
+    if scenario not in {
+        "job-topology-breakaway",
+        "job-topology-breakaway-denied",
+    }:
+        raise RuntimeError(f"unsupported breakaway scenario: {scenario}")
+    if inner_breakaway_enabled is not expected_breakaway:
+        raise RuntimeError("inner breakaway configuration does not match the scenario")
+
+    error_code = None
+    if creation_error is not None:
+        if creation_error.get("operation") != "Popen":
+            raise RuntimeError("creation refusal did not come from Popen")
+        if creation_error.get("phase") != "guardian-candidate-creation":
+            raise RuntimeError("creation refusal has the wrong phase")
+        observed_code = creation_error.get("win32_error")
+        if not isinstance(observed_code, int):
+            raise RuntimeError("creation refusal has no numeric Win32 error")
+        error_code = observed_code
+
+    classification = classify_breakaway_result(
+        process_created=process_created,
+        memberships=memberships,
+        error_code=error_code,
+    )
+    if not process_created:
+        if expected_breakaway:
+            raise RuntimeError("breakaway-enabled guardian creation was refused")
+        return classification
+    if creation_error is not None:
+        raise RuntimeError("a created guardian also reported a creation refusal")
+    assert memberships is not None
+    if not memberships["outer"]:
+        if memberships["inner"]:
+            raise RuntimeError(
+                "guardian retained the inner Job but escaped the outer Job"
+            )
+        raise RuntimeError("guardian escaped every known harness Job")
+    expected = (
+        {"inner": False, "outer": True}
+        if expected_breakaway
+        else {"inner": True, "outer": True}
+    )
+    if memberships != expected:
+        raise RuntimeError("guardian membership is not accepted for this scenario")
+    return classification
+
+
+def classify_post_exit_membership(
+    query: Callable[[], dict[str, bool]],
+) -> dict[str, Any]:
+    try:
+        return {"status": "success", "memberships": query()}
+    except BaseException as exc:
+        return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
+
+
+def terminate_common_ancestor[T](
+    actors: dict[str, T],
+    *,
+    is_active: Callable[[T], bool],
+    terminate: Callable[[], None],
+    wait: Callable[[T], None],
+    exit_code: Callable[[T], int],
+) -> dict[str, int]:
+    for label, actor in actors.items():
+        if not is_active(actor):
+            raise RuntimeError(f"{label} exited before common-ancestor termination")
+    terminate()
+    exit_codes: dict[str, int] = {}
+    for label, actor in actors.items():
+        wait(actor)
+        code = exit_code(actor)
+        if code != 204:
+            raise RuntimeError(
+                f"{label} exited with {code}, not common-ancestor code 204"
+            )
+        exit_codes[label] = code
+    return exit_codes
 
 
 def membership_matrix(
@@ -2338,6 +2445,24 @@ def _popen_handle(process: subprocess.Popen[bytes]) -> Any:
     return handle
 
 
+def create_topology_process[T](
+    spawn: Callable[[], T],
+    *,
+    register: Callable[[T], None],
+    phase: str,
+) -> tuple[T | None, dict[str, int | str] | None]:
+    try:
+        process = spawn()
+    except BaseException as exc:
+        return None, {
+            "operation": "Popen",
+            "phase": phase,
+            "win32_error": _win32_error_code(exc),
+        }
+    register(process)
+    return process, None
+
+
 def _spawn_topology_holder(
     ready_event: str,
     release_event: str,
@@ -2382,28 +2507,30 @@ def _topology_actor(
         events.append(handle)
         return name, handle
 
-    def spawn_holder(
-        label: str, *, creationflags: int = 0
-    ) -> tuple[subprocess.Popen[bytes], Any]:
+    def holder_controls(label: str) -> tuple[str, str, Any, Any]:
         ready_name, ready = event(f"{label}-ready")
         release_name, release = event(f"{label}-release")
+        return ready_name, release_name, ready, release
+
+    def spawn_holder(
+        controls: tuple[str, str, Any, Any], *, creationflags: int = 0
+    ) -> subprocess.Popen[bytes]:
+        ready_name, release_name, _ready, _release = controls
         process = _spawn_topology_holder(
             ready_name, release_name, creationflags=creationflags
         )
+        # Ownership begins when Popen returns, before readiness or Job assignment.
         processes.append(process)
-        return process, (ready, release)
+        return process
 
     def wait_ready(process: subprocess.Popen[bytes], ready: Any, phase: str) -> None:
-        try:
-            _wait(ready, _DEADLINE_SECONDS, f"{phase} did not become ready")
-        except BaseException as exc:
-            stdout, stderr = (
-                process.communicate() if process.poll() is not None else (b"", b"")
-            )
-            raise RuntimeError(
-                f"topology actor failed before ready: phase={phase} "
-                f"returncode={process.poll()!r} stdout={stdout!r} stderr={stderr!r}"
-            ) from exc
+        require_topology_actor_ready(
+            process,
+            phase,
+            wait_ready=lambda: _wait(
+                ready, _DEADLINE_SECONDS, f"{phase} did not become ready"
+            ),
+        )
 
     try:
         actor_before = membership_matrix(
@@ -2420,11 +2547,12 @@ def _topology_actor(
             candidates: dict[str, subprocess.Popen[bytes]] = {}
             controls: dict[str, tuple[Any, Any]] = {}
             for label in ("owner", "guardian", "browser-descendant"):
-                process, control = spawn_holder(label)
+                holder = holder_controls(label)
+                process = spawn_holder(holder)
                 candidates[label] = process
-                controls[label] = control
+                controls[label] = (holder[2], holder[3])
                 win32job.AssignProcessToJobObject(inner_job, _popen_handle(process))
-                wait_ready(process, control[0], label)
+                wait_ready(process, holder[2], label)
             before = {
                 label: _known_memberships(
                     _popen_handle(process),
@@ -2435,25 +2563,38 @@ def _topology_actor(
                 for label, process in candidates.items()
             }
             terminated_ns = time.perf_counter_ns()
-            win32job.TerminateJobObject(inner_job, 204)
             exits: dict[str, int] = {}
-            exit_codes: dict[str, int] = {}
-            for label, process in candidates.items():
+
+            def wait_for_common_ancestor(process: subprocess.Popen[bytes]) -> None:
+                label = next(
+                    name
+                    for name, candidate in candidates.items()
+                    if candidate is process
+                )
                 _wait(
                     _popen_handle(process),
                     _DEADLINE_SECONDS,
                     f"{label} survived common ancestor",
                 )
                 exits[label] = time.perf_counter_ns()
-                exit_codes[label] = process.wait(timeout=_DEADLINE_SECONDS)
+
+            exit_codes = terminate_common_ancestor(
+                candidates,
+                is_active=lambda process: _is_active(_popen_handle(process)),
+                terminate=lambda: win32job.TerminateJobObject(inner_job, 204),
+                wait=wait_for_common_ancestor,
+                exit_code=lambda process: process.wait(timeout=_DEADLINE_SECONDS),
+            )
             after = {
                 label: {
                     "active": _is_active(_popen_handle(process)),
-                    "memberships": _known_memberships(
-                        _popen_handle(process),
-                        inner_job=inner_job,
-                        outer_job=outer_job,
-                        win32job=win32job,
+                    "membership_diagnostic": classify_post_exit_membership(
+                        lambda process=process: _known_memberships(
+                            _popen_handle(process),
+                            inner_job=inner_job,
+                            outer_job=outer_job,
+                            win32job=win32job,
+                        )
                     ),
                 }
                 for label, process in candidates.items()
@@ -2466,7 +2607,7 @@ def _topology_actor(
                 "common_ancestor_termination_requested_ns": terminated_ns,
                 "exit_observed_ns": exits,
                 "exit_codes": exit_codes,
-                "memberships_after_termination": after,
+                "post_exit_observations": after,
                 "browser_descendant_drained": not after["browser-descendant"]["active"],
                 "structural_counterexample": not after["owner"]["active"]
                 and not after["guardian"]["active"],
@@ -2495,7 +2636,9 @@ def _topology_actor(
         )
 
         if scenario == "job-topology-self-assignment":
-            child, (child_ready, child_release) = spawn_holder("post-assignment-child")
+            child_controls = holder_controls("post-assignment-child")
+            child = spawn_holder(child_controls)
+            child_ready, child_release = child_controls[2:]
             wait_ready(child, child_ready, "post-assignment-child")
             child_memberships = _known_memberships(
                 _popen_handle(child),
@@ -2520,7 +2663,9 @@ def _topology_actor(
             require_successful_actor_completion(child, "post-assignment-child")
             return 0
 
-        ordinary, (ordinary_ready, ordinary_release) = spawn_holder("ordinary-child")
+        ordinary_controls = holder_controls("ordinary-child")
+        ordinary = spawn_holder(ordinary_controls)
+        ordinary_ready, ordinary_release = ordinary_controls[2:]
         wait_ready(ordinary, ordinary_ready, "ordinary-child")
         ordinary_memberships = _known_memberships(
             _popen_handle(ordinary),
@@ -2528,17 +2673,18 @@ def _topology_actor(
             outer_job=outer_job,
             win32job=win32job,
         )
-        guardian = None
-        guardian_controls = None
-        creation_error = None
-        try:
-            guardian, guardian_controls = spawn_holder(
-                "guardian-candidate",
+        guardian_controls = holder_controls("guardian-candidate")
+        guardian, creation_error = create_topology_process(
+            lambda: _spawn_topology_holder(
+                guardian_controls[0],
+                guardian_controls[1],
                 creationflags=getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB"),
-            )
-            wait_ready(guardian, guardian_controls[0], "guardian-candidate")
-        except BaseException as exc:
-            creation_error = _win32_error_code(exc)
+            ),
+            register=processes.append,
+            phase="guardian-candidate-creation",
+        )
+        if guardian is not None:
+            wait_ready(guardian, guardian_controls[2], "guardian-candidate")
         guardian_memberships = (
             _known_memberships(
                 _popen_handle(guardian),
@@ -2549,10 +2695,12 @@ def _topology_actor(
             if guardian is not None
             else None
         )
-        classification = classify_breakaway_result(
+        classification = require_accepted_breakaway_result(
+            scenario,
+            inner_breakaway_enabled=breakaway_enabled,
             process_created=guardian is not None,
             memberships=guardian_memberships,
-            error_code=creation_error,
+            creation_error=creation_error,
         )
         result = {
             "scenario": scenario,
@@ -2576,8 +2724,8 @@ def _topology_actor(
         _atomic_json(result_file, result)
         win32event.SetEvent(ordinary_release)
         require_successful_actor_completion(ordinary, "ordinary-child")
-        if guardian is not None and guardian_controls is not None:
-            win32event.SetEvent(guardian_controls[1])
+        if guardian is not None:
+            win32event.SetEvent(guardian_controls[3])
             require_successful_actor_completion(guardian, "guardian-candidate")
         return 0
     except BaseException as exc:
