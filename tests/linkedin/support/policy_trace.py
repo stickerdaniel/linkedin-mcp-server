@@ -682,6 +682,7 @@ def semantic_program_id(program: str) -> str:
         ("hasInvite", "connection_action_signals"),
         ("expanded === 'false'", "open_more_button"),
         ("hasIncomingActionRow", "incoming_accept"),
+        ("threadParticipant", "thread_participant"),
         ("status === 'resolved'", "profile_message_target_ready"),
         ("const validComposeHref", "profile_message_target"),
         ("return inspect(target).status === 'valid'", "message_composer_ready"),

@@ -1,0 +1,260 @@
+{
+  "call": {
+    "arguments": {
+      "confirm_send": true,
+      "message": "New text",
+      "thread_id": "2-policy-thread=="
+    },
+    "method": "reply_to_conversation"
+  },
+  "events": [
+    {
+      "call": "reply_to_conversation",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "section": "message"
+    },
+    {
+      "call": "reply_to_conversation",
+      "extra": {
+        "target_url": "https://www.linkedin.com/messaging/thread/2-policy-thread%3D%3D/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "section": "message"
+    },
+    {
+      "call": "reply_to_conversation",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/messaging/thread/2-policy-thread==/",
+      "requested_url": "https://www.linkedin.com/messaging/thread/2-policy-thread%3D%3D/",
+      "section": "message",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "reply_to_conversation",
+      "description": "goto https://www.linkedin.com/messaging/thread/2-policy-thread%3D%3D/",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "message"
+    },
+    {
+      "call": "reply_to_conversation",
+      "extra": {
+        "target_url": "https://www.linkedin.com/messaging/thread/2-policy-thread%3D%3D/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "section": "message"
+    },
+    {
+      "call": "reply_to_conversation",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "section": "message"
+    },
+    {
+      "call": "reply_to_conversation",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "section": "message"
+    },
+    {
+      "call": "reply_to_conversation",
+      "kind": "boundary.rate_limit",
+      "section": "message"
+    },
+    {
+      "call": "reply_to_conversation",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "section": "message",
+      "selector": "main",
+      "state": "visible",
+      "timeout_ms": null
+    },
+    {
+      "arg": {
+        "threadKey": "2-policy-thread=="
+      },
+      "call": "reply_to_conversation",
+      "kind": "wait_for_function",
+      "operation": "message_composer_ready",
+      "program_digest": "c0ae47ce4773",
+      "section": "message",
+      "timeout_ms": null
+    },
+    {
+      "arg": {
+        "threadKey": "2-policy-thread=="
+      },
+      "call": "reply_to_conversation",
+      "kind": "evaluate",
+      "operation": "message_composer_state",
+      "program_digest": "db45c394114f",
+      "section": "message"
+    },
+    {
+      "call": "reply_to_conversation",
+      "kind": "evaluate",
+      "operation": "thread_participant",
+      "program_digest": "fd0a4f49a0af",
+      "section": "message"
+    },
+    {
+      "arg": {
+        "threadKey": "2-policy-thread=="
+      },
+      "call": "reply_to_conversation",
+      "kind": "evaluate",
+      "operation": "message_composer_state",
+      "program_digest": "db45c394114f",
+      "section": "message"
+    },
+    {
+      "arg": {
+        "expectedRoute": "https://www.linkedin.com/messaging/thread/2-policy-thread==/",
+        "target": {
+          "threadKey": "2-policy-thread=="
+        }
+      },
+      "call": "reply_to_conversation",
+      "kind": "evaluate_handle",
+      "operation": "message_composer_owner",
+      "program_digest": "78f834338b12",
+      "section": "message"
+    },
+    {
+      "call": "reply_to_conversation",
+      "handle": "handle-1",
+      "kind": "handle.as_element",
+      "present": true,
+      "section": "message"
+    },
+    {
+      "arg": {
+        "message": "New text",
+        "threadKey": "2-policy-thread=="
+      },
+      "call": "reply_to_conversation",
+      "handle": "handle-1",
+      "kind": "handle.evaluate",
+      "operation": "message_composer_write",
+      "program_digest": "2219cd2ff200",
+      "section": "message"
+    },
+    {
+      "arg": {
+        "message": "New text",
+        "threadKey": "2-policy-thread=="
+      },
+      "call": "reply_to_conversation",
+      "handle": "handle-1",
+      "kind": "handle.evaluate",
+      "operation": "message_submit_ready",
+      "program_digest": "f476ce0faaf9",
+      "section": "message"
+    },
+    {
+      "arg": {
+        "expected": "New text",
+        "owner": {
+          "handle": "handle-1"
+        },
+        "threadKey": "2-policy-thread=="
+      },
+      "call": "reply_to_conversation",
+      "kind": "evaluate",
+      "operation": "message_confirmation_prepare",
+      "program_digest": "20a83d011da9",
+      "section": "message"
+    },
+    {
+      "arg": {
+        "message": "New text",
+        "threadKey": "2-policy-thread=="
+      },
+      "call": "reply_to_conversation",
+      "handle": "handle-1",
+      "kind": "handle.evaluate",
+      "operation": "message_submit",
+      "program_digest": "88dff3456522",
+      "section": "message"
+    },
+    {
+      "arg": {
+        "expected": "New text",
+        "owner": {
+          "handle": "handle-1"
+        },
+        "threadKey": "2-policy-thread==",
+        "token": "confirmation-1"
+      },
+      "call": "reply_to_conversation",
+      "kind": "wait_for_function",
+      "operation": "message_confirmation_ready",
+      "program_digest": "f3353726f48f",
+      "section": "message",
+      "timeout_ms": null
+    },
+    {
+      "call": "reply_to_conversation",
+      "handle": "snapshot-1",
+      "kind": "handle.json_value",
+      "section": "message",
+      "value": {
+        "path": "/messaging/thread/2-policy-thread==/"
+      }
+    },
+    {
+      "call": "reply_to_conversation",
+      "handle": "snapshot-1",
+      "kind": "handle.dispose",
+      "section": "message"
+    },
+    {
+      "arg": {
+        "owner": {
+          "handle": "handle-1"
+        },
+        "token": "confirmation-1"
+      },
+      "call": "reply_to_conversation",
+      "kind": "evaluate",
+      "operation": "message_confirmation_dispose",
+      "program_digest": "bd92ef816e24",
+      "section": "message"
+    },
+    {
+      "call": "reply_to_conversation",
+      "handle": "handle-1",
+      "kind": "handle.evaluate",
+      "operation": "message_composer_dispose",
+      "program_digest": "195abada1200",
+      "section": "message"
+    },
+    {
+      "call": "reply_to_conversation",
+      "handle": "handle-1",
+      "kind": "handle.dispose",
+      "section": "message"
+    }
+  ],
+  "result": {
+    "message": "Message submitted and confirmed in the conversation UI.",
+    "participant": "Ada Lovelace",
+    "recipient_selected": true,
+    "retry_safe": false,
+    "sent": true,
+    "status": "sent",
+    "thread_id": "2-policy-thread==",
+    "url": "https://www.linkedin.com/messaging/thread/2-policy-thread==/"
+  },
+  "scenario": "reply_to_conversation__sent",
+  "schema_version": 1
+}
