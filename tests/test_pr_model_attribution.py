@@ -28,9 +28,13 @@ def _workflow() -> dict[str, Any]:
 @pytest.mark.parametrize(
     "line",
     [
+        "Generated with Claude Opus 5",
         "Generated with Claude Opus 5.",
+        "Generated with GPT-5.6 Sol",
         "Generated with GPT-5.6 Sol.",
+        "Generated with Salesforce xGen",
         "Generated with Gemini 3 Pro Preview.",
+        "Generated with Command R",
         "Generated with Claude Sonnet 4.5 for implementation in Claude Code.",
         ("Generated with Claude Opus 5 for implementation in Claude Code via T3 Code."),
         (
@@ -59,6 +63,19 @@ def test_accepts_trailing_blank_lines() -> None:
     assert attribution.has_model_attribution(body)
 
 
+@pytest.mark.parametrize("keyword", ["for", "in", "and", "via"])
+@pytest.mark.parametrize("period", ["", "."])
+def test_rejects_trailing_reserved_minimal_tokens(keyword: str, period: str) -> None:
+    assert not attribution.has_model_attribution(
+        f"Generated with GPT-5.6 {keyword}{period}"
+    )
+
+
+@pytest.mark.parametrize("keyword", ["for", "in", "and", "via"])
+def test_rejects_leading_reserved_minimal_tokens(keyword: str) -> None:
+    assert not attribution.has_model_attribution(f"Generated with {keyword} GPT-5.6")
+
+
 @pytest.mark.parametrize(
     "body",
     [
@@ -71,15 +88,24 @@ def test_accepts_trailing_blank_lines() -> None:
         "Generated with GPT-5.6 for implementation.",
         "Generated with GPT-5.6 and Claude Opus 5.",
         "Generated with GPT-5.6 via T3 Code.",
+        "Generated with GPT-5.6 for implementation",
+        "Generated with GPT-5.6 in Claude Code",
+        "Generated with GPT-5.6 and Claude Opus 5",
+        "Generated with GPT-5.6 via T3 Code",
         "Generated with GPT-5.6 for implementation in via T3 Code.",
         "Generated with GPT-5.6 for implementation in Claude Code via .",
         (
             "Generated with GPT-5.6 for implementation in Claude Code via T3 Code "
             "via another wrapper."
         ),
+        "Generated with",
         "Generated with .",
+        "Generated with ..",
+        "Generated with <model>",
         "Generated with <model>.",
+        "Generated with [model]",
         "Generated with [model].",
+        "Generated with . for implementation in Claude Code.",
         "Generated with GPT-5.6 for implementation and testing in T3 Code.",
         (
             "Generated with Claude Sonnet 4.5 for implementation and GPT-5.6 for "
@@ -136,7 +162,8 @@ def test_template_ends_with_editable_attribution_placeholder() -> None:
     ]
 
     assert lines[-1] == "Generated with [model] for [job] in [harness]."
-    assert "Generated with <model>." in lines[-2]
+    assert '"Generated with <model>" with or without a final period' in lines[-2]
+    assert "detailed form below, which requires its final period" in lines[-2]
     assert "coding-agent runtime" in lines[-2]
     assert "in Claude Code via T3 Code" in lines[-2]
     assert not attribution.is_valid_attribution(lines[-1])
@@ -199,9 +226,9 @@ def test_failure_emits_actionable_github_annotation(
     output = capsys.readouterr().out
     assert output.startswith("::error title=PR model attribution required::")
     assert "final non-empty PR body line" in output
-    assert "Model-only is the minimum" in output
+    assert "Model-only is the minimum, with an optional final period" in output
     assert "Detailed attribution with the job, coding-agent harness" in output
-    assert "Generated with Claude Opus 5." in output
+    assert '"Generated with Claude Opus 5" or "Generated with Claude Opus 5."' in output
     assert (
         "Generated with Claude Opus 5 for implementation in Claude Code via T3 Code."
         in output
