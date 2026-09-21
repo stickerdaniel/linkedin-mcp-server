@@ -2463,25 +2463,50 @@ def create_topology_process[T](
     return process, None
 
 
-def _spawn_topology_holder(
+def _prepare_topology_holder(
     ready_event: str,
     release_event: str,
     *,
     creationflags: int = 0,
-) -> subprocess.Popen[bytes]:
-    return subprocess.Popen(
-        [
+) -> tuple[tuple[str, ...], int]:
+    return (
+        (
             sys.executable,
             str(Path(__file__).resolve()),
             "topology-holder",
             ready_event,
             release_event,
-        ],
-        cwd=_REPO_ROOT,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        creationflags=creationflags,
+        ),
+        creationflags,
+    )
+
+
+def create_topology_holder(
+    ready_event: str,
+    release_event: str,
+    *,
+    creationflags: int,
+    register: Callable[[subprocess.Popen[bytes]], None],
+    phase: str,
+    prepare: Callable[[str, str], tuple[tuple[str, ...], int]] | None = None,
+) -> tuple[subprocess.Popen[bytes] | None, dict[str, int | str] | None]:
+    if prepare is None:
+        args, prepared_creationflags = _prepare_topology_holder(
+            ready_event, release_event, creationflags=creationflags
+        )
+    else:
+        args, prepared_creationflags = prepare(ready_event, release_event)
+    return create_topology_process(
+        lambda: subprocess.Popen(
+            args,
+            cwd=_REPO_ROOT,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            creationflags=prepared_creationflags,
+        ),
+        register=register,
+        phase=phase,
     )
 
 
@@ -2516,8 +2541,16 @@ def _topology_actor(
         controls: tuple[str, str, Any, Any], *, creationflags: int = 0
     ) -> subprocess.Popen[bytes]:
         ready_name, release_name, _ready, _release = controls
-        process = _spawn_topology_holder(
+        args, prepared_creationflags = _prepare_topology_holder(
             ready_name, release_name, creationflags=creationflags
+        )
+        process = subprocess.Popen(
+            args,
+            cwd=_REPO_ROOT,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            creationflags=prepared_creationflags,
         )
         # Ownership begins when Popen returns, before readiness or Job assignment.
         processes.append(process)
@@ -2674,12 +2707,10 @@ def _topology_actor(
             win32job=win32job,
         )
         guardian_controls = holder_controls("guardian-candidate")
-        guardian, creation_error = create_topology_process(
-            lambda: _spawn_topology_holder(
-                guardian_controls[0],
-                guardian_controls[1],
-                creationflags=getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB"),
-            ),
+        guardian, creation_error = create_topology_holder(
+            guardian_controls[0],
+            guardian_controls[1],
+            creationflags=getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB"),
             register=processes.append,
             phase="guardian-candidate-creation",
         )

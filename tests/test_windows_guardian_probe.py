@@ -22,6 +22,7 @@ from windows_guardian_probe import (
     active_guardian_loss_wait_handles,
     classify_breakaway_result,
     classify_post_exit_membership,
+    create_topology_holder,
     create_topology_process,
     conjunction_admission,
     conjunction_guardian_shutdown,
@@ -1286,22 +1287,40 @@ def test_topology_creation_registers_before_actor_readiness() -> None:
     assert events == ["Popen", "register True", "readiness failed"]
 
 
-def test_event_setup_failure_is_not_a_creation_refusal() -> None:
+def test_holder_preparation_failure_is_not_a_creation_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class PreparationFailed(OSError):
+        winerror = 87
+
+    failure = PreparationFailed("invalid holder path")
     events: list[str] = []
+    processes: list[subprocess.Popen[bytes]] = []
 
-    def setup_event() -> None:
-        events.append("event setup")
-        raise OSError("event unavailable")
+    def fail_preparation(
+        ready_event: str, release_event: str
+    ) -> tuple[tuple[str, ...], int]:
+        events.append(f"prepare {ready_event} {release_event}")
+        raise failure
 
-    with pytest.raises(OSError, match="event unavailable"):
-        setup_event()
-        create_topology_process(
-            lambda: events.append("Popen") or object(),
-            register=lambda _process: events.append("register"),
+    def unexpected_popen(*_args: object, **_kwargs: object) -> subprocess.Popen[bytes]:
+        events.append("Popen")
+        raise AssertionError("Popen reached after preparation failure")
+
+    monkeypatch.setattr(probe.subprocess, "Popen", unexpected_popen)
+    with pytest.raises(PreparationFailed) as raised:
+        create_topology_holder(
+            "ready-event",
+            "release-event",
+            creationflags=0x01000000,
+            register=processes.append,
             phase="guardian-candidate-creation",
+            prepare=fail_preparation,
         )
 
-    assert events == ["event setup"]
+    assert raised.value is failure
+    assert events == ["prepare ready-event release-event"]
+    assert processes == []
 
 
 def test_common_ancestor_requires_live_actors_and_exact_exit_codes() -> None:
