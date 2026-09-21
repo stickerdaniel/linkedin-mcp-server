@@ -32,7 +32,9 @@ def _workflow() -> dict[str, Any]:
         "Generated with Claude Opus 5.",
         "Generated with GPT-5.6 Sol",
         "Generated with GPT-5.6 Sol.",
+        "Generated with Salesforce xGen",
         "Generated with Gemini 3 Pro Preview.",
+        "Generated with Command R",
         "Generated with Claude Sonnet 4.5 for implementation in Claude Code.",
         ("Generated with Claude Opus 5 for implementation in Claude Code via T3 Code."),
         (
@@ -59,6 +61,19 @@ def test_accepts_trailing_blank_lines() -> None:
     )
 
     assert attribution.has_model_attribution(body)
+
+
+@pytest.mark.parametrize("keyword", ["for", "in", "and", "via"])
+@pytest.mark.parametrize("period", ["", "."])
+def test_rejects_trailing_reserved_minimal_tokens(keyword: str, period: str) -> None:
+    assert not attribution.has_model_attribution(
+        f"Generated with GPT-5.6 {keyword}{period}"
+    )
+
+
+@pytest.mark.parametrize("keyword", ["for", "in", "and", "via"])
+def test_rejects_leading_reserved_minimal_tokens(keyword: str) -> None:
+    assert not attribution.has_model_attribution(f"Generated with {keyword} GPT-5.6")
 
 
 @pytest.mark.parametrize(

@@ -13,7 +13,7 @@ from typing import Any
 
 _PREFIX = "Generated with "
 _PLACEHOLDER_RE = re.compile(r"<[^>]*>|\[[^]]*]")
-_RESERVED_MINIMAL_PARTS = (" for ", " in ", " and ", " via ")
+_RESERVED_MINIMAL_RE = re.compile(r"\b(?:for|in|and|via)\b")
 _ERROR = (
     "Model attribution is required as the final non-empty PR body line. "
     'Model-only is the minimum, with an optional final period: "Generated with '
@@ -58,9 +58,7 @@ def is_valid_attribution(line: str) -> bool:
             and _has_valid_harness(harness)
             and _has_valid_model_jobs(model_jobs)
         )
-    return _has_model_name(attribution) and not any(
-        part in attribution for part in _RESERVED_MINIMAL_PARTS
-    )
+    return _has_model_name(attribution) and not _RESERVED_MINIMAL_RE.search(attribution)
 
 
 def has_model_attribution(body: str | None) -> bool:
