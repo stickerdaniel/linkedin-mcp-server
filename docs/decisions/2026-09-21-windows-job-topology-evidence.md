@@ -2,7 +2,7 @@
 
 - Date: 2026-09-21
 - Issue: [#808](https://github.com/stickerdaniel/linkedin-mcp-server/issues/808)
-- Status: native execution pending; production implementation stopped
+- Status: native synthetic topology evidence passed; production implementation stopped
 
 This stage adds synthetic Windows Job-topology evidence only. It does not use
 Patchright or Chromium, does not demonstrate browser containment, and does not
@@ -35,13 +35,19 @@ creation, cleanup is bounded, and cleanup errors do not replace the primary
 failure. Timestamps are diagnostics; named events, pre-termination membership
 and stable process-object exit codes establish ordering and causality.
 
-## Initial result
+## Native result
 
-Native execution pending. This record intentionally predicts no self-assignment,
-breakaway, ambient-host or exit-order result before the Windows CI matrix runs.
-The green platform-independent tests cover result classification, membership
-matrix interpretation, error preservation and scenario routing, not native Job
-semantics.
+GitHub Actions run
+[`35613835424`](https://github.com/stickerdaniel/linkedin-mcp-server/actions/runs/35613835424)
+executed all four topology scenarios successfully on Windows with Python 3.12.4,
+3.13 and 3.14 at commit `4c5c877bc3b996128a4ec2229ed2b560ed7e6de5`.
+Each run observed the topology actor in the outer Job before its start gate,
+required ordinary children to remain in both known Jobs, accepted guardian
+creation only under the scenario-specific containment contract, and required
+all three common-ancestor members to be live before termination and exit with
+code 204 afterward. Platform-independent tests separately cover result
+classification, Popen provenance, membership acceptance, error preservation and
+scenario routing.
 
 The common-ancestor experiment is a structural counterexample to treating
 owner and guardian Jobs as independent. A host or launcher that can terminate a
