@@ -2,7 +2,7 @@
 
 - Date: 2026-09-21
 - Issue: [#808](https://github.com/stickerdaniel/linkedin-mcp-server/issues/808)
-- Status: compatibility candidate falsified; native execution pending; production implementation stopped
+- Status: native compatibility falsification passed; production implementation stopped
 
 The conjunction evidence assigned profile-lock byte 0 to the owner and byte 1 to
 an external guardian. Inverting those regions does not create a mixed-version or
@@ -55,9 +55,11 @@ lifetime in the holder-loss cases. Lock acquisition is the result under test;
 timestamps are not proof.
 
 A green falsification scenario means the unsafe acquisition was observed. It is
-not a production safety claim. Darwin exercises the platform-independent
-byte-zero actor contract and explicitly skips all native scenarios. Native
-Windows execution remains pending for this record.
+not a production safety claim. GitHub Actions run
+[`35600591733`](https://github.com/stickerdaniel/linkedin-mcp-server/actions/runs/35600591733)
+executed all five scenarios successfully on Windows with Python 3.12.4, 3.13 and
+3.14 at commit `820047d33e498ed1b62cf5bf3127e687dcb5f895`. Darwin separately
+exercised the platform-independent actor, witness, retry and cleanup contracts.
 
 ## Decision and remaining boundary
 
