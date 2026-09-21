@@ -17,11 +17,13 @@ It does not change that probe's measured claims.
 ## Evidence added
 
 The native probe now uses a separate actor that opens `profile.lock` itself and
-implements the current source production protocol directly: acquire one byte at
-offset 0, validate the locked file identity and current path, and retain that
-region behind an event barrier. It does not call the conjunction admission
-helper. This is independent actor evidence for the current source protocol, not
-a replay of a released predecessor artifact.
+models only the current source byte-zero `LockFileEx` primitive under a private,
+stable root: acquire one byte at offset 0, validate the locked file identity and
+current path, and retain that region behind an event barrier. It does not call
+the conjunction admission helper. It does not model the full `ProfileLease`
+canonicalization, path hardening, retry, reference counting, handoff or lifecycle
+behavior. This is independent structural/model evidence for the primitive, not a
+replay of a released predecessor artifact.
 
 Five scenarios expose the unsafe outcome explicitly:
 
@@ -35,15 +37,20 @@ Five scenarios expose the unsafe outcome explicitly:
    the guardian arms. A second byte-0 actor can acquire in that window, so the
    guardian's byte-0 acquisition is contended and neither `ARMED` nor browser
    launch authority is published.
-4. After inverted guardian DISARM, a named event keeps an outer protected
-   mutation active while the owner retains byte 1. The byte-0 actor can acquire
-   before that mutation completes.
-5. During an inverted no-browser exclusive mutation, the owner retains byte 1
-   without a guardian. The byte-0 actor can acquire concurrently.
+4. The post-DISARM case is structural/model evidence. A guardian's clean exit
+   models byte-0 release, and a supervisor-owned manual event marks an outer
+   mutation as active while the owner retains byte 1. No production DISARM,
+   reference-count or mutation operation runs. The byte-0 actor can acquire
+   before the modeled mutation completes.
+5. The no-browser case and its fields and conclusion are structural/model
+   evidence. The owner retains byte 1, no guardian starts, and a manual hold
+   models an exclusive mutation. No production reference-count, mutation or
+   lifecycle operation runs. The byte-0 actor can acquire concurrently.
 
-Named events establish admission, ARM, DISARM, mutation and cleanup barriers.
-Stable process handles establish holder survival and exit. Browser Job
-accounting and tracked child process handles establish the surviving browser
+Named events establish admission, ARM and model barriers. Stable process handles
+establish holder survival and exit. The post-DISARM event is a supervisor-owned
+model marker, not a production protocol event. Browser Job accounting and
+tracked child process handles establish the surviving browser
 lifetime in the holder-loss cases. Lock acquisition is the result under test;
 timestamps are not proof.
 

@@ -31,9 +31,13 @@ from windows_guardian_probe import (
     open_descendant_handles_before_terminate,
     production_byte_zero_admission,
     query_control_job_membership,
+    raise_cleanup_error_unless_unwinding,
     read_published_json,
     remaining_wait_milliseconds,
+    require_publication_witnesses,
     require_same_file_identity,
+    require_successful_actor_completion,
+    retry_contended_publication,
     retry_lock_rundown,
     run_guardian_fail_closed,
     sample_guardian_loss_progress,
@@ -1129,6 +1133,105 @@ def test_lock_rundown_retries_only_contention_and_measures_progress() -> None:
     assert "unexpected wait" not in waits
 
 
+def test_actor_completion_rejects_nonzero_exit_with_diagnostics() -> None:
+    class Process:
+        returncode = 7
+
+        def wait(self, *, timeout: float) -> int:
+            assert timeout == 3
+            return self.returncode
+
+        def communicate(self) -> tuple[bytes, bytes]:
+            return b"actor stdout", b"actor stderr"
+
+    with pytest.raises(RuntimeError) as raised:
+        require_successful_actor_completion(Process(), "post-entry", timeout=3)
+
+    assert str(raised.value) == (
+        "actor failed: phase=post-entry returncode=7 "
+        "stdout=b'actor stdout' stderr=b'actor stderr'"
+    )
+
+
+def test_contended_publication_rejects_owner_expiry_after_entry() -> None:
+    owner = object()
+    owner_alive = True
+
+    def attempt() -> str:
+        nonlocal owner_alive
+        owner_alive = False
+        return "published"
+
+    with pytest.raises(RuntimeError, match="owner exited during entrant publication"):
+        retry_contended_publication(
+            attempt,
+            require_window=lambda: require_publication_witnesses(
+                {"owner": owner},
+                is_active=lambda handle: handle is owner and owner_alive,
+            ),
+            deadline=2.0,
+            wait_for_retry=lambda: pytest.fail("a successful attempt was retried"),
+            monotonic=lambda: 1.0,
+        )
+
+
+def test_post_entry_child_witness_must_match_pre_entry_handle() -> None:
+    first = object()
+    replacement = object()
+    live = {first}
+    children_before = require_publication_witnesses(
+        {},
+        is_active=lambda handle: handle in live,
+        child_handles=[first, replacement],
+    )
+    live = {replacement}
+
+    with pytest.raises(RuntimeError, match="no pre-entry child process survived"):
+        require_publication_witnesses(
+            {},
+            is_active=lambda handle: handle in live,
+            child_handles=[first, replacement],
+            required_children=children_before,
+        )
+
+
+def test_contended_publication_rechecks_window_for_each_attempt() -> None:
+    attempts = iter([None, "published"])
+    events: list[str] = []
+    clock = iter([1.0, 1.1, 1.2])
+
+    result, attempt_count, duration = retry_contended_publication(
+        lambda: events.append("attempt") or next(attempts),
+        require_window=lambda: events.append("witness"),
+        deadline=2.0,
+        wait_for_retry=lambda: events.append("wait"),
+        monotonic=lambda: next(clock),
+    )
+
+    assert result == "published"
+    assert attempt_count == 2
+    assert duration == pytest.approx(0.2)
+    assert events == [
+        "witness",
+        "attempt",
+        "witness",
+        "wait",
+        "witness",
+        "attempt",
+        "witness",
+    ]
+
+
+def test_cleanup_error_does_not_replace_active_body_error() -> None:
+    body_error = RuntimeError("body failed")
+    cleanup_error = OSError("cleanup failed")
+
+    raise_cleanup_error_unless_unwinding(cleanup_error, body_error)
+    with pytest.raises(OSError) as raised:
+        raise_cleanup_error_unless_unwinding(cleanup_error, None)
+    assert raised.value is cleanup_error
+
+
 def test_post_harness_admission_retries_until_a_and_b_are_available() -> None:
     admissions = iter([False, False, True])
     opened = iter([10, 11, 12])
@@ -1974,6 +2077,10 @@ def test_falsifies_original_assignment_after_owner_loss(tmp_path: Path) -> None:
     assert measurement["browser_active_before_entry"] > 0
     assert measurement["browser_active_after_entry"] > 0
     assert measurement["live_children_before_entry"] > 0
+    assert measurement["live_children_after_entry"] > 0
+    assert measurement["same_child_live_before_and_after_entry"] is True
+    assert measurement["entrant_rundown_attempts"] >= 1
+    assert measurement["entrant_rundown_seconds"] >= 0
     assert measurement["byte_zero_entrant_acquired"] is True
     assert measurement["unsafe_compatibility_result"] is True
 
@@ -1990,6 +2097,10 @@ def test_falsifies_inverted_assignment_after_guardian_loss(tmp_path: Path) -> No
     assert measurement["browser_active_before_entry"] > 0
     assert measurement["browser_active_after_entry"] > 0
     assert measurement["live_children_before_entry"] > 0
+    assert measurement["live_children_after_entry"] > 0
+    assert measurement["same_child_live_before_and_after_entry"] is True
+    assert measurement["entrant_rundown_attempts"] >= 1
+    assert measurement["entrant_rundown_seconds"] >= 0
     assert measurement["byte_zero_entrant_acquired"] is True
     assert measurement["unsafe_compatibility_result"] is True
 

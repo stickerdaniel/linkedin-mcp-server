@@ -2002,6 +2002,62 @@ def retry_admission_after_drain(
     )
 
 
+def retry_contended_publication[T](
+    attempt: Callable[[], T | None],
+    *,
+    require_window: Callable[[], object],
+    deadline: float,
+    wait_for_retry: Callable[[], None],
+    monotonic: Callable[[], float] = time.monotonic,
+) -> tuple[T, int, float]:
+    """Retry contention while proving the protected observation window remains."""
+
+    def witnessed_attempt() -> T | None:
+        require_window()
+        result = attempt()
+        require_window()
+        return result
+
+    return retry_lock_rundown(
+        witnessed_attempt,
+        deadline=deadline,
+        wait_for_retry=wait_for_retry,
+        monotonic=monotonic,
+    )
+
+
+def require_publication_witnesses[T](
+    survivors: dict[str, T],
+    *,
+    is_active: Callable[[T], bool],
+    child_handles: list[T] | None = None,
+    required_children: list[T] | None = None,
+) -> list[T]:
+    for label, handle in survivors.items():
+        if not is_active(handle):
+            raise RuntimeError(f"{label} exited during entrant publication")
+    if child_handles is None:
+        return []
+    live_children = [handle for handle in child_handles if is_active(handle)]
+    if not live_children:
+        raise RuntimeError("no child process survived entrant publication")
+    if required_children is not None and not any(
+        required is observed
+        for required in required_children
+        for observed in live_children
+    ):
+        raise RuntimeError("no pre-entry child process survived entrant publication")
+    return live_children
+
+
+def raise_cleanup_error_unless_unwinding(
+    cleanup_error: BaseException | None,
+    active_exception: BaseException | None,
+) -> None:
+    if cleanup_error is not None and active_exception is None:
+        raise cleanup_error
+
+
 def open_descendant_handles_before_terminate[T](
     *,
     open_handles: Callable[[], list[T]],
@@ -2168,6 +2224,24 @@ def _attempt_here(path: Path) -> tuple[bool, int]:
     return acquired, fd
 
 
+def require_successful_actor_completion(
+    process: Any,
+    phase: str,
+    *,
+    timeout: float = _DEADLINE_SECONDS,
+) -> None:
+    try:
+        process.wait(timeout=timeout)
+    except BaseException as exc:
+        raise RuntimeError(f"actor did not complete: phase={phase}") from exc
+    if process.returncode != 0:
+        stdout, stderr = process.communicate()
+        raise RuntimeError(
+            f"actor failed: phase={phase} returncode={process.returncode!r} "
+            f"stdout={stdout!r} stderr={stderr!r}"
+        )
+
+
 def _run_region_falsification_probe(scenario: str, root: Path) -> dict[str, Any]:
     """Measure static region assignments against a byte-zero-only entrant."""
     from linkedin_mcp_server import process_tree
@@ -2208,7 +2282,19 @@ def _run_region_falsification_probe(scenario: str, root: Path) -> dict[str, Any]
         return process, result_file, ready
 
     def wait_result(path: Path, ready: Any) -> dict[str, Any]:
-        _wait(ready, _DEADLINE_SECONDS, f"{path.name} was not ready")
+        try:
+            _wait(ready, _DEADLINE_SECONDS, f"{path.name} was not ready")
+        except BaseException as exc:
+            process = actors_by_result[path]
+            returncode = process.poll()
+            stdout = b""
+            stderr = b""
+            if returncode is not None:
+                stdout, stderr = process.communicate()
+            raise RuntimeError(
+                f"{path.name} was not ready: phase=before-ready "
+                f"returncode={returncode!r} stdout={stdout!r} stderr={stderr!r}"
+            ) from exc
         return read_published_json(path, deadline=time.monotonic() + 5)
 
     def signal(handle: Any) -> None:
@@ -2220,9 +2306,14 @@ def _run_region_falsification_probe(scenario: str, root: Path) -> dict[str, Any]
             raise RuntimeError("Windows Popen exposed no stable process handle")
         return _is_active(handle)
 
-    def finish(process: subprocess.Popen[bytes], release: Any) -> None:
+    def finish(process: subprocess.Popen[bytes], release: Any, phase: str) -> None:
+        if process.poll() is not None:
+            require_successful_actor_completion(process, f"{phase}-before-release")
+            raise RuntimeError(
+                f"actor exited before observation acknowledgement: {phase}"
+            )
         signal(release)
-        process.wait(timeout=_DEADLINE_SECONDS)
+        require_successful_actor_completion(process, phase)
 
     def production_entrant(
         label: str,
@@ -2234,7 +2325,10 @@ def _run_region_falsification_probe(scenario: str, root: Path) -> dict[str, Any]
             {"hold_event": release_name},
         )
         result = wait_result(result_file, ready)
-        require_same_file_identity(identity, result["file_identity"])
+        if result["acquired"]:
+            require_same_file_identity(identity, result["file_identity"])
+        else:
+            require_successful_actor_completion(actor, f"{label}-contention")
         return actor, result, release
 
     def browser_fixture(label: str) -> tuple[Any, list[subprocess.Popen[bytes]]]:
@@ -2250,10 +2344,102 @@ def _run_region_falsification_probe(scenario: str, root: Path) -> dict[str, Any]
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
+            processes.append(child)
             job.assign_popen(child)
             children.append(child)
-            processes.append(child)
         return job, children
+
+    def publish_entrant(
+        label: str,
+        survivors: dict[str, subprocess.Popen[bytes]],
+        child_handles: list[subprocess.Popen[bytes]] | None = None,
+    ) -> tuple[
+        subprocess.Popen[bytes],
+        dict[str, Any],
+        Any,
+        list[subprocess.Popen[bytes]],
+        list[subprocess.Popen[bytes]],
+    ]:
+        children_before = require_publication_witnesses(
+            survivors,
+            is_active=active,
+            child_handles=child_handles,
+        )
+        actor, result, release = production_entrant(label)
+        children_after = require_publication_witnesses(
+            survivors,
+            is_active=active,
+            child_handles=child_handles,
+            required_children=children_before if child_handles is not None else None,
+        )
+        return actor, result, release, children_before, children_after
+
+    def retry_holder_death_entrant(
+        label: str,
+        survivors: dict[str, subprocess.Popen[bytes]],
+        child_handles: list[subprocess.Popen[bytes]],
+        browser_active_processes: Callable[[], int],
+    ) -> tuple[
+        subprocess.Popen[bytes],
+        dict[str, Any],
+        Any,
+        list[subprocess.Popen[bytes]],
+        list[subprocess.Popen[bytes]],
+        int,
+        float,
+    ]:
+        children_before = require_publication_witnesses(
+            survivors,
+            is_active=active,
+            child_handles=child_handles,
+        )
+        attempt_number = 0
+        throttle = win32event.CreateEvent(None, False, False, None)
+        events.append(throttle)
+
+        def require_window() -> None:
+            require_publication_witnesses(
+                survivors,
+                is_active=active,
+                child_handles=child_handles,
+                required_children=children_before,
+            )
+            if browser_active_processes() <= 0:
+                raise RuntimeError("browser Job drained during entrant publication")
+
+        def attempt() -> tuple[subprocess.Popen[bytes], dict[str, Any], Any] | None:
+            nonlocal attempt_number
+            attempt_number += 1
+            actor, result, release = production_entrant(
+                f"{label}-attempt-{attempt_number}"
+            )
+            if not result["acquired"]:
+                return None
+            return actor, result, release
+
+        (actor, result, release), attempts, seconds = retry_contended_publication(
+            attempt,
+            require_window=require_window,
+            deadline=time.monotonic() + _DEADLINE_SECONDS,
+            wait_for_retry=lambda: wait_on_unsignaled_throttle(
+                throttle, wait=win32event.WaitForSingleObject
+            ),
+        )
+        children_after = require_publication_witnesses(
+            survivors,
+            is_active=active,
+            child_handles=child_handles,
+            required_children=children_before,
+        )
+        return (
+            actor,
+            result,
+            release,
+            children_before,
+            children_after,
+            attempts,
+            seconds,
+        )
 
     try:
         identity = list(file_identity(base_fd))
@@ -2279,14 +2465,24 @@ def _run_region_falsification_probe(scenario: str, root: Path) -> dict[str, Any]
             _terminate_process(owner)
             guardian_active_before = active(guardian)
             browser_active_before = _query_named_job_active_processes(browser_job.name)
-            live_children_before = sum(child.poll() is None for child in children)
-            entrant, entrant_result, entrant_release = production_entrant(
-                "byte-zero-entrant"
+            (
+                entrant,
+                entrant_result,
+                entrant_release,
+                children_before,
+                children_after,
+                entrant_attempts,
+                entrant_rundown_seconds,
+            ) = retry_holder_death_entrant(
+                "byte-zero-entrant",
+                {"guardian": guardian},
+                children,
+                lambda: _query_named_job_active_processes(browser_job.name),
             )
             guardian_active_after = active(guardian)
             browser_active_after = _query_named_job_active_processes(browser_job.name)
-            finish(entrant, entrant_release)
-            finish(guardian, guardian_release)
+            finish(entrant, entrant_release, "owner-loss-entrant")
+            finish(guardian, guardian_release, "owner-loss-guardian")
             return {
                 "scenario": scenario,
                 "assignment": {"owner": 0, "guardian": 1, "entrant": 0},
@@ -2296,7 +2492,13 @@ def _run_region_falsification_probe(scenario: str, root: Path) -> dict[str, Any]
                 "guardian_active_after_entry": guardian_active_after,
                 "browser_active_before_entry": browser_active_before,
                 "browser_active_after_entry": browser_active_after,
-                "live_children_before_entry": live_children_before,
+                "live_children_before_entry": len(children_before),
+                "live_children_after_entry": len(children_after),
+                "same_child_live_before_and_after_entry": any(
+                    child in children_after for child in children_before
+                ),
+                "entrant_rundown_attempts": entrant_attempts,
+                "entrant_rundown_seconds": entrant_rundown_seconds,
                 "byte_zero_entrant_acquired": entrant_result["acquired"],
                 "unsafe_compatibility_result": entrant_result["acquired"],
             }
@@ -2324,14 +2526,24 @@ def _run_region_falsification_probe(scenario: str, root: Path) -> dict[str, Any]
             _terminate_process(guardian)
             owner_active_before = active(owner)
             browser_active_before = _query_named_job_active_processes(browser_job.name)
-            live_children_before = sum(child.poll() is None for child in children)
-            entrant, entrant_result, entrant_release = production_entrant(
-                "byte-zero-entrant"
+            (
+                entrant,
+                entrant_result,
+                entrant_release,
+                children_before,
+                children_after,
+                entrant_attempts,
+                entrant_rundown_seconds,
+            ) = retry_holder_death_entrant(
+                "byte-zero-entrant",
+                {"owner": owner},
+                children,
+                lambda: _query_named_job_active_processes(browser_job.name),
             )
             owner_active_after = active(owner)
             browser_active_after = _query_named_job_active_processes(browser_job.name)
-            finish(entrant, entrant_release)
-            finish(owner, owner_release)
+            finish(entrant, entrant_release, "guardian-loss-entrant")
+            finish(owner, owner_release, "guardian-loss-owner")
             return {
                 "scenario": scenario,
                 "assignment": {"owner": 1, "guardian": 0, "entrant": 0},
@@ -2340,7 +2552,13 @@ def _run_region_falsification_probe(scenario: str, root: Path) -> dict[str, Any]
                 "owner_cleanup_paused": owner_active_before and owner_active_after,
                 "browser_active_before_entry": browser_active_before,
                 "browser_active_after_entry": browser_active_after,
-                "live_children_before_entry": live_children_before,
+                "live_children_before_entry": len(children_before),
+                "live_children_after_entry": len(children_after),
+                "same_child_live_before_and_after_entry": any(
+                    child in children_after for child in children_before
+                ),
+                "entrant_rundown_attempts": entrant_attempts,
+                "entrant_rundown_seconds": entrant_rundown_seconds,
                 "byte_zero_entrant_acquired": entrant_result["acquired"],
                 "unsafe_compatibility_result": entrant_result["acquired"],
             }
@@ -2359,7 +2577,7 @@ def _run_region_falsification_probe(scenario: str, root: Path) -> dict[str, Any]
                 "production-byte-zero", "transient-admission", {}
             )
             admission_result = wait_result(admission_file, admission_ready)
-            admission.wait(timeout=_DEADLINE_SECONDS)
+            require_successful_actor_completion(admission, "transient-admission")
 
             guardian_pause_name, guardian_pause = event("allow-guardian-arm")
             armed_name, armed = event("guardian-armed")
@@ -2376,17 +2594,17 @@ def _run_region_falsification_probe(scenario: str, root: Path) -> dict[str, Any]
                 [owner_handle],
             )
             _wait(guardian_ready, _DEADLINE_SECONDS, "guardian did not reach pre-ARM")
-            entrant, entrant_result, entrant_release = production_entrant(
-                "byte-zero-entrant"
+            entrant, entrant_result, entrant_release, _before, _after = publish_entrant(
+                "byte-zero-entrant", {"owner": owner}
             )
             signal(guardian_pause)
-            guardian.wait(timeout=_DEADLINE_SECONDS)
+            require_successful_actor_completion(guardian, "pre-arm-guardian")
             guardian_result = read_published_json(
                 guardian_file, deadline=time.monotonic() + 5
             )
             armed_state = win32event.WaitForSingleObject(armed, 0)
-            finish(entrant, entrant_release)
-            finish(owner, owner_release)
+            finish(entrant, entrant_release, "pre-arm-entrant")
+            finish(owner, owner_release, "pre-arm-owner")
             return {
                 "scenario": scenario,
                 "assignment": {"owner": 1, "guardian": 0, "entrant": 0},
@@ -2424,16 +2642,16 @@ def _run_region_falsification_probe(scenario: str, root: Path) -> dict[str, Any]
             mutation_name, mutation_active = event("outer-mutation-active")
             _ = mutation_name
             signal(mutation_active)
-            finish(guardian, guardian_release)
+            finish(guardian, guardian_release, "modeled-guardian-disarm")
             mutation_still_active = (
                 win32event.WaitForSingleObject(mutation_active, 0) == _WAIT_OBJECT_0
             )
-            owner_active = active(owner)
-            entrant, entrant_result, entrant_release = production_entrant(
-                "byte-zero-entrant"
+            entrant, entrant_result, entrant_release, _before, _after = publish_entrant(
+                "byte-zero-entrant", {"owner": owner}
             )
-            finish(entrant, entrant_release)
-            finish(owner, owner_release)
+            owner_active = active(owner)
+            finish(entrant, entrant_release, "post-disarm-entrant")
+            finish(owner, owner_release, "post-disarm-owner")
             return {
                 "scenario": scenario,
                 "assignment": {"owner": 1, "guardian": 0, "entrant": 0},
@@ -2453,12 +2671,12 @@ def _run_region_falsification_probe(scenario: str, root: Path) -> dict[str, Any]
                 {"offset": 1, "hold_event": owner_release_name},
             )
             wait_result(owner_file, owner_ready)
-            owner_active = active(owner)
-            entrant, entrant_result, entrant_release = production_entrant(
-                "byte-zero-entrant"
+            entrant, entrant_result, entrant_release, _before, _after = publish_entrant(
+                "byte-zero-entrant", {"owner": owner}
             )
-            finish(entrant, entrant_release)
-            finish(owner, owner_release)
+            owner_active = active(owner)
+            finish(entrant, entrant_release, "exclusive-mutation-entrant")
+            finish(owner, owner_release, "exclusive-mutation-owner")
             return {
                 "scenario": scenario,
                 "assignment": {"owner": 1, "guardian": None, "entrant": 0},
@@ -2471,6 +2689,7 @@ def _run_region_falsification_probe(scenario: str, root: Path) -> dict[str, Any]
 
         raise RuntimeError(f"unknown region falsification scenario: {scenario}")
     finally:
+        active_exception = sys.exception()
         first_error: BaseException | None = None
         for process in reversed(processes):
             try:
@@ -2496,8 +2715,7 @@ def _run_region_falsification_probe(scenario: str, root: Path) -> dict[str, Any]
             os.close(base_fd)
         except BaseException as exc:
             first_error = first_error or exc
-        if first_error is not None:
-            raise first_error
+        raise_cleanup_error_unless_unwinding(first_error, active_exception)
 
 
 def _run_conjunction_probe(scenario: str, root: Path) -> dict[str, Any]:
