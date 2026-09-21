@@ -151,6 +151,7 @@ Optional additional keys:
 - `references["search_results"]` (search_posts only) — DOM references first, then up to 50 `kind: "feed_post"` permalinks read from the page's JSON/document payload responses (`/feed/update/<urn>/` or `/posts/<slug>`, both valid). Captured permalinks are appended, not aligned to result order.
 - `apply: {type, url?}` (get_job_apply_url, which returns no `sections`) — `type` is `easy_apply`, `external`, `applied`, `closed` or `unknown`; `url` is the employer's application link as LinkedIn gives it, never opened, present for external postings
 - `apply: {type}` (get_job_details) — `type` is `applied` or `closed`, read from the posting's text above its description without clicking; absent for an open posting and for one whose description heading was not captured
+- `reply_to_conversation` returns no `sections`: `{url, status, message, recipient_selected, sent, retry_safe, thread_id, participant}`, the `send_message` fields plus the thread and the name its title shows (null when unread)
 
 ## Tests
 

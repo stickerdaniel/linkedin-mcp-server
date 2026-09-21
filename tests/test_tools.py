@@ -41,6 +41,7 @@ def _make_mock_extractor(result: dict) -> MagicMock:
     mock.get_conversation = AsyncMock(return_value=result)
     mock.search_conversations = AsyncMock(return_value=result)
     mock.send_message = AsyncMock(return_value=result)
+    mock.reply_to_conversation = AsyncMock(return_value=result)
     mock.get_my_profile = AsyncMock(return_value=result)
     mock.search_companies = AsyncMock(return_value=result)
     mock.search_posts = AsyncMock(return_value=result)
@@ -2016,6 +2017,100 @@ class TestMessagingTools:
                 mock_context,
             )
 
+    async def test_send_message_description_points_replies_elsewhere(self):
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool = await mcp.get_tool("send_message")
+        assert tool is not None and tool.description is not None
+        description = " ".join(tool.description.split())
+        assert "use reply_to_conversation with the thread's id instead" in description
+        assert "Until a thread-targeted send path is available" not in description
+
+    async def test_reply_to_conversation_forwards_the_thread(
+        self, mock_context, serve_extractor
+    ):
+        expected = {
+            "url": "https://www.linkedin.com/messaging/thread/2-abc/",
+            "status": "sent",
+            "sent": True,
+            "retry_safe": False,
+            "thread_id": "2-abc",
+            "participant": "Ada Lovelace",
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        serve_extractor(mock_extractor)
+        tool_fn = await get_tool_fn(mcp, "reply_to_conversation")
+        result = await tool_fn("2-abc", "Hello!", True, mock_context)
+
+        assert result == expected
+        mock_extractor.reply_to_conversation.assert_awaited_once_with(
+            "2-abc", "Hello!", confirm_send=True
+        )
+
+    async def test_reply_to_conversation_is_a_write(self):
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool = await mcp.get_tool("reply_to_conversation")
+        assert tool is not None and tool.annotations is not None
+        assert not tool.annotations.read_only_hint
+        assert tool.annotations.destructive_hint is True
+        assert tool.parameters["required"] == ["thread_id", "message", "confirm_send"]
+
+    @pytest.mark.parametrize("message", ["", "tab\there"], ids=["blank", "c0"])
+    async def test_reply_to_conversation_refuses_before_a_session(
+        self, mock_context, message
+    ):
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "reply_to_conversation")
+        with patch(
+            "linkedin_mcp_server.tools.messaging.get_ready_extractor",
+            new_callable=AsyncMock,
+        ) as ready:
+            result = await tool_fn("2-abc", message, True, mock_context)
+
+        ready.assert_not_awaited()
+        assert result["status"] == "invalid_message"
+        assert result["retry_safe"] is True
+        assert result["url"] == "https://www.linkedin.com/messaging/thread/2-abc/"
+
+    async def test_reply_to_conversation_maps_a_bad_thread_id(self, mock_context):
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.core.exceptions import InvalidReferenceError
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "reply_to_conversation")
+        with (
+            patch(
+                "linkedin_mcp_server.tools.messaging.get_ready_extractor",
+                new_callable=AsyncMock,
+            ) as ready,
+            pytest.raises(ToolError) as excinfo,
+        ):
+            await tool_fn("../../feed", "", True, mock_context)
+
+        ready.assert_not_awaited()
+        assert isinstance(excinfo.value.__cause__, InvalidReferenceError)
+
 
 class TestGetMyProfileTool:
     async def test_get_my_profile_success(self, mock_context, serve_extractor):
@@ -2467,6 +2562,7 @@ class TestToolTimeouts:
             "get_conversation",
             "search_conversations",
             "send_message",
+            "reply_to_conversation",
             "get_feed",
             "search_posts",
             "close_session",
@@ -2501,6 +2597,7 @@ class TestToolTimeouts:
             "get_conversation",
             "search_conversations",
             "send_message",
+            "reply_to_conversation",
             "get_feed",
             "search_posts",
             "close_session",
