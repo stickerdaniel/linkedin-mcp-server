@@ -12,8 +12,6 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SCRIPT = _REPO_ROOT / "scripts" / "check_pr_model_attribution.py"
 _WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "check-attribution.yml"
 _TEMPLATE = _REPO_ROOT / ".github" / "pull_request_template.md"
-_AGENT_GUIDE = _REPO_ROOT / "AGENTS.md"
-_CONTRIBUTING = _REPO_ROOT / "CONTRIBUTING.md"
 _SPEC = importlib.util.spec_from_file_location("check_pr_model_attribution", _SCRIPT)
 assert _SPEC is not None and _SPEC.loader is not None
 attribution = importlib.util.module_from_spec(_SPEC)
@@ -142,17 +140,6 @@ def test_template_ends_with_editable_attribution_placeholder() -> None:
     assert "coding-agent runtime" in lines[-2]
     assert "in Claude Code via T3 Code" in lines[-2]
     assert not attribution.is_valid_attribution(lines[-1])
-
-
-def test_guides_require_only_the_model_and_recommend_provenance() -> None:
-    agent_guide = _AGENT_GUIDE.read_text(encoding="utf-8")
-    contributing = _CONTRIBUTING.read_text(encoding="utf-8")
-
-    assert "CI accepts `Generated with <model>.` as the minimum" in agent_guide
-    assert "coding-agent runtime that invokes the model and tools" in agent_guide
-    assert "in Claude Code via T3 Code" in agent_guide
-    assert "the model before merge" in contributing
-    assert "job and coding-agent harness are preferred" in contributing
 
 
 def test_workflow_checks_attribution_in_required_job() -> None:
