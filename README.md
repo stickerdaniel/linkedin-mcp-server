@@ -662,7 +662,7 @@ Use code <strong>RAPID10</strong> for 10% off <a href="https://www.rapidproxy.io
 
 LinkedIn scores the address a session signs in from. Your account's usual IP address is the safe one. You should use a proxy in your country when the server cannot use it: a VPS, another country, or a second account that must not share the first one's address.
 
-Take a dedicated static ISP address and keep it. From a residential pool, use a sticky session that holds one address (never per-request rotation). A WireGuard or Tailscale connection to your home network works too.
+With a paid provider, use a sticky residential session that holds one address (never per-request rotation). A WireGuard full tunnel or Tailscale exit node on your home network works when the server should use your usual home address.
 
 **Setup:**
 
