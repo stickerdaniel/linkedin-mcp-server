@@ -1544,6 +1544,29 @@ def _actor_admission(
     )
 
 
+def production_byte_zero_admission(
+    descriptor: _ActorFd,
+    path: Path,
+    expected_identity: list[int],
+    *,
+    try_lock: Callable[[int, int], bool],
+    unlock: Callable[[int, int], None],
+    identity: Callable[[int], tuple[int, int, int]] = file_identity,
+    still_at: Callable[[int, Path], bool] | None = None,
+) -> bool:
+    """Model the current production protocol without conjunction helpers."""
+    return acquire_actor_region(
+        descriptor,
+        path,
+        expected_identity,
+        0,
+        try_lock=try_lock,
+        unlock=unlock,
+        identity=identity,
+        still_at=still_at,
+    )
+
+
 def _finish_actor_fd(descriptor: _ActorFd, first_error: BaseException | None) -> None:
     try:
         descriptor.close()
@@ -1638,6 +1661,34 @@ def _actor(
             else:
                 _atomic_json(result_file, result)
                 _signal(ready_event)
+            return 0
+
+        if mode == "production-byte-zero":
+            acquired = production_byte_zero_admission(
+                descriptor,
+                lock_path,
+                expected_identity,
+                try_lock=try_lock,
+                unlock=unlock,
+            )
+            result.update(
+                {
+                    "acquired": acquired,
+                    "protocol": "current-source-production-byte-zero",
+                    "offset": 0,
+                }
+            )
+            if acquired:
+                locked_offset = 0
+                result["file_identity"] = list(file_identity(fd))
+            _atomic_json(result_file, result)
+            _signal(ready_event)
+            hold_event = options.get("hold_event")
+            if acquired and hold_event:
+                _actor_wait(hold_event)
+            if acquired:
+                unlock(fd, 0)
+                locked_offset = None
             return 0
 
         offset = int(options["offset"])
@@ -2115,6 +2166,338 @@ def _attempt_here(path: Path) -> tuple[bool, int]:
             os.close(fd)
         raise
     return acquired, fd
+
+
+def _run_region_falsification_probe(scenario: str, root: Path) -> dict[str, Any]:
+    """Measure static region assignments against a byte-zero-only entrant."""
+    from linkedin_mcp_server import process_tree
+
+    _win32api, _win32con, win32event, _win32job = _windows_modules()
+    root.mkdir(parents=True, exist_ok=True)
+    lock_path = root / "auth" / "profile.lock"
+    base_fd = _probe_fd(lock_path)
+    events: list[Any] = []
+    processes: list[subprocess.Popen[bytes]] = []
+    jobs: list[Any] = []
+    actors_by_result: dict[Path, subprocess.Popen[bytes]] = {}
+
+    def event(label: str) -> tuple[str, Any]:
+        name, handle = _new_event(win32event, label)
+        events.append(handle)
+        return name, handle
+
+    def spawn(
+        mode: str,
+        label: str,
+        options: dict[str, Any],
+        extra_handles: list[int] | None = None,
+    ) -> tuple[subprocess.Popen[bytes], Path, Any]:
+        ready_name, ready = event(f"{label}-ready")
+        result_file = root / f"{label}.json"
+        process = _spawn_actor(
+            mode,
+            lock_path,
+            identity,
+            ready_name,
+            result_file,
+            options,
+            extra_handles,
+        )
+        processes.append(process)
+        actors_by_result[result_file] = process
+        return process, result_file, ready
+
+    def wait_result(path: Path, ready: Any) -> dict[str, Any]:
+        _wait(ready, _DEADLINE_SECONDS, f"{path.name} was not ready")
+        return read_published_json(path, deadline=time.monotonic() + 5)
+
+    def signal(handle: Any) -> None:
+        win32event.SetEvent(handle)
+
+    def active(process: subprocess.Popen[bytes]) -> bool:
+        handle = getattr(process, "_handle", None)
+        if handle is None:
+            raise RuntimeError("Windows Popen exposed no stable process handle")
+        return _is_active(handle)
+
+    def finish(process: subprocess.Popen[bytes], release: Any) -> None:
+        signal(release)
+        process.wait(timeout=_DEADLINE_SECONDS)
+
+    def production_entrant(
+        label: str,
+    ) -> tuple[subprocess.Popen[bytes], dict[str, Any], Any]:
+        release_name, release = event(f"{label}-release")
+        actor, result_file, ready = spawn(
+            "production-byte-zero",
+            label,
+            {"hold_event": release_name},
+        )
+        result = wait_result(result_file, ready)
+        require_same_file_identity(identity, result["file_identity"])
+        return actor, result, release
+
+    def browser_fixture(label: str) -> tuple[Any, list[subprocess.Popen[bytes]]]:
+        job = process_tree.WindowsJob.named(label)
+        jobs.append(job)
+        if job.name is None:
+            raise RuntimeError("browser Job has no name")
+        children = []
+        for _ in range(4):
+            child = subprocess.Popen(
+                [sys.executable, "-c", "import threading; threading.Event().wait()"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            job.assign_popen(child)
+            children.append(child)
+            processes.append(child)
+        return job, children
+
+    try:
+        identity = list(file_identity(base_fd))
+
+        if scenario == "falsification-original-owner-loss":
+            browser_job, children = browser_fixture("original-owner-loss-browser")
+            owner, owner_file, owner_ready = spawn("hold", "owner", {"offset": 0})
+            guardian_release_name, guardian_release = event("guardian-drain-complete")
+            guardian, guardian_file, guardian_ready = spawn(
+                "hold",
+                "guardian",
+                {
+                    "offset": 1,
+                    "job_name": browser_job.name,
+                    "hold_event": guardian_release_name,
+                },
+            )
+            owner_result = wait_result(owner_file, owner_ready)
+            guardian_result = wait_result(guardian_file, guardian_ready)
+            require_same_file_identity(identity, owner_result["file_identity"])
+            require_same_file_identity(identity, guardian_result["file_identity"])
+            browser_job.close()
+            _terminate_process(owner)
+            guardian_active_before = active(guardian)
+            browser_active_before = _query_named_job_active_processes(browser_job.name)
+            live_children_before = sum(child.poll() is None for child in children)
+            entrant, entrant_result, entrant_release = production_entrant(
+                "byte-zero-entrant"
+            )
+            guardian_active_after = active(guardian)
+            browser_active_after = _query_named_job_active_processes(browser_job.name)
+            finish(entrant, entrant_release)
+            finish(guardian, guardian_release)
+            return {
+                "scenario": scenario,
+                "assignment": {"owner": 0, "guardian": 1, "entrant": 0},
+                "protocol": entrant_result["protocol"],
+                "owner_exit_observed": not active(owner),
+                "guardian_active_before_entry": guardian_active_before,
+                "guardian_active_after_entry": guardian_active_after,
+                "browser_active_before_entry": browser_active_before,
+                "browser_active_after_entry": browser_active_after,
+                "live_children_before_entry": live_children_before,
+                "byte_zero_entrant_acquired": entrant_result["acquired"],
+                "unsafe_compatibility_result": entrant_result["acquired"],
+            }
+
+        if scenario == "falsification-inverted-guardian-loss":
+            browser_job, children = browser_fixture("inverted-guardian-loss-browser")
+            owner_release_name, owner_release = event("allow-owner-drain")
+            owner, owner_file, owner_ready = spawn(
+                "hold",
+                "owner",
+                {
+                    "offset": 1,
+                    "job_name": browser_job.name,
+                    "hold_event": owner_release_name,
+                },
+            )
+            guardian, guardian_file, guardian_ready = spawn(
+                "hold", "guardian", {"offset": 0}
+            )
+            owner_result = wait_result(owner_file, owner_ready)
+            guardian_result = wait_result(guardian_file, guardian_ready)
+            require_same_file_identity(identity, owner_result["file_identity"])
+            require_same_file_identity(identity, guardian_result["file_identity"])
+            browser_job.close()
+            _terminate_process(guardian)
+            owner_active_before = active(owner)
+            browser_active_before = _query_named_job_active_processes(browser_job.name)
+            live_children_before = sum(child.poll() is None for child in children)
+            entrant, entrant_result, entrant_release = production_entrant(
+                "byte-zero-entrant"
+            )
+            owner_active_after = active(owner)
+            browser_active_after = _query_named_job_active_processes(browser_job.name)
+            finish(entrant, entrant_release)
+            finish(owner, owner_release)
+            return {
+                "scenario": scenario,
+                "assignment": {"owner": 1, "guardian": 0, "entrant": 0},
+                "protocol": entrant_result["protocol"],
+                "guardian_exit_observed": not active(guardian),
+                "owner_cleanup_paused": owner_active_before and owner_active_after,
+                "browser_active_before_entry": browser_active_before,
+                "browser_active_after_entry": browser_active_after,
+                "live_children_before_entry": live_children_before,
+                "byte_zero_entrant_acquired": entrant_result["acquired"],
+                "unsafe_compatibility_result": entrant_result["acquired"],
+            }
+
+        if scenario == "falsification-inverted-pre-arm":
+            owner_release_name, owner_release = event("owner-release")
+            owner, owner_file, owner_ready = spawn(
+                "hold",
+                "owner",
+                {"offset": 1, "hold_event": owner_release_name},
+            )
+            owner_result = wait_result(owner_file, owner_ready)
+            require_same_file_identity(identity, owner_result["file_identity"])
+
+            admission, admission_file, admission_ready = spawn(
+                "production-byte-zero", "transient-admission", {}
+            )
+            admission_result = wait_result(admission_file, admission_ready)
+            admission.wait(timeout=_DEADLINE_SECONDS)
+
+            guardian_pause_name, guardian_pause = event("allow-guardian-arm")
+            armed_name, armed = event("guardian-armed")
+            owner_handle = int(getattr(owner, "_handle"))
+            guardian, guardian_file, guardian_ready = spawn(
+                "guardian-publish",
+                "guardian",
+                {
+                    "offset": 0,
+                    "owner_handle": owner_handle,
+                    "pause_event": guardian_pause_name,
+                    "armed_event": armed_name,
+                },
+                [owner_handle],
+            )
+            _wait(guardian_ready, _DEADLINE_SECONDS, "guardian did not reach pre-ARM")
+            entrant, entrant_result, entrant_release = production_entrant(
+                "byte-zero-entrant"
+            )
+            signal(guardian_pause)
+            guardian.wait(timeout=_DEADLINE_SECONDS)
+            guardian_result = read_published_json(
+                guardian_file, deadline=time.monotonic() + 5
+            )
+            armed_state = win32event.WaitForSingleObject(armed, 0)
+            finish(entrant, entrant_release)
+            finish(owner, owner_release)
+            return {
+                "scenario": scenario,
+                "assignment": {"owner": 1, "guardian": 0, "entrant": 0},
+                "protocol": entrant_result["protocol"],
+                "transient_admission_acquired": admission_result["acquired"],
+                "transient_admission_released": admission.returncode == 0,
+                "byte_zero_entrant_acquired_before_guardian_arm": entrant_result[
+                    "acquired"
+                ],
+                "guardian_contention": guardian_result["contention"],
+                "guardian_armed": guardian_result["armed"],
+                "armed_event_unpublished": armed_state == _WAIT_TIMEOUT,
+                "guardian_job_authority": guardian_result["job_authority"],
+                "guardian_browser_authority": guardian_result["browser_authority"],
+                "unsafe_compatibility_result": (
+                    entrant_result["acquired"] and not guardian_result["armed"]
+                ),
+            }
+
+        if scenario == "falsification-inverted-post-disarm-mutation":
+            owner_release_name, owner_release = event("outer-mutation-complete")
+            owner, owner_file, owner_ready = spawn(
+                "hold",
+                "owner",
+                {"offset": 1, "hold_event": owner_release_name},
+            )
+            guardian_release_name, guardian_release = event("guardian-disarm")
+            guardian, guardian_file, guardian_ready = spawn(
+                "hold",
+                "guardian",
+                {"offset": 0, "hold_event": guardian_release_name},
+            )
+            wait_result(owner_file, owner_ready)
+            wait_result(guardian_file, guardian_ready)
+            mutation_name, mutation_active = event("outer-mutation-active")
+            _ = mutation_name
+            signal(mutation_active)
+            finish(guardian, guardian_release)
+            mutation_still_active = (
+                win32event.WaitForSingleObject(mutation_active, 0) == _WAIT_OBJECT_0
+            )
+            owner_active = active(owner)
+            entrant, entrant_result, entrant_release = production_entrant(
+                "byte-zero-entrant"
+            )
+            finish(entrant, entrant_release)
+            finish(owner, owner_release)
+            return {
+                "scenario": scenario,
+                "assignment": {"owner": 1, "guardian": 0, "entrant": 0},
+                "protocol": entrant_result["protocol"],
+                "guardian_disarm_observed": guardian.returncode == 0,
+                "outer_mutation_active_after_disarm": mutation_still_active,
+                "owner_active_during_mutation": owner_active,
+                "byte_zero_entrant_acquired": entrant_result["acquired"],
+                "unsafe_compatibility_result": entrant_result["acquired"],
+            }
+
+        if scenario == "falsification-inverted-exclusive-mutation":
+            owner_release_name, owner_release = event("exclusive-mutation-complete")
+            owner, owner_file, owner_ready = spawn(
+                "hold",
+                "owner",
+                {"offset": 1, "hold_event": owner_release_name},
+            )
+            wait_result(owner_file, owner_ready)
+            owner_active = active(owner)
+            entrant, entrant_result, entrant_release = production_entrant(
+                "byte-zero-entrant"
+            )
+            finish(entrant, entrant_release)
+            finish(owner, owner_release)
+            return {
+                "scenario": scenario,
+                "assignment": {"owner": 1, "guardian": None, "entrant": 0},
+                "protocol": entrant_result["protocol"],
+                "owner_active_during_mutation": owner_active,
+                "guardian_started": False,
+                "byte_zero_entrant_acquired": entrant_result["acquired"],
+                "unsafe_compatibility_result": entrant_result["acquired"],
+            }
+
+        raise RuntimeError(f"unknown region falsification scenario: {scenario}")
+    finally:
+        first_error: BaseException | None = None
+        for process in reversed(processes):
+            try:
+                if process.poll() is None:
+                    _terminate_process(process)
+            except BaseException as exc:
+                first_error = first_error or exc
+        for job in jobs:
+            try:
+                if not job.closed:
+                    job.terminate()
+                    job.wait_until_empty(timeout=_DEADLINE_SECONDS)
+                    if not job.closed:
+                        job.close()
+            except BaseException as exc:
+                first_error = first_error or exc
+        for handle in events:
+            try:
+                handle.Close()
+            except BaseException as exc:
+                first_error = first_error or exc
+        try:
+            os.close(base_fd)
+        except BaseException as exc:
+            first_error = first_error or exc
+        if first_error is not None:
+            raise first_error
 
 
 def _run_conjunction_probe(scenario: str, root: Path) -> dict[str, Any]:
@@ -2676,6 +3059,11 @@ def _parse_args() -> argparse.Namespace:
             "conjunction-owner-loss-terminate-error",
             "conjunction-owner-loss-query-error",
             "conjunction-owner-loss-drain-timeout",
+            "falsification-original-owner-loss",
+            "falsification-inverted-guardian-loss",
+            "falsification-inverted-pre-arm",
+            "falsification-inverted-post-disarm-mutation",
+            "falsification-inverted-exclusive-mutation",
         ),
     )
     run.add_argument("root", type=Path)
@@ -2706,6 +3094,7 @@ def _parse_args() -> argparse.Namespace:
         choices=(
             "hold",
             "attempt",
+            "production-byte-zero",
             "region-probe",
             "guardian-publish",
             "guardian-drain",
@@ -2730,11 +3119,12 @@ def main() -> int:
     if os.name != "nt":
         raise SystemExit("this probe requires native Windows Job Objects")
     if args.role == "run":
-        runner = (
-            _run_conjunction_probe
-            if args.scenario.startswith("conjunction-")
-            else _run_probe
-        )
+        if args.scenario.startswith("conjunction-"):
+            runner = _run_conjunction_probe
+        elif args.scenario.startswith("falsification-"):
+            runner = _run_region_falsification_probe
+        else:
+            runner = _run_probe
         print(json.dumps(runner(args.scenario, args.root)), flush=True)
         return 0
     if args.role == "actor":

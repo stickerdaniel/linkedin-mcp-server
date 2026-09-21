@@ -29,6 +29,7 @@ from windows_guardian_probe import (
     observe_guardian_identity,
     observe_named_job_objects,
     open_descendant_handles_before_terminate,
+    production_byte_zero_admission,
     query_control_job_membership,
     read_published_json,
     remaining_wait_milliseconds,
@@ -1304,6 +1305,23 @@ def test_actor_locks_before_checking_identity_and_current_path() -> None:
     assert events == ["open path", "lock B", "identity", "path current"]
 
 
+def test_production_protocol_actor_targets_only_byte_zero() -> None:
+    events: list[str] = []
+    descriptor = probe._ActorFd(7, close=lambda _fd: events.append("close"))
+
+    assert production_byte_zero_admission(
+        descriptor,
+        Path("profile.lock"),
+        [1, 2, 3],
+        try_lock=lambda fd, offset: events.append(f"lock {fd} {offset}") or True,
+        unlock=lambda fd, offset: events.append(f"unlock {fd} {offset}"),
+        identity=lambda _fd: events.append("identity") or (1, 2, 3),
+        still_at=lambda _fd, _path: events.append("path current") or True,
+    )
+
+    assert events == ["lock 7 0", "identity", "path current"]
+
+
 def test_actor_identity_mismatch_unlocks_and_closes_without_publication() -> None:
     events: list[str] = ["open path"]
     descriptor = probe._ActorFd(7, close=lambda _fd: events.append("close"))
@@ -1941,6 +1959,84 @@ def test_external_guardian_holds_fence_until_browser_job_is_empty(
     assert "project_owner_query_error" not in guardian
     assert "project_owner_query_timeout" not in guardian
     assert measurement["lease_acquired_ns"] >= guardian["zero_observed_ns"]
+
+
+@_WINDOWS_ONLY
+def test_falsifies_original_assignment_after_owner_loss(tmp_path: Path) -> None:
+    measurement = _run_probe(tmp_path, "falsification-original-owner-loss")
+    _record_measurement(measurement)
+
+    assert measurement["assignment"] == {"owner": 0, "guardian": 1, "entrant": 0}
+    assert measurement["protocol"] == "current-source-production-byte-zero"
+    assert measurement["owner_exit_observed"] is True
+    assert measurement["guardian_active_before_entry"] is True
+    assert measurement["guardian_active_after_entry"] is True
+    assert measurement["browser_active_before_entry"] > 0
+    assert measurement["browser_active_after_entry"] > 0
+    assert measurement["live_children_before_entry"] > 0
+    assert measurement["byte_zero_entrant_acquired"] is True
+    assert measurement["unsafe_compatibility_result"] is True
+
+
+@_WINDOWS_ONLY
+def test_falsifies_inverted_assignment_after_guardian_loss(tmp_path: Path) -> None:
+    measurement = _run_probe(tmp_path, "falsification-inverted-guardian-loss")
+    _record_measurement(measurement)
+
+    assert measurement["assignment"] == {"owner": 1, "guardian": 0, "entrant": 0}
+    assert measurement["protocol"] == "current-source-production-byte-zero"
+    assert measurement["guardian_exit_observed"] is True
+    assert measurement["owner_cleanup_paused"] is True
+    assert measurement["browser_active_before_entry"] > 0
+    assert measurement["browser_active_after_entry"] > 0
+    assert measurement["live_children_before_entry"] > 0
+    assert measurement["byte_zero_entrant_acquired"] is True
+    assert measurement["unsafe_compatibility_result"] is True
+
+
+@_WINDOWS_ONLY
+def test_falsifies_inverted_pre_arm_window(tmp_path: Path) -> None:
+    measurement = _run_probe(tmp_path, "falsification-inverted-pre-arm")
+    _record_measurement(measurement)
+
+    assert measurement["assignment"] == {"owner": 1, "guardian": 0, "entrant": 0}
+    assert measurement["protocol"] == "current-source-production-byte-zero"
+    assert measurement["transient_admission_acquired"] is True
+    assert measurement["transient_admission_released"] is True
+    assert measurement["byte_zero_entrant_acquired_before_guardian_arm"] is True
+    assert measurement["guardian_contention"] is True
+    assert measurement["guardian_armed"] is False
+    assert measurement["armed_event_unpublished"] is True
+    assert measurement["guardian_job_authority"] is False
+    assert measurement["guardian_browser_authority"] is False
+    assert measurement["unsafe_compatibility_result"] is True
+
+
+@_WINDOWS_ONLY
+def test_falsifies_inverted_post_disarm_mutation_window(tmp_path: Path) -> None:
+    measurement = _run_probe(tmp_path, "falsification-inverted-post-disarm-mutation")
+    _record_measurement(measurement)
+
+    assert measurement["assignment"] == {"owner": 1, "guardian": 0, "entrant": 0}
+    assert measurement["protocol"] == "current-source-production-byte-zero"
+    assert measurement["guardian_disarm_observed"] is True
+    assert measurement["outer_mutation_active_after_disarm"] is True
+    assert measurement["owner_active_during_mutation"] is True
+    assert measurement["byte_zero_entrant_acquired"] is True
+    assert measurement["unsafe_compatibility_result"] is True
+
+
+@_WINDOWS_ONLY
+def test_falsifies_inverted_exclusive_mutation_window(tmp_path: Path) -> None:
+    measurement = _run_probe(tmp_path, "falsification-inverted-exclusive-mutation")
+    _record_measurement(measurement)
+
+    assert measurement["assignment"] == {"owner": 1, "guardian": None, "entrant": 0}
+    assert measurement["protocol"] == "current-source-production-byte-zero"
+    assert measurement["owner_active_during_mutation"] is True
+    assert measurement["guardian_started"] is False
+    assert measurement["byte_zero_entrant_acquired"] is True
+    assert measurement["unsafe_compatibility_result"] is True
 
 
 @_WINDOWS_ONLY
