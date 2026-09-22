@@ -4764,17 +4764,22 @@ def _run_browser_launch_probe(scenario: str, root: Path) -> dict[str, Any]:
         )
 
         def describe_outer_remainder() -> str:
-            rows: list[str] = []
-            inner_job = None
             try:
                 pids = sorted(_job_process_ids(outer, win32job))
+            except Exception as exc:
+                return f"inventory={type(exc).__name__}: {exc}"
+            inner_job = None
+            inner_state = "closed"
+            try:
                 inner_job = win32job.OpenJobObject(
                     win32job.JOB_OBJECT_QUERY,
                     False,
                     _read_json(root / "owner.json")["inner_job_name"],
                 )
+                inner_state = "open"
             except Exception as exc:
-                return f"inventory={type(exc).__name__}: {exc}"
+                inner_state = f"unavailable:{type(exc).__name__}"
+            rows: list[str] = []
             try:
                 for pid in pids:
                     image = "unavailable"
@@ -4788,9 +4793,10 @@ def _run_browser_launch_probe(scenario: str, root: Path) -> dict[str, Any]:
                         )
                         try:
                             image = _full_process_image_path(handle)
-                            in_inner = str(
-                                bool(win32job.IsProcessInJob(handle, inner_job))
-                            )
+                            if inner_job is not None:
+                                in_inner = str(
+                                    bool(win32job.IsProcessInJob(handle, inner_job))
+                                )
                         finally:
                             handle.Close()
                     except Exception as exc:
@@ -4799,7 +4805,7 @@ def _run_browser_launch_probe(scenario: str, root: Path) -> dict[str, Any]:
             finally:
                 if inner_job is not None:
                     inner_job.Close()
-            return "members=[" + "; ".join(rows) + "]"
+            return f"inner_job={inner_state} members=[" + "; ".join(rows) + "]"
 
         outer_active = prove_coordinator_is_only_outer_process(
             [owner, guardian],
