@@ -4219,14 +4219,9 @@ async def _browser_launch_owner(root: Path, controls: dict[str, str]) -> int:
         _remaining_browser_seconds(deadline),
     )
     page = context.pages[0]
-    await page.set_content(
-        "<script>window.worker = new Worker(URL.createObjectURL(new Blob(["
-        "'postMessage({ready:true})'], {type:'text/javascript'})));"
-        "window.workerReady = new Promise(r => worker.onmessage = e => r(e.data.ready));"
-        "</script>"
-    )
+    await page.set_content(browser_activity_html())
     renderer_ready = await page.evaluate("() => 6 * 7 === 42")
-    worker_ready = await page.evaluate("() => window.workerReady")
+    worker_ready = await page.evaluate("async () => await window.workerReady")
     browser = context.browser
     if browser is None:
         raise RuntimeError("persistent context exposed no browser-level CDP endpoint")
@@ -4568,6 +4563,22 @@ _BROWSER_CONTROL_LABELS = (
     "fence-released",
     "close-guardian",
 )
+
+
+def browser_activity_html() -> str:
+    """Local renderer and worker activity without a startup message race."""
+    return (
+        "<script>"
+        "const worker = new Worker(URL.createObjectURL(new Blob("
+        '["self.onmessage = () => postMessage(true);"],'
+        '{type:"text/javascript"})));'
+        "window.worker = worker;"
+        "window.workerReady = new Promise((resolve) => {"
+        "worker.onmessage = (event) => resolve(event.data === true);"
+        "});"
+        'worker.postMessage("start");'
+        "</script>"
+    )
 
 
 def browser_control_key(label: str) -> str:
