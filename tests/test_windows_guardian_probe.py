@@ -3331,23 +3331,25 @@ class TestBrowserProbeRootOwnership:
         )
         assert escaped == [10, 11]
 
-    def test_coordinator_allowance_includes_its_redirector_parent(self) -> None:
-        assert probe.coordinator_process_ids({4, 5, 6}, 5, 4) == {4, 5}
-        assert probe.coordinator_process_ids({5}, 5, 4) == {5}
+    def test_coordinator_allowance_includes_its_release_gate_ancestors(self) -> None:
+        parents = {5: 4, 4: 2, 2: 1, 9: 5}
+        assert probe.coordinator_process_ids({2, 4, 5, 9}, 5, parents) == {2, 4, 5}
+        assert probe.coordinator_process_ids({5}, 5, parents) == {5}
 
     def test_outer_pids_must_match_the_coordinator(self) -> None:
         released: list[str] = []
-        observed = iter([{4, 5, 9}, {4, 5}])
+        observed = iter([{2, 4, 5, 9}, {2, 4, 5}])
+        parents = {5: 4, 4: 2, 2: 1, 9: 5}
 
         assert probe.prove_outer_pids_are_coordinator(
             ["owner"],
             release=released.append,
             query_pids=lambda: next(observed),
-            allowed_pids=lambda pids: probe.coordinator_process_ids(pids, 5, 4),
+            allowed_pids=lambda pids: probe.coordinator_process_ids(pids, 5, parents),
             deadline=5,
             wait_for_retry=lambda: None,
             monotonic=lambda: 0,
-        ) == [4, 5]
+        ) == [2, 4, 5]
         assert released == ["owner"]
 
     def test_outer_accounting_starts_after_exited_actor_handles_are_released(

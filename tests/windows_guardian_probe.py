@@ -4623,12 +4623,17 @@ def python_pids_to_terminate(
 
 
 def coordinator_process_ids(
-    outer_pids: set[int], process_id: int, parent_pid: int
+    outer_pids: set[int], process_id: int, parents: dict[int, int]
 ) -> set[int]:
-    """The coordinator redirector and interpreter, when both are still in the Job."""
-    allowed = {process_id}
-    if parent_pid in outer_pids:
-        allowed.add(parent_pid)
+    """The probe and every still-contained ancestor, including the release gate."""
+    allowed: set[int] = set()
+    pid = process_id
+    while pid in outer_pids and pid not in allowed:
+        allowed.add(pid)
+        parent = parents.get(pid, 0)
+        if parent == pid:
+            break
+        pid = parent
     return allowed
 
 
@@ -5001,7 +5006,7 @@ def _run_browser_launch_probe(scenario: str, root: Path) -> dict[str, Any]:
             release=release_exited_actor,
             query_pids=lambda: _job_process_ids(outer, win32job),
             allowed_pids=lambda pids: coordinator_process_ids(
-                pids, os.getpid(), os.getppid()
+                pids, os.getpid(), _windows_process_parents()
             ),
             deadline=deadline,
             wait_for_retry=lambda: time.sleep(0.001),
