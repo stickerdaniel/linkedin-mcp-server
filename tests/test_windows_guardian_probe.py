@@ -3125,3 +3125,123 @@ class TestReviewedBrowserLaunchRepairs:
         assert f"RuntimeError: {role} failed" in str(failure)
         assert f"{role} out" in str(failure)
         assert f"{role} err" in str(failure)
+
+
+class TestBrowserBarrierRace:
+    @staticmethod
+    def _failure_fixture(tmp_path: Path, role: str, returncode: int | None):
+        class Process:
+            def poll(self) -> int | None:
+                return returncode
+
+        stdout = tmp_path / f"{role}.stdout"
+        stderr = tmp_path / f"{role}.stderr"
+        stdout.write_text("actor stdout", encoding="utf-8")
+        stderr.write_text("actor stderr", encoding="utf-8")
+        (tmp_path / f"{role}-error.json").write_text(
+            json.dumps({"error": "RuntimeError: primary actor failure"}),
+            encoding="utf-8",
+        )
+        return Process(), {role: (stdout, stderr)}
+
+    def test_waiter_rechecks_simultaneous_error_after_barrier_wins(
+        self, tmp_path: Path
+    ) -> None:
+        process, logs = self._failure_fixture(tmp_path, "guardian", None)
+        process._handle = object()
+
+        class Win32Event:
+            @staticmethod
+            def WaitForMultipleObjects(
+                _handles: list[Any], _all: bool, _timeout: int
+            ) -> int:
+                return probe._WAIT_OBJECT_0
+
+            @staticmethod
+            def WaitForSingleObject(_handle: object, _timeout: int) -> int:
+                return probe._WAIT_OBJECT_0
+
+        with pytest.raises(RuntimeError, match="primary actor failure"):
+            probe._wait_browser_barrier(
+                object(),
+                actor_error=object(),
+                actors={"guardian": process},
+                logs=logs,
+                root=tmp_path,
+                deadline=time.monotonic() + 2,
+                win32event=Win32Event,
+            )
+
+    def test_simultaneous_barrier_and_error_rechecks_error_after_lowest_index(
+        self, tmp_path: Path
+    ) -> None:
+        process, logs = self._failure_fixture(tmp_path, "guardian", None)
+        with pytest.raises(RuntimeError) as raised:
+            probe.require_clean_browser_barrier(
+                actor_error_signaled=True,
+                actors={"guardian": process},
+                expected_alive={"guardian"},
+                logs=logs,
+                root=tmp_path,
+            )
+        assert "primary actor failure" in str(raised.value)
+        assert "actor stdout" in str(raised.value)
+        assert "actor stderr" in str(raised.value)
+
+    def test_waiter_rechecks_actor_exit_immediately_after_barrier(
+        self, tmp_path: Path
+    ) -> None:
+        process, logs = self._failure_fixture(tmp_path, "guardian", 7)
+        process._handle = object()
+
+        class Win32Event:
+            @staticmethod
+            def WaitForMultipleObjects(
+                _handles: list[Any], _all: bool, _timeout: int
+            ) -> int:
+                return probe._WAIT_OBJECT_0
+
+            @staticmethod
+            def WaitForSingleObject(_handle: object, _timeout: int) -> int:
+                return probe._WAIT_TIMEOUT
+
+        with pytest.raises(RuntimeError, match="primary actor failure"):
+            probe._wait_browser_barrier(
+                object(),
+                actor_error=object(),
+                actors={"guardian": process},
+                logs=logs,
+                root=tmp_path,
+                deadline=time.monotonic() + 2,
+                win32event=Win32Event,
+            )
+
+    def test_actor_exit_immediately_after_barrier_surfaces_published_primary(
+        self, tmp_path: Path
+    ) -> None:
+        process, logs = self._failure_fixture(tmp_path, "guardian", 7)
+        with pytest.raises(RuntimeError) as raised:
+            probe.require_clean_browser_barrier(
+                actor_error_signaled=False,
+                actors={"guardian": process},
+                expected_alive={"guardian"},
+                logs=logs,
+                root=tmp_path,
+            )
+        assert "primary actor failure" in str(raised.value)
+        assert "returncode=7" in str(raised.value)
+
+    def test_expected_actor_exit_is_not_rejected_without_an_error(
+        self, tmp_path: Path
+    ) -> None:
+        class Process:
+            def poll(self) -> int:
+                return 0
+
+        probe.require_clean_browser_barrier(
+            actor_error_signaled=False,
+            actors={"guardian": Process()},
+            expected_alive=set(),
+            logs={},
+            root=tmp_path,
+        )

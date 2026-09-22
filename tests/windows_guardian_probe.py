@@ -4461,6 +4461,26 @@ def browser_actor_failure(
     return RuntimeError("browser actor error was signaled without a published failure")
 
 
+def require_clean_browser_barrier(
+    *,
+    actor_error_signaled: bool,
+    actors: dict[str, Any],
+    expected_alive: set[str],
+    logs: dict[str, tuple[Path, Path]],
+    root: Path,
+) -> None:
+    if actor_error_signaled:
+        raise browser_actor_failure(root, actors, logs)
+    exited = {
+        role: process for role, process in actors.items() if process.poll() is not None
+    }
+    unexpected = expected_alive & exited.keys()
+    if unexpected:
+        raise browser_actor_failure(
+            root, {role: exited[role] for role in unexpected}, logs
+        )
+
+
 def _wait_browser_barrier(
     barrier: Any,
     *,
@@ -4470,6 +4490,7 @@ def _wait_browser_barrier(
     root: Path,
     deadline: float,
     win32event: Any,
+    expected_alive: set[str] | None = None,
 ) -> None:
     handles = [
         barrier,
@@ -4480,12 +4501,55 @@ def _wait_browser_barrier(
         handles, False, max(1, int(_remaining_browser_seconds(deadline) * 1000))
     )
     if result == _WAIT_OBJECT_0:
+        require_clean_browser_barrier(
+            actor_error_signaled=(
+                win32event.WaitForSingleObject(actor_error, 0) == _WAIT_OBJECT_0
+            ),
+            actors=actors,
+            expected_alive=set(actors) if expected_alive is None else expected_alive,
+            logs=logs,
+            root=root,
+        )
         return
     if result == _WAIT_TIMEOUT:
         raise TimeoutError("browser launch barrier expired")
     if _WAIT_OBJECT_0 < result < _WAIT_OBJECT_0 + len(handles):
         raise browser_actor_failure(root, actors, logs)
     raise RuntimeError(f"WaitForMultipleObjects returned {result}")
+
+
+def _wait_browser_actor_completion(
+    role: str,
+    process: Any,
+    *,
+    actor_error: Any,
+    logs: dict[str, tuple[Path, Path]],
+    root: Path,
+    deadline: float,
+    win32event: Any,
+) -> None:
+    actors = {role: process}
+    result = win32event.WaitForMultipleObjects(
+        [actor_error, _popen_handle(process)],
+        False,
+        max(1, int(_remaining_browser_seconds(deadline) * 1000)),
+    )
+    if result == _WAIT_TIMEOUT:
+        raise TimeoutError(f"browser {role} did not complete before the deadline")
+    if result not in {_WAIT_OBJECT_0, _WAIT_OBJECT_0 + 1}:
+        raise RuntimeError(f"WaitForMultipleObjects returned {result}")
+    require_clean_browser_barrier(
+        actor_error_signaled=(
+            win32event.WaitForSingleObject(actor_error, 0) == _WAIT_OBJECT_0
+        ),
+        actors=actors,
+        expected_alive=set(),
+        logs=logs,
+        root=root,
+    )
+    process.wait(timeout=_remaining_browser_seconds(deadline))
+    if process.returncode != 0:
+        raise browser_actor_failure(root, actors, logs)
 
 
 def _run_browser_launch_probe(scenario: str, root: Path) -> dict[str, Any]:
@@ -4620,10 +4684,14 @@ def _run_browser_launch_probe(scenario: str, root: Path) -> dict[str, Any]:
         assert acquired
         contender.release()
         _signal(controls["close-guardian"])
-        require_successful_actor_completion(
+        _wait_browser_actor_completion(
+            "guardian",
             guardian,
-            "browser guardian",
-            timeout=_remaining_browser_seconds(deadline),
+            actor_error=events["actor-error"],
+            logs=actor_logs,
+            root=root,
+            deadline=deadline,
+            win32event=win32event,
         )
         outer_active = int(
             win32job.QueryInformationJobObject(
