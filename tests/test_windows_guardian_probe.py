@@ -3297,12 +3297,13 @@ class TestBrowserProbeRootOwnership:
         assert not (root / "auth").exists()
 
     def test_worker_activity_waits_for_a_start_message(self) -> None:
-        html = probe.browser_activity_html()
-        assert html.index("worker.onmessage") < html.index(
+        script = probe.browser_activity_script()
+        assert script.index("worker.onmessage") < script.index(
             'worker.postMessage("start")'
         )
-        assert "self.onmessage = () => postMessage(true)" in html
-        assert "postMessage({ready:true})" not in html
+        assert "self.onmessage = () => postMessage(true)" in script
+        assert "postMessage({ready:true})" not in script
+        assert "error:" in script
 
     def test_close_guardian_signal_uses_the_stored_control_key(self) -> None:
         signaled: list[str] = []

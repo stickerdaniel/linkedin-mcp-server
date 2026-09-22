@@ -4219,9 +4219,9 @@ async def _browser_launch_owner(root: Path, controls: dict[str, str]) -> int:
         _remaining_browser_seconds(deadline),
     )
     page = context.pages[0]
-    await page.set_content(browser_activity_html())
-    renderer_ready = await page.evaluate("() => 6 * 7 === 42")
-    worker_ready = await page.evaluate("async () => await window.workerReady")
+    activity = await page.evaluate(browser_activity_script())
+    renderer_ready = activity["renderer"]
+    worker_ready = activity["worker"]
     browser = context.browser
     if browser is None:
         raise RuntimeError("persistent context exposed no browser-level CDP endpoint")
@@ -4565,20 +4565,33 @@ _BROWSER_CONTROL_LABELS = (
 )
 
 
-def browser_activity_html() -> str:
-    """Local renderer and worker activity without a startup message race."""
-    return (
-        "<script>"
-        "const worker = new Worker(URL.createObjectURL(new Blob("
-        '["self.onmessage = () => postMessage(true);"],'
-        '{type:"text/javascript"})));'
-        "window.worker = worker;"
-        "window.workerReady = new Promise((resolve) => {"
-        "worker.onmessage = (event) => resolve(event.data === true);"
-        "});"
-        'worker.postMessage("start");'
-        "</script>"
-    )
+def browser_activity_script() -> str:
+    """Return renderer and worker results, including a worker failure string."""
+    return """async () => {
+      const renderer = 6 * 7 === 42;
+      try {
+        const worker = new Worker(URL.createObjectURL(new Blob(
+          ["self.onmessage = () => postMessage(true);"],
+          {type: "text/javascript"}
+        )));
+        window.worker = worker;
+        const ready = await new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error("worker timed out")), 5000);
+          worker.onmessage = (event) => {
+            clearTimeout(timer);
+            resolve(event.data === true);
+          };
+          worker.onerror = () => {
+            clearTimeout(timer);
+            reject(new Error("worker failed"));
+          };
+          worker.postMessage("start");
+        });
+        return {renderer, worker: ready};
+      } catch (error) {
+        return {renderer, worker: "error:" + (error && error.message ? error.message : String(error))};
+      }
+    }"""
 
 
 def browser_control_key(label: str) -> str:
