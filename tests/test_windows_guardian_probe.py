@@ -3295,3 +3295,15 @@ class TestBrowserProbeRootOwnership:
         with pytest.raises(RuntimeError, match="metadata"):
             probe.prepare_browser_probe_root(root)
         assert not (root / "auth").exists()
+
+    def test_close_guardian_signal_uses_the_stored_control_key(self) -> None:
+        signaled: list[str] = []
+        controls = {
+            probe.browser_control_key(label): f"event-{label}"
+            for label in probe._BROWSER_CONTROL_LABELS
+        }
+
+        probe.signal_browser_control(controls, "close-guardian", signaled.append)
+
+        assert signaled == ["event-close-guardian"]
+        assert "close-guardian" not in controls

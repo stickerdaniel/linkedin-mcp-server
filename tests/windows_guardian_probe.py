@@ -16,7 +16,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -4552,6 +4552,34 @@ def _wait_browser_actor_completion(
         raise browser_actor_failure(root, actors, logs)
 
 
+_BROWSER_CONTROL_LABELS = (
+    "owner-ready",
+    "guardian-armed",
+    "inventory-ready",
+    "cdp-request",
+    "cdp-ready",
+    "actor-error",
+    "inventory-retained",
+    "hold-owner",
+    "job-zero",
+    "check-stable-handles",
+    "both-zero",
+    "allow-fence-release",
+    "fence-released",
+    "close-guardian",
+)
+
+
+def browser_control_key(label: str) -> str:
+    return label.replace("-", "_")
+
+
+def signal_browser_control(
+    controls: Mapping[str, str], label: str, signal: Callable[[str], None]
+) -> None:
+    signal(controls[browser_control_key(label)])
+
+
 def prepare_browser_probe_root(root: Path) -> str:
     if not root.is_dir():
         raise RuntimeError("browser probe root was not prepared by its outer harness")
@@ -4580,24 +4608,9 @@ def _run_browser_launch_probe(scenario: str, root: Path) -> dict[str, Any]:
     outer = win32job.OpenJobObject(win32job.JOB_OBJECT_QUERY, False, outer_name)
     events: dict[str, Any] = {}
     controls: dict[str, str] = {"outer_job_name": outer_name}
-    for label in (
-        "owner-ready",
-        "guardian-armed",
-        "inventory-ready",
-        "cdp-request",
-        "cdp-ready",
-        "actor-error",
-        "inventory-retained",
-        "hold-owner",
-        "job-zero",
-        "check-stable-handles",
-        "both-zero",
-        "allow-fence-release",
-        "fence-released",
-        "close-guardian",
-    ):
+    for label in _BROWSER_CONTROL_LABELS:
         name, handle = _new_event(win32event, f"browser-{label}")
-        controls[label.replace("-", "_")] = name
+        controls[browser_control_key(label)] = name
         events[label] = handle
     processes: list[subprocess.Popen[bytes]] = []
     actor_logs: dict[str, tuple[Path, Path]] = {}
@@ -4697,7 +4710,7 @@ def _run_browser_launch_probe(scenario: str, root: Path) -> dict[str, Any]:
         )
         assert acquired
         contender.release()
-        _signal(controls["close-guardian"])
+        signal_browser_control(controls, "close-guardian", _signal)
         _wait_browser_actor_completion(
             "guardian",
             guardian,
