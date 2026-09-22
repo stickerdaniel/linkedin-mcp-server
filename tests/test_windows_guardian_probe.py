@@ -1398,6 +1398,36 @@ def test_contended_publication_rejects_owner_expiry_after_entry() -> None:
         )
 
 
+def test_contended_publication_discards_result_after_witness_failure() -> None:
+    witness_error = RuntimeError("guardian exited")
+    cleanup_error = OSError("descriptor close failed")
+    witness_checks = 0
+    closes: list[int] = []
+
+    def require_window() -> None:
+        nonlocal witness_checks
+        witness_checks += 1
+        if witness_checks == 2:
+            raise witness_error
+
+    def discard_result(descriptor: int) -> None:
+        closes.append(descriptor)
+        raise cleanup_error
+
+    with pytest.raises(RuntimeError) as raised:
+        retry_contended_publication(
+            lambda: 7,
+            require_window=require_window,
+            deadline=2.0,
+            wait_for_retry=lambda: pytest.fail("an acquired result was retried"),
+            discard_result=discard_result,
+            monotonic=lambda: 1.0,
+        )
+
+    assert raised.value is witness_error
+    assert closes == [7]
+
+
 def test_post_entry_child_witness_must_match_pre_entry_handle() -> None:
     first = object()
     replacement = object()
@@ -1443,6 +1473,40 @@ def test_contended_publication_rechecks_window_for_each_attempt() -> None:
         "attempt",
         "witness",
     ]
+
+
+def test_contended_publication_rejects_window_loss_before_retry() -> None:
+    guardian = object()
+    guardian_alive = True
+    attempts = 0
+
+    def attempt() -> None:
+        nonlocal attempts
+        attempts += 1
+        return None
+
+    def require_window() -> None:
+        require_publication_witnesses(
+            {"guardian": guardian},
+            is_active=lambda handle: handle is guardian and guardian_alive,
+        )
+
+    def wait_for_retry() -> None:
+        nonlocal guardian_alive
+        guardian_alive = False
+
+    with pytest.raises(
+        RuntimeError, match="guardian exited during entrant publication"
+    ):
+        retry_contended_publication(
+            attempt,
+            require_window=require_window,
+            deadline=2.0,
+            wait_for_retry=wait_for_retry,
+            monotonic=lambda: 1.0,
+        )
+
+    assert attempts == 1
 
 
 def test_cleanup_error_does_not_replace_active_body_error() -> None:
@@ -2650,6 +2714,8 @@ def test_conjunction_publication(tmp_path: Path) -> None:
     assert measurement["b_probe_blocked"] is True
     assert measurement["browser_started_after_armed"] is True
     assert measurement["late_successor_admitted"] is True
+    assert measurement["late_successor_attempts"] >= 1
+    assert measurement["late_successor_seconds"] >= 0
     assert measurement["late_guardian_armed"] is False
     assert measurement["conflict_guardian_contention"] is True
     assert measurement["conflict_guardian_armed"] is False

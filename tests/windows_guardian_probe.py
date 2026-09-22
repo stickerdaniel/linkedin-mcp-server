@@ -2008,22 +2008,39 @@ def retry_contended_publication[T](
     require_window: Callable[[], object],
     deadline: float,
     wait_for_retry: Callable[[], None],
+    discard_result: Callable[[T], None] | None = None,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> tuple[T, int, float]:
     """Retry contention while proving the protected observation window remains."""
+    accepted_result: T | None = None
 
     def witnessed_attempt() -> T | None:
+        nonlocal accepted_result
         require_window()
         result = attempt()
-        require_window()
+        try:
+            require_window()
+        except BaseException as exc:
+            if result is not None and discard_result is not None:
+                close_preserving_error(lambda: discard_result(result), exc)
+            raise
+        accepted_result = result
         return result
 
-    return retry_lock_rundown(
-        witnessed_attempt,
-        deadline=deadline,
-        wait_for_retry=wait_for_retry,
-        monotonic=monotonic,
-    )
+    try:
+        outcome = retry_lock_rundown(
+            witnessed_attempt,
+            deadline=deadline,
+            wait_for_retry=wait_for_retry,
+            monotonic=monotonic,
+        )
+    except BaseException as exc:
+        owned_result = accepted_result
+        if owned_result is not None and discard_result is not None:
+            close_preserving_error(lambda: discard_result(owned_result), exc)
+        raise
+    accepted_result = None
+    return outcome
 
 
 def require_publication_witnesses[T](
@@ -3375,6 +3392,12 @@ def _run_conjunction_probe(scenario: str, root: Path) -> dict[str, Any]:
     def signal(handle: Any) -> None:
         win32event.SetEvent(handle)
 
+    def active(process: subprocess.Popen[bytes]) -> bool:
+        handle = getattr(process, "_handle", None)
+        if handle is None:
+            raise RuntimeError("Windows Popen exposed no stable process handle")
+        return _is_active(handle)
+
     def descendants(
         job: Any, count: int = 4
     ) -> tuple[list[subprocess.Popen[bytes]], list[int]]:
@@ -3559,10 +3582,35 @@ def _run_conjunction_probe(scenario: str, root: Path) -> dict[str, Any]:
             )
             _wait(late_ready, _DEADLINE_SECONDS, "late guardian did not pause")
             _terminate_process(late_owner)
-            successor, successor_fd = _attempt_here(lock_path)
-            if not successor:
-                os.close(successor_fd)
-                raise RuntimeError("successor could not pass A+B")
+            throttle = win32event.CreateEvent(None, False, False, None)
+            events.append(throttle)
+
+            def require_late_publication_window() -> None:
+                require_publication_witnesses(
+                    {"late guardian": late},
+                    is_active=active,
+                )
+                if active(late_owner):
+                    raise RuntimeError("late owner survived successor admission")
+
+            def admit_successor() -> int | None:
+                acquired, descriptor = _attempt_here(lock_path)
+                if acquired:
+                    return descriptor
+                os.close(descriptor)
+                return None
+
+            successor_fd, successor_attempts, successor_seconds = (
+                retry_contended_publication(
+                    admit_successor,
+                    require_window=require_late_publication_window,
+                    deadline=time.monotonic() + _DEADLINE_SECONDS,
+                    wait_for_retry=lambda: wait_on_unsignaled_throttle(
+                        throttle, wait=win32event.WaitForSingleObject
+                    ),
+                    discard_result=os.close,
+                )
+            )
             retained_fds.append(successor_fd)
             signal(pause_event)
             late.wait(timeout=_DEADLINE_SECONDS)
@@ -3599,7 +3647,9 @@ def _run_conjunction_probe(scenario: str, root: Path) -> dict[str, Any]:
                 "armed": guardian_result["armed"],
                 "b_probe_blocked": b_blocked,
                 "browser_started_after_armed": browser_started_after_armed,
-                "late_successor_admitted": successor,
+                "late_successor_admitted": True,
+                "late_successor_attempts": successor_attempts,
+                "late_successor_seconds": successor_seconds,
                 "late_guardian_armed": late_result.get("armed", False),
                 "late_guardian_contention": late_result.get("contention", False),
                 "conflict_guardian_contention": conflict_result["contention"],
