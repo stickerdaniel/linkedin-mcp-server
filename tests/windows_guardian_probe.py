@@ -2008,22 +2008,39 @@ def retry_contended_publication[T](
     require_window: Callable[[], object],
     deadline: float,
     wait_for_retry: Callable[[], None],
+    discard_result: Callable[[T], None] | None = None,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> tuple[T, int, float]:
     """Retry contention while proving the protected observation window remains."""
+    accepted_result: T | None = None
 
     def witnessed_attempt() -> T | None:
+        nonlocal accepted_result
         require_window()
         result = attempt()
-        require_window()
+        try:
+            require_window()
+        except BaseException as exc:
+            if result is not None and discard_result is not None:
+                close_preserving_error(lambda: discard_result(result), exc)
+            raise
+        accepted_result = result
         return result
 
-    return retry_lock_rundown(
-        witnessed_attempt,
-        deadline=deadline,
-        wait_for_retry=wait_for_retry,
-        monotonic=monotonic,
-    )
+    try:
+        outcome = retry_lock_rundown(
+            witnessed_attempt,
+            deadline=deadline,
+            wait_for_retry=wait_for_retry,
+            monotonic=monotonic,
+        )
+    except BaseException as exc:
+        owned_result = accepted_result
+        if owned_result is not None and discard_result is not None:
+            close_preserving_error(lambda: discard_result(owned_result), exc)
+        raise
+    accepted_result = None
+    return outcome
 
 
 def require_publication_witnesses[T](
@@ -3591,6 +3608,7 @@ def _run_conjunction_probe(scenario: str, root: Path) -> dict[str, Any]:
                     wait_for_retry=lambda: wait_on_unsignaled_throttle(
                         throttle, wait=win32event.WaitForSingleObject
                     ),
+                    discard_result=os.close,
                 )
             )
             retained_fds.append(successor_fd)

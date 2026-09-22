@@ -1398,6 +1398,36 @@ def test_contended_publication_rejects_owner_expiry_after_entry() -> None:
         )
 
 
+def test_contended_publication_discards_result_after_witness_failure() -> None:
+    witness_error = RuntimeError("guardian exited")
+    cleanup_error = OSError("descriptor close failed")
+    witness_checks = 0
+    closes: list[int] = []
+
+    def require_window() -> None:
+        nonlocal witness_checks
+        witness_checks += 1
+        if witness_checks == 2:
+            raise witness_error
+
+    def discard_result(descriptor: int) -> None:
+        closes.append(descriptor)
+        raise cleanup_error
+
+    with pytest.raises(RuntimeError) as raised:
+        retry_contended_publication(
+            lambda: 7,
+            require_window=require_window,
+            deadline=2.0,
+            wait_for_retry=lambda: pytest.fail("an acquired result was retried"),
+            discard_result=discard_result,
+            monotonic=lambda: 1.0,
+        )
+
+    assert raised.value is witness_error
+    assert closes == [7]
+
+
 def test_post_entry_child_witness_must_match_pre_entry_handle() -> None:
     first = object()
     replacement = object()
