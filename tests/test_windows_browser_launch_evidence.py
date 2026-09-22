@@ -6,8 +6,10 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from importlib.metadata import version
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -16,6 +18,29 @@ from linkedin_mcp_server import process_tree
 _PROBE = Path(__file__).with_name("windows_guardian_probe.py")
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _EXPECTED_BROWSER = "149.0.7827.55"
+
+
+def _without_node_override[T](probe: Callable[[], T]) -> T:
+    override = os.environ.pop("PLAYWRIGHT_NODEJS_PATH", None)
+    try:
+        return probe()
+    finally:
+        if override is not None:
+            os.environ["PLAYWRIGHT_NODEJS_PATH"] = override
+
+
+def _assign_and_release(process: Any, harness: Any, nonce: str) -> None:
+    try:
+        harness.assign_popen(process)
+    except BaseException as assignment_error:
+        try:
+            process.kill()
+            process.wait(timeout=5)
+        except BaseException:
+            pass
+        raise assignment_error
+    assert process.stdin is not None
+    process_tree.release_windows_gate(process.stdin, nonce)
 
 
 def _locked_stack() -> dict[str, str]:
@@ -31,33 +56,33 @@ def _locked_stack() -> dict[str, str]:
     )
     chromium = next(item for item in browsers["browsers"] if item["name"] == "chromium")
     expected_node = package / "driver" / "node.exe"
-    override = os.environ.pop("PLAYWRIGHT_NODEJS_PATH", None)
-    try:
-        node, _entrypoint = compute_driver_executable()
-    finally:
-        if override is not None:
-            os.environ["PLAYWRIGHT_NODEJS_PATH"] = override
-    node_path = Path(node)
-    if node_path.resolve() != expected_node.resolve():
-        raise AssertionError(
-            "Patchright did not select its wheel-owned driver/node.exe"
-        )
-    node_runtime = json.loads(
-        subprocess.run(
-            [
-                node_path,
-                "-e",
-                "console.log(JSON.stringify({node:process.version,uv:process.versions.uv}))",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout
-    )
-    from patchright.sync_api import sync_playwright
 
-    with sync_playwright() as driver:
-        resolved_browser = Path(driver.chromium.executable_path)
+    def probe() -> tuple[Path, dict[str, str], Path]:
+        node, _entrypoint = compute_driver_executable()
+        node_path = Path(node)
+        if node_path.resolve() != expected_node.resolve():
+            raise AssertionError(
+                "Patchright did not select its wheel-owned driver/node.exe"
+            )
+        node_runtime = json.loads(
+            subprocess.run(
+                [
+                    node_path,
+                    "-e",
+                    "console.log(JSON.stringify({node:process.version,uv:process.versions.uv}))",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+        )
+        from patchright.sync_api import sync_playwright
+
+        with sync_playwright() as driver:
+            resolved_browser = Path(driver.chromium.executable_path)
+        return node_path, node_runtime, resolved_browser
+
+    node_path, node_runtime, resolved_browser = _without_node_override(probe)
     return {
         "patchright": version("patchright"),
         "core": core["version"],
@@ -116,9 +141,7 @@ def test_locked_browser_tree_remains_fenced_until_guardian_proves_zero(
         },
     )
     try:
-        harness.assign_popen(process)
-        assert process.stdin is not None
-        process_tree.release_windows_gate(process.stdin, nonce)
+        _assign_and_release(process, harness, nonce)
         stdout, stderr = process.communicate(timeout=180)
         assert process.returncode == 0, stderr.decode("utf-8", "replace")
         harness.wait_until_empty(timeout=60)
@@ -151,7 +174,13 @@ def test_locked_browser_tree_remains_fenced_until_guardian_proves_zero(
     assert inventory["owner_outside_inner"] is True
     assert inventory["guardian_outside_inner"] is True
     assert inventory["driver_in_inner_and_outer"] is True
+    assert inventory["cdp_sample_count"] >= 2
+    assert (
+        Path(inventory["browser_image_path"]).resolve()
+        == Path(stack["browser_path"]).resolve()
+    )
     metadata = measurement["metadata"]
+    assert metadata["inner_job_kill_on_close"] is True
     assert metadata["ignored_playwright_nodejs_path"] is True
     assert (
         Path(metadata["expected_driver_path"]).resolve()
@@ -171,3 +200,45 @@ def test_locked_browser_tree_remains_fenced_until_guardian_proves_zero(
         with Path(summary).open("a", encoding="utf-8") as stream:
             stream.write(json.dumps({"stack": stack, "measurement": measurement}))
             stream.write("\n")
+
+
+def test_stack_gate_hides_invalid_node_override_and_restores_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PLAYWRIGHT_NODEJS_PATH", "invalid-node")
+    observed: list[str | None] = []
+
+    assert (
+        _without_node_override(
+            lambda: observed.append(os.environ.get("PLAYWRIGHT_NODEJS_PATH")) or "ok"
+        )
+        == "ok"
+    )
+    assert observed == [None]
+    assert os.environ["PLAYWRIGHT_NODEJS_PATH"] == "invalid-node"
+
+
+def test_assignment_failure_kills_gated_process_and_preserves_primary() -> None:
+    events: list[str] = []
+    assignment_error = OSError("assignment failed")
+
+    class Process:
+        stdin = object()
+
+        def kill(self) -> None:
+            events.append("kill")
+
+        def wait(self, *, timeout: float) -> int:
+            events.append(f"wait {timeout}")
+            raise OSError("cleanup failed")
+
+    class Harness:
+        def assign_popen(self, _process: object) -> None:
+            events.append("assign")
+            raise assignment_error
+
+    with pytest.raises(OSError) as raised:
+        _assign_and_release(Process(), Harness(), "nonce")
+
+    assert raised.value is assignment_error
+    assert events == ["assign", "kill", "wait 5"]
