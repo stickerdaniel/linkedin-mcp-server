@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import contextlib
 import ctypes
 import faulthandler
@@ -2397,7 +2398,156 @@ def membership_matrix(
     return {"inner": inner, "outer": outer}
 
 
+_BROWSER_DEADLINE_SECONDS = 60.0
+_BROWSER_REQUIRED_ROLES = frozenset({"browser", "renderer"})
+_BROWSER_ROLE_ALIASES = {
+    "browser": "browser",
+    "renderer": "renderer",
+    "gpu-process": "gpu",
+    "gpu": "gpu",
+    "utility": "utility",
+    "crashpad-handler": "crashpad",
+    "crashpad": "crashpad",
+}
+
+
+def normalize_cdp_processes(entries: list[dict[str, Any]]) -> dict[int, str]:
+    """Normalize CDP process rows without discarding unrecognized roles."""
+    normalized: dict[int, str] = {}
+    for entry in entries:
+        pid = entry.get("id", entry.get("pid"))
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            raise RuntimeError("CDP process inventory contains a non-positive PID")
+        raw_role = entry.get("type", entry.get("role", "unknown"))
+        if not isinstance(raw_role, str) or not raw_role.strip():
+            raw_role = "unknown"
+        role_key = raw_role.strip().lower().replace("_", "-")
+        role = _BROWSER_ROLE_ALIASES.get(role_key, f"unknown:{raw_role.strip()}")
+        previous = normalized.get(pid)
+        if previous is not None and previous != role:
+            raise RuntimeError(f"CDP PID {pid} has conflicting roles")
+        normalized[pid] = role
+    return normalized
+
+
+def require_browser_inventory(
+    cdp_processes: dict[int, str], retained_pids: set[int], driver_pid: int
+) -> dict[str, Any]:
+    roles = set(cdp_processes.values())
+    missing = _BROWSER_REQUIRED_ROLES - roles
+    if missing:
+        raise RuntimeError(f"browser inventory lacks required roles: {sorted(missing)}")
+    if driver_pid not in retained_pids:
+        raise RuntimeError(
+            "the Patchright driver is absent from the retained Job census"
+        )
+    missing_handles = set(cdp_processes) - retained_pids
+    if missing_handles:
+        raise RuntimeError(
+            f"CDP processes are absent from the retained Job census: {sorted(missing_handles)}"
+        )
+    return {
+        "cdp_processes": [
+            {"pid": pid, "role": role} for pid, role in sorted(cdp_processes.items())
+        ],
+        "unclassified_job_pids": sorted(retained_pids - set(cdp_processes)),
+        "required_roles": sorted(_BROWSER_REQUIRED_ROLES),
+    }
+
+
+def retain_stable_browser_inventory[T](
+    *,
+    sample_cdp: Callable[[], list[dict[str, Any]]],
+    sample_job_pids: Callable[[], set[int]],
+    open_handle: Callable[[int], T],
+    validate_handle: Callable[[int, T], None],
+    close_handle: Callable[[T], None],
+    driver_pid: int,
+    deadline: float,
+    wait_for_retry: Callable[[], None],
+    monotonic: Callable[[], float] = time.monotonic,
+) -> tuple[dict[int, str], dict[int, T]]:
+    """Retain one quiescent two-sided census under a single deadline."""
+    while True:
+        provisional: dict[int, T] = {}
+        first_error: BaseException | None = None
+        try:
+            cdp_a = normalize_cdp_processes(sample_cdp())
+            job_a = sample_job_pids()
+            for pid in sorted(job_a):
+                handle = open_handle(pid)
+                provisional[pid] = handle
+                validate_handle(pid, handle)
+            cdp_b = normalize_cdp_processes(sample_cdp())
+            job_b = sample_job_pids()
+            if cdp_a == cdp_b and job_a == job_b == set(provisional):
+                require_browser_inventory(cdp_b, set(provisional), driver_pid)
+                for pid, handle in provisional.items():
+                    validate_handle(pid, handle)
+                return cdp_b, provisional
+        except BaseException as exc:
+            first_error = exc
+        if first_error is not None:
+            for handle in provisional.values():
+                with contextlib.suppress(BaseException):
+                    close_handle(handle)
+            raise first_error
+        for handle in provisional.values():
+            close_handle(handle)
+        if monotonic() >= deadline:
+            raise TimeoutError("browser process census did not become quiescent")
+        wait_for_retry()
+
+
+def wait_handles_to_deadline[T](
+    handles: dict[int, T],
+    *,
+    wait_one: Callable[[T, int], bool],
+    deadline: float,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> None:
+    for pid, handle in handles.items():
+        remaining = deadline - monotonic()
+        if remaining <= 0 or not wait_one(handle, max(1, int(remaining * 1000))):
+            raise TimeoutError(f"process {pid} remained active at the shared deadline")
+
+
+def browser_guardian_shutdown[T](
+    *,
+    retained: dict[int, T],
+    active_pids: Callable[[dict[int, T]], set[int]],
+    terminate_job: Callable[[], None],
+    query_active_processes: Callable[[], int],
+    signal_job_zero: Callable[[], None],
+    wait_check_stable_handles: Callable[[], None],
+    wait_handles: Callable[[dict[int, T]], None],
+    signal_both_zero: Callable[[], None],
+    wait_allow_fence_release: Callable[[], None],
+    release_fence: Callable[[], None],
+) -> dict[str, Any]:
+    """Drain the retained launch while keeping the fence through both proofs."""
+    before = sorted(active_pids(retained))
+    terminate_job()
+    active = query_active_processes()
+    if active != 0:
+        raise RuntimeError(f"browser Job retained {active} active processes")
+    signal_job_zero()
+    wait_check_stable_handles()
+    wait_handles(retained)
+    after = sorted(active_pids(retained))
+    if after:
+        raise RuntimeError(f"retained browser handles remain active: {after}")
+    if query_active_processes() != 0:
+        raise RuntimeError("browser Job became non-empty after retained-handle waits")
+    signal_both_zero()
+    wait_allow_fence_release()
+    release_fence()
+    return {"active_before_termination": before, "active_after_wait": after}
+
+
 def topology_runner(scenario: str) -> str:
+    if scenario.startswith("browser-launch-"):
+        return "browser-launch"
     if scenario.startswith("job-topology-"):
         return "job-topology"
     if scenario.startswith("conjunction-"):
@@ -3904,6 +4054,453 @@ def _gate(wait_event: str, started_event: str) -> int:
     return 0
 
 
+def _remaining_browser_seconds(
+    deadline: float, *, monotonic: Callable[[], float] = time.monotonic
+) -> float:
+    remaining = deadline - monotonic()
+    if remaining <= 0:
+        raise TimeoutError("browser launch evidence deadline expired")
+    return remaining
+
+
+def _browser_event_wait(name: str, deadline: float) -> None:
+    _win32api, win32con, _win32event, _win32job = _windows_modules()
+    handle = _actor_event(name, win32con.SYNCHRONIZE)
+    try:
+        _wait(
+            handle,
+            _remaining_browser_seconds(deadline),
+            f"event {name} was not signaled before the shared deadline",
+        )
+    finally:
+        handle.Close()
+
+
+def _full_process_image_path(handle: Any) -> str:
+    from ctypes import wintypes
+
+    kernel32 = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
+    query = kernel32.QueryFullProcessImageNameW
+    query.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPWSTR,
+        wintypes.LPDWORD,
+    ]
+    query.restype = wintypes.BOOL
+    capacity = wintypes.DWORD(32768)
+    buffer = ctypes.create_unicode_buffer(capacity.value)
+    if not query(int(handle), 0, buffer, ctypes.byref(capacity)):
+        raise getattr(ctypes, "WinError")(getattr(ctypes, "get_last_error")())
+    return buffer.value
+
+
+def _job_process_ids(job: Any, win32job: Any) -> set[int]:
+    information = win32job.QueryInformationJobObject(
+        job, win32job.JobObjectBasicProcessIdList
+    )
+    values = information.get("ProcessIdList", information.get("ProcessIds"))
+    if values is None:
+        raise RuntimeError("Job process inventory exposed no process list")
+    return {int(pid) for pid in values}
+
+
+def _asyncio_process_handle(process: Any) -> Any:
+    transport = getattr(process, "_transport", None)
+    popen = transport.get_extra_info("subprocess") if transport is not None else None
+    handle = getattr(popen, "_handle", None)
+    if handle is None:
+        raise RuntimeError("Patchright Node exposed no stable asyncio/Popen handle")
+    return handle
+
+
+async def _browser_launch_owner(root: Path, controls: dict[str, str]) -> int:
+    import patchright
+    from patchright.async_api import async_playwright
+
+    ignored_node_override = os.environ.pop("PLAYWRIGHT_NODEJS_PATH", None)
+    expected_node = Path(patchright.__file__).parent / "driver" / "node.exe"
+    _win32api, _win32con, _win32event, win32job = _windows_modules()
+    deadline = time.monotonic() + _BROWSER_DEADLINE_SECONDS
+    inner_name = f"Local\\linkedin-mcp-browser-launch-{secrets.token_hex(16)}"
+    inner = win32job.CreateJobObject(None, inner_name)
+    driver = await asyncio.wait_for(
+        async_playwright().start(), _remaining_browser_seconds(deadline)
+    )
+    process = driver._impl_obj._connection._transport._proc
+    node_handle = _asyncio_process_handle(process)
+    win32job.AssignProcessToJobObject(inner, node_handle)
+    node_pid = int(process.pid)
+    prelaunch = _job_process_ids(inner, win32job)
+    accounting = win32job.QueryInformationJobObject(
+        inner, win32job.JobObjectBasicAccountingInformation
+    )
+    if prelaunch != {node_pid} or int(accounting["ActiveProcesses"]) != 1:
+        raise RuntimeError("prelaunch inner Job membership is not exactly the driver")
+    _atomic_json(
+        root / "owner.json",
+        {
+            "inner_job_name": inner_name,
+            "owner_pid": os.getpid(),
+            "driver_pid": node_pid,
+            "expected_driver_path": str(expected_node),
+            "ignored_playwright_nodejs_path": ignored_node_override is not None,
+            "profile_path": str(root / "auth" / "profile"),
+            "browser_path": driver.chromium.executable_path,
+            "prelaunch_inner_pids": sorted(prelaunch),
+            "prelaunch_active_processes": int(accounting["ActiveProcesses"]),
+        },
+    )
+    _signal(controls["owner_ready"])
+    _browser_event_wait(controls["guardian_armed"], deadline)
+    context = await asyncio.wait_for(
+        driver.chromium.launch_persistent_context(
+            root / "auth" / "profile",
+            channel="chromium",
+            headless=True,
+            viewport={"width": 1280, "height": 720},
+            locale="en-US",
+        ),
+        _remaining_browser_seconds(deadline),
+    )
+    page = context.pages[0]
+    await page.set_content(
+        "<script>window.worker = new Worker(URL.createObjectURL(new Blob(["
+        "'postMessage({ready:true})'], {type:'text/javascript'})));"
+        "window.workerReady = new Promise(r => worker.onmessage = e => r(e.data.ready));"
+        "</script>"
+    )
+    renderer_ready = await page.evaluate("() => 6 * 7 === 42")
+    worker_ready = await page.evaluate("() => window.workerReady")
+    browser = context.browser
+    if browser is None:
+        raise RuntimeError("persistent context exposed no browser-level CDP endpoint")
+    session = await browser.new_browser_cdp_session()
+    version = await session.send("Browser.getVersion")
+    process_info = await session.send("SystemInfo.getProcessInfo")
+    _atomic_json(
+        root / "browser.json",
+        {
+            "renderer_ready": renderer_ready,
+            "worker_ready": worker_ready,
+            "patchright_browser_version": browser.version,
+            "browser_get_version": version,
+            "process_info": process_info["processInfo"],
+        },
+    )
+    _signal(controls["inventory_ready"])
+    _actor_wait(controls["hold_owner"])
+    return 0
+
+
+def _browser_launch_guardian(root: Path, controls: dict[str, str]) -> int:
+    from linkedin_mcp_server.profile_lease import ProfileLease
+
+    win32api, win32con, _win32event, win32job = _windows_modules()
+    win32process = importlib.import_module("win32process")
+
+    deadline = time.monotonic() + _BROWSER_DEADLINE_SECONDS
+    lease = ProfileLease(root / "auth")
+    retained: dict[int, Any] = {}
+    inner = None
+    outer = None
+    owner = None
+    try:
+        if not lease.try_acquire():
+            raise RuntimeError("browser guardian could not acquire the profile lease")
+        _browser_event_wait(controls["owner_ready"], deadline)
+        metadata = _read_json(root / "owner.json")
+        inner = win32job.OpenJobObject(
+            win32job.JOB_OBJECT_ALL_ACCESS, False, metadata["inner_job_name"]
+        )
+        outer = win32job.OpenJobObject(
+            win32job.JOB_OBJECT_QUERY, False, controls["outer_job_name"]
+        )
+        owner = win32api.OpenProcess(
+            win32con.SYNCHRONIZE | win32con.PROCESS_QUERY_LIMITED_INFORMATION,
+            False,
+            int(metadata["owner_pid"]),
+        )
+        driver = win32api.OpenProcess(
+            win32con.SYNCHRONIZE | win32con.PROCESS_QUERY_LIMITED_INFORMATION,
+            False,
+            int(metadata["driver_pid"]),
+        )
+        guardian_self = _duplicate_real_self(win32api, win32con)
+        try:
+            if win32job.IsProcessInJob(owner, inner):
+                raise RuntimeError("owner entered the inner launch Job")
+            if win32job.IsProcessInJob(guardian_self, inner):
+                raise RuntimeError("guardian entered the inner launch Job")
+            if not win32job.IsProcessInJob(owner, outer) or not win32job.IsProcessInJob(
+                guardian_self, outer
+            ):
+                raise RuntimeError("a control process is outside the outer harness Job")
+            if not win32job.IsProcessInJob(
+                driver, inner
+            ) or not win32job.IsProcessInJob(driver, outer):
+                raise RuntimeError("Node is not a member of both launch Jobs")
+        finally:
+            guardian_self.Close()
+            driver.Close()
+        _signal(controls["guardian_armed"])
+        _browser_event_wait(controls["inventory_ready"], deadline)
+        process_identities: dict[int, dict[str, Any]] = {}
+
+        def open_handle(pid: int) -> Any:
+            return win32api.OpenProcess(
+                win32con.SYNCHRONIZE | win32con.PROCESS_QUERY_LIMITED_INFORMATION,
+                False,
+                pid,
+            )
+
+        def validate(pid: int, handle: Any) -> None:
+            if int(win32api.GetProcessId(handle)) != pid:
+                raise RuntimeError("retained handle PID changed")
+            if not _is_active(handle):
+                raise RuntimeError("retained Job member exited during census")
+            if not win32job.IsProcessInJob(
+                handle, inner
+            ) or not win32job.IsProcessInJob(handle, outer):
+                raise RuntimeError("retained process left a required Job")
+            path = _full_process_image_path(handle)
+            created = win32process.GetProcessTimes(handle)["CreationTime"]
+            if not path or created is None:
+                raise RuntimeError("retained process identity is incomplete")
+            identity = {"creation_time": int(created), "image_path": path}
+            previous = process_identities.get(pid)
+            if previous is not None and previous != identity:
+                raise RuntimeError("retained process identity changed during census")
+            process_identities[pid] = identity
+
+        cdp, retained = retain_stable_browser_inventory(
+            sample_cdp=lambda: _read_json(root / "browser.json")["process_info"],
+            sample_job_pids=lambda: _job_process_ids(inner, win32job),
+            open_handle=open_handle,
+            validate_handle=validate,
+            close_handle=lambda handle: handle.Close(),
+            driver_pid=int(metadata["driver_pid"]),
+            deadline=deadline,
+            wait_for_retry=lambda: win32api.Sleep(1),
+        )
+        inventory = require_browser_inventory(
+            cdp, set(retained), int(metadata["driver_pid"])
+        )
+        inventory.update(
+            {
+                "retained_pids": sorted(retained),
+                "process_identities": {
+                    str(pid): process_identities[pid] for pid in sorted(retained)
+                },
+                "owner_outside_inner": True,
+                "guardian_outside_inner": True,
+                "driver_in_inner_and_outer": True,
+            }
+        )
+        _atomic_json(root / "inventory.json", inventory)
+        _signal(controls["inventory_retained"])
+        _wait(owner, _remaining_browser_seconds(deadline), "owner did not die")
+
+        def wait_all(handles: dict[int, Any]) -> None:
+            wait_handles_to_deadline(
+                handles,
+                wait_one=lambda handle, milliseconds: (
+                    _windows_modules()[2].WaitForSingleObject(handle, milliseconds)
+                    == _WAIT_OBJECT_0
+                ),
+                deadline=deadline,
+            )
+
+        shutdown = browser_guardian_shutdown(
+            retained=retained,
+            active_pids=lambda handles: {
+                pid for pid, handle in handles.items() if _is_active(handle)
+            },
+            terminate_job=lambda: win32job.TerminateJobObject(inner, 208),
+            query_active_processes=lambda: int(
+                win32job.QueryInformationJobObject(
+                    inner, win32job.JobObjectBasicAccountingInformation
+                )["ActiveProcesses"]
+            ),
+            signal_job_zero=lambda: _signal(controls["job_zero"]),
+            wait_check_stable_handles=lambda: _browser_event_wait(
+                controls["check_stable_handles"], deadline
+            ),
+            wait_handles=wait_all,
+            signal_both_zero=lambda: _signal(controls["both_zero"]),
+            wait_allow_fence_release=lambda: _browser_event_wait(
+                controls["allow_fence_release"], deadline
+            ),
+            release_fence=lease.release,
+        )
+        _atomic_json(root / "guardian.json", shutdown)
+        _signal(controls["fence_released"])
+        _browser_event_wait(controls["close_guardian"], deadline)
+        return 0
+    except BaseException as exc:
+        _atomic_json(
+            root / "guardian-error.json", {"error": f"{type(exc).__name__}: {exc}"}
+        )
+        threading.Event().wait()
+        raise
+    finally:
+        for handle in retained.values():
+            with contextlib.suppress(BaseException):
+                handle.Close()
+        if owner is not None:
+            with contextlib.suppress(BaseException):
+                owner.Close()
+        if inner is not None:
+            with contextlib.suppress(BaseException):
+                inner.Close()
+        if outer is not None:
+            with contextlib.suppress(BaseException):
+                outer.Close()
+
+
+def _run_browser_launch_probe(scenario: str, root: Path) -> dict[str, Any]:
+    from linkedin_mcp_server.profile_lease import ProfileLease
+
+    if scenario != "browser-launch-owner-loss":
+        raise RuntimeError(f"unsupported browser launch scenario: {scenario}")
+    _win32api, _win32con, win32event, win32job = _windows_modules()
+    root.mkdir(parents=True)
+    (root / "auth").mkdir()
+    outer_metadata = _read_json(root / "outer-job.json")
+    outer = win32job.OpenJobObject(
+        win32job.JOB_OBJECT_QUERY, False, outer_metadata["name"]
+    )
+    events: dict[str, Any] = {}
+    controls: dict[str, str] = {"outer_job_name": outer_metadata["name"]}
+    for label in (
+        "owner-ready",
+        "guardian-armed",
+        "inventory-ready",
+        "inventory-retained",
+        "hold-owner",
+        "job-zero",
+        "check-stable-handles",
+        "both-zero",
+        "allow-fence-release",
+        "fence-released",
+        "close-guardian",
+    ):
+        name, handle = _new_event(win32event, f"browser-{label}")
+        controls[label.replace("-", "_")] = name
+        events[label] = handle
+    processes: list[subprocess.Popen[bytes]] = []
+    owner = guardian = None
+    deadline = time.monotonic() + _BROWSER_DEADLINE_SECONDS
+    try:
+        for role in ("guardian", "owner"):
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(Path(__file__).resolve()),
+                    f"browser-{role}",
+                    str(root),
+                    json.dumps(controls),
+                ],
+                cwd=_REPO_ROOT,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            processes.append(process)
+            if role == "owner":
+                owner = process
+            else:
+                guardian = process
+        assert owner is not None and guardian is not None
+        _wait(
+            events["inventory-retained"],
+            _remaining_browser_seconds(deadline),
+            "inventory not retained",
+        )
+        contender = ProfileLease(root / "auth")
+        rejections = []
+
+        def reject(label: str) -> None:
+            acquired = contender.try_acquire()
+            if acquired:
+                contender.release()
+                raise RuntimeError(f"contender acquired at {label}")
+            rejections.append(label)
+
+        reject("inventory-retained")
+        owner_handle = _popen_handle(owner)
+        _win32api.TerminateProcess(owner_handle, 208)
+        _wait(
+            owner_handle,
+            _remaining_browser_seconds(deadline),
+            "owner did not terminate",
+        )
+        owner.wait(timeout=_remaining_browser_seconds(deadline))
+        _wait(
+            events["job-zero"],
+            _remaining_browser_seconds(deadline),
+            "Job zero not published",
+        )
+        reject("job-zero")
+        _signal(controls["check_stable_handles"])
+        _wait(
+            events["both-zero"],
+            _remaining_browser_seconds(deadline),
+            "both zero not published",
+        )
+        reject("both-zero")
+        _signal(controls["allow_fence_release"])
+        _wait(
+            events["fence-released"],
+            _remaining_browser_seconds(deadline),
+            "fence not released",
+        )
+        acquired, attempts, seconds = retry_lock_rundown(
+            lambda: True if contender.try_acquire() else None,
+            deadline=deadline,
+            wait_for_retry=lambda: win32event.WaitForSingleObject(
+                events["job-zero"], 1
+            ),
+        )
+        assert acquired
+        contender.release()
+        _signal(controls["close-guardian"])
+        require_successful_actor_completion(
+            guardian,
+            "browser guardian",
+            timeout=_remaining_browser_seconds(deadline),
+        )
+        outer_active = int(
+            win32job.QueryInformationJobObject(
+                outer, win32job.JobObjectBasicAccountingInformation
+            )["ActiveProcesses"]
+        )
+        if outer_active != 1:
+            raise RuntimeError(
+                "outer harness retained a process beyond the coordinator"
+            )
+        metadata = _read_json(root / "owner.json")
+        browser = _read_json(root / "browser.json")
+        return {
+            "scenario": scenario,
+            "metadata": metadata,
+            "browser": browser,
+            "inventory": _read_json(root / "inventory.json"),
+            "guardian": _read_json(root / "guardian.json"),
+            "lease_rejections": rejections,
+            "post_release_acquired": acquired,
+            "post_release_attempts": attempts,
+            "post_release_seconds": seconds,
+            "outer_active_processes_before_coordinator_exit": outer_active,
+        }
+    finally:
+        for handle in events.values():
+            with contextlib.suppress(BaseException):
+                handle.Close()
+        with contextlib.suppress(BaseException):
+            outer.Close()
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="role", required=True)
@@ -3937,6 +4534,11 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     run.add_argument("root", type=Path)
+
+    for browser_role in ("browser-owner", "browser-guardian"):
+        browser_actor = subparsers.add_parser(browser_role)
+        browser_actor.add_argument("root", type=Path)
+        browser_actor.add_argument("controls", type=json.loads)
 
     owner = subparsers.add_parser("owner")
     owner.add_argument("scenario", choices=("baseline", "candidate"))
@@ -4001,6 +4603,7 @@ def main() -> int:
     if args.role == "run":
         runner_name = topology_runner(args.scenario)
         runner = {
+            "browser-launch": _run_browser_launch_probe,
             "job-topology": _run_job_topology_probe,
             "conjunction": _run_conjunction_probe,
             "region-falsification": _run_region_falsification_probe,
@@ -4008,6 +4611,10 @@ def main() -> int:
         }[runner_name]
         print(json.dumps(runner(args.scenario, args.root)), flush=True)
         return 0
+    if args.role == "browser-owner":
+        return asyncio.run(_browser_launch_owner(args.root, args.controls))
+    if args.role == "browser-guardian":
+        return _browser_launch_guardian(args.root, args.controls)
     if args.role == "topology-actor":
         return _topology_actor(
             args.scenario,

@@ -222,7 +222,7 @@ def _prepare_probe_harness(
     tmp_path: Path, scenario: str
 ) -> tuple[Path, Any, Any, subprocess.Popen[bytes], str]:
     root = tmp_path / scenario
-    topology = scenario.startswith("job-topology-")
+    topology = scenario.startswith(("job-topology-", "browser-launch-"))
     harness = (
         process_tree.WindowsJob.named("topology-outer")
         if topology
@@ -2816,3 +2816,149 @@ def test_conjunction_owner_loss_failure_holds_b(
         assert measurement["query_samples"] == []
     else:
         assert measurement["query_samples"] == []
+
+
+class TestBrowserLaunchEvidenceHelpers:
+    def test_role_normalization_preserves_unknown_and_rejects_conflicts(self) -> None:
+        assert probe.normalize_cdp_processes(
+            [
+                {"id": 11, "type": "browser"},
+                {"id": 12, "type": "renderer"},
+                {"id": 13, "type": "future-service"},
+            ]
+        ) == {11: "browser", 12: "renderer", 13: "unknown:future-service"}
+        with pytest.raises(RuntimeError, match="conflicting roles"):
+            probe.normalize_cdp_processes(
+                [
+                    {"id": 11, "type": "browser"},
+                    {"id": 11, "type": "renderer"},
+                ]
+            )
+
+    def test_browser_and_renderer_are_mandatory_and_cdp_is_a_subset(self) -> None:
+        with pytest.raises(RuntimeError, match="required roles"):
+            probe.require_browser_inventory({2: "browser"}, {1, 2}, 1)
+        with pytest.raises(RuntimeError, match="absent from"):
+            probe.require_browser_inventory({2: "browser", 3: "renderer"}, {1, 2}, 1)
+        result = probe.require_browser_inventory(
+            {2: "browser", 3: "renderer", 4: "unknown:new"}, {1, 2, 3, 4, 5}, 1
+        )
+        assert result["unclassified_job_pids"] == [1, 5]
+        assert result["cdp_processes"][-1] == {"pid": 4, "role": "unknown:new"}
+
+    def test_census_retries_churn_and_closes_provisional_handles(self) -> None:
+        jobs = iter([{1, 2}, {1, 3}, {1, 2, 3}, {1, 2, 3}])
+        cdp = iter(
+            [
+                [{"id": 2, "type": "browser"}, {"id": 3, "type": "renderer"}],
+                [{"id": 2, "type": "browser"}, {"id": 3, "type": "renderer"}],
+                [{"id": 2, "type": "browser"}, {"id": 3, "type": "renderer"}],
+                [{"id": 2, "type": "browser"}, {"id": 3, "type": "renderer"}],
+            ]
+        )
+        closed: list[int] = []
+        waits: list[str] = []
+        normalized, handles = probe.retain_stable_browser_inventory(
+            sample_cdp=lambda: next(cdp),
+            sample_job_pids=lambda: next(jobs),
+            open_handle=lambda pid: pid,
+            validate_handle=lambda _pid, _handle: None,
+            close_handle=closed.append,
+            driver_pid=1,
+            deadline=10,
+            wait_for_retry=lambda: waits.append("wait"),
+            monotonic=lambda: 0,
+        )
+        assert normalized == {2: "browser", 3: "renderer"}
+        assert handles == {1: 1, 2: 2, 3: 3}
+        assert closed == [1, 2]
+        assert waits == ["wait"]
+
+    def test_open_failure_invalidates_the_whole_census(self) -> None:
+        closed: list[int] = []
+        error = OSError("OpenProcess failed")
+        with pytest.raises(OSError) as raised:
+            probe.retain_stable_browser_inventory(
+                sample_cdp=lambda: [
+                    {"id": 2, "type": "browser"},
+                    {"id": 3, "type": "renderer"},
+                ],
+                sample_job_pids=lambda: {1, 2, 3},
+                open_handle=lambda pid: (
+                    (_ for _ in ()).throw(error) if pid == 2 else pid
+                ),
+                validate_handle=lambda _pid, _handle: None,
+                close_handle=closed.append,
+                driver_pid=1,
+                deadline=10,
+                wait_for_retry=lambda: pytest.fail("open errors are not churn"),
+            )
+        assert raised.value is error
+        assert closed == [1]
+
+    def test_handle_waits_share_one_deadline(self) -> None:
+        times = iter([0.0, 0.4])
+        timeouts: list[int] = []
+        probe.wait_handles_to_deadline(
+            {1: "one", 2: "two"},
+            wait_one=lambda _handle, timeout: timeouts.append(timeout) or True,
+            deadline=1.0,
+            monotonic=lambda: next(times),
+        )
+        assert timeouts == [1000, 600]
+
+    def test_shutdown_holds_fence_through_job_and_handle_zero(self) -> None:
+        events: list[str] = []
+        active = iter([{1}, set()])
+        probe.browser_guardian_shutdown(
+            retained={1: object()},
+            active_pids=lambda _handles: next(active),
+            terminate_job=lambda: events.append("terminate"),
+            query_active_processes=lambda: events.append("query") or 0,
+            signal_job_zero=lambda: events.append("JOB_ZERO"),
+            wait_check_stable_handles=lambda: events.append("CHECK_HANDLES"),
+            wait_handles=lambda _handles: events.append("wait handles"),
+            signal_both_zero=lambda: events.append("BOTH_ZERO"),
+            wait_allow_fence_release=lambda: events.append("ALLOW_RELEASE"),
+            release_fence=lambda: events.append("release"),
+        )
+        assert events == [
+            "terminate",
+            "query",
+            "JOB_ZERO",
+            "CHECK_HANDLES",
+            "wait handles",
+            "query",
+            "BOTH_ZERO",
+            "ALLOW_RELEASE",
+            "release",
+        ]
+
+    def test_query_and_handle_failures_never_release_the_fence(self) -> None:
+        for query, wait, message in [
+            (lambda: (_ for _ in ()).throw(OSError("query")), lambda _h: None, "query"),
+            (
+                lambda: 0,
+                lambda _h: (_ for _ in ()).throw(TimeoutError("handles")),
+                "handles",
+            ),
+        ]:
+            events: list[str] = []
+            with pytest.raises((OSError, TimeoutError), match=message):
+                probe.browser_guardian_shutdown(
+                    retained={1: object()},
+                    active_pids=lambda _handles: {1},
+                    terminate_job=lambda: None,
+                    query_active_processes=query,
+                    signal_job_zero=lambda: events.append("JOB_ZERO"),
+                    wait_check_stable_handles=lambda: None,
+                    wait_handles=wait,
+                    signal_both_zero=lambda: events.append("BOTH_ZERO"),
+                    wait_allow_fence_release=lambda: None,
+                    release_fence=lambda: events.append("release"),
+                )
+            assert "release" not in events
+            assert "BOTH_ZERO" not in events
+
+    def test_browser_launch_routes_separately(self) -> None:
+        assert probe.topology_runner("browser-launch-owner-loss") == "browser-launch"
