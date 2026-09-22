@@ -4602,6 +4602,7 @@ def prove_coordinator_is_only_outer_process[T](
     query_active: Callable[[], int],
     deadline: float,
     wait_for_retry: Callable[[], None],
+    describe: Callable[[], str] = lambda: "",
     monotonic: Callable[[], float] = time.monotonic,
 ) -> int:
     """Require the coordinator alone after exited actor handles are released."""
@@ -4612,8 +4613,11 @@ def prove_coordinator_is_only_outer_process[T](
         if active == 1:
             return active
         if monotonic() >= deadline:
+            detail = describe()
+            suffix = f" {detail}" if detail else ""
             raise RuntimeError(
-                f"outer harness retained {active} processes beyond the coordinator"
+                f"outer harness ActiveProcesses={active}; expected the coordinator"
+                f" alone{suffix}"
             )
         wait_for_retry()
 
@@ -4758,6 +4762,45 @@ def _run_browser_launch_probe(scenario: str, root: Path) -> dict[str, Any]:
             deadline=deadline,
             win32event=win32event,
         )
+
+        def describe_outer_remainder() -> str:
+            rows: list[str] = []
+            inner_job = None
+            try:
+                pids = sorted(_job_process_ids(outer, win32job))
+                inner_job = win32job.OpenJobObject(
+                    win32job.JOB_OBJECT_QUERY,
+                    False,
+                    _read_json(root / "owner.json")["inner_job_name"],
+                )
+            except Exception as exc:
+                return f"inventory={type(exc).__name__}: {exc}"
+            try:
+                for pid in pids:
+                    image = "unavailable"
+                    in_inner = "unknown"
+                    try:
+                        handle = _win32api.OpenProcess(
+                            _win32con.PROCESS_QUERY_LIMITED_INFORMATION
+                            | _win32con.SYNCHRONIZE,
+                            False,
+                            pid,
+                        )
+                        try:
+                            image = _full_process_image_path(handle)
+                            in_inner = str(
+                                bool(win32job.IsProcessInJob(handle, inner_job))
+                            )
+                        finally:
+                            handle.Close()
+                    except Exception as exc:
+                        image = f"{type(exc).__name__}: {exc}"
+                    rows.append(f"{pid} inner={in_inner} image={image}")
+            finally:
+                if inner_job is not None:
+                    inner_job.Close()
+            return "members=[" + "; ".join(rows) + "]"
+
         outer_active = prove_coordinator_is_only_outer_process(
             [owner, guardian],
             release=release_exited_actor,
@@ -4768,6 +4811,7 @@ def _run_browser_launch_probe(scenario: str, root: Path) -> dict[str, Any]:
             ),
             deadline=deadline,
             wait_for_retry=lambda: time.sleep(0.001),
+            describe=describe_outer_remainder,
         )
         metadata = _read_json(root / "owner.json")
         browser = _read_json(root / "browser.json")

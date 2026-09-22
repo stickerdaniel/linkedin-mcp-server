@@ -3329,13 +3329,25 @@ class TestBrowserProbeRootOwnership:
     def test_live_outer_process_is_not_treated_as_handle_accounting(
         self,
     ) -> None:
-        with pytest.raises(RuntimeError, match="retained 2"):
+        with pytest.raises(RuntimeError, match="ActiveProcesses=2"):
             probe.prove_coordinator_is_only_outer_process(
                 [],
                 release=lambda _actor: None,
                 query_active=lambda: 2,
                 deadline=1,
                 wait_for_retry=lambda: None,
+                monotonic=lambda: 2,
+            )
+
+    def test_outer_remainder_error_includes_process_inventory(self) -> None:
+        with pytest.raises(RuntimeError, match="pid=9 image=chrome.exe"):
+            probe.prove_coordinator_is_only_outer_process(
+                [],
+                release=lambda _actor: None,
+                query_active=lambda: 4,
+                deadline=1,
+                wait_for_retry=lambda: None,
+                describe=lambda: "pid=9 image=chrome.exe",
                 monotonic=lambda: 2,
             )
 
