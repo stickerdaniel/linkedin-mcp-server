@@ -4552,20 +4552,34 @@ def _wait_browser_actor_completion(
         raise browser_actor_failure(root, actors, logs)
 
 
+def prepare_browser_probe_root(root: Path) -> str:
+    if not root.is_dir():
+        raise RuntimeError("browser probe root was not prepared by its outer harness")
+    entries = {entry.name for entry in root.iterdir()}
+    if entries != {"outer-job.json"}:
+        raise RuntimeError(
+            f"browser probe root has unexpected preexisting state: {sorted(entries)}"
+        )
+    outer_metadata = _read_json(root / "outer-job.json")
+    if not isinstance(outer_metadata, dict) or set(outer_metadata) != {"name"}:
+        raise RuntimeError("outer Job metadata has an unexpected shape")
+    outer_name = outer_metadata["name"]
+    if not isinstance(outer_name, str) or not outer_name:
+        raise RuntimeError("outer Job metadata has no valid name")
+    (root / "auth").mkdir()
+    return outer_name
+
+
 def _run_browser_launch_probe(scenario: str, root: Path) -> dict[str, Any]:
     from linkedin_mcp_server.profile_lease import ProfileLease
 
     if scenario != "browser-launch-owner-loss":
         raise RuntimeError(f"unsupported browser launch scenario: {scenario}")
     _win32api, _win32con, win32event, win32job = _windows_modules()
-    root.mkdir(parents=True)
-    (root / "auth").mkdir()
-    outer_metadata = _read_json(root / "outer-job.json")
-    outer = win32job.OpenJobObject(
-        win32job.JOB_OBJECT_QUERY, False, outer_metadata["name"]
-    )
+    outer_name = prepare_browser_probe_root(root)
+    outer = win32job.OpenJobObject(win32job.JOB_OBJECT_QUERY, False, outer_name)
     events: dict[str, Any] = {}
-    controls: dict[str, str] = {"outer_job_name": outer_metadata["name"]}
+    controls: dict[str, str] = {"outer_job_name": outer_name}
     for label in (
         "owner-ready",
         "guardian-armed",

@@ -3245,3 +3245,53 @@ class TestBrowserBarrierRace:
             logs={},
             root=tmp_path,
         )
+
+
+class TestBrowserProbeRootOwnership:
+    def test_coordinator_accepts_exact_harness_preparation(
+        self, tmp_path: Path
+    ) -> None:
+        root = tmp_path / "browser-launch-owner-loss"
+        root.mkdir()
+        (root / "outer-job.json").write_text(
+            json.dumps({"name": "Local\\outer-job"}), encoding="utf-8"
+        )
+
+        assert probe.prepare_browser_probe_root(root) == "Local\\outer-job"
+        assert {entry.name for entry in root.iterdir()} == {"outer-job.json", "auth"}
+        assert (root / "auth").is_dir()
+
+    @pytest.mark.parametrize(
+        "prepare",
+        [
+            lambda root: None,
+            lambda root: (root.mkdir(), (root / "unexpected").write_text("x")),
+            lambda root: (
+                root.mkdir(),
+                (root / "outer-job.json").write_text(json.dumps({"name": "outer"})),
+                (root / "stale.json").write_text("{}"),
+            ),
+        ],
+    )
+    def test_coordinator_rejects_missing_or_unexpected_preexisting_state(
+        self, tmp_path: Path, prepare: Any
+    ) -> None:
+        root = tmp_path / "browser-launch-owner-loss"
+        prepare(root)
+        with pytest.raises(RuntimeError):
+            probe.prepare_browser_probe_root(root)
+        assert not (root / "auth").exists()
+
+    @pytest.mark.parametrize(
+        "metadata",
+        [{}, {"name": ""}, {"name": 7}, {"name": "outer", "extra": True}],
+    )
+    def test_coordinator_rejects_invalid_outer_job_metadata(
+        self, tmp_path: Path, metadata: dict[str, Any]
+    ) -> None:
+        root = tmp_path / "browser-launch-owner-loss"
+        root.mkdir()
+        (root / "outer-job.json").write_text(json.dumps(metadata), encoding="utf-8")
+        with pytest.raises(RuntimeError, match="metadata"):
+            probe.prepare_browser_probe_root(root)
+        assert not (root / "auth").exists()
