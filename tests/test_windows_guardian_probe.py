@@ -222,7 +222,7 @@ def _prepare_probe_harness(
     tmp_path: Path, scenario: str
 ) -> tuple[Path, Any, Any, subprocess.Popen[bytes], str]:
     root = tmp_path / scenario
-    topology = scenario.startswith("job-topology-")
+    topology = scenario.startswith(("job-topology-", "browser-launch-"))
     harness = (
         process_tree.WindowsJob.named("topology-outer")
         if topology
@@ -2816,3 +2816,608 @@ def test_conjunction_owner_loss_failure_holds_b(
         assert measurement["query_samples"] == []
     else:
         assert measurement["query_samples"] == []
+
+
+class TestBrowserLaunchEvidenceHelpers:
+    def test_role_normalization_preserves_unknown_and_rejects_conflicts(self) -> None:
+        assert probe.normalize_cdp_processes(
+            [
+                {"id": 11, "type": "browser"},
+                {"id": 12, "type": "renderer"},
+                {"id": 13, "type": "future-service"},
+            ]
+        ) == {11: "browser", 12: "renderer", 13: "unknown:future-service"}
+        with pytest.raises(RuntimeError, match="conflicting roles"):
+            probe.normalize_cdp_processes(
+                [
+                    {"id": 11, "type": "browser"},
+                    {"id": 11, "type": "renderer"},
+                ]
+            )
+
+    def test_browser_and_renderer_are_mandatory_and_cdp_is_a_subset(self) -> None:
+        with pytest.raises(RuntimeError, match="required roles"):
+            probe.require_browser_inventory({2: "browser"}, {1, 2}, 1)
+        with pytest.raises(RuntimeError, match="absent from"):
+            probe.require_browser_inventory({2: "browser", 3: "renderer"}, {1, 2}, 1)
+        result = probe.require_browser_inventory(
+            {2: "browser", 3: "renderer", 4: "unknown:new"}, {1, 2, 3, 4, 5}, 1
+        )
+        assert result["unclassified_job_pids"] == [1, 5]
+        assert result["cdp_processes"][-1] == {"pid": 4, "role": "unknown:new"}
+
+    def test_census_retries_churn_and_closes_provisional_handles(self) -> None:
+        jobs = iter([{1, 2}, {1, 3}, {1, 2, 3}, {1, 2, 3}])
+        cdp = iter(
+            [
+                [{"id": 2, "type": "browser"}, {"id": 3, "type": "renderer"}],
+                [{"id": 2, "type": "browser"}, {"id": 3, "type": "renderer"}],
+                [{"id": 2, "type": "browser"}, {"id": 3, "type": "renderer"}],
+                [{"id": 2, "type": "browser"}, {"id": 3, "type": "renderer"}],
+            ]
+        )
+        closed: list[int] = []
+        waits: list[str] = []
+        normalized, handles = probe.retain_stable_browser_inventory(
+            sample_cdp=lambda: next(cdp),
+            sample_job_pids=lambda: next(jobs),
+            open_handle=lambda pid: pid,
+            validate_handle=lambda _pid, _handle: None,
+            close_handle=closed.append,
+            driver_pid=1,
+            deadline=10,
+            wait_for_retry=lambda: waits.append("wait"),
+            monotonic=lambda: 0,
+        )
+        assert normalized == {2: "browser", 3: "renderer"}
+        assert handles == {1: 1, 2: 2, 3: 3}
+        assert closed == [1, 2]
+        assert waits == ["wait"]
+
+    def test_open_failure_invalidates_the_whole_census(self) -> None:
+        closed: list[int] = []
+        error = OSError("OpenProcess failed")
+        with pytest.raises(OSError) as raised:
+            probe.retain_stable_browser_inventory(
+                sample_cdp=lambda: [
+                    {"id": 2, "type": "browser"},
+                    {"id": 3, "type": "renderer"},
+                ],
+                sample_job_pids=lambda: {1, 2, 3},
+                open_handle=lambda pid: (
+                    (_ for _ in ()).throw(error) if pid == 2 else pid
+                ),
+                validate_handle=lambda _pid, _handle: None,
+                close_handle=closed.append,
+                driver_pid=1,
+                deadline=10,
+                wait_for_retry=lambda: pytest.fail("open errors are not churn"),
+            )
+        assert raised.value is error
+        assert closed == [1]
+
+    def test_handle_waits_share_one_deadline(self) -> None:
+        times = iter([0.0, 0.4])
+        timeouts: list[int] = []
+        probe.wait_handles_to_deadline(
+            {1: "one", 2: "two"},
+            wait_one=lambda _handle, timeout: timeouts.append(timeout) or True,
+            deadline=1.0,
+            monotonic=lambda: next(times),
+        )
+        assert timeouts == [1000, 600]
+
+    def test_shutdown_holds_fence_through_job_and_handle_zero(self) -> None:
+        events: list[str] = []
+        active = iter([{1}, set()])
+        probe.browser_guardian_shutdown(
+            retained={1: object()},
+            active_pids=lambda _handles: next(active),
+            terminate_job=lambda: events.append("terminate"),
+            query_active_processes=lambda: events.append("query") or 0,
+            signal_job_zero=lambda: events.append("JOB_ZERO"),
+            wait_check_stable_handles=lambda: events.append("CHECK_HANDLES"),
+            wait_handles=lambda _handles: events.append("wait handles"),
+            signal_both_zero=lambda: events.append("BOTH_ZERO"),
+            wait_allow_fence_release=lambda: events.append("ALLOW_RELEASE"),
+            release_fence=lambda: events.append("release"),
+        )
+        assert events == [
+            "terminate",
+            "query",
+            "JOB_ZERO",
+            "CHECK_HANDLES",
+            "wait handles",
+            "query",
+            "BOTH_ZERO",
+            "ALLOW_RELEASE",
+            "release",
+        ]
+
+    def test_query_and_handle_failures_never_release_the_fence(self) -> None:
+        for query, wait, message in [
+            (lambda: (_ for _ in ()).throw(OSError("query")), lambda _h: None, "query"),
+            (
+                lambda: 0,
+                lambda _h: (_ for _ in ()).throw(TimeoutError("handles")),
+                "handles",
+            ),
+        ]:
+            events: list[str] = []
+            with pytest.raises((OSError, TimeoutError), match=message):
+                probe.browser_guardian_shutdown(
+                    retained={1: object()},
+                    active_pids=lambda _handles: {1},
+                    terminate_job=lambda: None,
+                    query_active_processes=query,
+                    signal_job_zero=lambda: events.append("JOB_ZERO"),
+                    wait_check_stable_handles=lambda: None,
+                    wait_handles=wait,
+                    signal_both_zero=lambda: events.append("BOTH_ZERO"),
+                    wait_allow_fence_release=lambda: None,
+                    release_fence=lambda: events.append("release"),
+                )
+            assert "release" not in events
+            assert "BOTH_ZERO" not in events
+
+    def test_browser_launch_routes_separately(self) -> None:
+        assert probe.topology_runner("browser-launch-owner-loss") == "browser-launch"
+
+
+class TestReviewedBrowserLaunchRepairs:
+    def test_browser_launch_job_is_configured_before_use(self) -> None:
+        events: list[str] = []
+        job = probe.create_browser_launch_job(
+            "inner",
+            create=lambda name: events.append(f"create {name}") or object(),
+            configure=lambda _job: events.append("configure kill-on-close"),
+        )
+        events.append(f"use {job is not None}")
+        assert events == ["create inner", "configure kill-on-close", "use True"]
+
+    def test_inner_job_configuration_enables_kill_on_close(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        limits = {"BasicLimitInformation": {"LimitFlags": 4}}
+        observed: list[tuple[object, int, dict[str, Any]]] = []
+
+        class Win32Job:
+            JobObjectExtendedLimitInformation = 9
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+
+            @staticmethod
+            def QueryInformationJobObject(job: object, kind: int) -> dict[str, Any]:
+                assert job == "inner"
+                assert kind == 9
+                return limits
+
+            @staticmethod
+            def SetInformationJobObject(
+                job: object, kind: int, value: dict[str, Any]
+            ) -> None:
+                observed.append((job, kind, value))
+
+        monkeypatch.setattr(
+            probe,
+            "_windows_modules",
+            lambda: (object(), object(), object(), Win32Job),
+        )
+        probe._configure_kill_on_close("inner")
+        assert limits["BasicLimitInformation"]["LimitFlags"] == 0x2004
+        assert observed == [("inner", 9, limits)]
+
+    def test_run_parser_accepts_browser_launch_owner_loss(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["probe", "run", "browser-launch-owner-loss", str(tmp_path)],
+        )
+        args = probe._parse_args()
+        assert args.role == "run"
+        assert args.scenario == "browser-launch-owner-loss"
+        assert args.root == tmp_path
+
+    def test_job_process_ids_accept_real_pywin32_sequence_shape(self) -> None:
+        assert probe.job_process_ids_from_query((101, 202, 303)) == {101, 202, 303}
+        with pytest.raises(RuntimeError, match="unexpected pywin32 shape"):
+            probe.job_process_ids_from_query({"ProcessIdList": [101]})
+        with pytest.raises(RuntimeError, match="non-positive"):
+            probe.job_process_ids_from_query((0, 101))
+
+    def test_process_creation_identity_normalizes_pytime_shaped_datetimes(self) -> None:
+        import datetime
+
+        assert (
+            probe.process_creation_identity(
+                datetime.datetime(2026, 9, 22, 12, 30, 1, 123456)
+            )
+            == "2026-09-22T12:30:01.123456+00:00"
+        )
+        assert (
+            probe.process_creation_identity(
+                datetime.datetime(
+                    2026,
+                    9,
+                    22,
+                    20,
+                    30,
+                    1,
+                    123456,
+                    tzinfo=datetime.timezone(datetime.timedelta(hours=8)),
+                )
+            )
+            == "2026-09-22T12:30:01.123456+00:00"
+        )
+        with pytest.raises(RuntimeError, match="datetime-shaped"):
+            probe.process_creation_identity(123)
+
+    def test_fresh_cdp_b_change_retries_before_acceptance(self) -> None:
+        samples = iter(
+            [
+                [{"id": 2, "type": "browser"}, {"id": 3, "type": "renderer"}],
+                [{"id": 2, "type": "browser"}, {"id": 4, "type": "renderer"}],
+                [{"id": 2, "type": "browser"}, {"id": 3, "type": "renderer"}],
+                [{"id": 2, "type": "browser"}, {"id": 3, "type": "renderer"}],
+            ]
+        )
+        sample_calls: list[str] = []
+        closed: list[int] = []
+
+        def sample() -> list[dict[str, Any]]:
+            sample_calls.append("sample")
+            return next(samples)
+
+        cdp, retained = probe.retain_stable_browser_inventory(
+            sample_cdp=sample,
+            sample_job_pids=lambda: {1, 2, 3},
+            open_handle=lambda pid: pid,
+            validate_handle=lambda _pid, _handle: None,
+            close_handle=closed.append,
+            driver_pid=1,
+            deadline=2,
+            wait_for_retry=lambda: None,
+            monotonic=lambda: 0,
+        )
+        assert sample_calls == ["sample"] * 4
+        assert closed == [1, 2, 3]
+        assert cdp == {2: "browser", 3: "renderer"}
+        assert retained == {1: 1, 2: 2, 3: 3}
+
+    def test_browser_role_must_match_resolved_chromium_image(
+        self, tmp_path: Path
+    ) -> None:
+        expected = tmp_path / "chrome.exe"
+        identity = {2: {"image_path": str(expected), "creation_time": "stable"}}
+        assert probe.require_browser_image_identity(
+            {2: "browser", 3: "renderer"}, identity, str(expected)
+        ) == {"browser_pid": 2, "browser_image_path": str(expected)}
+        with pytest.raises(RuntimeError, match="does not match"):
+            probe.require_browser_image_identity(
+                {2: "browser", 3: "renderer"},
+                {2: {"image_path": str(tmp_path / "other.exe")}},
+                str(expected),
+            )
+        with pytest.raises(RuntimeError, match="exactly one"):
+            probe.require_browser_image_identity(
+                {2: "browser", 3: "browser"}, identity, str(expected)
+            )
+
+    @pytest.mark.parametrize("role", ["owner", "guardian"])
+    def test_actor_failure_preserves_published_error_and_logs(
+        self, tmp_path: Path, role: str
+    ) -> None:
+        class Process:
+            def poll(self) -> int:
+                return 7
+
+        (tmp_path / f"{role}-error.json").write_text(
+            json.dumps({"error": f"RuntimeError: {role} failed"}), encoding="utf-8"
+        )
+        stdout = tmp_path / f"{role}.stdout"
+        stderr = tmp_path / f"{role}.stderr"
+        stdout.write_text(f"{role} out", encoding="utf-8")
+        stderr.write_text(f"{role} err", encoding="utf-8")
+        failure = probe.browser_actor_failure(
+            tmp_path, {role: Process()}, {role: (stdout, stderr)}
+        )
+        assert f"RuntimeError: {role} failed" in str(failure)
+        assert f"{role} out" in str(failure)
+        assert f"{role} err" in str(failure)
+
+
+class TestBrowserBarrierRace:
+    @staticmethod
+    def _failure_fixture(tmp_path: Path, role: str, returncode: int | None):
+        class Process:
+            def poll(self) -> int | None:
+                return returncode
+
+        stdout = tmp_path / f"{role}.stdout"
+        stderr = tmp_path / f"{role}.stderr"
+        stdout.write_text("actor stdout", encoding="utf-8")
+        stderr.write_text("actor stderr", encoding="utf-8")
+        (tmp_path / f"{role}-error.json").write_text(
+            json.dumps({"error": "RuntimeError: primary actor failure"}),
+            encoding="utf-8",
+        )
+        return Process(), {role: (stdout, stderr)}
+
+    def test_waiter_rechecks_simultaneous_error_after_barrier_wins(
+        self, tmp_path: Path
+    ) -> None:
+        process, logs = self._failure_fixture(tmp_path, "guardian", None)
+        process._handle = object()
+
+        class Win32Event:
+            @staticmethod
+            def WaitForMultipleObjects(
+                _handles: list[Any], _all: bool, _timeout: int
+            ) -> int:
+                return probe._WAIT_OBJECT_0
+
+            @staticmethod
+            def WaitForSingleObject(_handle: object, _timeout: int) -> int:
+                return probe._WAIT_OBJECT_0
+
+        with pytest.raises(RuntimeError, match="primary actor failure"):
+            probe._wait_browser_barrier(
+                object(),
+                actor_error=object(),
+                actors={"guardian": process},
+                logs=logs,
+                root=tmp_path,
+                deadline=time.monotonic() + 2,
+                win32event=Win32Event,
+            )
+
+    def test_simultaneous_barrier_and_error_rechecks_error_after_lowest_index(
+        self, tmp_path: Path
+    ) -> None:
+        process, logs = self._failure_fixture(tmp_path, "guardian", None)
+        with pytest.raises(RuntimeError) as raised:
+            probe.require_clean_browser_barrier(
+                actor_error_signaled=True,
+                actors={"guardian": process},
+                expected_alive={"guardian"},
+                logs=logs,
+                root=tmp_path,
+            )
+        assert "primary actor failure" in str(raised.value)
+        assert "actor stdout" in str(raised.value)
+        assert "actor stderr" in str(raised.value)
+
+    def test_waiter_rechecks_actor_exit_immediately_after_barrier(
+        self, tmp_path: Path
+    ) -> None:
+        process, logs = self._failure_fixture(tmp_path, "guardian", 7)
+        process._handle = object()
+
+        class Win32Event:
+            @staticmethod
+            def WaitForMultipleObjects(
+                _handles: list[Any], _all: bool, _timeout: int
+            ) -> int:
+                return probe._WAIT_OBJECT_0
+
+            @staticmethod
+            def WaitForSingleObject(_handle: object, _timeout: int) -> int:
+                return probe._WAIT_TIMEOUT
+
+        with pytest.raises(RuntimeError, match="primary actor failure"):
+            probe._wait_browser_barrier(
+                object(),
+                actor_error=object(),
+                actors={"guardian": process},
+                logs=logs,
+                root=tmp_path,
+                deadline=time.monotonic() + 2,
+                win32event=Win32Event,
+            )
+
+    def test_actor_exit_immediately_after_barrier_surfaces_published_primary(
+        self, tmp_path: Path
+    ) -> None:
+        process, logs = self._failure_fixture(tmp_path, "guardian", 7)
+        with pytest.raises(RuntimeError) as raised:
+            probe.require_clean_browser_barrier(
+                actor_error_signaled=False,
+                actors={"guardian": process},
+                expected_alive={"guardian"},
+                logs=logs,
+                root=tmp_path,
+            )
+        assert "primary actor failure" in str(raised.value)
+        assert "returncode=7" in str(raised.value)
+
+    def test_expected_actor_exit_is_not_rejected_without_an_error(
+        self, tmp_path: Path
+    ) -> None:
+        class Process:
+            def poll(self) -> int:
+                return 0
+
+        probe.require_clean_browser_barrier(
+            actor_error_signaled=False,
+            actors={"guardian": Process()},
+            expected_alive=set(),
+            logs={},
+            root=tmp_path,
+        )
+
+
+class TestBrowserProbeRootOwnership:
+    def test_coordinator_accepts_exact_harness_preparation(
+        self, tmp_path: Path
+    ) -> None:
+        root = tmp_path / "browser-launch-owner-loss"
+        root.mkdir()
+        (root / "outer-job.json").write_text(
+            json.dumps({"name": "Local\\outer-job"}), encoding="utf-8"
+        )
+
+        assert probe.prepare_browser_probe_root(root) == "Local\\outer-job"
+        assert {entry.name for entry in root.iterdir()} == {"outer-job.json", "auth"}
+        assert (root / "auth").is_dir()
+
+    @pytest.mark.parametrize(
+        "prepare",
+        [
+            lambda root: None,
+            lambda root: (root.mkdir(), (root / "unexpected").write_text("x")),
+            lambda root: (
+                root.mkdir(),
+                (root / "outer-job.json").write_text(json.dumps({"name": "outer"})),
+                (root / "stale.json").write_text("{}"),
+            ),
+        ],
+    )
+    def test_coordinator_rejects_missing_or_unexpected_preexisting_state(
+        self, tmp_path: Path, prepare: Any
+    ) -> None:
+        root = tmp_path / "browser-launch-owner-loss"
+        prepare(root)
+        with pytest.raises(RuntimeError):
+            probe.prepare_browser_probe_root(root)
+        assert not (root / "auth").exists()
+
+    @pytest.mark.parametrize(
+        "metadata",
+        [{}, {"name": ""}, {"name": 7}, {"name": "outer", "extra": True}],
+    )
+    def test_coordinator_rejects_invalid_outer_job_metadata(
+        self, tmp_path: Path, metadata: dict[str, Any]
+    ) -> None:
+        root = tmp_path / "browser-launch-owner-loss"
+        root.mkdir()
+        (root / "outer-job.json").write_text(json.dumps(metadata), encoding="utf-8")
+        with pytest.raises(RuntimeError, match="metadata"):
+            probe.prepare_browser_probe_root(root)
+        assert not (root / "auth").exists()
+
+    def test_venv_actor_launches_the_base_interpreter(self, tmp_path: Path) -> None:
+        base = tmp_path / "python.exe"
+        launcher = tmp_path / "venv" / "python.exe"
+        chosen, env = probe.probe_python_invocation(str(launcher), str(base), {})
+        assert chosen == str(base)
+        assert env["__PYVENV_LAUNCHER__"] == str(launcher)
+        same, unchanged = probe.probe_python_invocation(str(base), str(base), {})
+        assert same == str(base)
+        assert "__PYVENV_LAUNCHER__" not in unchanged
+
+    def test_worker_activity_waits_for_a_start_message(self) -> None:
+        script = probe.browser_activity_script()
+        assert script.index("worker.onmessage") < script.index(
+            'worker.postMessage("start")'
+        )
+        assert "self.onmessage = () => postMessage(true)" in script
+        assert "postMessage({ready:true})" not in script
+        assert "error:" in script
+
+    def test_close_guardian_signal_uses_the_stored_control_key(self) -> None:
+        signaled: list[str] = []
+        controls = {
+            probe.browser_control_key(label): f"event-{label}"
+            for label in probe._BROWSER_CONTROL_LABELS
+        }
+
+        probe.signal_browser_control(controls, "close-guardian", signaled.append)
+
+        assert signaled == ["event-close-guardian"]
+        assert "close-guardian" not in controls
+
+    def test_owner_termination_kills_python_children_but_not_browser_descendants(
+        self,
+    ) -> None:
+        selected = probe.python_pids_to_terminate(
+            10,
+            {10: 1, 11: 10, 12: 11, 13: 12},
+            {
+                10: r"C:\venv\Scripts\python.exe",
+                11: r"C:\Python\python.exe",
+                12: r"C:\node.exe",
+                13: r"C:\chrome.exe",
+            },
+            {12, 13},
+        )
+        assert selected == [10, 11]
+        escaped = probe.python_pids_to_terminate(
+            10,
+            {10: 1, 11: 10, 13: 11},
+            {10: "python.exe", 11: "python.exe", 13: "chrome.exe"},
+            set(),
+        )
+        assert escaped == [10, 11]
+
+    def test_coordinator_allowance_includes_its_release_gate_ancestors(self) -> None:
+        parents = {5: 4, 4: 2, 2: 1, 9: 5}
+        assert probe.coordinator_process_ids({2, 4, 5, 9}, 5, parents) == {2, 4, 5}
+        assert probe.coordinator_process_ids({5}, 5, parents) == {5}
+
+    def test_outer_pids_must_match_the_coordinator(self) -> None:
+        released: list[str] = []
+        observed = iter([{2, 4, 5, 9}, {2, 4, 5}])
+        parents = {5: 4, 4: 2, 2: 1, 9: 5}
+
+        assert probe.prove_outer_pids_are_coordinator(
+            ["owner"],
+            release=released.append,
+            query_pids=lambda: next(observed),
+            allowed_pids=lambda pids: probe.coordinator_process_ids(pids, 5, parents),
+            deadline=5,
+            wait_for_retry=lambda: None,
+            monotonic=lambda: 0,
+        ) == [2, 4, 5]
+        assert released == ["owner"]
+
+    def test_outer_accounting_starts_after_exited_actor_handles_are_released(
+        self,
+    ) -> None:
+        released: list[str] = []
+        counts = iter([3, 1])
+
+        active = probe.prove_coordinator_is_only_outer_process(
+            ["owner", "guardian"],
+            release=released.append,
+            query_active=lambda: next(counts),
+            deadline=5,
+            wait_for_retry=lambda: None,
+            monotonic=lambda: 0,
+        )
+
+        assert released == ["owner", "guardian"]
+        assert active == 1
+
+    def test_live_outer_process_is_not_treated_as_handle_accounting(
+        self,
+    ) -> None:
+        with pytest.raises(RuntimeError, match="ActiveProcesses=2"):
+            probe.prove_coordinator_is_only_outer_process(
+                [],
+                release=lambda _actor: None,
+                query_active=lambda: 2,
+                deadline=1,
+                wait_for_retry=lambda: None,
+                monotonic=lambda: 2,
+            )
+
+    def test_outer_remainder_error_includes_process_inventory(self) -> None:
+        with pytest.raises(RuntimeError, match="pid=9 image=chrome.exe"):
+            probe.prove_coordinator_is_only_outer_process(
+                [],
+                release=lambda _actor: None,
+                query_active=lambda: 4,
+                deadline=1,
+                wait_for_retry=lambda: None,
+                describe=lambda: "pid=9 image=chrome.exe",
+                monotonic=lambda: 2,
+            )
+
+    def test_live_actor_handle_is_not_released(self) -> None:
+        class Actor:
+            def poll(self) -> None:
+                return None
+
+        with pytest.raises(RuntimeError, match="live browser actor"):
+            probe.release_exited_actor(Actor())
