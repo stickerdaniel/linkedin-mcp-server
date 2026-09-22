@@ -3308,6 +3308,48 @@ class TestBrowserProbeRootOwnership:
         assert signaled == ["event-close-guardian"]
         assert "close-guardian" not in controls
 
+    def test_owner_termination_kills_python_children_but_not_browser_descendants(
+        self,
+    ) -> None:
+        selected = probe.python_pids_to_terminate(
+            10,
+            {10: 1, 11: 10, 12: 11, 13: 12},
+            {
+                10: r"C:\venv\Scripts\python.exe",
+                11: r"C:\Python\python.exe",
+                12: r"C:\node.exe",
+                13: r"C:\chrome.exe",
+            },
+            {12, 13},
+        )
+        assert selected == [10, 11]
+        escaped = probe.python_pids_to_terminate(
+            10,
+            {10: 1, 11: 10, 13: 11},
+            {10: "python.exe", 11: "python.exe", 13: "chrome.exe"},
+            set(),
+        )
+        assert escaped == [10, 11]
+
+    def test_coordinator_allowance_includes_its_redirector_parent(self) -> None:
+        assert probe.coordinator_process_ids({4, 5, 6}, 5, 4) == {4, 5}
+        assert probe.coordinator_process_ids({5}, 5, 4) == {5}
+
+    def test_outer_pids_must_match_the_coordinator(self) -> None:
+        released: list[str] = []
+        observed = iter([{4, 5, 9}, {4, 5}])
+
+        assert probe.prove_outer_pids_are_coordinator(
+            ["owner"],
+            release=released.append,
+            query_pids=lambda: next(observed),
+            allowed_pids=lambda pids: probe.coordinator_process_ids(pids, 5, 4),
+            deadline=5,
+            wait_for_retry=lambda: None,
+            monotonic=lambda: 0,
+        ) == [4, 5]
+        assert released == ["owner"]
+
     def test_outer_accounting_starts_after_exited_actor_handles_are_released(
         self,
     ) -> None:

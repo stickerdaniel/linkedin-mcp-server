@@ -165,7 +165,8 @@ def test_locked_browser_tree_remains_fenced_until_guardian_proves_zero(
         "both-zero",
     ]
     assert measurement["post_release_acquired"] is True
-    assert measurement["outer_active_processes_before_coordinator_exit"] == 1
+    assert measurement["outer_process_ids"] == measurement["coordinator_process_ids"]
+    assert measurement["coordinator_process_ids"]
     assert browser["renderer_ready"] is True
     assert browser["worker_ready"] is True
     assert browser["patchright_browser_version"] == _EXPECTED_BROWSER

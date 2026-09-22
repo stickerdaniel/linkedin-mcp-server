@@ -4595,6 +4595,43 @@ def release_exited_actor(process: Any) -> None:
     close()
 
 
+def python_pids_to_terminate(
+    root_pid: int,
+    parents: dict[int, int],
+    images: dict[int, str],
+    inner_pids: set[int],
+) -> list[int]:
+    """Select an owner redirector and its Python children, never the browser tree."""
+    children: dict[int, list[int]] = {}
+    for pid, parent in parents.items():
+        children.setdefault(parent, []).append(pid)
+    selected: list[int] = []
+    seen: set[int] = set()
+    stack = [root_pid]
+    while stack:
+        pid = stack.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        image_name = os.path.basename(images.get(pid, "").replace("\\", "/")).lower()
+        is_python = image_name in {"python.exe", "pythonw.exe"}
+        if pid in inner_pids or not (pid == root_pid or is_python):
+            continue
+        selected.append(pid)
+        stack.extend(children.get(pid, ()))
+    return sorted(selected)
+
+
+def coordinator_process_ids(
+    outer_pids: set[int], process_id: int, parent_pid: int
+) -> set[int]:
+    """The coordinator redirector and interpreter, when both are still in the Job."""
+    allowed = {process_id}
+    if parent_pid in outer_pids:
+        allowed.add(parent_pid)
+    return allowed
+
+
 def prove_coordinator_is_only_outer_process[T](
     actors: list[T],
     *,
@@ -4620,6 +4657,151 @@ def prove_coordinator_is_only_outer_process[T](
                 f" alone{suffix}"
             )
         wait_for_retry()
+
+
+def prove_outer_pids_are_coordinator[T](
+    actors: list[T],
+    *,
+    release: Callable[[T], None],
+    query_pids: Callable[[], set[int]],
+    allowed_pids: Callable[[set[int]], set[int]],
+    deadline: float,
+    wait_for_retry: Callable[[], None],
+    describe: Callable[[], str] = lambda: "",
+    monotonic: Callable[[], float] = time.monotonic,
+) -> list[int]:
+    """Require the outer Job to contain only the coordinator after actor release."""
+    for actor in actors:
+        release(actor)
+    while True:
+        pids = query_pids()
+        allowed = allowed_pids(pids)
+        if pids == allowed and allowed:
+            return sorted(pids)
+        if monotonic() >= deadline:
+            detail = describe()
+            suffix = f" {detail}" if detail else ""
+            raise RuntimeError(
+                "outer harness retained processes outside the coordinator: "
+                f"pids={sorted(pids)} allowed={sorted(allowed)}{suffix}"
+            )
+        wait_for_retry()
+
+
+def _windows_process_parents() -> dict[int, int]:
+    kernel32 = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
+    from ctypes import wintypes
+
+    class ProcessEntry(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", wintypes.LONG),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", wintypes.WCHAR * 260),
+        ]
+
+    snapshot_api = kernel32.CreateToolhelp32Snapshot
+    snapshot_api.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    snapshot_api.restype = wintypes.HANDLE
+    first = kernel32.Process32FirstW
+    first.argtypes = [wintypes.HANDLE, ctypes.POINTER(ProcessEntry)]
+    first.restype = wintypes.BOOL
+    nxt = kernel32.Process32NextW
+    nxt.argtypes = [wintypes.HANDLE, ctypes.POINTER(ProcessEntry)]
+    nxt.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+    snapshot = snapshot_api(2, 0)
+    if snapshot == wintypes.HANDLE(-1).value:
+        raise getattr(ctypes, "WinError")(getattr(ctypes, "get_last_error")())
+    entry = ProcessEntry()
+    entry.dwSize = ctypes.sizeof(entry)
+    parents: dict[int, int] = {}
+    try:
+        found = first(snapshot, ctypes.byref(entry))
+        while found:
+            parents[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
+            found = nxt(snapshot, ctypes.byref(entry))
+    finally:
+        close_handle(snapshot)
+    return parents
+
+
+def _process_image(pid: int, win32api: Any, win32con: Any) -> str:
+    handle = win32api.OpenProcess(
+        win32con.PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+    )
+    try:
+        return _full_process_image_path(handle)
+    finally:
+        handle.Close()
+
+
+def _terminate_owner_python(
+    owner: subprocess.Popen[bytes],
+    *,
+    inner_name: str,
+    win32api: Any,
+    win32con: Any,
+    win32job: Any,
+    deadline: float,
+) -> None:
+    """Terminate the owner redirector and real interpreter, not the browser tree."""
+    inner = win32job.OpenJobObject(win32job.JOB_OBJECT_QUERY, False, inner_name)
+    try:
+        parents = _windows_process_parents()
+        descendants = [int(owner.pid)]
+        seen = {int(owner.pid)}
+        children: dict[int, list[int]] = {}
+        for pid, parent in parents.items():
+            children.setdefault(parent, []).append(pid)
+        stack = list(children.get(int(owner.pid), []))
+        while stack:
+            pid = stack.pop()
+            if pid in seen:
+                continue
+            seen.add(pid)
+            descendants.append(pid)
+            stack.extend(children.get(pid, []))
+        images = {}
+        for pid in descendants:
+            try:
+                images[pid] = _process_image(pid, win32api, win32con)
+            except Exception:
+                images[pid] = ""
+        selected = python_pids_to_terminate(
+            int(owner.pid),
+            parents,
+            images,
+            _job_process_ids(inner, win32job),
+        )
+        for pid in selected:
+            handle = win32api.OpenProcess(
+                win32con.PROCESS_TERMINATE | win32con.SYNCHRONIZE, False, pid
+            )
+            try:
+                try:
+                    win32api.TerminateProcess(handle, 208)
+                except Exception:
+                    if _is_active(handle):
+                        raise
+                if _is_active(handle):
+                    _wait(
+                        handle,
+                        _remaining_browser_seconds(deadline),
+                        f"owner python {pid} did not terminate",
+                    )
+            finally:
+                handle.Close()
+    finally:
+        inner.Close()
 
 
 def prepare_browser_probe_root(root: Path) -> str:
@@ -4705,7 +4887,14 @@ def _run_browser_launch_probe(scenario: str, root: Path) -> dict[str, Any]:
 
         reject("inventory-retained")
         owner_handle = _popen_handle(owner)
-        _win32api.TerminateProcess(owner_handle, 208)
+        _terminate_owner_python(
+            owner,
+            inner_name=_read_json(root / "owner.json")["inner_job_name"],
+            win32api=_win32api,
+            win32con=_win32con,
+            win32job=win32job,
+            deadline=deadline,
+        )
         _wait(
             owner_handle,
             _remaining_browser_seconds(deadline),
@@ -4807,13 +4996,12 @@ def _run_browser_launch_probe(scenario: str, root: Path) -> dict[str, Any]:
                     inner_job.Close()
             return f"inner_job={inner_state} members=[" + "; ".join(rows) + "]"
 
-        outer_active = prove_coordinator_is_only_outer_process(
+        coordinator_pids = prove_outer_pids_are_coordinator(
             [owner, guardian],
             release=release_exited_actor,
-            query_active=lambda: int(
-                win32job.QueryInformationJobObject(
-                    outer, win32job.JobObjectBasicAccountingInformation
-                )["ActiveProcesses"]
+            query_pids=lambda: _job_process_ids(outer, win32job),
+            allowed_pids=lambda pids: coordinator_process_ids(
+                pids, os.getpid(), os.getppid()
             ),
             deadline=deadline,
             wait_for_retry=lambda: time.sleep(0.001),
@@ -4831,7 +5019,8 @@ def _run_browser_launch_probe(scenario: str, root: Path) -> dict[str, Any]:
             "post_release_acquired": acquired,
             "post_release_attempts": attempts,
             "post_release_seconds": seconds,
-            "outer_active_processes_before_coordinator_exit": outer_active,
+            "outer_process_ids": coordinator_pids,
+            "coordinator_process_ids": coordinator_pids,
         }
     finally:
         for handle in events.values():
