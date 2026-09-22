@@ -3296,6 +3296,16 @@ class TestBrowserProbeRootOwnership:
             probe.prepare_browser_probe_root(root)
         assert not (root / "auth").exists()
 
+    def test_venv_actor_launches_the_base_interpreter(self, tmp_path: Path) -> None:
+        base = tmp_path / "python.exe"
+        launcher = tmp_path / "venv" / "python.exe"
+        chosen, env = probe.probe_python_invocation(str(launcher), str(base), {})
+        assert chosen == str(base)
+        assert env["__PYVENV_LAUNCHER__"] == str(launcher)
+        same, unchanged = probe.probe_python_invocation(str(base), str(base), {})
+        assert same == str(base)
+        assert "__PYVENV_LAUNCHER__" not in unchanged
+
     def test_worker_activity_waits_for_a_start_message(self) -> None:
         script = probe.browser_activity_script()
         assert script.index("worker.onmessage") < script.index(

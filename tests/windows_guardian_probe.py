@@ -4619,6 +4619,19 @@ def release_exited_actor(process: Any) -> None:
     close()
 
 
+def probe_python_invocation(
+    executable: str, base_executable: str, env: Mapping[str, str]
+) -> tuple[str, dict[str, str]]:
+    """Launch the real interpreter so termination cannot miss a redirector child."""
+    copied = dict(env)
+    if os.path.normcase(os.path.abspath(base_executable)) != os.path.normcase(
+        os.path.abspath(executable)
+    ):
+        copied["__PYVENV_LAUNCHER__"] = executable
+        return base_executable, copied
+    return executable, copied
+
+
 def python_pids_to_terminate(
     root_pid: int,
     parents: dict[int, int],
@@ -4812,15 +4825,21 @@ def _terminate_owner_python(
             _job_process_ids(inner, win32job),
         )
         for pid in selected:
-            handle = win32api.OpenProcess(
-                win32con.PROCESS_TERMINATE | win32con.SYNCHRONIZE, False, pid
-            )
+            owns_handle = pid != int(owner.pid)
+            if owns_handle:
+                handle = win32api.OpenProcess(
+                    win32con.PROCESS_TERMINATE | win32con.SYNCHRONIZE, False, pid
+                )
+            else:
+                handle = _popen_handle(owner)
             try:
                 try:
                     win32api.TerminateProcess(handle, 208)
-                except Exception:
+                except Exception as exc:
                     if _is_active(handle):
-                        raise
+                        raise RuntimeError(
+                            f"cannot terminate owner python {pid}: {exc}"
+                        ) from exc
                 if _is_active(handle):
                     _wait(
                         handle,
@@ -4828,7 +4847,8 @@ def _terminate_owner_python(
                         f"owner python {pid} did not terminate",
                     )
             finally:
-                handle.Close()
+                if owns_handle:
+                    handle.Close()
     finally:
         inner.Close()
 
@@ -4875,9 +4895,14 @@ def _run_browser_launch_probe(scenario: str, root: Path) -> dict[str, Any]:
             stderr_path = root / f"{role}.stderr"
             actor_logs[role] = (stdout_path, stderr_path)
             with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
+                python, python_env = probe_python_invocation(
+                    sys.executable,
+                    getattr(sys, "_base_executable", sys.executable),
+                    os.environ,
+                )
                 process = subprocess.Popen(
                     [
-                        sys.executable,
+                        python,
                         str(Path(__file__).resolve()),
                         f"browser-{role}",
                         str(root),
@@ -4887,6 +4912,7 @@ def _run_browser_launch_probe(scenario: str, root: Path) -> dict[str, Any]:
                     stdin=subprocess.DEVNULL,
                     stdout=stdout,
                     stderr=stderr,
+                    env=python_env,
                 )
             processes.append(process)
             if role == "owner":
