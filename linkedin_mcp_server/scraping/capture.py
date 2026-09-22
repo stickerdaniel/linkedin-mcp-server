@@ -77,13 +77,13 @@ def capture_plan_for_url(url: str, max_scrolls: int | None = None) -> CapturePla
         "/company/" in path and path.rstrip("/").endswith("/posts")
     ):
         mode |= CaptureMode.ACTIVITY
-    if "/search/results/" in url:
+    if "/search/results/" in path:
         mode |= CaptureMode.SEARCH_RESULTS
     if path.startswith("/search/results/content"):
         mode |= CaptureMode.POST_PERMALINKS
-    if "/company/" in url and "/people/" in url:
+    if "/company/" in path and "/people/" in path:
         mode |= CaptureMode.COMPANY_PEOPLE
-    if "/details/" in url:
+    if "/details/" in path:
         mode |= CaptureMode.DETAILS
     return CapturePlan(mode=mode, max_scrolls=max_scrolls)
 
