@@ -4580,6 +4580,44 @@ def signal_browser_control(
     signal(controls[browser_control_key(label)])
 
 
+def release_exited_actor(process: Any) -> None:
+    """Drop CPython's handle so Job accounting can forget an exited actor.
+
+    ``ActiveProcesses`` still counts an exited member while this process holds
+    its ``Popen`` handle. The same release precedes every production drain.
+    """
+    if process.poll() is None:
+        raise RuntimeError("cannot release a live browser actor handle")
+    handle = getattr(process, "_handle", None)
+    close = getattr(handle, "Close", None)
+    if not callable(close):
+        raise RuntimeError("Windows Popen exposed no releasable process handle")
+    close()
+
+
+def prove_coordinator_is_only_outer_process[T](
+    actors: list[T],
+    *,
+    release: Callable[[T], None],
+    query_active: Callable[[], int],
+    deadline: float,
+    wait_for_retry: Callable[[], None],
+    monotonic: Callable[[], float] = time.monotonic,
+) -> int:
+    """Require the coordinator alone after exited actor handles are released."""
+    for actor in actors:
+        release(actor)
+    while True:
+        active = query_active()
+        if active == 1:
+            return active
+        if monotonic() >= deadline:
+            raise RuntimeError(
+                f"outer harness retained {active} processes beyond the coordinator"
+            )
+        wait_for_retry()
+
+
 def prepare_browser_probe_root(root: Path) -> str:
     if not root.is_dir():
         raise RuntimeError("browser probe root was not prepared by its outer harness")
@@ -4720,15 +4758,17 @@ def _run_browser_launch_probe(scenario: str, root: Path) -> dict[str, Any]:
             deadline=deadline,
             win32event=win32event,
         )
-        outer_active = int(
-            win32job.QueryInformationJobObject(
-                outer, win32job.JobObjectBasicAccountingInformation
-            )["ActiveProcesses"]
+        outer_active = prove_coordinator_is_only_outer_process(
+            [owner, guardian],
+            release=release_exited_actor,
+            query_active=lambda: int(
+                win32job.QueryInformationJobObject(
+                    outer, win32job.JobObjectBasicAccountingInformation
+                )["ActiveProcesses"]
+            ),
+            deadline=deadline,
+            wait_for_retry=lambda: time.sleep(0.001),
         )
-        if outer_active != 1:
-            raise RuntimeError(
-                "outer harness retained a process beyond the coordinator"
-            )
         metadata = _read_json(root / "owner.json")
         browser = _read_json(root / "browser.json")
         return {

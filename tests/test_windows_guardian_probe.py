@@ -3307,3 +3307,42 @@ class TestBrowserProbeRootOwnership:
 
         assert signaled == ["event-close-guardian"]
         assert "close-guardian" not in controls
+
+    def test_outer_accounting_starts_after_exited_actor_handles_are_released(
+        self,
+    ) -> None:
+        released: list[str] = []
+        counts = iter([3, 1])
+
+        active = probe.prove_coordinator_is_only_outer_process(
+            ["owner", "guardian"],
+            release=released.append,
+            query_active=lambda: next(counts),
+            deadline=5,
+            wait_for_retry=lambda: None,
+            monotonic=lambda: 0,
+        )
+
+        assert released == ["owner", "guardian"]
+        assert active == 1
+
+    def test_live_outer_process_is_not_treated_as_handle_accounting(
+        self,
+    ) -> None:
+        with pytest.raises(RuntimeError, match="retained 2"):
+            probe.prove_coordinator_is_only_outer_process(
+                [],
+                release=lambda _actor: None,
+                query_active=lambda: 2,
+                deadline=1,
+                wait_for_retry=lambda: None,
+                monotonic=lambda: 2,
+            )
+
+    def test_live_actor_handle_is_not_released(self) -> None:
+        class Actor:
+            def poll(self) -> None:
+                return None
+
+        with pytest.raises(RuntimeError, match="live browser actor"):
+            probe.release_exited_actor(Actor())
