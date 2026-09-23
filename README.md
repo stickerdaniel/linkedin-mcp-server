@@ -354,6 +354,7 @@ codex plugin add linkedin-mcp-server@linkedin-mcp-server
 
 <details>
 <summary><strong>I know what I'm doing</strong></summary>
+
 **Prerequisites:** Make sure [Docker](https://www.docker.com/get-started/) is installed and running.
 
 ### Authentication
