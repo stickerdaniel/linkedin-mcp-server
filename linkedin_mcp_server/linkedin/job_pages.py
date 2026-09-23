@@ -446,7 +446,17 @@ EASY_APPLY_FOLLOW_JS = (
     const form = dialog.querySelector('form') || dialog;
     const footer = form.querySelector('footer');
     const box = footer && footer.querySelector('input[type="checkbox"]');
-    return box ? {id: box.id || '', checked: box.checked} : null;
+    if (!box) return null;
+    // Whether the control can be clicked at all. LinkedIn styles the box with
+    // a label and may leave the input itself with nothing to click, which a
+    // locator refuses to act on rather than clicking something else.
+    const shown = Boolean(
+        box.offsetWidth || box.offsetHeight || box.getClientRects().length
+    );
+    const labelled = Boolean(
+        box.id && form.querySelector(`label[for="${CSS.escape(box.id)}"]`)
+    );
+    return {id: box.id || '', checked: box.checked, shown, labelled};
 }"""
 )
 
@@ -488,6 +498,19 @@ def easy_apply_control_selector(control_id: str) -> str:
     reaches a dialog the document's own `querySelector` never sees.
     """
     inside = f"[id={json.dumps(control_id)}]"
+    return ", ".join(f"{part} {inside}" for part in _EASY_APPLY_DIALOG_PARTS)
+
+
+# The footer checkbox addressed without an id, for a control LinkedIn left
+# anonymous. Its own selector rather than the control one, which an id keys.
+EASY_APPLY_FOLLOW_SELECTOR = ", ".join(
+    f'{part} footer input[type="checkbox"]' for part in _EASY_APPLY_DIALOG_PARTS
+)
+
+
+def easy_apply_label_selector(control_id: str) -> str:
+    """A selector for the label that stands in for one control of the dialog."""
+    inside = f"label[for={json.dumps(control_id)}]"
     return ", ".join(f"{part} {inside}" for part in _EASY_APPLY_DIALOG_PARTS)
 
 
@@ -1232,27 +1255,22 @@ class JobPageReader:
     async def _set_follow_company(self, follow: bool) -> bool | None:
         """Leave the follow checkbox as ``follow`` asks; answers its real state.
 
-        Tried more than once, because the footer is rebuilt along with the rest
-        of the step and a box set while that is happening comes back at
-        LinkedIn's default. Reported rather than assumed either way, and never
-        worth failing an application over: a checkbox that cannot be reached
-        costs the caller a company in their feed, which is not the
-        irreversible half of this tool.
+        Tried more than one way, because the box measured live took none of
+        them: LinkedIn styles it with a label, and the input behind it is not
+        something a locator will click. Reported rather than assumed either
+        way, and never worth failing an application over: a checkbox that
+        cannot be reached costs the caller a company in their feed, which is
+        not the irreversible half of this tool.
         """
         page = self._session.page
         box = await page.evaluate(EASY_APPLY_FOLLOW_JS)
         if box is None:
             return None
-        for _ in range(_EASY_APPLY_FOLLOW_TRIES):
-            if box["checked"] == follow or not box["id"]:
+        for attempt in range(_EASY_APPLY_FOLLOW_TRIES):
+            if box["checked"] == follow:
                 break
-            control = page.locator(easy_apply_control_selector(box["id"])).first
-            timeout = _EASY_APPLY_SET_TIMEOUT * 1000
             try:
-                if follow:
-                    await control.check(timeout=timeout)
-                else:
-                    await control.uncheck(timeout=timeout)
+                await self._toggle_follow(box, attempt)
             except Exception as e:
                 logger.warning("Could not set the follow checkbox (%s)", e)
             await self._session.delay(_APPLY_POLL)
@@ -1265,6 +1283,37 @@ class JobPageReader:
                 "checked" if box["checked"] else "clear",
             )
         return bool(box["checked"])
+
+    async def _toggle_follow(self, box: dict[str, Any], attempt: int) -> None:
+        """One go at the follow checkbox, from the most honest way down.
+
+        `check` is what a checkbox is for and it goes first, on the id where
+        LinkedIn gave the control one and on the footer's own checkbox where it
+        did not. It refuses a control with nothing to click, and the way past
+        that is the label: clicking it is what a person does, and the browser
+        toggles the box itself.
+        """
+        page = self._session.page
+        timeout = _EASY_APPLY_SET_TIMEOUT * 1000
+        label = page.locator(easy_apply_label_selector(box["id"])).first
+        if attempt and box["labelled"]:
+            await label.click(timeout=timeout)
+            return
+        if not box["shown"]:
+            if not box["labelled"]:
+                raise RuntimeError("The follow checkbox has nothing to click")
+            await label.click(timeout=timeout)
+            return
+        selector = (
+            easy_apply_control_selector(box["id"])
+            if box["id"]
+            else EASY_APPLY_FOLLOW_SELECTOR
+        )
+        control = page.locator(selector).first
+        if box["checked"]:
+            await control.uncheck(timeout=timeout)
+        else:
+            await control.check(timeout=timeout)
 
     async def _click_easy_apply_submit(self) -> str:
         """Send the application; answers with what LinkedIn showed afterwards.

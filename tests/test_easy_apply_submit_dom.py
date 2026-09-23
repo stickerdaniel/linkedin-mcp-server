@@ -155,7 +155,8 @@ const render = () => {
         + (step.progress === null ? '' : `<progress max="100" value="${step.progress}"></progress>`)
         + `<form><h3>${step.heading}</h3>${step.body}`
         + '<footer role="presentation">'
-        + '<input id="follow" type="checkbox" checked><label for="follow">Follow Acme</label>'
+        + '<input id="follow" type="checkbox" checked style="' + window.followStyle + '">'
+        + '<label for="follow">Follow Acme</label>'
         + (last
             ? '<button type="button" data-live-test-easy-apply-submit-button>Submit application</button>'
             : '<button type="button" data-easy-apply-next-button>Next</button>')
@@ -212,13 +213,14 @@ EASY_APPLY = (
 )
 
 
-def posting(steps: list[dict], delay: int = 400) -> str:
+def posting(steps: list[dict], delay: int = 400, follow_style: str = "") -> str:
     return (
         "<main>"
         f"<h1>AI Engineer</h1><p>Acme</p>{EASY_APPLY}"
         "<h2>About the job</h2><p>Build agents.</p>"
         "</main>"
         f"<script>window.uploadDelay = {delay};"
+        f"window.followStyle = {json.dumps(follow_style)};"
         f"{DIALOG_SCRIPT % json.dumps(steps)}</script>"
     )
 
@@ -270,10 +272,11 @@ async def answer(
     confirm_submit: bool = False,
     follow_company: bool = False,
     delay: int = 400,
+    follow_style: str = "",
 ) -> EasyApplySubmitRead:
     """Answer the synthetic posting's form the way the workflow does."""
     await page.goto(JOB_URL)
-    await page.set_content(posting(steps, delay))
+    await page.set_content(posting(steps, delay, follow_style))
     session = PageSession(page)
     reader = JobPageReader(session, PageNavigator(session), PageContentReader(session))
     with patch.object(reader._navigator, "_navigate_to_page", new_callable=AsyncMock):
@@ -430,6 +433,21 @@ async def test_the_follow_checkbox_is_left_checked_when_it_is_asked_for(dom_page
 
     assert "follow=true" in await log(dom_page)
     assert result.follow is True
+
+
+async def test_a_follow_checkbox_hidden_behind_its_label_is_still_unchecked(dom_page):
+    # How LinkedIn renders it: the input has nothing to click, so `uncheck`
+    # will not act on it and only the label a person clicks does.
+    result = await answer(
+        dom_page,
+        [CONTACT, QUESTIONS],
+        ALL_ANSWERS,
+        confirm_submit=True,
+        follow_style="display:none",
+    )
+
+    assert "follow=false" in await log(dom_page)
+    assert result.follow is False
 
 
 async def test_a_one_step_form_submits_from_its_own_footer(dom_page, resume):
