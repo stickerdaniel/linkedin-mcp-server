@@ -195,7 +195,13 @@ LOCALES = (ENGLISH, GERMAN, OPAQUE, EMPTY_ARIA)
 Build = Callable[[Labels], str]
 
 
-def action_bar(labels: Labels, *, pressed: str = "false", opener: bool = True) -> str:
+def action_bar(
+    labels: Labels,
+    *,
+    pressed: str = "false",
+    opener: bool = True,
+    click_id: str = "post",
+) -> str:
     """The post's own social bar: a reaction toggle plus three more controls.
 
     The toggle carries ``aria-pressed`` and the repost control carries
@@ -203,7 +209,8 @@ def action_bar(labels: Labels, *, pressed: str = "false", opener: bool = True) -
     """
     repost = (
         f'<button type="button" aria-expanded="false" aria-label="{labels.repost}"'
-        f" onclick=\"document.body.setAttribute('data-clicked','post-repost')\""
+        f" onclick=\"this.setAttribute('aria-expanded','true');"
+        f" document.body.setAttribute('data-clicked','{click_id}-repost')\""
         f">{labels.repost_now}</button>"
         if opener
         else f'<button type="button" aria-label="{labels.repost}">'
@@ -212,10 +219,10 @@ def action_bar(labels: Labels, *, pressed: str = "false", opener: bool = True) -
     return f"""
   <div class="social-bar">
     <button type="button" aria-pressed="{pressed}" aria-label="{labels.react}"
-      onclick="document.body.setAttribute('data-clicked','post-react')"
+      onclick="document.body.setAttribute('data-clicked','{click_id}-react')"
       >{labels.like}</button>
     <button type="button" aria-label="{labels.comment}"
-      onclick="document.body.setAttribute('data-clicked','post-comment')"
+      onclick="document.body.setAttribute('data-clicked','{click_id}-comment')"
       >{labels.comment}</button>
     {repost}
     <button type="button" aria-label="{labels.send}">{labels.send}</button>
@@ -301,6 +308,7 @@ def post(
     draft: str = "",
     submit: bool = True,
     detours: bool = True,
+    click_id: str = "post",
 ) -> str:
     """One post container, the way a permalink page renders it."""
     return f"""
@@ -315,7 +323,7 @@ def post(
     <p>Post body text</p>
   </div>
   <div data-urn="{SOCIAL_URN}">
-    {action_bar(labels, pressed=pressed, opener=opener)}
+    {action_bar(labels, pressed=pressed, opener=opener, click_id=click_id)}
   </div>
   {comment_editor(labels, draft=draft, submit=submit, detours=detours) if editor else ""}
   {comment_thread(labels) if comments else ""}
@@ -351,6 +359,34 @@ def post_without_repost_opener(labels: Labels) -> str:
 def post_with_a_decoy_post(labels: Labels) -> str:
     """Another post on the page, which must not be mistaken for this one."""
     return post(labels) + post(labels, urn=OTHER_URN, editor=False, comments=False)
+
+
+def post_with_nested_original(labels: Labels) -> str:
+    """A reshare: the named post wraps another post that has its own bar.
+
+    The nested original's controls come first in DOM order. Acting on them
+    would engage the embedded post, so the named root's bar has to win.
+    """
+    inner = post(
+        labels,
+        urn=OTHER_URN,
+        editor=False,
+        comments=False,
+        click_id="nested",
+    )
+    return f"""
+<div class="update" data-urn="{POST_URN}">
+  <div class="actor">
+    <button type="button" aria-pressed="false">Follow</button>
+    <button type="button" aria-expanded="false">More</button>
+    {"".join('<button type="button">actor control</button>' for _ in range(7))}
+  </div>
+  {inner}
+  <div data-urn="{SOCIAL_URN}">
+    {action_bar(labels)}
+  </div>
+</div>
+"""
 
 
 def post_rendered_twice(labels: Labels) -> str:
@@ -601,6 +637,21 @@ class TestFindingTheRootPost:
             return (signals["hasRoot"], signals["barButtonCount"])
 
         await _in_every_locale(dom_page, post_with_a_decoy_post, (True, 4), read)
+
+    async def test_a_nested_originals_bar_is_not_the_named_posts_bar(
+        self, dom_page
+    ) -> None:
+        async def read(page, html):
+            handle = await _pinned(page, html)
+            outcome = await page.evaluate(CLICK_REACT_TOGGLE_JS, {"root": handle})
+            return (outcome, await _clicked(page))
+
+        await _in_every_locale(
+            dom_page,
+            post_with_nested_original,
+            ("clicked", "post-react"),
+            read,
+        )
 
     async def test_the_same_post_twice_is_ambiguous_and_refused(self, dom_page) -> None:
         async def read(page, html):

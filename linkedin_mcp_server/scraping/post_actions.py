@@ -52,7 +52,10 @@ import re
 
 from patchright.async_api import ElementHandle, TimeoutError as PlaywrightTimeoutError
 
-from linkedin_mcp_server.scraping.contracts import post_action_result
+from linkedin_mcp_server.scraping.contracts import (
+    POST_ACTION_INTERRUPTED_WARNING,
+    post_action_result,
+)
 from linkedin_mcp_server.scraping.identifiers import normalize_post_reference
 from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.session import ScrapingSession
@@ -214,13 +217,36 @@ function findPostRoot(postId) {
 # comment's action row has no equivalent, so requiring it is what keeps a
 # comment row from ever qualifying. A candidate whose walk reaches a container
 # wider than a bar is abandoned; later toggles still get their own walk.
+#
+# A permalink that reshares another post nests that original's bar inside the
+# named root. Taking the first structurally valid bar would act on the nested
+# post. Any toggle that sits inside a descendant bare post URN is skipped so
+# the named root's own bar is the only one that can qualify; two remaining
+# bars or none is a refusal.
 _FIND_ACTION_BAR_FN_JS = (
     r"""
+function insideNestedPost(root, node) {
+  const attributes = """
+    + repr(list(_URN_ATTRIBUTES)).replace("'", '"')
+    + r""";
+  const barePostUrn = /^urn:li:(?:ugcPost|share|activity):[0-9]+$/;
+  let element = node.parentElement;
+  while (element && element !== root && root.contains(element)) {
+    for (const name of attributes) {
+      const value = element.getAttribute(name);
+      if (value && barePostUrn.test(value.trim())) return true;
+    }
+    element = element.parentElement;
+  }
+  return false;
+}
 function findActionBar(root) {
   const toggles = Array.from(root.querySelectorAll('button[aria-pressed]'))
     .filter(visible);
   if (toggles.length === 0) return null;
+  const found = [];
   for (const toggle of toggles) {
+    if (insideNestedPost(root, toggle)) continue;
     let element = toggle.parentElement;
     while (element && root.contains(element)) {
       const buttons = element.querySelectorAll('button');
@@ -233,14 +259,14 @@ function findActionBar(root) {
     + r""" &&
           element.querySelector('button[aria-expanded]')
         ) {
-          return {bar: element, toggle};
+          found.push({bar: element, toggle});
         }
         break;
       }
       element = element.parentElement;
     }
   }
-  return null;
+  return found.length === 1 ? found[0] : null;
 }
 """
 )
@@ -448,6 +474,11 @@ OPEN_REPOST_MENU_JS = r"""
     return 'disabled';
   }
   opener.click();
+  // The opener is the ownership tie for a portal-mounted menu. If this
+  // control did not expand, a visible menu elsewhere is not ours.
+  if ((opener.getAttribute('aria-expanded') || '').toLowerCase() !== 'true') {
+    return 'not_expanded';
+  }
   return 'clicked';
 })
 """
@@ -476,6 +507,18 @@ CLICK_REPOST_MENU_ITEM_JS = (
 """
     + _VISIBLE_FN_JS
     + r"""
+  const opener = arg.root && arg.root.__linkedinMcpPost
+    ? arg.root.__linkedinMcpPost.opener
+    : null;
+  if (
+    arg.root &&
+    (
+      !opener ||
+      (opener.getAttribute('aria-expanded') || '').toLowerCase() !== 'true'
+    )
+  ) {
+    return false;
+  }
   const menus = Array.from(document.querySelectorAll('[role="menu"]')).filter(visible);
   if (menus.length !== 1) return false;
   const items = Array.from(menus[0].querySelectorAll(
@@ -827,7 +870,11 @@ class PostActions:
                 }.get(str(outcome), "Could not click the reaction control."),
                 reaction=reaction,
             )
-        return await self._confirm_reaction(permalink, post_id, reaction)
+        try:
+            return await self._confirm_reaction(permalink, post_id, reaction)
+        except BaseException:
+            logger.warning(POST_ACTION_INTERRUPTED_WARNING)
+            raise
 
     async def _react_specific(
         self,
@@ -924,6 +971,18 @@ class PostActions:
         reaction: str,
     ) -> dict[str, Any]:
         """Confirm a reaction by the toggle's own pressed state."""
+        try:
+            return await self._poll_reaction(permalink, post_id, reaction)
+        except BaseException:
+            logger.warning(POST_ACTION_INTERRUPTED_WARNING)
+            raise
+
+    async def _poll_reaction(
+        self,
+        permalink: str,
+        post_id: str,
+        reaction: str,
+    ) -> dict[str, Any]:
         deadline = _CONFIRM_TIMEOUT / 1000
         waited = 0.0
         while waited < deadline:
@@ -1080,7 +1139,7 @@ class PostActions:
             index = 1 if commentary is not None else 0
             clicked = await self._session.page.evaluate(
                 CLICK_REPOST_MENU_ITEM_JS,
-                {"expected": _REPOST_MENU_ITEMS, "index": index},
+                {"expected": _REPOST_MENU_ITEMS, "index": index, "root": root},
             )
             if not clicked:
                 await self._dismiss_overlay()
@@ -1326,6 +1385,31 @@ class PostActions:
         noun: str,
     ) -> dict[str, Any]:
         """Confirm submitted text by a new matching unit inside the post."""
+        try:
+            return await self._poll_text(
+                root,
+                permalink,
+                text,
+                baseline=baseline,
+                success_status=success_status,
+                unconfirmed_status=unconfirmed_status,
+                noun=noun,
+            )
+        except BaseException:
+            logger.warning(POST_ACTION_INTERRUPTED_WARNING)
+            raise
+
+    async def _poll_text(
+        self,
+        root: ElementHandle,
+        permalink: str,
+        text: str,
+        *,
+        baseline: int,
+        success_status: str,
+        unconfirmed_status: str,
+        noun: str,
+    ) -> dict[str, Any]:
         deadline = _CONFIRM_TIMEOUT / 1000
         waited = 0.0
         while waited < deadline:
@@ -1372,6 +1456,18 @@ class PostActions:
         would be the text dependency this project refuses, while noticing
         that it is no longer the same string is not.
         """
+        try:
+            return await self._poll_repost(permalink, post_id, baseline)
+        except BaseException:
+            logger.warning(POST_ACTION_INTERRUPTED_WARNING)
+            raise
+
+    async def _poll_repost(
+        self,
+        permalink: str,
+        post_id: str,
+        baseline: list[str],
+    ) -> dict[str, Any]:
         deadline = _CONFIRM_TIMEOUT / 1000
         waited = 0.0
         while waited < deadline:

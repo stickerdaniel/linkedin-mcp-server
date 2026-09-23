@@ -15,6 +15,8 @@ one proves the queries.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -22,6 +24,7 @@ import pytest
 from patchright.async_api import Page
 
 import linkedin_mcp_server.scraping.post_actions as post_actions
+from linkedin_mcp_server.scraping.contracts import POST_ACTION_INTERRUPTED_WARNING
 from linkedin_mcp_server.core.exceptions import InvalidReferenceError
 from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.post_actions import PostActions
@@ -403,6 +406,25 @@ class TestReact:
         # A retry could remove a reaction that did land.
         assert result["retry_safe"] is False
 
+    async def test_a_cancelled_confirm_still_warns(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        page = FakePage(signals=signals(pressed=False), react="clicked")
+
+        async def boom(_delay: float) -> None:
+            raise asyncio.CancelledError()
+
+        with (
+            navigated(),
+            patch.object(post_actions.asyncio, "sleep", side_effect=boom),
+            caplog.at_level(
+                logging.WARNING, logger="linkedin_mcp_server.scraping.post_actions"
+            ),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await actions(page).react_to_post(PERMALINK)
+        assert POST_ACTION_INTERRUPTED_WARNING in caplog.messages
+
     async def test_a_specific_reaction_is_picked_by_index(self) -> None:
         page = FakePage(
             signals=[signals(pressed=False), signals(pressed=True)],
@@ -699,7 +721,8 @@ class TestRepost:
         assert result["acted"] is True
         assert result["retry_safe"] is False
         # Index 0 is the immediate repost; index 1 opens a composer.
-        assert page.picked_repost == {"expected": 2, "index": 0}
+        assert page.picked_repost["expected"] == 2
+        assert page.picked_repost["index"] == 0
 
     async def test_counts_that_never_change_leave_the_repost_unconfirmed(self) -> None:
         page = FakePage(
@@ -748,7 +771,8 @@ class TestRepost:
         assert result["status"] == "reposted"
         assert result["acted"] is True
         assert result["retry_safe"] is False
-        assert page.picked_repost == {"expected": 2, "index": 1}
+        assert page.picked_repost["expected"] == 2
+        assert page.picked_repost["index"] == 1
         assert page.pin_editor_scope is page.dialog_handle
         assert "units" not in page.calls
         assert "pin_dialog" in page.calls
@@ -803,6 +827,13 @@ class TestRepost:
             )
         assert result["status"] == "repost_composer_unavailable"
         assert "type" not in page.calls
+
+    async def test_an_opener_that_does_not_expand_clicks_nothing(self) -> None:
+        page = FakePage(signals=signals(), open_repost="not_expanded")
+        with navigated():
+            result = await actions(page).repost_post(PERMALINK, confirm_repost=True)
+        assert result["status"] == "repost_unavailable"
+        assert "pick_repost" not in page.calls
 
     async def test_a_disabled_repost_control_refuses(self) -> None:
         page = FakePage(signals=signals(), open_repost="disabled")
