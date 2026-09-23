@@ -128,16 +128,22 @@ shadow.addEventListener('change', (e) => {
     const el = e.target;
     if (el.type !== 'file' || !el.files.length) return;
     window.log.push('upload:' + el.files[0].name);
-    // LinkedIn answers an upload by re-rendering the step around a card for
-    // the new file, which the old card deselects for.
+    // LinkedIn tears the resume list down when the upload starts and rebuilds
+    // it around the new file only once that file has arrived. Nothing about
+    // the empty list in between says a file is coming.
     const list = shadow.getElementById('resume-list');
     if (!list) return;
-    for (const radio of list.querySelectorAll('input[type=radio]')) radio.checked = false;
-    const id = 'card-' + (list.children.length + 1);
-    const card = document.createElement('div');
-    card.innerHTML = `<input id="${id}" type="radio" name="resume" checked>`
-        + `<label for="${id}">Select resume ${el.files[0].name}</label>`;
-    list.appendChild(card);
+    const name = el.files[0].name;
+    list.innerHTML = '';
+    setTimeout(() => {
+        const live = shadow.getElementById('resume-list');
+        if (!live) return;
+        const card = document.createElement('div');
+        card.innerHTML = '<input id="card-new" type="radio" name="resume" checked>'
+            + `<label for="card-new">Select resume ${name}</label>`;
+        live.appendChild(card);
+        window.log.push('rebuilt');
+    }, window.uploadDelay);
 }, true);
 let index = 0;
 const render = () => {
@@ -206,13 +212,14 @@ EASY_APPLY = (
 )
 
 
-def posting(steps: list[dict]) -> str:
+def posting(steps: list[dict], delay: int = 400) -> str:
     return (
         "<main>"
         f"<h1>AI Engineer</h1><p>Acme</p>{EASY_APPLY}"
         "<h2>About the job</h2><p>Build agents.</p>"
         "</main>"
-        f"<script>{DIALOG_SCRIPT % json.dumps(steps)}</script>"
+        f"<script>window.uploadDelay = {delay};"
+        f"{DIALOG_SCRIPT % json.dumps(steps)}</script>"
     )
 
 
@@ -245,6 +252,7 @@ def _short_waits(monkeypatch):
     monkeypatch.setattr(job_pages, "_EASY_APPLY_STEP_TIMEOUT", 2.0)
     monkeypatch.setattr(job_pages, "_EASY_APPLY_DISCARD_TIMEOUT", 1.0)
     monkeypatch.setattr(job_pages, "_EASY_APPLY_SUBMIT_TIMEOUT", 2.0)
+    monkeypatch.setattr(job_pages, "_EASY_APPLY_UPLOAD_TIMEOUT", 4.0)
 
 
 @pytest.fixture
@@ -261,10 +269,11 @@ async def answer(
     *,
     confirm_submit: bool = False,
     follow_company: bool = False,
+    delay: int = 400,
 ) -> EasyApplySubmitRead:
     """Answer the synthetic posting's form the way the workflow does."""
     await page.goto(JOB_URL)
-    await page.set_content(posting(steps))
+    await page.set_content(posting(steps, delay))
     session = PageSession(page)
     reader = JobPageReader(session, PageNavigator(session), PageContentReader(session))
     with patch.object(reader._navigator, "_navigate_to_page", new_callable=AsyncMock):
@@ -332,6 +341,33 @@ async def test_the_uploaded_file_lands_and_its_new_card_is_not_a_refusal(
         if field["label"] == "Select resume resume.pdf"
     )
     assert card["selected"] == ["Select resume resume.pdf"]
+
+
+async def test_a_resume_list_torn_down_by_the_upload_is_waited_out(dom_page, resume):
+    # The live failure: the list empties the moment the upload starts and
+    # holds still until the file lands. Reads agreeing on the empty list is
+    # not the file having arrived.
+    result = await answer(dom_page, [RESUME], {"Upload resume": resume}, delay=1500)
+
+    events = await log(dom_page)
+    assert events.index("upload:resume.pdf") < events.index("rebuilt")
+    labels = [field["label"] for field in result.steps[0]["fields"]]
+    assert "Select resume resume.pdf" in labels
+
+
+async def test_a_file_the_form_never_shows_back_is_not_submitted(dom_page, resume):
+    with pytest.raises(InvalidAnswerError, match="did not show 'resume.pdf'"):
+        await answer(
+            dom_page,
+            [RESUME],
+            {"Upload resume": resume},
+            confirm_submit=True,
+            delay=100_000,
+        )
+
+    events = await log(dom_page)
+    assert "submit" not in events
+    assert "discard" in events
 
 
 async def test_without_the_flag_the_form_is_filled_and_the_draft_discarded(dom_page):
