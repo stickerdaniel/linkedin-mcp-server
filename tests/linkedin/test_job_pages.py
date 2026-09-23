@@ -1856,6 +1856,11 @@ class _Dialog:
         #: arrives. 0 rebuilds it before the first read back.
         self.tear_down_reads = 0
         self.follow_resets = 0
+        #: How LinkedIn renders the follow checkbox. Measured live, the input
+        #: itself takes no click and only its label does.
+        self.follow_id = "follow"
+        self.follow_shown = True
+        self.follow_labelled = True
         self.log: list[Any] = []
         page.evaluate = AsyncMock(side_effect=self._evaluate)
         page.keyboard.press = AsyncMock(side_effect=lambda key: self.log.append(key))
@@ -1891,7 +1896,12 @@ class _Dialog:
         if script is job_pages_module.EASY_APPLY_FOLLOW_JS:
             if self.follow is None:
                 return None
-            return {"id": "follow", "checked": self.follow}
+            return {
+                "id": self.follow_id,
+                "checked": self.follow,
+                "shown": self.follow_shown,
+                "labelled": bool(self.follow_id) and self.follow_labelled,
+            }
         if script is job_pages_module.EASY_APPLY_CONFIRMATION_JS:
             return self.confirmation
         return self.open
@@ -1907,6 +1917,22 @@ class _Dialog:
             control.click = AsyncMock(side_effect=self._submit)
         elif selector == job_pages_module.EASY_APPLY_DISCARD_SELECTOR:
             control.click = AsyncMock(side_effect=self._discard)
+        elif "footer" in selector:
+            control.check = AsyncMock(
+                side_effect=lambda **_: self._set("follow", "check", "")
+            )
+            control.uncheck = AsyncMock(
+                side_effect=lambda **_: self._set("follow", "uncheck", "")
+            )
+        elif selector.startswith(
+            '[role="dialog"]:has([data-easy-apply-next-button]) label'
+        ):
+            label = re.search(r'label\[for="(.*?)"\]', selector)
+            assert label is not None
+            for_id = label.group(1)
+            control.click = AsyncMock(
+                side_effect=lambda **_: self._set(for_id, "label-click", "")
+            )
         else:
             match = re.search(r'\[id="(.*?)"\]', selector)
             assert match is not None
@@ -1961,7 +1987,12 @@ class _Dialog:
     def _set(self, control_id: str, action: str, value: str):
         self.log.append((control_id, action, value))
         if control_id == "follow":
-            self.follow = action == "check"
+            if action == "label-click":
+                self.follow = not self.follow
+            elif not self.follow_shown:
+                raise AssertionError("the follow input takes no click")
+            else:
+                self.follow = action == "check"
             if self.follow_resets:
                 # A re-render restoring LinkedIn's default under the answer.
                 self.follow_resets -= 1
@@ -2220,11 +2251,62 @@ class TestSubmitEasyApply:
                 self.URL, "123", JOB_APPLY_EN_US, answers, confirm_submit=True
             )
 
+        # The box itself first, then the label, which is what a person clicks.
         assert [entry for entry in dialog.log if entry[0] == "follow"] == [
             ("follow", "uncheck", ""),
-            ("follow", "uncheck", ""),
+            ("follow", "label-click", ""),
         ]
         assert result.follow is False
+
+    async def test_a_follow_checkbox_with_nothing_to_click_is_set_by_its_label(
+        self, mock_page
+    ):
+        # How LinkedIn renders it, measured live: the input takes no click and
+        # only the label it is styled with does.
+        dialog, run, reader, answers, _ = self._run(mock_page)
+        dialog.follow_shown = False
+
+        with run:
+            result = await reader.submit_easy_apply(
+                self.URL, "123", JOB_APPLY_EN_US, answers, confirm_submit=True
+            )
+
+        assert [entry for entry in dialog.log if entry[0] == "follow"] == [
+            ("follow", "label-click", "")
+        ]
+        assert result.follow is False
+
+    async def test_a_follow_checkbox_linkedin_left_anonymous_is_still_reached(
+        self, mock_page
+    ):
+        # No id, so no way to key a selector on one and no label to point at
+        # it. The footer's own checkbox is what is left.
+        dialog, run, reader, answers, _ = self._run(mock_page)
+        dialog.follow_id = ""
+
+        with run:
+            result = await reader.submit_easy_apply(
+                self.URL, "123", JOB_APPLY_EN_US, answers, confirm_submit=True
+            )
+
+        assert ("follow", "uncheck", "") in dialog.log
+        assert result.follow is False
+
+    async def test_a_follow_checkbox_that_takes_nothing_is_reported_as_it_is(
+        self, mock_page
+    ):
+        dialog, run, reader, answers, _ = self._run(mock_page)
+        dialog.follow_shown = False
+        dialog.follow_labelled = False
+
+        with run:
+            result = await reader.submit_easy_apply(
+                self.URL, "123", JOB_APPLY_EN_US, answers, confirm_submit=True
+            )
+
+        # Never worth failing an application over, and never claimed either.
+        assert result.follow is True
+        assert result.submitted is True
 
     async def test_a_step_that_neither_moves_nor_complains_ends_the_run(
         self, mock_page
