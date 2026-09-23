@@ -1,17 +1,20 @@
 """Tests for scraping section config dicts and section parsers."""
 
 from collections import namedtuple
+from urllib.parse import parse_qs, urlparse
 
 from linkedin_mcp_server.scraping import (
     COMPANY_SECTIONS as EXPORTED_COMPANY_SECTIONS,
 )
 from linkedin_mcp_server.scraping import PERSON_SECTIONS as EXPORTED_PERSON_SECTIONS
+from linkedin_mcp_server.scraping.capture import CaptureMode, capture_plan_for_url
 from linkedin_mcp_server.scraping.fields import (
     COMPANY_SECTIONS,
     PERSON_SECTIONS,
     parse_company_sections,
     parse_person_sections,
 )
+from linkedin_mcp_server.scraping.identifiers import company_page_url
 
 
 def _has_exact_tuple_contract(sections: dict[str, tuple[str, bool]]) -> bool:
@@ -73,7 +76,7 @@ class TestCompanySections:
     def test_exported_mapping_retains_exact_tuple_contract_and_identity(self):
         expected = {
             "about": ("/about/", False),
-            "posts": ("/posts/", False),
+            "posts": ("/posts/?viewAsMember=true&feedView=all", False),
             "jobs": ("/jobs/", False),
         }
         assert COMPANY_SECTIONS == expected
@@ -88,6 +91,27 @@ class TestCompanySections:
     def test_no_overlays(self):
         for name, (_suffix, is_overlay) in COMPANY_SECTIONS.items():
             assert is_overlay is False, f"{name} should not be an overlay"
+
+    def test_the_posts_navigation_asks_for_the_member_feed(self):
+        """A page admin is answered with the dashboard unless it opts out.
+
+        The dashboard lays its posts out in a pager, which body scrolling
+        cannot advance, so dropping either parameter silently caps the capture
+        at the pager's first page on exactly the pages the caller administers.
+        """
+        query = parse_qs(urlparse(COMPANY_SECTIONS["posts"][0]).query)
+        assert query["viewAsMember"] == ["true"]
+        assert query["feedView"] == ["all"]
+
+    def test_the_posts_query_string_does_not_hide_the_activity_path(self):
+        """ACTIVITY is what scrolls, and it is chosen from the path alone.
+
+        Carrying the opt-out in the path instead of the query would satisfy the
+        test above while turning the scroll off, which is the regression this
+        pins: without ACTIVITY the capture takes one screenful and stops.
+        """
+        url = company_page_url("acme", COMPANY_SECTIONS["posts"][0])
+        assert CaptureMode.ACTIVITY in capture_plan_for_url(url).mode
 
 
 def test_exact_tuple_contract_rejects_equal_tuple_subclasses():

@@ -23,9 +23,23 @@ PERSON_SECTIONS: dict[str, tuple[str, bool]] = {
     "posts": ("/recent-activity/all/", False),
 }
 
+# A page admin asking for /posts/ can be served the page-management dashboard
+# instead of the member-facing feed. The dashboard paginates posts rather than
+# exposing the infinite scroll that `CaptureMode.ACTIVITY` walks, so body
+# scrolling cannot load the complete feed.
+#
+# `viewAsMember=true` opts out of that redirect and `feedView=all` selects the
+# all-posts feed once there, which is the infinite scroll ACTIVITY already
+# walks. Both are needed: the first defeats the dashboard, the second defeats
+# the member page's default filtered view.
+#
+# This is the whole reason the suffix carries a query string, and
+# `capture_plan_for_url` reads `urlparse(url).path`, so ACTIVITY still matches.
+COMPANY_POSTS_SUFFIX = "/posts/?viewAsMember=true&feedView=all"
+
 COMPANY_SECTIONS: dict[str, tuple[str, bool]] = {
     "about": ("/about/", False),
-    "posts": ("/posts/", False),
+    "posts": (COMPANY_POSTS_SUFFIX, False),
     "jobs": ("/jobs/", False),
 }
 

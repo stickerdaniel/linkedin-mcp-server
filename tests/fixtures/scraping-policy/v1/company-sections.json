@@ -122,7 +122,7 @@
     {
       "call": "scrape_company",
       "extra": {
-        "target_url": "https://www.linkedin.com/company/analytical-engine/posts/",
+        "target_url": "https://www.linkedin.com/company/analytical-engine/posts/?viewAsMember=true&feedView=all",
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
@@ -131,21 +131,21 @@
     {
       "call": "scrape_company",
       "kind": "navigate",
-      "landed_url": "https://www.linkedin.com/company/analytical-engine/posts/",
-      "requested_url": "https://www.linkedin.com/company/analytical-engine/posts/",
+      "landed_url": "https://www.linkedin.com/company/analytical-engine/posts/?viewAsMember=true&feedView=all",
+      "requested_url": "https://www.linkedin.com/company/analytical-engine/posts/?viewAsMember=true&feedView=all",
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
     },
     {
       "call": "scrape_company",
-      "description": "goto https://www.linkedin.com/company/analytical-engine/posts/",
+      "description": "goto https://www.linkedin.com/company/analytical-engine/posts/?viewAsMember=true&feedView=all",
       "kind": "boundary.stabilize",
       "result": null
     },
     {
       "call": "scrape_company",
       "extra": {
-        "target_url": "https://www.linkedin.com/company/analytical-engine/posts/",
+        "target_url": "https://www.linkedin.com/company/analytical-engine/posts/?viewAsMember=true&feedView=all",
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
