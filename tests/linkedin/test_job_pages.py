@@ -1668,7 +1668,7 @@ class TestAnswerEasyApplyStep:
         resume.write_bytes(b"%PDF-1.7")
         done = self._dialog(mock_page)
 
-        used = await _reader(mock_page)._answer_easy_apply_step(
+        used, _ = await _reader(mock_page)._answer_easy_apply_step(
             self.CONTACT,
             {
                 "First name": "Noor",
@@ -1697,7 +1697,7 @@ class TestAnswerEasyApplyStep:
     async def test_a_field_no_answer_names_is_left_alone(self, mock_page):
         done = self._dialog(mock_page)
 
-        used = await _reader(mock_page)._answer_easy_apply_step(
+        used, _ = await _reader(mock_page)._answer_easy_apply_step(
             self.CONTACT, {"First name": "Noor"}
         )
 
@@ -1709,7 +1709,7 @@ class TestAnswerEasyApplyStep:
     ):
         done = self._dialog(mock_page)
 
-        used = await _reader(mock_page)._answer_easy_apply_step(
+        used, _ = await _reader(mock_page)._answer_easy_apply_step(
             self.CONTACT, {"Years of Python": "5"}
         )
 
@@ -1770,7 +1770,10 @@ class TestAnswerEasyApplyStep:
         step = dict(self.CONTACT, fields=[city])
         done = self._dialog(mock_page)
 
-        assert await _reader(mock_page)._answer_easy_apply_step(step, {}) == set()
+        assert await _reader(mock_page)._answer_easy_apply_step(step, {}) == (
+            set(),
+            False,
+        )
         assert done == []
         with pytest.raises(InvalidAnswerError, match="typeahead"):
             await _reader(mock_page)._answer_easy_apply_step(
@@ -1787,6 +1790,25 @@ class TestAnswerEasyApplyStep:
         assert "No option is labelled 'me@acme.test'" in message
         assert "Email address (select)" in message
         assert "'me@example.com'" in message
+
+    def test_an_option_list_the_read_cut_is_left_for_the_browser_to_match(self):
+        # The 250-entry country list the read caps at 50. Refusing on the
+        # options that survived would refuse every country past the cut.
+        country = {
+            "label": "Phone country code",
+            "type": "select",
+            "required": True,
+            "options": ["Select an option", "Afghanistan (+93)"],
+            "options_total": 250,
+            "ids": ["country"],
+        }
+
+        assert job_pages_module.plan_easy_apply_answer(country, "France (+33)") == [
+            job_pages_module.EasyApplyEdit("country", "select", "France (+33)")
+        ]
+        whole = {key: value for key, value in country.items() if key != "options_total"}
+        with pytest.raises(InvalidAnswerError, match="No option is labelled"):
+            job_pages_module.plan_easy_apply_answer(whole, "France (+33)")
 
     def test_an_option_no_radio_carries_refuses(self):
         with pytest.raises(InvalidAnswerError, match="No option is labelled 'Maybe'"):

@@ -845,7 +845,12 @@ def plan_easy_apply_answer(
             easy_apply_answer_refused(field, "It takes one value, written out.")
         )
     if kind == "select":
-        if answer not in (field.get("options") or []):
+        # A country list runs past the read's cap and comes back cut, with its
+        # real length beside it. The options that were kept cannot say the
+        # answer is wrong, so a cut list is left for the browser to match and
+        # refuse; only a whole one is checked here.
+        options = field.get("options") or []
+        if answer not in options and not field.get("options_total"):
             raise InvalidAnswerError(
                 easy_apply_answer_refused(field, f"No option is labelled {answer!r}.")
             )
@@ -1150,12 +1155,13 @@ class JobPageReader:
         used: set[str] = set()
         step = await self._read_easy_apply_step(None)
         while True:
-            answered = await self._answer_easy_apply_step(step, answers)
+            answered, uploaded = await self._answer_easy_apply_step(step, answers)
             if answered:
-                # Read again rather than reason about what was typed: a file
-                # answer re-renders the step, and nothing is decided on a step
-                # as it stood before the answers went into it.
-                step = await self._read_easy_apply_step(None)
+                # Read again rather than reason about what was typed, and after
+                # an upload wait for the step to actually change: LinkedIn only
+                # re-renders it once the file has arrived, and a step that has
+                # merely stopped moving is the step as it was before.
+                step = await self._read_easy_apply_step(step if uploaded else None)
                 used |= answered
             missing = _unanswered_required(step, answered)
             if missing:
@@ -1232,8 +1238,13 @@ class JobPageReader:
 
     async def _answer_easy_apply_step(
         self, step: dict[str, Any], answers: Mapping[str, EasyApplyAnswer]
-    ) -> set[str]:
-        """Fill ``step`` from ``answers``; answers the labels it took.
+    ) -> tuple[set[str], bool]:
+        """Fill ``step`` from ``answers``; answers the labels it took, and
+        whether one of them was a file.
+
+        A file is the one answer that travels: LinkedIn takes the upload, and
+        the step only changes once it comes back. The caller needs to know, or
+        it reads the step in the state it was in before the file arrived.
 
         The whole step is resolved before anything is touched, so a refusal
         leaves the dialog holding what LinkedIn prefilled. Every control is
@@ -1259,7 +1270,7 @@ class JobPageReader:
                 # input behind an upload button, and an upload is the one thing
                 # a locator does without the element being shown.
                 await control.set_input_files(edit.value, timeout=timeout)
-        return used
+        return used, any(edit.action == "upload" for edit in edits)
 
     async def _read_easy_apply_step(
         self, previous: dict[str, Any] | None
