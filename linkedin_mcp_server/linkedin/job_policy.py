@@ -464,6 +464,30 @@ def easy_apply_unknown_answers_error(labels: list[str]) -> str:
     )
 
 
+def easy_apply_required_unanswered_error(fields: list[dict[str, Any]]) -> str:
+    """The message for required fields left empty on a step about to be sent.
+
+    LinkedIn would refuse the step anyway, and the run would end on its error
+    rather than on the caller's answers. Stopping first names every one of them
+    at once, which is what a second run needs.
+    """
+    named = "; ".join(
+        f"{field.get('label') or '(unlabelled)'} ({field.get('type')})"
+        for field in fields
+    )
+    return (
+        f"This step requires an answer for: {named}. LinkedIn prefilled none of "
+        "them and none was supplied, so nothing further was sent."
+    )
+
+
+EASY_APPLY_SUBMIT_UNCONFIRMED = (
+    "Submit was clicked and the Easy Apply dialog stayed open, so the "
+    "application was probably not sent. Read the form again to see what "
+    "LinkedIn is asking for."
+)
+
+
 EASY_APPLY_DRAFT_LEFT = (
     "The Easy Apply dialog could not be closed and its draft discarded, so "
     "LinkedIn may keep a saved application for this posting."

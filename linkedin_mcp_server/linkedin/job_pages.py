@@ -47,6 +47,7 @@ from linkedin_mcp_server.linkedin.identifiers import job_view_url
 from linkedin_mcp_server.linkedin.job_policy import (
     EASY_APPLY_DRAFT_LEFT,
     EASY_APPLY_NO_CONTROL,
+    EASY_APPLY_SUBMIT_UNCONFIRMED,
     EASY_APPLY_TYPEAHEAD_REFUSED,
     SAFETY_REDIRECT_PATH,
     SCROLL_DEADLINE_MAX,
@@ -54,6 +55,7 @@ from linkedin_mcp_server.linkedin.job_policy import (
     EasyApplyAnswer,
     easy_apply_answer_refused,
     easy_apply_duplicate_label_error,
+    easy_apply_required_unanswered_error,
     easy_apply_unknown_answers_error,
     employer_apply_url,
     parse_posting_title,
@@ -303,13 +305,18 @@ _APPLY_POLL = 0.25
 # the open roots first. Playwright locators pierce them on their own. The dialog
 # is told apart from others by an Easy Apply control inside it, and every button
 # by a LinkedIn data attribute rather than by its localized label.
-_EASY_APPLY_DIALOG_JS = r"""
+_SHADOW_ROOTS_JS = r"""
     const roots = [document];
     for (let i = 0; i < roots.length; i++) {
         for (const el of roots[i].querySelectorAll('*')) {
             if (el.shadowRoot) roots.push(el.shadowRoot);
         }
     }
+"""
+
+_EASY_APPLY_DIALOG_JS = (
+    _SHADOW_ROOTS_JS
+    + r"""
     const marker = '[data-easy-apply-next-button], '
         + '[data-live-test-easy-apply-submit-button], [id*="easyApplyFormElement"]';
     let dialog = null;
@@ -319,6 +326,7 @@ _EASY_APPLY_DIALOG_JS = r"""
         if (dialog) break;
     }
 """
+)
 
 EASY_APPLY_OPEN_JS = (
     "() => {" + _EASY_APPLY_DIALOG_JS + "    return Boolean(dialog);\n}"
@@ -426,7 +434,40 @@ EASY_APPLY_STEP_JS = (
 }"""
 )
 
+# The follow-the-company checkbox, which LinkedIn ships checked and puts in the
+# footer the step program skips: it is not one of the form's questions, and
+# nobody answering a job application means to follow the company by omission.
+EASY_APPLY_FOLLOW_JS = (
+    "() => {"
+    + _EASY_APPLY_DIALOG_JS
+    + r"""
+    if (!dialog) return null;
+    const form = dialog.querySelector('form') || dialog;
+    const footer = form.querySelector('footer');
+    const box = footer && footer.querySelector('input[type="checkbox"]');
+    return box ? {id: box.id || '', checked: box.checked} : null;
+}"""
+)
+
+# What LinkedIn shows once the form dialog is gone. Any dialog will do, because
+# the point is evidence that something answered the Submit click rather than the
+# dialog closing on its own, and the caller is the one who reads it.
+EASY_APPLY_CONFIRMATION_JS = (
+    "() => {"
+    + _SHADOW_ROOTS_JS
+    + r"""
+    for (const root of roots) {
+        for (const box of root.querySelectorAll('[role="dialog"], [role="alertdialog"]')) {
+            const text = (box.textContent || '').replace(/\s+/g, ' ').trim();
+            if (text) return text.slice(0, 400);
+        }
+    }
+    return '';
+}"""
+)
+
 EASY_APPLY_NEXT_SELECTOR = "[data-easy-apply-next-button]"
+EASY_APPLY_SUBMIT_SELECTOR = "[data-live-test-easy-apply-submit-button]"
 EASY_APPLY_DISCARD_SELECTOR = '[data-control-name="discard_application_confirm_btn"]'
 
 # The open dialog, named the same way the programs above name it. A control is
@@ -452,6 +493,7 @@ def easy_apply_control_selector(control_id: str) -> str:
 _EASY_APPLY_OPEN_TIMEOUT = 10.0
 _EASY_APPLY_STEP_TIMEOUT = 8.0
 _EASY_APPLY_SET_TIMEOUT = 5.0
+_EASY_APPLY_SUBMIT_TIMEOUT = 15.0
 _EASY_APPLY_DISCARD_TIMEOUT = 5.0
 # How long closing the dialog may hold the page once the walk has ended, a
 # cancelled walk included: the wait for a dialog still opening, Escape, the
@@ -609,6 +651,75 @@ def _refused_step(before: dict[str, Any], after: dict[str, Any]) -> dict[str, An
 def _unrefused_step(step: dict[str, Any]) -> dict[str, Any]:
     """``step`` without errors, for a step no click has been refused on."""
     return _refused_step(step, step)
+
+
+@dataclass(frozen=True, slots=True)
+class EasyApplySubmitRead:
+    """What one answered Easy Apply run did, and what it left behind.
+
+    `complete` is False when a step was refused or the form ran past the step
+    cap, which is also why `submitted` can be False on a run that asked to
+    submit. `follow` is the state the follow-the-company checkbox ended in, or
+    None where the dialog had none, and `confirmation` is what LinkedIn showed
+    once the form dialog was gone.
+    """
+
+    type: ApplyType
+    steps: tuple[dict[str, Any], ...] = ()
+    complete: bool = False
+    submitted: bool = False
+    follow: bool | None = None
+    discarded: bool = True
+    confirmation: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _WalkOutcome:
+    """What the answering walk did, before the dialog is closed."""
+
+    complete: bool
+    submitted: bool = False
+    follow: bool | None = None
+    confirmation: str | None = None
+
+
+def _step_identity(step: dict[str, Any]) -> tuple[str, Any]:
+    """Which step of the form this is.
+
+    Its heading and progress, not its `signature`. The signature carries the
+    controls, and answering a file field re-renders the step around a new
+    resume card: same step, new signature. The read walk can compare signatures
+    because it types nothing; a walk that answers cannot.
+    """
+    return step["heading"], step["progress"]
+
+
+def _step_errors(step: dict[str, Any]) -> list[dict[str, Any]]:
+    """The fields LinkedIn is complaining about."""
+    return [field for field in step["fields"] if field.get("error")]
+
+
+def _unanswered_required(
+    step: dict[str, Any], answered: set[str]
+) -> list[dict[str, Any]]:
+    """The required fields of ``step`` holding nothing that nothing answered.
+
+    A field answered on this step counts as held whatever it reads back as: a
+    file input never reports the file it was given, and it is the only control
+    LinkedIn lets us set without being able to see the result.
+    """
+    missing = []
+    for field in step["fields"]:
+        if not field.get("required") or field["label"] in answered:
+            continue
+        held = (
+            field.get("selected")
+            if field["type"] in ("radio", "checkbox")
+            else field.get("value")
+        )
+        if not held:
+            missing.append(field)
+    return missing
 
 
 def _public_step(step: dict[str, Any]) -> dict[str, Any]:
@@ -962,6 +1073,158 @@ class JobPageReader:
                 steps[-1] = _public_step(_refused_step(step, after))
                 return False
             step = after
+
+    async def submit_easy_apply(
+        self,
+        url: str,
+        job_id: str,
+        text: JobApplyTextTable,
+        answers: Mapping[str, EasyApplyAnswer],
+        *,
+        submit: bool,
+        follow_company: bool = False,
+    ) -> EasyApplySubmitRead:
+        """Answer a posting's Easy Apply form, and send it when asked to.
+
+        Every step is filled from ``answers`` alone, by the label the form read
+        returned, and a field no answer names keeps LinkedIn's prefill. Submit
+        is clicked only when ``submit`` is set and only once every step was
+        reached with its required fields holding something; without it the form
+        is filled, read back and the draft discarded, which is the rehearsal
+        for the real thing.
+
+        Both are writes. LinkedIn saves Easy Apply answers to the account and
+        prefills them into the next application, and an uploaded resume becomes
+        the preselected one, so a run that submits nothing still changes what
+        the next form starts from.
+        """
+        kind, _ = await self._read_apply_type(url, job_id, text)
+        if kind != "easy_apply":
+            return EasyApplySubmitRead(kind)
+
+        steps: list[dict[str, Any]] = []
+        try:
+            outcome = await self._walk_easy_apply_answers(
+                job_id, answers, steps, submit=submit, follow_company=follow_company
+            )
+        except Exception as e:
+            if not await self._discard_easy_apply():
+                raise RuntimeError(EASY_APPLY_DRAFT_LEFT) from e
+            raise
+        return EasyApplySubmitRead(
+            "easy_apply",
+            tuple(steps),
+            complete=outcome.complete,
+            submitted=outcome.submitted,
+            follow=outcome.follow,
+            # A sent application leaves no dialog and no draft to discard.
+            discarded=True if outcome.submitted else await self._discard_easy_apply(),
+            confirmation=outcome.confirmation,
+        )
+
+    async def _walk_easy_apply_answers(
+        self,
+        job_id: str,
+        answers: Mapping[str, EasyApplyAnswer],
+        steps: list[dict[str, Any]],
+        *,
+        submit: bool,
+        follow_company: bool,
+    ) -> _WalkOutcome:
+        """Open the dialog, answer it step by step, and end on the last one."""
+        page = self._session.page
+        await page.locator(f'main a[href*="/jobs/view/{job_id}/apply"]').first.click(
+            timeout=5000
+        )
+        try:
+            await page.wait_for_function(
+                EASY_APPLY_OPEN_JS, timeout=_EASY_APPLY_OPEN_TIMEOUT * 1000
+            )
+        except PlaywrightTimeoutError:
+            raise RuntimeError("The Easy Apply dialog did not open") from None
+
+        used: set[str] = set()
+        step = await self._read_easy_apply_step(None)
+        while True:
+            answered = await self._answer_easy_apply_step(step, answers)
+            if answered:
+                # Read again rather than reason about what was typed: a file
+                # answer re-renders the step, and nothing is decided on a step
+                # as it stood before the answers went into it.
+                step = await self._read_easy_apply_step(None)
+                used |= answered
+            missing = _unanswered_required(step, answered)
+            if missing:
+                raise InvalidAnswerError(easy_apply_required_unanswered_error(missing))
+            steps.append(_public_step(step))
+            if not step["next"]:
+                break
+            if len(steps) >= _EASY_APPLY_MAX_STEPS:
+                return _WalkOutcome(complete=False)
+            await page.locator(EASY_APPLY_NEXT_SELECTOR).click(timeout=5000)
+            after = await self._read_easy_apply_step(step)
+            if _step_errors(after) or _step_identity(after) == _step_identity(step):
+                # Refused, or standing still and saying nothing about why.
+                steps[-1] = _public_step(after)
+                return _WalkOutcome(complete=False)
+            step = after
+
+        # Now that every step has been seen, an answer none of them asked for
+        # is a stale answers file, and this is the last moment to say so: the
+        # draft is still discardable and nothing has been sent.
+        refuse_unused_easy_apply_answers(answers, used)
+
+        follow = await self._set_follow_company(follow_company)
+        if not submit:
+            return _WalkOutcome(complete=True, follow=follow)
+        confirmation = await self._click_easy_apply_submit()
+        return _WalkOutcome(
+            complete=True, submitted=True, follow=follow, confirmation=confirmation
+        )
+
+    async def _set_follow_company(self, follow: bool) -> bool | None:
+        """Leave the follow checkbox as ``follow`` asks; answers its real state.
+
+        Reported rather than assumed, and never worth failing an application
+        over: a checkbox that cannot be reached costs the caller a company in
+        their feed, which is not the irreversible half of this tool.
+        """
+        page = self._session.page
+        box = await page.evaluate(EASY_APPLY_FOLLOW_JS)
+        if box is None:
+            return None
+        if box["checked"] != follow and box["id"]:
+            control = page.locator(easy_apply_control_selector(box["id"])).first
+            timeout = _EASY_APPLY_SET_TIMEOUT * 1000
+            try:
+                if follow:
+                    await control.check(timeout=timeout)
+                else:
+                    await control.uncheck(timeout=timeout)
+            except Exception as e:
+                logger.warning("Could not set the follow checkbox (%s)", e)
+            box = await page.evaluate(EASY_APPLY_FOLLOW_JS)
+        return bool(box and box["checked"])
+
+    async def _click_easy_apply_submit(self) -> str:
+        """Send the application; answers with what LinkedIn showed afterwards.
+
+        The one click that cannot be taken back. A dialog still holding the
+        form after it is a submission that did not happen, and it is raised
+        rather than reported, so that nothing downstream records an application
+        on the strength of a click alone.
+        """
+        page = self._session.page
+        await page.locator(EASY_APPLY_SUBMIT_SELECTOR).first.click(
+            timeout=_EASY_APPLY_SET_TIMEOUT * 1000
+        )
+        try:
+            await page.wait_for_function(
+                EASY_APPLY_CLOSED_JS, timeout=_EASY_APPLY_SUBMIT_TIMEOUT * 1000
+            )
+        except PlaywrightTimeoutError:
+            raise RuntimeError(EASY_APPLY_SUBMIT_UNCONFIRMED) from None
+        return await page.evaluate(EASY_APPLY_CONFIRMATION_JS)
 
     async def _answer_easy_apply_step(
         self, step: dict[str, Any], answers: Mapping[str, EasyApplyAnswer]
