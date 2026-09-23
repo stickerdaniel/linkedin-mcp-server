@@ -184,6 +184,10 @@ class LinkedInExtractor:
             tool_timeout,
         )
 
+    async def save_job(self, job_id: str) -> dict[str, Any]:
+        """Save a single job posting to the authenticated account."""
+        return await self._jobs.save_job(job_id)
+
     async def get_saved_jobs(self, max_pages: int = 3) -> dict[str, Any]:
         """List the authenticated user's saved job postings."""
         return await self._jobs.get_saved_jobs(max_pages)

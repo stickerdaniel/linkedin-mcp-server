@@ -9,6 +9,7 @@ diagnostics that decide what a page *means* stay with the workflow.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 import asyncio
 import logging
@@ -129,6 +130,58 @@ PROMOTED_JOB_IDS_JS = (
     return promoted;
 }"""
 )
+
+# Save-state labels for the job Save control, keyed by browser locale. The
+# control's text is the only state signal LinkedIn exposes: measured on an
+# en-US account on 2026-09-21, unsaved is `<button aria-label="Save the
+# job">Save</button>` and saved is `<button aria-label="Unsave the
+# job">Saved</button>`, with no `aria-pressed` and no state attribute. The
+# `aria-label` verb is locale-dependent, so detection is guarded by this
+# explicit per-locale table and fails closed on unknown locales. The control
+# exists only on an open posting the account has not applied to, which is the
+# only state ``save_job`` acts on.
+_JOB_SAVE_LABELS_BY_LOCALE = {
+    "en": {"saved": "Saved", "unsaved": "Save"},
+    "en-US": {"saved": "Saved", "unsaved": "Save"},
+}
+
+# Read the job Save control's state from the main content area. The control
+# is the one button-like element whose text equals one of the locale labels;
+# expanders (aria-expanded) and disabled controls are excluded so the "More"
+# menu and a mid-transition button never win. Exactly one match or null.
+_JOB_SAVE_STATE_JS = """({ labels }) => {
+    const root = document.querySelector('main') || document.body;
+    const normalize = value => (value || '').replace(/\\s+/g, ' ').trim();
+    const controls = Array.from(
+        root.querySelectorAll('button, [role="button"]')
+    ).filter(element => {
+        if (element.hasAttribute('aria-expanded')) return false;
+        if (element.hasAttribute('disabled')) return false;
+        const text = normalize(element.innerText || element.textContent);
+        return text === labels.saved || text === labels.unsaved;
+    });
+    if (controls.length !== 1) return null;
+    const text = normalize(controls[0].innerText || controls[0].textContent);
+    return text === labels.saved ? 'saved' : 'unsaved';
+}"""
+
+# Click the job Save control when its text matches the expected state's
+# label. Returns true iff exactly one control matched and the click
+# dispatched; the caller re-reads the state afterwards.
+_JOB_SAVE_CLICK_JS = """({ expectedLabel }) => {
+    const root = document.querySelector('main') || document.body;
+    const normalize = value => (value || '').replace(/\\s+/g, ' ').trim();
+    const controls = Array.from(
+        root.querySelectorAll('button, [role="button"]')
+    ).filter(element =>
+        !element.hasAttribute('aria-expanded') &&
+        !element.hasAttribute('disabled') &&
+        normalize(element.innerText || element.textContent) === expectedLabel
+    );
+    if (controls.length !== 1) return false;
+    controls[0].click();
+    return true;
+}"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -626,3 +679,62 @@ class JobPageReader:
             }"""
         )
         return int(value) if value is not None else None
+
+    async def open_job_posting(self, url: str) -> None:
+        """Navigate to a job posting and clear anything covering its controls.
+
+        The navigation half of a capture with none of the reading: the save
+        and unsave workflows act on the posting's own control, so the text
+        extraction and scroll plan a capture would run are work with no
+        consumer. Rate limits and blocking modals are still checked here
+        because they are what a click would otherwise land on.
+        """
+        await self._navigator._navigate_to_page(url)
+        await detect_rate_limit(self._session.page)
+        await handle_modal_close(self._session.page)
+
+    async def save_control_state(self) -> Literal["saved", "unsaved"]:
+        """Read the job Save control's state using the per-locale label table."""
+        labels = await self._save_labels()
+        state = await self._session.page.evaluate(
+            _JOB_SAVE_STATE_JS, {"labels": labels}
+        )
+        if state not in {"saved", "unsaved"}:
+            raise LinkedInScraperException(
+                "Could not uniquely identify the LinkedIn job Save control."
+            )
+        return state
+
+    async def click_save_control(
+        self, expected_state: Literal["saved", "unsaved"] = "unsaved"
+    ) -> bool:
+        """Click the unique job Save control when it has *expected_state*.
+
+        A false answer means no click was dispatched: no control matched the
+        expected label, or more than one did. The caller re-reads the state
+        afterwards, because a dispatched click is not a state change.
+        """
+        labels = await self._save_labels()
+        try:
+            return bool(
+                await self._session.page.evaluate(
+                    _JOB_SAVE_CLICK_JS,
+                    {"expectedLabel": labels[expected_state]},
+                )
+            )
+        except Exception:
+            logger.debug("Job Save control click failed", exc_info=True)
+            return False
+
+    async def _save_labels(self) -> dict[str, str]:
+        """Return labels for the active browser locale, or fail closed."""
+        locale = await self._session.page.evaluate("() => navigator.language || ''")
+        labels = (
+            _JOB_SAVE_LABELS_BY_LOCALE.get(locale) if isinstance(locale, str) else None
+        )
+        if labels is None:
+            raise LinkedInScraperException(
+                "Job save-state detection is not supported for browser locale "
+                f"{locale!r}."
+            )
+        return labels

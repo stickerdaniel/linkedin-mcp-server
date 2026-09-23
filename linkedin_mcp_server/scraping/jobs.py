@@ -504,6 +504,38 @@ class JobScraper:
             result["section_errors"] = section_errors
         return result
 
+    async def save_job(self, job_id: str) -> dict[str, Any]:
+        """Save a single job posting to the authenticated LinkedIn account.
+
+        Idempotent: a posting already in its saved state returns
+        ``already_saved`` without touching the control.
+        """
+        job_id = normalize_job_id(job_id)
+        url = job_view_url(job_id, "/")
+        await self._pages.open_job_posting(url)
+
+        state = await self._pages.save_control_state()
+        if state == "saved":
+            return {"url": url, "job_id": job_id, "saved": True, "already_saved": True}
+
+        clicked = await self._pages.click_save_control("unsaved")
+        if not clicked:
+            raise LinkedInScraperException(
+                "Could not find or click the LinkedIn Save button for this job."
+            )
+
+        # The click helper only proves the DOM click dispatched. LinkedIn can
+        # swallow it (overlay, transient disable) without changing state, so
+        # report the observed state rather than the attempt. The tool is
+        # idempotent: a caller retry lands in the already-saved branch.
+        await asyncio.sleep(1)
+        if await self._pages.save_control_state() != "saved":
+            raise LinkedInScraperException(
+                "Clicked the LinkedIn Save button, but the control did not "
+                "switch to its saved state."
+            )
+        return {"url": url, "job_id": job_id, "saved": True, "already_saved": False}
+
     async def get_saved_jobs(self, max_pages: int = 3) -> dict[str, Any]:
         """List the authenticated user's saved job postings.
 

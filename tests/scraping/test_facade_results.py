@@ -57,6 +57,7 @@ class TestEveryNormalizedEntryPoint:
             ("scrape_company", ("../../feed", {"about"}), {}),
             ("get_company_employees", ("../../feed",), {}),
             ("scrape_job", ("../../feed",), {}),
+            ("save_job", ("../../feed",), {}),
             ("get_conversation", (), {"thread_id": "../../feed"}),
         ],
     )
