@@ -2936,6 +2936,44 @@ class TestBrowserLaunchEvidenceHelpers:
         assert events[:5] == ["terminate", "query", "query", "query", "JOB_ZERO"]
         assert "release" in events
 
+    def test_post_handle_job_zero_polls_before_both_zero(self) -> None:
+        samples = iter([0, 2, 0])
+        events: list[str] = []
+        waits: list[str] = []
+
+        def query() -> int:
+            events.append("query")
+            return next(samples)
+
+        probe.browser_guardian_shutdown(
+            retained={1: object()},
+            active_pids=lambda _handles: set(),
+            terminate_job=lambda: events.append("terminate"),
+            query_active_processes=query,
+            signal_job_zero=lambda: events.append("JOB_ZERO"),
+            wait_check_stable_handles=lambda: events.append("CHECK_HANDLES"),
+            wait_handles=lambda _handles: events.append("wait handles"),
+            signal_both_zero=lambda: events.append("BOTH_ZERO"),
+            wait_allow_fence_release=lambda: None,
+            release_fence=lambda: events.append("release"),
+            deadline=5,
+            wait_for_retry=lambda: waits.append("wait"),
+            monotonic=lambda: 0,
+        )
+
+        assert waits == ["wait"]
+        assert events == [
+            "terminate",
+            "query",
+            "JOB_ZERO",
+            "CHECK_HANDLES",
+            "wait handles",
+            "query",
+            "query",
+            "BOTH_ZERO",
+            "release",
+        ]
+
     def test_job_zero_timeout_reports_the_remaining_count(self) -> None:
         with pytest.raises(RuntimeError, match="retained 2"):
             probe.browser_guardian_shutdown(
