@@ -5,7 +5,8 @@ The unit suite mocks ``page.evaluate``, so none of the programs behind
 real control. These run the whole walk against a synthetic posting in headless
 chromium, with the navigation stubbed. The dialog is rendered inside an open
 shadow root, validates its required fields on Next, grows a card for an
-uploaded resume and holds Submit beside the follow checkbox in its footer, as
+uploaded resume, offers a typeahead that binds an entity only to a chosen
+suggestion, and holds Submit beside the follow checkbox in its footer, as
 LinkedIn's does; its markup carries the data attributes LinkedIn's dialog was
 measured with and none of its classes, so it is a claim about which signals are
 read and written, not about LinkedIn's layout.
@@ -77,6 +78,37 @@ QUESTIONS: dict[str, Any] = {
     ),
 }
 
+# What the typeahead is offering to look up, and the entity behind each label.
+# Two of them share a prefix, so an answer that stops at the prefix names none.
+CITIES: dict[str, str] = {
+    "Paris, \u00cele-de-France, France": "urn:li:geo:104994268",
+    "Paris, Texas, United States": "urn:li:geo:101857102",
+}
+
+
+def with_city(city: str = "") -> dict[str, Any]:
+    """The contact step with a city typeahead, optionally already chosen.
+
+    Beside the other contact questions rather than alone, because what a failed
+    pick must leave untouched is the rest of the step.
+
+    The combobox carries a hidden sibling for the entity behind the text: what
+    LinkedIn stores is the entity and the visible string is only its label. The
+    read drops hidden controls, so the sibling never appears as a field, and
+    the step refuses on Next while it is empty -- which is what makes
+    typed-but-unpicked text fail here the way it fails live.
+    """
+    return dict(
+        CONTACT,
+        body=CONTACT["body"]
+        + '<div data-test-form-element><label for="city">Location (city)</label>'
+        '<input id="city" type="text" role="combobox" autocomplete="off"'
+        f' aria-autocomplete="list" aria-expanded="false" required value="{city}">'
+        f'<input id="city-urn" type="hidden" value="{CITIES.get(city, "")}">'
+        "</div>",
+    )
+
+
 # The resume step LinkedIn renders: the cards it already holds, and an upload
 # button with the file input hidden behind it.
 RESUME: dict[str, Any] = {
@@ -110,10 +142,10 @@ SOLO: dict[str, Any] = {
 
 # The posting, its Easy Apply anchor, and a dialog that behaves like LinkedIn's:
 # opened by the anchor, rendered in a shadow root, refusing Next while a
-# required field is empty, growing a card for an uploaded resume, and asking to
-# save the draft on Escape. Every click, keystroke and value that reaches it is
-# logged on `window.log`.
-DIALOG_SCRIPT = """
+# required field is empty or a typeahead holds text nobody picked, growing a
+# card for an uploaded resume, and asking to save the draft on Escape. Every
+# click, keystroke and value that reaches it is logged on `window.log`.
+DIALOG_SCRIPT = r"""
 const STEPS = %s;
 window.log = [];
 const outlet = document.createElement('div');
@@ -145,8 +177,76 @@ shadow.addEventListener('change', (e) => {
         window.log.push('rebuilt');
     }, window.uploadDelay);
 }, true);
+// A typeahead that behaves like LinkedIn's: it searches only on keystrokes,
+// it debounces, it renders its list outside the dialog, and it binds an entity
+// only when one of its suggestions is chosen. Typing again abandons whatever
+// was bound, so a string that merely reads right is worth nothing.
+const wireTypeahead = (input) => {
+    const hidden = shadow.getElementById(input.id + '-urn');
+    let box = null;
+    let timer = null;
+    const close = () => {
+        if (box) box.remove();
+        box = null;
+        input.setAttribute('aria-expanded', 'false');
+        input.removeAttribute('aria-owns');
+    };
+    const open = (typed) => {
+        // What the component saw, not what the field holds by the time the
+        // debounce fires. A value set in one shot arrives after the last
+        // keystroke was seen, and this one searches for what it was given.
+        const query = typed.replace(/\s+/g, ' ').trim().toLowerCase();
+        close();
+        if (!query) return;
+        const hits = Object.keys(window.CITIES)
+            .filter((city) => city.toLowerCase().startsWith(query));
+        if (!hits.length) return;
+        // Portalled to the document's body, where the dialog-scoped selectors
+        // cannot see it.
+        box = document.createElement('div');
+        box.id = input.id + '-suggestions';
+        box.setAttribute('role', 'listbox');
+        for (const city of hits) {
+            const option = document.createElement('div');
+            option.setAttribute('role', 'option');
+            // As markup renders it: indented and wrapped, with the
+            // aria-hidden copy LinkedIn puts beside the visible text. Reading
+            // it raw would double the label and match nothing.
+            option.innerHTML = `
+                <span>${city}</span>
+                <span aria-hidden="true">${city}</span>
+            `;
+            option.addEventListener('click', () => {
+                window.log.push('clicked:' + city);
+                // `ignore` is the suggestion LinkedIn offered and then did
+                // nothing with: the text stays as it was typed and the list
+                // stays open, which is the only thing that separates it from
+                // a pick when the answer was spelled out in full.
+                if (window.pickAnswer === 'ignore') return;
+                input.value = city;
+                hidden.value = window.CITIES[city];
+                window.log.push('picked:' + city);
+                close();
+            });
+            box.appendChild(option);
+        }
+        document.body.appendChild(box);
+        input.setAttribute('aria-expanded', 'true');
+        input.setAttribute('aria-owns', box.id);
+        window.log.push('suggested:' + hits.length);
+    };
+    input.addEventListener('keydown', () => setTimeout(() => {
+        hidden.value = '';
+        const typed = input.value;
+        clearTimeout(timer);
+        timer = setTimeout(() => open(typed), window.suggestDelay);
+    }, 0));
+};
 let index = 0;
 const render = () => {
+    for (const stale of document.querySelectorAll('body > [role="listbox"]')) {
+        stale.remove();
+    }
     const step = STEPS[index];
     const last = index === STEPS.length - 1;
     shadow.innerHTML = '<div role="dialog" data-test-modal>'
@@ -166,9 +266,16 @@ const render = () => {
         window.log.push('next');
         let valid = true;
         for (const el of shadow.querySelectorAll('form [required]')) {
+            // A combobox is answered by the entity behind it. Text that was
+            // typed and never picked leaves that empty, and the step refuses.
+            const entity = el.getAttribute('role') === 'combobox'
+                && shadow.getElementById(el.id + '-urn');
+            // What the step was judged on, kept where a later render cannot
+            // take it away.
+            if (entity) window.log.push('entity=' + entity.value);
             const empty = el.type === 'radio'
                 ? !shadow.querySelector(`[name="${el.name}"]:checked`)
-                : !el.value;
+                : entity ? !entity.value : !el.value;
             if (!empty || shadow.getElementById(el.id + '-error')) continue;
             el.setAttribute('aria-describedby', el.id + '-error');
             const error = document.createElement('div');
@@ -179,6 +286,8 @@ const render = () => {
         }
         if (valid) setTimeout(() => { index += 1; render(); }, 100);
     });
+    const combo = shadow.querySelector('[role="combobox"]');
+    if (combo) wireTypeahead(combo);
     const submit = shadow.querySelector('[data-live-test-easy-apply-submit-button]');
     if (submit) submit.addEventListener('click', () => {
         window.log.push('submit');
@@ -235,6 +344,8 @@ def posting(
     follow_style: str = "",
     submit_answer: str = "dialog",
     posting_delay: int = 300,
+    suggest_delay: int = 200,
+    pick_answer: str = "commit",
 ) -> str:
     return (
         "<main>"
@@ -245,6 +356,9 @@ def posting(
         f"window.followStyle = {json.dumps(follow_style)};"
         f"window.submitAnswer = {json.dumps(submit_answer)};"
         f"window.postingDelay = {posting_delay};"
+        f"window.suggestDelay = {suggest_delay};"
+        f"window.pickAnswer = {json.dumps(pick_answer)};"
+        f"window.CITIES = {json.dumps(CITIES)};"
         f"{DIALOG_SCRIPT % json.dumps(steps)}</script>"
     )
 
@@ -280,6 +394,8 @@ def _short_waits(monkeypatch):
     monkeypatch.setattr(job_pages, "_EASY_APPLY_SUBMIT_TIMEOUT", 2.0)
     monkeypatch.setattr(job_pages, "_EASY_APPLY_CONFIRMATION_TIMEOUT", 2.0)
     monkeypatch.setattr(job_pages, "_EASY_APPLY_UPLOAD_TIMEOUT", 4.0)
+    monkeypatch.setattr(job_pages, "_EASY_APPLY_SUGGEST_TIMEOUT", 3.0)
+    monkeypatch.setattr(job_pages, "_EASY_APPLY_PICK_TIMEOUT", 1.5)
 
 
 @pytest.fixture
@@ -300,11 +416,21 @@ async def answer(
     follow_style: str = "",
     submit_answer: str = "dialog",
     posting_delay: int = 300,
+    suggest_delay: int = 200,
+    pick_answer: str = "commit",
 ) -> EasyApplySubmitRead:
     """Answer the synthetic posting's form the way the workflow does."""
     await page.goto(JOB_URL)
     await page.set_content(
-        posting(steps, delay, follow_style, submit_answer, posting_delay)
+        posting(
+            steps,
+            delay,
+            follow_style,
+            submit_answer,
+            posting_delay,
+            suggest_delay,
+            pick_answer,
+        )
     )
     session = PageSession(page)
     reader = JobPageReader(session, PageNavigator(session), PageContentReader(session))
@@ -539,3 +665,169 @@ async def test_a_line_in_the_description_is_not_the_postings_state(dom_page, res
 
     assert result.submitted is True
     assert result.confirmation == ""
+
+
+PARIS = "Paris, Île-de-France, France"
+
+
+def judged_on(events: list[str]) -> list[str]:
+    """The entity the city held each time LinkedIn judged the step.
+
+    Read from the log rather than from the DOM: the hidden control goes with
+    the step that carried it, and what matters is what it held at the moment
+    Next was pressed.
+    """
+    return [
+        event.removeprefix("entity=") for event in events if event.startswith("entity=")
+    ]
+
+
+async def test_a_typeahead_is_answered_by_picking_what_linkedin_offers(dom_page):
+    result = await answer(
+        dom_page, [with_city(), QUESTIONS], {**ALL_ANSWERS, "Location (city)": PARIS}
+    )
+
+    city = {field["label"]: field for field in result.steps[0]["fields"]}
+    assert city["Location (city)"]["value"] == PARIS
+    events = await log(dom_page)
+    # The entity is what LinkedIn stores, and only a chosen suggestion sets it.
+    assert judged_on(events) == [CITIES[PARIS]]
+    assert f"picked:{PARIS}" in events
+    # Typed a character at a time: a value set in one shot never reaches a
+    # search that listens for keystrokes.
+    assert len([e for e in events if e.startswith("city=")]) > 1
+    # And the step was accepted, so its entity was there when Next was pressed.
+    assert result.complete is True
+
+
+async def test_an_answer_no_suggestion_wears_refuses_and_says_what_was_offered(
+    dom_page,
+):
+    with pytest.raises(InvalidAnswerError) as refusal:
+        await answer(
+            dom_page,
+            [with_city(), QUESTIONS],
+            {"Location (city)": "Paris", "First name": "Noor"},
+        )
+
+    message = str(refusal.value)
+    assert "No suggestion is labelled 'Paris'" in message
+    # Both spellings LinkedIn offered, so the retry is one call away.
+    assert PARIS in message and "Paris, Texas, United States" in message
+    assert "Location (city) (typeahead)" in message
+
+
+async def test_a_refused_pick_leaves_the_step_as_linkedin_prefilled_it(dom_page):
+    with pytest.raises(InvalidAnswerError):
+        await answer(
+            dom_page,
+            [with_city(), QUESTIONS],
+            # The city named after the other answer, so the order the edits
+            # run in is the planner's doing rather than the dict's.
+            {"First name": "Noor", "Location (city)": "Nowhere"},
+        )
+
+    events = await log(dom_page)
+    # The pick ran before every other edit, so nothing else was written, and
+    # the fragment it typed was taken back out.
+    assert not any(event.startswith("first=") for event in events)
+    assert "city=" in events
+
+
+async def test_a_prefilled_typeahead_is_replaced_when_an_answer_names_it(dom_page):
+    texas = "Paris, Texas, United States"
+    result = await answer(
+        dom_page,
+        [with_city(texas), QUESTIONS],
+        {**ALL_ANSWERS, "Location (city)": PARIS},
+    )
+
+    city = {field["label"]: field for field in result.steps[0]["fields"]}
+    assert city["Location (city)"]["value"] == PARIS
+    assert judged_on(await log(dom_page)) == [CITIES[PARIS]]
+
+
+async def test_a_prefill_that_already_is_the_answer_is_never_retyped(dom_page):
+    result = await answer(
+        dom_page,
+        [with_city(PARIS), QUESTIONS],
+        {**ALL_ANSWERS, "Location (city)": PARIS},
+    )
+
+    city = {field["label"]: field for field in result.steps[0]["fields"]}
+    assert city["Location (city)"]["value"] == PARIS
+    events = await log(dom_page)
+    # Untouched: LinkedIn's own binding of that text to an entity survived.
+    assert judged_on(events) == [CITIES[PARIS]]
+    assert not any(event.startswith("city=") for event in events)
+
+
+async def test_an_empty_typeahead_no_answer_names_still_refuses(dom_page):
+    with pytest.raises(InvalidAnswerError, match="needs an answer naming it"):
+        await answer(dom_page, [with_city(), QUESTIONS], ALL_ANSWERS)
+
+
+async def test_typing_the_label_and_not_picking_does_not_answer_the_step(dom_page):
+    """What the tests above would look like if the pick never committed.
+
+    The dialog is built to refuse that, because without it every test here
+    would pass for an implementation that types the right string, picks
+    nothing, and sends an application LinkedIn has no entity for.
+    """
+    await dom_page.goto(JOB_URL)
+    await dom_page.set_content(posting([with_city(), QUESTIONS]))
+    await dom_page.locator('main a[href*="/apply"]').click()
+    city = dom_page.locator('[role="dialog"] [id="city"]')
+    await city.wait_for()
+    await city.press_sequentially(PARIS, delay=5)
+    await dom_page.wait_for_timeout(400)
+
+    assert await city.input_value() == PARIS
+    await dom_page.locator(job_pages.EASY_APPLY_NEXT_SELECTOR).click()
+    await dom_page.wait_for_timeout(300)
+
+    assert judged_on(await log(dom_page)) == [""]
+    assert await dom_page.locator('[role="dialog"] [id="city-error"]').count() == 1
+
+
+async def test_a_suggestion_linkedin_does_not_take_refuses(dom_page):
+    """The answer spelled out in full, clicked, and quietly dropped.
+
+    The field reads back as the answer either way, because that is what was
+    typed. Only the list staying open says nothing was chosen.
+    """
+    with pytest.raises(InvalidAnswerError) as refusal:
+        await answer(
+            dom_page,
+            [with_city(), QUESTIONS],
+            {**ALL_ANSWERS, "Location (city)": PARIS},
+            pick_answer="ignore",
+        )
+
+    message = str(refusal.value)
+    assert "LinkedIn did not take it" in message
+    events = await log(dom_page)
+    assert f"clicked:{PARIS}" in events and f"picked:{PARIS}" not in events
+    # And the string that was typed is not left behind as the answer.
+    assert "city=" in events
+
+
+async def test_a_suggestion_is_matched_by_what_it_shows(dom_page):
+    """Not by what its markup holds.
+
+    LinkedIn wraps a suggestion over several indented lines and repeats its
+    text in an aria-hidden copy. Read raw, the label comes back doubled and
+    padded, and an answer wearing the visible text matches nothing.
+    """
+    spaced = "  Paris,   \u00cele-de-France,\n France "
+    assert spaced != PARIS
+
+    result = await answer(
+        dom_page,
+        [with_city(), QUESTIONS],
+        {**ALL_ANSWERS, "Location (city)": spaced},
+    )
+
+    city = {field["label"]: field for field in result.steps[0]["fields"]}
+    assert city["Location (city)"]["value"] == PARIS
+    assert judged_on(await log(dom_page)) == [CITIES[PARIS]]

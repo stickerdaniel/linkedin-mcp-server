@@ -412,9 +412,9 @@ def apply_link_missing_section_error() -> dict[str, str]:
 EasyApplyAnswer = str | bool | list[str]
 
 EASY_APPLY_TYPEAHEAD_REFUSED = (
-    "A typeahead is answered by picking a suggestion that only appears while "
-    "typing, which this server does not do. Answer it once by hand on any Easy "
-    "Apply form and LinkedIn prefills it from then on."
+    "A typeahead is answered by picking one of the suggestions LinkedIn offers "
+    "while the value is typed, so it needs an answer naming it. Name this "
+    "field in the answers with the value to look up."
 )
 
 EASY_APPLY_NO_CONTROL = (
@@ -434,6 +434,55 @@ def easy_apply_answer_refused(field: dict[str, Any], reason: str) -> str:
     if options:
         described += ", options: " + ", ".join(repr(option) for option in options)
     return f"{reason} Field: {described}."
+
+
+# How many of LinkedIn's suggestions a refusal quotes. Enough to recognise the
+# spelling that was meant; a city query that comes back with more than this was
+# too vague to be the answer anyway.
+_EASY_APPLY_QUOTED_SUGGESTIONS = 20
+
+
+def easy_apply_no_suggestion_error(
+    field: dict[str, Any], answer: str, offered: list[str]
+) -> str:
+    """The message for a typeahead whose suggestions never held ``answer``.
+
+    What LinkedIn offered travels with it, because the vocabulary is LinkedIn's
+    and the caller has no other way to learn it: the read cannot publish a list
+    that only exists as a response to a query. One refusal is meant to be
+    enough to write the retry.
+    """
+    if not offered:
+        listed = "LinkedIn offered no suggestions for it."
+    else:
+        quoted = ", ".join(
+            repr(option) for option in offered[:_EASY_APPLY_QUOTED_SUGGESTIONS]
+        )
+        rest = len(offered) - _EASY_APPLY_QUOTED_SUGGESTIONS
+        listed = f"LinkedIn offered {quoted}" + (
+            f" and {rest} more." if rest > 0 else "."
+        )
+    return easy_apply_answer_refused(
+        field, f"No suggestion is labelled {answer!r}. {listed}"
+    )
+
+
+def easy_apply_pick_unconfirmed_error(
+    field: dict[str, Any], answer: str, held: str
+) -> str:
+    """The message for a suggestion that was clicked and did not take.
+
+    The click landed on a suggestion LinkedIn was offering, so what follows is
+    LinkedIn's side of it: the field is left holding something other than the
+    answer, or the list never closed on the pick. Either way nothing was
+    chosen, and saying so beats sending an application whose answer is a string
+    that was typed rather than an entity that was picked.
+    """
+    return easy_apply_answer_refused(
+        field,
+        f"Its suggestion {answer!r} was clicked and LinkedIn did not take it; "
+        f"the field was left holding {held!r}.",
+    )
 
 
 def easy_apply_duplicate_label_error(label: str) -> str:

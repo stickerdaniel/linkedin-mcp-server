@@ -190,9 +190,11 @@ def register_job_tools(
 
         Every run writes to the LinkedIn account, submitted or not: LinkedIn
         saves Easy Apply answers and prefills them into the next application,
-        and an uploaded resume becomes the preselected one. A location
-        typeahead cannot be answered here and refuses unless LinkedIn already
-        prefilled it. An uploaded file has to come back named on the form
+        and an uploaded resume becomes the preselected one. A typeahead is
+        answered by naming it with the value to look up: what lands in the
+        field is a suggestion LinkedIn offered for that value, and an answer
+        none of them wears refuses with the suggestions quoted, so the retry is
+        one call away. An uploaded file has to come back named on the form
         before anything else happens, so a slow upload refuses rather than
         sending the application with the resume it was meant to replace.
 
