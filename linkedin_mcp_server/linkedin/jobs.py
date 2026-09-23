@@ -244,7 +244,9 @@ class JobReader:
             confirmation?}, with form present for Easy Apply postings only and
             shaped as get_easy_apply_form's. follow is the state the
             follow-the-company checkbox ended in, and confirmation is what
-            LinkedIn showed after a submitted application. An answer the form
+            LinkedIn said about a submitted application, its own modal or the
+            posting's applied line; it is absent when neither spoke, which says
+            nothing about whether the application was sent. An answer the form
             refuses raises; a form that could not be walked at all is a section
             error, as is a draft left undiscarded.
         """
@@ -285,7 +287,9 @@ class JobReader:
             result["form"] = {"steps": list(read.steps), "complete": read.complete}
         if read.follow is not None:
             result["follow"] = read.follow
-        if read.confirmation is not None:
+        # Empty is not an account of anything, and a key carrying it reads as
+        # one. Absent says the same thing without the invitation to read it.
+        if read.confirmation:
             result["confirmation"] = read.confirmation
         if not read.discarded:
             result["section_errors"] = {"form": easy_apply_draft_section_error()}
