@@ -481,6 +481,22 @@ def easy_apply_required_unanswered_error(fields: list[dict[str, Any]]) -> str:
     )
 
 
+def easy_apply_upload_unconfirmed_error(names: list[str]) -> str:
+    """The message for a file LinkedIn never showed back.
+
+    Raised rather than reported, because the shape it guards against is an
+    application sent with the resume it was meant to replace. The upload is the
+    one answer whose result cannot be read off the control that took it, so the
+    form showing the file back is the only evidence there is.
+    """
+    named = ", ".join(repr(name) for name in sorted(names))
+    return (
+        f"LinkedIn did not show {named} back on the form after it was "
+        "uploaded, so there is no evidence it was attached and nothing was "
+        "sent. The form may still have been rebuilding; try again."
+    )
+
+
 EASY_APPLY_SUBMIT_UNCONFIRMED = (
     "Submit was clicked and the Easy Apply dialog stayed open, so the "
     "application was probably not sent. Read the form again to see what "

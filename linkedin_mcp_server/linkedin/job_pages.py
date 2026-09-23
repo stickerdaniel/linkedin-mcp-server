@@ -56,6 +56,7 @@ from linkedin_mcp_server.linkedin.job_policy import (
     easy_apply_answer_refused,
     easy_apply_duplicate_label_error,
     easy_apply_required_unanswered_error,
+    easy_apply_upload_unconfirmed_error,
     easy_apply_unknown_answers_error,
     employer_apply_url,
     parse_posting_title,
@@ -494,6 +495,9 @@ _EASY_APPLY_OPEN_TIMEOUT = 10.0
 _EASY_APPLY_STEP_TIMEOUT = 8.0
 _EASY_APPLY_SET_TIMEOUT = 5.0
 _EASY_APPLY_SUBMIT_TIMEOUT = 15.0
+# An upload is a round trip to LinkedIn and a rebuilt step afterwards.
+_EASY_APPLY_UPLOAD_TIMEOUT = 30.0
+_EASY_APPLY_FOLLOW_TRIES = 3
 _EASY_APPLY_DISCARD_TIMEOUT = 5.0
 # How long closing the dialog may hold the page once the walk has ended, a
 # cancelled walk included: the wait for a dialog still opening, Escape, the
@@ -1102,6 +1106,9 @@ class JobPageReader:
         prefills them into the next application, and an uploaded resume becomes
         the preselected one, so a run that submits nothing still changes what
         the next form starts from.
+
+        An uploaded file is waited for until the form names it back, because
+        that is the only account LinkedIn gives of what it is holding.
         """
         kind, _ = await self._read_apply_type(url, job_id, text)
         if kind != "easy_apply":
@@ -1157,11 +1164,12 @@ class JobPageReader:
         while True:
             answered, uploaded = await self._answer_easy_apply_step(step, answers)
             if answered:
-                # Read again rather than reason about what was typed, and after
-                # an upload wait for the step to actually change: LinkedIn only
-                # re-renders it once the file has arrived, and a step that has
-                # merely stopped moving is the step as it was before.
-                step = await self._read_easy_apply_step(step if uploaded else None)
+                # Read again rather than reason about what was typed.
+                step = (
+                    await self._settle_easy_apply_upload(uploaded)
+                    if uploaded
+                    else await self._read_easy_apply_step(None)
+                )
                 used |= answered
             missing = _unanswered_required(step, answered)
             if missing:
@@ -1192,18 +1200,52 @@ class JobPageReader:
             complete=True, submitted=True, follow=follow, confirmation=confirmation
         )
 
+    async def _settle_easy_apply_upload(self, names: set[str]) -> dict[str, Any]:
+        """The step once LinkedIn has named every file in ``names`` back.
+
+        Waiting for the step to change is not enough, and reading it once it
+        stops changing is not either. An upload tears the resume list down
+        before the file arrives, and the torn-down list holds still: two reads
+        agree on it, and what comes back is a form with no resume on it at all.
+        Measured on a live application, which is how this is known.
+
+        So the file itself is the signal, and nothing weaker stands in for it.
+        LinkedIn names an uploaded resume on the card it renders for it, which
+        is the only account this side gets of what it is holding. Refusing a
+        file it never names costs a run that changed nothing; accepting one
+        costs an application sent with the resume it was meant to replace.
+        """
+        deadline = self._session.monotonic() + _EASY_APPLY_UPLOAD_TIMEOUT
+        while True:
+            step = await self._read_easy_apply_step(None)
+            missing = sorted(
+                name
+                for name in names
+                if not any(name in field["label"] for field in step["fields"])
+            )
+            if not missing:
+                return step
+            if self._session.monotonic() >= deadline:
+                raise InvalidAnswerError(easy_apply_upload_unconfirmed_error(missing))
+            await self._session.delay(_APPLY_POLL)
+
     async def _set_follow_company(self, follow: bool) -> bool | None:
         """Leave the follow checkbox as ``follow`` asks; answers its real state.
 
-        Reported rather than assumed, and never worth failing an application
-        over: a checkbox that cannot be reached costs the caller a company in
-        their feed, which is not the irreversible half of this tool.
+        Tried more than once, because the footer is rebuilt along with the rest
+        of the step and a box set while that is happening comes back at
+        LinkedIn's default. Reported rather than assumed either way, and never
+        worth failing an application over: a checkbox that cannot be reached
+        costs the caller a company in their feed, which is not the
+        irreversible half of this tool.
         """
         page = self._session.page
         box = await page.evaluate(EASY_APPLY_FOLLOW_JS)
         if box is None:
             return None
-        if box["checked"] != follow and box["id"]:
+        for _ in range(_EASY_APPLY_FOLLOW_TRIES):
+            if box["checked"] == follow or not box["id"]:
+                break
             control = page.locator(easy_apply_control_selector(box["id"])).first
             timeout = _EASY_APPLY_SET_TIMEOUT * 1000
             try:
@@ -1213,8 +1255,16 @@ class JobPageReader:
                     await control.uncheck(timeout=timeout)
             except Exception as e:
                 logger.warning("Could not set the follow checkbox (%s)", e)
+            await self._session.delay(_APPLY_POLL)
             box = await page.evaluate(EASY_APPLY_FOLLOW_JS)
-        return bool(box and box["checked"])
+            if box is None:
+                return None
+        if box["checked"] != follow:
+            logger.warning(
+                "The follow checkbox stayed %s",
+                "checked" if box["checked"] else "clear",
+            )
+        return bool(box["checked"])
 
     async def _click_easy_apply_submit(self) -> str:
         """Send the application; answers with what LinkedIn showed afterwards.
@@ -1238,13 +1288,14 @@ class JobPageReader:
 
     async def _answer_easy_apply_step(
         self, step: dict[str, Any], answers: Mapping[str, EasyApplyAnswer]
-    ) -> tuple[set[str], bool]:
-        """Fill ``step`` from ``answers``; answers the labels it took, and
-        whether one of them was a file.
+    ) -> tuple[set[str], set[str]]:
+        """Fill ``step`` from ``answers``; answers the labels it took, and the
+        names of any files it uploaded.
 
-        A file is the one answer that travels: LinkedIn takes the upload, and
-        the step only changes once it comes back. The caller needs to know, or
-        it reads the step in the state it was in before the file arrived.
+        A file is the one answer that travels: LinkedIn takes the upload, tears
+        the step's resume list down and rebuilds it around the new file. The
+        names come back because the rebuilt list showing them is the only
+        evidence that the upload landed.
 
         The whole step is resolved before anything is touched, so a refusal
         leaves the dialog holding what LinkedIn prefilled. Every control is
@@ -1270,7 +1321,9 @@ class JobPageReader:
                 # input behind an upload button, and an upload is the one thing
                 # a locator does without the element being shown.
                 await control.set_input_files(edit.value, timeout=timeout)
-        return used, any(edit.action == "upload" for edit in edits)
+        return used, {
+            Path(edit.value).name for edit in edits if edit.action == "upload"
+        }
 
     async def _read_easy_apply_step(
         self, previous: dict[str, Any] | None

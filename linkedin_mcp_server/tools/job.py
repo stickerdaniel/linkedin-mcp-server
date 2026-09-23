@@ -192,7 +192,9 @@ def register_job_tools(
         saves Easy Apply answers and prefills them into the next application,
         and an uploaded resume becomes the preselected one. A location
         typeahead cannot be answered here and refuses unless LinkedIn already
-        prefilled it.
+        prefilled it. An uploaded file has to come back named on the form
+        before anything else happens, so a slow upload refuses rather than
+        sending the application with the resume it was meant to replace.
 
         Args:
             job_id: LinkedIn job ID (e.g., "4252026496", "3856789012")

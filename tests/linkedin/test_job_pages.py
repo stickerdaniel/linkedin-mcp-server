@@ -1733,7 +1733,7 @@ class TestAnswerEasyApplyStep:
 
         assert await _reader(mock_page)._answer_easy_apply_step(step, {}) == (
             set(),
-            False,
+            set(),
         )
         assert done == []
         with pytest.raises(InvalidAnswerError, match="typeahead"):
@@ -1849,6 +1849,13 @@ class _Dialog:
         self.confirmation = "Your application was sent to Acme"
         self.refuse: dict[int, dict[str, str]] = {}
         self.stuck: set[int] = set()
+        self.cards: list[str] = []
+        self.pending: str | None = None
+        self.rebuild_in = 0
+        #: How many settled reads the torn-down list survives before the file
+        #: arrives. 0 rebuilds it before the first read back.
+        self.tear_down_reads = 0
+        self.follow_resets = 0
         self.log: list[Any] = []
         page.evaluate = AsyncMock(side_effect=self._evaluate)
         page.keyboard.press = AsyncMock(side_effect=lambda key: self.log.append(key))
@@ -1858,7 +1865,24 @@ class _Dialog:
         if script is job_pages_module.EASY_APPLY_STEP_JS:
             if not self.open:
                 return None
+            if self.pending is not None:
+                if self.rebuild_in <= 0:
+                    self.cards.append(self.pending)
+                    self.pending = None
+                else:
+                    self.rebuild_in -= 1
             step = copy.deepcopy(self.steps[self.index])
+            step["fields"] += [
+                {
+                    "label": f"Deselect resume {name}",
+                    "type": "radio",
+                    "required": False,
+                    "options": [f"Deselect resume {name}"],
+                    "selected": [f"Deselect resume {name}"],
+                    "ids": [f"card-{name}"],
+                }
+                for name in self.cards
+            ]
             step["signature"] = repr(
                 [step["heading"], step["progress"]]
                 + [i for field in step["fields"] for i in field.get("ids", [])]
@@ -1938,6 +1962,10 @@ class _Dialog:
         self.log.append((control_id, action, value))
         if control_id == "follow":
             self.follow = action == "check"
+            if self.follow_resets:
+                # A re-render restoring LinkedIn's default under the answer.
+                self.follow_resets -= 1
+                self.follow = True
             return
         for field in self.steps[self.index]["fields"]:
             ids = field.get("ids") or []
@@ -1946,20 +1974,15 @@ class _Dialog:
             if action in ("fill", "select"):
                 field["value"] = value
             elif action == "upload":
-                # What the walk has to survive: LinkedIn re-renders the step
-                # around the card for the file just uploaded, so the step's
-                # controls change although the step did not move.
+                # What the walk has to survive, measured live: LinkedIn tears
+                # the resume list down when the upload starts and rebuilds it
+                # around the new file only once that file has arrived. The
+                # torn-down list holds still in between, so reads agree on a
+                # step with no resume on it at all.
                 field["ids"] = [f"{control_id}-again"]
-                self.steps[self.index]["fields"].append(
-                    {
-                        "label": f"Deselect resume {value.rsplit('/', 1)[-1]}",
-                        "type": "radio",
-                        "required": False,
-                        "options": ["card"],
-                        "selected": ["card"],
-                        "ids": ["card"],
-                    }
-                )
+                self.cards.clear()
+                self.rebuild_in = self.tear_down_reads
+                self.pending = value.rsplit("/", 1)[-1]
             else:
                 option = field["options"][ids.index(control_id)]
                 selected = set(field.get("selected") or [])
@@ -2133,6 +2156,75 @@ class TestSubmitEasyApply:
             "Upload resume",
             "Deselect resume resume.pdf",
         ]
+
+    async def test_a_resume_list_still_rebuilding_is_waited_out(
+        self, mock_page, tmp_path
+    ):
+        # The live failure: the upload empties the list, the empty list holds
+        # still, and two reads agreeing on it is not the file having arrived.
+        resume = tmp_path / "resume.pdf"
+        resume.write_bytes(b"%PDF-1.7")
+        steps = copy.deepcopy(self.QUESTIONS)
+        steps[0]["fields"].append(
+            {"label": "Upload resume", "type": "file", "required": False, "ids": ["cv"]}
+        )
+        dialog, run, reader, _, _ = self._run(mock_page, steps)
+        dialog.tear_down_reads = 4
+
+        with run:
+            result = await reader.submit_easy_apply(
+                self.URL,
+                "123",
+                JOB_APPLY_EN_US,
+                {**self.ANSWERS, "Upload resume": str(resume)},
+                confirm_submit=True,
+            )
+
+        assert result.submitted is True
+        assert "Deselect resume resume.pdf" in [
+            field["label"] for field in result.steps[0]["fields"]
+        ]
+
+    async def test_a_file_linkedin_never_shows_back_is_not_submitted(
+        self, mock_page, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(job_pages_module, "_EASY_APPLY_UPLOAD_TIMEOUT", 0)
+        resume = tmp_path / "resume.pdf"
+        resume.write_bytes(b"%PDF-1.7")
+        steps = copy.deepcopy(self.QUESTIONS)
+        steps[0]["fields"].append(
+            {"label": "Upload resume", "type": "file", "required": False, "ids": ["cv"]}
+        )
+        dialog, run, reader, _, _ = self._run(mock_page, steps)
+        dialog.tear_down_reads = 99
+
+        with run:
+            with pytest.raises(InvalidAnswerError, match="did not show 'resume.pdf'"):
+                await reader.submit_easy_apply(
+                    self.URL,
+                    "123",
+                    JOB_APPLY_EN_US,
+                    {**self.ANSWERS, "Upload resume": str(resume)},
+                    confirm_submit=True,
+                )
+
+        assert "submit" not in dialog.log
+        assert "discard" in dialog.log
+
+    async def test_a_follow_checkbox_a_re_render_resets_is_set_again(self, mock_page):
+        dialog, run, reader, answers, _ = self._run(mock_page)
+        dialog.follow_resets = 1
+
+        with run:
+            result = await reader.submit_easy_apply(
+                self.URL, "123", JOB_APPLY_EN_US, answers, confirm_submit=True
+            )
+
+        assert [entry for entry in dialog.log if entry[0] == "follow"] == [
+            ("follow", "uncheck", ""),
+            ("follow", "uncheck", ""),
+        ]
+        assert result.follow is False
 
     async def test_a_step_that_neither_moves_nor_complains_ends_the_run(
         self, mock_page
