@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import asyncio
+import re
 import time
 
 import anyio
 import pytest
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
-from linkedin_mcp_server.core.exceptions import AuthenticationError
+from linkedin_mcp_server.core.exceptions import (
+    AuthenticationError,
+    InvalidAnswerError,
+)
 from linkedin_mcp_server.linkedin import job_pages as job_pages_module
 from linkedin_mcp_server.linkedin.content import PageContentReader
 from linkedin_mcp_server.linkedin.contracts import (
@@ -1573,3 +1578,269 @@ class TestReadEasyApplyForm:
 
         assert discarded.is_set()
         assert spent < 0.05
+
+class TestAnswerEasyApplyStep:
+    """Filling one step of the Easy Apply dialog from label-keyed answers."""
+
+    CONTACT: dict[str, Any] = {
+        "heading": "Contact info",
+        "progress": 0,
+        "fields": [
+            {
+                "label": "First name",
+                "type": "text",
+                "required": True,
+                "value": "Ada",
+                "ids": ["first"],
+            },
+            {
+                "label": "Email address",
+                "type": "select",
+                "required": True,
+                "options": ["Select an option", "me@example.com"],
+                "value": "Select an option",
+                "ids": ["email"],
+            },
+            {
+                "label": "Authorized to work in France?",
+                "type": "radio",
+                "required": True,
+                "options": ["Yes", "No"],
+                "selected": [],
+                "ids": ["yes", "no"],
+            },
+            {
+                "label": "Why Acme?",
+                "type": "textarea",
+                "required": False,
+                "max_length": 20,
+                "ids": ["why"],
+            },
+            {
+                "label": "Upload resume",
+                "type": "file",
+                "required": False,
+                "ids": ["cv"],
+            },
+        ],
+    }
+
+    @staticmethod
+    def _dialog(mock_page) -> list[tuple[str, str, str]]:
+        """Route locators to per-control doubles that record what reached them."""
+        done: list[tuple[str, str, str]] = []
+
+        def locator_for(selector: str):
+            match = re.search(r'\[id="(.*?)"\]', selector)
+            assert match is not None
+            control_id = match.group(1)
+            control = MagicMock()
+            control.first = control
+            control.fill = AsyncMock(
+                side_effect=lambda value, **_: done.append((control_id, "fill", value))
+            )
+            control.select_option = AsyncMock(
+                side_effect=lambda label, **_: done.append(
+                    (control_id, "select", label)
+                )
+            )
+            control.check = AsyncMock(
+                side_effect=lambda **_: done.append((control_id, "check", ""))
+            )
+            control.uncheck = AsyncMock(
+                side_effect=lambda **_: done.append((control_id, "uncheck", ""))
+            )
+            control.set_input_files = AsyncMock(
+                side_effect=lambda files, **_: done.append(
+                    (control_id, "upload", files)
+                )
+            )
+            return control
+
+        mock_page.locator.side_effect = locator_for
+        return done
+
+    async def test_every_control_type_is_set_the_way_it_is_answered(
+        self, mock_page, tmp_path
+    ):
+        resume = tmp_path / "resume.pdf"
+        resume.write_bytes(b"%PDF-1.7")
+        done = self._dialog(mock_page)
+
+        used = await _reader(mock_page)._answer_easy_apply_step(
+            self.CONTACT,
+            {
+                "First name": "Noor",
+                "Email address": "me@example.com",
+                "Authorized to work in France?": "Yes",
+                "Why Acme?": "Agents.",
+                "Upload resume": str(resume),
+            },
+        )
+
+        assert done == [
+            ("first", "fill", "Noor"),
+            ("email", "select", "me@example.com"),
+            ("yes", "check", ""),
+            ("why", "fill", "Agents."),
+            ("cv", "upload", str(resume)),
+        ]
+        assert used == {
+            "First name",
+            "Email address",
+            "Authorized to work in France?",
+            "Why Acme?",
+            "Upload resume",
+        }
+
+    async def test_a_field_no_answer_names_is_left_alone(self, mock_page):
+        done = self._dialog(mock_page)
+
+        used = await _reader(mock_page)._answer_easy_apply_step(
+            self.CONTACT, {"First name": "Noor"}
+        )
+
+        assert done == [("first", "fill", "Noor")]
+        assert used == {"First name"}
+
+    async def test_an_answer_the_step_does_not_ask_for_is_left_for_another(
+        self, mock_page
+    ):
+        done = self._dialog(mock_page)
+
+        used = await _reader(mock_page)._answer_easy_apply_step(
+            self.CONTACT, {"Years of Python": "5"}
+        )
+
+        assert done == []
+        assert used == set()
+
+    def test_an_answer_no_step_asked_for_refuses(self):
+        with pytest.raises(InvalidAnswerError, match="'Years of Python'"):
+            job_pages_module.refuse_unused_easy_apply_answers(
+                {"First name": "Noor", "Years of Python": "5"}, {"First name"}
+            )
+
+    async def test_two_fields_sharing_a_label_refuse_rather_than_pick_one(
+        self, mock_page
+    ):
+        twice = dict(
+            self.CONTACT,
+            fields=[
+                dict(self.CONTACT["fields"][0]),
+                dict(self.CONTACT["fields"][0], ids=["second"]),
+            ],
+        )
+        done = self._dialog(mock_page)
+
+        with pytest.raises(InvalidAnswerError, match="both labelled 'First name'"):
+            await _reader(mock_page)._answer_easy_apply_step(twice, {"First name": "S"})
+        assert done == []
+
+    async def test_an_empty_typeahead_refuses_even_unanswered(self, mock_page):
+        step = dict(
+            self.CONTACT,
+            fields=[
+                *self.CONTACT["fields"],
+                {
+                    "label": "Location (city)",
+                    "type": "typeahead",
+                    "required": True,
+                    "ids": ["city"],
+                },
+            ],
+        )
+        done = self._dialog(mock_page)
+
+        with pytest.raises(InvalidAnswerError, match="typeahead"):
+            await _reader(mock_page)._answer_easy_apply_step(
+                step, {"First name": "Noor"}
+            )
+        assert done == []
+
+    async def test_a_prefilled_typeahead_is_kept_and_never_answered(self, mock_page):
+        city = {
+            "label": "Location (city)",
+            "type": "typeahead",
+            "required": True,
+            "value": "Paris",
+            "ids": ["city"],
+        }
+        step = dict(self.CONTACT, fields=[city])
+        done = self._dialog(mock_page)
+
+        assert await _reader(mock_page)._answer_easy_apply_step(step, {}) == set()
+        assert done == []
+        with pytest.raises(InvalidAnswerError, match="typeahead"):
+            await _reader(mock_page)._answer_easy_apply_step(
+                step, {"Location (city)": "Lyon"}
+            )
+
+    def test_a_refusal_names_the_field_and_what_it_takes(self):
+        email = self.CONTACT["fields"][1]
+
+        with pytest.raises(InvalidAnswerError) as refusal:
+            job_pages_module.plan_easy_apply_answer(email, "me@acme.test")
+
+        message = str(refusal.value)
+        assert "No option is labelled 'me@acme.test'" in message
+        assert "Email address (select)" in message
+        assert "'me@example.com'" in message
+
+    def test_an_option_no_radio_carries_refuses(self):
+        with pytest.raises(InvalidAnswerError, match="No option is labelled 'Maybe'"):
+            job_pages_module.plan_easy_apply_answer(self.CONTACT["fields"][2], "Maybe")
+
+    def test_a_checkbox_group_is_set_to_exactly_what_the_answer_names(self):
+        field = {
+            "label": "Which apply?",
+            "type": "checkbox",
+            "required": False,
+            "options": ["Python", "Go", "Rust"],
+            "selected": ["Go", "Rust"],
+            "ids": ["py", "go", "rs"],
+        }
+
+        edits = job_pages_module.plan_easy_apply_answer(field, ["Python", "Go"])
+
+        assert edits == [
+            job_pages_module.EasyApplyEdit("py", "check", "Python"),
+            job_pages_module.EasyApplyEdit("rs", "uncheck", "Rust"),
+        ]
+
+    def test_a_lone_checkbox_takes_yes_or_no(self):
+        field = {
+            "label": "I agree",
+            "type": "checkbox",
+            "required": True,
+            "options": ["I agree"],
+            "selected": [],
+            "ids": ["agree"],
+        }
+
+        assert job_pages_module.plan_easy_apply_answer(field, True) == [
+            job_pages_module.EasyApplyEdit("agree", "check", "I agree")
+        ]
+        assert job_pages_module.plan_easy_apply_answer(field, False) == []
+
+    def test_an_answer_longer_than_the_field_holds_refuses(self):
+        with pytest.raises(InvalidAnswerError, match="LinkedIn would cut it"):
+            job_pages_module.plan_easy_apply_answer(self.CONTACT["fields"][3], "x" * 21)
+
+    def test_a_resume_that_is_not_there_refuses(self, tmp_path):
+        missing = str(tmp_path / "nope.pdf")
+
+        with pytest.raises(InvalidAnswerError, match="There is no file at"):
+            job_pages_module.plan_easy_apply_answer(self.CONTACT["fields"][4], missing)
+
+    def test_a_control_linkedin_gave_no_id_refuses(self):
+        field = dict(self.CONTACT["fields"][0], ids=[""])
+
+        with pytest.raises(InvalidAnswerError, match="no id"):
+            job_pages_module.plan_easy_apply_answer(field, "Noor")
+
+    def test_a_control_is_addressed_inside_the_dialog_only(self):
+        selector = job_pages_module.easy_apply_control_selector("first")
+
+        assert selector.count('[id="first"]') == 3
+        assert all(part.startswith('[role="dialog"]') for part in selector.split(", "))
