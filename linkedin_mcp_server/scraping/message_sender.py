@@ -895,7 +895,6 @@ _PROFILE_PATH_RE = re.compile(r"^/in/[^/?#]+/$")
 # encoded slash and let one path pose as another. The id identifies nobody on
 # its own, and the recipient is proven by the composer rather than this path.
 _MESSAGE_THREAD_PATH_RE = re.compile(r"^/messaging/thread/[A-Za-z0-9_=-]+/$")
-_PROFILE_URN_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _PROFILE_URN_PREFIX = "urn:li:fsd_profile:"
 
 
@@ -945,10 +944,11 @@ def _normalize_profile_urn(value: str | None) -> str | None:
     """Return the identifier carried by a profile URN or raw recipient value."""
     if not isinstance(value, str):
         return None
-    candidate = value.strip()
-    if candidate.startswith(_PROFILE_URN_PREFIX):
-        candidate = candidate[len(_PROFILE_URN_PREFIX) :]
-    return candidate if _PROFILE_URN_RE.fullmatch(candidate) else None
+    try:
+        candidate = normalize_profile_urn(value)
+    except LinkedInScraperException:
+        return None
+    return candidate.removeprefix(_PROFILE_URN_PREFIX)
 
 
 def _profile_path_from_url(value: str) -> str | None:

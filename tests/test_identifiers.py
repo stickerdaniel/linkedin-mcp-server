@@ -354,12 +354,23 @@ class TestReferencesThisServerEmits:
     def test_thread_id_still_passes_through(self):
         assert normalize_thread_id("2-abc123") == "2-abc123"
 
+    @pytest.mark.parametrize(
+        "value",
+        [PROFILE_ID, f"urn:li:fsd_profile:{PROFILE_ID}"],
+    )
+    def test_profile_urn_preserves_each_supported_form(self, value: str):
+        assert normalize_profile_urn(value) == value
+
     def test_profile_urn_is_trimmed(self):
         assert normalize_profile_urn(f" {PROFILE_ID} ") == PROFILE_ID
 
-    def test_profile_urn_refuses_a_path(self):
+    @pytest.mark.parametrize(
+        "value",
+        ["/feed/", "urn:li:company:123", "urn:li:fsd_profile:"],
+    )
+    def test_profile_urn_refuses_a_non_profile_value(self, value: str):
         with pytest.raises(InvalidReferenceError, match="profile_urn"):
-            normalize_profile_urn("/feed/")
+            normalize_profile_urn(value)
 
     def test_job_reference_yields_the_id(self):
         assert normalize_job_id("/jobs/view/4252026496/") == "4252026496"

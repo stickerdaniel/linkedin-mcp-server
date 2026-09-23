@@ -135,6 +135,28 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
             },
             "profile_urn is not a LinkedIn id",
         ),
+        (
+            "messaging",
+            "send_message",
+            {
+                "linkedin_username": "alice",
+                "profile_urn": "urn:li:company:123",
+                "message": "Hello",
+                "confirm_send": False,
+            },
+            "profile_urn is not a LinkedIn id",
+        ),
+        (
+            "messaging",
+            "send_message",
+            {
+                "linkedin_username": "alice",
+                "profile_urn": "urn:li:fsd_profile:",
+                "message": "Hello",
+                "confirm_send": False,
+            },
+            "profile_urn is not a LinkedIn id",
+        ),
     ],
 )
 async def test_invalid_reference_is_rejected_before_extractor(

@@ -142,6 +142,9 @@ _THREAD_ROUTE = ("messaging", "thread")
 # page load to discover.
 _NUMERIC_ID = re.compile(r"^[0-9]+$")
 
+_PROFILE_URN_PREFIX = "urn:li:fsd_profile:"
+_PROFILE_URN_ID = re.compile(r"^[A-Za-z0-9_-]+$")
+
 
 def _decoded(value: str) -> str | None:
     """The value with at most one layer of percent-encoding removed."""
@@ -478,9 +481,12 @@ def normalize_thread_id(value: str) -> str:
 
 
 def normalize_profile_urn(value: str) -> str:
-    """A caller-supplied profile id, refused when it is a path or a URL.
-
-    ``send_message`` compares this after stripping a ``urn:li:fsd_profile:``
-    prefix, so that form stays intact here.
-    """
-    return normalize_opaque_id(value, field="profile_urn")
+    """A raw profile id or full profile URN, in the caller's original form."""
+    value = value.strip()
+    identifier = value.removeprefix(_PROFILE_URN_PREFIX)
+    if not _PROFILE_URN_ID.fullmatch(identifier):
+        raise InvalidReferenceError(
+            "profile_urn is not a LinkedIn id. Pass the id exactly as a previous "
+            "result returned it, with no URL, path or query around it."
+        )
+    return value
