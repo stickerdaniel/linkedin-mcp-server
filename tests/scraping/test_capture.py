@@ -30,7 +30,11 @@ from linkedin_mcp_server.scraping.contracts import (
 )
 from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.session import ScrapingSession
-from linkedin_mcp_server.scraping.text import DetailCaptureTextTable
+from linkedin_mcp_server.scraping.text import (
+    JOB_POSTING_EN_US,
+    DetailCaptureTextTable,
+    JobPostingTextTable,
+)
 
 
 def _capture(page) -> SectionCapture:
@@ -509,6 +513,131 @@ class TestActivityFeedExtraction:
         expansion.filter.assert_called_once_with(
             has_text=detail_text.expansion_button_pattern
         )
+
+    async def test_job_posting_waits_for_description_before_scrolling(self, mock_page):
+        events: list[str] = []
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "source": "root",
+                "text": "About the job\nBuild things",
+                "references": [],
+            }
+        )
+        mock_page.wait_for_function = AsyncMock(
+            side_effect=lambda *_, **__: events.append("wait")
+        )
+        capture = _capture(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.session.scroll_to_bottom",
+                new_callable=AsyncMock,
+                side_effect=lambda *_, **__: events.append("scroll"),
+            ) as mock_scroll,
+            patch(
+                "linkedin_mcp_server.scraping.session.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            result = await capture._capture_once(
+                "https://www.linkedin.com/jobs/view/12345/",
+                section_name="job_posting",
+                plan=CapturePlan(CaptureMode.JOB_POSTING),
+            )
+
+        mock_page.wait_for_function.assert_awaited_once_with(
+            JOB_POSTING_EN_US.readiness_expression(), timeout=10000
+        )
+        assert events == ["wait", "scroll"]
+        _, kwargs = mock_scroll.call_args
+        assert kwargs["pause_time"] == 0.5
+        assert kwargs["max_scrolls"] == 5
+        assert result.text == "About the job\nBuild things"
+
+    async def test_job_posting_consumes_injected_text_policy(self, mock_page):
+        mock_page.evaluate = AsyncMock(
+            return_value={"source": "root", "text": "Posting", "references": []}
+        )
+        mock_page.wait_for_function = AsyncMock()
+        session = ScrapingSession(mock_page)
+        capture = SectionCapture(
+            session,
+            PageNavigator(session),
+            PageContentReader(session),
+            job_posting_text=JobPostingTextTable(
+                description_headings=("Mutated heading",)
+            ),
+        )
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.session.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            await capture._capture_once(
+                "https://www.linkedin.com/jobs/view/12345/",
+                section_name="job_posting",
+                plan=CapturePlan(CaptureMode.JOB_POSTING),
+            )
+
+        wait_args = mock_page.wait_for_function.await_args
+        assert wait_args is not None
+        assert '["Mutated heading"]' in wait_args.args[0]
+        assert "About the job" not in wait_args.args[0]
+
+    async def test_job_posting_timeout_still_extracts_what_rendered(self, mock_page):
+        from patchright.async_api import TimeoutError as PlaywrightTimeoutError
+
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "source": "root",
+                "text": "Software Engineer\nApply",
+                "references": [],
+            }
+        )
+        mock_page.wait_for_function = AsyncMock(
+            side_effect=PlaywrightTimeoutError("description never appeared")
+        )
+        capture = _capture(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.session.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ) as mock_scroll,
+            patch(
+                "linkedin_mcp_server.scraping.session.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            result = await capture._capture_once(
+                "https://www.linkedin.com/jobs/view/12345/",
+                section_name="job_posting",
+                plan=CapturePlan(CaptureMode.JOB_POSTING),
+            )
+
+        mock_page.wait_for_function.assert_awaited_once()
+        mock_scroll.assert_awaited_once()
+        assert result.text == "Software Engineer\nApply"
+        assert result.error is None
 
     async def test_max_scrolls_override_passed_to_scroll_to_bottom(self, mock_page):
         """Custom max_scrolls on a detail page overrides the default of 5."""
