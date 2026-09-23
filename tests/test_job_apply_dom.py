@@ -245,6 +245,30 @@ async def test_a_destination_inside_this_host_is_never_loaded(dom_page, requeste
     assert not any("127.0.0.1" in url for url in requested)
 
 
+async def test_a_tab_naming_this_host_is_refused_before_it_loads(dom_page, requested):
+    """A tab opened straight onto the loopback is never asked for.
+
+    The dialog cases above are refused by the policy, which the tab path never
+    reaches: LinkedIn, not this code, navigates the tab, so an address read off
+    the loaded tab has already been fetched by the time it is judged.
+    """
+    html = posting(EXTERNAL, script=click_opens_tab("http://127.0.0.1:9/x"))
+
+    assert await read(dom_page, html) == JobApplyRead("external")
+    assert not any("127.0.0.1" in url for url in requested)
+
+
+async def test_a_tabs_address_is_read_without_loading_it(dom_page, requested, employer):
+    """The interstitial names its destination, so the tab need not be loaded."""
+    interstitial = safety(f"{employer}/short")
+    html = posting(EXTERNAL, script=click_opens_tab(interstitial))
+
+    assert await read(dom_page, html) == JobApplyRead(
+        "external", f"{employer}/acme/jobs/1"
+    )
+    assert interstitial not in requested
+
+
 async def test_a_name_resolving_into_this_host_is_never_loaded(
     dom_page, requested, monkeypatch
 ):

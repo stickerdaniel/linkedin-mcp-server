@@ -18,7 +18,7 @@ import re
 import socket
 import time
 
-from patchright.async_api import Page
+from patchright.async_api import Page, Request, Route
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.core.exceptions import LinkedInScraperException
@@ -252,6 +252,10 @@ DIALOG_REDIRECT_JS = r"""(redirectPath) => {
 # everywhere else.
 _APPLY_READY_TIMEOUT = 10.0
 _APPLY_ANSWER_TIMEOUT = 10.0
+#: How long a refused tab gets to arrive as a page of its own. Refusing its
+#: document answers before the tab exists, and a tab nobody closes outlives the
+#: call.
+_TAB_ARRIVES_TIMEOUT = 1.0
 _APPLY_POLL = 0.25
 _EMPLOYER_LOAD_TIMEOUT = 30.0
 
@@ -277,6 +281,18 @@ async def _resolves_off_this_host(destination: str) -> bool:
         return True
     # A sockaddr's first element is the address; the annotation widens it.
     return all(reaches_the_public_internet(str(answer[4][0])) for answer in answers)
+
+
+# A tab's first document is issued before the tab's frame exists, so asking
+# that request for its frame is what tells the two apart. The `window.open('',
+# '_blank')`-then-assign shape has a frame by the time it navigates, and is
+# caught by the frame belonging to another page instead.
+def _is_this_pages_own(request: Request, page: Page) -> bool:
+    """Whether ``request`` is the driven page's own document, not a tab's."""
+    try:
+        return request.frame.page is page
+    except Exception:
+        return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -419,16 +435,37 @@ class JobPageReader:
         The button clicked is the one the read chose, found again by the same
         boundary and clicked through a mark, so a "More jobs" card carrying the
         same word cannot take the click. Whichever answers is read: a dialog
-        carrying the interstitial link, or a tab LinkedIn opens, whose first
-        address is read and which is closed without waiting for it to load.
+        carrying the interstitial link, or a tab LinkedIn opens.
+
+        A tab is read from the request that would have loaded it, and that
+        request is refused, so the address is learned without being fetched.
+        Reading it off the loaded tab instead would mean the browser had
+        already asked for it, and an interstitial names its destination in a
+        query parameter, which `employer_apply_url` answers with: the tab
+        carries nothing that loading it would add. Whatever it names is then
+        judged and loaded by `_follow_to_employer` like any other destination.
         """
         page = self._session.page
         opened: list[Page] = []
+        offered: list[str] = []
 
         def record(tab: Page) -> None:
             opened.append(tab)
 
+        async def refuse_a_tabs_document(intercepted: Route) -> None:
+            request = intercepted.request
+            if request.is_navigation_request() and not _is_this_pages_own(
+                request, page
+            ):
+                offered.append(request.url)
+                await intercepted.abort()
+                return
+            # Deferred rather than continued: another handler may own this one,
+            # and continuing would answer past it.
+            await intercepted.fallback()
+
         page.context.on("page", record)
+        await page.context.route("**/*", refuse_a_tabs_document)
         try:
             marked = await page.evaluate(
                 MARK_EXTERNAL_APPLY_JS,
@@ -443,18 +480,25 @@ class JobPageReader:
             await button.first.click(timeout=5000)
             deadline = self._session.monotonic() + _APPLY_ANSWER_TIMEOUT
             while self._session.monotonic() < deadline:
-                if opened:
-                    if opened[0].url not in ("", "about:blank"):
-                        return employer_apply_url(opened[0].url)
-                else:
-                    href = await page.evaluate(DIALOG_REDIRECT_JS, SAFETY_REDIRECT_PATH)
-                    if isinstance(href, str):
-                        return employer_apply_url(href)
+                if offered:
+                    return employer_apply_url(offered[0])
+                # A tab that has opened but not yet named an address is still
+                # answered here: it reaches the refusal above when it navigates.
+                href = await page.evaluate(DIALOG_REDIRECT_JS, SAFETY_REDIRECT_PATH)
+                if isinstance(href, str):
+                    return employer_apply_url(href)
                 await self._session.delay(_APPLY_POLL)
             return None
         finally:
+            await page.context.unroute("**/*", refuse_a_tabs_document)
+            if offered and not opened:
+                # `record` is still listening, and fills `opened` from here.
+                with suppress(Exception):
+                    await page.context.wait_for_event(
+                        "page", timeout=_TAB_ARRIVES_TIMEOUT * 1000
+                    )
             page.context.remove_listener("page", record)
-            for tab in opened:
+            for tab in dict.fromkeys(opened):
                 with suppress(Exception):
                     await tab.close()
 
@@ -467,6 +511,19 @@ class JobPageReader:
         employer's address. A destination that resolves back into this host is
         not loaded at all and answers None, which reads to the caller as a
         posting whose link could not be read.
+
+        What the hops after it answer with is not judged, because nothing on
+        this side can judge it. A route sees a navigation's first request and
+        not the hop it redirects to, and fulfilling that hop's response does
+        not bring the next one back through the route either. The request API,
+        which can be asked for one hop at a time, resolves in the driver rather
+        than in the browser: it cannot see `--host-resolver-rules`, and under a
+        proxy that resolves for the browser it would not resolve the name at
+        all. Walking the chain there would judge one resolution and load
+        another, which is the rebinding it was meant to answer. The bound is
+        that a destination is loaded and never read: the address the tool
+        answers with passes through `employer_apply_url`, so a hop into private
+        space is never reported, only fetched.
         """
         if not await _resolves_off_this_host(destination):
             logger.debug("Refused an apply destination resolving into this host")
