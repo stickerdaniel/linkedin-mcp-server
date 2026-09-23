@@ -71,7 +71,8 @@ def register_company_tools(
             that facet.
         """
         try:
-            company_name = normalize_company_identifier(company_name)
+            # Validate before starting the browser; the scraper normalizes the original reference.
+            normalize_company_identifier(company_name)
             extractor = extractor or await get_ready_extractor(
                 ctx, tool_name="get_company_profile"
             )
@@ -259,7 +260,8 @@ def register_company_tools(
             References include /in/ profile paths for listed employees.
         """
         try:
-            company_name = normalize_company_identifier(company_name)
+            # Preserve the reference for the scraper's single normalization pass.
+            normalize_company_identifier(company_name)
             extractor = extractor or await get_ready_extractor(
                 ctx, tool_name="get_company_employees"
             )

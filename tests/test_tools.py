@@ -700,7 +700,42 @@ class TestCompanyTools:
         )
         assert "about" in result["sections"]
         assert "pages_visited" not in result
-        assert mock_extractor.scrape_company.await_args.args[0] == "testcorp"
+        assert (
+            mock_extractor.scrape_company.await_args.args[0]
+            == "https://uk.linkedin.com/company/testcorp/"
+        )
+
+    @pytest.mark.parametrize(
+        "tool_name", ["get_company_profile", "get_company_employees"]
+    )
+    @pytest.mark.parametrize("slug", ["linkedin.com", "lnkd.in"])
+    async def test_company_collision_slug_reaches_scraper(
+        self, mock_context, tool_name, slug
+    ):
+        from linkedin_mcp_server.scraping.company import CompanyScraper
+        from linkedin_mcp_server.tools.company import register_company_tools
+
+        capture = MagicMock()
+        capture.capture = AsyncMock(
+            return_value=ExtractedSection(text="company text", references=[])
+        )
+        scraper = CompanyScraper(MagicMock(), capture)
+        mcp = FastMCP("test")
+        register_company_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, tool_name)
+        result = await tool_fn(f"/company/{slug}/", mock_context, extractor=scraper)
+
+        suffix = "/" if tool_name == "get_company_profile" else "/people/"
+        url = f"https://www.linkedin.com/company/{slug}{suffix}"
+        assert result["url"] == url
+        assert result["sections"]
+        capture.capture.assert_awaited_once()
+        assert capture.capture.await_args is not None
+        capture_suffix = "/about/" if tool_name == "get_company_profile" else suffix
+        assert capture.capture.await_args.args[0] == (
+            f"https://www.linkedin.com/company/{slug}{capture_suffix}"
+        )
 
     async def test_get_company_posts_normalizes_a_pasted_link(self, mock_context):
         """get_company_posts builds its URL in the tool, not in the extractor.
@@ -1621,7 +1656,7 @@ class TestGetCompanyEmployeesTool:
         )
         assert "employees" in result["sections"]
         mock_extractor.get_company_employees.assert_awaited_once_with(
-            "anthropic", keywords=None
+            "https://www.linkedin.com/company/anthropic/", keywords=None
         )
 
     async def test_get_company_employees_with_keywords(self, mock_context):
