@@ -5,11 +5,12 @@ The unit suite mocks ``page.evaluate``, so none of the programs behind
 real control. These run the whole walk against a synthetic posting in headless
 chromium, with the navigation stubbed. The dialog is rendered inside an open
 shadow root, validates its required fields on Next, grows a card for an
-uploaded resume, offers a typeahead that binds an entity only to a chosen
-suggestion, and holds Submit beside the follow checkbox in its footer, as
-LinkedIn's does; its markup carries the data attributes LinkedIn's dialog was
-measured with and none of its classes, so it is a claim about which signals are
-read and written, not about LinkedIn's layout.
+uploaded resume, offers a typeahead that renders its suggestions in that same
+shadow root and binds an entity only to a chosen one, and holds Submit beside
+the follow checkbox in its footer, as LinkedIn's does; its markup carries the
+data attributes LinkedIn's dialog was measured with and none of its classes, so
+it is a claim about which signals are read and written, not about LinkedIn's
+layout.
 
 Skipped automatically when chromium is not installed; run locally after
 ``uv run patchright install chromium --no-shell``.
@@ -94,16 +95,24 @@ def with_city(city: str = "") -> dict[str, Any]:
 
     The combobox carries a hidden sibling for the entity behind the text: what
     LinkedIn stores is the entity and the visible string is only its label. The
-    read drops hidden controls, so the sibling never appears as a field, and
-    the step refuses on Next while it is empty -- which is what makes
-    typed-but-unpicked text fail here the way it fails live.
+    hidden control is this dialog's own device -- LinkedIn publishes no control
+    carrying the entity and keeps the binding in component state -- and it is
+    here for the one behaviour both share: the step refuses on Next while
+    nothing is bound, so typed-but-unpicked text fails here the way it fails
+    live. Nothing under test reads it, because there is nothing to read.
+
+    The label says its text twice, once for the screen and once aria-hidden, as
+    LinkedIn's does. Read raw it would double, and the step read drops the copy.
     """
     return dict(
         CONTACT,
-        body=CONTACT["body"]
-        + '<div data-test-form-element><label for="city">Location (city)</label>'
-        '<input id="city" type="text" role="combobox" autocomplete="off"'
+        body=CONTACT["body"] + '<div data-test-form-element><label for="city">'
+        '<span aria-hidden="true">Location (city)</span>'
+        '<span class="visually-hidden">Location (city)</span></label>'
+        '<div id="city-ta">'
+        '<input id="city" type="text" role="combobox"'
         f' aria-autocomplete="list" aria-expanded="false" required value="{city}">'
+        "</div>"
         f'<input id="city-urn" type="hidden" value="{CITIES.get(city, "")}">'
         "</div>",
     )
@@ -178,9 +187,10 @@ shadow.addEventListener('change', (e) => {
     }, window.uploadDelay);
 }, true);
 // A typeahead that behaves like LinkedIn's: it searches only on keystrokes,
-// it debounces, it renders its list outside the dialog, and it binds an entity
-// only when one of its suggestions is chosen. Typing again abandons whatever
-// was bound, so a string that merely reads right is worth nothing.
+// it debounces, it names its open list through both `aria-owns` and
+// `aria-controls`, and it binds an entity only when one of its suggestions is
+// chosen. Typing again abandons whatever was bound, so a string that merely
+// reads right is worth nothing.
 const wireTypeahead = (input) => {
     const hidden = shadow.getElementById(input.id + '-urn');
     let box = null;
@@ -190,6 +200,7 @@ const wireTypeahead = (input) => {
         box = null;
         input.setAttribute('aria-expanded', 'false');
         input.removeAttribute('aria-owns');
+        input.removeAttribute('aria-controls');
     };
     const open = (typed) => {
         // What the component saw, not what the field holds by the time the
@@ -201,17 +212,16 @@ const wireTypeahead = (input) => {
         const hits = Object.keys(window.CITIES)
             .filter((city) => city.toLowerCase().startsWith(query));
         if (!hits.length) return;
-        // Portalled to the document's body, where the dialog-scoped selectors
-        // cannot see it.
         box = document.createElement('div');
         box.id = input.id + '-suggestions';
         box.setAttribute('role', 'listbox');
         for (const city of hits) {
             const option = document.createElement('div');
             option.setAttribute('role', 'option');
-            // As markup renders it: indented and wrapped, with the
-            // aria-hidden copy LinkedIn puts beside the visible text. Reading
-            // it raw would double the label and match nothing.
+            // As markup renders it: wrapped and indented, so what the
+            // node reads as is nothing like the string it shows. The
+            // aria-hidden copy is the shape LinkedIn's labels carry, given to
+            // a suggestion too so both go through one cleaning rule.
             option.innerHTML = `
                 <span>${city}</span>
                 <span aria-hidden="true">${city}</span>
@@ -230,9 +240,13 @@ const wireTypeahead = (input) => {
             });
             box.appendChild(option);
         }
-        document.body.appendChild(box);
+        // Beside the input, inside the same shadow root, which is where
+        // LinkedIn renders it. The document's own `querySelector` reaches
+        // neither the field nor the list; a CSS locator reaches both.
+        input.parentElement.appendChild(box);
         input.setAttribute('aria-expanded', 'true');
         input.setAttribute('aria-owns', box.id);
+        input.setAttribute('aria-controls', box.id);
         window.log.push('suggested:' + hits.length);
     };
     input.addEventListener('keydown', () => setTimeout(() => {
@@ -244,9 +258,6 @@ const wireTypeahead = (input) => {
 };
 let index = 0;
 const render = () => {
-    for (const stale of document.querySelectorAll('body > [role="listbox"]')) {
-        stale.remove();
-    }
     const step = STEPS[index];
     const last = index === STEPS.length - 1;
     shadow.innerHTML = '<div role="dialog" data-test-modal>'

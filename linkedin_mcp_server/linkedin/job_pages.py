@@ -549,13 +549,15 @@ def easy_apply_label_selector(control_id: str) -> str:
 def easy_apply_option_selector(list_id: str | None) -> str:
     """The suggestions a typeahead is offering, by its list's id or by role.
 
-    Not scoped to the dialog, which is the one selector here that is not: a
-    suggestion list is commonly portalled to the document's body, and the
-    dialog-scoped parts would miss it there. CSS locators pierce open shadow
-    roots on their own, so a role-based selector reaches the list wherever it
-    renders, and `aria-owns` narrows it to this field's own list when LinkedIn
-    supplies one. Visible only, so a collapsed list left in the document is not
-    mistaken for an open one.
+    LinkedIn renders the list beside the input, inside the open shadow root
+    that carries the whole dialog: the document's own `querySelector` finds no
+    listbox and no option anywhere, while a CSS locator pierces the root and
+    finds both. Not scoped to the dialog even so, which is the one selector
+    here that is not, so a list rendered somewhere else is still reached.
+    `aria-owns` narrows it to this field's own list, which LinkedIn sets while
+    the list is open beside an `aria-controls` carrying the same id. Visible
+    only, so a collapsed list left in the document is not mistaken for an open
+    one.
     """
     if list_id:
         return f'[id={json.dumps(list_id)}] [role="option"]:visible'
@@ -1544,7 +1546,9 @@ class JobPageReader:
         Keyboard selection is deliberately not used. It picks by position
         rather than by what the option says, and its `Enter` reaches the form
         the field sits in whenever no list is open, which in this dialog is a
-        step advanced on an answer nobody checked.
+        step advanced on an answer nobody checked. LinkedIn leaves
+        `aria-activedescendant` empty while the list stands open, so there is
+        not even a reading of which option a keystroke would take.
 
         A pick that does not land clears the field before refusing, so the
         typed fragment is not left behind as the answer.
@@ -1606,6 +1610,8 @@ class JobPageReader:
         `aria-controls` when it names one, and by role when it does not or when
         the named list holds nothing. Both are attribute presence and ARIA
         roles, so neither depends on the language the page is served in.
+        LinkedIn sets both attributes to the same id, and only while the list
+        is open; the role fallback is what carries a page that names nothing.
         """
         page = self._session.page
         named = (await control.get_attribute("aria-owns")) or (

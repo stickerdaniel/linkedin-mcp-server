@@ -24,6 +24,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Minimize DOM dependence.** Prefer innerText and URL navigation over DOM selectors. When DOM access is unavoidable, use minimal generic selectors (`a[href*="/jobs/view/"]`) — never class names tied to LinkedIn's layout.
 - **Throttling is a status, not a sentence.** LinkedIn's 429 (and its own 999) is read from the responses the page receives, never from words on the page, which are translated. `core/throttle.py` records them for the length of one call, and a call that fails says what LinkedIn refused, even when its error would otherwise be masked. [Read the decision](docs/decisions/2026-09-23-throttling-is-a-status.md).
 - **Detection must be locale-independent.** Classification logic — connection state, action availability, button identity — must rely on URL patterns (`/preload/custom-invite/?vanityName=USER`, `/in/USER/edit/intro/`, `/messaging/compose/`), attribute *presence* (`aria-label` exists, `aria-expanded` exists, `aria-disabled` exists), or structural counts — never on text values like "Connect", "Follow", "Message", "1st", "Pending". The verb in an `aria-label` is locale-dependent; whether the attribute exists is not. Where text is genuinely the only signal, guard it behind an explicit per-locale table and document the limitation in code.
+- **The Easy Apply dialog is not in the document.** It renders inside the open
+  shadow root of `div#interop-outlet`, so `document.querySelector` finds no
+  dialog, no combobox and no suggestion list. CSS locators pierce an open root
+  on their own, and the programs that do run in the page walk
+  `element.shadowRoot` themselves; swapping either for a document query reaches
+  nothing live. What the dialog publishes and what it withholds — a typeahead's
+  ARIA, where its suggestions render, and the entity binding that exists in no
+  control — is measured in `docs/easy-apply-markup.md`.
 
 ## Browser Identity Rules
 
