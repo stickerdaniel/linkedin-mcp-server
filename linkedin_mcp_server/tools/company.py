@@ -71,6 +71,8 @@ def register_company_tools(
             that facet.
         """
         try:
+            # Validate before starting the browser; the scraper normalizes the original reference.
+            normalize_company_identifier(company_name)
             extractor = extractor or await get_ready_extractor(
                 ctx, tool_name="get_company_profile"
             )
@@ -124,6 +126,7 @@ def register_company_tools(
             The LLM should parse the raw text to extract individual posts.
         """
         try:
+            company_name = normalize_company_identifier(company_name)
             extractor = extractor or await get_ready_extractor(
                 ctx, tool_name="get_company_posts"
             )
@@ -133,7 +136,6 @@ def register_company_tools(
                 progress=0, total=100, message="Starting company posts scrape"
             )
 
-            company_name = normalize_company_identifier(company_name)
             url = company_page_url(company_name, "/posts/")
             extracted = await extractor.extract_page(url, section_name="posts")
 
@@ -258,6 +260,8 @@ def register_company_tools(
             References include /in/ profile paths for listed employees.
         """
         try:
+            # Preserve the reference for the scraper's single normalization pass.
+            normalize_company_identifier(company_name)
             extractor = extractor or await get_ready_extractor(
                 ctx, tool_name="get_company_employees"
             )

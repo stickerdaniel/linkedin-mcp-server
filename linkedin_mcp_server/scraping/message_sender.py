@@ -18,6 +18,7 @@ from linkedin_mcp_server.core.exceptions import LinkedInScraperException
 import linkedin_mcp_server.scraping.contracts as contracts
 from linkedin_mcp_server.scraping.identifiers import (
     normalize_person_identifier,
+    normalize_profile_urn,
     person_profile_url,
 )
 from linkedin_mcp_server.scraping.navigation import PageNavigator
@@ -894,7 +895,6 @@ _PROFILE_PATH_RE = re.compile(r"^/in/[^/?#]+/$")
 # encoded slash and let one path pose as another. The id identifies nobody on
 # its own, and the recipient is proven by the composer rather than this path.
 _MESSAGE_THREAD_PATH_RE = re.compile(r"^/messaging/thread/[A-Za-z0-9_=-]+/$")
-_PROFILE_URN_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _PROFILE_URN_PREFIX = "urn:li:fsd_profile:"
 
 
@@ -944,10 +944,11 @@ def _normalize_profile_urn(value: str | None) -> str | None:
     """Return the identifier carried by a profile URN or raw recipient value."""
     if not isinstance(value, str):
         return None
-    candidate = value.strip()
-    if candidate.startswith(_PROFILE_URN_PREFIX):
-        candidate = candidate[len(_PROFILE_URN_PREFIX) :]
-    return candidate if _PROFILE_URN_RE.fullmatch(candidate) else None
+    try:
+        candidate = normalize_profile_urn(value)
+    except LinkedInScraperException:
+        return None
+    return candidate.removeprefix(_PROFILE_URN_PREFIX)
 
 
 def _profile_path_from_url(value: str) -> str | None:
@@ -1353,6 +1354,8 @@ class MessageSender:
         if refusal is not None:
             return refusal
         linkedin_username = normalize_person_identifier(linkedin_username)
+        if profile_urn is not None:
+            profile_urn = normalize_profile_urn(profile_urn)
         profile_url = person_profile_url(linkedin_username, "/")
 
         await self._navigator._navigate_to_page(profile_url)

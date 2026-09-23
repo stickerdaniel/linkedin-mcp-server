@@ -20,6 +20,8 @@ from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_er
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.scraping import parse_person_sections
 from linkedin_mcp_server.scraping.contracts import FilterValidationError
+from linkedin_mcp_server.scraping.identifiers import normalize_person_identifier
+from linkedin_mcp_server.scraping.search_urls import build_people_search_url
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +104,7 @@ def register_person_tools(
             The LLM should parse the raw text in each section.
         """
         try:
+            linkedin_username = normalize_person_identifier(linkedin_username)
             extractor = extractor or await get_ready_extractor(
                 ctx, tool_name="get_person_profile"
             )
@@ -174,6 +177,19 @@ def register_person_tools(
             Dict with url, sections (name -> raw text), and optional references.
             The LLM should parse the raw text to extract individual people and their profiles.
         """
+        try:
+            # The builder refuses a filter LinkedIn would ignore. Doing it here
+            # keeps that refusal off the browser: get_ready_extractor can install
+            # Chromium or rotate a login before this call would have failed.
+            build_people_search_url(
+                keywords,
+                location=location,
+                network=network,
+                current_company=current_company,
+            )
+        except FilterValidationError as e:
+            raise ToolError(str(e)) from e
+
         try:
             extractor = extractor or await get_ready_extractor(
                 ctx, tool_name="search_people"
@@ -262,6 +278,7 @@ def register_person_tools(
             before calling again, because a repeat may invite twice.
         """
         try:
+            linkedin_username = normalize_person_identifier(linkedin_username)
             extractor = extractor or await get_ready_extractor(
                 ctx, tool_name="connect_with_person"
             )
@@ -324,6 +341,7 @@ def register_person_tools(
             /in/username/ paths. Only sections present on the page are included.
         """
         try:
+            linkedin_username = normalize_person_identifier(linkedin_username)
             extractor = extractor or await get_ready_extractor(
                 ctx, tool_name="get_sidebar_profiles"
             )
