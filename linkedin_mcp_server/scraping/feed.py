@@ -175,7 +175,10 @@ class FeedScraper:
                 # reads still need stopping.
                 page.remove_listener("response", _handle_response)
             except Exception:
-                pass
+                logger.debug(
+                    "Failed to remove feed response listener",
+                    exc_info=True,
+                )
             await self._drain_listener_tasks(pending_reads)
 
     async def _extract_feed_body(

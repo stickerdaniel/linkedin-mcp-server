@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import ast
 import asyncio
+import logging
 import re
 
 import pytest
@@ -1321,6 +1322,51 @@ class TestPostPermalinkCapture:
 
         assert created
         assert all(task.done() for task in created)
+
+    async def test_removal_failure_is_logged_without_rearming_or_losing_output(
+        self, mock_page, caplog
+    ):
+        first = self._response(body=b'{"urn":"urn:li:ugcPost:7505583248597512192"}')
+        stale = self._response(body=b'{"urn":"urn:li:ugcPost:7600000000000000000"}')
+        mock_page.remove_listener = MagicMock(
+            side_effect=RuntimeError("listener already gone")
+        )
+        listener = capture_module._PermalinkResponseListener(mock_page)
+        listener.install()
+        listener._handle_response(first)
+        await asyncio.sleep(0)
+
+        with caplog.at_level(logging.DEBUG, logger=capture_module.__name__):
+            listener.remove()
+            # The browser may still call the registered object after failed
+            # removal. Disarming, rather than successful unsubscribe, rejects it.
+            listener._handle_response(stale)
+            await listener.drain()
+
+        assert await listener.collect() == [
+            "/feed/update/urn:li:ugcPost:7505583248597512192/"
+        ]
+        stale.body.assert_not_awaited()
+        records = [
+            record
+            for record in caplog.records
+            if record.message == "Failed to remove permalink response listener"
+        ]
+        assert len(records) == 1
+        assert records[0].exc_info is not None
+
+    async def test_successful_removal_emits_no_cleanup_failure(self, mock_page, caplog):
+        listener = capture_module._PermalinkResponseListener(mock_page)
+        listener.install()
+
+        with caplog.at_level(logging.DEBUG, logger=capture_module.__name__):
+            listener.remove()
+            await listener.drain()
+
+        mock_page.remove_listener.assert_called_once_with(
+            "response", listener._handle_response
+        )
+        assert "Failed to remove permalink response listener" not in caplog.text
 
 
 class TestExtractOverlay:
