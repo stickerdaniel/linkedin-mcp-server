@@ -130,14 +130,6 @@ def register_messaging_tools(
                 ),
                 "get_conversation",
             )
-        if linkedin_username and thread_id:
-            raise_tool_error(
-                InvalidReferenceError(
-                    "Provide either linkedin_username or thread_id, not both"
-                ),
-                "get_conversation",
-            )
-
         try:
             if thread_id:
                 thread_id = normalize_thread_id(thread_id)

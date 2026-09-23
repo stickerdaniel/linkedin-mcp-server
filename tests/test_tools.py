@@ -116,6 +116,12 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
         ),
         (
             "messaging",
+            "get_conversation",
+            {"linkedin_username": "alice", "thread_id": "/feed/"},
+            "thread_id is not a LinkedIn id",
+        ),
+        (
+            "messaging",
             "send_message",
             {
                 "linkedin_username": "/feed/",
@@ -1158,23 +1164,30 @@ class TestMessagingTools:
             linkedin_username=None, thread_id="abc123", index=0
         )
 
-    async def test_get_conversation_rejects_both_identifiers_before_extractor(self):
-        from fastmcp.exceptions import ToolError
-
+    async def test_get_conversation_thread_id_takes_precedence_over_username(self):
         from linkedin_mcp_server.tools.messaging import register_messaging_tools
 
+        mock_extractor = _make_mock_extractor(
+            {"url": "https://www.linkedin.com/messaging/thread/abc123/", "sections": {}}
+        )
         mcp = FastMCP("test")
         register_messaging_tools(mcp)
-        ready = AsyncMock(side_effect=AssertionError("get_ready_extractor was called"))
+        ready = AsyncMock(return_value=mock_extractor)
 
         with patch("linkedin_mcp_server.tools.messaging.get_ready_extractor", ready):
-            with pytest.raises(ToolError, match="not both"):
-                await mcp.call_tool(
-                    "get_conversation",
-                    {"linkedin_username": "alice", "thread_id": "abc123"},
-                )
+            await mcp.call_tool(
+                "get_conversation",
+                {
+                    "linkedin_username": "/feed/",
+                    "thread_id": "https://www.linkedin.com/messaging/thread/abc123/",
+                    "index": 2,
+                },
+            )
 
-        ready.assert_not_awaited()
+        ready.assert_awaited_once()
+        mock_extractor.get_conversation.assert_awaited_once_with(
+            linkedin_username="/feed/", thread_id="abc123", index=2
+        )
 
     async def test_get_conversation_rejects_missing_identifier_before_extractor(self):
         from fastmcp.exceptions import ToolError
