@@ -2907,6 +2907,53 @@ class TestBrowserLaunchEvidenceHelpers:
         )
         assert timeouts == [1000, 600]
 
+    def test_job_zero_polls_while_termination_is_still_draining(self) -> None:
+        samples = iter([3, 1, 0, 0])
+        events: list[str] = []
+        waits: list[str] = []
+
+        def query() -> int:
+            events.append("query")
+            return next(samples)
+
+        probe.browser_guardian_shutdown(
+            retained={1: object()},
+            active_pids=lambda _handles: set(),
+            terminate_job=lambda: events.append("terminate"),
+            query_active_processes=query,
+            signal_job_zero=lambda: events.append("JOB_ZERO"),
+            wait_check_stable_handles=lambda: None,
+            wait_handles=lambda _handles: events.append("wait handles"),
+            signal_both_zero=lambda: events.append("BOTH_ZERO"),
+            wait_allow_fence_release=lambda: None,
+            release_fence=lambda: events.append("release"),
+            deadline=5,
+            wait_for_retry=lambda: waits.append("wait"),
+            monotonic=lambda: 0,
+        )
+
+        assert waits == ["wait", "wait"]
+        assert events[:5] == ["terminate", "query", "query", "query", "JOB_ZERO"]
+        assert "release" in events
+
+    def test_job_zero_timeout_reports_the_remaining_count(self) -> None:
+        with pytest.raises(RuntimeError, match="retained 2"):
+            probe.browser_guardian_shutdown(
+                retained={1: object()},
+                active_pids=lambda _handles: {1},
+                terminate_job=lambda: None,
+                query_active_processes=lambda: 2,
+                signal_job_zero=lambda: pytest.fail("job zero was signaled early"),
+                wait_check_stable_handles=lambda: None,
+                wait_handles=lambda _handles: None,
+                signal_both_zero=lambda: None,
+                wait_allow_fence_release=lambda: None,
+                release_fence=lambda: pytest.fail("fence released"),
+                deadline=1,
+                wait_for_retry=lambda: pytest.fail("deadline already passed"),
+                monotonic=lambda: 2,
+            )
+
     def test_shutdown_holds_fence_through_job_and_handle_zero(self) -> None:
         events: list[str] = []
         active = iter([{1}, set()])
@@ -2921,6 +2968,9 @@ class TestBrowserLaunchEvidenceHelpers:
             signal_both_zero=lambda: events.append("BOTH_ZERO"),
             wait_allow_fence_release=lambda: events.append("ALLOW_RELEASE"),
             release_fence=lambda: events.append("release"),
+            deadline=5,
+            wait_for_retry=lambda: None,
+            monotonic=lambda: 0,
         )
         assert events == [
             "terminate",
@@ -2956,6 +3006,9 @@ class TestBrowserLaunchEvidenceHelpers:
                     signal_both_zero=lambda: events.append("BOTH_ZERO"),
                     wait_allow_fence_release=lambda: None,
                     release_fence=lambda: events.append("release"),
+                    deadline=5,
+                    wait_for_retry=lambda: None,
+                    monotonic=lambda: 0,
                 )
             assert "release" not in events
             assert "BOTH_ZERO" not in events
