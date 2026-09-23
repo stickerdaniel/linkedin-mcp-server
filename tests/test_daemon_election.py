@@ -8230,24 +8230,50 @@ class TestElectionSettlement:
     ):
         profile = _profile(tmp_path)
         config = _config(profile)
+        published: list[str] = []
+        probed: list[str] = []
+        clock = [0.0]
+
+        class Inspector:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                return None
+
+            def require_fresh_inspection(self) -> None:
+                return None
+
+            def inspect_until(self, *, timeout: float) -> OwnerLookup:
+                return daemon_module._inspect(profile.parent, profile, config)
 
         def finish(*args: object, **kwargs: object) -> _Attempt:
-            _publish_stale_owner(profile.parent, profile, config)
+            published.append(_publish_stale_owner(profile.parent, profile, config))
             if isinstance(failure, OSError):
                 raise failure
             return failure
 
+        def answer(attachment: Attachment, timeout: float) -> Reach:
+            probed.append(attachment.descriptor.instance_id)
+            return Reach.ANSWERED
+
+        def monotonic() -> float:
+            now = clock[0]
+            clock[0] += 0.001
+            return now
+
+        monkeypatch.setattr(election_module, "_IS_WINDOWS", False)
+        monkeypatch.setattr(election_module, "_DescriptorInspector", Inspector)
         monkeypatch.setattr(election_module, "_start_owner", finish)
+        monkeypatch.setattr(election_module.time, "monotonic", monotonic)
         outcome = obtain_owner(
             profile.parent,
             profile,
             config,
             deadline_seconds=0.2,
             settlement_seconds=0.2,
-            connect=lambda attachment, timeout: Reach.ANSWERED,
+            connect=answer,
         )
 
         assert outcome.worth_connecting
+        assert probed == published
 
     @pytest.mark.parametrize("failure", [_Attempt.ABORTED, OSError("spawn failed")])
     def test_early_terminal_local_result_gets_only_one_settlement_budget(

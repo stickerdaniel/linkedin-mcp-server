@@ -1423,3 +1423,44 @@ class TestStartingAgainAfterAClose:
         assert manager._containment is None
         assert record["drained"] == [(first_marker, job)]
         assert record["drivers"][1].stops == 1, "the uncontained driver kept running"
+
+
+@pytest.mark.asyncio
+async def test_start_orders_driver_containment_guard_and_launch(tmp_path, monkeypatch):
+    events: list[str] = []
+
+    class StopAfterLaunch(Exception):
+        pass
+
+    class Chromium:
+        executable_path = str(tmp_path / "chromium")
+
+        async def launch_persistent_context(self, _profile, **_options):
+            events.append("launch")
+            raise StopAfterLaunch
+
+    class Driver:
+        chromium = Chromium()
+
+        async def stop(self):
+            return None
+
+    async def start_driver():
+        events.append("driver")
+        return Driver()
+
+    monkeypatch.setattr(
+        "linkedin_mcp_server.core.browser.contain_browser_launch",
+        lambda _driver: events.append("contain") or object(),
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.core.browser.refuse_a_downgrade",
+        lambda _profile, _binary: events.append("guard"),
+    )
+    manager = BrowserManager(user_data_dir=tmp_path / "profile", headless=False)
+    with mock.patch("linkedin_mcp_server.core.browser.async_playwright") as playwright:
+        playwright.return_value.start = start_driver
+        with pytest.raises(NetworkError):
+            await manager.start()
+
+    assert events[:4] == ["driver", "contain", "guard", "launch"]

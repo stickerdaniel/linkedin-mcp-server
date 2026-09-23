@@ -66,9 +66,9 @@ NETWORK_TOKENS = ("F", "S", "O")
 
 
 def _normalize_csv(value: str, mapping: dict[str, str]) -> str:
-    """Normalize a comma-separated filter value using the provided mapping."""
+    """Normalize and encode each token in a comma-separated filter value."""
     parts = [v.strip() for v in value.split(",")]
-    return ",".join(mapping.get(p, p) for p in parts)
+    return ",".join(quote_plus(mapping.get(p, p), safe="") for p in parts)
 
 
 def _encode_list_facet(values: list[str]) -> str:

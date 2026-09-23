@@ -739,6 +739,68 @@ class TestSearchJobs:
         assert error["error_type"] == "filters_dropped"
         assert "location" in error["error_message"]
 
+    @pytest.mark.parametrize(
+        "lands_on,expected_dropped",
+        [
+            (None, False),
+            (
+                "https://www.linkedin.com/jobs/search/?keywords=python&f_EA=true",
+                True,
+            ),
+        ],
+    )
+    async def test_encoded_facet_is_one_filter_and_drop_detection_keeps_it(
+        self, mock_page, lands_on: str | None, expected_dropped: bool
+    ):
+        scraper = _scraper(mock_page)
+
+        with (
+            patch.object(
+                scraper._pages,
+                "_extract_search_page",
+                side_effect=self._navigating(
+                    mock_page,
+                    [extracted("python jobs")],
+                    lands_on=lands_on,
+                ),
+            ),
+            patch.object(
+                scraper._pages,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["901"],
+            ),
+            patch.object(
+                scraper._pages,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await scraper.search_jobs(
+                "python",
+                job_type="x&f_EA=true",
+                easy_apply=True,
+                max_pages=1,
+            )
+
+        assert result["url"] == (
+            "https://www.linkedin.com/jobs/search/"
+            "?keywords=python&f_JT=x%26f_EA%3Dtrue&f_EA=true"
+        )
+        assert result["job_ids"] == ["901"]
+        if expected_dropped:
+            error = result["section_errors"]["search_results"]
+            assert error["error_type"] == "filters_dropped"
+            assert "f_JT" in error["error_message"]
+            assert "did not keep f_EA" not in error["error_message"]
+        else:
+            assert "section_errors" not in result
+
     async def test_a_dropped_filter_survives_whatever_stops_the_loop(self, mock_page):
         """The warning describes the results, and the results are returned.
 

@@ -256,14 +256,8 @@ for that.
 
 Always read [`CONTRIBUTING.md`](CONTRIBUTING.md) before filing an issue or working on this repository.
 
-- Write a short synthetic prompt that would reproduce the PR diff if given to a fresh Claude Code session. Don't copy the user's first message — distill the conversation into a single instruction that captures the full scope of changes. This tells the maintainer what was intended, which is often more useful than reviewing the full diff. Use a Markdown blockquote under a `## Synthetic prompt` heading, followed by the model attribution:
-  ```
-  ## Synthetic prompt
-
-  > Add `skills` and `projects` sections to `get_person_profile`, following the certifications PR pattern. Update fields, tests, docs, and manifest.
-
-  Generated with <model name and version>
-  ```
+- Write a short synthetic prompt that would reproduce the PR diff if given to a fresh Claude Code session. Don't copy the user's first message — distill the conversation into a single instruction that captures the full scope of changes. This tells the maintainer what was intended, which is often more useful than reviewing the full diff. Use a Markdown blockquote under a `## Synthetic prompt` heading.
+- The final non-empty line of every PR body must disclose every model used. CI accepts `Generated with <model>` or `Generated with <model>.` as the minimum. The final period is optional only for this model-only form. Prefer the detailed form `Generated with <model> for <job> in <harness>.`; for example, `Generated with Claude Opus 5 for implementation in Claude Code via T3 Code.` A harness is the coding-agent runtime that invokes the model and tools, such as Claude Code or Codex CLI. Add an outer host or wrapper with optional `via <host>`. For multiple models, use `Generated with <model 1> for <job 1> and <model 2> for <job 2> in <harness>.`; `and` separates model/job pairs exclusively, and commas or `/` list multiple jobs for one model.
 - When implementing a new feature/fix:
   1. Packet: before filing or commenting on a GitHub issue, read [.agents/skills/issue-packet/SKILL.md](.agents/skills/issue-packet/SKILL.md).
   2. Branch from `main`: `feature/issue-number-short-description`
