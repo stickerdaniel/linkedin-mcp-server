@@ -111,6 +111,10 @@
       "send_message": {
         "coroutine": true,
         "signature": "(self, linkedin_username: 'str', message: 'str', *, confirm_send: 'bool', profile_urn: 'str | None' = None) -> 'dict[str, Any]'"
+      },
+      "submit_easy_apply": {
+        "coroutine": true,
+        "signature": "(self, job_id: 'str', answers: 'Mapping[str, EasyApplyAnswer] | None' = None, follow_company: 'bool' = False, confirm_submit: 'bool' = False) -> 'dict[str, Any]'"
       }
     },
     "tool_methods": [
@@ -136,7 +140,8 @@
       "search_jobs",
       "search_people",
       "search_posts",
-      "send_message"
+      "send_message",
+      "submit_easy_apply"
     ],
     "tool_schemas": {
       "archive_conversation": {
@@ -912,6 +917,63 @@
             "linkedin_username",
             "message",
             "confirm_send"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "submit_easy_apply": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "answers": {
+              "anyOf": [
+                {
+                  "additionalProperties": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "boolean"
+                      },
+                      {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      }
+                    ]
+                  },
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Field label to answer. Text for a typed or picked control,\nthe option's label for a radio, a list of labels for a checkbox\ngroup, true or false for a lone checkbox, and an absolute path\nfor a resume upload"
+            },
+            "confirm_submit": {
+              "default": false,
+              "description": "Send the application. Submitting cannot be undone",
+              "type": "boolean"
+            },
+            "follow_company": {
+              "default": false,
+              "description": "Leave the follow-the-company checkbox checked.\nLinkedIn ships it checked and this unchecks it by default",
+              "type": "boolean"
+            },
+            "job_id": {
+              "description": "LinkedIn job ID (e.g., \"4252026496\", \"3856789012\")",
+              "type": "string"
+            }
+          },
+          "required": [
+            "job_id"
           ],
           "type": "object"
         },

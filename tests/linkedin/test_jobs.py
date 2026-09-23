@@ -13,6 +13,7 @@ from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.core.exceptions import (
     AuthenticationError,
+    InvalidAnswerError,
     LinkedInOperationError,
 )
 from linkedin_mcp_server.linkedin import jobs as jobs_module
@@ -29,6 +30,7 @@ from linkedin_mcp_server.linkedin.contracts import (
 from linkedin_mcp_server.linkedin.job_pages import (
     EasyApplyDraftLeftError,
     EasyApplyFormRead,
+    EasyApplySubmitRead,
     JobApplyRead,
     JobPageCapture,
     JobPageReader,
@@ -363,6 +365,105 @@ class TestGetEasyApplyForm:
         with self._reading(reader, side_effect=AuthenticationError("expired")):
             with pytest.raises(AuthenticationError):
                 await reader.get_easy_apply_form("12345")
+
+
+class TestSubmitEasyApply:
+    URL = "https://www.linkedin.com/jobs/view/12345/"
+    STEP = {
+        "heading": "Contact info",
+        "progress": 0,
+        "fields": [
+            {"label": "First name", "type": "text", "required": True, "value": "S"}
+        ],
+    }
+    ANSWERS = {"First name": "S"}
+
+    @staticmethod
+    def _walking(reader, **kwargs):
+        return patch.object(
+            reader._pages, "submit_easy_apply", new_callable=AsyncMock, **kwargs
+        )
+
+    async def test_a_sent_application_carries_what_linkedin_showed(self, mock_page):
+        reader = _reader(mock_page)
+        read = EasyApplySubmitRead(
+            "easy_apply",
+            (self.STEP,),
+            complete=True,
+            submitted=True,
+            follow=False,
+            confirmation="Your application was sent",
+        )
+        with self._walking(reader, return_value=read) as walk:
+            result = await reader.submit_easy_apply(
+                "12345", self.ANSWERS, confirm_submit=True
+            )
+
+        walk.assert_awaited_once_with(
+            self.URL,
+            "12345",
+            JOB_APPLY_EN_US,
+            self.ANSWERS,
+            confirm_submit=True,
+            follow_company=False,
+        )
+        assert result == {
+            "url": self.URL,
+            "apply": {"type": "easy_apply"},
+            "submitted": True,
+            "form": {"steps": [self.STEP], "complete": True},
+            "follow": False,
+            "confirmation": "Your application was sent",
+        }
+
+    async def test_a_rehearsal_answers_with_the_form_it_would_have_sent(
+        self, mock_page
+    ):
+        reader = _reader(mock_page)
+        read = EasyApplySubmitRead("easy_apply", (self.STEP,), complete=True)
+        with self._walking(reader, return_value=read):
+            result = await reader.submit_easy_apply("12345", self.ANSWERS)
+
+        assert result["submitted"] is False
+        assert result["form"] == {"steps": [self.STEP], "complete": True}
+        assert "confirmation" not in result and "follow" not in result
+
+    async def test_a_refused_answer_reaches_the_caller(self, mock_page):
+        reader = _reader(mock_page)
+        refusal = InvalidAnswerError("No option is labelled 'Maybe'.")
+        with self._walking(reader, side_effect=refusal):
+            with pytest.raises(InvalidAnswerError, match="Maybe"):
+                await reader.submit_easy_apply("12345", self.ANSWERS)
+
+    async def test_a_walk_that_failed_is_a_section_error_and_nothing_sent(
+        self, mock_page
+    ):
+        reader = _reader(mock_page)
+        with self._walking(reader, side_effect=RuntimeError("dialog did not open")):
+            result = await reader.submit_easy_apply("12345", self.ANSWERS)
+
+        assert result["submitted"] is False
+        assert "form" not in result and "apply" not in result
+        assert "form" in result["section_errors"]
+
+    async def test_a_draft_left_behind_is_reported_beside_the_form(self, mock_page):
+        reader = _reader(mock_page)
+        read = EasyApplySubmitRead("easy_apply", (self.STEP,), discarded=False)
+        with self._walking(reader, return_value=read):
+            result = await reader.submit_easy_apply("12345", self.ANSWERS)
+
+        assert result["section_errors"]["form"]["error_type"] == "easy_apply_draft_left"
+
+    async def test_any_other_posting_carries_its_type_alone(self, mock_page):
+        reader = _reader(mock_page)
+        with self._walking(reader, return_value=EasyApplySubmitRead("applied")):
+            result = await reader.submit_easy_apply("12345", self.ANSWERS)
+
+        assert result == {
+            "url": self.URL,
+            "apply": {"type": "applied"},
+            "submitted": False,
+        }
 
 
 class TestSearchJobs:

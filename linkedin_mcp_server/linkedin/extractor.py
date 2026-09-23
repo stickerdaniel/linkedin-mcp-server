@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from patchright.async_api import Page
@@ -19,7 +20,7 @@ from linkedin_mcp_server.linkedin.contracts import (
 from linkedin_mcp_server.linkedin.conversations import ConversationReader
 from linkedin_mcp_server.linkedin.feed import FeedReader
 from linkedin_mcp_server.linkedin.job_pages import JobPageReader
-from linkedin_mcp_server.linkedin.job_policy import JobsTrackerStage
+from linkedin_mcp_server.linkedin.job_policy import EasyApplyAnswer, JobsTrackerStage
 from linkedin_mcp_server.linkedin.jobs import JobReader
 from linkedin_mcp_server.linkedin.message_sender import MessageSender
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
@@ -165,6 +166,18 @@ class LinkedInExtractor:
     async def get_easy_apply_form(self, job_id: str) -> dict[str, Any]:
         """Read the questions of a job posting's Easy Apply form."""
         return await self._jobs.get_easy_apply_form(job_id)
+
+    async def submit_easy_apply(
+        self,
+        job_id: str,
+        answers: Mapping[str, EasyApplyAnswer] | None = None,
+        follow_company: bool = False,
+        confirm_submit: bool = False,
+    ) -> dict[str, Any]:
+        """Answer a job posting's Easy Apply form, and send it when asked to."""
+        return await self._jobs.submit_easy_apply(
+            job_id, answers, follow_company, confirm_submit
+        )
 
     async def search_jobs(
         self,
