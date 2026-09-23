@@ -335,6 +335,64 @@ def plain_post(labels: Labels) -> str:
     return post(labels)
 
 
+def sdui_post(labels: Labels) -> str:
+    """Current detail-page shape: a facepile id and no untouched pressed state."""
+    return f"""
+<div class="update">
+  <div class="actor">
+    <button type="button" aria-label="{labels.react}">Follow</button>
+    <button type="button" aria-expanded="false">More</button>
+    {"".join('<button type="button">actor control</button>' for _ in range(7))}
+  </div>
+  <div data-testid="ReactionFacepileCollection-{POST_URN}"></div>
+  <div class="social-bar">
+    <button type="button" aria-label="{labels.react}"
+      onclick="document.body.setAttribute('data-clicked','post-react')"
+      >{labels.like}</button>
+    <button type="button" aria-expanded="false" aria-label="{labels.react}"
+      onclick="this.setAttribute('aria-expanded','true');
+               document.body.setAttribute('data-clicked','reaction-menu')"
+      ></button>
+    <button type="button">{labels.comment}</button>
+    <button type="button" aria-expanded="false"
+      onclick="this.setAttribute('aria-expanded','true');
+               document.body.setAttribute('data-clicked','post-repost')"
+      >{labels.repost_now}</button>
+  </div>
+  {comment_editor(labels)}
+</div>
+"""
+
+
+def split_sdui_post(labels: Labels) -> str:
+    """The identity marker may sit outside the post action-bar subtree."""
+    comment_bars = "".join(
+        f"""
+        <div class="comment-bar">
+          <button type="button" aria-label="{labels.react}">{labels.like}</button>
+          <button type="button" aria-expanded="false"></button>
+          <button type="button" aria-expanded="false">{labels.comment}</button>
+        </div>
+        """
+        for _ in range(2)
+    )
+    return f"""
+<div class="post-content">
+  <div class="social-bar">
+    <button type="button" aria-label="{labels.react}">{labels.like}</button>
+    <button type="button" aria-expanded="false"></button>
+    <button type="button">{labels.comment}</button>
+    <button type="button" aria-expanded="false">{labels.repost_now}</button>
+  </div>
+  {comment_editor(labels)}
+</div>
+<div class="comment-list">
+  <div data-testid="ReactionFacepileCollection-{POST_URN}"></div>
+  {comment_bars}
+</div>
+"""
+
+
 def post_with_activity_urn(labels: Labels) -> str:
     """The permalink's ugcPost id and rendered activity id can differ."""
     return post(labels, urn=ACTIVITY_URN)
@@ -577,6 +635,40 @@ class TestFindingTheRootPost:
             dom_page, plain_post, (True, True, 4, True, False, 1), read
         )
 
+    async def test_sdui_facepile_resolves_without_untouched_pressed_state(
+        self, dom_page
+    ) -> None:
+        async def read(page, html):
+            signals = await _signals(page, html)
+            handle = await _pinned(page, html)
+            reaction = await page.evaluate(CLICK_REACT_TOGGLE_JS, {"root": handle})
+            clicked = await _clicked(page)
+            return (
+                signals["hasRoot"],
+                signals["hasBar"],
+                signals["barButtonCount"],
+                signals["hasRepostOpener"],
+                reaction,
+                clicked,
+            )
+
+        await _in_every_locale(
+            dom_page,
+            sdui_post,
+            (True, True, 4, True, "clicked", "post-react"),
+            read,
+        )
+
+    async def test_sdui_repost_uses_the_second_expanding_control(
+        self, dom_page
+    ) -> None:
+        async def read(page, html):
+            handle = await _pinned(page, html)
+            outcome = await page.evaluate(OPEN_REPOST_MENU_JS, {"root": handle})
+            return (outcome, await _clicked(page))
+
+        await _in_every_locale(dom_page, sdui_post, ("clicked", "post-repost"), read)
+
     async def test_repost_counts_ignore_controls_outside_the_bar(
         self, dom_page
     ) -> None:
@@ -595,6 +687,15 @@ class TestFindingTheRootPost:
             return (signals["hasRoot"], signals["hasBar"], signals["barButtonCount"])
 
         await _in_every_locale(dom_page, post_with_activity_urn, (True, True, 4), read)
+
+    async def test_a_detached_sdui_identity_uses_the_unique_four_button_bar(
+        self, dom_page
+    ) -> None:
+        async def read(page, html):
+            signals = await _signals(page, html)
+            return (signals["hasRoot"], signals["hasBar"], signals["barButtonCount"])
+
+        await _in_every_locale(dom_page, split_sdui_post, (True, True, 4), read)
 
     async def test_two_structural_fallback_candidates_are_refused(
         self, dom_page

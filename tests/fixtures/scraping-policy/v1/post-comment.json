@@ -74,7 +74,7 @@
       "call": "comment_on_post",
       "kind": "evaluate",
       "operation": "post_action_signals",
-      "program_digest": "a1a3713473fc",
+      "program_digest": "13b83390e601",
       "section": "post"
     },
     {
@@ -82,7 +82,7 @@
       "call": "comment_on_post",
       "kind": "evaluate",
       "operation": "post_action_signals",
-      "program_digest": "a1a3713473fc",
+      "program_digest": "13b83390e601",
       "section": "post"
     },
     {
@@ -90,7 +90,7 @@
       "call": "comment_on_post",
       "kind": "evaluate_handle",
       "operation": "post_root_owner",
-      "program_digest": "650c85cb0a92",
+      "program_digest": "bb115d4eb12e",
       "section": "post"
     },
     {

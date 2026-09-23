@@ -123,6 +123,7 @@ _URN_ATTRIBUTES = (
     "data-activity-urn",
     "data-entity-urn",
     "data-chameleon-result-urn",
+    "data-testid",
 )
 
 _VISIBLE_FN_JS = r"""
@@ -155,6 +156,11 @@ function visible(element) {
 # latter. When the exact match is absent, the fallback below accepts one
 # outermost bare post URN only if it owns a complete action bar. Requiring
 # exactly one keeps a page with another post or independent reshare ambiguous.
+#
+# An SDUI detail page can put the exact facepile identity in the comment-list
+# subtree rather than around the post controls. In that shape the page root is
+# accepted only when it owns exactly one action bar; comment bars have three
+# buttons and therefore cannot satisfy the four-button SDUI shape below.
 _FIND_POST_ROOT_FN_JS = (
     r"""
 function findPostRoot(postId) {
@@ -163,6 +169,7 @@ function findPostRoot(postId) {
   const digits = String(postId).replace(/[^0-9]/g, '');
   if (!digits) return null;
   const pattern = new RegExp('urn:li:(?:ugcPost|share|activity):' + digits + '$');
+  const barePostUrn = /^urn:li:(?:ugcPost|share|activity):[0-9]+$/;
   const attributes = """
     + repr(list(_URN_ATTRIBUTES)).replace("'", '"')
     + r""";
@@ -177,13 +184,35 @@ function findPostRoot(postId) {
       }
     }
   }
-  const outermost = matches.filter(
-    element => !matches.some(other => other !== element && other.contains(element))
+  const owners = [];
+  for (const match of matches) {
+    const isDirectRoot = attributes.some(name => {
+      const value = match.getAttribute(name);
+      return value && barePostUrn.test(value.trim());
+    });
+    if (isDirectRoot) {
+      owners.push(match);
+      continue;
+    }
+    let element = match;
+    while (element && main.contains(element)) {
+      if (visible(element) && findActionBar(element) !== null) {
+        owners.push(element);
+        break;
+      }
+      element = element.parentElement;
+    }
+  }
+  const uniqueOwners = Array.from(new Set(owners));
+  const outermost = uniqueOwners.filter(
+    element => !uniqueOwners.some(
+      other => other !== element && other.contains(element)
+    )
   );
   if (outermost.length === 1) return outermost[0];
   if (outermost.length > 1) return null;
+  if (matches.length > 0 && findActionBar(main) !== null) return main;
 
-  const barePostUrn = /^urn:li:(?:ugcPost|share|activity):[0-9]+$/;
   const structural = [];
   for (const element of main.querySelectorAll(selector)) {
     for (const name of attributes) {
@@ -209,14 +238,19 @@ function findPostRoot(postId) {
 
 # Locate the root post's own social action bar inside its container.
 #
-# Every visible `aria-pressed` button is tried in DOM order. LinkedIn also puts
-# `aria-pressed` on the author's Follow control, so assuming the first one is
-# the reaction toggle makes every real permalink refuse. For each candidate,
-# the walk climbs to the smallest ancestor that looks like a bar, and
-# `aria-expanded` has to be present in it — that is the repost opener, and a
-# comment's action row has no equivalent, so requiring it is what keeps a
-# comment row from ever qualifying. A candidate whose walk reaches a container
-# wider than a bar is abandoned; later toggles still get their own walk.
+# Every visible `aria-pressed` button is tried in DOM order. The SDUI post page
+# does not put `aria-pressed` on an untouched reaction control, so a labelled
+# non-expanding button is also a candidate only when its compact bar has exactly
+# four buttons and two expanding controls. The label's value is never read.
+# Those structural guards distinguish the SDUI post bar from three-button
+# comment bars, while the original one-expander shape still requires
+# `aria-pressed`.
+#
+# LinkedIn also puts `aria-pressed` on the author's Follow control, so assuming
+# the first one is the reaction toggle makes every real permalink refuse. For
+# each candidate, the walk climbs to the smallest ancestor that looks like a
+# bar. A candidate whose walk reaches a container wider than a bar is abandoned;
+# later toggles still get their own walk.
 #
 # A permalink that reshares another post nests that original's bar inside the
 # named root. Taking the first structurally valid bar would act on the nested
@@ -241,7 +275,9 @@ function insideNestedPost(root, node) {
   return false;
 }
 function findActionBar(root) {
-  const toggles = Array.from(root.querySelectorAll('button[aria-pressed]'))
+  const toggles = Array.from(root.querySelectorAll(
+    'button[aria-pressed], button[aria-label]:not([aria-expanded])'
+  ))
     .filter(visible);
   if (toggles.length === 0) return null;
   const found = [];
@@ -253,11 +289,19 @@ function findActionBar(root) {
       if (buttons.length >= """
     + str(_BAR_BUTTONS_MIN)
     + r""") {
+        const expanders = element.querySelectorAll('button[aria-expanded]');
+        const oldShape = toggle.hasAttribute('aria-pressed') &&
+          expanders.length === 1;
+        const sduiShape = !toggle.hasAttribute('aria-pressed') &&
+          toggle.hasAttribute('aria-label') &&
+          buttons.length === 4 &&
+          expanders.length === 2;
         if (
           buttons.length <= """
     + str(_BAR_BUTTONS_MAX)
     + r""" &&
-          element.querySelector('button[aria-expanded]')
+          !element.querySelector('[role="textbox"][contenteditable="true"]') &&
+          (oldShape || sduiShape)
         ) {
           found.push({bar: element, toggle});
         }
@@ -318,7 +362,7 @@ POST_ACTION_SIGNALS_JS = (
         (found.toggle.getAttribute('aria-disabled') || '').toLowerCase() === 'true'
       : null,
     hasRepostOpener: found
-      ? !!found.bar.querySelector('button[aria-expanded]')
+      ? [1, 2].includes(found.bar.querySelectorAll('button[aria-expanded]').length)
       : false,
     editorCount: editors.length,
     barText: found ? (found.bar.innerText || '') : '',
@@ -344,11 +388,18 @@ PIN_POST_ROOT_JS = (
   if (!root) return null;
   const found = findActionBar(root);
   if (!found) return null;
+  const openers = Array.from(
+    found.bar.querySelectorAll('button[aria-expanded]')
+  ).filter(visible);
   root.__linkedinMcpPost = {
     postId: String(postId),
     bar: found.bar,
     toggle: found.toggle,
-    opener: found.bar.querySelector('button[aria-expanded]'),
+    opener: openers.length === 1
+      ? openers[0]
+      : openers.length === 2
+        ? openers[1]
+        : null,
   };
   return root;
 })
