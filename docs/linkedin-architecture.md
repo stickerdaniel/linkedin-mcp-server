@@ -96,6 +96,7 @@ a page-owning collaborator.
 - `search_people`
 - `search_posts`
 - `send_message`
+- `submit_easy_apply`
 
 ## `LinkedInExtractor` construction-state allowlist
 

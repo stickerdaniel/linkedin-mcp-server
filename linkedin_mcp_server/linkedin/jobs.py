@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -27,6 +28,7 @@ from linkedin_mcp_server.linkedin.job_pages import (
     JobPageReader,
 )
 from linkedin_mcp_server.linkedin.job_policy import (
+    EasyApplyAnswer,
     JOB_SEARCH_PATHS,
     RESULTS_PER_LINKEDIN_PAGE,
     SAVED_JOBS_PAGE_SIZE,
@@ -224,6 +226,67 @@ class JobReader:
         result: dict[str, Any] = {"url": url, "apply": {"type": read.type}}
         if read.type == "easy_apply":
             result["form"] = {"steps": list(read.steps), "complete": read.complete}
+        if not read.discarded:
+            result["section_errors"] = {"form": easy_apply_draft_section_error()}
+        return result
+
+    async def submit_easy_apply(
+        self,
+        job_id: str,
+        answers: Mapping[str, EasyApplyAnswer] | None = None,
+        follow_company: bool = False,
+        confirm_submit: bool = False,
+    ) -> dict[str, Any]:
+        """Answer a posting's Easy Apply form, and send it when asked to.
+
+        Returns:
+            {url, apply: {type}, submitted, form?: {steps, complete}, follow?,
+            confirmation?}, with form present for Easy Apply postings only and
+            shaped as get_easy_apply_form's. follow is the state the
+            follow-the-company checkbox ended in, and confirmation is what
+            LinkedIn showed after a submitted application. An answer the form
+            refuses raises; a form that could not be walked at all is a section
+            error, as is a draft left undiscarded.
+        """
+        job_id = normalize_job_id(job_id)
+        url = job_view_url(job_id, "/")
+        try:
+            read = await self._pages.submit_easy_apply(
+                url,
+                job_id,
+                self._apply_text,
+                answers or {},
+                confirm_submit=confirm_submit,
+                follow_company=follow_company,
+            )
+        except LinkedInOperationError:
+            raise
+        except Exception as e:
+            logger.warning("Failed to answer the Easy Apply form of %s: %s", url, e)
+            return {
+                "url": url,
+                "submitted": False,
+                "section_errors": {
+                    "form": build_issue_diagnostics(
+                        e,
+                        context="submit_easy_apply",
+                        target_url=url,
+                        section_name="form",
+                    )
+                },
+            }
+
+        result: dict[str, Any] = {
+            "url": url,
+            "apply": {"type": read.type},
+            "submitted": read.submitted,
+        }
+        if read.type == "easy_apply":
+            result["form"] = {"steps": list(read.steps), "complete": read.complete}
+        if read.follow is not None:
+            result["follow"] = read.follow
+        if read.confirmation is not None:
+            result["confirmation"] = read.confirmation
         if not read.discarded:
             result["section_errors"] = {"form": easy_apply_draft_section_error()}
         return result

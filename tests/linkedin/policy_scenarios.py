@@ -1021,6 +1021,27 @@ async def _easy_apply_form_scenario() -> dict[str, Any]:
     )
 
 
+async def _submit_easy_apply_scenario() -> dict[str, Any]:
+    recorder = TraceRecorder("submit_easy_apply__closed", _COMMON_ALLOWED)
+    clock = FakeClock(recorder)
+    page = _page(recorder).script(
+        "evaluate:job_apply_signals",
+        {"easy_apply": False, "external_link": None, "applied": False, "closed": True},
+    )
+    extractor = _extractor(page)
+    arguments: dict[str, Any] = {
+        "job_id": "123",
+        "answers": {"First name": "Ada"},
+    }
+    async with boundaries(recorder, clock):
+        with recorder.context("submit_easy_apply"):
+            result = await extractor.submit_easy_apply(**arguments)
+    page.assert_clean()
+    return recorder.trace(
+        {"method": "submit_easy_apply", "arguments": arguments}, result
+    )
+
+
 async def _get_my_profile_scenario() -> dict[str, Any]:
     name = "get_my_profile__baseline"
     recorder = TraceRecorder(name, _COMMON_ALLOWED)
@@ -1281,6 +1302,7 @@ TOOL_FACADE_METHODS = {
     "search_jobs",
     "search_people",
     "search_posts",
+    "submit_easy_apply",
     "send_message",
     "reply_to_conversation",
 }
@@ -1360,6 +1382,7 @@ async def build_policy_traces() -> dict[str, dict[str, Any]]:
         "read-job-description-missing.json": await _description_missing_scenario(),
         "job-apply-url.json": await _job_apply_scenario(),
         "easy-apply-form.json": await _easy_apply_form_scenario(),
+        "submit-easy-apply.json": await _submit_easy_apply_scenario(),
         "search-people.json": await _single_capture_facade_scenario("search_people"),
         "search-companies.json": await _single_capture_facade_scenario(
             "search_companies"

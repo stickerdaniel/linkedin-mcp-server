@@ -1081,14 +1081,14 @@ class JobPageReader:
         text: JobApplyTextTable,
         answers: Mapping[str, EasyApplyAnswer],
         *,
-        submit: bool,
+        confirm_submit: bool,
         follow_company: bool = False,
     ) -> EasyApplySubmitRead:
         """Answer a posting's Easy Apply form, and send it when asked to.
 
         Every step is filled from ``answers`` alone, by the label the form read
         returned, and a field no answer names keeps LinkedIn's prefill. Submit
-        is clicked only when ``submit`` is set and only once every step was
+        is clicked only when ``confirm_submit`` is set and only once every step was
         reached with its required fields holding something; without it the form
         is filled, read back and the draft discarded, which is the rehearsal
         for the real thing.
@@ -1105,7 +1105,11 @@ class JobPageReader:
         steps: list[dict[str, Any]] = []
         try:
             outcome = await self._walk_easy_apply_answers(
-                job_id, answers, steps, submit=submit, follow_company=follow_company
+                job_id,
+                answers,
+                steps,
+                confirm_submit=confirm_submit,
+                follow_company=follow_company,
             )
         except Exception as e:
             if not await self._discard_easy_apply():
@@ -1128,7 +1132,7 @@ class JobPageReader:
         answers: Mapping[str, EasyApplyAnswer],
         steps: list[dict[str, Any]],
         *,
-        submit: bool,
+        confirm_submit: bool,
         follow_company: bool,
     ) -> _WalkOutcome:
         """Open the dialog, answer it step by step, and end on the last one."""
@@ -1175,7 +1179,7 @@ class JobPageReader:
         refuse_unused_easy_apply_answers(answers, used)
 
         follow = await self._set_follow_company(follow_company)
-        if not submit:
+        if not confirm_submit:
             return _WalkOutcome(complete=True, follow=follow)
         confirmation = await self._click_easy_apply_submit()
         return _WalkOutcome(
