@@ -218,6 +218,16 @@ ORGANIC_BEFORE_NOTICE_JS = (
 }"""
 )
 
+# The posting's own lines: everything above its description heading, trimmed.
+# One fragment rather than one per reader, because the boundary is what keeps a
+# word in the description or on a "More jobs" card from passing for this
+# posting's state, and two copies of it are two chances to put it elsewhere.
+# Needs `main` and `descriptionHeadings` already in scope.
+_TOP_LINES_JS = r"""    const lines = (main.innerText || '').split('\n').map((line) => line.trim());
+    const end = lines.findIndex((line) => descriptionHeadings.includes(line));
+    const top = end === -1 ? [] : lines.slice(0, end);
+"""
+
 # This posting's apply control and state, once they render. Easy Apply comes in
 # two shapes. The anchor into the posting's own `/apply/` route
 # (`<a href=".../jobs/view/<id>/apply/?openSDUIApplyFlow=true">`, measured on
@@ -243,7 +253,8 @@ ORGANIC_BEFORE_NOTICE_JS = (
 # them, and `textContent` on every element of a posting copies that posting
 # once per level of nesting. That is worth the difference because the readiness
 # poll runs this program on every frame for up to ten seconds.
-APPLY_SIGNALS_JS = r"""(opts) => {
+APPLY_SIGNALS_JS = (
+    r"""(opts) => {
     const {
         applyPath, redirectPath, easyApplyLabel, externalLabel, descriptionHeadings,
         closedLines, appliedPattern,
@@ -268,10 +279,9 @@ APPLY_SIGNALS_JS = r"""(opts) => {
     const above = (el) => Boolean(
         heading && (heading.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_PRECEDING)
     );
-    const lines = (main.innerText || '').split('\n').map((line) => line.trim());
-    const end = lines.findIndex((line) => descriptionHeadings.includes(line));
-    const top = end === -1 ? [] : lines.slice(0, end);
-    const applied = new RegExp(appliedPattern);
+"""
+    + _TOP_LINES_JS
+    + r"""    const applied = new RegExp(appliedPattern);
     const anchors = [...main.querySelectorAll('a[href]')];
     const link = anchors.find((anchor) => above(anchor)
         && (anchor.innerText || '').trim() === externalLabel
@@ -286,6 +296,7 @@ APPLY_SIGNALS_JS = r"""(opts) => {
         closed: top.some((line) => closedLines.includes(line)),
     };
 }"""
+)
 
 # Ready once the description heading and a signal are both in. The Easy Apply
 # anchor is found without the heading (the button is not), but the applied and
@@ -477,6 +488,23 @@ EASY_APPLY_CONFIRMATION_JS = (
 }"""
 )
 
+# The posting's own account of the application, for the submission LinkedIn
+# answers without a modal. The lines `APPLY_SIGNALS_JS` reads for the applied
+# state, returning the one that matched rather than whether one did: where no
+# dialog renders, this line is the only thing the page says about what
+# happened, and the posting is the surface that says it.
+APPLIED_LINE_JS = (
+    r"""(opts) => {
+    const {descriptionHeadings, appliedPattern} = opts;
+    const main = document.querySelector('main');
+    if (!main) return '';
+"""
+    + _TOP_LINES_JS
+    + r"""    const applied = new RegExp(appliedPattern);
+    return top.find((line) => applied.test(line)) || '';
+}"""
+)
+
 EASY_APPLY_NEXT_SELECTOR = "[data-easy-apply-next-button]"
 EASY_APPLY_SUBMIT_SELECTOR = "[data-live-test-easy-apply-submit-button]"
 EASY_APPLY_DISCARD_SELECTOR = '[data-control-name="discard_application_confirm_btn"]'
@@ -518,6 +546,9 @@ _EASY_APPLY_OPEN_TIMEOUT = 10.0
 _EASY_APPLY_STEP_TIMEOUT = 8.0
 _EASY_APPLY_SET_TIMEOUT = 5.0
 _EASY_APPLY_SUBMIT_TIMEOUT = 15.0
+# How long LinkedIn's account of a sent application gets to render. Short,
+# because the submission is already sound without one: the dialog is gone.
+_EASY_APPLY_CONFIRMATION_TIMEOUT = 5.0
 # An upload is a round trip to LinkedIn and a rebuilt step afterwards.
 _EASY_APPLY_UPLOAD_TIMEOUT = 30.0
 _EASY_APPLY_FOLLOW_TRIES = 3
@@ -687,8 +718,9 @@ class EasyApplySubmitRead:
     `complete` is False when a step was refused or the form ran past the step
     cap, which is also why `submitted` can be False on a run that asked to
     submit. `follow` is the state the follow-the-company checkbox ended in, or
-    None where the dialog had none, and `confirmation` is what LinkedIn showed
-    once the form dialog was gone.
+    None where the dialog had none, and `confirmation` is what LinkedIn said
+    about the sent application, its own modal or the posting's applied line,
+    empty where neither surface spoke before the deadline.
     """
 
     type: ApplyType
@@ -1141,6 +1173,7 @@ class JobPageReader:
         try:
             outcome = await self._walk_easy_apply_answers(
                 job_id,
+                text,
                 answers,
                 steps,
                 confirm_submit=confirm_submit,
@@ -1164,6 +1197,7 @@ class JobPageReader:
     async def _walk_easy_apply_answers(
         self,
         job_id: str,
+        text: JobApplyTextTable,
         answers: Mapping[str, EasyApplyAnswer],
         steps: list[dict[str, Any]],
         *,
@@ -1218,7 +1252,7 @@ class JobPageReader:
         follow = await self._set_follow_company(follow_company)
         if not confirm_submit:
             return _WalkOutcome(complete=True, follow=follow)
-        confirmation = await self._click_easy_apply_submit()
+        confirmation = await self._click_easy_apply_submit(text)
         return _WalkOutcome(
             complete=True, submitted=True, follow=follow, confirmation=confirmation
         )
@@ -1315,7 +1349,7 @@ class JobPageReader:
         else:
             await control.check(timeout=timeout)
 
-    async def _click_easy_apply_submit(self) -> str:
+    async def _click_easy_apply_submit(self, text: JobApplyTextTable) -> str:
         """Send the application; answers with what LinkedIn showed afterwards.
 
         The one click that cannot be taken back. A dialog still holding the
@@ -1333,7 +1367,43 @@ class JobPageReader:
             )
         except PlaywrightTimeoutError:
             raise RuntimeError(EASY_APPLY_SUBMIT_UNCONFIRMED) from None
-        return await page.evaluate(EASY_APPLY_CONFIRMATION_JS)
+        return await self._read_easy_apply_confirmation(text)
+
+    async def _read_easy_apply_confirmation(self, text: JobApplyTextTable) -> str:
+        """What LinkedIn says about the application once the form is gone.
+
+        The closing is the evidence that the click landed; this is the account
+        of it, and there are two surfaces that give one. LinkedIn's own modal
+        is the direct one and it does not always come: measured on 2026-09-23,
+        an application that landed closed the form and rendered no dialog at
+        all, which left this empty on a submission the posting itself reported
+        as sent. So the posting's applied line stands in, the same line
+        `read_apply_link` reads, and reaching it is not a fallback on weaker
+        evidence: the modal is LinkedIn narrating the click, while the line is
+        the posting's state having changed. Both are polled, the modal first
+        within a round because it is the one that renders immediately. Neither
+        is waited for past a few seconds, and an empty answer means only that
+        neither spoke, never that nothing was sent.
+        """
+        page = self._session.page
+        opts = {
+            "descriptionHeadings": list(text.description_headings),
+            "appliedPattern": text.applied_pattern.pattern,
+        }
+        deadline = self._session.monotonic() + _EASY_APPLY_CONFIRMATION_TIMEOUT
+        while True:
+            confirmation = await page.evaluate(EASY_APPLY_CONFIRMATION_JS)
+            if confirmation:
+                return confirmation
+            # The posting could not have been showing this before the click:
+            # a posting that reads as applied never reaches the form at all.
+            applied = await page.evaluate(APPLIED_LINE_JS, opts)
+            if applied:
+                return applied
+            if self._session.monotonic() >= deadline:
+                logger.info("A sent application showed no confirmation of its own")
+                return ""
+            await self._session.delay(_APPLY_POLL)
 
     async def _answer_easy_apply_step(
         self, step: dict[str, Any], answers: Mapping[str, EasyApplyAnswer]

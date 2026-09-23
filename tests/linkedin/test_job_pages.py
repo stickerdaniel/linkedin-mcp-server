@@ -1847,6 +1847,9 @@ class _Dialog:
         self.open = False
         self.follow = follow
         self.confirmation = "Your application was sent to Acme"
+        #: The posting's own applied line, which is what LinkedIn leaves behind
+        #: when it answers a sent application with no dialog at all.
+        self.applied_line = ""
         self.refuse: dict[int, dict[str, str]] = {}
         self.stuck: set[int] = set()
         self.cards: list[str] = []
@@ -1904,6 +1907,8 @@ class _Dialog:
             }
         if script is job_pages_module.EASY_APPLY_CONFIRMATION_JS:
             return self.confirmation
+        if script is job_pages_module.APPLIED_LINE_JS:
+            return self.applied_line
         return self.open
 
     def _locator(self, selector: str):
@@ -2124,6 +2129,57 @@ class TestSubmitEasyApply:
         assert result.confirmation == "Your application was sent to Acme"
         assert "submit" in dialog.log and "discard" not in dialog.log
         assert result.discarded is True
+
+    async def test_the_postings_applied_line_answers_a_submit_no_dialog_follows(
+        self, mock_page
+    ):
+        """A sent application LinkedIn narrates with nothing at all.
+
+        Measured on 2026-09-23: the form closed, no modal rendered, and the
+        posting behind it carried the applied line. The dialog closing already
+        proved the click landed, so what is being read here is the account of
+        it, and the posting is the one surface still giving one.
+        """
+        dialog, run, reader, answers, _ = self._run(mock_page)
+        dialog.confirmation = ""
+        dialog.applied_line = "Application submitted"
+
+        with run:
+            result = await reader.submit_easy_apply(
+                self.URL, "123", JOB_APPLY_EN_US, answers, confirm_submit=True
+            )
+
+        assert result.submitted is True
+        assert result.confirmation == "Application submitted"
+
+    async def test_linkedins_own_dialog_is_taken_over_the_postings_line(
+        self, mock_page
+    ):
+        dialog, run, reader, answers, _ = self._run(mock_page)
+        dialog.applied_line = "Application submitted"
+
+        with run:
+            result = await reader.submit_easy_apply(
+                self.URL, "123", JOB_APPLY_EN_US, answers, confirm_submit=True
+            )
+
+        assert result.confirmation == "Your application was sent to Acme"
+
+    async def test_neither_surface_speaking_is_empty_and_not_a_failed_submit(
+        self, mock_page, monkeypatch
+    ):
+        monkeypatch.setattr(job_pages_module, "_EASY_APPLY_CONFIRMATION_TIMEOUT", 0)
+        dialog, run, reader, answers, _ = self._run(mock_page)
+        dialog.confirmation = ""
+
+        with run:
+            result = await reader.submit_easy_apply(
+                self.URL, "123", JOB_APPLY_EN_US, answers, confirm_submit=True
+            )
+
+        assert result.submitted is True
+        assert result.confirmation == ""
+        assert "submit" in dialog.log
 
     async def test_a_required_field_nothing_answers_stops_before_any_click(
         self, mock_page

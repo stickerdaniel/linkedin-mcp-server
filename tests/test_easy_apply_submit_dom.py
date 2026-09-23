@@ -183,7 +183,23 @@ const render = () => {
     if (submit) submit.addEventListener('click', () => {
         window.log.push('submit');
         window.log.push('follow=' + shadow.getElementById('follow').checked);
-        shadow.innerHTML = '<div role="dialog"><h2>Your application was sent to Acme</h2></div>';
+        shadow.innerHTML = '';
+        // What LinkedIn does next is the thing that varies. `dialog` is the
+        // modal it narrates the send with; `posting` is the case measured on
+        // 2026-09-23, where nothing renders and the posting behind the form
+        // grows its applied line a moment later; `silent` is neither.
+        if (window.submitAnswer === 'dialog') {
+            shadow.innerHTML = '<div role="dialog">'
+                + '<h2>Your application was sent to Acme</h2></div>';
+        } else if (window.submitAnswer === 'posting') {
+            setTimeout(() => {
+                const main = document.querySelector('main');
+                const line = document.createElement('p');
+                line.textContent = 'Application submitted';
+                main.insertBefore(line, main.querySelector('h2'));
+                window.log.push('applied');
+            }, window.postingDelay);
+        }
     });
 };
 document.querySelector('main a[href*="/apply"]').addEventListener('click', (event) => {
@@ -213,7 +229,13 @@ EASY_APPLY = (
 )
 
 
-def posting(steps: list[dict], delay: int = 400, follow_style: str = "") -> str:
+def posting(
+    steps: list[dict],
+    delay: int = 400,
+    follow_style: str = "",
+    submit_answer: str = "dialog",
+    posting_delay: int = 300,
+) -> str:
     return (
         "<main>"
         f"<h1>AI Engineer</h1><p>Acme</p>{EASY_APPLY}"
@@ -221,6 +243,8 @@ def posting(steps: list[dict], delay: int = 400, follow_style: str = "") -> str:
         "</main>"
         f"<script>window.uploadDelay = {delay};"
         f"window.followStyle = {json.dumps(follow_style)};"
+        f"window.submitAnswer = {json.dumps(submit_answer)};"
+        f"window.postingDelay = {posting_delay};"
         f"{DIALOG_SCRIPT % json.dumps(steps)}</script>"
     )
 
@@ -254,6 +278,7 @@ def _short_waits(monkeypatch):
     monkeypatch.setattr(job_pages, "_EASY_APPLY_STEP_TIMEOUT", 2.0)
     monkeypatch.setattr(job_pages, "_EASY_APPLY_DISCARD_TIMEOUT", 1.0)
     monkeypatch.setattr(job_pages, "_EASY_APPLY_SUBMIT_TIMEOUT", 2.0)
+    monkeypatch.setattr(job_pages, "_EASY_APPLY_CONFIRMATION_TIMEOUT", 2.0)
     monkeypatch.setattr(job_pages, "_EASY_APPLY_UPLOAD_TIMEOUT", 4.0)
 
 
@@ -273,10 +298,14 @@ async def answer(
     follow_company: bool = False,
     delay: int = 400,
     follow_style: str = "",
+    submit_answer: str = "dialog",
+    posting_delay: int = 300,
 ) -> EasyApplySubmitRead:
     """Answer the synthetic posting's form the way the workflow does."""
     await page.goto(JOB_URL)
-    await page.set_content(posting(steps, delay, follow_style))
+    await page.set_content(
+        posting(steps, delay, follow_style, submit_answer, posting_delay)
+    )
     session = PageSession(page)
     reader = JobPageReader(session, PageNavigator(session), PageContentReader(session))
     with patch.object(reader._navigator, "_navigate_to_page", new_callable=AsyncMock):
@@ -461,3 +490,52 @@ async def test_a_one_step_form_submits_from_its_own_footer(dom_page, resume):
     assert result.submitted is True
     assert result.complete is True
     assert result.confirmation == "Your application was sent to Acme"
+
+
+async def test_a_submit_with_no_dialog_is_confirmed_by_the_posting(dom_page, resume):
+    """The one-step form as it was measured: no modal, ever.
+
+    The form closes and nothing narrates it. What renders instead, and only
+    after a moment, is the posting's own applied line, which the read has to
+    still be looking for by then.
+    """
+    result = await answer(
+        dom_page,
+        [SOLO],
+        {"Upload resume": resume},
+        confirm_submit=True,
+        submit_answer="posting",
+    )
+
+    assert result.submitted is True
+    assert result.confirmation == "Application submitted"
+    assert "applied" in await log(dom_page)
+
+
+async def test_a_line_in_the_description_is_not_the_postings_state(dom_page, resume):
+    """The applied line is read above the description heading and nowhere else.
+
+    A posting whose own text uses the words is not a posting that has been
+    applied to, and reading one as the other would report a confirmation for
+    an application LinkedIn said nothing about.
+    """
+    await dom_page.goto(JOB_URL)
+    body = posting([SOLO], submit_answer="silent")
+    await dom_page.set_content(
+        body.replace(
+            "<p>Build agents.</p>", "<p>Application submitted</p><p>Build agents.</p>"
+        )
+    )
+    session = PageSession(dom_page)
+    reader = JobPageReader(session, PageNavigator(session), PageContentReader(session))
+    with patch.object(reader._navigator, "_navigate_to_page", new_callable=AsyncMock):
+        result = await reader.submit_easy_apply(
+            JOB_URL,
+            "123",
+            JOB_APPLY_EN_US,
+            {"Upload resume": resume},
+            confirm_submit=True,
+        )
+
+    assert result.submitted is True
+    assert result.confirmation == ""

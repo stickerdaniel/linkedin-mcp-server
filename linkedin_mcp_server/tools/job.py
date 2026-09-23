@@ -211,7 +211,9 @@ def register_job_tools(
             Dict with url, apply: {type} and submitted. Easy Apply postings add
             form: {steps, complete} as get_easy_apply_form returns it, with the
             fields as they were left; follow is the state the checkbox ended in
-            and confirmation is what LinkedIn showed after a sent application.
+            and confirmation is what LinkedIn said about a sent application,
+            its own modal or the posting's applied line. It is absent when
+            neither appeared; submitted is what says the application was sent.
             section_errors reports a form that could not be answered or a draft
             that could not be discarded.
         """

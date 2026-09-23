@@ -416,6 +416,26 @@ class TestSubmitEasyApply:
             "confirmation": "Your application was sent",
         }
 
+    async def test_a_submit_neither_surface_narrated_carries_no_confirmation(
+        self, mock_page
+    ):
+        """An empty string is not an account of anything, so it is not offered.
+
+        Absent says the same thing without inviting a caller to read it, and
+        `submitted` is what answers whether the application was sent.
+        """
+        reader = _reader(mock_page)
+        read = EasyApplySubmitRead(
+            "easy_apply", (self.STEP,), complete=True, submitted=True, confirmation=""
+        )
+        with self._walking(reader, return_value=read):
+            result = await reader.submit_easy_apply(
+                "12345", self.ANSWERS, confirm_submit=True
+            )
+
+        assert result["submitted"] is True
+        assert "confirmation" not in result
+
     async def test_a_rehearsal_answers_with_the_form_it_would_have_sent(
         self, mock_page
     ):
