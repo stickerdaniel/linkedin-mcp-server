@@ -2513,6 +2513,24 @@ def wait_handles_to_deadline[T](
             raise TimeoutError(f"process {pid} remained active at the shared deadline")
 
 
+def _wait_for_job_zero(
+    query_active_processes: Callable[[], int],
+    *,
+    deadline: float,
+    wait_for_retry: Callable[[], None],
+    monotonic: Callable[[], float],
+    message: str,
+) -> None:
+    """Poll until termination is visible. One sample can precede process exit."""
+    while True:
+        active = query_active_processes()
+        if active == 0:
+            return
+        if monotonic() >= deadline:
+            raise RuntimeError(message.format(active=active))
+        wait_for_retry()
+
+
 def browser_guardian_shutdown[T](
     *,
     retained: dict[int, T],
@@ -2525,21 +2543,33 @@ def browser_guardian_shutdown[T](
     signal_both_zero: Callable[[], None],
     wait_allow_fence_release: Callable[[], None],
     release_fence: Callable[[], None],
+    deadline: float,
+    wait_for_retry: Callable[[], None],
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> dict[str, Any]:
     """Drain the retained launch while keeping the fence through both proofs."""
     before = sorted(active_pids(retained))
     terminate_job()
-    active = query_active_processes()
-    if active != 0:
-        raise RuntimeError(f"browser Job retained {active} active processes")
+    _wait_for_job_zero(
+        query_active_processes,
+        deadline=deadline,
+        wait_for_retry=wait_for_retry,
+        monotonic=monotonic,
+        message="browser Job retained {active} active processes",
+    )
     signal_job_zero()
     wait_check_stable_handles()
     wait_handles(retained)
     after = sorted(active_pids(retained))
     if after:
         raise RuntimeError(f"retained browser handles remain active: {after}")
-    if query_active_processes() != 0:
-        raise RuntimeError("browser Job became non-empty after retained-handle waits")
+    _wait_for_job_zero(
+        query_active_processes,
+        deadline=deadline,
+        wait_for_retry=wait_for_retry,
+        monotonic=monotonic,
+        message="browser Job became non-empty after retained-handle waits",
+    )
     signal_both_zero()
     wait_allow_fence_release()
     release_fence()
@@ -4226,6 +4256,8 @@ async def _browser_launch_owner(root: Path, controls: dict[str, str]) -> int:
     if browser is None:
         raise RuntimeError("persistent context exposed no browser-level CDP endpoint")
     session = await browser.new_browser_cdp_session()
+    # CDP product string for the browser already launched on this disposable
+    # profile. This is not the forbidden Windows `--version` process launch.
     version = await session.send("Browser.getVersion")
     _atomic_json(
         root / "browser.json",
@@ -4408,6 +4440,8 @@ def _browser_launch_guardian(root: Path, controls: dict[str, str]) -> int:
                 controls["allow_fence_release"], deadline
             ),
             release_fence=lease.release,
+            deadline=deadline,
+            wait_for_retry=lambda: time.sleep(0.001),
         )
         _atomic_json(root / "guardian.json", shutdown)
         _signal(controls["fence_released"])

@@ -8,7 +8,7 @@ Issue: #808
 
 ## Decision
 
-Production integration remains stopped. Before changing the Windows profile-fence protocol, collect one native measurement against the exact locked Patchright stack. The measurement launches a real, network-isolated persistent Chromium context in a named inner Job while the coordinator, launch owner, and guardian remain in an outer harness Job. The guardian retains stable handles for a quiescent two-sided CDP and Job census, keeps a real profile lease through Job zero and retained-handle zero, and releases it only after the coordinator permits release.
+Production integration remains stopped. Before changing the Windows profile-fence protocol, collect one native measurement against the exact locked Patchright stack. The measurement launches a real persistent Chromium context for local page activity in a named inner Job while the coordinator, launch owner, and guardian remain in an outer harness Job. The guardian retains stable handles for a quiescent two-sided CDP and Job census, keeps a real profile lease through Job zero and retained-handle zero, and releases it only after the coordinator permits release.
 
 The native CI result is authoritative. Stack, topology, inventory, and fence mismatches fail rather than skip or rewrite the evidence.
 
@@ -18,7 +18,7 @@ The evidence requires the locked Python package, bundled core, Chromium revision
 
 ## Non-claims
 
-This stage does not establish a production protocol, choose lock bytes, change defaults, prove that `TerminateJobObject` caused every observed exit, cover anonymous production Job ownership, or authorize production integration. It does not measure LinkedIn, authentication, a real profile, proxy behavior, browser identity evasion, or any user session. Conditional GPU, utility, and crashpad processes are inventory observations, not acceptance premises.
+This stage does not establish a production protocol, choose lock bytes, change defaults, prove that `TerminateJobObject` caused every observed exit, cover anonymous production Job ownership, or authorize production integration. It does not measure LinkedIn, authentication, a real profile, proxy behavior, browser identity evasion, or any user session. It also does not establish network isolation: Chromium can still open background connections, and the evidence only avoids page navigation. Conditional GPU, utility, and crashpad processes are inventory observations, not acceptance premises.
 
 ## Native result
 
