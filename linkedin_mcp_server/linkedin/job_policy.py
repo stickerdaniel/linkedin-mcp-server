@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from ipaddress import IPv6Address, ip_address
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import parse_qs, urlparse
 
 
@@ -403,6 +403,65 @@ def apply_link_missing_section_error() -> dict[str, str]:
             "this host's own network, so none is returned."
         ),
     }
+
+
+# Answers arrive keyed by the label the read returned, and each one is a
+# value the caller chose: text for a typed or picked control, a list for a
+# checkbox group answered with several options, a bool for a lone checkbox,
+# and a path for a file input.
+EasyApplyAnswer = str | bool | list[str]
+
+EASY_APPLY_TYPEAHEAD_REFUSED = (
+    "A typeahead is answered by picking a suggestion that only appears while "
+    "typing, which this server does not do. Answer it once by hand on any Easy "
+    "Apply form and LinkedIn prefills it from then on."
+)
+
+EASY_APPLY_NO_CONTROL = (
+    "LinkedIn gave this control no id, so there is no way to address it."
+)
+
+
+def easy_apply_answer_refused(field: dict[str, Any], reason: str) -> str:
+    """The message for an answer that cannot be placed in ``field``.
+
+    The label, the type and the options travel with the reason because the fix
+    is in the caller's answers rather than in the dialog: they name the field
+    by the same label the read returned, and they need to see what it accepts.
+    """
+    described = f"{field.get('label') or '(unlabelled)'} ({field.get('type')})"
+    options = field.get("options")
+    if options:
+        described += ", options: " + ", ".join(repr(option) for option in options)
+    return f"{reason} Field: {described}."
+
+
+def easy_apply_duplicate_label_error(label: str) -> str:
+    """The message for two fields on one step sharing a label.
+
+    Never resolved by picking one. The answer was written against a label, and
+    two fields wearing it means the answer names a question the form asks
+    twice, which only whoever wrote the answers can settle.
+    """
+    return (
+        f"Two fields on this step are both labelled {label!r}, so an answer "
+        "naming it could go to either one."
+    )
+
+
+def easy_apply_unknown_answers_error(labels: list[str]) -> str:
+    """The message for answers no field on the form wears.
+
+    A stale answers file is the likely cause, and the risk it carries is the
+    one thing worth stopping for: an answer that silently goes nowhere leaves a
+    question filled with whatever LinkedIn prefilled, on an application that is
+    then submitted as though it had been answered.
+    """
+    named = ", ".join(repr(label) for label in sorted(labels))
+    return (
+        f"The form asks nothing labelled {named}, so those answers would go "
+        "nowhere. The labels have to match what the form read returned."
+    )
 
 
 EASY_APPLY_DRAFT_LEFT = (

@@ -8,11 +8,14 @@ diagnostics that decide what a page *means* stay with the workflow.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 import asyncio
+import json
 import logging
 import re
 import time
@@ -21,7 +24,10 @@ from urllib.parse import parse_qs, urlparse
 import anyio
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
-from linkedin_mcp_server.core.exceptions import LinkedInOperationError
+from linkedin_mcp_server.core.exceptions import (
+    InvalidAnswerError,
+    LinkedInOperationError,
+)
 from linkedin_mcp_server.core.utils import (
     _JOB_CARD_SELECTOR,
     _RAIL_PICK_JS,
@@ -40,9 +46,15 @@ from linkedin_mcp_server.linkedin.contracts import (
 from linkedin_mcp_server.linkedin.identifiers import job_view_url
 from linkedin_mcp_server.linkedin.job_policy import (
     EASY_APPLY_DRAFT_LEFT,
+    EASY_APPLY_NO_CONTROL,
+    EASY_APPLY_TYPEAHEAD_REFUSED,
     SAFETY_REDIRECT_PATH,
     SCROLL_DEADLINE_MAX,
     ApplyType,
+    EasyApplyAnswer,
+    easy_apply_answer_refused,
+    easy_apply_duplicate_label_error,
+    easy_apply_unknown_answers_error,
     employer_apply_url,
     parse_posting_title,
     route,
@@ -317,6 +329,11 @@ EASY_APPLY_CLOSED_JS = "() => !(" + EASY_APPLY_OPEN_JS + ")()"
 # per question; every other control is its own field. Footer controls (follow
 # the company) are not questions, and a file input is read although hidden
 # behind its upload button. `signature` changes when the step does.
+#
+# `ids` carries the control behind each field so an answer can reach it: one
+# entry for a text, select or file input, and one per option, in the options'
+# order, for a radio or checkbox group. `_public_step` drops it again, because
+# a control id is the walk's own handle and means nothing to a caller.
 EASY_APPLY_STEP_JS = (
     "(maxOptions) => {"
     + _EASY_APPLY_DIALOG_JS
@@ -383,6 +400,7 @@ EASY_APPLY_STEP_JS = (
         } else if (first.type !== 'file' && first.value) {
             field.value = first.value;
         }
+        field.ids = group.map((el) => el.id || '');
         if (first.maxLength > 0) field.max_length = first.maxLength;
         // Hints are described too. Which text is an error is the walk's to
         // say, by what a refused Next added (`_refused_step`).
@@ -411,8 +429,29 @@ EASY_APPLY_STEP_JS = (
 EASY_APPLY_NEXT_SELECTOR = "[data-easy-apply-next-button]"
 EASY_APPLY_DISCARD_SELECTOR = '[data-control-name="discard_application_confirm_btn"]'
 
+# The open dialog, named the same way the programs above name it. A control is
+# addressed through it rather than by its id alone, because the posting behind
+# the dialog is still in the document and an id is only unique within one tree.
+_EASY_APPLY_DIALOG_PARTS = (
+    '[role="dialog"]:has([data-easy-apply-next-button])',
+    '[role="dialog"]:has([data-live-test-easy-apply-submit-button])',
+    '[role="dialog"]:has([id*="easyApplyFormElement"])',
+)
+
+
+def easy_apply_control_selector(control_id: str) -> str:
+    """A selector for one control of the open dialog, by its id.
+
+    CSS locators pierce open shadow roots on their own, which is how this
+    reaches a dialog the document's own `querySelector` never sees.
+    """
+    inside = f"[id={json.dumps(control_id)}]"
+    return ", ".join(f"{part} {inside}" for part in _EASY_APPLY_DIALOG_PARTS)
+
+
 _EASY_APPLY_OPEN_TIMEOUT = 10.0
 _EASY_APPLY_STEP_TIMEOUT = 8.0
+_EASY_APPLY_SET_TIMEOUT = 5.0
 _EASY_APPLY_DISCARD_TIMEOUT = 5.0
 # How long closing the dialog may hold the page once the walk has ended, a
 # cancelled walk included: the wait for a dialog still opening, Escape, the
@@ -579,8 +618,192 @@ def _public_step(step: dict[str, Any]) -> dict[str, Any]:
         public["heading"] = step["heading"]
     if step["progress"] is not None:
         public["progress"] = step["progress"]
-    public["fields"] = step["fields"]
+    public["fields"] = [
+        {key: value for key, value in field.items() if key != "ids"}
+        for field in step["fields"]
+    ]
     return public
+
+
+@dataclass(frozen=True, slots=True)
+class EasyApplyEdit:
+    """One control of the open dialog, and what to do to it.
+
+    Every answer is resolved into these before the first one is carried out,
+    so an answer the form cannot take refuses while the dialog is still
+    untouched. That matters more here than it reads: LinkedIn saves Easy Apply
+    answers to the account and prefills them into the next application, so a
+    half-filled step is not undone by discarding the draft.
+    """
+
+    control_id: str
+    action: Literal["fill", "select", "check", "uncheck", "upload"]
+    value: str
+
+
+def _one_control(field: dict[str, Any]) -> str:
+    """The id of the single control behind ``field``."""
+    ids = field.get("ids") or []
+    if len(ids) != 1 or not ids[0]:
+        raise InvalidAnswerError(
+            easy_apply_answer_refused(field, EASY_APPLY_NO_CONTROL)
+        )
+    return ids[0]
+
+
+def _plan_choice(field: dict[str, Any], answer: EasyApplyAnswer) -> list[EasyApplyEdit]:
+    """The edits that leave a radio or checkbox group holding ``answer``.
+
+    A radio takes one option and checking it clears the rest, so only the
+    wanted option is ever touched. A checkbox group is set to exactly what the
+    answer names, because answering the question at all claims its whole value.
+    """
+    options: list[str] = field.get("options") or []
+    selected: set[str] = set(field.get("selected") or [])
+    ids: list[str] = field.get("ids") or []
+    radio = field["type"] == "radio"
+
+    if isinstance(answer, bool):
+        if len(options) != 1:
+            raise InvalidAnswerError(
+                easy_apply_answer_refused(
+                    field, "Yes or no answers only one option. Name the option instead."
+                )
+            )
+        wanted = set(options) if answer else set()
+    else:
+        wanted = {answer} if isinstance(answer, str) else set(answer)
+
+    if radio and len(wanted) != 1:
+        raise InvalidAnswerError(
+            easy_apply_answer_refused(field, "Exactly one option answers this field.")
+        )
+    missing = sorted(wanted - set(options))
+    if missing:
+        raise InvalidAnswerError(
+            easy_apply_answer_refused(
+                field,
+                "No option is labelled "
+                + ", ".join(repr(name) for name in missing)
+                + ".",
+            )
+        )
+    if len(set(options)) != len(options) or len(ids) != len(options):
+        raise InvalidAnswerError(
+            easy_apply_answer_refused(
+                field, "Its options do not each carry one distinct label and control."
+            )
+        )
+
+    edits: list[EasyApplyEdit] = []
+    for option, control_id in zip(options, ids, strict=True):
+        if option in wanted and option not in selected:
+            action: Literal["check", "uncheck"] = "check"
+        elif not radio and option not in wanted and option in selected:
+            action = "uncheck"
+        else:
+            continue
+        if not control_id:
+            raise InvalidAnswerError(
+                easy_apply_answer_refused(field, EASY_APPLY_NO_CONTROL)
+            )
+        edits.append(EasyApplyEdit(control_id, action, option))
+    return edits
+
+
+def plan_easy_apply_answer(
+    field: dict[str, Any], answer: EasyApplyAnswer
+) -> list[EasyApplyEdit]:
+    """The edits that leave ``field`` holding ``answer``, or a refusal.
+
+    Nothing is inferred and nothing is adjusted to fit: a value the field
+    cannot take refuses, naming the field and what it accepts, rather than
+    going in as the nearest thing that would.
+    """
+    kind = field["type"]
+    if kind == "typeahead":
+        raise InvalidAnswerError(
+            easy_apply_answer_refused(field, EASY_APPLY_TYPEAHEAD_REFUSED)
+        )
+    if kind in ("radio", "checkbox"):
+        return _plan_choice(field, answer)
+
+    control_id = _one_control(field)
+    if not isinstance(answer, str):
+        raise InvalidAnswerError(
+            easy_apply_answer_refused(field, "It takes one value, written out.")
+        )
+    if kind == "select":
+        if answer not in (field.get("options") or []):
+            raise InvalidAnswerError(
+                easy_apply_answer_refused(field, f"No option is labelled {answer!r}.")
+            )
+        return [EasyApplyEdit(control_id, "select", answer)]
+    if kind == "file":
+        path = Path(answer).expanduser()
+        if not path.is_file():
+            raise InvalidAnswerError(
+                easy_apply_answer_refused(field, f"There is no file at {answer!r}.")
+            )
+        return [EasyApplyEdit(control_id, "upload", str(path))]
+
+    limit = field.get("max_length")
+    if limit and len(answer) > limit:
+        raise InvalidAnswerError(
+            easy_apply_answer_refused(
+                field,
+                f"The answer is {len(answer)} characters and the field holds "
+                f"{limit}, so LinkedIn would cut it.",
+            )
+        )
+    return [EasyApplyEdit(control_id, "fill", answer)]
+
+
+def plan_easy_apply_step(
+    step: dict[str, Any], answers: Mapping[str, EasyApplyAnswer]
+) -> tuple[list[EasyApplyEdit], set[str]]:
+    """The edits one step takes from ``answers``, and the labels they used.
+
+    A field no answer names keeps whatever LinkedIn prefilled. A label this
+    step does not carry is left for another step to claim; what becomes of one
+    no step claims is the walk's to decide, once every step has been seen.
+
+    An empty typeahead refuses even unanswered, because it is the one field
+    this server cannot fill and LinkedIn will not accept the step without it.
+    """
+    for field in step["fields"]:
+        if field["type"] == "typeahead" and not field.get("value"):
+            raise InvalidAnswerError(
+                easy_apply_answer_refused(field, EASY_APPLY_TYPEAHEAD_REFUSED)
+            )
+
+    by_label: dict[str, dict[str, Any]] = {}
+    duplicated: set[str] = set()
+    for field in step["fields"]:
+        if field["label"] in by_label:
+            duplicated.add(field["label"])
+        by_label[field["label"]] = field
+
+    edits: list[EasyApplyEdit] = []
+    used: set[str] = set()
+    for label, answer in answers.items():
+        field = by_label.get(label)
+        if field is None:
+            continue
+        if label in duplicated:
+            raise InvalidAnswerError(easy_apply_duplicate_label_error(label))
+        edits.extend(plan_easy_apply_answer(field, answer))
+        used.add(label)
+    return edits, used
+
+
+def refuse_unused_easy_apply_answers(
+    answers: Mapping[str, EasyApplyAnswer], used: set[str]
+) -> None:
+    """Refuse when the form asked nothing for some of ``answers``."""
+    unused = [label for label in answers if label not in used]
+    if unused:
+        raise InvalidAnswerError(easy_apply_unknown_answers_error(unused))
 
 
 @dataclass(frozen=True, slots=True)
@@ -739,6 +962,37 @@ class JobPageReader:
                 steps[-1] = _public_step(_refused_step(step, after))
                 return False
             step = after
+
+    async def _answer_easy_apply_step(
+        self, step: dict[str, Any], answers: Mapping[str, EasyApplyAnswer]
+    ) -> set[str]:
+        """Fill ``step`` from ``answers``; answers the labels it took.
+
+        The whole step is resolved before anything is touched, so a refusal
+        leaves the dialog holding what LinkedIn prefilled. Every control is
+        reached through a Playwright locator rather than through a script: the
+        dialog is React, and a value written straight onto an element is not an
+        answer it has seen.
+        """
+        edits, used = plan_easy_apply_step(step, answers)
+        page = self._session.page
+        for edit in edits:
+            control = page.locator(easy_apply_control_selector(edit.control_id)).first
+            timeout = _EASY_APPLY_SET_TIMEOUT * 1000
+            if edit.action == "fill":
+                await control.fill(edit.value, timeout=timeout)
+            elif edit.action == "select":
+                await control.select_option(label=edit.value, timeout=timeout)
+            elif edit.action == "check":
+                await control.check(timeout=timeout)
+            elif edit.action == "uncheck":
+                await control.uncheck(timeout=timeout)
+            else:
+                # The one control set while invisible: LinkedIn hides the file
+                # input behind an upload button, and an upload is the one thing
+                # a locator does without the element being shown.
+                await control.set_input_files(edit.value, timeout=timeout)
+        return used
 
     async def _read_easy_apply_step(
         self, previous: dict[str, Any] | None
