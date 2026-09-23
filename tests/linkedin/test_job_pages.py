@@ -1626,6 +1626,13 @@ class TestAnswerEasyApplyStep:
         ],
     }
 
+    CITY = {
+        "label": "Location (city)",
+        "type": "typeahead",
+        "required": True,
+        "ids": ["city"],
+    }
+
     @staticmethod
     def _dialog(mock_page) -> list[tuple[str, str, str]]:
         """Route locators to per-control doubles that record what reached them."""
@@ -1738,47 +1745,82 @@ class TestAnswerEasyApplyStep:
             await _reader(mock_page)._answer_easy_apply_step(twice, {"First name": "S"})
         assert done == []
 
-    async def test_an_empty_typeahead_refuses_even_unanswered(self, mock_page):
-        step = dict(
-            self.CONTACT,
-            fields=[
-                *self.CONTACT["fields"],
-                {
-                    "label": "Location (city)",
-                    "type": "typeahead",
-                    "required": True,
-                    "ids": ["city"],
-                },
-            ],
-        )
+    async def test_an_empty_typeahead_no_answer_names_still_refuses(self, mock_page):
+        step = dict(self.CONTACT, fields=[*self.CONTACT["fields"], self.CITY])
         done = self._dialog(mock_page)
 
-        with pytest.raises(InvalidAnswerError, match="typeahead"):
+        with pytest.raises(InvalidAnswerError, match="needs an answer naming it"):
             await _reader(mock_page)._answer_easy_apply_step(
                 step, {"First name": "Noor"}
             )
         assert done == []
 
-    async def test_a_prefilled_typeahead_is_kept_and_never_answered(self, mock_page):
-        city = {
-            "label": "Location (city)",
-            "type": "typeahead",
-            "required": True,
-            "value": "Paris",
-            "ids": ["city"],
-        }
-        step = dict(self.CONTACT, fields=[city])
-        done = self._dialog(mock_page)
+    def test_a_named_typeahead_is_picked_rather_than_typed(self):
+        step = dict(self.CONTACT, fields=[self.CITY])
 
-        assert await _reader(mock_page)._answer_easy_apply_step(step, {}) == (
-            set(),
-            set(),
+        edits, used = job_pages_module.plan_easy_apply_step(
+            step, {"Location (city)": "Paris, \u00cele-de-France, France"}
         )
-        assert done == []
-        with pytest.raises(InvalidAnswerError, match="typeahead"):
-            await _reader(mock_page)._answer_easy_apply_step(
-                step, {"Location (city)": "Lyon"}
+
+        assert edits == [
+            job_pages_module.EasyApplyEdit(
+                "city", "pick", "Paris, \u00cele-de-France, France"
             )
+        ]
+        assert used == {"Location (city)"}
+
+    def test_a_prefilled_typeahead_no_answer_names_is_kept(self):
+        step = dict(self.CONTACT, fields=[dict(self.CITY, value="Paris, France")])
+
+        assert job_pages_module.plan_easy_apply_step(step, {}) == ([], set())
+
+    def test_a_prefilled_typeahead_an_answer_names_is_replaced(self):
+        step = dict(self.CONTACT, fields=[dict(self.CITY, value="Paris, France")])
+
+        edits, _ = job_pages_module.plan_easy_apply_step(
+            step, {"Location (city)": "Lyon, France"}
+        )
+
+        assert edits == [job_pages_module.EasyApplyEdit("city", "pick", "Lyon, France")]
+
+    def test_a_prefill_that_already_is_the_answer_is_left_where_it_is(self):
+        # Retyping it would throw away LinkedIn's binding of that text to an
+        # entity for the chance of picking the same one back.
+        step = dict(
+            self.CONTACT,
+            fields=[dict(self.CITY, value="Paris, I\u0302le-de-France, France")],
+        )
+
+        edits, used = job_pages_module.plan_easy_apply_step(
+            step, {"Location (city)": "Paris, \u00cele-de-France, France"}
+        )
+
+        assert edits == []
+        assert used == {"Location (city)"}
+
+    def test_a_typeahead_takes_one_value_rather_than_a_list(self):
+        step = dict(self.CONTACT, fields=[self.CITY])
+
+        with pytest.raises(InvalidAnswerError, match="one value, written out"):
+            job_pages_module.plan_easy_apply_step(
+                step, {"Location (city)": ["Paris", "Lyon"]}
+            )
+
+    def test_picks_are_carried_out_before_every_other_edit(self):
+        # A pick only learns whether it matches after its value is typed into
+        # the page, so a failing one must find the rest of the step untouched.
+        step = dict(self.CONTACT, fields=[*self.CONTACT["fields"], self.CITY])
+
+        edits, _ = job_pages_module.plan_easy_apply_step(
+            step,
+            {
+                "First name": "Noor",
+                "Location (city)": "Lyon, France",
+                "Why Acme?": "Agents.",
+            },
+        )
+
+        assert [edit.action for edit in edits] == ["pick", "fill", "fill"]
 
     def test_a_refusal_names_the_field_and_what_it_takes(self):
         email = self.CONTACT["fields"][1]

@@ -8,6 +8,7 @@ diagnostics that decide what a page *means* stay with the workflow.
 
 from __future__ import annotations
 
+import unicodedata
 from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ import time
 from urllib.parse import parse_qs, urlparse
 
 import anyio
+from patchright.async_api import Locator
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.core.exceptions import (
@@ -55,6 +57,8 @@ from linkedin_mcp_server.linkedin.job_policy import (
     EasyApplyAnswer,
     easy_apply_answer_refused,
     easy_apply_duplicate_label_error,
+    easy_apply_no_suggestion_error,
+    easy_apply_pick_unconfirmed_error,
     easy_apply_required_unanswered_error,
     easy_apply_upload_unconfirmed_error,
     easy_apply_unknown_answers_error,
@@ -542,6 +546,32 @@ def easy_apply_label_selector(control_id: str) -> str:
     return ", ".join(f"{part} {inside}" for part in _EASY_APPLY_DIALOG_PARTS)
 
 
+def easy_apply_option_selector(list_id: str | None) -> str:
+    """The suggestions a typeahead is offering, by its list's id or by role.
+
+    Not scoped to the dialog, which is the one selector here that is not: a
+    suggestion list is commonly portalled to the document's body, and the
+    dialog-scoped parts would miss it there. CSS locators pierce open shadow
+    roots on their own, so a role-based selector reaches the list wherever it
+    renders, and `aria-owns` narrows it to this field's own list when LinkedIn
+    supplies one. Visible only, so a collapsed list left in the document is not
+    mistaken for an open one.
+    """
+    if list_id:
+        return f'[id={json.dumps(list_id)}] [role="option"]:visible'
+    return '[role="listbox"] [role="option"]:visible'
+
+
+# What one suggestion reads as, cleaned the way the step read cleans a label,
+# so an answer that matches the label it was written against also matches the
+# suggestion wearing it. LinkedIn repeats text in an aria-hidden copy.
+EASY_APPLY_OPTION_TEXT_JS = r"""(nodes) => nodes.map((node) => {
+    const copy = node.cloneNode(true);
+    copy.querySelectorAll('[aria-hidden="true"]').forEach((el) => el.remove());
+    return (copy.textContent || '').replace(/\s+/g, ' ').trim();
+})"""
+
+
 _EASY_APPLY_OPEN_TIMEOUT = 10.0
 _EASY_APPLY_STEP_TIMEOUT = 8.0
 _EASY_APPLY_SET_TIMEOUT = 5.0
@@ -559,6 +589,15 @@ _EASY_APPLY_DISCARD_TIMEOUT = 5.0
 # between them.
 _EASY_APPLY_CLOSE_GRACE = 4 * _EASY_APPLY_DISCARD_TIMEOUT
 _EASY_APPLY_MAX_STEPS = 8
+# How long a typeahead's list gets to arrive. It is a round trip to LinkedIn
+# behind a debounce, so longer than setting a control and shorter than a step.
+_EASY_APPLY_SUGGEST_TIMEOUT = 8.0
+# How long a clicked suggestion gets to reach the field and close the list.
+_EASY_APPLY_PICK_TIMEOUT = 3.0
+# Between keystrokes. A typeahead that listens for keys rather than for the
+# input event sees nothing of a value set in one shot, and one that debounces
+# needs the gaps to be gaps.
+_EASY_APPLY_TYPE_DELAY = 40
 # A country list runs to 250 options; the prefilled value is still reported.
 # A radio or checkbox group is cut the same way, and keeps every option checked.
 _EASY_APPLY_MAX_OPTIONS = 50
@@ -807,8 +846,20 @@ class EasyApplyEdit:
     """
 
     control_id: str
-    action: Literal["fill", "select", "check", "uncheck", "upload"]
+    action: Literal["fill", "select", "check", "uncheck", "upload", "pick"]
     value: str
+
+
+def normalise_easy_apply_text(value: str) -> str:
+    """``value`` as it is compared against what LinkedIn shows.
+
+    Composed to NFC and with runs of whitespace collapsed, so an answer written
+    with a decomposed accent still matches the suggestion it names. Nothing
+    beyond that: case folding and substring matching would let the server
+    settle for a near miss, which is the one thing it must never do when the
+    result is an entity the caller cannot see.
+    """
+    return unicodedata.normalize("NFC", " ".join(value.split()))
 
 
 def _one_control(field: dict[str, Any]) -> str:
@@ -892,9 +943,20 @@ def plan_easy_apply_answer(
     """
     kind = field["type"]
     if kind == "typeahead":
-        raise InvalidAnswerError(
-            easy_apply_answer_refused(field, EASY_APPLY_TYPEAHEAD_REFUSED)
-        )
+        control_id = _one_control(field)
+        if not isinstance(answer, str):
+            raise InvalidAnswerError(
+                easy_apply_answer_refused(field, "It takes one value, written out.")
+            )
+        # A prefill that already is the answer is left where it is. Retyping it
+        # would throw away LinkedIn's own binding of that text to an entity for
+        # the chance of picking the same one back.
+        held = field.get("value") or ""
+        if held and normalise_easy_apply_text(held) == normalise_easy_apply_text(
+            answer
+        ):
+            return []
+        return [EasyApplyEdit(control_id, "pick", answer)]
     if kind in ("radio", "checkbox"):
         return _plan_choice(field, answer)
 
@@ -943,11 +1005,23 @@ def plan_easy_apply_step(
     step does not carry is left for another step to claim; what becomes of one
     no step claims is the walk's to decide, once every step has been seen.
 
-    An empty typeahead refuses even unanswered, because it is the one field
-    this server cannot fill and LinkedIn will not accept the step without it.
+    An empty typeahead no answer names refuses here rather than at the end of
+    the step, because no prefill means there is nothing to keep and LinkedIn
+    will not take the step without it. Naming it is what makes it answerable.
+
+    Picks come back first. Every other answer is resolved before the first one
+    is carried out, so a refusal cannot leave a half-filled step; a pick only
+    learns whether it matches after its value has been typed into the page,
+    which breaks that. Running the picks first is what restores the intent — a
+    pick that finds no suggestion leaves the rest of the dialog as LinkedIn
+    prefilled it.
     """
     for field in step["fields"]:
-        if field["type"] == "typeahead" and not field.get("value"):
+        if (
+            field["type"] == "typeahead"
+            and not field.get("value")
+            and field["label"] not in answers
+        ):
             raise InvalidAnswerError(
                 easy_apply_answer_refused(field, EASY_APPLY_TYPEAHEAD_REFUSED)
             )
@@ -969,6 +1043,7 @@ def plan_easy_apply_step(
             raise InvalidAnswerError(easy_apply_duplicate_label_error(label))
         edits.extend(plan_easy_apply_answer(field, answer))
         used.add(label)
+    edits.sort(key=lambda edit: edit.action != "pick")
     return edits, used
 
 
@@ -1424,11 +1499,20 @@ class JobPageReader:
         """
         edits, used = plan_easy_apply_step(step, answers)
         page = self._session.page
+        by_control = {
+            control_id: field
+            for field in step["fields"]
+            for control_id in field.get("ids") or []
+        }
         for edit in edits:
             control = page.locator(easy_apply_control_selector(edit.control_id)).first
             timeout = _EASY_APPLY_SET_TIMEOUT * 1000
             if edit.action == "fill":
                 await control.fill(edit.value, timeout=timeout)
+            elif edit.action == "pick":
+                await self._pick_easy_apply_suggestion(
+                    by_control.get(edit.control_id, {}), control, edit.value
+                )
             elif edit.action == "select":
                 await control.select_option(label=edit.value, timeout=timeout)
             elif edit.action == "check":
@@ -1443,6 +1527,111 @@ class JobPageReader:
         return used, {
             Path(edit.value).name for edit in edits if edit.action == "upload"
         }
+
+    async def _pick_easy_apply_suggestion(
+        self, field: dict[str, Any], control: Locator, answer: str
+    ) -> None:
+        """Leave the typeahead behind ``control`` holding the suggestion
+        LinkedIn offers for ``answer``.
+
+        Typed one character at a time, because a value set in one shot reaches
+        a component listening for React's change event and nothing at all of
+        one listening for keystrokes, and a debounce needs the gaps to be gaps.
+        What lands in the field is then a suggestion LinkedIn itself offered,
+        clicked by the text it wears: the server never composes the value, and
+        it never settles for the nearest suggestion to one that is missing.
+
+        Keyboard selection is deliberately not used. It picks by position
+        rather than by what the option says, and its `Enter` reaches the form
+        the field sits in whenever no list is open, which in this dialog is a
+        step advanced on an answer nobody checked.
+
+        A pick that does not land clears the field before refusing, so the
+        typed fragment is not left behind as the answer.
+        """
+        wanted = normalise_easy_apply_text(answer)
+        await self._clear_easy_apply_control(control)
+        await control.press_sequentially(
+            answer,
+            delay=_EASY_APPLY_TYPE_DELAY,
+            timeout=_EASY_APPLY_SET_TIMEOUT * 1000,
+        )
+
+        offered: list[str] = []
+        deadline = self._session.monotonic() + _EASY_APPLY_SUGGEST_TIMEOUT
+        while True:
+            options, offered = await self._easy_apply_suggestions(control)
+            match = next(
+                (
+                    index
+                    for index, text in enumerate(offered)
+                    if normalise_easy_apply_text(text) == wanted
+                ),
+                None,
+            )
+            if match is not None:
+                break
+            if self._session.monotonic() >= deadline:
+                await self._clear_easy_apply_control(control)
+                raise InvalidAnswerError(
+                    easy_apply_no_suggestion_error(field, answer, offered)
+                )
+            await self._session.delay(_APPLY_POLL)
+
+        await options.nth(match).click(timeout=_EASY_APPLY_SET_TIMEOUT * 1000)
+
+        # The click landed on a suggestion; whether LinkedIn took it is its own
+        # answer. The field holding the text is not enough on its own, because
+        # an answer spelled out in full holds it before anything is picked. The
+        # list closing is what says a choice was made.
+        deadline = self._session.monotonic() + _EASY_APPLY_PICK_TIMEOUT
+        while True:
+            held = await control.input_value(timeout=_EASY_APPLY_SET_TIMEOUT * 1000)
+            _, still_offered = await self._easy_apply_suggestions(control)
+            if normalise_easy_apply_text(held) == wanted and not still_offered:
+                return
+            if self._session.monotonic() >= deadline:
+                await self._clear_easy_apply_control(control)
+                raise InvalidAnswerError(
+                    easy_apply_pick_unconfirmed_error(field, answer, held)
+                )
+            await self._session.delay(_APPLY_POLL)
+
+    async def _easy_apply_suggestions(
+        self, control: Locator
+    ) -> tuple[Locator, list[str]]:
+        """The suggestions open under ``control``, and what each one reads as.
+
+        Addressed through the list the field names in `aria-owns` or
+        `aria-controls` when it names one, and by role when it does not or when
+        the named list holds nothing. Both are attribute presence and ARIA
+        roles, so neither depends on the language the page is served in.
+        """
+        page = self._session.page
+        named = (await control.get_attribute("aria-owns")) or (
+            await control.get_attribute("aria-controls")
+        )
+        ids = named.split() if named else []
+        list_id = ids[0] if ids else None
+        options = page.locator(easy_apply_option_selector(list_id))
+        texts = await options.evaluate_all(EASY_APPLY_OPTION_TEXT_JS)
+        if not texts and list_id:
+            options = page.locator(easy_apply_option_selector(None))
+            texts = await options.evaluate_all(EASY_APPLY_OPTION_TEXT_JS)
+        return options, texts
+
+    @staticmethod
+    async def _clear_easy_apply_control(control: Locator) -> None:
+        """Empty ``control`` through the keyboard.
+
+        A programmatic clear has the same blind spot as a programmatic fill: it
+        never reaches a component that listens for keystrokes, which would then
+        keep offering suggestions for a query the field no longer holds.
+        """
+        timeout = _EASY_APPLY_SET_TIMEOUT * 1000
+        await control.click(timeout=timeout)
+        await control.press("ControlOrMeta+a", timeout=timeout)
+        await control.press("Delete", timeout=timeout)
 
     async def _read_easy_apply_step(
         self, previous: dict[str, Any] | None
