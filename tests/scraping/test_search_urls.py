@@ -9,6 +9,8 @@ checks agrees with any table.
 
 from __future__ import annotations
 
+from urllib.parse import parse_qs, urlparse
+
 import pytest
 
 from linkedin_mcp_server.scraping.contracts import FilterValidationError
@@ -242,6 +244,64 @@ class TestBuildJobSearchUrl:
             experience_level="entry,director",
             work_type="on_site,hybrid",
         ) == (f"{JOBS}keywords=python&f_JT=F,C&f_E=2,5&f_WT=1,3")
+
+    def test_job_type_encodes_a_literal_plus_once(self):
+        url = build_job_search_url("python", job_type="C++")
+
+        assert url == f"{JOBS}keywords=python&f_JT=C%2B%2B"
+        assert parse_qs(urlparse(url).query)["f_JT"] == ["C++"]
+
+    def test_experience_level_encodes_a_literal_plus_once(self):
+        url = build_job_search_url("python", experience_level="C++")
+
+        assert url == f"{JOBS}keywords=python&f_E=C%2B%2B"
+        assert parse_qs(urlparse(url).query)["f_E"] == ["C++"]
+
+    def test_work_type_encodes_a_literal_plus_once(self):
+        url = build_job_search_url("python", work_type="C++")
+
+        assert url == f"{JOBS}keywords=python&f_WT=C%2B%2B"
+        assert parse_qs(urlparse(url).query)["f_WT"] == ["C++"]
+
+    def test_a_facet_token_cannot_inject_an_easy_apply_parameter(self):
+        url = build_job_search_url("python", job_type="x&f_EA=true", easy_apply=True)
+
+        assert url == f"{JOBS}keywords=python&f_JT=x%26f_EA%3Dtrue&f_EA=true"
+        assert parse_qs(urlparse(url).query) == {
+            "keywords": ["python"],
+            "f_JT": ["x&f_EA=true"],
+            "f_EA": ["true"],
+        }
+
+    def test_mixed_work_types_keep_token_order_and_literal_commas(self):
+        url = build_job_search_url("python", work_type="remote,C++")
+
+        assert url == f"{JOBS}keywords=python&f_WT=2,C%2B%2B"
+        assert parse_qs(urlparse(url).query)["f_WT"] == ["2,C++"]
+
+    @pytest.mark.parametrize(
+        "value,encoded",
+        [
+            ("%", "%25"),
+            ("%2C", "%252C"),
+            ("C%2B%2B", "C%252B%252B"),
+            ("x y/?#&=;", "x+y%2F%3F%23%26%3D%3B"),
+            ("軟體", "%E8%BB%9F%E9%AB%94"),
+            ("AZaz09-._~", "AZaz09-._~"),
+        ],
+    )
+    def test_unknown_facet_tokens_are_encoded_as_raw_text_once(
+        self, value: str, encoded: str
+    ):
+        url = build_job_search_url("python", experience_level=value)
+
+        assert url == f"{JOBS}keywords=python&f_E={encoded}"
+        assert parse_qs(urlparse(url).query)["f_E"] == [value]
+
+    def test_csv_stability_keeps_unknown_case_order_and_empty_components(self):
+        assert build_job_search_url(
+            "python", job_type=" full_time,,MiXeD,contract, "
+        ) == (f"{JOBS}keywords=python&f_JT=F,,MiXeD,C,")
 
     def test_csv_elements_are_trimmed_before_lookup(self):
         assert build_job_search_url(

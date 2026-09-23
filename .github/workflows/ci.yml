@@ -378,6 +378,12 @@ jobs:
       - name: Run the browser containment test
         run: uv run pytest tests/test_browser_containment.py
 
+      - name: Run the Windows browser launch evidence
+        if: runner.os == 'Windows'
+        env:
+          UV_PYTHON: "3.13"
+        run: uv run pytest -v -s -o faulthandler_timeout=120 tests/test_windows_browser_launch_evidence.py
+
       - name: Run the identity gate
         env:
           # Only where one was started. macOS ignores it, but naming a display

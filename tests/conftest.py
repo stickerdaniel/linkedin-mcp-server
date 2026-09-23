@@ -1,3 +1,4 @@
+import os
 import sys
 
 import pytest
@@ -56,6 +57,26 @@ def reset_singletons():
     reset_liveness_for_testing()
     teardown_trace_logging(keep_traces=True)
     reset_trace_state_for_testing()
+
+
+#: The browser cache the run was started with, read before any test can write
+#: the variable.
+_INHERITED_BROWSERS_PATH = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+
+
+@pytest.fixture(autouse=True)
+def installed_browser_for_dom_tests(request, reset_singletons, monkeypatch):
+    """Give ``browser_dom`` tests the browser cache the run was started with.
+
+    ``reset_bootstrap_for_testing`` deletes ``PLAYWRIGHT_BROWSERS_PATH`` so that
+    no bootstrap test measures, reports on or installs into a real cache. That
+    also hid a browser installed outside patchright's default cache, such as the
+    server's own under ``~/.linkedin-mcp/patchright-browsers``, and every DOM
+    test skipped. These tests only launch Chromium against synthetic markup, so
+    they get the caller's cache back and nothing else does.
+    """
+    if _INHERITED_BROWSERS_PATH and request.node.get_closest_marker("browser_dom"):
+        monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", _INHERITED_BROWSERS_PATH)
 
 
 @pytest.fixture(autouse=True)

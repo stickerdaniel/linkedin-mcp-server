@@ -1,6 +1,7 @@
 """Tests for the routing and reference policy of the job list workflows."""
 
 from linkedin_mcp_server.scraping.job_policy import (
+    dropped_filters_section_error,
     label_similar_jobs,
     reconcile_search_references,
     route,
@@ -117,3 +118,34 @@ class TestSameJobSearch:
             ("www.linkedin.com", "/jobs/search"),
             ("evil.example", "/jobs/search-results"),
         )
+
+
+class TestDroppedFiltersSectionError:
+    HINT = "reads location and work type from the keywords"
+
+    def test_the_redesigned_route_says_where_the_filters_go(self):
+        error = dropped_filters_section_error(
+            ["f_WT", "location"],
+            "https://www.linkedin.com/jobs/search-results/?keywords=python",
+        )
+
+        assert error["error_type"] == "filters_dropped"
+        assert "f_WT, location" in error["error_message"]
+        assert self.HINT in error["error_message"]
+
+    def test_the_classic_route_carries_no_hint(self):
+        error = dropped_filters_section_error(
+            ["location"], "https://www.linkedin.com/jobs/search/?keywords=python"
+        )
+
+        assert self.HINT not in error["error_message"]
+
+    def test_filters_the_keywords_cannot_carry_get_no_hint(self):
+        """A job type the redesign dropped is not recovered by rewording."""
+        error = dropped_filters_section_error(
+            ["f_E", "f_JT"],
+            "https://www.linkedin.com/jobs/search-results/?keywords=python",
+        )
+
+        assert "f_E, f_JT" in error["error_message"]
+        assert self.HINT not in error["error_message"]
