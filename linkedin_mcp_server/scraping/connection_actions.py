@@ -533,6 +533,7 @@ class ConnectionActions:
                 btn_count = await buttons.count()
                 if btn_count >= 2:
                     await buttons.nth(btn_count - 2).click()
+                    textarea_appeared = True
                     try:
                         await self._session.page.wait_for_selector(
                             _DIALOG_TEXTAREA_SELECTOR,
@@ -541,11 +542,24 @@ class ConnectionActions:
                         )
                     except PlaywrightTimeoutError:
                         logger.debug("Note textarea did not appear")
-                    note_limit_message = await self._get_premium_upsell_message()
-                    if note_limit_message is not None:
-                        logger.info("Premium upsell blocked opening invite note editor")
-                        await self._dismiss_dialog()
-                        return False, False, note_limit_message
+                        textarea_appeared = False
+                    # ponytail: LinkedIn now renders a persistent Premium
+                    # nudge banner on this step even when quota is NOT
+                    # exhausted (observed: "3 personalized invitations
+                    # remaining this month" alongside a live, fillable
+                    # textarea). Bailing on banner presence alone false-
+                    # positives on every note send. Only treat it as a
+                    # real block when the textarea never mounted at all —
+                    # the one case where LinkedIn actually replaces the
+                    # note UI with the upsell instead of showing both.
+                    if not textarea_appeared:
+                        note_limit_message = await self._get_premium_upsell_message()
+                        if note_limit_message is not None:
+                            logger.info(
+                                "Premium upsell blocked opening invite note editor"
+                            )
+                            await self._dismiss_dialog()
+                            return False, False, note_limit_message
 
             note_filled = await self._fill_dialog_textarea(note)
             if not note_filled:
@@ -592,22 +606,32 @@ class ConnectionActions:
                 await self._dismiss_dialog()
                 return False, False, None
 
-        # LinkedIn may swap the invite dialog for a Premium upsell when the
-        # free note quota is exhausted. The textarea was filled but the
-        # invite was not delivered — surface LinkedIn's raw dialog text.
-        if note:
-            note_limit_message = await self._get_premium_upsell_message()
-            if note_limit_message is not None:
-                logger.info("Premium upsell modal intercepted invite submit")
-                await self._dismiss_dialog()
-                return False, False, note_limit_message
-
+        dialog_closed = True
         try:
             await self._session.page.wait_for_selector(
                 _DIALOG_SELECTOR, state="hidden", timeout=5000
             )
         except PlaywrightTimeoutError:
             logger.debug("Invite dialog did not close after submit")
+            dialog_closed = False
+
+        # LinkedIn may swap the invite dialog for a Premium upsell when the
+        # free note quota is exhausted, instead of closing it after Send —
+        # the textarea was filled but the invite was not delivered, so
+        # surface LinkedIn's raw dialog text. Gated on the dialog still
+        # being open: the same benign nudge banner that can sit alongside a
+        # live, fillable textarea (see the reveal-step fix above) can also
+        # still be in the DOM for a moment right after a successful Send,
+        # before it unmounts with the closing dialog. Checking unconditionally
+        # here would report a genuinely delivered invite as blocked. A dialog
+        # that failed to close is real evidence something went wrong; one
+        # that closed on schedule is not, banner or no banner.
+        if note and not dialog_closed:
+            note_limit_message = await self._get_premium_upsell_message()
+            if note_limit_message is not None:
+                logger.info("Premium upsell modal intercepted invite submit")
+                await self._dismiss_dialog()
+                return False, False, note_limit_message
 
         return True, note_filled, None
 
