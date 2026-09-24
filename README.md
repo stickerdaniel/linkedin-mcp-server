@@ -291,7 +291,7 @@ while a container is running.
 On startup, the MCP Bundle prepares the shared Patchright Chromium browser cache in the background. On the first tool call that needs authentication, the server opens a LinkedIn login browser window.
 
 > [!NOTE]
-> Early tool calls may return a setup/authentication-in-progress error until browser setup or login finishes. Retry the tool call once sign-in completes.
+> Early tool calls may return a setup/authentication-in-progress error until browser setup or login finishes. Retry the tool call once the browser download or sign-in completes.
 
 ### Setup Help
 
