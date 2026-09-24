@@ -69,6 +69,7 @@ POST_ID = "7506667649444237313"
 POST_URN = f"urn:li:ugcPost:{POST_ID}"
 OTHER_URN = "urn:li:ugcPost:7000000000000000001"
 ACTIVITY_URN = "urn:li:activity:7506667700000000000"
+MISMATCH_ACTIVITY_URN = "urn:li:activity:7506667799999999999"
 # A comment on the post. Its URN embeds the post's own id, which is why the
 # root search anchors on the end of the value instead of searching for it.
 COMMENT_URN = f"urn:li:comment:({POST_URN},4455667788)"
@@ -297,6 +298,39 @@ def comment_editor(
 """
 
 
+def sdui_comment_editor(labels: Labels) -> str:
+    """Three icon controls before typing; one text control appears afterward."""
+    return f"""
+  <div class="comment-composer">
+    <div role="textbox" contenteditable="true" aria-label="{labels.comment}"
+      oninput="
+        const controls = this.parentElement.querySelector('.composer-controls');
+        if (!controls.querySelector('[data-generated-submit]')) {{
+          const submit = document.createElement('button');
+          submit.type = 'button';
+          submit.setAttribute('data-generated-submit', '');
+          submit.innerHTML = '<span>{labels.submit}</span>';
+          submit.onclick = () => document.body.setAttribute(
+            'data-clicked', 'sdui-comment-submit'
+          );
+          controls.appendChild(submit);
+        }}
+      "></div>
+    <div class="composer-controls">
+      <button type="button" aria-expanded="false" aria-label="{labels.emoji}">
+        <svg></svg>
+      </button>
+      <button type="button" aria-expanded="false" aria-label="{labels.emoji}">
+        <svg></svg>
+      </button>
+      <button type="button" aria-label="{labels.photo}">
+        <svg></svg>
+      </button>
+    </div>
+  </div>
+"""
+
+
 def post(
     labels: Labels,
     *,
@@ -362,6 +396,12 @@ def sdui_post(labels: Labels) -> str:
   {comment_editor(labels)}
 </div>
 """
+
+
+def sdui_post_with_current_editor(labels: Labels) -> str:
+    return sdui_post(labels).replace(
+        comment_editor(labels), sdui_comment_editor(labels)
+    )
 
 
 def split_sdui_post(labels: Labels) -> str:
@@ -518,16 +558,30 @@ def reaction_flyout(labels: Labels, *, count: int = 6) -> str:
     return f'<div class="flyout">{controls}</div>'
 
 
+def six_control_decoy(labels: Labels) -> str:
+    """Six labelled controls grouped as three pairs, not six picker entries."""
+    controls = "".join(
+        f"""
+        <div>
+          <button aria-label="{labels.react}"></button>
+          <button aria-label="{labels.comment}"></button>
+        </div>
+        """
+        for _ in range(3)
+    )
+    return f'<div class="decoy">{controls}</div>'
+
+
 def repost_menu(labels: Labels, *, count: int = 2) -> str:
     """The repost menu, portal-mounted, found by role rather than containment."""
-    names = [labels.repost_now, labels.repost_thoughts, "extra"][:count]
+    names = [labels.repost_thoughts, labels.repost_now, "extra"][:count]
     items = "".join(
-        f'<button type="button" role="menuitem"'
+        f'<div role="button" tabindex="0"'
         f" onclick=\"document.body.setAttribute('data-clicked','menu-{index}')\""
-        f">{name}</button>"
+        f">{name}</div>"
         for index, name in enumerate(names)
     )
-    return f'<div role="menu">{items}</div>'
+    return f'<div popover="manual" style="display:block">{items}</div>'
 
 
 def composer_dialog(labels: Labels) -> str:
@@ -545,6 +599,24 @@ def composer_dialog(labels: Labels) -> str:
     onclick="document.body.setAttribute('data-clicked','composer-submit');
              return false;"
     >{labels.submit}</button>
+</dialog>
+"""
+
+
+def current_composer_dialog(labels: Labels) -> str:
+    return f"""
+<dialog open>
+  <button type="button" aria-label="{labels.comment}"><svg></svg></button>
+  <div role="button" aria-expanded="false"><svg></svg></div>
+  <div role="textbox" contenteditable="true"
+    aria-label="{labels.repost_thoughts}"></div>
+  <button type="button" aria-expanded="false" aria-label="{labels.emoji}">
+    <svg></svg>
+  </button>
+  <button type="button"
+    onclick="document.body.setAttribute('data-clicked','current-repost-submit')">
+    <span>{labels.submit}</span>
+  </button>
 </dialog>
 """
 
@@ -583,6 +655,22 @@ async def _pinned(page, html: str):
     await page.set_content(_page_html(html))
     handle = await page.evaluate_handle(PIN_POST_ROOT_JS, POST_ID)
     return handle
+
+
+async def _pinned_before_flyout(page, html: str):
+    """Pin while the marked portal flyout is absent, then attach it."""
+    await page.set_content(_page_html(html))
+    flyout = await page.evaluate_handle(
+        """() => {
+          const node = document.querySelector('.flyout.new');
+          if (!node) return null;
+          node.remove();
+          return node;
+        }"""
+    )
+    root = await page.evaluate_handle(PIN_POST_ROOT_JS, POST_ID)
+    await page.evaluate("(node) => document.body.append(node)", flyout)
+    return root
 
 
 async def _clicked(page) -> str | None:
@@ -696,6 +784,37 @@ class TestFindingTheRootPost:
             return (signals["hasRoot"], signals["hasBar"], signals["barButtonCount"])
 
         await _in_every_locale(dom_page, split_sdui_post, (True, True, 4), read)
+
+    async def test_a_share_slug_can_own_one_bar_with_a_different_activity_id(
+        self, dom_page
+    ) -> None:
+        async def read(page, html):
+            url = f"https://www.linkedin.com/posts/member_topic-share-{POST_ID}-suffix/"
+
+            async def fulfill(route):
+                await route.fulfill(body=_page_html(html), content_type="text/html")
+
+            await page.route(url, fulfill)
+            try:
+                await page.goto(url)
+                signals = await page.evaluate(POST_ACTION_SIGNALS_JS, POST_ID)
+                return (
+                    signals["hasRoot"],
+                    signals["hasBar"],
+                    signals["barButtonCount"],
+                )
+            finally:
+                await page.unroute(url, fulfill)
+
+        await _in_every_locale(
+            dom_page,
+            lambda labels: (
+                split_sdui_post(labels).replace(POST_URN, MISMATCH_ACTIVITY_URN)
+                + action_bar(labels, click_id="later-decoy")
+            ),
+            (True, True, 4),
+            read,
+        )
 
     async def test_two_structural_fallback_candidates_are_refused(
         self, dom_page
@@ -817,18 +936,31 @@ class TestReacting:
 
     async def test_the_flyout_reports_its_own_control_count(self, dom_page) -> None:
         async def read(page, html):
-            await page.set_content(_page_html(html))
-            return (await page.evaluate(READ_REACTION_FLYOUT_JS, 6))["count"]
+            root = await _pinned_before_flyout(page, html)
+            return (
+                await page.evaluate(
+                    READ_REACTION_FLYOUT_JS, {"expected": 6, "root": root}
+                )
+            )["count"]
 
         await _in_every_locale(
-            dom_page, lambda labels: post(labels) + reaction_flyout(labels), 6, read
+            dom_page,
+            lambda labels: (
+                post(labels)
+                + reaction_flyout(labels).replace(
+                    'class="flyout"', 'class="flyout new"'
+                )
+            ),
+            6,
+            read,
         )
 
     async def test_a_reaction_is_picked_by_index(self, dom_page) -> None:
         async def read(page, html):
-            await page.set_content(_page_html(html))
+            root = await _pinned_before_flyout(page, html)
+            await page.evaluate(READ_REACTION_FLYOUT_JS, {"expected": 6, "root": root})
             clicked = await page.evaluate(
-                CLICK_REACTION_JS, {"expected": 6, "index": 5}
+                CLICK_REACTION_JS, {"expected": 6, "index": 5, "root": root}
             )
             return (clicked, await _clicked(page))
 
@@ -836,9 +968,68 @@ class TestReacting:
         await _in_every_locale(
             dom_page,
             lambda labels: (
-                post(labels, editor=False, comments=False) + reaction_flyout(labels)
+                post(labels, editor=False, comments=False)
+                + reaction_flyout(labels).replace(
+                    'class="flyout"', 'class="flyout new"'
+                )
             ),
             (True, "reaction-5"),
+            read,
+        )
+
+    async def test_six_controls_outside_six_entries_do_not_ambiguous_the_picker(
+        self, dom_page
+    ) -> None:
+        async def read(page, html):
+            root = await _pinned_before_flyout(page, html)
+            count = (
+                await page.evaluate(
+                    READ_REACTION_FLYOUT_JS, {"expected": 6, "root": root}
+                )
+            )["count"]
+            clicked = await page.evaluate(
+                CLICK_REACTION_JS, {"expected": 6, "index": 1, "root": root}
+            )
+            return (count, clicked, await _clicked(page))
+
+        await _in_every_locale(
+            dom_page,
+            lambda labels: (
+                post(labels, editor=False, comments=False)
+                + six_control_decoy(labels)
+                + reaction_flyout(labels).replace(
+                    'class="flyout"', 'class="flyout new"'
+                )
+            ),
+            (6, True, "reaction-1"),
+            read,
+        )
+
+    async def test_an_existing_six_entry_picker_is_not_claimed(self, dom_page) -> None:
+        async def read(page, html):
+            root = await _pinned_before_flyout(page, html)
+            count = (
+                await page.evaluate(
+                    READ_REACTION_FLYOUT_JS, {"expected": 6, "root": root}
+                )
+            )["count"]
+            clicked = await page.evaluate(
+                CLICK_REACTION_JS, {"expected": 6, "index": 4, "root": root}
+            )
+            return (count, clicked, await _clicked(page))
+
+        await _in_every_locale(
+            dom_page,
+            lambda labels: (
+                post(labels, editor=False, comments=False)
+                + reaction_flyout(labels).replace(
+                    'class="flyout"', 'class="flyout old"'
+                )
+                + reaction_flyout(labels)
+                .replace('class="flyout"', 'class="flyout new"')
+                .replace("reaction-", "new-reaction-")
+            ),
+            (6, True, "new-reaction-4"),
             read,
         )
 
@@ -850,9 +1041,10 @@ class TestReacting:
         # does not exist. At seven it does, and it names the wrong reaction —
         # which is why the guard is an exact count and not a lower bound.
         async def read(page, html):
-            await page.set_content(_page_html(html))
+            root = await _pinned_before_flyout(page, html)
+            await page.evaluate(READ_REACTION_FLYOUT_JS, {"expected": 6, "root": root})
             clicked = await page.evaluate(
-                CLICK_REACTION_JS, {"expected": 6, "index": 5}
+                CLICK_REACTION_JS, {"expected": 6, "index": 5, "root": root}
             )
             return (clicked, await _clicked(page))
 
@@ -860,7 +1052,9 @@ class TestReacting:
             dom_page,
             lambda labels: (
                 post(labels, editor=False, comments=False)
-                + reaction_flyout(labels, count=offered)
+                + reaction_flyout(labels, count=offered).replace(
+                    'class="flyout"', 'class="flyout new"'
+                )
             ),
             (False, None),
             read,
@@ -894,13 +1088,13 @@ class TestReposting:
             read,
         )
 
-    async def test_the_first_item_is_the_one_a_bare_repost_clicks(
+    async def test_the_second_item_is_the_one_a_bare_repost_clicks(
         self, dom_page
     ) -> None:
         async def read(page, html):
             await page.set_content(_page_html(html))
             clicked = await page.evaluate(
-                CLICK_REPOST_MENU_ITEM_JS, {"expected": 2, "index": 0}
+                CLICK_REPOST_MENU_ITEM_JS, {"expected": 2, "index": 1}
             )
             return (clicked, await _clicked(page))
 
@@ -909,7 +1103,7 @@ class TestReposting:
             lambda labels: (
                 post(labels, editor=False, comments=False) + repost_menu(labels)
             ),
-            (True, "menu-0"),
+            (True, "menu-1"),
             read,
         )
 
@@ -1082,6 +1276,51 @@ class TestWritingText:
             dom_page,
             plain_post,
             ("Well put, thanks", "submitted", "comment-submit"),
+            read,
+        )
+
+    async def test_sdui_submit_is_the_one_control_added_after_typing(
+        self, dom_page
+    ) -> None:
+        async def read(page, html):
+            root, editor = await _typed(page, html, "Well put, thanks")
+            outcome = await page.evaluate(
+                SUBMIT_EDITOR_JS, {"scope": root, "text": "Well put, thanks"}
+            )
+            return (outcome, await _clicked(page), editor is not None)
+
+        await _in_every_locale(
+            dom_page,
+            sdui_post_with_current_editor,
+            ("submitted", "sdui-comment-submit", True),
+            read,
+        )
+
+    async def test_current_repost_dialog_has_one_structural_submit(
+        self, dom_page
+    ) -> None:
+        async def read(page, html):
+            await page.set_content(_page_html(html))
+            dialog = await page.evaluate_handle(PIN_VISIBLE_DIALOG_JS)
+            pinned = await page.evaluate_handle(
+                PIN_EDITOR_JS, arg={"scope": dialog.as_element()}
+            )
+            editor = (await pinned.get_property("editor")).as_element()
+            await editor.click()
+            await page.keyboard.type("Worth a read")
+            await page.evaluate(
+                OWN_EDITOR_JS, {"editor": editor, "text": "Worth a read"}
+            )
+            outcome = await page.evaluate(
+                SUBMIT_EDITOR_JS,
+                {"scope": dialog.as_element(), "text": "Worth a read"},
+            )
+            return (outcome, await _clicked(page))
+
+        await _in_every_locale(
+            dom_page,
+            current_composer_dialog,
+            ("submitted", "current-repost-submit"),
             read,
         )
 

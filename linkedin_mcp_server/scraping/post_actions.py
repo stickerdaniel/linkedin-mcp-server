@@ -27,8 +27,8 @@ about the control rather than about the language the page is in:
   same inverse-of-aria-label trick the profile More menu uses;
 - the comment editor is the ``[role="textbox"][contenteditable="true"]``
   inside the root post;
-- a repost-with-commentary editor lives in a portal-mounted dialog, not in
-  the post, so pin and submit are scoped to that one visible dialog.
+- a repost-with-commentary editor lives in a portal-mounted dialog outside the
+  post, even though opening it changes the URL to `/sharing/compose`.
 
 Two positional assumptions remain, both guarded by an exact count so a
 layout change refuses instead of clicking the wrong thing. They are named at
@@ -75,11 +75,13 @@ logger = logging.getLogger(__name__)
 # cheaper failure.
 _REACTION_ORDER = ("like", "celebrate", "support", "love", "insightful", "funny")
 
-# The repost menu, in the order it renders: the immediate repost first, the
-# one that opens a composer second. Same guard as the reactions — exactly two
-# items or the flow refuses, because index 0 posts immediately and getting it
-# wrong publishes to the actor's own feed.
+# The current repost popover renders the commentary composer first and the
+# immediate repost second. Same guard as the reactions — exactly two items or
+# the flow refuses, because getting this position wrong publishes immediately
+# to the actor's own feed.
 _REPOST_MENU_ITEMS = 2
+_REPOST_COMMENTARY_INDEX = 0
+_REPOST_IMMEDIATE_INDEX = 1
 
 # The band a social action bar's button count falls in. The bar holds react,
 # comment, repost and send, so three is the floor once a layout drops one and
@@ -106,6 +108,10 @@ _SUBMIT_TIMEOUT = 4000
 
 _EDITOR_SELECTOR = '[role="textbox"][contenteditable="true"]'
 _DIALOG_SELECTOR = 'dialog[open], [role="dialog"]'
+_DIALOG_EDITOR_SELECTOR = (
+    'dialog[open] [role="textbox"][contenteditable="true"], '
+    '[role="dialog"] [role="textbox"][contenteditable="true"]'
+)
 
 # The numeric entity id inside either permalink shape. Both are produced by
 # `normalize_post_reference`, so this reads its output rather than a caller's
@@ -212,6 +218,14 @@ function findPostRoot(postId) {
   if (outermost.length === 1) return outermost[0];
   if (outermost.length > 1) return null;
   if (matches.length > 0 && findActionBar(main) !== null) return main;
+  const slugPattern = new RegExp(
+    '-(?:ugcPost|share|activity)-' + digits + '(?:-|/|$)'
+  );
+  if (
+    window.location.pathname.startsWith('/posts/') &&
+    slugPattern.test(window.location.pathname) &&
+    findActionBar(main) !== null
+  ) return main;
 
   const structural = [];
   for (const element of main.querySelectorAll(selector)) {
@@ -310,7 +324,20 @@ function findActionBar(root) {
       element = element.parentElement;
     }
   }
-  return found.length === 1 ? found[0] : null;
+  if (found.length === 1) return found[0];
+  if (found.length > 1) {
+    const markers = Array.from(root.querySelectorAll(
+      '[data-testid^="ReactionFacepileCollection-urn:li:"]'
+    )).filter(visible);
+    if (markers.length === 1) {
+      const preceding = found.filter(
+        item => item.bar.compareDocumentPosition(markers[0]) &
+          Node.DOCUMENT_POSITION_FOLLOWING
+      );
+      if (preceding.length === 1) return preceding[0];
+    }
+  }
+  return null;
 }
 """
 )
@@ -357,6 +384,7 @@ POST_ACTION_SIGNALS_JS = (
     reactPressed: found
       ? (found.toggle.getAttribute('aria-pressed') || '').toLowerCase() === 'true'
       : null,
+    reactState: found ? found.toggle.getAttribute('aria-label') : null,
     reactDisabled: found
       ? found.toggle.disabled ||
         (found.toggle.getAttribute('aria-disabled') || '').toLowerCase() === 'true'
@@ -372,6 +400,41 @@ POST_ACTION_SIGNALS_JS = (
 """
 )
 
+# A reaction flyout is portal-mounted, so ownership cannot be proved by DOM
+# containment. Return only its minimal six-entry structural candidates; the
+# pin records every candidate that existed before hover, and the reader accepts
+# only one that appeared afterwards.
+_REACTION_FLYOUTS_FN_JS = r"""
+function reactionFlyouts(expected) {
+  const controls = Array.from(document.querySelectorAll(
+    'button[aria-label], [role="menuitem"][aria-label]'
+  )).filter(visible);
+  const containers = new Set();
+  for (const control of controls) {
+    let element = control.parentElement;
+    while (element) {
+      containers.add(element);
+      element = element.parentElement;
+    }
+  }
+  const matching = Array.from(containers).filter(container => {
+    const owned = controls.filter(control => container.contains(control));
+    const children = Array.from(container.children);
+    return owned.length === expected &&
+      children.length === expected &&
+      children.every(child =>
+        controls.filter(control => child === control || child.contains(control))
+          .length === 1
+      );
+  });
+  return matching.filter(
+    container => !matching.some(
+      other => other !== container && container.contains(other)
+    )
+  );
+}
+"""
+
 # Pin the root post and its controls on the node itself, so every later step
 # is scoped to one subtree that cannot drift. Same technique as the message
 # composer's `__linkedinMcpComposer`, and for the same reason: a re-query
@@ -383,6 +446,7 @@ PIN_POST_ROOT_JS = (
     + _VISIBLE_FN_JS
     + _FIND_POST_ROOT_FN_JS
     + _FIND_ACTION_BAR_FN_JS
+    + _REACTION_FLYOUTS_FN_JS
     + r"""
   const root = findPostRoot(postId);
   if (!root) return null;
@@ -400,6 +464,8 @@ PIN_POST_ROOT_JS = (
       : openers.length === 2
         ? openers[1]
         : null,
+    reactionFlyoutBaseline: new Set(reactionFlyouts(6)),
+    reactionFlyout: null,
   };
   return root;
 })
@@ -433,75 +499,54 @@ CLICK_REACT_TOGGLE_JS = r"""
 # Read the reaction flyout that hovering the toggle opens.
 #
 # Searched document-wide because the flyout is portal-mounted outside the post
-# container, then narrowed to the *smallest* container holding exactly the
-# expected number of labelled, visible controls. `aria-label` presence is
-# required on each one and its value is never read — that is what makes this
-# work identically on a German page.
+# container. Ownership comes from being the sole structural candidate that was
+# not present when this post was pinned, before its toggle was hovered.
 READ_REACTION_FLYOUT_JS = (
     r"""
-((expected) => {
+((arg) => {
 """
     + _VISIBLE_FN_JS
+    + _REACTION_FLYOUTS_FN_JS
     + r"""
-  const controls = Array.from(document.querySelectorAll(
+  const pinned = arg.root?.__linkedinMcpPost;
+  if (!pinned || !arg.root.isConnected) return {count: 0};
+  const candidates = reactionFlyouts(arg.expected).filter(
+    container => !pinned.reactionFlyoutBaseline.has(container)
+  );
+  if (candidates.length === 0) return {count: 0};
+  if (candidates.length !== 1) return {count: -1};
+  pinned.reactionFlyout = candidates[0];
+  const controls = Array.from(candidates[0].querySelectorAll(
     'button[aria-label], [role="menuitem"][aria-label]'
   )).filter(visible);
-  const containers = new Set();
-  for (const control of controls) {
-    let element = control.parentElement;
-    while (element) {
-      containers.add(element);
-      element = element.parentElement;
-    }
-  }
-  const matching = Array.from(containers).filter(container => {
-    const owned = controls.filter(control => container.contains(control));
-    return owned.length === expected;
-  });
-  if (matching.length === 0) return {count: 0};
-  const smallest = matching.filter(
-    container => !matching.some(other => other !== container && container.contains(other))
-  );
-  if (smallest.length !== 1) return {count: -1};
   return {
-    count: expected,
-    labels: controls
-      .filter(control => smallest[0].contains(control))
-      .map(control => !!control.getAttribute('aria-label')),
+    count: arg.expected,
+    labels: controls.map(control => !!control.getAttribute('aria-label')),
   };
 })
 """
 )
 
-# Click one reaction by index, re-deriving the flyout in the same tick and
-# refusing unless the count still matches. See _REACTION_ORDER for why the
-# count is the whole safety argument here.
+# Click one reaction by index, re-verifying the owned flyout in the same tick.
+# See _REACTION_ORDER for why the count is the whole safety argument here.
 CLICK_REACTION_JS = (
     r"""
 ((arg) => {
 """
     + _VISIBLE_FN_JS
+    + _REACTION_FLYOUTS_FN_JS
     + r"""
-  const controls = Array.from(document.querySelectorAll(
+  const pinned = arg.root?.__linkedinMcpPost;
+  if (!pinned || !arg.root.isConnected) return false;
+  const flyout = pinned.reactionFlyout;
+  if (
+    !flyout ||
+    !flyout.isConnected ||
+    !reactionFlyouts(arg.expected).includes(flyout)
+  ) return false;
+  const owned = Array.from(flyout.querySelectorAll(
     'button[aria-label], [role="menuitem"][aria-label]'
   )).filter(visible);
-  const containers = new Set();
-  for (const control of controls) {
-    let element = control.parentElement;
-    while (element) {
-      containers.add(element);
-      element = element.parentElement;
-    }
-  }
-  const matching = Array.from(containers).filter(container => {
-    const owned = controls.filter(control => container.contains(control));
-    return owned.length === arg.expected;
-  });
-  const smallest = matching.filter(
-    container => !matching.some(other => other !== container && container.contains(other))
-  );
-  if (smallest.length !== 1) return false;
-  const owned = controls.filter(control => smallest[0].contains(control));
   if (owned.length !== arg.expected) return false;
   const target = owned[arg.index];
   if (!target || !target.isConnected) return false;
@@ -542,11 +587,25 @@ READ_REPOST_MENU_JS = (
 """
     + _VISIBLE_FN_JS
     + r"""
-  const menus = Array.from(document.querySelectorAll('[role="menu"]')).filter(visible);
-  if (menus.length !== 1) return {menus: menus.length, items: 0};
-  const items = Array.from(menus[0].querySelectorAll(
-    '[role="menuitem"], button'
-  )).filter(visible);
+  const candidates = [];
+  for (const menu of Array.from(
+    document.querySelectorAll('[role="menu"]')
+  ).filter(visible)) {
+    const items = Array.from(menu.querySelectorAll(
+      '[role="menuitem"], button'
+    )).filter(visible);
+    if (items.length > 0) candidates.push({container: menu, items});
+  }
+  for (const popover of Array.from(
+    document.querySelectorAll('[popover="manual"]')
+  ).filter(visible)) {
+    const items = Array.from(
+      popover.querySelectorAll('[role="button"]')
+    ).filter(visible);
+    if (items.length > 0) candidates.push({container: popover, items});
+  }
+  if (candidates.length !== 1) return {menus: candidates.length, items: 0};
+  const items = candidates[0].items;
   return {menus: 1, items: items.length};
 })
 """
@@ -570,11 +629,25 @@ CLICK_REPOST_MENU_ITEM_JS = (
   ) {
     return false;
   }
-  const menus = Array.from(document.querySelectorAll('[role="menu"]')).filter(visible);
-  if (menus.length !== 1) return false;
-  const items = Array.from(menus[0].querySelectorAll(
-    '[role="menuitem"], button'
-  )).filter(visible);
+  const candidates = [];
+  for (const menu of Array.from(
+    document.querySelectorAll('[role="menu"]')
+  ).filter(visible)) {
+    const items = Array.from(menu.querySelectorAll(
+      '[role="menuitem"], button'
+    )).filter(visible);
+    if (items.length > 0) candidates.push({container: menu, items});
+  }
+  for (const popover of Array.from(
+    document.querySelectorAll('[popover="manual"]')
+  ).filter(visible)) {
+    const items = Array.from(
+      popover.querySelectorAll('[role="button"]')
+    ).filter(visible);
+    if (items.length > 0) candidates.push({container: popover, items});
+  }
+  if (candidates.length !== 1) return false;
+  const items = candidates[0].items;
   if (items.length !== arg.expected) return false;
   const target = items[arg.index];
   if (!target || !target.isConnected) return false;
@@ -627,6 +700,23 @@ PIN_EDITOR_JS = (
   if (editors.length !== 1) return {status: 'ambiguous_editor', editor: null};
   const editor = editors[0];
   if ((editor.innerText || '').trim()) return {status: 'draft_present', editor: null};
+  let controls = editor.parentElement;
+  while (controls && scope.contains(controls)) {
+    const buttons = Array.from(controls.querySelectorAll('button')).filter(visible);
+    if (buttons.length > 0) {
+      editor.__linkedinMcpInitialControls = {
+        count: buttons.length,
+        labelledSvg: buttons.filter(
+          button => button.hasAttribute('aria-label') && button.querySelector('svg')
+        ).length,
+        expanders: buttons.filter(
+          button => button.hasAttribute('aria-expanded')
+        ).length,
+      };
+      break;
+    }
+    controls = controls.parentElement;
+  }
   return {status: 'pinned', editor: editor};
 })
 """
@@ -659,18 +749,16 @@ CLEAR_EDITOR_JS = r"""
 })
 """
 
-# Submit the pinned editor by clicking the one enabled `type="submit"` control
-# in its nearest form-like ancestor. Exactly one, or it refuses.
+# Submit the pinned editor by clicking one structurally identified control.
 #
-# `type="submit"` is required and never relaxed to "the only button left". That
-# fallback is not a weaker version of this rule, it is a different and much
-# worse one: measured against a live comment box, the buttons LinkedIn renders
-# beside an untouched editor are an emoji trigger and a photo attachment, the
-# emoji one is dropped for its `aria-expanded`, and the photo one is therefore
-# a lone candidate that reads as unambiguous. It was clicked, it opened a file
-# picker, and nothing was ever published. A button this code cannot identify
-# as a submit is not a submit; refusing costs a retry, while guessing clicks
-# an unknown control on a page where controls publish things.
+# The original composer exposes exactly one enabled `type="submit"`. The SDUI
+# composer instead starts with three labelled SVG controls, then appends one
+# unlabeled, non-SVG `type="button"` after real key events. That exact 3-to-4
+# transition identifies the new submit control without reading a label. The
+# pinned repost dialog has one enabled unlabeled, non-SVG `type="button"`; its
+# other controls are labelled or expanding. Neither rule is relaxed to "the
+# only enabled button": the untouched photo control is labelled, contains an
+# SVG, and exists in the recorded baseline.
 #
 # The submit control is also absent until the editor holds text LinkedIn
 # believes a human entered, which is why `_type_text` uses real key events.
@@ -705,10 +793,70 @@ SUBMIT_EDITOR_JS = (
     !button.hasAttribute('aria-pressed')
   );
   const candidates = buttons.filter(button => button.type === 'submit');
-  if (candidates.length === 0) return 'no_submit_control';
-  if (candidates.length !== 1) return 'ambiguous_submit';
-  candidates[0].click();
-  return 'submitted';
+  if (candidates.length > 1) return 'ambiguous_submit';
+  if (candidates.length === 1) {
+    candidates[0].click();
+    return 'submitted';
+  }
+  if (
+    scope instanceof Element &&
+    scope.matches('dialog[open], [role="dialog"]')
+  ) {
+    const dialogCandidates = Array.from(
+      scope.querySelectorAll('button[type="button"]')
+    ).filter(button =>
+      visible(button) &&
+      !button.disabled &&
+      (button.getAttribute('aria-disabled') || '').toLowerCase() !== 'true' &&
+      !button.hasAttribute('aria-label') &&
+      !button.hasAttribute('aria-expanded') &&
+      !button.hasAttribute('aria-pressed') &&
+      !button.querySelector('svg')
+    );
+    if (dialogCandidates.length > 1) return 'ambiguous_submit';
+    if (dialogCandidates.length === 1) {
+      dialogCandidates[0].click();
+      return 'submitted';
+    }
+  }
+  const baseline = editor.__linkedinMcpInitialControls;
+  let controls = editor.parentElement;
+  while (controls && scope.contains(controls)) {
+    const compact = Array.from(controls.querySelectorAll('button')).filter(visible);
+    if (compact.length > 0) {
+      const generated = compact.filter(button =>
+        !button.disabled &&
+        (button.getAttribute('aria-disabled') || '').toLowerCase() !== 'true' &&
+        button.type === 'button' &&
+        !button.hasAttribute('aria-label') &&
+        !button.hasAttribute('aria-expanded') &&
+        !button.hasAttribute('aria-pressed') &&
+        !button.querySelector('svg')
+      );
+      const labelledSvg = compact.filter(
+        button => button.hasAttribute('aria-label') && button.querySelector('svg')
+      );
+      const expanders = compact.filter(
+        button => button.hasAttribute('aria-expanded')
+      );
+      if (
+        baseline &&
+        baseline.count === 3 &&
+        baseline.labelledSvg === 3 &&
+        baseline.expanders === 2 &&
+        compact.length === 4 &&
+        labelledSvg.length === 3 &&
+        expanders.length === 2 &&
+        generated.length === 1
+      ) {
+        generated[0].click();
+        return 'submitted';
+      }
+      break;
+    }
+    controls = controls.parentElement;
+  }
+  return 'no_submit_control';
 })
 """
 )
@@ -894,8 +1042,20 @@ class PostActions:
             )
         try:
             if reaction == "like":
-                return await self._react_default(root, permalink, post_id, reaction)
-            return await self._react_specific(root, permalink, post_id, reaction)
+                return await self._react_default(
+                    root,
+                    permalink,
+                    post_id,
+                    reaction,
+                    signals.get("reactState"),
+                )
+            return await self._react_specific(
+                root,
+                permalink,
+                post_id,
+                reaction,
+                signals.get("reactState"),
+            )
         finally:
             await root.dispose()
 
@@ -905,6 +1065,7 @@ class PostActions:
         permalink: str,
         post_id: str,
         reaction: str,
+        previous_state: Any,
     ) -> dict[str, Any]:
         """Click the reaction toggle itself, which is the default reaction."""
         outcome = await self._session.page.evaluate(
@@ -922,7 +1083,9 @@ class PostActions:
                 reaction=reaction,
             )
         try:
-            return await self._confirm_reaction(permalink, post_id, reaction)
+            return await self._confirm_reaction(
+                permalink, post_id, reaction, previous_state
+            )
         except BaseException:
             logger.warning(POST_ACTION_INTERRUPTED_WARNING)
             raise
@@ -933,6 +1096,7 @@ class PostActions:
         permalink: str,
         post_id: str,
         reaction: str,
+        previous_state: Any,
     ) -> dict[str, Any]:
         """Open the reaction flyout and pick one reaction by index."""
         # Hovered through the pinned handle rather than a fresh selector. A
@@ -962,7 +1126,7 @@ class PostActions:
         finally:
             await toggle.dispose()
 
-        flyout = await self._wait_for_flyout()
+        flyout = await self._wait_for_flyout(root)
         if flyout is None:
             return post_action_result(
                 permalink,
@@ -986,6 +1150,7 @@ class PostActions:
             {
                 "expected": len(_REACTION_ORDER),
                 "index": _REACTION_ORDER.index(reaction),
+                "root": root,
             },
         )
         if not clicked:
@@ -995,16 +1160,19 @@ class PostActions:
                 "The reaction picker changed before the reaction was clicked.",
                 reaction=reaction,
             )
-        return await self._confirm_reaction(permalink, post_id, reaction)
+        return await self._confirm_reaction(
+            permalink, post_id, reaction, previous_state
+        )
 
-    async def _wait_for_flyout(self) -> int | None:
+    async def _wait_for_flyout(self, root: ElementHandle) -> int | None:
         """The control count of the reaction flyout once it renders."""
         deadline = _FLYOUT_TIMEOUT / 1000
         waited = 0.0
         last: int | None = None
         while waited < deadline:
             data = await self._session.page.evaluate(
-                READ_REACTION_FLYOUT_JS, len(_REACTION_ORDER)
+                READ_REACTION_FLYOUT_JS,
+                {"expected": len(_REACTION_ORDER), "root": root},
             )
             if isinstance(data, dict):
                 count = int(data.get("count") or 0)
@@ -1020,10 +1188,13 @@ class PostActions:
         permalink: str,
         post_id: str,
         reaction: str,
+        previous_state: Any,
     ) -> dict[str, Any]:
-        """Confirm a reaction by the toggle's own pressed state."""
+        """Confirm a reaction by a state transition on its own toggle."""
         try:
-            return await self._poll_reaction(permalink, post_id, reaction)
+            return await self._poll_reaction(
+                permalink, post_id, reaction, previous_state
+            )
         except BaseException:
             logger.warning(POST_ACTION_INTERRUPTED_WARNING)
             raise
@@ -1033,12 +1204,21 @@ class PostActions:
         permalink: str,
         post_id: str,
         reaction: str,
+        previous_state: Any,
     ) -> dict[str, Any]:
         deadline = _CONFIRM_TIMEOUT / 1000
         waited = 0.0
         while waited < deadline:
             signals = await self._read_signals(post_id)
-            if signals.get("reactPressed"):
+            current_state = signals.get("reactState")
+            state_changed = (
+                isinstance(previous_state, str)
+                and bool(previous_state)
+                and isinstance(current_state, str)
+                and bool(current_state)
+                and current_state != previous_state
+            )
+            if signals.get("reactPressed") or state_changed:
                 return post_action_result(
                     permalink,
                     "reacted",
@@ -1185,9 +1365,12 @@ class PostActions:
                     "cannot be trusted and nothing was clicked.",
                 )
 
-            if commentary is None:
-                baseline = await self._bar_counts(post_id)
-            index = 1 if commentary is not None else 0
+            baseline = await self._bar_counts(post_id)
+            index = (
+                _REPOST_COMMENTARY_INDEX
+                if commentary is not None
+                else _REPOST_IMMEDIATE_INDEX
+            )
             clicked = await self._session.page.evaluate(
                 CLICK_REPOST_MENU_ITEM_JS,
                 {"expected": _REPOST_MENU_ITEMS, "index": index, "root": root},
@@ -1211,6 +1394,7 @@ class PostActions:
                 unconfirmed_status="repost_unconfirmed",
                 noun="repost",
                 post_id=post_id,
+                repost_baseline=baseline,
             )
         finally:
             await root.dispose()
@@ -1241,13 +1425,14 @@ class PostActions:
         unconfirmed_status: str,
         noun: str,
         post_id: str | None = None,
+        repost_baseline: list[str] | None = None,
     ) -> dict[str, Any]:
         """Type text into the one available editor and submit it.
 
         ``scoped_to_root`` is the difference between a comment, whose editor
-        lives inside the post, and a repost commentary, whose editor lives in
-        a portal-mounted dialog outside it. Commentary is confirmed the same
-        way a bare repost is: the source post's own count strings change.
+        lives inside the post, and repost commentary, whose editor lives in a
+        portal-mounted dialog outside it. Commentary is confirmed the same way
+        a bare repost is: the source post's own count strings change.
         Matching text inside that post is not evidence — the commentary
         publishes to the actor's feed, and the permalink page still has a
         comment box that would satisfy a text count without a reshare.
@@ -1256,7 +1441,7 @@ class PostActions:
         dialog: Any = None
         if not scoped_to_root:
             try:
-                await page.locator(_DIALOG_SELECTOR).first.wait_for(
+                await page.locator(_DIALOG_EDITOR_SELECTOR).first.wait_for(
                     state="visible", timeout=_EDITOR_TIMEOUT
                 )
             except Exception:
@@ -1322,7 +1507,7 @@ class PostActions:
             if scoped_to_root:
                 submitted = await self._submit_editor(scope, text)
             else:
-                baseline_counts = await self._bar_counts(str(post_id))
+                baseline_counts = repost_baseline or []
                 submitted = await self._submit_editor(scope, text)
             if submitted != "submitted":
                 # Nothing was clicked on either of these two, so the typed text is

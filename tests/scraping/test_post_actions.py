@@ -57,6 +57,7 @@ def signals(
     root: bool = True,
     bar: bool = True,
     pressed: bool = False,
+    state: str | None = "no reaction",
     disabled: bool = False,
     repost_opener: bool = True,
     editors: int = 1,
@@ -70,6 +71,7 @@ def signals(
         "hasBar": bar,
         "barButtonCount": 4 if bar else 0,
         "reactPressed": pressed if bar else None,
+        "reactState": state if bar else None,
         "reactDisabled": disabled if bar else None,
         "hasRepostOpener": repost_opener,
         "editorCount": editors,
@@ -406,6 +408,22 @@ class TestReact:
         # A retry could remove a reaction that did land.
         assert result["retry_safe"] is False
 
+    async def test_an_opaque_label_change_confirms_current_sdui_reaction(
+        self,
+    ) -> None:
+        page = FakePage(
+            signals=[
+                signals(pressed=False, state="Reaction button state: no reaction"),
+                signals(pressed=False, state="Reaction button state: Celebrate"),
+            ],
+            flyout={"count": 6},
+            pick_reaction=True,
+        )
+        with navigated():
+            result = await actions(page).react_to_post(PERMALINK, reaction="celebrate")
+        assert result["status"] == "reacted"
+        assert result["acted"] is True
+
     async def test_a_cancelled_confirm_still_warns(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -436,7 +454,11 @@ class TestReact:
         assert result["status"] == "reacted"
         assert result["reaction"] == "funny"
         # "funny" is the sixth control, and the index is what the flow sends.
-        assert page.picked_reaction == {"expected": 6, "index": 5}
+        assert page.picked_reaction == {
+            "expected": 6,
+            "index": 5,
+            "root": page.handle,
+        }
         assert "react" not in page.calls
 
     @pytest.mark.parametrize("offered", [5, 7])
@@ -720,9 +742,9 @@ class TestRepost:
         assert result["status"] == "reposted"
         assert result["acted"] is True
         assert result["retry_safe"] is False
-        # Index 0 is the immediate repost; index 1 opens a composer.
+        # The current popover puts the immediate repost second.
         assert page.picked_repost["expected"] == 2
-        assert page.picked_repost["index"] == 0
+        assert page.picked_repost["index"] == 1
 
     async def test_counts_that_never_change_leave_the_repost_unconfirmed(self) -> None:
         page = FakePage(
@@ -772,10 +794,35 @@ class TestRepost:
         assert result["acted"] is True
         assert result["retry_safe"] is False
         assert page.picked_repost["expected"] == 2
-        assert page.picked_repost["index"] == 1
+        assert page.picked_repost["index"] == 0
         assert page.pin_editor_scope is page.dialog_handle
         assert "units" not in page.calls
         assert "pin_dialog" in page.calls
+
+    async def test_commentary_url_change_still_pins_the_composer_dialog(
+        self,
+    ) -> None:
+        page = FakePage(
+            signals=[
+                signals(counts=["12", "3"]),
+                signals(counts=["12", "3"]),
+                signals(counts=["12", "4"]),
+            ],
+            open_repost="clicked",
+            repost_menu={"menus": 1, "items": 2},
+            pick_repost=True,
+            submit="submitted",
+        )
+        page.url = "https://www.linkedin.com/sharing/compose"
+        with navigated() as navigate:
+            result = await actions(page).repost_post(
+                PERMALINK, confirm_repost=True, commentary="Worth a read"
+            )
+        assert result["status"] == "reposted"
+        assert result["acted"] is True
+        assert page.pin_editor_scope is page.dialog_handle
+        assert "pin_dialog" in page.calls
+        assert navigate.await_count == 1
 
     async def test_commentary_does_not_treat_text_in_the_source_post_as_proof(
         self,

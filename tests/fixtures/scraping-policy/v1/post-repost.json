@@ -73,7 +73,7 @@
       "call": "repost_post",
       "kind": "evaluate",
       "operation": "post_action_signals",
-      "program_digest": "13b83390e601",
+      "program_digest": "198134452fbb",
       "section": "post"
     },
     {
@@ -81,7 +81,7 @@
       "call": "repost_post",
       "kind": "evaluate_handle",
       "operation": "post_root_owner",
-      "program_digest": "bb115d4eb12e",
+      "program_digest": "fb3c4e57e032",
       "section": "post"
     },
     {
@@ -107,7 +107,7 @@
       "call": "repost_post",
       "kind": "evaluate",
       "operation": "post_repost_menu",
-      "program_digest": "4fa6ca0d7ac1",
+      "program_digest": "45be9b9bdf65",
       "section": "post"
     },
     {
@@ -115,13 +115,13 @@
       "call": "repost_post",
       "kind": "evaluate",
       "operation": "post_action_signals",
-      "program_digest": "13b83390e601",
+      "program_digest": "198134452fbb",
       "section": "post"
     },
     {
       "arg": {
         "expected": 2,
-        "index": 0,
+        "index": 1,
         "root": {
           "handle": "handle-1"
         }
@@ -129,7 +129,7 @@
       "call": "repost_post",
       "kind": "evaluate",
       "operation": "post_repost_pick",
-      "program_digest": "65411e39e4c9",
+      "program_digest": "2bcaa505c1c0",
       "section": "post"
     },
     {
@@ -137,7 +137,7 @@
       "call": "repost_post",
       "kind": "evaluate",
       "operation": "post_action_signals",
-      "program_digest": "13b83390e601",
+      "program_digest": "198134452fbb",
       "section": "post"
     },
     {
