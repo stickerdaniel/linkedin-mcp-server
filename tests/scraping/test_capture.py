@@ -1640,15 +1640,18 @@ class TestCapturePlans:
                 CaptureMode.ACTIVITY,
             ),
             (
-                "https://www.linkedin.com/search/results/people/?keywords=ada",
+                "https://www.linkedin.com/search/results/people/"
+                "?next=/company/acme/people/#/details/experience/",
                 CaptureMode.SEARCH_RESULTS,
             ),
             (
-                "https://www.linkedin.com/company/acme/people/",
+                "https://www.linkedin.com/company/acme/people/"
+                "?next=/details/experience/#/search/results/people/",
                 CaptureMode.COMPANY_PEOPLE,
             ),
             (
-                "https://www.linkedin.com/in/ada/details/experience/",
+                "https://www.linkedin.com/in/ada/details/experience/"
+                "?next=/search/results/people/#/company/acme/people/",
                 CaptureMode.DETAILS,
             ),
         ],
@@ -1663,33 +1666,16 @@ class TestCapturePlans:
         )
 
     @pytest.mark.parametrize(
-        ("url", "mode"),
-        [
-            (
-                "https://www.linkedin.com/in/ada/?next=/details/experience/",
-                CaptureMode.DETAILS,
-            ),
-            (
-                "https://www.linkedin.com/in/ada/#/search/results/people/",
-                CaptureMode.SEARCH_RESULTS,
-            ),
-            (
-                "https://www.linkedin.com/in/ada/?next=/company/acme/people/",
-                CaptureMode.COMPANY_PEOPLE,
-            ),
-        ],
-    )
-    def test_url_adapter_raw_url_markers_include_query_and_fragment(self, url, mode):
-        assert capture_plan_for_url(url).mode is mode
-
-    @pytest.mark.parametrize(
         "url",
         [
+            "https://www.linkedin.com/in/ada/?next=/details/experience/",
+            "https://www.linkedin.com/in/ada/#/search/results/people/",
+            "https://www.linkedin.com/in/ada/?next=/company/acme/people/",
             "https://www.linkedin.com/in/ada/?next=/recent-activity/all/",
             "https://www.linkedin.com/in/ada/#/company/acme/posts/",
         ],
     )
-    def test_url_adapter_activity_markers_use_parsed_path_only(self, url):
+    def test_url_adapter_markers_use_parsed_path_only(self, url):
         assert capture_plan_for_url(url).mode is CaptureMode.STANDARD
 
     def test_capture_plan_is_immutable(self):
