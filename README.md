@@ -42,23 +42,23 @@ An MCP server that connects AI assistants like Claude to LinkedIn through your o
 
 | Tool | Description |
 |------|-------------|
-| `get_person_profile` | Read selected profile sections, such as experience, education, skills, projects and posts. |
-| `get_my_profile` | Read sections of your own profile, including contact info, interests and languages. |
-| `connect_with_person` | Send or accept a connection request to a person, with an optional invitation note. |
-| `get_sidebar_profiles` | Find recommended profile links in the sidebar of a person's LinkedIn profile. |
+| `get_person_profile` | Read profile sections such as experience, education, skills, projects and posts. |
+| `get_my_profile` | Read your own profile using the same selectable sections. |
+| `connect_with_person` | Send or accept a connection request, with an optional note. |
+| `get_sidebar_profiles` | Find recommended profile links in a person's sidebar. |
 | `get_inbox` | List recent messaging conversations from your LinkedIn inbox. |
-| `get_conversation` | Read a messaging conversation by the other person's username or its thread ID. |
-| `search_conversations` | Search your LinkedIn messages by keyword to find matching conversations. |
+| `get_conversation` | Read a conversation by username or thread ID. |
+| `search_conversations` | Search messages by keyword across your conversations. |
 | `send_message` | Send after confirmation. Targeting a profile may start a separate DM instead of replying in a thread ([#483](https://github.com/stickerdaniel/linkedin-mcp-server/issues/483)). |
 | `get_company_profile` | Read posts and jobs; about references can include a `company_urn` for the `currentCompany` search facet. |
 | `get_company_posts` | Read recent posts published on a company's LinkedIn page. |
 | `search_companies` | Find LinkedIn company profiles matching a keyword search. |
-| `get_company_employees` | List employees of a company, optionally narrowing the list by keyword. |
+| `get_company_employees` | List company employees, optionally filtered by keyword. |
 | `search_jobs` | Find LinkedIn job postings by keyword and location. |
 | `get_saved_jobs` | List the job postings you have saved on LinkedIn. |
-| `search_people` | Find people by keyword, location, connection degree or current company. |
+| `search_people` | Search by keyword, location, connection degree or company. |
 | `get_job_details` | Read the details of a LinkedIn job posting by its job ID. |
-| `get_feed` | Read recent posts from your LinkedIn home feed, with post links in `references`. |
+| `get_feed` | Read recent home-feed posts, with links in `references`. |
 | `search_posts` | Search posts by keyword with optional recency filters; `references` contains unordered candidate post links. |
 | `close_session` | Close the active browser session and release its resources. |
 
