@@ -692,6 +692,82 @@ class TestInviteDialog:
         mock_message.assert_awaited_once()
         mock_dismiss.assert_awaited_once()
 
+    async def test_note_sent_despite_premium_banner_when_textarea_appears(
+        self, mock_page
+    ):
+        """A Premium nudge banner alongside a live textarea is not a block.
+
+        LinkedIn renders the "N personalized invitations remaining" /
+        Activate Premium banner on this step as a persistent upsell nudge,
+        not only when the free quota is truly exhausted, and it can still be
+        in the DOM for a moment right after a successful Send, before it
+        unmounts with the closing dialog. The regression this guards: an
+        earlier version bailed the instant that banner was detectable —
+        either the moment the textarea appeared, or the moment Send
+        succeeded — silently dropping the note on every single send that
+        rendered it, independent of actual remaining quota.
+
+        ``_get_premium_upsell_message`` is mocked to always return a message
+        (a banner that is genuinely detectable start to finish), so a
+        version that still gates either check on banner presence alone
+        fails this test; only gating on textarea absence / dialog staying
+        open lets it pass.
+        """
+        actions = _actions(mock_page)
+        textarea = MagicMock()
+        textarea.count = AsyncMock(return_value=0)
+        add_note_button = MagicMock()
+        add_note_button.click = AsyncMock(return_value=None)
+        buttons = MagicMock()
+        buttons.count = AsyncMock(return_value=2)
+        buttons.nth.return_value = add_note_button
+
+        def locator_for(selector: str):
+            return textarea if "textarea" in selector else buttons
+
+        mock_page.locator.side_effect = locator_for
+        # Textarea mounts successfully, and afterwards the dialog closes on
+        # schedule after Send — both are plain "did not time out" waits, and
+        # the Premium banner is present in the DOM throughout regardless.
+        mock_page.wait_for_selector = AsyncMock(return_value=None)
+
+        with (
+            patch.object(
+                actions, "_dialog_is_open", new_callable=AsyncMock, return_value=True
+            ),
+            patch.object(
+                actions,
+                "_fill_dialog_textarea",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_fill,
+            patch.object(
+                actions,
+                "_click_dialog_primary_button",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                actions,
+                "_get_premium_upsell_message",
+                new_callable=AsyncMock,
+                return_value=PREMIUM_MESSAGE,
+            ) as mock_message,
+        ):
+            result = await actions._submit_invite_dialog("Hello")
+
+        # Proves the reveal-step bail is gone: the code must reach the fill
+        # call rather than returning the instant the banner is detectable.
+        mock_fill.assert_awaited_once_with("Hello")
+        assert result == (True, True, None)
+        # Neither the reveal-step check nor the post-submit check calls
+        # _get_premium_upsell_message on this path: the textarea appeared
+        # (skips the reveal-step gate) and the dialog closed on schedule
+        # (skips the post-submit gate). A version that still gates either
+        # check on banner presence alone would call this and return a
+        # blocked result instead of (True, True, None) above.
+        mock_message.assert_not_called()
+
     async def test_reports_premium_after_send_click_failure(self, mock_page):
         """Premium upsell intercepting the Send click is a note-limit block.
 
@@ -767,10 +843,14 @@ class TestInviteDialog:
         """A Send click that succeeds is not yet a note that was delivered.
 
         LinkedIn accepts the click and then swaps the invite dialog for the
-        quota upsell, so the only evidence that the note went nowhere is the
-        modal standing open afterwards. Reporting this as a send would tell
-        the caller a note reached a member who never got one, and the two
-        earlier upsell probes cannot see it: both sit on failure paths.
+        quota upsell modal, which matches the same dialog selector as the
+        invite dialog it replaced — so the close-wait genuinely times out
+        rather than resolving, and that timeout is the real, structural
+        signal (no label text read) that distinguishes this from a benign
+        nudge banner that closes with the dialog on a real send. Reporting
+        this as a send would tell the caller a note reached a member who
+        never got one, and the two earlier upsell probes cannot see it: both
+        sit on failure paths.
         """
         actions = _actions(mock_page)
 
@@ -779,7 +859,12 @@ class TestInviteDialog:
         textarea.first = textarea
         textarea.fill = AsyncMock()
         mock_page.locator.return_value = textarea
-        mock_page.wait_for_selector = AsyncMock()
+        # The close-wait times out: the upsell modal that replaced the
+        # invite dialog still matches _DIALOG_SELECTOR, so it never becomes
+        # "hidden".
+        mock_page.wait_for_selector = AsyncMock(
+            side_effect=PlaywrightTimeoutError("dialog still open")
+        )
 
         with (
             patch.object(
@@ -812,8 +897,10 @@ class TestInviteDialog:
         assert result == (False, False, PREMIUM_MESSAGE)
         mock_message.assert_awaited_once()
         mock_dismiss.assert_awaited_once()
-        # The close wait belongs to the delivered path, which this is not.
-        mock_page.wait_for_selector.assert_not_awaited()
+        # The close wait is what proves this is the blocked path: it is
+        # attempted and times out, which is the real signal gating the
+        # premium check below it.
+        mock_page.wait_for_selector.assert_awaited_once()
 
     async def test_the_quota_probe_never_clicks_the_primary_button(self, mock_page):
         """The probe opens the note editor and touches nothing else.
