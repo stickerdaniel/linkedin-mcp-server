@@ -23,6 +23,8 @@ tests
 AGENTS.md
 CLAUDE.md
 CONTRIBUTING.md
+CHANGELOG.md
+changelog.d
 docker-compose.yml
 Dockerfile
 RELEASE_NOTES_TEMPLATE.md

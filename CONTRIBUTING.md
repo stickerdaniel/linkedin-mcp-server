@@ -165,6 +165,22 @@ when the reviewed policy change is intentional.
 6. PRs are squash-merged into `main`, so the PR title becomes the commit
    subject; commits inside a PR are for review only
 
+## Changelog Fragments
+
+A PR titled `feat`, `fix` or with a `!` needs a changelog fragment. The PR
+Title check fails until it is there.
+
+1. Open the PR as a draft to get its number.
+2. Add `changelog.d/<number>.feat.md`, `.fix.md` or `.breaking.md` to match the
+   title. A `!` title takes `.breaking.md` whatever its type.
+3. Write one user-facing sentence in it, without a PR link; the release adds
+   that.
+4. Push it to the same branch. The PR Title check turns green.
+
+Retitling to or from `!` means renaming the fragment. Edit an existing fragment
+instead of running `towncrier create` again, which writes a second, numbered
+file that the check rejects.
+
 ## Scraping Philosophy: Minimize DOM Dependence
 
 Voyager and other LinkedIn private APIs are out of scope. See [Read the rendered page](docs/decisions/2026-09-16-rendered-page.md).

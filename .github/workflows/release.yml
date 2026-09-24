@@ -55,6 +55,39 @@ jobs:
             echo "should-release=false" >> $GITHUB_OUTPUT
           fi
 
+      # Composed here, before build and publish-pypi, so a CHANGELOG without a
+      # section for this version stops the release while nothing exists yet
+      # that would have to be withdrawn. The previous version is read on its
+      # own because the step above falls back to 0.0.0 in silence.
+      - name: Compose release notes
+        if: steps.check.outputs.should-release == 'true'
+        env:
+          VERSION: ${{ steps.check.outputs.new-version }}
+        run: |
+          set -euo pipefail
+          PREVIOUS=$(git show HEAD~1:pyproject.toml | python3 -c \
+            'import sys, tomllib; print(tomllib.load(sys.stdin.buffer)["project"]["version"])')
+          echo "Previous version: $PREVIOUS"
+          git ls-remote --exit-code --tags origin "refs/tags/v$PREVIOUS"
+          python3 scripts/compose_release_notes.py \
+            --changelog CHANGELOG.md \
+            --template RELEASE_NOTES_TEMPLATE.md \
+            --fragments-dir changelog.d \
+            --version "$VERSION" \
+            --previous-version "$PREVIOUS" \
+            --repository "$GITHUB_REPOSITORY" \
+            --output RELEASE_NOTES.md
+
+      - name: Upload release notes
+        if: steps.check.outputs.should-release == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-notes
+          path: RELEASE_NOTES.md
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
   # Builds the distributions without any publishing or administration
   # credentials: the build backend is third-party code and must not run where
   # it could reach the OIDC identity. Its output travels to the publishing job
@@ -468,20 +501,13 @@ jobs:
           bunx "@anthropic-ai/mcpb@$MCPB_VERSION" pack .
           mv linkedin-mcp-server.mcpb linkedin-mcp-server-v$VERSION.mcpb
 
-      - name: Generate release notes
-        run: |
-          envsubst < RELEASE_NOTES_TEMPLATE.md > RELEASE_NOTES.md
-          echo "✅ Generated release notes from template"
-
       # Overwrites for the same reason as the distributions upload: the bun
       # cache save runs after this and can fail the job around it.
       - name: Upload release assets
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: github-release-assets
-          path: |
-            linkedin-mcp-server-v${{ env.VERSION }}.mcpb
-            RELEASE_NOTES.md
+          path: linkedin-mcp-server-v${{ env.VERSION }}.mcpb
           if-no-files-found: error
           overwrite: true
           retention-days: 7
@@ -501,26 +527,10 @@ jobs:
         with:
           name: github-release-assets
 
-      # GitHub places a supplied body above the notes it generates, which put
-      # the install steps before the changes. Generating them here lets the
-      # changes lead and the install steps follow, above the changelog link.
-      - name: Compose release notes
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
-            -f tag_name="v$VERSION" --jq .body > CHANGES.md
-          awk -v install=RELEASE_NOTES.md '
-            function emit(line) {
-              while ((getline line < install) > 0) print line
-              print ""
-              done = 1
-            }
-            /^\*\*Full Changelog\*\*/ && !done { emit() }
-            { print }
-            END { if (!done) { print ""; emit() } }
-          ' CHANGES.md > RELEASE_BODY.md
-          grep -q "^## Install or update" RELEASE_BODY.md
+      - name: Download release notes
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-notes
 
       - name: Create GitHub Release
         env:
@@ -534,7 +544,7 @@ jobs:
           draft: false
           prerelease: false
           name: "v${{ env.VERSION }}"
-          body_path: RELEASE_BODY.md
+          body_path: RELEASE_NOTES.md
 
       - name: Summary
         run: |

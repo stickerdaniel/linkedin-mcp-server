@@ -176,6 +176,13 @@
       "url": "https://github.com/Kludex/starlette",
       "branch": "main",
       "specialNotes": "ASGI framework constrained directly to keep MCP transports above known security advisories."
+    },
+    {
+      "type": "git",
+      "name": "towncrier",
+      "url": "https://github.com/twisted/towncrier",
+      "branch": "trunk",
+      "specialNotes": "Builds CHANGELOG.md from changelog.d fragments at release time. Configured in pyproject.toml [tool.towncrier]."
     }
   ]
 }
