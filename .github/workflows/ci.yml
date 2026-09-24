@@ -245,6 +245,10 @@ jobs:
           cat /tmp/xvfb.log >&2
           exit 1
 
+      # An unsupported group flag is reported as UNSUPPORTED, not readiness.
+      - name: Measure retained leader pidfd group signaling
+        run: uv run pytest -v -s -o faulthandler_timeout=120 tests/test_pidfd_group_signal.py::test_retained_leader_pidfd_signals_its_group_after_reaping
+
       # `--dist loadgroup` keeps every test that launches Chromium on one
       # worker. The identity cases share two cached launches; the DOM and auth
       # contracts launch per case, and the DOM timers use wall-clock deadlines
