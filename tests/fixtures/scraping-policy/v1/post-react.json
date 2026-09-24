@@ -73,7 +73,7 @@
       "call": "react_to_post",
       "kind": "evaluate",
       "operation": "post_action_signals",
-      "program_digest": "198134452fbb",
+      "program_digest": "aa2cd943bfa0",
       "section": "post"
     },
     {
@@ -81,7 +81,7 @@
       "call": "react_to_post",
       "kind": "evaluate_handle",
       "operation": "post_root_owner",
-      "program_digest": "fb3c4e57e032",
+      "program_digest": "8bc23d831437",
       "section": "post"
     },
     {
@@ -100,7 +100,7 @@
       "call": "react_to_post",
       "kind": "evaluate",
       "operation": "post_react_toggle",
-      "program_digest": "9f94d943dc2a",
+      "program_digest": "2624c4ff1642",
       "section": "post"
     },
     {
@@ -108,7 +108,7 @@
       "call": "react_to_post",
       "kind": "evaluate",
       "operation": "post_action_signals",
-      "program_digest": "198134452fbb",
+      "program_digest": "aa2cd943bfa0",
       "section": "post"
     },
     {

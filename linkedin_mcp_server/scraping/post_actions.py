@@ -75,13 +75,14 @@ logger = logging.getLogger(__name__)
 # cheaper failure.
 _REACTION_ORDER = ("like", "celebrate", "support", "love", "insightful", "funny")
 
-# The current repost popover renders the commentary composer first and the
-# immediate repost second. Same guard as the reactions — exactly two items or
-# the flow refuses, because getting this position wrong publishes immediately
-# to the actor's own feed.
+# The legacy menu renders immediate repost first; the current popover renders
+# commentary first. Layout and count are both re-verified at click time because
+# getting this position wrong publishes immediately to the actor's own feed.
 _REPOST_MENU_ITEMS = 2
-_REPOST_COMMENTARY_INDEX = 0
-_REPOST_IMMEDIATE_INDEX = 1
+_REPOST_INDEXES = {
+    "menu": {"immediate": 0, "commentary": 1},
+    "popover": {"immediate": 1, "commentary": 0},
+}
 
 # The band a social action bar's button count falls in. The bar holds react,
 # comment, repost and send, so three is the floor once a layout drops one and
@@ -224,6 +225,7 @@ function findPostRoot(postId) {
   if (
     window.location.pathname.startsWith('/posts/') &&
     slugPattern.test(window.location.pathname) &&
+    currentPermalinkMarkers(main).length === 1 &&
     findActionBar(main) !== null
   ) return main;
 
@@ -288,6 +290,23 @@ function insideNestedPost(root, node) {
   }
   return false;
 }
+function currentPermalinkMarkers(root) {
+  const current = window.location.pathname.replace(/\/+$/, '');
+  return Array.from(root.querySelectorAll(
+    '[data-testid^="ReactionFacepileCollection-urn:li:"]'
+  )).filter(marker => {
+    if (!visible(marker)) return false;
+    const anchor = marker.closest('a[href]');
+    if (!anchor) return false;
+    try {
+      const target = new URL(anchor.href, window.location.href);
+      return target.origin === window.location.origin &&
+        target.pathname.replace(/\/+$/, '') === current;
+    } catch {
+      return false;
+    }
+  });
+}
 function findActionBar(root) {
   const toggles = Array.from(root.querySelectorAll(
     'button[aria-pressed], button[aria-label]:not([aria-expanded])'
@@ -326,9 +345,7 @@ function findActionBar(root) {
   }
   if (found.length === 1) return found[0];
   if (found.length > 1) {
-    const markers = Array.from(root.querySelectorAll(
-      '[data-testid^="ReactionFacepileCollection-urn:li:"]'
-    )).filter(visible);
+    const markers = currentPermalinkMarkers(root);
     if (markers.length === 1) {
       const preceding = found.filter(
         item => item.bar.compareDocumentPosition(markers[0]) &
@@ -381,10 +398,14 @@ POST_ACTION_SIGNALS_JS = (
     hasRoot: true,
     hasBar: !!found,
     barButtonCount: found ? found.bar.querySelectorAll('button').length : 0,
+    reactPressedPresent: found
+      ? found.toggle.hasAttribute('aria-pressed')
+      : false,
     reactPressed: found
-      ? (found.toggle.getAttribute('aria-pressed') || '').toLowerCase() === 'true'
+      ? found.toggle.hasAttribute('aria-pressed')
+        ? (found.toggle.getAttribute('aria-pressed') || '').toLowerCase() === 'true'
+        : null
       : null,
-    reactState: found ? found.toggle.getAttribute('aria-label') : null,
     reactDisabled: found
       ? found.toggle.disabled ||
         (found.toggle.getAttribute('aria-disabled') || '').toLowerCase() === 'true'
@@ -488,6 +509,7 @@ CLICK_REACT_TOGGLE_JS = r"""
   ) {
     return 'disabled';
   }
+  if (!toggle.hasAttribute('aria-pressed')) return 'unsupported_state';
   if ((toggle.getAttribute('aria-pressed') || '').toLowerCase() === 'true') {
     return 'already_pressed';
   }
@@ -520,7 +542,7 @@ READ_REACTION_FLYOUT_JS = (
     'button[aria-label], [role="menuitem"][aria-label]'
   )).filter(visible);
   return {
-    count: arg.expected,
+    count: controls.length,
     labels: controls.map(control => !!control.getAttribute('aria-label')),
   };
 })
@@ -594,7 +616,7 @@ READ_REPOST_MENU_JS = (
     const items = Array.from(menu.querySelectorAll(
       '[role="menuitem"], button'
     )).filter(visible);
-    if (items.length > 0) candidates.push({container: menu, items});
+    if (items.length > 0) candidates.push({container: menu, items, layout: 'menu'});
   }
   for (const popover of Array.from(
     document.querySelectorAll('[popover="manual"]')
@@ -602,11 +624,13 @@ READ_REPOST_MENU_JS = (
     const items = Array.from(
       popover.querySelectorAll('[role="button"]')
     ).filter(visible);
-    if (items.length > 0) candidates.push({container: popover, items});
+    if (items.length > 0) {
+      candidates.push({container: popover, items, layout: 'popover'});
+    }
   }
   if (candidates.length !== 1) return {menus: candidates.length, items: 0};
   const items = candidates[0].items;
-  return {menus: 1, items: items.length};
+  return {menus: 1, items: items.length, layout: candidates[0].layout};
 })
 """
 )
@@ -636,7 +660,7 @@ CLICK_REPOST_MENU_ITEM_JS = (
     const items = Array.from(menu.querySelectorAll(
       '[role="menuitem"], button'
     )).filter(visible);
-    if (items.length > 0) candidates.push({container: menu, items});
+    if (items.length > 0) candidates.push({container: menu, items, layout: 'menu'});
   }
   for (const popover of Array.from(
     document.querySelectorAll('[popover="manual"]')
@@ -644,9 +668,12 @@ CLICK_REPOST_MENU_ITEM_JS = (
     const items = Array.from(
       popover.querySelectorAll('[role="button"]')
     ).filter(visible);
-    if (items.length > 0) candidates.push({container: popover, items});
+    if (items.length > 0) {
+      candidates.push({container: popover, items, layout: 'popover'});
+    }
   }
   if (candidates.length !== 1) return false;
+  if (candidates[0].layout !== arg.layout) return false;
   const items = candidates[0].items;
   if (items.length !== arg.expected) return false;
   const target = items[arg.index];
@@ -700,12 +727,16 @@ PIN_EDITOR_JS = (
   if (editors.length !== 1) return {status: 'ambiguous_editor', editor: null};
   const editor = editors[0];
   if ((editor.innerText || '').trim()) return {status: 'draft_present', editor: null};
+  const scopeButtons = scope instanceof Element
+    ? Array.from(scope.querySelectorAll('button')).filter(visible)
+    : [];
   let controls = editor.parentElement;
   while (controls && scope.contains(controls)) {
     const buttons = Array.from(controls.querySelectorAll('button')).filter(visible);
     if (buttons.length > 0) {
       editor.__linkedinMcpInitialControls = {
         count: buttons.length,
+        scopeElements: scopeButtons,
         labelledSvg: buttons.filter(
           button => button.hasAttribute('aria-label') && button.querySelector('svg')
         ).length,
@@ -802,6 +833,7 @@ SUBMIT_EDITOR_JS = (
     scope instanceof Element &&
     scope.matches('dialog[open], [role="dialog"]')
   ) {
+    const baseline = editor.__linkedinMcpInitialControls;
     const dialogCandidates = Array.from(
       scope.querySelectorAll('button[type="button"]')
     ).filter(button =>
@@ -811,7 +843,9 @@ SUBMIT_EDITOR_JS = (
       !button.hasAttribute('aria-label') &&
       !button.hasAttribute('aria-expanded') &&
       !button.hasAttribute('aria-pressed') &&
-      !button.querySelector('svg')
+      !button.querySelector('svg') &&
+      baseline &&
+      !baseline.scopeElements.includes(button)
     );
     if (dialogCandidates.length > 1) return 'ambiguous_submit';
     if (dialogCandidates.length === 1) {
@@ -1024,6 +1058,14 @@ class PostActions:
                 "would remove the reaction, so nothing was clicked.",
                 reaction=reaction,
             )
+        if not signals.get("reactPressedPresent"):
+            return post_action_result(
+                permalink,
+                "actions_unavailable",
+                "LinkedIn does not expose a locale-independent current reaction "
+                "state on that post, so clicking could remove an existing reaction.",
+                reaction=reaction,
+            )
         if signals.get("reactDisabled"):
             return post_action_result(
                 permalink,
@@ -1042,20 +1084,8 @@ class PostActions:
             )
         try:
             if reaction == "like":
-                return await self._react_default(
-                    root,
-                    permalink,
-                    post_id,
-                    reaction,
-                    signals.get("reactState"),
-                )
-            return await self._react_specific(
-                root,
-                permalink,
-                post_id,
-                reaction,
-                signals.get("reactState"),
-            )
+                return await self._react_default(root, permalink, post_id, reaction)
+            return await self._react_specific(root, permalink, post_id, reaction)
         finally:
             await root.dispose()
 
@@ -1065,7 +1095,6 @@ class PostActions:
         permalink: str,
         post_id: str,
         reaction: str,
-        previous_state: Any,
     ) -> dict[str, Any]:
         """Click the reaction toggle itself, which is the default reaction."""
         outcome = await self._session.page.evaluate(
@@ -1078,14 +1107,14 @@ class PostActions:
                 {
                     "already_pressed": "This account has already reacted to that post.",
                     "disabled": "The reaction control is disabled on that post.",
+                    "unsupported_state": "LinkedIn does not expose the current "
+                    "reaction state on that post.",
                     "unpinned": "The post changed while it was being acted on.",
                 }.get(str(outcome), "Could not click the reaction control."),
                 reaction=reaction,
             )
         try:
-            return await self._confirm_reaction(
-                permalink, post_id, reaction, previous_state
-            )
+            return await self._confirm_reaction(permalink, post_id, reaction)
         except BaseException:
             logger.warning(POST_ACTION_INTERRUPTED_WARNING)
             raise
@@ -1096,7 +1125,6 @@ class PostActions:
         permalink: str,
         post_id: str,
         reaction: str,
-        previous_state: Any,
     ) -> dict[str, Any]:
         """Open the reaction flyout and pick one reaction by index."""
         # Hovered through the pinned handle rather than a fresh selector. A
@@ -1160,9 +1188,7 @@ class PostActions:
                 "The reaction picker changed before the reaction was clicked.",
                 reaction=reaction,
             )
-        return await self._confirm_reaction(
-            permalink, post_id, reaction, previous_state
-        )
+        return await self._confirm_reaction(permalink, post_id, reaction)
 
     async def _wait_for_flyout(self, root: ElementHandle) -> int | None:
         """The control count of the reaction flyout once it renders."""
@@ -1188,13 +1214,10 @@ class PostActions:
         permalink: str,
         post_id: str,
         reaction: str,
-        previous_state: Any,
     ) -> dict[str, Any]:
-        """Confirm a reaction by a state transition on its own toggle."""
+        """Confirm a reaction by the toggle's own pressed state."""
         try:
-            return await self._poll_reaction(
-                permalink, post_id, reaction, previous_state
-            )
+            return await self._poll_reaction(permalink, post_id, reaction)
         except BaseException:
             logger.warning(POST_ACTION_INTERRUPTED_WARNING)
             raise
@@ -1204,21 +1227,12 @@ class PostActions:
         permalink: str,
         post_id: str,
         reaction: str,
-        previous_state: Any,
     ) -> dict[str, Any]:
         deadline = _CONFIRM_TIMEOUT / 1000
         waited = 0.0
         while waited < deadline:
             signals = await self._read_signals(post_id)
-            current_state = signals.get("reactState")
-            state_changed = (
-                isinstance(previous_state, str)
-                and bool(previous_state)
-                and isinstance(current_state, str)
-                and bool(current_state)
-                and current_state != previous_state
-            )
-            if signals.get("reactPressed") or state_changed:
+            if signals.get("reactPressed"):
                 return post_action_result(
                     permalink,
                     "reacted",
@@ -1354,8 +1368,8 @@ class PostActions:
                     else "The repost control is disabled on that post.",
                 )
 
-            items = await self._wait_for_repost_menu()
-            if items != _REPOST_MENU_ITEMS:
+            items, layout = await self._wait_for_repost_menu()
+            if items != _REPOST_MENU_ITEMS or layout not in _REPOST_INDEXES:
                 await self._dismiss_overlay()
                 return post_action_result(
                     permalink,
@@ -1366,14 +1380,16 @@ class PostActions:
                 )
 
             baseline = await self._bar_counts(post_id)
-            index = (
-                _REPOST_COMMENTARY_INDEX
-                if commentary is not None
-                else _REPOST_IMMEDIATE_INDEX
-            )
+            action = "commentary" if commentary is not None else "immediate"
+            index = _REPOST_INDEXES[layout][action]
             clicked = await self._session.page.evaluate(
                 CLICK_REPOST_MENU_ITEM_JS,
-                {"expected": _REPOST_MENU_ITEMS, "index": index, "root": root},
+                {
+                    "expected": _REPOST_MENU_ITEMS,
+                    "index": index,
+                    "layout": layout,
+                    "root": root,
+                },
             )
             if not clicked:
                 await self._dismiss_overlay()
@@ -1399,20 +1415,23 @@ class PostActions:
         finally:
             await root.dispose()
 
-    async def _wait_for_repost_menu(self) -> int:
-        """How many items the open repost menu holds."""
+    async def _wait_for_repost_menu(self) -> tuple[int, str | None]:
+        """The item count and structural layout of the open repost menu."""
         deadline = _FLYOUT_TIMEOUT / 1000
         waited = 0.0
         items = 0
+        layout: str | None = None
         while waited < deadline:
             data = await self._session.page.evaluate(READ_REPOST_MENU_JS)
             if isinstance(data, dict) and data.get("menus") == 1:
                 items = int(data.get("items") or 0)
-                if items == _REPOST_MENU_ITEMS:
-                    return items
+                candidate_layout = data.get("layout")
+                layout = candidate_layout if isinstance(candidate_layout, str) else None
+                if items == _REPOST_MENU_ITEMS and layout in _REPOST_INDEXES:
+                    return items, layout
             await asyncio.sleep(_CONFIRM_POLL)
             waited += _CONFIRM_POLL
-        return items
+        return items, layout
 
     async def _write_and_submit(
         self,

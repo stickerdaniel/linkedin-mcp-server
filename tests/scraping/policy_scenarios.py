@@ -1039,6 +1039,7 @@ def _post_signals(
         "hasRoot": True,
         "hasBar": True,
         "barButtonCount": 4,
+        "reactPressedPresent": True,
         "reactPressed": pressed,
         "reactDisabled": False,
         "hasRepostOpener": True,
@@ -1150,7 +1151,10 @@ async def _repost_post_scenario() -> dict[str, Any]:
         _post_signals(counts=["12", "4"]),
     )
     page.script("evaluate:post_repost_open", "clicked")
-    page.script("evaluate:post_repost_menu", {"menus": 1, "items": 2})
+    page.script(
+        "evaluate:post_repost_menu",
+        {"menus": 1, "items": 2, "layout": "popover"},
+    )
     page.script("evaluate:post_repost_pick", True)
     extractor = _extractor(page)
     async with boundaries(recorder, clock):

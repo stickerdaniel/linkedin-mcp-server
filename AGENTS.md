@@ -25,12 +25,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **A public write picked by position refuses rather than guesses.** Two
   controls in `post_actions.py` cannot be named locale-independently at all and
   are reached by index: LinkedIn's reaction flyout, whose six entries are in a
-  fixed order, and its current repost popover, whose two items are repost with
-  commentary then bare repost. Both are guarded by an exact count, and a count that does not
-  match returns `reaction_picker_changed` / `repost_menu_changed` without
-  clicking. The asymmetry is the point: a missed reaction costs nothing, while
-  the wrong index publishes to the user's own feed. Never widen either guard to
-  "at least N" and never fall back to the nearest match.
+  fixed order, and LinkedIn's repost control. The legacy repost menu orders
+  bare repost before commentary; the current popover reverses them. Layout and
+  exact count choose the index together. A mismatch returns
+  `reaction_picker_changed` / `repost_menu_changed` without clicking. The
+  asymmetry is the point: a missed reaction costs nothing, while the wrong
+  index publishes to the user's own feed. Never widen either guard to "at
+  least N" and never fall back to the nearest match.
 - **A write is confirmed by something only LinkedIn could have produced.**
  [Read the evidence rule](docs/decisions/2026-09-18-evidence-of-a-write.md).
  Text this server typed is not evidence that it was published: the comment
@@ -38,8 +39,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
  typing alone and confirms a comment that was never sent. Nor is a click this
  server chose to make. A submit control is either `type="submit"`, the sole
  control in the exact SDUI three-to-four transition recorded around real key
- events, or the one unlabeled non-SVG button in the pinned repost dialog; never
- fall back to an enabled button by elimination, because an untouched comment
+  events, or the one unlabeled non-SVG button newly added to the pinned repost
+  dialog after typing; never fall back to an enabled button by elimination,
+  because an untouched comment
  box offers a photo button as that candidate. Both mistakes shipped together
  and reported two comments published on posts that had none.
 - **Detection must be locale-independent.** Classification logic — connection state, action availability, button identity — must rely on URL patterns (`/preload/custom-invite/?vanityName=USER`, `/in/USER/edit/intro/`, `/messaging/compose/`), attribute *presence* (`aria-label` exists, `aria-expanded` exists, `aria-disabled` exists), or structural counts — never on text values like "Connect", "Follow", "Message", "1st", "Pending". The verb in an `aria-label` is locale-dependent; whether the attribute exists is not. Where text is genuinely the only signal, guard it behind an explicit per-locale table and document the limitation in code.

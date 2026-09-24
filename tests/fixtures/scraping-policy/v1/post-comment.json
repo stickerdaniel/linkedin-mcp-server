@@ -74,7 +74,7 @@
       "call": "comment_on_post",
       "kind": "evaluate",
       "operation": "post_action_signals",
-      "program_digest": "198134452fbb",
+      "program_digest": "aa2cd943bfa0",
       "section": "post"
     },
     {
@@ -82,7 +82,7 @@
       "call": "comment_on_post",
       "kind": "evaluate",
       "operation": "post_action_signals",
-      "program_digest": "198134452fbb",
+      "program_digest": "aa2cd943bfa0",
       "section": "post"
     },
     {
@@ -90,7 +90,7 @@
       "call": "comment_on_post",
       "kind": "evaluate_handle",
       "operation": "post_root_owner",
-      "program_digest": "fb3c4e57e032",
+      "program_digest": "8bc23d831437",
       "section": "post"
     },
     {
@@ -122,7 +122,7 @@
       "call": "comment_on_post",
       "kind": "evaluate_handle",
       "operation": "post_editor_pin",
-      "program_digest": "ec7803bbf501",
+      "program_digest": "7ec11127eb10",
       "section": "post"
     },
     {
@@ -211,7 +211,7 @@
       "call": "comment_on_post",
       "kind": "evaluate",
       "operation": "post_text_submit",
-      "program_digest": "24a444ae4434",
+      "program_digest": "55fc04aa25ec",
       "section": "post"
     },
     {

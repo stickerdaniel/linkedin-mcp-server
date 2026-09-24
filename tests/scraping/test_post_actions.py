@@ -57,7 +57,7 @@ def signals(
     root: bool = True,
     bar: bool = True,
     pressed: bool = False,
-    state: str | None = "no reaction",
+    pressed_present: bool = True,
     disabled: bool = False,
     repost_opener: bool = True,
     editors: int = 1,
@@ -70,8 +70,8 @@ def signals(
         "hasRoot": root,
         "hasBar": bar,
         "barButtonCount": 4 if bar else 0,
-        "reactPressed": pressed if bar else None,
-        "reactState": state if bar else None,
+        "reactPressedPresent": pressed_present if bar else False,
+        "reactPressed": pressed if bar and pressed_present else None,
         "reactDisabled": disabled if bar else None,
         "hasRepostOpener": repost_opener,
         "editorCount": editors,
@@ -408,21 +408,15 @@ class TestReact:
         # A retry could remove a reaction that did land.
         assert result["retry_safe"] is False
 
-    async def test_an_opaque_label_change_confirms_current_sdui_reaction(
-        self,
-    ) -> None:
-        page = FakePage(
-            signals=[
-                signals(pressed=False, state="Reaction button state: no reaction"),
-                signals(pressed=False, state="Reaction button state: Celebrate"),
-            ],
-            flyout={"count": 6},
-            pick_reaction=True,
-        )
+    async def test_a_toggle_without_pressed_state_is_not_clicked(self) -> None:
+        page = FakePage(signals=signals(pressed_present=False))
         with navigated():
-            result = await actions(page).react_to_post(PERMALINK, reaction="celebrate")
-        assert result["status"] == "reacted"
-        assert result["acted"] is True
+            result = await actions(page).react_to_post(PERMALINK)
+        assert result["status"] == "actions_unavailable"
+        assert result["acted"] is False
+        assert result["retry_safe"] is True
+        assert "react" not in page.calls
+        assert "pin" not in page.calls
 
     async def test_a_cancelled_confirm_still_warns(
         self, caplog: pytest.LogCaptureFixture
@@ -734,7 +728,7 @@ class TestRepost:
                 signals(counts=["12", "4"]),
             ],
             open_repost="clicked",
-            repost_menu={"menus": 1, "items": 2},
+            repost_menu={"menus": 1, "items": 2, "layout": "popover"},
             pick_repost=True,
         )
         with navigated():
@@ -745,12 +739,30 @@ class TestRepost:
         # The current popover puts the immediate repost second.
         assert page.picked_repost["expected"] == 2
         assert page.picked_repost["index"] == 1
+        assert page.picked_repost["layout"] == "popover"
+
+    async def test_a_legacy_menu_takes_the_first_item_for_bare_repost(self) -> None:
+        page = FakePage(
+            signals=[
+                signals(counts=["12", "3"]),
+                signals(counts=["12", "3"]),
+                signals(counts=["12", "4"]),
+            ],
+            open_repost="clicked",
+            repost_menu={"menus": 1, "items": 2, "layout": "menu"},
+            pick_repost=True,
+        )
+        with navigated():
+            result = await actions(page).repost_post(PERMALINK, confirm_repost=True)
+        assert result["status"] == "reposted"
+        assert page.picked_repost["index"] == 0
+        assert page.picked_repost["layout"] == "menu"
 
     async def test_counts_that_never_change_leave_the_repost_unconfirmed(self) -> None:
         page = FakePage(
             signals=signals(counts=["12", "3"]),
             open_repost="clicked",
-            repost_menu={"menus": 1, "items": 2},
+            repost_menu={"menus": 1, "items": 2, "layout": "popover"},
             pick_repost=True,
         )
         with navigated():
@@ -782,7 +794,7 @@ class TestRepost:
                 signals(counts=["12", "4"]),
             ],
             open_repost="clicked",
-            repost_menu={"menus": 1, "items": 2},
+            repost_menu={"menus": 1, "items": 2, "layout": "popover"},
             pick_repost=True,
             submit="submitted",
         )
@@ -795,6 +807,7 @@ class TestRepost:
         assert result["retry_safe"] is False
         assert page.picked_repost["expected"] == 2
         assert page.picked_repost["index"] == 0
+        assert page.picked_repost["layout"] == "popover"
         assert page.pin_editor_scope is page.dialog_handle
         assert "units" not in page.calls
         assert "pin_dialog" in page.calls
@@ -809,7 +822,7 @@ class TestRepost:
                 signals(counts=["12", "4"]),
             ],
             open_repost="clicked",
-            repost_menu={"menus": 1, "items": 2},
+            repost_menu={"menus": 1, "items": 2, "layout": "popover"},
             pick_repost=True,
             submit="submitted",
         )
@@ -830,7 +843,7 @@ class TestRepost:
         page = FakePage(
             signals=signals(counts=["12", "3"]),
             open_repost="clicked",
-            repost_menu={"menus": 1, "items": 2},
+            repost_menu={"menus": 1, "items": 2, "layout": "popover"},
             pick_repost=True,
             units=[0, 1],
             submit="submitted",
@@ -848,7 +861,7 @@ class TestRepost:
         page = FakePage(
             signals=signals(),
             open_repost="clicked",
-            repost_menu={"menus": 1, "items": 2},
+            repost_menu={"menus": 1, "items": 2, "layout": "popover"},
             pick_repost=True,
             dialog_pinned=False,
         )
@@ -864,7 +877,7 @@ class TestRepost:
         page = FakePage(
             signals=signals(),
             open_repost="clicked",
-            repost_menu={"menus": 1, "items": 2},
+            repost_menu={"menus": 1, "items": 2, "layout": "popover"},
             pick_repost=True,
         )
         page.dialog_wait.side_effect = TimeoutError("no dialog")

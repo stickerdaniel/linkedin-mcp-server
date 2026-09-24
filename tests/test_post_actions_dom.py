@@ -67,6 +67,7 @@ pytestmark = [
 
 POST_ID = "7506667649444237313"
 POST_URN = f"urn:li:ugcPost:{POST_ID}"
+SHARE_URL = f"https://www.linkedin.com/posts/member_topic-share-{POST_ID}-suffix/"
 OTHER_URN = "urn:li:ugcPost:7000000000000000001"
 ACTIVITY_URN = "urn:li:activity:7506667700000000000"
 MISMATCH_ACTIVITY_URN = "urn:li:activity:7506667799999999999"
@@ -404,7 +405,7 @@ def sdui_post_with_current_editor(labels: Labels) -> str:
     )
 
 
-def split_sdui_post(labels: Labels) -> str:
+def split_sdui_post(labels: Labels, *, marker_href: str | None = None) -> str:
     """The identity marker may sit outside the post action-bar subtree."""
     comment_bars = "".join(
         f"""
@@ -416,6 +417,9 @@ def split_sdui_post(labels: Labels) -> str:
         """
         for _ in range(2)
     )
+    marker = f'<div data-testid="ReactionFacepileCollection-{POST_URN}"></div>'
+    if marker_href is not None:
+        marker = f'<a href="{marker_href}">{marker}</a>'
     return f"""
 <div class="post-content">
   <div class="social-bar">
@@ -427,7 +431,7 @@ def split_sdui_post(labels: Labels) -> str:
   {comment_editor(labels)}
 </div>
 <div class="comment-list">
-  <div data-testid="ReactionFacepileCollection-{POST_URN}"></div>
+  {marker}
   {comment_bars}
 </div>
 """
@@ -572,16 +576,23 @@ def six_control_decoy(labels: Labels) -> str:
     return f'<div class="decoy">{controls}</div>'
 
 
-def repost_menu(labels: Labels, *, count: int = 2) -> str:
-    """The repost menu, portal-mounted, found by role rather than containment."""
-    names = [labels.repost_thoughts, labels.repost_now, "extra"][:count]
+def repost_menu(labels: Labels, *, count: int = 2, layout: str = "popover") -> str:
+    """One of LinkedIn's two measured portal-mounted repost layouts."""
+    names = (
+        [labels.repost_thoughts, labels.repost_now, "extra"]
+        if layout == "popover"
+        else [labels.repost_now, labels.repost_thoughts, "extra"]
+    )[:count]
+    role = "button" if layout == "popover" else "menuitem"
     items = "".join(
-        f'<div role="button" tabindex="0"'
+        f'<div role="{role}" tabindex="0"'
         f" onclick=\"document.body.setAttribute('data-clicked','menu-{index}')\""
         f">{name}</div>"
         for index, name in enumerate(names)
     )
-    return f'<div popover="manual" style="display:block">{items}</div>'
+    if layout == "popover":
+        return f'<div popover="manual" style="display:block">{items}</div>'
+    return f'<div role="menu">{items}</div>'
 
 
 def composer_dialog(labels: Labels) -> str:
@@ -606,17 +617,16 @@ def composer_dialog(labels: Labels) -> str:
 def current_composer_dialog(labels: Labels) -> str:
     return f"""
 <dialog open>
-  <button type="button" aria-label="{labels.comment}"><svg></svg></button>
-  <div role="button" aria-expanded="false"><svg></svg></div>
-  <div role="textbox" contenteditable="true"
-    aria-label="{labels.repost_thoughts}"></div>
-  <button type="button" aria-expanded="false" aria-label="{labels.emoji}">
-    <svg></svg>
-  </button>
-  <button type="button"
-    onclick="document.body.setAttribute('data-clicked','current-repost-submit')">
-    <span>{labels.submit}</span>
-  </button>
+  <div data-composer-row>
+    <button type="button" aria-label="{labels.comment}"><svg></svg></button>
+    <div role="button" aria-expanded="false"><svg></svg></div>
+    <div role="textbox" contenteditable="true"
+      aria-label="{labels.repost_thoughts}"></div>
+    <button type="button" aria-expanded="false" aria-label="{labels.emoji}">
+      <svg></svg>
+    </button>
+    <div data-submit-slot></div>
+  </div>
 </dialog>
 """
 
@@ -723,7 +733,7 @@ class TestFindingTheRootPost:
             dom_page, plain_post, (True, True, 4, True, False, 1), read
         )
 
-    async def test_sdui_facepile_resolves_without_untouched_pressed_state(
+    async def test_sdui_facepile_resolves_but_refuses_unknown_pressed_state(
         self, dom_page
     ) -> None:
         async def read(page, html):
@@ -736,6 +746,7 @@ class TestFindingTheRootPost:
                 signals["hasBar"],
                 signals["barButtonCount"],
                 signals["hasRepostOpener"],
+                signals["reactPressedPresent"],
                 reaction,
                 clicked,
             )
@@ -743,7 +754,7 @@ class TestFindingTheRootPost:
         await _in_every_locale(
             dom_page,
             sdui_post,
-            (True, True, 4, True, "clicked", "post-react"),
+            (True, True, 4, True, False, "unsupported_state", None),
             read,
         )
 
@@ -789,14 +800,12 @@ class TestFindingTheRootPost:
         self, dom_page
     ) -> None:
         async def read(page, html):
-            url = f"https://www.linkedin.com/posts/member_topic-share-{POST_ID}-suffix/"
-
             async def fulfill(route):
                 await route.fulfill(body=_page_html(html), content_type="text/html")
 
-            await page.route(url, fulfill)
+            await page.route(SHARE_URL, fulfill)
             try:
-                await page.goto(url)
+                await page.goto(SHARE_URL)
                 signals = await page.evaluate(POST_ACTION_SIGNALS_JS, POST_ID)
                 return (
                     signals["hasRoot"],
@@ -804,15 +813,66 @@ class TestFindingTheRootPost:
                     signals["barButtonCount"],
                 )
             finally:
-                await page.unroute(url, fulfill)
+                await page.unroute(SHARE_URL, fulfill)
 
         await _in_every_locale(
             dom_page,
             lambda labels: (
-                split_sdui_post(labels).replace(POST_URN, MISMATCH_ACTIVITY_URN)
+                split_sdui_post(labels, marker_href=SHARE_URL).replace(
+                    POST_URN, MISMATCH_ACTIVITY_URN
+                )
                 + action_bar(labels, click_id="later-decoy")
             ),
             (True, True, 4),
+            read,
+        )
+
+    async def test_a_share_slug_refuses_a_facepile_linked_elsewhere(
+        self, dom_page
+    ) -> None:
+        async def read(page, html):
+            async def fulfill(route):
+                await route.fulfill(body=_page_html(html), content_type="text/html")
+
+            await page.route(SHARE_URL, fulfill)
+            try:
+                await page.goto(SHARE_URL)
+                return (await page.evaluate(POST_ACTION_SIGNALS_JS, POST_ID))["hasRoot"]
+            finally:
+                await page.unroute(SHARE_URL, fulfill)
+
+        await _in_every_locale(
+            dom_page,
+            lambda labels: split_sdui_post(
+                labels, marker_href="https://www.linkedin.com/posts/someone_else/"
+            ).replace(POST_URN, MISMATCH_ACTIVITY_URN),
+            False,
+            read,
+        )
+
+    async def test_two_bars_before_the_owned_facepile_are_refused(
+        self, dom_page
+    ) -> None:
+        async def read(page, html):
+            async def fulfill(route):
+                await route.fulfill(body=_page_html(html), content_type="text/html")
+
+            await page.route(SHARE_URL, fulfill)
+            try:
+                await page.goto(SHARE_URL)
+                return (await page.evaluate(POST_ACTION_SIGNALS_JS, POST_ID))["hasRoot"]
+            finally:
+                await page.unroute(SHARE_URL, fulfill)
+
+        await _in_every_locale(
+            dom_page,
+            lambda labels: (
+                action_bar(labels, click_id="earlier-decoy")
+                + split_sdui_post(labels, marker_href=SHARE_URL).replace(
+                    POST_URN, MISMATCH_ACTIVITY_URN
+                )
+            ),
+            False,
             read,
         )
 
@@ -1084,7 +1144,7 @@ class TestReposting:
             lambda labels: (
                 post(labels, editor=False, comments=False) + repost_menu(labels)
             ),
-            {"menus": 1, "items": 2},
+            {"menus": 1, "items": 2, "layout": "popover"},
             read,
         )
 
@@ -1094,7 +1154,8 @@ class TestReposting:
         async def read(page, html):
             await page.set_content(_page_html(html))
             clicked = await page.evaluate(
-                CLICK_REPOST_MENU_ITEM_JS, {"expected": 2, "index": 1}
+                CLICK_REPOST_MENU_ITEM_JS,
+                {"expected": 2, "index": 1, "layout": "popover"},
             )
             return (clicked, await _clicked(page))
 
@@ -1107,11 +1168,32 @@ class TestReposting:
             read,
         )
 
+    async def test_the_legacy_menu_keeps_immediate_repost_first(self, dom_page) -> None:
+        async def read(page, html):
+            await page.set_content(_page_html(html))
+            measured = await page.evaluate(READ_REPOST_MENU_JS)
+            clicked = await page.evaluate(
+                CLICK_REPOST_MENU_ITEM_JS,
+                {"expected": 2, "index": 0, "layout": "menu"},
+            )
+            return (measured, clicked, await _clicked(page))
+
+        await _in_every_locale(
+            dom_page,
+            lambda labels: (
+                post(labels, editor=False, comments=False)
+                + repost_menu(labels, layout="menu")
+            ),
+            ({"menus": 1, "items": 2, "layout": "menu"}, True, "menu-0"),
+            read,
+        )
+
     async def test_a_menu_of_three_items_clicks_nothing(self, dom_page) -> None:
         async def read(page, html):
             await page.set_content(_page_html(html))
             clicked = await page.evaluate(
-                CLICK_REPOST_MENU_ITEM_JS, {"expected": 2, "index": 0}
+                CLICK_REPOST_MENU_ITEM_JS,
+                {"expected": 2, "index": 0, "layout": "popover"},
             )
             return (clicked, await _clicked(page))
 
@@ -1311,6 +1393,17 @@ class TestWritingText:
             await page.evaluate(
                 OWN_EDITOR_JS, {"editor": editor, "text": "Worth a read"}
             )
+            await page.evaluate(
+                """() => {
+                  const button = document.createElement('button');
+                  button.type = 'button';
+                  button.innerHTML = '<span>submit</span>';
+                  button.onclick = () => document.body.setAttribute(
+                    'data-clicked', 'current-repost-submit'
+                  );
+                  document.querySelector('[data-submit-slot]').append(button);
+                }"""
+            )
             outcome = await page.evaluate(
                 SUBMIT_EDITOR_JS,
                 {"scope": dialog.as_element(), "text": "Worth a read"},
@@ -1323,6 +1416,38 @@ class TestWritingText:
             ("submitted", "current-repost-submit"),
             read,
         )
+
+    async def test_repost_dialog_does_not_click_a_preexisting_unlabelled_button(
+        self, dom_page
+    ) -> None:
+        def build(labels: Labels) -> str:
+            return current_composer_dialog(labels).replace(
+                "<dialog open>",
+                '<dialog open><button type="button" '
+                'onclick="document.body.setAttribute('
+                "'data-clicked','preexisting-dialog-control')\">"
+                "<span>close</span></button>",
+            )
+
+        async def read(page, html):
+            await page.set_content(_page_html(html))
+            dialog = await page.evaluate_handle(PIN_VISIBLE_DIALOG_JS)
+            pinned = await page.evaluate_handle(
+                PIN_EDITOR_JS, arg={"scope": dialog.as_element()}
+            )
+            editor = (await pinned.get_property("editor")).as_element()
+            await editor.click()
+            await page.keyboard.type("Worth a read")
+            await page.evaluate(
+                OWN_EDITOR_JS, {"editor": editor, "text": "Worth a read"}
+            )
+            outcome = await page.evaluate(
+                SUBMIT_EDITOR_JS,
+                {"scope": dialog.as_element(), "text": "Worth a read"},
+            )
+            return (outcome, await _clicked(page))
+
+        await _in_every_locale(dom_page, build, ("no_submit_control", None), read)
 
     async def test_submitting_text_the_editor_does_not_hold_refuses(
         self, dom_page

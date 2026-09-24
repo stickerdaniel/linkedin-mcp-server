@@ -16,16 +16,15 @@ member-facing post detail page with workspace commit `1f72e79`:
   `aria-label`, no `aria-expanded`, no `aria-pressed`, and no SVG.
 - The earlier composer instead exposes exactly one enabled
   `type="submit"` button.
-- The pinned repost dialog exposes exactly one enabled, unlabeled, non-SVG
-  `type="button"` after text is entered. Its other controls are labelled or
-  expanding.
+- Real key events add exactly one enabled, unlabeled, non-SVG `type="button"`
+  to the pinned repost dialog. Its other controls are labelled or expanding.
 
 Therefore a comment submit may be clicked only when it is either the one
 enabled `type="submit"` control, the one control produced by that exact
 three-to-four transition, or the structurally unique control in the pinned
-repost dialog. The baseline is recorded before typing. A generic "only enabled
-button" fallback remains forbidden: before text, that rule can select the photo
-attachment and publish nothing.
+repost dialog that was absent from the baseline recorded before typing. A
+generic "only enabled button" fallback remains forbidden: before text, that
+rule can select the photo attachment and publish nothing.
 
 `PIN_EDITOR_JS` records the baseline, `SUBMIT_EDITOR_JS` enforces both accepted
 shapes, and the browser-DOM suite holds the transition independently of label
