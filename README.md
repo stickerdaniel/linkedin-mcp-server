@@ -35,8 +35,8 @@ An MCP server that connects AI assistants like Claude to LinkedIn through your o
 <br/>
 <a href="https://cadenza.page" target="_blank">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="CADENZA_BANNER_DARK">
-    <img src="CADENZA_BANNER_LIGHT" alt="Cadenza, the hosted LinkedIn MCP server" width="100%">
+    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/defcb488-384c-474d-86e7-a02c7ae58b89">
+    <img src="https://github.com/user-attachments/assets/061ec94a-0902-4268-ba1b-d35b98b8e840" alt="Cadenza, the hosted LinkedIn MCP server" width="100%">
   </picture>
 </a>
 
