@@ -1,6 +1,6 @@
 # Contributing
 
-Contributions are welcome! Packet: search first, then add evidence to an existing issue or prepare a new report. Agents follow the [packet skill](https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/.agents/skills/issue-packet/SKILL.md). Humans use the [issue forms](https://github.com/stickerdaniel/linkedin-mcp-server/issues/new/choose).
+Contributions are welcome. Search existing issues first, then use the [issue forms](https://github.com/stickerdaniel/linkedin-mcp-server/issues/new/choose) for anything new. AI agents follow the [issue-packet skill](https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/.agents/skills/issue-packet/SKILL.md).
 
 ## Development Setup
 
@@ -155,7 +155,7 @@ when the reviewed policy change is intentional.
 
 ## Workflow
 
-1. Link the canonical issue for the change. Follow the packet procedure above when adding a report.
+1. Link the canonical issue for the change, or open one as described above.
 2. Create a branch: `feature/<issue-number>-<short-description>` or `fix/<issue-number>-<short-description>`
 3. Implement, test, and update docs (see checklists above)
 4. Open a PR — AI agents review first, then manual review
