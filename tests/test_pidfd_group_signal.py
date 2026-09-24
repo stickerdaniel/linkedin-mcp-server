@@ -9,10 +9,13 @@ from __future__ import annotations
 import errno
 import json
 import os
+import platform
+import re
 import signal
 import subprocess
 import sys
 from collections.abc import Callable
+from importlib.metadata import version
 from pathlib import Path
 from typing import cast
 
@@ -54,8 +57,10 @@ UNAVAILABLE = {{errno.ENOSYS, errno.EPERM}}
 
 pidfd_open = getattr(os, "pidfd_open", None)
 raw_pidfd_send_signal = getattr(signal, "pidfd_send_signal", None)
+if os.environ.get("LINKEDIN_MCP_TEST_PIDFD_NO_API") == "1":
+    pidfd_open = None
 if pidfd_open is None or raw_pidfd_send_signal is None:
-    print(json.dumps({{"status": "skip", "reason": "Python has no pidfd API"}}))
+    print(json.dumps({{"status": "skip", "reason": "Python has no pidfd API", "spawned": False, "cleanup": "not spawned"}}))
     raise SystemExit(0)
 
 pidfd_signal_calls = []
@@ -118,12 +123,14 @@ def unavailable(exc):
 
 
 member_open_fault = os.environ.get("LINKEDIN_MCP_TEST_PIDFD_MEMBER_OPEN_FAULT")
+leader_open_fault = os.environ.get("LINKEDIN_MCP_TEST_PIDFD_LEADER_OPEN_FAULT")
 
 
 def open_pidfd(pid, role):
     try:
-        if role == "member" and member_open_fault:
-            injected = getattr(errno, member_open_fault)
+        fault = member_open_fault if role == "member" else leader_open_fault if role == "leader" else None
+        if fault:
+            injected = getattr(errno, fault)
             raise OSError(injected, os.strerror(injected))
         return pidfd_open(pid)
     except OSError as exc:
@@ -142,6 +149,9 @@ def send(pidfd, sent, flags):
         if flags == PIDFD_SIGNAL_PROCESS_GROUP and group_fault and not group_fault_used:
             group_fault_used = True
             injected = getattr(errno, group_fault)
+            raise OSError(injected, os.strerror(injected))
+        if flags == 0 and sent == 0 and os.environ.get("LINKEDIN_MCP_TEST_PIDFD_PREFLIGHT_FAULT"):
+            injected = getattr(errno, os.environ["LINKEDIN_MCP_TEST_PIDFD_PREFLIGHT_FAULT"])
             raise OSError(injected, os.strerror(injected))
         pidfd_send_signal(pidfd, sent, None, flags)
     except OSError as exc:
@@ -171,12 +181,12 @@ def wait_for(path):
 try:
     preflight_pidfd = open_pidfd(os.getpid(), "preflight")
 except ProbeSkipped as exc:
-    print(json.dumps({{"status": "skip", "reason": str(exc)}}))
+    print(json.dumps({{"status": "skip", "reason": str(exc), "spawned": False, "cleanup": "not spawned"}}))
     raise SystemExit(0)
 try:
     preflight = send(preflight_pidfd, 0, 0)
     if preflight == "unavailable":
-        print(json.dumps({{"status": "skip", "reason": "pidfd signal unavailable"}}))
+        print(json.dumps({{"status": "skip", "reason": "pidfd signal unavailable", "spawned": False, "cleanup": "not spawned"}}))
         raise SystemExit(0)
     if preflight != "sent":
         raise RuntimeError("the current process disappeared during pidfd preflight")
@@ -309,6 +319,8 @@ report.update(
     {{
         "leader": leader.pid if leader is not None else -1,
         "member": member_pid,
+        "spawned": True,
+        "cleanup": "spawned and fully cleaned" if reaped_leader and reaped_member and len(closed_fds) == sum(fd >= 0 for fd in (leader_pidfd, member_pidfd)) else "incomplete",
         "reaped_leader": reaped_leader,
         "reaped_member": reaped_member,
         "leader_cleanup_confirmed": leader_cleanup_confirmed,
@@ -436,6 +448,7 @@ def _run_probe(
     fault: str | None = None,
     *,
     member_open_fault: str | None = None,
+    leader_open_fault: str | None = None,
     leader_cleanup: str = "command",
 ) -> dict[str, object]:
     environment = os.environ.copy()
@@ -443,6 +456,9 @@ def _run_probe(
         environment["LINKEDIN_MCP_TEST_PIDFD_GROUP_FAULT"] = fault
     if member_open_fault is not None:
         environment["LINKEDIN_MCP_TEST_PIDFD_MEMBER_OPEN_FAULT"] = member_open_fault
+        environment["LINKEDIN_MCP_TEST_PIDFD_LEADER_CLEANUP"] = leader_cleanup
+    if leader_open_fault is not None:
+        environment["LINKEDIN_MCP_TEST_PIDFD_LEADER_OPEN_FAULT"] = leader_open_fault
         environment["LINKEDIN_MCP_TEST_PIDFD_LEADER_CLEANUP"] = leader_cleanup
     result = subprocess.run(
         [sys.executable, "-c", _SUBREAPER_PROBE],
@@ -456,20 +472,208 @@ def _run_probe(
     return cast(dict[str, object], json.loads(result.stdout.splitlines()[-1]))
 
 
-def _assert_probe_reaped_every_process(report: dict[str, object]) -> None:
+def _write_probe_summary(status: str, cleanup: str) -> None:
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not summary:
+        return
+    source = os.environ.get("GITHUB_SHA", "local")
+    if not re.fullmatch(r"[0-9a-f]{40}", source):
+        source = "local"
+    runner = os.environ.get("ImageOS", platform.system())
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", runner):
+        runner = platform.system()
+    line = (
+        f"pidfd L1 | source={source} | runner={runner} "
+        f"| kernel={platform.release()} | arch={platform.machine()} "
+        f"| Python={platform.python_version()} | Patchright={version('patchright')} "
+        f"| status={status} | cleanup={cleanup}\n"
+    )
+    with Path(summary).open("a", encoding="utf-8") as output:
+        output.write(line)
+    print(line, end="")
+
+
+def _assert_probe_reaped_every_process(
+    report: dict[str, object], *, expected_fds: int = 2
+) -> None:
+    assert report["spawned"] is True
+    assert report["cleanup"] == "spawned and fully cleaned"
     assert report["leader"] != report["member"]
     assert report["reaped_leader"] is True
     assert report["reaped_member"] is True
-    assert report["closed_fds"] == 2
+    assert report["closed_fds"] == expected_fds
 
 
 def test_retained_leader_pidfd_signals_its_group_after_reaping(tmp_path: Path):
-    report = _run_probe(tmp_path)
-    _assert_probe_reaped_every_process(report)
-    if report["status"] == "skip":
-        pytest.skip(cast(str, report["reason"]))
+    status = "ERROR"
+    cleanup = "unconfirmed"
+    try:
+        report = _run_probe(tmp_path)
+        cleanup = cast(str, report["cleanup"])
+        if report["status"] == "skip":
+            if report["spawned"] is True:
+                reason = cast(str, report["reason"])
+                if reason.startswith("pidfd_open leader:"):
+                    assert report["leader_cleanup_confirmed"] is True
+                    _assert_probe_reaped_every_process(report, expected_fds=0)
+                elif reason.startswith("pidfd_open member:"):
+                    assert report["leader_cleanup_confirmed"] is True
+                    _assert_probe_reaped_every_process(report, expected_fds=1)
+                else:
+                    _assert_probe_reaped_every_process(report)
+            else:
+                assert report["spawned"] is False
+                assert cleanup == "not spawned"
+            status = "UNSUPPORTED"
+            pytest.skip(cast(str, report["reason"]))
+        _assert_probe_reaped_every_process(report)
+        assert report["status"] == "passed"
+        status = "SUPPORTED_OBSERVATION"
+    finally:
+        primary_error = sys.exc_info()[0]
+        try:
+            _write_probe_summary(status, cleanup)
+        except Exception:
+            if primary_error is not None and not issubclass(
+                primary_error, pytest.skip.Exception
+            ):
+                print("pidfd evidence summary unavailable", file=sys.stderr)
+            else:
+                raise RuntimeError("pidfd evidence summary unavailable") from None
 
-    assert report["status"] == "passed"
+
+def test_pidfd_evidence_log_matches_step_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+):
+    summary = tmp_path / "summary"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+
+    test_retained_leader_pidfd_signals_its_group_after_reaping(tmp_path)
+
+    evidence = summary.read_text()
+    assert capsys.readouterr().out == evidence
+    assert "status=SUPPORTED_OBSERVATION" in evidence
+    assert "cleanup=spawned and fully cleaned" in evidence
+
+
+def test_member_open_refusal_reports_unsupported_after_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    summary = tmp_path / "summary"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    monkeypatch.setenv("LINKEDIN_MCP_TEST_PIDFD_MEMBER_OPEN_FAULT", "EPERM")
+
+    with pytest.raises(pytest.skip.Exception) as skipped:
+        test_retained_leader_pidfd_signals_its_group_after_reaping(tmp_path)
+
+    evidence = summary.read_text()
+    assert "status=UNSUPPORTED" in evidence
+    if "pidfd_open member" not in str(skipped.value):
+        assert "cleanup=not spawned" in evidence
+        pytest.skip(str(skipped.value))
+    assert "cleanup=spawned and fully cleaned" in evidence
+
+
+def test_member_open_refusal_preflight_without_api_skips(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("LINKEDIN_MCP_TEST_PIDFD_NO_API", "1")
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary"))
+
+    with pytest.raises(pytest.skip.Exception, match="Python has no pidfd API"):
+        test_member_open_refusal_reports_unsupported_after_cleanup(
+            tmp_path, monkeypatch
+        )
+
+    evidence = (tmp_path / "summary").read_text()
+    assert "status=UNSUPPORTED" in evidence
+    assert "cleanup=not spawned" in evidence
+
+
+def test_leader_open_refusal_reports_unsupported_after_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    summary = tmp_path / "summary"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    monkeypatch.setenv("LINKEDIN_MCP_TEST_PIDFD_LEADER_OPEN_FAULT", "EPERM")
+
+    with pytest.raises(pytest.skip.Exception, match="pidfd_open leader"):
+        test_retained_leader_pidfd_signals_its_group_after_reaping(tmp_path)
+
+    evidence = summary.read_text()
+    assert "status=UNSUPPORTED" in evidence
+    assert "cleanup=spawned and fully cleaned" in evidence
+
+
+@pytest.mark.parametrize("leader_cleanup", ["command", "eof"])
+def test_leader_pidfd_open_failure_uses_leader_cleanup_contract(
+    tmp_path: Path, leader_cleanup: str
+):
+    report = _run_probe(
+        tmp_path, leader_open_fault="EPERM", leader_cleanup=leader_cleanup
+    )
+
+    assert report["status"] == "skip"
+    _assert_probe_reaped_every_process(report, expected_fds=0)
+    assert report["leader_cleanup_confirmed"] is True
+    assert report["member_cleanup_pidfd_calls"] == 0
+
+
+def test_summary_failure_preserves_primary_probe_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    def fail_probe(_tmp_path: Path) -> dict[str, object]:
+        raise RuntimeError("probe crashed")
+
+    def fail_summary(_status: str, _cleanup: str) -> None:
+        raise OSError("private summary path")
+
+    monkeypatch.setattr(sys.modules[__name__], "_run_probe", fail_probe)
+    monkeypatch.setattr(sys.modules[__name__], "_write_probe_summary", fail_summary)
+
+    with pytest.raises(RuntimeError, match="^probe crashed$"):
+        test_retained_leader_pidfd_signals_its_group_after_reaping(tmp_path)
+    diagnostic = capsys.readouterr().err
+    assert "pidfd evidence summary unavailable" in diagnostic
+    assert "private summary path" not in diagnostic
+
+
+def test_summary_failure_rejects_successful_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "missing" / "summary"))
+
+    with pytest.raises(RuntimeError, match="^pidfd evidence summary unavailable$"):
+        test_retained_leader_pidfd_signals_its_group_after_reaping(tmp_path)
+
+
+def test_summary_failure_rejects_unsupported_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("LINKEDIN_MCP_TEST_PIDFD_NO_API", "1")
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "missing" / "summary"))
+
+    with pytest.raises(RuntimeError, match="^pidfd evidence summary unavailable$"):
+        test_retained_leader_pidfd_signals_its_group_after_reaping(tmp_path)
+
+
+@pytest.mark.parametrize("preflight", ["no_api", "ENOSYS", "EPERM"])
+def test_preflight_unavailable_does_not_spawn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, preflight: str
+):
+    if preflight == "no_api":
+        monkeypatch.setenv("LINKEDIN_MCP_TEST_PIDFD_NO_API", "1")
+    else:
+        monkeypatch.setenv("LINKEDIN_MCP_TEST_PIDFD_PREFLIGHT_FAULT", preflight)
+    report = _run_probe(tmp_path)
+
+    assert report["status"] == "skip"
+    assert report["spawned"] is False
+    assert report["cleanup"] == "not spawned"
+    assert "leader" not in report
+    assert "member" not in report
 
 
 @pytest.mark.parametrize("fault", ["EINVAL", "ENOSYS", "EPERM"])
