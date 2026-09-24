@@ -42,7 +42,7 @@ Use one of:
 
 A successful call on the maintainer's different account never refutes a failure on the reporter's account. Target content language is not the authenticated account's UI language. Captures and URL or attribute evidence may establish the needed variation without another live call.
 
-Review reporter commands before execution. Publishing permission does not authorize `send_message`, a connection request, a forced login, or repeated calls with account side effects. Record `sent`, `recipient_selected`, and `retry_safe` as observed fields, not as replay authorization.
+Review reporter commands before execution. Publishing permission does not authorize `send_message`, a connection request, `react_to_post`, `comment_on_post`, `repost_post`, a forced login, or repeated calls with account side effects. Record `sent`, `recipient_selected`, `acted`, and `retry_safe` as observed fields, not as replay authorization. The post tools are public writes: a retried reaction can remove it, and a retried comment or repost can publish twice.
 
 If the next decision needs a live observation, name the exact unresolved question and ask before login, session changes, or LinkedIn writes. If the human declines, keep the packet-and-source verdict.
 

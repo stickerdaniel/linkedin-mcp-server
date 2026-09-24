@@ -1,0 +1,246 @@
+{
+  "call": {
+    "arguments": {
+      "comment": "Policy comment",
+      "confirm_comment": true,
+      "post": "/feed/update/urn:li:ugcPost:7506667649444237313/"
+    },
+    "method": "comment_on_post"
+  },
+  "events": [
+    {
+      "call": "comment_on_post",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "section": "post"
+    },
+    {
+      "call": "comment_on_post",
+      "extra": {
+        "target_url": "https://www.linkedin.com/feed/update/urn:li:ugcPost:7506667649444237313/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "section": "post"
+    },
+    {
+      "call": "comment_on_post",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/feed/update/urn:li:ugcPost:7506667649444237313/",
+      "requested_url": "https://www.linkedin.com/feed/update/urn:li:ugcPost:7506667649444237313/",
+      "section": "post",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "comment_on_post",
+      "description": "goto https://www.linkedin.com/feed/update/urn:li:ugcPost:7506667649444237313/",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "post"
+    },
+    {
+      "call": "comment_on_post",
+      "extra": {
+        "target_url": "https://www.linkedin.com/feed/update/urn:li:ugcPost:7506667649444237313/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "section": "post"
+    },
+    {
+      "call": "comment_on_post",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "section": "post"
+    },
+    {
+      "call": "comment_on_post",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "section": "post"
+    },
+    {
+      "call": "comment_on_post",
+      "kind": "boundary.rate_limit",
+      "section": "post"
+    },
+    {
+      "arg": "7506667649444237313",
+      "call": "comment_on_post",
+      "kind": "evaluate",
+      "operation": "post_action_signals",
+      "program_digest": "aa2cd943bfa0",
+      "section": "post"
+    },
+    {
+      "arg": "7506667649444237313",
+      "call": "comment_on_post",
+      "kind": "evaluate",
+      "operation": "post_action_signals",
+      "program_digest": "aa2cd943bfa0",
+      "section": "post"
+    },
+    {
+      "arg": "7506667649444237313",
+      "call": "comment_on_post",
+      "kind": "evaluate_handle",
+      "operation": "post_root_owner",
+      "program_digest": "8bc23d831437",
+      "section": "post"
+    },
+    {
+      "call": "comment_on_post",
+      "handle": "handle-1",
+      "kind": "handle.as_element",
+      "present": true,
+      "section": "post"
+    },
+    {
+      "arg": {
+        "root": {
+          "handle": "handle-1"
+        },
+        "text": "Policy comment"
+      },
+      "call": "comment_on_post",
+      "kind": "evaluate",
+      "operation": "post_text_units",
+      "program_digest": "ae9ef45443f2",
+      "section": "post"
+    },
+    {
+      "arg": {
+        "scope": {
+          "handle": "handle-1"
+        }
+      },
+      "call": "comment_on_post",
+      "kind": "evaluate_handle",
+      "operation": "post_editor_pin",
+      "program_digest": "7ec11127eb10",
+      "section": "post"
+    },
+    {
+      "call": "comment_on_post",
+      "handle": "handle-2",
+      "kind": "handle.get_property",
+      "property": "status",
+      "section": "post"
+    },
+    {
+      "call": "comment_on_post",
+      "handle": "handle-2:status",
+      "kind": "handle.json_value",
+      "section": "post"
+    },
+    {
+      "call": "comment_on_post",
+      "handle": "handle-2",
+      "kind": "handle.get_property",
+      "property": "editor",
+      "section": "post"
+    },
+    {
+      "call": "comment_on_post",
+      "handle": "handle-2:editor",
+      "kind": "handle.as_element",
+      "present": true,
+      "section": "post"
+    },
+    {
+      "call": "comment_on_post",
+      "handle": "handle-2",
+      "kind": "handle.dispose",
+      "section": "post"
+    },
+    {
+      "call": "comment_on_post",
+      "handle": "handle-2:editor",
+      "kind": "handle.click",
+      "section": "post",
+      "timeout_ms": null
+    },
+    {
+      "call": "comment_on_post",
+      "handle": "handle-2:editor",
+      "kind": "handle.evaluate",
+      "operation": "post_editor_focus",
+      "program_digest": "6a4b053ea995",
+      "section": "post"
+    },
+    {
+      "call": "comment_on_post",
+      "delay_ms": 12,
+      "kind": "keyboard.type",
+      "section": "post",
+      "text": "Policy comment"
+    },
+    {
+      "call": "comment_on_post",
+      "handle": "handle-2:editor",
+      "kind": "handle.evaluate",
+      "operation": "post_editor_text",
+      "program_digest": "fb5280973ed2",
+      "section": "post"
+    },
+    {
+      "arg": {
+        "editor": {
+          "handle": "handle-2:editor"
+        },
+        "text": "Policy comment"
+      },
+      "call": "comment_on_post",
+      "kind": "evaluate",
+      "operation": "post_editor_own",
+      "program_digest": "4822bce64548",
+      "section": "post"
+    },
+    {
+      "arg": {
+        "scope": {
+          "handle": "handle-1"
+        },
+        "text": "Policy comment"
+      },
+      "call": "comment_on_post",
+      "kind": "evaluate",
+      "operation": "post_text_submit",
+      "program_digest": "55fc04aa25ec",
+      "section": "post"
+    },
+    {
+      "arg": {
+        "root": {
+          "handle": "handle-1"
+        },
+        "text": "Policy comment"
+      },
+      "call": "comment_on_post",
+      "kind": "evaluate",
+      "operation": "post_text_units",
+      "program_digest": "ae9ef45443f2",
+      "section": "post"
+    },
+    {
+      "call": "comment_on_post",
+      "handle": "handle-1",
+      "kind": "handle.dispose",
+      "section": "post"
+    }
+  ],
+  "result": {
+    "acted": true,
+    "message": "The comment was published and is rendered on the post.",
+    "retry_safe": false,
+    "status": "commented",
+    "url": "https://www.linkedin.com/feed/update/urn:li:ugcPost:7506667649444237313/"
+  },
+  "scenario": "comment_on_post__commented",
+  "schema_version": 1
+}

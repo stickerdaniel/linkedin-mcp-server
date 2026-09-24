@@ -22,6 +22,28 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Voyager / private API.** Out of scope. [Read the rendered page](docs/decisions/2026-09-16-rendered-page.md).
 - **One section = one navigation.** Each entry in `PERSON_SECTIONS` / `COMPANY_SECTIONS` (`scraping/fields.py`) maps to exactly one page navigation. Never combine multiple URLs behind a single section.
 - **Minimize DOM dependence.** Prefer innerText and URL navigation over DOM selectors. When DOM access is unavoidable, use minimal generic selectors (`a[href*="/jobs/view/"]`) — never class names tied to LinkedIn's layout.
+- **A public write picked by position refuses rather than guesses.** Two
+  controls in `post_actions.py` cannot be named locale-independently at all and
+  are reached by index: LinkedIn's reaction flyout, whose six entries are in a
+  fixed order, and LinkedIn's repost control. The legacy repost menu orders
+  bare repost before commentary; the current popover reverses them. Layout and
+  exact count choose the index together. A mismatch returns
+  `reaction_picker_changed` / `repost_menu_changed` without clicking. The
+  asymmetry is the point: a missed reaction costs nothing, while the wrong
+  index publishes to the user's own feed. Never widen either guard to "at
+  least N" and never fall back to the nearest match.
+- **A write is confirmed by something only LinkedIn could have produced.**
+ [Read the evidence rule](docs/decisions/2026-09-18-evidence-of-a-write.md).
+ Text this server typed is not evidence that it was published: the comment
+ editor sits *inside* the post, so a naive count of matching text rises on the
+ typing alone and confirms a comment that was never sent. Nor is a click this
+ server chose to make. A submit control is either `type="submit"`, the sole
+ control in the exact SDUI three-to-four transition recorded around real key
+  events, or the one unlabeled non-SVG button newly added to the pinned repost
+  dialog after typing; never fall back to an enabled button by elimination,
+  because an untouched comment
+ box offers a photo button as that candidate. Both mistakes shipped together
+ and reported two comments published on posts that had none.
 - **Detection must be locale-independent.** Classification logic — connection state, action availability, button identity — must rely on URL patterns (`/preload/custom-invite/?vanityName=USER`, `/in/USER/edit/intro/`, `/messaging/compose/`), attribute *presence* (`aria-label` exists, `aria-expanded` exists, `aria-disabled` exists), or structural counts — never on text values like "Connect", "Follow", "Message", "1st", "Pending". The verb in an `aria-label` is locale-dependent; whether the attribute exists is not. Where text is genuinely the only signal, guard it behind an explicit per-locale table and document the limitation in code.
 
 ## Browser Identity Rules
@@ -139,7 +161,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Tool Return Format
 
-All scraping tools return: `{url, sections: {name: raw_text}}`.
+All scraping tools return: `{url, sections: {name: raw_text}}`. The three post
+engagement tools are the exception and return an action result instead; see
+below.
 
 Optional additional keys:
 
@@ -151,6 +175,28 @@ Optional additional keys:
 - `promoted_job_ids: [id, ...]` (search_jobs only) — the subset of `job_ids` shown as promoted; present only when every page could be read, so an empty list means none were
 - `references["feed"]` (get_feed only) — every entry is `kind: "feed_post"`; non-post anchors (sidebar profiles, employer logos) are filtered. URLs may carry either `/feed/update/<urn>/` (DOM-anchor-derived) or `/posts/<slug>` (SDUI-derived) form; both are valid LinkedIn permalinks. Cap is 50 entries, matching `get_feed`'s `num_posts` ceiling.
 - `references["search_results"]` (search_posts only) — DOM references first, then up to 50 `kind: "feed_post"` permalinks read from the page's JSON/document payload responses (`/feed/update/<urn>/` or `/posts/<slug>`, both valid). Captured permalinks are appended, not aligned to result order.
+
+### Post Action Result
+
+`react_to_post`, `comment_on_post` and `repost_post` return
+`{url, status, message, acted, retry_safe}`, plus `reaction` for a react. Built
+by `post_action_result` in `scraping/contracts.py`.
+
+- **`acted` is a reading, not a receipt.** It says the structural transition
+ this server looks for was observed — a reaction control reporting itself
+ pressed, submitted text found rendered *outside every editable region* and not
+ present there before. It never claims LinkedIn kept the action or showed it to
+ anybody. The one way this field has actually been wrong was a reading that
+ could not fail: see the [evidence
+ rule](docs/decisions/2026-09-18-evidence-of-a-write.md).
+- **`retry_safe` is the only field a retry may be keyed on, and it is false from
+  the moment a click that could land is dispatched** — not from the moment one
+  is confirmed. Two of the three actions are public content published under the
+  user's name, so an unconfirmed submit is the case where a retry does the
+  damage. A retried *reaction* is worse than a duplicate: clicking a pressed
+  reaction control removes the reaction, which is why `react_to_post` refuses a
+  post this account has already reacted to instead of toggling it.
+- **`status` is the branch, `message` is for the human.** Never parse `message`.
 
 ## Tests
 

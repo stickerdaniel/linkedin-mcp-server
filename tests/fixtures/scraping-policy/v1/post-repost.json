@@ -1,0 +1,160 @@
+{
+  "call": {
+    "arguments": {
+      "confirm_repost": true,
+      "post": "/feed/update/urn:li:ugcPost:7506667649444237313/"
+    },
+    "method": "repost_post"
+  },
+  "events": [
+    {
+      "call": "repost_post",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "section": "post"
+    },
+    {
+      "call": "repost_post",
+      "extra": {
+        "target_url": "https://www.linkedin.com/feed/update/urn:li:ugcPost:7506667649444237313/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "section": "post"
+    },
+    {
+      "call": "repost_post",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/feed/update/urn:li:ugcPost:7506667649444237313/",
+      "requested_url": "https://www.linkedin.com/feed/update/urn:li:ugcPost:7506667649444237313/",
+      "section": "post",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "repost_post",
+      "description": "goto https://www.linkedin.com/feed/update/urn:li:ugcPost:7506667649444237313/",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "post"
+    },
+    {
+      "call": "repost_post",
+      "extra": {
+        "target_url": "https://www.linkedin.com/feed/update/urn:li:ugcPost:7506667649444237313/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "section": "post"
+    },
+    {
+      "call": "repost_post",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "section": "post"
+    },
+    {
+      "call": "repost_post",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "section": "post"
+    },
+    {
+      "call": "repost_post",
+      "kind": "boundary.rate_limit",
+      "section": "post"
+    },
+    {
+      "arg": "7506667649444237313",
+      "call": "repost_post",
+      "kind": "evaluate",
+      "operation": "post_action_signals",
+      "program_digest": "aa2cd943bfa0",
+      "section": "post"
+    },
+    {
+      "arg": "7506667649444237313",
+      "call": "repost_post",
+      "kind": "evaluate_handle",
+      "operation": "post_root_owner",
+      "program_digest": "8bc23d831437",
+      "section": "post"
+    },
+    {
+      "call": "repost_post",
+      "handle": "handle-1",
+      "kind": "handle.as_element",
+      "present": true,
+      "section": "post"
+    },
+    {
+      "arg": {
+        "root": {
+          "handle": "handle-1"
+        }
+      },
+      "call": "repost_post",
+      "kind": "evaluate",
+      "operation": "post_repost_open",
+      "program_digest": "93ab675f0499",
+      "section": "post"
+    },
+    {
+      "call": "repost_post",
+      "kind": "evaluate",
+      "operation": "post_repost_menu",
+      "program_digest": "78f8df58f3a4",
+      "section": "post"
+    },
+    {
+      "arg": "7506667649444237313",
+      "call": "repost_post",
+      "kind": "evaluate",
+      "operation": "post_action_signals",
+      "program_digest": "aa2cd943bfa0",
+      "section": "post"
+    },
+    {
+      "arg": {
+        "expected": 2,
+        "index": 1,
+        "layout": "popover",
+        "root": {
+          "handle": "handle-1"
+        }
+      },
+      "call": "repost_post",
+      "kind": "evaluate",
+      "operation": "post_repost_pick",
+      "program_digest": "b8c6b87402e7",
+      "section": "post"
+    },
+    {
+      "arg": "7506667649444237313",
+      "call": "repost_post",
+      "kind": "evaluate",
+      "operation": "post_action_signals",
+      "program_digest": "aa2cd943bfa0",
+      "section": "post"
+    },
+    {
+      "call": "repost_post",
+      "handle": "handle-1",
+      "kind": "handle.dispose",
+      "section": "post"
+    }
+  ],
+  "result": {
+    "acted": true,
+    "message": "The repost was published and the post's own counts changed.",
+    "retry_safe": false,
+    "status": "reposted",
+    "url": "https://www.linkedin.com/feed/update/urn:li:ugcPost:7506667649444237313/"
+  },
+  "scenario": "repost_post__reposted",
+  "schema_version": 1
+}

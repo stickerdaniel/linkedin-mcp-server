@@ -9,7 +9,7 @@
   <a href="https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/LICENSE" target="_blank"><img src="https://img.shields.io/badge/License-Apache%202.0-%233fb950?labelColor=32383f" alt="License"></a>
 </p>
 
-An MCP server that connects AI assistants like Claude to LinkedIn through your own logged-in browser session. Look up profiles and companies, send messages, manage your inbox, or search for jobs. All browser actions run locally on your machine.
+An MCP server that connects AI assistants like Claude to LinkedIn through your own logged-in browser session. Look up profiles and companies, send messages, engage with posts, manage your inbox, or search for jobs. All browser actions run locally on your machine.
 
 > This is an independent open-source project, not affiliated with, authorized by, endorsed by, or sponsored by LinkedIn or Microsoft. LinkedIn is a trademark of LinkedIn Corporation and is used here only to identify the service this software interacts with.
 
@@ -60,7 +60,32 @@ An MCP server that connects AI assistants like Claude to LinkedIn through your o
 | `get_job_details` | Get detailed information about a specific job posting |
 | `get_feed` | Get recent posts from the authenticated user's home feed |
 | `search_posts` | Search posts/content globally by keyword (the "Posts" tab) with an optional recency filter (past-24h/past-week/past-month); returns unordered candidate permalinks in references |
+| `react_to_post` | React to one post (like, celebrate, support, love, insightful, funny); refuses to click a reaction this account already gave, since that click would remove it |
+| `comment_on_post` | Publish a comment on one post (`confirm_comment=true`; `false` is a dry run) |
+| `repost_post` | Reshare one post, bare or with commentary (`confirm_repost=true`; `false` is a dry run) |
 | `close_session` | Close browser session and clean up resources |
+
+<details>
+<summary><strong>Post engagement (write tools)</strong></summary>
+
+These three tools are public, account-attributed writes on **one** post. Discover posts with `get_feed` or `search_posts`, then pass a `feed_post` permalink as `post` (`/feed/update/<urn>/` or `/posts/<slug>`).
+
+**Confirmation**
+
+- `react_to_post` has no confirmation flag. If this account has already reacted, it returns `already_reacted` without clicking — that click would remove the reaction. Change or remove a reaction in LinkedIn.
+- `comment_on_post` publishes only when `confirm_comment=true`. `false` checks that the post loads and a comment box exists, and types nothing.
+- `repost_post` publishes only when `confirm_repost=true`. `false` checks that a repost control exists. Optional `commentary` adds text above the reshare. Either form is confirmed by the source post's own count strings changing — not by finding the commentary text on that post, because the reshare publishes to the actor's feed.
+
+**Return shape (not `{url, sections}`)**
+
+`{url, status, message, acted, retry_safe}`; `react_to_post` also returns `reaction`.
+
+- `acted` means the server observed the expected UI transition. It is not proof LinkedIn kept or showed the action.
+- `retry_safe` is the only field to key a retry on. While it is `false`, do not call again: a reaction retry can remove the reaction, and a comment or repost retry can duplicate public content.
+
+Comment and commentary text may include newlines. Other control characters are rejected before a browser opens. Finding posts is not permission to engage; authorize each post and action explicitly.
+
+</details>
 
 <br/>
 <br/>

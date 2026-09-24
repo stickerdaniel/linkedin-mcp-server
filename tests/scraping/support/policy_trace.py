@@ -280,6 +280,39 @@ class ScriptedHandle:
         self.page.recorder.record("handle.evaluate", **values)
         return self.page._take(f"{self.semantic_id}.evaluate:{operation}")
 
+    async def get_property(self, name: str) -> ScriptedHandle:
+        """One property of a returned JS object, as its own handle.
+
+        The property handle keeps the parent's id in its own so a trace names
+        which object a read came from; it is deliberately not registered in
+        ``page.handles``, whose numbering is the creation order of handles
+        production asked the page for.
+        """
+        self._assert_live()
+        self.page.recorder.record(
+            "handle.get_property", handle=self.semantic_id, property=name
+        )
+        is_element = self.page._take(f"{self.semantic_id}.get_property:{name}")
+        if not isinstance(is_element, bool):
+            raise AssertionError(
+                f"{self.page.recorder.scenario}: get_property outcome must be bool"
+            )
+        return ScriptedHandle(
+            self.page, f"{self.semantic_id}:{name}", is_element=is_element
+        )
+
+    async def json_value(self) -> Any:
+        self._assert_live()
+        self.page.recorder.record("handle.json_value", handle=self.semantic_id)
+        return self.page._take(f"{self.semantic_id}.json_value")
+
+    async def click(self, *, timeout: int | None = None) -> None:
+        self._assert_live()
+        self.page.recorder.record(
+            "handle.click", handle=self.semantic_id, timeout_ms=timeout
+        )
+        self.page._take(f"{self.semantic_id}.click", default=None)
+
     async def dispose(self) -> None:
         self._assert_live()
         self.page.recorder.record("handle.dispose", handle=self.semantic_id)
@@ -596,6 +629,26 @@ def semantic_program_id(program: str) -> str:
     compact = " ".join(program.split())
     checks = (
         ("performance.timeOrigin", "document_origin"),
+        # The post-engagement programs come first because two of them would
+        # otherwise be claimed by a marker further down: the editor clear shares
+        # `document.execCommand` with the message composer's write, and both are
+        # legitimate uses of the same editing path.
+        ("hasRepostOpener", "post_action_signals"),
+        ("__linkedinMcpPost =", "post_root_owner"),
+        ("return 'already_pressed'", "post_react_toggle"),
+        ("const target = owned[arg.index]", "post_reaction_pick"),
+        ("labels: controls", "post_reaction_flyout"),
+        ("const opener = pinned.opener", "post_repost_open"),
+        ("return {menus: 1, items:", "post_repost_menu"),
+        ("const target = items[arg.index]", "post_repost_pick"),
+        ("element => element === document.activeElement", "post_editor_focus"),
+        ("element => element.innerText || ''", "post_editor_text"),
+        ("if (dialogs.length !== 1) return null", "post_dialog_pin"),
+        ("return {status: 'pinned', editor: editor}", "post_editor_pin"),
+        ("arg.editor.__linkedinMcpOwnedText = arg.text", "post_editor_own"),
+        ("range.selectNodeContents(editor)", "post_editor_clear"),
+        ("return 'ambiguous_submit'", "post_text_submit"),
+        ("return smallest.length;", "post_text_units"),
         ("MAX_HEADING_CONTAINERS", "root_content"),
         ("SIDEBAR_SECTIONS", "sidebar_profiles"),
         ("showAllUrls", "sidebar_profiles"),

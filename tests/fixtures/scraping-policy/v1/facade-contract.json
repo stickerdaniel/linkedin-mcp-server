@@ -16,6 +16,10 @@
         "coroutine": true,
         "signature": "(self, text: 'str', *, scope: 'str' = 'main', timeout: 'int' = 5000) -> 'bool'"
       },
+      "comment_on_post": {
+        "coroutine": true,
+        "signature": "(self, post: 'str', comment: 'str', *, confirm_comment: 'bool') -> 'dict[str, Any]'"
+      },
       "connect_with_person": {
         "coroutine": true,
         "signature": "(self, username: 'str', *, note: 'str | None' = None) -> 'dict[str, Any]'"
@@ -56,6 +60,14 @@
         "coroutine": true,
         "signature": "(self, username: 'str') -> 'dict[str, Any]'"
       },
+      "react_to_post": {
+        "coroutine": true,
+        "signature": "(self, post: 'str', *, reaction: 'str' = 'like') -> 'dict[str, Any]'"
+      },
+      "repost_post": {
+        "coroutine": true,
+        "signature": "(self, post: 'str', *, confirm_repost: 'bool', commentary: 'str | None' = None) -> 'dict[str, Any]'"
+      },
       "scrape_company": {
         "coroutine": true,
         "signature": "(self, company_name: 'str', requested: 'set[str]', callbacks: 'ProgressCallback | None' = None) -> 'dict[str, Any]'"
@@ -94,6 +106,7 @@
       }
     },
     "tool_methods": [
+      "comment_on_post",
       "connect_with_person",
       "extract_feed",
       "extract_page",
@@ -103,6 +116,8 @@
       "get_my_profile",
       "get_saved_jobs",
       "get_sidebar_profiles",
+      "react_to_post",
+      "repost_post",
       "scrape_company",
       "scrape_job",
       "scrape_person",
@@ -118,6 +133,35 @@
         "input": {
           "additionalProperties": false,
           "properties": {},
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "comment_on_post": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "comment": {
+              "description": "Text to publish. Newlines are allowed; every other control\ncharacter is rejected before a browser is touched.",
+              "type": "string"
+            },
+            "confirm_comment": {
+              "description": "Must be True to publish the comment",
+              "type": "boolean"
+            },
+            "post": {
+              "description": "Permalink of one post, in either shape ``references`` returns\nfor ``kind: \"feed_post\"``. See react_to_post for the accepted\nforms.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "post",
+            "comment",
+            "confirm_comment"
+          ],
           "type": "object"
         },
         "output": {
@@ -449,6 +493,74 @@
           },
           "required": [
             "linkedin_username"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "react_to_post": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "post": {
+              "description": "Permalink of one post, in either shape ``references`` returns\nfor ``kind: \"feed_post\"`` — ``/feed/update/<urn>/`` or\n``/posts/<slug>``. An absolute URL on any locale subdomain and a\nbare ``urn:li:{ugcPost,share,activity}:<id>`` are accepted too.",
+              "type": "string"
+            },
+            "reaction": {
+              "default": "like",
+              "description": "Which reaction to add. One of like, celebrate, support,\nlove, insightful, funny. \"like\" clicks the post's own reaction\ncontrol directly; every other value has to open the reaction\npicker, which can refuse with ``reaction_picker_unavailable`` or\n``reaction_picker_changed`` if LinkedIn's picker is not the six\ncontrols this tool knows how to index.",
+              "enum": [
+                "like",
+                "celebrate",
+                "support",
+                "love",
+                "insightful",
+                "funny"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "post"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "repost_post": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "commentary": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional text to publish above the reshared post.\nNewlines are allowed; every other control character is rejected\nbefore a browser is touched. Omit for a bare repost."
+            },
+            "confirm_repost": {
+              "description": "Must be True to publish the repost",
+              "type": "boolean"
+            },
+            "post": {
+              "description": "Permalink of one post, in either shape ``references`` returns\nfor ``kind: \"feed_post\"``. See react_to_post for the accepted\nforms.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "post",
+            "confirm_repost"
           ],
           "type": "object"
         },

@@ -6,14 +6,19 @@ import pytest
 
 from linkedin_mcp_server.scraping import contracts
 from linkedin_mcp_server.scraping.contracts import (
+    POST_ACTION_INTERRUPTED_WARNING,
     RATE_LIMITED_SECTION_TEXT,
     SEND_INTERRUPTED_WARNING,
     ExtractedSection,
     FilterValidationError,
     message_action_result,
+    post_action_result,
     rate_limited_section_error,
     refuse_an_invalid_message,
+    refuse_invalid_post_text,
 )
+
+POST_URL = "https://www.linkedin.com/feed/update/urn:li:ugcPost:7506667649444237313/"
 
 
 class TestRateLimitedSection:
@@ -82,6 +87,83 @@ class TestMessageActionResult:
             "is unknown; check the conversation before retrying, as a retry may "
             "deliver the message twice."
         )
+
+
+class TestPostActionResult:
+    def test_the_retry_contract_is_explicit_on_every_result(self):
+        assert post_action_result(
+            POST_URL,
+            "commented",
+            "The comment was published.",
+            acted=True,
+            retry_safe=False,
+        ) == {
+            "url": POST_URL,
+            "status": "commented",
+            "message": "The comment was published.",
+            "acted": True,
+            "retry_safe": False,
+        }
+
+    def test_a_result_is_unacted_and_retry_safe_until_told_otherwise(self):
+        # The safe defaults are the ones a refusal wants, and every refusal in
+        # the owner is built by naming nothing but url, status and message.
+        result = post_action_result(POST_URL, "confirmation_required", "Set the flag.")
+        assert result["acted"] is False
+        assert result["retry_safe"] is True
+
+    def test_the_reaction_key_is_absent_unless_a_reaction_was_asked_for(self):
+        assert "reaction" not in post_action_result(POST_URL, "commented", "done")
+        assert (
+            post_action_result(POST_URL, "reacted", "done", reaction="funny")[
+                "reaction"
+            ]
+            == "funny"
+        )
+
+    def test_the_interruption_warning_names_duplicate_publication(self):
+        assert POST_ACTION_INTERRUPTED_WARNING == (
+            "A post action was interrupted while in flight. The outcome is "
+            "unknown; open the post before retrying, as a retry may publish it "
+            "twice."
+        )
+
+
+class TestRefuseInvalidPostText:
+    @pytest.mark.parametrize("text", ["before\tafter", "text\x7f", "a\x00b", "a\rb"])
+    def test_every_control_character_but_a_newline_is_refused(self, text: str):
+        assert refuse_invalid_post_text(POST_URL, text, field="comment") == (
+            post_action_result(
+                POST_URL,
+                "invalid_text",
+                "comment must not contain control characters. A newline is allowed.",
+            )
+        )
+
+    def test_a_newline_is_content_rather_than_a_control_character(self):
+        # A comment is routinely more than one paragraph, which is where this
+        # parts company with refuse_an_invalid_message. Nothing about the
+        # insertion path changes: the submit is a button click, never Enter.
+        assert refuse_invalid_post_text(POST_URL, "one\n\ntwo", field="comment") is None
+
+    def test_whitespace_alone_is_refused(self):
+        assert refuse_invalid_post_text(POST_URL, " \n ", field="commentary") == (
+            post_action_result(
+                POST_URL,
+                "invalid_text",
+                "commentary must contain non-whitespace characters.",
+            )
+        )
+
+    def test_the_field_name_reaches_the_caller(self):
+        refusal = refuse_invalid_post_text(POST_URL, "", field="commentary")
+        assert refusal is not None
+        assert refusal["message"].startswith("commentary ")
+
+    def test_ordinary_text_is_accepted(self):
+        assert refuse_invalid_post_text(
+            POST_URL, "Great write-up", field="comment"
+        ) is (None)
 
 
 class TestRefuseAnInvalidMessage:

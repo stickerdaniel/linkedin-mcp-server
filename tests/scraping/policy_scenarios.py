@@ -58,8 +58,11 @@ _COMMON_ALLOWED = {
     "evaluate",
     "evaluate_handle",
     "handle.as_element",
+    "handle.click",
     "handle.dispose",
     "handle.evaluate",
+    "handle.get_property",
+    "handle.json_value",
     "keyboard.press",
     "keyboard.type",
     "listener.add",
@@ -1020,7 +1023,155 @@ async def _facade_contract_trace() -> dict[str, Any]:
     }
 
 
+_POST_ID = "7506667649444237313"
+_POST_PERMALINK = f"/feed/update/urn:li:ugcPost:{_POST_ID}/"
+_POST_URL = f"https://www.linkedin.com{_POST_PERMALINK}"
+
+
+def _post_signals(
+    *,
+    pressed: bool = False,
+    counts: list[str] | None = None,
+) -> dict[str, Any]:
+    """One structural read of a post, as POST_ACTION_SIGNALS_JS returns it."""
+    return {
+        "hasMain": True,
+        "hasRoot": True,
+        "hasBar": True,
+        "barButtonCount": 4,
+        "reactPressedPresent": True,
+        "reactPressed": pressed,
+        "reactDisabled": False,
+        "hasRepostOpener": True,
+        "editorCount": 1,
+        "barText": "",
+        "counts": counts if counts is not None else ["12", "3", "1"],
+    }
+
+
+def _script_post_surface(page: ScriptedPage, *signals: dict[str, Any]) -> None:
+    """Land on the permalink and script one structural read per call."""
+    page.goto_landings.append(_POST_URL)
+    page.script("evaluate:post_action_signals", *signals)
+    page.script("evaluate_handle:post_root_owner", True)
+    page.script("handle-1.dispose", None)
+
+
+def _script_post_editor(
+    page: ScriptedPage, text: str, *, handle: str = "handle-2"
+) -> None:
+    """Script the editor pin and the keystrokes that fill it.
+
+    The read-back answers with the text that was asked for, which is what the
+    trace then pins as an ordering: the editor is clicked and focused before any
+    key event, and the text is verified before a submit is reachable. Nothing
+    here is written from JavaScript, because a live comment box does not draw a
+    submit control for text that arrived that way.
+    """
+    page.script("evaluate_handle:post_editor_pin", True)
+    page.script(f"{handle}.get_property:status", False)
+    page.script(f"{handle}:status.json_value", "pinned")
+    page.script(f"{handle}.get_property:editor", True)
+    page.script(f"{handle}:editor.evaluate:post_editor_focus", True)
+    page.script(f"{handle}:editor.evaluate:post_editor_text", text)
+    page.script("evaluate:post_editor_own", True)
+
+
+async def _react_to_post_scenario() -> dict[str, Any]:
+    """The default reaction: one click on the toggle, confirmed by its state.
+
+    The specific-reaction branch is not traced, because opening the picker
+    needs a hover and the strict page double has no pointer surface. The unit
+    and DOM suites carry that branch instead.
+    """
+    recorder = TraceRecorder("react_to_post__reacted", _COMMON_ALLOWED)
+    clock = FakeClock(recorder)
+    page = _page(recorder)
+    _script_post_surface(
+        page, _post_signals(pressed=False), _post_signals(pressed=True)
+    )
+    page.script("evaluate:post_react_toggle", "clicked")
+    extractor = _extractor(page)
+    async with boundaries(recorder, clock):
+        with recorder.context("react_to_post", "post"):
+            result = await extractor.react_to_post(_POST_PERMALINK, reaction="like")
+    page.assert_clean()
+    return recorder.trace(
+        {
+            "method": "react_to_post",
+            "arguments": {"post": _POST_PERMALINK, "reaction": "like"},
+        },
+        result,
+    )
+
+
+async def _comment_on_post_scenario() -> dict[str, Any]:
+    """A confirmed comment, verified by its text appearing on the post."""
+    recorder = TraceRecorder("comment_on_post__commented", _COMMON_ALLOWED)
+    clock = FakeClock(recorder)
+    page = _page(recorder)
+    # Two reads: the action-bar read, then the comment-editor wait.
+    _script_post_surface(page, _post_signals(), _post_signals())
+    # Zero matching units before the submit, one after, which is the whole
+    # confirmation contract: an identical earlier comment cannot stand in.
+    page.script("evaluate:post_text_units", 0, 1)
+    _script_post_editor(page, "Policy comment")
+    page.script("evaluate:post_text_submit", "submitted")
+    extractor = _extractor(page)
+    async with boundaries(recorder, clock):
+        with recorder.context("comment_on_post", "post"):
+            result = await extractor.comment_on_post(
+                _POST_PERMALINK,
+                "Policy comment",
+                confirm_comment=True,
+            )
+    page.assert_clean()
+    return recorder.trace(
+        {
+            "method": "comment_on_post",
+            "arguments": {
+                "post": _POST_PERMALINK,
+                "comment": "Policy comment",
+                "confirm_comment": True,
+            },
+        },
+        result,
+    )
+
+
+async def _repost_post_scenario() -> dict[str, Any]:
+    """A bare repost: menu item zero, confirmed by the post's counts changing."""
+    recorder = TraceRecorder("repost_post__reposted", _COMMON_ALLOWED)
+    clock = FakeClock(recorder)
+    page = _page(recorder)
+    _script_post_surface(
+        page,
+        _post_signals(counts=["12", "3"]),
+        _post_signals(counts=["12", "3"]),
+        _post_signals(counts=["12", "4"]),
+    )
+    page.script("evaluate:post_repost_open", "clicked")
+    page.script(
+        "evaluate:post_repost_menu",
+        {"menus": 1, "items": 2, "layout": "popover"},
+    )
+    page.script("evaluate:post_repost_pick", True)
+    extractor = _extractor(page)
+    async with boundaries(recorder, clock):
+        with recorder.context("repost_post", "post"):
+            result = await extractor.repost_post(_POST_PERMALINK, confirm_repost=True)
+    page.assert_clean()
+    return recorder.trace(
+        {
+            "method": "repost_post",
+            "arguments": {"post": _POST_PERMALINK, "confirm_repost": True},
+        },
+        result,
+    )
+
+
 TOOL_FACADE_METHODS = {
+    "comment_on_post",
     "connect_with_person",
     "extract_feed",
     "extract_page",
@@ -1030,6 +1181,8 @@ TOOL_FACADE_METHODS = {
     "get_my_profile",
     "get_saved_jobs",
     "get_sidebar_profiles",
+    "react_to_post",
+    "repost_post",
     "scrape_company",
     "scrape_job",
     "scrape_person",
@@ -1111,6 +1264,9 @@ async def build_policy_traces() -> dict[str, dict[str, Any]]:
             "search_companies"
         ),
         "search-posts.json": await _single_capture_facade_scenario("search_posts"),
+        "post-react.json": await _react_to_post_scenario(),
+        "post-comment.json": await _comment_on_post_scenario(),
+        "post-repost.json": await _repost_post_scenario(),
         "inbox.json": await _conversation_scenario("get_inbox"),
         "conversation.json": await _conversation_scenario("get_conversation"),
         "search-conversations.json": await _conversation_scenario(

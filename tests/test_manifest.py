@@ -166,6 +166,26 @@ def test_every_declared_key_is_referenced(manifest: dict[str, Any]) -> None:
     )
 
 
+async def test_the_declared_tools_are_the_tools_the_server_serves(
+    manifest: dict[str, Any],
+) -> None:
+    """The bundle's tool list is hand-written, so nothing else keeps it honest.
+
+    It is what a Claude Desktop user reads before installing, and it is the one
+    inventory in the repository with no generator behind it. Both directions are
+    wrong and neither is loud: a tool the server serves and the bundle omits is
+    undisclosed, and a tool the bundle names and the server dropped is a promise
+    the install cannot keep. ``mcpb validate`` checks neither, because the schema
+    has no way to reach the server.
+    """
+    from linkedin_mcp_server.server import create_mcp_server
+
+    declared = {tool["name"] for tool in manifest["tools"]}
+    served = {tool.name for tool in await create_mcp_server().list_tools()}
+
+    assert declared == served
+
+
 def test_send_message_documents_single_line_controls(manifest: dict[str, Any]) -> None:
     tools = {tool["name"]: tool["description"] for tool in manifest["tools"]}
     assert (

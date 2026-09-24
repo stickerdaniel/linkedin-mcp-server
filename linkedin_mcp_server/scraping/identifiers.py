@@ -56,6 +56,7 @@ __all__ = [
     "normalize_opaque_id",
     "normalize_person_identifier",
     "normalize_profile_urn",
+    "normalize_post_reference",
     "normalize_thread_id",
     "person_profile_url",
 ]
@@ -128,6 +129,38 @@ _RESERVED = {"me"}
 # caller asserting which route it belongs to.
 _PERSON_ROUTE = "in"
 _ORGANIZATION_ROUTES = {"company"}
+
+# The two permalink shapes a post arrives in, anchored for validation.
+#
+# Deliberately not the patterns in ``feed_payload``. Those scan arbitrary
+# payload text for *any* permalink and carry a ten-digit floor to keep
+# fixture-sized numbers out of live captures; these judge one value a caller
+# handed over, where the floor would refuse a reference this server itself
+# printed from a fixture. The set of URN kinds is the shared part and has to
+# stay in step with ``_POST_ENTITY_URN_RE`` there: only these three resolve as
+# a post, while a comment, reaction or profile URN names something else.
+#
+# The kind is matched case-insensitively and rewritten to the spelling below,
+# because a URN path segment is case-sensitive to LinkedIn: `urn:li:ugcpost:1`
+# answers 404 where `urn:li:ugcPost:1` serves the post. Lowercasing is what a
+# shell, a spreadsheet or a model that retyped the reference does to it.
+_POST_URN_KINDS = ("ugcPost", "share", "activity")
+_POST_URN = re.compile(
+    r"^urn:li:(?P<kind>" + "|".join(_POST_URN_KINDS) + r"):(?P<id>[0-9]+)$",
+    re.IGNORECASE,
+)
+
+# The slug LinkedIn puts in /posts/, e.g.
+# `williamhgates_some-words-ugcPost-7506667649444237313-g3b0`. The embedded
+# kind and id are not extracted: the slug resolves as written, and rebuilding
+# it as a URN would drop the author segment LinkedIn uses to route.
+_POST_SLUG = re.compile(
+    r"^[A-Za-z0-9_-]+-(?:" + "|".join(_POST_URN_KINDS) + r")-[0-9]+-[A-Za-z0-9_-]+$",
+    re.IGNORECASE,
+)
+
+_POST_UPDATE_ROUTE = ("feed", "update")
+_POST_SLUG_ROUTE = "posts"
 
 # The routes this repository emits for the ids these tools take. link_metadata
 # renders every reference as a site-relative path (``/in/alice/``,
@@ -391,6 +424,83 @@ def normalize_company_identifier(value: str) -> str:
             'in a company URL, for example "microsoft".'
         )
     return reference
+
+
+def _canonical_post_urn(value: str) -> str | None:
+    """A post entity URN in LinkedIn's own casing, or ``None``."""
+    match = _POST_URN.match(value)
+    if match is None:
+        return None
+    kind = next(
+        known
+        for known in _POST_URN_KINDS
+        if known.lower() == match.group("kind").lower()
+    )
+    return f"urn:li:{kind}:{match.group('id')}"
+
+
+def normalize_post_reference(value: str) -> str:
+    """The absolute permalink for a post, from a reference of any shape.
+
+    Returns a URL rather than an identifier, which is where this parts company
+    with its siblings above. A post has no single id to return: the two forms
+    ``references`` emits are not interchangeable and neither can be derived
+    from the other. ``/feed/update/urn:li:ugcPost:123/`` carries the entity URN
+    with no author, and ``/posts/<author>_<words>-ugcPost-123-<hash>`` carries
+    an author segment and a hash that LinkedIn issued and nothing here can
+    reconstruct. So each is canonicalized in place, and the caller navigates to
+    whichever it was given. ``build_feed_references`` documents the same
+    polymorphism from the producing side.
+
+    Accepted: either relative path as printed in ``references``, either as an
+    absolute URL on any locale subdomain, and a bare ``urn:li:{ugcPost,share,
+    activity}:<id>`` for a caller holding only the URN.
+
+    Idempotent, so passing a previous return value back through is harmless.
+
+    Raises:
+        InvalidReferenceError: when the value cannot name a post. Refusing here
+            costs nothing, where acting on a guess is a public write on
+            somebody else's content.
+    """
+    value = value.strip()
+    if not value:
+        raise InvalidReferenceError(
+            "Missing post (a LinkedIn post permalink, as returned in "
+            'references, for example "/feed/update/urn:li:ugcPost:123/" or '
+            '"/posts/name_words-ugcPost-123-abcd").'
+        )
+
+    # A bare URN is not a URL and must be judged before the URL branch, which
+    # would read `urn:li:ugcPost:123` as a scheme it does not serve.
+    if urn := _canonical_post_urn(value):
+        return f"https://www.linkedin.com/feed/update/{quote(urn, safe=':')}/"
+
+    segments = _linkedin_segments(value, want="post permalink")
+    if segments is None:
+        raise InvalidReferenceError(
+            "That is not a LinkedIn post reference. Pass a post permalink as "
+            'returned in references (kind "feed_post"), for example '
+            '"/feed/update/urn:li:ugcPost:123/" or '
+            '"/posts/name_words-ugcPost-123-abcd".'
+        )
+
+    route = [segment.lower() for segment in segments[: len(_POST_UPDATE_ROUTE)]]
+    if route == list(_POST_UPDATE_ROUTE) and len(segments) > len(_POST_UPDATE_ROUTE):
+        candidate = _usable(segments[len(_POST_UPDATE_ROUTE)])
+        if candidate is not None and (urn := _canonical_post_urn(candidate)):
+            return f"https://www.linkedin.com/feed/update/{quote(urn, safe=':')}/"
+
+    if segments and segments[0].lower() == _POST_SLUG_ROUTE and len(segments) > 1:
+        slug = _identifier(segments[1])
+        if slug is not None and _POST_SLUG.match(slug):
+            return f"https://www.linkedin.com/posts/{quote(slug, safe='')}"
+
+    raise InvalidReferenceError(
+        "That is a LinkedIn link but not a post permalink. Pass the "
+        "/feed/update/<urn>/ or /posts/<slug> URL for one post, as returned "
+        'in references (kind "feed_post").'
+    )
 
 
 def _numeric_tail(segment: str) -> str:

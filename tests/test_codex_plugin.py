@@ -107,8 +107,29 @@ def test_skill_keeps_unrelated_work_and_writes_out_of_scope() -> None:
     )
     assert "Use only for an explicit LinkedIn request" in skill
     assert "Do not call LinkedIn tools for unrelated" in skill
-    assert "exact recipient and action" in skill
+    assert "exact target and action" in skill
     assert "Never enable the plugin or its MCP server" in skill
+
+
+async def test_the_skill_names_every_write_tool() -> None:
+    # The skill is the only place an agent reading this plugin learns which
+    # tools write. A tool added to the server and not named here is a write the
+    # agent has no authorization rule for, which is how an unasked-for public
+    # action gets taken; the phrase pins above cannot notice that.
+    from linkedin_mcp_server.server import create_mcp_server
+
+    skill = (_PLUGIN_ROOT / "skills" / "linkedin-mcp" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    tools = await create_mcp_server().list_tools()
+    writes = {
+        tool.name
+        for tool in tools
+        if tool.annotations is not None and tool.annotations.destructiveHint
+    }
+
+    assert writes, "no tool declares itself destructive; the guard below is vacuous"
+    assert {name for name in writes if f"`{name}`" not in skill} == set()
 
 
 @pytest.mark.parametrize(

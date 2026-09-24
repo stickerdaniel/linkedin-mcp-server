@@ -44,6 +44,16 @@ SEND_INTERRUPTED_WARNING = (
 )
 
 
+# The same in-flight blind spot as SEND_INTERRUPTED_WARNING, for the two post
+# actions that publish. Worth its own line because these two are public: an
+# interrupted comment or repost that did land is visible to everybody who sees
+# the post, where an interrupted message is visible to one recipient.
+POST_ACTION_INTERRUPTED_WARNING = (
+    "A post action was interrupted while in flight. The outcome is unknown; "
+    "open the post before retrying, as a retry may publish it twice."
+)
+
+
 def rate_limited_section_error() -> dict[str, str]:
     """The ``section_errors`` entry for a section that came back empty.
 
@@ -90,6 +100,66 @@ def message_action_result(
         "sent": sent,
         "retry_safe": retry_safe,
     }
+
+
+def post_action_result(
+    url: str,
+    status: str,
+    message: str,
+    *,
+    acted: bool = False,
+    retry_safe: bool = True,
+    reaction: str | None = None,
+) -> dict[str, Any]:
+    """Build a structured response for a react, comment or repost attempt.
+
+    ``acted`` carries the same narrow meaning ``sent`` carries above: the
+    structural transition this server looks for was observed, not that LinkedIn
+    accepted, kept or showed the action to anybody. ``retry_safe`` is the field
+    a caller should key a retry on, and it is false from the moment a click that
+    could land is dispatched. The distinction matters more here than for a
+    message, because two of these three actions are public and a doubled repost
+    is visible on the actor's own feed.
+
+    ``reaction`` is present only for a react, naming the reaction that was
+    asked for. It is the request, not a reading of what LinkedIn recorded.
+    """
+    result: dict[str, Any] = {
+        "url": url,
+        "status": status,
+        "message": message,
+        "acted": acted,
+        "retry_safe": retry_safe,
+    }
+    if reaction is not None:
+        result["reaction"] = reaction
+    return result
+
+
+def refuse_invalid_post_text(
+    post_url: str, text: str, *, field: str
+) -> dict[str, Any] | None:
+    """Return the browser-free refusal for unsafe comment or repost text.
+
+    Diverges from ``refuse_an_invalid_message`` on one character, deliberately.
+    A newline is allowed here and refused there, because a comment or a repost
+    commentary is routinely more than one paragraph while a chat message is
+    not. Nothing about the insertion path changes: the text is inserted with
+    ``insertText`` and submitted by clicking a button, so a line break is
+    content and never a submit. Every other C0 control and DEL stays refused,
+    which is what keeps the insertion contract to text.
+    """
+    reason = None
+    if not text.strip():
+        reason = f"{field} must contain non-whitespace characters."
+    elif any(
+        (ord(character) < 32 and character != "\n") or ord(character) == 127
+        for character in text
+    ):
+        reason = f"{field} must not contain control characters. A newline is allowed."
+    if reason is None:
+        return None
+    return post_action_result(post_url, "invalid_text", reason)
 
 
 def refuse_an_invalid_message(

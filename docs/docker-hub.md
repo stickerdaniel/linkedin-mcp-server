@@ -22,6 +22,7 @@ A Model Context Protocol (MCP) server that connects AI assistants to LinkedIn. A
 - **Company Posts**: Get recent posts from a company's LinkedIn feed
 - **Home Feed**: Get recent posts from the authenticated user's LinkedIn home feed
 - **Post Search**: Search posts/content globally by keyword (the "Posts" tab) with an optional recency filter
+- **Post Engagement**: React to a post with any of the six reaction types, publish a comment, or reshare bare or with your own commentary; the comment and the repost require explicit confirmation
 - **Compact References**: Return typed per-section links alongside readable text without shipping full-page markdown
 
 ## Quick Start

@@ -160,7 +160,7 @@ async def test_tool_schema_trace_keeps_people_boundary_coercion_and_inventory():
         "tool_schemas"
     ]
 
-    assert len(schemas) == 19
+    assert len(schemas) == 22
     network = schemas["search_people"]["input"]["properties"]["network"]
     assert network["anyOf"] == [
         {"items": {"type": "string"}, "type": "array"},
@@ -404,6 +404,45 @@ async def test_message_pins_owner_route_and_submit_before_same_node_evidence():
         "owner": {"handle": "handle-1"},
         "token": "confirmation-1",
     }
+
+
+async def test_comment_evidence_is_taken_before_typing_and_text_before_submit():
+    """The order that separates a confirmed comment from a self-fulfilling one.
+
+    Both halves were wrong at once in the shipped version and the result was a
+    tool reporting a published comment on a post that had none. The baseline
+    count has to be read while the editor is still empty, because the editor is
+    inside the post and a later baseline would include the draft and cancel it
+    out; and the typed text has to be read back before a submit is reachable,
+    because a submit is the point after which nothing can be taken back. The
+    keystrokes sit between them, which is the other measured requirement: text
+    written from JavaScript leaves LinkedIn drawing no submit control at all.
+    """
+    commented = (await build_policy_traces())["post-comment.json"]
+    positions = _operation_positions(commented)
+
+    assert commented["result"]["status"] == "commented"
+    assert commented["result"]["acted"] is True
+    assert commented["result"]["retry_safe"] is False
+    assert (
+        positions["post_text_units"][0]
+        < positions["post_editor_pin"][0]
+        < positions["handle.click"][0]
+        < positions["post_editor_focus"][0]
+        < positions["keyboard.type"][0]
+        < positions["post_editor_text"][0]
+        < positions["post_text_submit"][0]
+        < positions["post_text_units"][1]
+    )
+    # Two reads of the same count, before and after: one alone cannot tell a
+    # comment that appeared from one that was already there.
+    assert len(positions["post_text_units"]) == 2
+    # The characters reach the page as key events and are never written into it.
+    assert "post_text_insert" not in positions
+    typed = next(
+        event for event in commented["events"] if event["kind"] == "keyboard.type"
+    )
+    assert typed["text"] == "Policy comment"
 
 
 async def test_message_retry_safety_and_cleanup_follow_dispatch_boundary():
