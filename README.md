@@ -29,6 +29,22 @@ An MCP server that connects AI assistants like Claude to LinkedIn through your o
 [Try Unipile free for 7 days →](https://golink.onl/unipile-free-trial)
 </details>
 
+<br/>
+<details open>
+<summary><strong>Hosted Premium</strong></summary>
+<br/>
+<a href="https://cadenza.page" target="_blank">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="CADENZA_BANNER_DARK">
+    <img src="CADENZA_BANNER_LIGHT" alt="Cadenza, the hosted LinkedIn MCP server" width="100%">
+  </picture>
+</a>
+
+> [**Cadenza**](https://cadenza.page) is the hosted premium layer built on this server. Connect it to Claude with no server to run. It drafts in your own writing voice and adds Sales Navigator, Recruiter, and InMail through your own account. Every outgoing message needs your approval first. All tools in this repository stay free and open source.
+
+[Try Cadenza →](https://cadenza.page)
+</details>
+
 ---
 
 <a id="installation-methods"></a>
