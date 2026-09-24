@@ -123,12 +123,14 @@ def unavailable(exc):
 
 
 member_open_fault = os.environ.get("LINKEDIN_MCP_TEST_PIDFD_MEMBER_OPEN_FAULT")
+leader_open_fault = os.environ.get("LINKEDIN_MCP_TEST_PIDFD_LEADER_OPEN_FAULT")
 
 
 def open_pidfd(pid, role):
     try:
-        if role == "member" and member_open_fault:
-            injected = getattr(errno, member_open_fault)
+        fault = member_open_fault if role == "member" else leader_open_fault if role == "leader" else None
+        if fault:
+            injected = getattr(errno, fault)
             raise OSError(injected, os.strerror(injected))
         return pidfd_open(pid)
     except OSError as exc:
@@ -318,7 +320,7 @@ report.update(
         "leader": leader.pid if leader is not None else -1,
         "member": member_pid,
         "spawned": True,
-        "cleanup": "spawned and fully cleaned" if reaped_leader and reaped_member and len(closed_fds) == (1 if member_pidfd < 0 else 2) else "incomplete",
+        "cleanup": "spawned and fully cleaned" if reaped_leader and reaped_member and len(closed_fds) == sum(fd >= 0 for fd in (leader_pidfd, member_pidfd)) else "incomplete",
         "reaped_leader": reaped_leader,
         "reaped_member": reaped_member,
         "leader_cleanup_confirmed": leader_cleanup_confirmed,
@@ -446,6 +448,7 @@ def _run_probe(
     fault: str | None = None,
     *,
     member_open_fault: str | None = None,
+    leader_open_fault: str | None = None,
     leader_cleanup: str = "command",
 ) -> dict[str, object]:
     environment = os.environ.copy()
@@ -453,6 +456,9 @@ def _run_probe(
         environment["LINKEDIN_MCP_TEST_PIDFD_GROUP_FAULT"] = fault
     if member_open_fault is not None:
         environment["LINKEDIN_MCP_TEST_PIDFD_MEMBER_OPEN_FAULT"] = member_open_fault
+        environment["LINKEDIN_MCP_TEST_PIDFD_LEADER_CLEANUP"] = leader_cleanup
+    if leader_open_fault is not None:
+        environment["LINKEDIN_MCP_TEST_PIDFD_LEADER_OPEN_FAULT"] = leader_open_fault
         environment["LINKEDIN_MCP_TEST_PIDFD_LEADER_CLEANUP"] = leader_cleanup
     result = subprocess.run(
         [sys.executable, "-c", _SUBREAPER_PROBE],
@@ -506,7 +512,11 @@ def test_retained_leader_pidfd_signals_its_group_after_reaping(tmp_path: Path):
         cleanup = cast(str, report["cleanup"])
         if report["status"] == "skip":
             if report["spawned"] is True:
-                if cast(str, report["reason"]).startswith("pidfd_open member:"):
+                reason = cast(str, report["reason"])
+                if reason.startswith("pidfd_open leader:"):
+                    assert report["leader_cleanup_confirmed"] is True
+                    _assert_probe_reaped_every_process(report, expected_fds=0)
+                elif reason.startswith("pidfd_open member:"):
                     assert report["leader_cleanup_confirmed"] is True
                     _assert_probe_reaped_every_process(report, expected_fds=1)
                 else:
@@ -555,12 +565,60 @@ def test_member_open_refusal_reports_unsupported_after_cleanup(
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
     monkeypatch.setenv("LINKEDIN_MCP_TEST_PIDFD_MEMBER_OPEN_FAULT", "EPERM")
 
-    with pytest.raises(pytest.skip.Exception, match="pidfd_open member"):
+    with pytest.raises(pytest.skip.Exception) as skipped:
+        test_retained_leader_pidfd_signals_its_group_after_reaping(tmp_path)
+
+    evidence = summary.read_text()
+    assert "status=UNSUPPORTED" in evidence
+    if "pidfd_open member" not in str(skipped.value):
+        assert "cleanup=not spawned" in evidence
+        pytest.skip(str(skipped.value))
+    assert "cleanup=spawned and fully cleaned" in evidence
+
+
+def test_member_open_refusal_preflight_without_api_skips(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("LINKEDIN_MCP_TEST_PIDFD_NO_API", "1")
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary"))
+
+    with pytest.raises(pytest.skip.Exception, match="Python has no pidfd API"):
+        test_member_open_refusal_reports_unsupported_after_cleanup(
+            tmp_path, monkeypatch
+        )
+
+    evidence = (tmp_path / "summary").read_text()
+    assert "status=UNSUPPORTED" in evidence
+    assert "cleanup=not spawned" in evidence
+
+
+def test_leader_open_refusal_reports_unsupported_after_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    summary = tmp_path / "summary"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    monkeypatch.setenv("LINKEDIN_MCP_TEST_PIDFD_LEADER_OPEN_FAULT", "EPERM")
+
+    with pytest.raises(pytest.skip.Exception, match="pidfd_open leader"):
         test_retained_leader_pidfd_signals_its_group_after_reaping(tmp_path)
 
     evidence = summary.read_text()
     assert "status=UNSUPPORTED" in evidence
     assert "cleanup=spawned and fully cleaned" in evidence
+
+
+@pytest.mark.parametrize("leader_cleanup", ["command", "eof"])
+def test_leader_pidfd_open_failure_uses_leader_cleanup_contract(
+    tmp_path: Path, leader_cleanup: str
+):
+    report = _run_probe(
+        tmp_path, leader_open_fault="EPERM", leader_cleanup=leader_cleanup
+    )
+
+    assert report["status"] == "skip"
+    _assert_probe_reaped_every_process(report, expected_fds=0)
+    assert report["leader_cleanup_confirmed"] is True
+    assert report["member_cleanup_pidfd_calls"] == 0
 
 
 def test_summary_failure_preserves_primary_probe_error(
