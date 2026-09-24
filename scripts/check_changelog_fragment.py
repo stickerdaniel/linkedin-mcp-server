@@ -25,6 +25,19 @@ INVALID_PR_DATA = "Unable to read current pull request data."
 INVALID_FILES_DATA = "Unable to read the pull request's changed files."
 INVALID_CONFIG = "Unable to read [tool.towncrier] from pyproject.toml."
 
+# The files API lists at most this many files, however many pages are read.
+MAX_FILES = 3000
+TOO_MANY_FILES = (
+    f"This pull request changes more than {MAX_FILES} files, which the files "
+    "API cannot list in full. Split it into smaller pull requests."
+)
+INCOMPLETE_FILES = (
+    "The changed files returned for this pull request do not match its "
+    "changed_files count. Rerun the check."
+)
+
+_NO_EOF_NEWLINE = "\\ No newline at end of file"
+
 # Echo a path only when it cannot carry a newline, a workflow command or a
 # bidirectional control character; the name comes from the pull request.
 _SHOWABLE = re.compile(r"[A-Za-z0-9._/+-]{1,200}")
@@ -41,17 +54,24 @@ def _read_json(path: Path) -> Any:
         raise _InputError from None
 
 
-def _load_pr(path: Path) -> tuple[int, str]:
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _load_pr(path: Path) -> tuple[int, str, int]:
     data = _read_json(path)
     if not isinstance(data, dict):
         raise _InputError
     number = data.get("number")
     title = data.get("title")
-    if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
+    changed_files = data.get("changed_files")
+    if not _is_int(number) or number <= 0:
         raise _InputError
     if not isinstance(title, str) or not title:
         raise _InputError
-    return number, title
+    if not _is_int(changed_files) or changed_files < 0:
+        raise _InputError
+    return number, title, changed_files
 
 
 def _load_files(path: Path) -> list[dict[str, Any]]:
@@ -85,6 +105,37 @@ def _load_config(path: Path) -> tuple[str, tuple[str, ...]]:
     if not types or not all(isinstance(name, str) and name for name in types):
         raise _InputError
     return directory.rstrip("/"), types
+
+
+def _inventory_error(changed_files: int, files: list[dict[str, Any]]) -> str | None:
+    """Refuse a file list that cannot be the whole pull request.
+
+    Pagination does not lift the API's ceiling, and a lost or repeated page
+    still parses, so an exempt title would otherwise pass unseen files.
+    """
+    if changed_files > MAX_FILES:
+        return TOO_MANY_FILES
+    names = [entry["filename"] for entry in files]
+    if len(set(names)) != len(names) or len(names) != changed_files:
+        return INCOMPLETE_FILES
+    return None
+
+
+def _is_text_file(entry: dict[str, Any]) -> bool:
+    """Whether the new side is a text file that ends in a newline.
+
+    The files API carries no file mode and renders an added symlink as its
+    target path without a final newline. towncrier would follow the link, so
+    that shape is refused. A marker after a removed line concerns the old
+    side only.
+    """
+    patch = entry.get("patch")
+    if patch is None:
+        return False
+    lines = patch.splitlines()
+    if len(lines) >= 2 and lines[-1] == _NO_EOF_NEWLINE:
+        return not lines[-2].startswith(("+", " "))
+    return True
 
 
 def _has_added_text(entry: dict[str, Any]) -> bool:
@@ -121,7 +172,7 @@ def check(
     errors: list[str] = []
     prefix = f"{directory}/"
     name_pattern = re.compile(
-        r"[0-9]+\.(?:" + "|".join(re.escape(name) for name in types) + r")\.md"
+        r"[1-9][0-9]*\.(?:" + "|".join(re.escape(name) for name in types) + r")\.md"
     )
 
     # Every surviving fragment is checked, whatever the title says, so a
@@ -139,6 +190,11 @@ def check(
                 f"{_shown(path)} is not a fragment name. Use "
                 f"{prefix}<PR number>.<type>.md with a type of "
                 f"{', '.join(types)}."
+            )
+        elif not _is_text_file(entry):
+            errors.append(
+                f"{_shown(path)} must be a text file ending in a newline, "
+                "as `towncrier create` writes it."
             )
         elif entry["status"] == "added" and not _has_added_text(entry):
             errors.append(f"{_shown(path)} is empty. Write one user-facing sentence.")
@@ -174,7 +230,7 @@ def _parse_args() -> argparse.Namespace:
 def main() -> int:
     args = _parse_args()
     try:
-        number, title = _load_pr(args.pr_json)
+        number, title, changed_files = _load_pr(args.pr_json)
     except _InputError:
         print(f"::error::{INVALID_PR_DATA}")
         return 1
@@ -182,6 +238,10 @@ def main() -> int:
         files = _load_files(args.files_json)
     except _InputError:
         print(f"::error::{INVALID_FILES_DATA}")
+        return 1
+    inventory_error = _inventory_error(changed_files, files)
+    if inventory_error is not None:
+        print(f"::error::{inventory_error}")
         return 1
     try:
         directory, types = _load_config(_PYPROJECT)

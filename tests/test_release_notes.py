@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -278,6 +280,140 @@ def test_release_body_comes_from_the_composed_notes() -> None:
 
     assets = _step(jobs["build-mcpb"], "Upload release assets")
     assert "RELEASE_NOTES" not in assets["with"]["path"]
+
+
+_NEW_VERSION_OUTPUT = "${{ steps.check.outputs.new-version }}"
+
+_RELEASED_CHANGELOG = """\
+# Changelog
+
+<!-- towncrier release notes start -->
+
+## 4.26.0 (2026-09-24)
+
+### Features
+
+- Newer feature. ([#2](https://example.test/pull/2))
+
+
+## 4.25.0 (2026-09-01)
+
+### Bug Fixes
+
+- Older fix. ([#1](https://example.test/pull/1))
+"""
+
+
+def _git(cwd: Path, *args: str, env: dict[str, str]) -> None:
+    subprocess.run(
+        ["git", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", *args],
+        cwd=cwd,
+        env=env,
+        check=True,
+        capture_output=True,
+    )
+
+
+def _run_compose_step(
+    tmp_path: Path, *, tag_on_origin: bool
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    """Run the workflow's own compose step in a repo that just bumped 4.26.0."""
+    step = _step(_workflow()["jobs"]["check-version-bump"], "Compose release notes")
+    step_env = {
+        key: value.replace(_NEW_VERSION_OUTPUT, "4.26.0")
+        for key, value in step["env"].items()
+    }
+    assert "VERSION" in step_env
+    assert not any("${{" in value for value in step_env.values()), step_env
+
+    # The step calls plain python3; point it at this interpreter.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    python3 = bin_dir / "python3"
+    python3.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding="utf-8")
+    python3.chmod(0o755)
+    env = {
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "HOME": str(tmp_path),
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "core.hooksPath",
+        "GIT_CONFIG_VALUE_0": os.devnull,
+        "GIT_AUTHOR_NAME": "Release Test",
+        "GIT_AUTHOR_EMAIL": "release-test@example.test",
+        "GIT_COMMITTER_NAME": "Release Test",
+        "GIT_COMMITTER_EMAIL": "release-test@example.test",
+    }
+
+    origin = tmp_path / "origin.git"
+    _git(tmp_path, "init", "--bare", "--quiet", str(origin), env=env)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "--quiet", "--initial-branch=main", env=env)
+    _git(repo, "remote", "add", "origin", str(origin), env=env)
+
+    pyproject = repo / "pyproject.toml"
+    pyproject.write_text(
+        '[project]\nname = "demo"\nversion = "4.25.0"\n', encoding="utf-8"
+    )
+    _git(repo, "add", "pyproject.toml", env=env)
+    _git(repo, "commit", "--quiet", "-m", "chore: Release 4.25.0", env=env)
+    _git(repo, "tag", "v4.25.0", env=env)
+    if tag_on_origin:
+        _git(repo, "push", "--quiet", "origin", "refs/tags/v4.25.0", env=env)
+
+    pyproject.write_text(
+        '[project]\nname = "demo"\nversion = "4.26.0"\n', encoding="utf-8"
+    )
+    (repo / "CHANGELOG.md").write_text(_RELEASED_CHANGELOG, encoding="utf-8")
+    shutil.copy(_TEMPLATE, repo / "RELEASE_NOTES_TEMPLATE.md")
+    (repo / "scripts").mkdir()
+    shutil.copy(_SCRIPT, repo / "scripts" / "compose_release_notes.py")
+    (repo / "changelog.d").mkdir()
+    (repo / "changelog.d" / "README.md").write_text("Fragments.\n", encoding="utf-8")
+    _git(repo, "add", ".", env=env)
+    _git(repo, "commit", "--quiet", "-m", "chore: Bump version to 4.26.0", env=env)
+
+    script = tmp_path / "step.sh"
+    script.write_text(step["run"], encoding="utf-8")
+    result = subprocess.run(
+        # What Actions runs for a step without an explicit shell.
+        ["bash", "-e", str(script)],
+        cwd=repo,
+        env={**env, **step_env, "GITHUB_REPOSITORY": _REPOSITORY},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result, repo / "RELEASE_NOTES.md"
+
+
+def test_compose_step_writes_the_new_versions_notes(tmp_path: Path) -> None:
+    result, output = _run_compose_step(tmp_path, tag_on_origin=True)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    install = _TEMPLATE.read_text(encoding="utf-8").replace("${VERSION}", "4.26.0")
+    assert "$" not in install
+    assert output.read_text(encoding="utf-8") == (
+        "### Features\n"
+        "\n"
+        "- Newer feature. ([#2](https://example.test/pull/2))\n"
+        "\n"
+        f"{install.strip()}\n"
+        "\n"
+        "**Full Changelog**: https://github.com/stickerdaniel/linkedin-mcp-server"
+        "/compare/v4.25.0...v4.26.0\n"
+    )
+
+
+def test_compose_step_needs_the_previous_tag_on_origin(tmp_path: Path) -> None:
+    result, output = _run_compose_step(tmp_path, tag_on_origin=False)
+
+    # `git ls-remote --exit-code` answers 2 when the ref is missing.
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "Previous version: 4.25.0" in result.stdout
+    assert not output.exists()
 
 
 # The prepare-release job holds the admin token. This change must leave it

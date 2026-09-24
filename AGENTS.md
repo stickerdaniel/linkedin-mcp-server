@@ -265,7 +265,7 @@ Always read [`CONTRIBUTING.md`](CONTRIBUTING.md) before filing an issue or worki
   2. Branch from `main`: `feature/issue-number-short-description`
   3. Implement and test
   4. Update README.md and docs/docker-hub.md if relevant
-  5. Create a draft PR; only convert to regular PR when ready to merge. A `feat`, `fix` or `!` PR then adds `changelog.d/<PR>.<type>.md`; see CONTRIBUTING
+  5. Create a draft PR; only convert to regular PR when ready to merge. A `feat`, `fix` or breaking (`type!:`) PR then adds `changelog.d/<PR>.<type>.md`; see CONTRIBUTING
   6. Review with AI agents first, then manual review. PRs are squash-merged into `main` (one commit per PR), so keep the PR title as the conventional-commit subject; commits within a PR are for review only. The squash commit title is `<PR title> (#N)`, which an API or CLI merge sets explicitly.
 
 ### Submitting

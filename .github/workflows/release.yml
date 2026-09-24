@@ -58,7 +58,7 @@ jobs:
       # Composed here, before build and publish-pypi, so a CHANGELOG without a
       # section for this version stops the release while nothing exists yet
       # that would have to be withdrawn. The previous version is read on its
-      # own because the step above falls back to 0.0.0 in silence.
+      # own and an unreadable parent manifest fails the step.
       - name: Compose release notes
         if: steps.check.outputs.should-release == 'true'
         env:

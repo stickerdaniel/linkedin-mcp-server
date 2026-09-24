@@ -40,13 +40,16 @@ def _run(
 ) -> subprocess.CompletedProcess[str]:
     pr_json = tmp_path / "pull-request.json"
     files_json = tmp_path / "pull-request-files.json"
-    pr_json.write_text(
-        json.dumps({"number": _NUMBER, "title": title} if pr is None else pr),
-        encoding="utf-8",
-    )
-    files_json.write_text(
-        json.dumps([files] if pages is None else pages), encoding="utf-8"
-    )
+    if pages is None:
+        pages = [files]
+    if pr is None:
+        pr = {
+            "number": _NUMBER,
+            "title": title,
+            "changed_files": sum(len(page) for page in pages),
+        }
+    pr_json.write_text(json.dumps(pr), encoding="utf-8")
+    files_json.write_text(json.dumps(pages), encoding="utf-8")
     return subprocess.run(
         [
             sys.executable,
@@ -160,18 +163,92 @@ def test_fragment_that_is_not_added_does_not_count(tmp_path: Path, status: str) 
     assert any("changelog.d/1234.feat.md" in error for error in _errors(result))
 
 
-@pytest.mark.parametrize("patch", ["@@ -0,0 +1,2 @@\n+   \n+\t", None])
-def test_fragment_without_text_is_rejected(tmp_path: Path, patch: str | None) -> None:
+def test_fragment_without_text_is_rejected(tmp_path: Path) -> None:
     result = _run(
         tmp_path,
         "feat: Add company search",
-        [_file("changelog.d/1234.feat.md", patch=patch)],
+        [_file("changelog.d/1234.feat.md", patch="@@ -0,0 +1,2 @@\n+   \n+\t")],
     )
 
     assert result.returncode == 1
     assert _errors(result) == [
         "changelog.d/1234.feat.md is empty. Write one user-facing sentence."
     ]
+
+
+_NO_NEWLINE = "\\ No newline at end of file"
+
+
+def _not_a_text_file(path: str) -> str:
+    return (
+        f"{path} must be a text file ending in a newline, "
+        "as `towncrier create` writes it."
+    )
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        # How the files API shows an added symlink to AGENTS.md (d17cca15).
+        f"@@ -0,0 +1 @@\n+AGENTS.md\n{_NO_NEWLINE}",
+        f"@@ -0,0 +1,2 @@\n+Search results keep\n+their order.\n{_NO_NEWLINE}",
+        None,
+    ],
+    ids=["symlink", "no-final-newline", "no-patch"],
+)
+def test_added_fragment_that_is_not_a_text_file_is_rejected(
+    tmp_path: Path, patch: str | None
+) -> None:
+    result = _run(
+        tmp_path,
+        "feat: Add company search",
+        [_CODE, _file("changelog.d/1234.feat.md", patch=patch)],
+    )
+
+    assert result.returncode == 1
+    assert _errors(result) == [_not_a_text_file("changelog.d/1234.feat.md")]
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        f"@@ -1 +1 @@\n-Old text.\n{_NO_NEWLINE}\n+Old text.",
+        f"@@ -1,2 +1 @@\n Old text.\n-Dropped line.\n{_NO_NEWLINE}",
+    ],
+    ids=["line-rewritten", "last-line-dropped"],
+)
+def test_modified_fragment_gaining_its_final_newline_passes(
+    tmp_path: Path, patch: str
+) -> None:
+    result = _run(
+        tmp_path,
+        "docs: Explain setup",
+        [_file("changelog.d/1076.fix.md", "modified", patch)],
+    )
+
+    assert result.returncode == 0, result.stdout
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        f"@@ -1 +1 @@\n-Old text.\n+New text.\n{_NO_NEWLINE}",
+        f"@@ -1,2 +1,2 @@\n-Old text.\n+New text.\n Kept line.\n{_NO_NEWLINE}",
+        None,
+    ],
+    ids=["changed-line", "context-line", "no-patch"],
+)
+def test_modified_fragment_that_is_not_a_text_file_is_rejected(
+    tmp_path: Path, patch: str | None
+) -> None:
+    result = _run(
+        tmp_path,
+        "docs: Explain setup",
+        [_file("changelog.d/1076.fix.md", "modified", patch)],
+    )
+
+    assert result.returncode == 1
+    assert _errors(result) == [_not_a_text_file("changelog.d/1076.fix.md")]
 
 
 @pytest.mark.parametrize(
@@ -183,6 +260,9 @@ def test_fragment_without_text_is_rejected(tmp_path: Path, patch: str | None) ->
         "changelog.d/notes.md",
         "changelog.d/sub/1234.feat.md",
         "changelog.d/+orphan.feat.md",
+        # towncrier reads the number as an int, so this collides with 1234.
+        "changelog.d/01234.feat.md",
+        "changelog.d/0.fix.md",
     ],
 )
 def test_malformed_extra_fails_beside_a_valid_fragment(
@@ -199,12 +279,13 @@ def test_malformed_extra_fails_beside_a_valid_fragment(
     assert error.startswith(f"{name} is not a fragment name.")
 
 
-def test_malformed_fragment_fails_an_exempt_title(tmp_path: Path) -> None:
-    result = _run(tmp_path, "docs: Explain setup", [_file("changelog.d/notes.md")])
+@pytest.mark.parametrize("name", ["changelog.d/notes.md", "changelog.d/01076.fix.md"])
+def test_malformed_fragment_fails_an_exempt_title(tmp_path: Path, name: str) -> None:
+    result = _run(tmp_path, "docs: Explain setup", [_file(name)])
 
     assert result.returncode == 1
     [error] = _errors(result)
-    assert error.startswith("changelog.d/notes.md is not a fragment name.")
+    assert error.startswith(f"{name} is not a fragment name.")
 
 
 @pytest.mark.parametrize(
@@ -263,10 +344,78 @@ def test_fragment_on_a_later_page_counts(tmp_path: Path) -> None:
         tmp_path,
         "feat: Add company search",
         [],
-        pages=[[_CODE, _CODE], [_file("changelog.d/1234.feat.md")]],
+        pages=[
+            [_CODE, _file("README.md", "modified")],
+            [_file("changelog.d/1234.feat.md")],
+        ],
     )
 
     assert result.returncode == 0, result.stdout
+
+
+def _code_files(start: int, count: int) -> list[dict[str, Any]]:
+    return [
+        _file(f"src/module_{index}.py", "modified", "@@ -1 +1 @@\n-a\n+b")
+        for index in range(start, start + count)
+    ]
+
+
+def _pages(files: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    return [files[index : index + 100] for index in range(0, len(files), 100)]
+
+
+def _pr(changed_files: int, title: str = "docs: Explain setup") -> dict[str, Any]:
+    return {"number": _NUMBER, "title": title, "changed_files": changed_files}
+
+
+_TOO_MANY = (
+    "This pull request changes more than 3000 files, which the files API "
+    "cannot list in full. Split it into smaller pull requests."
+)
+_INCOMPLETE = (
+    "The changed files returned for this pull request do not match its "
+    "changed_files count. Rerun the check."
+)
+
+
+def test_more_files_than_the_api_lists_fails_an_exempt_title(
+    tmp_path: Path,
+) -> None:
+    result = _run(tmp_path, "", [], pr=_pr(3001), pages=_pages(_code_files(0, 3000)))
+
+    assert result.returncode == 1
+    assert _errors(result) == [_TOO_MANY]
+
+
+def test_every_file_the_api_lists_passes(tmp_path: Path) -> None:
+    result = _run(tmp_path, "", [], pr=_pr(3000), pages=_pages(_code_files(0, 3000)))
+
+    assert result.returncode == 0, result.stdout
+    assert result.stdout == ""
+
+
+def test_missing_middle_page_fails_an_exempt_title(tmp_path: Path) -> None:
+    pages = _pages(_code_files(0, 300))
+    del pages[1]
+
+    result = _run(tmp_path, "", [], pr=_pr(300), pages=pages)
+
+    assert result.returncode == 1
+    assert _errors(result) == [_INCOMPLETE]
+
+
+@pytest.mark.parametrize("changed_files", [2, 3])
+def test_duplicate_file_fails_an_exempt_title(
+    tmp_path: Path, changed_files: int
+) -> None:
+    # With 3 declared, the repeated entry stands in for a file never returned.
+    first, second = _code_files(0, 2)
+    pages = [[first, second], [second]]
+
+    result = _run(tmp_path, "", [], pr=_pr(changed_files), pages=pages)
+
+    assert result.returncode == 1
+    assert _errors(result) == [_INCOMPLETE]
 
 
 def test_unsafe_file_name_is_not_echoed(tmp_path: Path) -> None:
@@ -285,6 +434,10 @@ def test_unsafe_file_name_is_not_echoed(tmp_path: Path) -> None:
         ({"number": "1234", "title": "docs: Explain setup"}, [[]]),
         ({"number": True, "title": "docs: Explain setup"}, [[]]),
         ({"number": _NUMBER, "title": None}, [[]]),
+        ({"number": _NUMBER, "title": "docs: Explain setup"}, [[]]),
+        (_pr(-1), [[]]),
+        (_pr(True), [[]]),
+        ({**_pr(0), "changed_files": "0"}, [[]]),
         ([], [[]]),
     ],
 )
