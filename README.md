@@ -17,6 +17,17 @@ An MCP server that connects AI assistants like Claude to LinkedIn through your o
 <details open>
 <summary><strong>LinkedIn MCP Sponsor</strong></summary>
 <br/>
+<a href="https://cadenza.page" target="_blank">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/27f6cf09-20b8-4845-bc50-21842011cff6">
+    <img src="https://github.com/user-attachments/assets/e43ef651-2051-49bb-b068-c86748fc81e1" alt="Cadenza, hosted LinkedIn MCP for your AI assistant" width="100%">
+  </picture>
+</a>
+
+> Prefer not to run a server? [**Cadenza**](https://cadenza.page) is the hosted LinkedIn MCP server for your agents, on web, desktop, and mobile. Set your own limits on LinkedIn actions and use your Sales Navigator, Recruiter, and InMail right from your agent.
+
+<br/>
+
 <a href="https://golink.onl/unipile-banner" target="_blank">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/c2e7f3b4-6812-4f28-8728-10f882a44e0e">
@@ -27,20 +38,6 @@ An MCP server that connects AI assistants like Claude to LinkedIn through your o
 > This MCP server is supported by [**Unipile**](https://golink.onl/unipile-link). Unipile is the fully managed cloud option for developers: a hosted LinkedIn API for Classic, Sales Navigator, and Recruiter that handles auth, sessions, and infrastructure for you.
 
 [Try Unipile free for 7 days →](https://golink.onl/unipile-free-trial)
-</details>
-
-<br/>
-<details open>
-<summary><strong>Hosted LinkedIn MCP</strong></summary>
-<br/>
-<a href="https://cadenza.page" target="_blank">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/27f6cf09-20b8-4845-bc50-21842011cff6">
-    <img src="https://github.com/user-attachments/assets/e43ef651-2051-49bb-b068-c86748fc81e1" alt="Cadenza, hosted LinkedIn MCP for your AI assistant" width="100%">
-  </picture>
-</a>
-
-> Prefer not to run a server? [**Cadenza**](https://cadenza.page) is the hosted LinkedIn MCP server for your agents, on web, desktop, and mobile. Set your own limits on LinkedIn actions and use your Sales Navigator, Recruiter, and InMail right from your agent.
 </details>
 
 ---
