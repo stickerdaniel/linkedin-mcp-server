@@ -8,7 +8,7 @@
 
 Keep `daemon_enabled = False` on every platform. This review does not authorize an `auto` mode or a new admission or cleanup protocol. An election failure followed by Direct fallback is not proof that the previous browser has stopped. A platform-limited default would be a separate product decision, not completion of cross-platform readiness.
 
-This decision was checked against source at `9f2cc9c410792f5fae3d4facba6868721c291ce9`. The later `03828d5bee876561d8989ca4e030b49703e03ce8` changes README tool descriptions only. Closing the election and startup-log issues [#1014](https://github.com/stickerdaniel/linkedin-mcp-server/issues/1014) and [#801](https://github.com/stickerdaniel/linkedin-mcp-server/issues/801) did not establish the remaining crash, compatibility, or filesystem guarantees.
+This decision was checked against source at `9f2cc9c410792f5fae3d4facba6868721c291ce9`. Closing the election and startup-log issues [#1014](https://github.com/stickerdaniel/linkedin-mcp-server/issues/1014) and [#801](https://github.com/stickerdaniel/linkedin-mcp-server/issues/801) did not establish the remaining crash, compatibility, or filesystem guarantees.
 
 ## Established boundaries
 
