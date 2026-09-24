@@ -12,7 +12,7 @@ changelog:
     authors:
       - renovate[bot]
   categories:
-    - title: "⚠️ Breaking Changes"
+    - title: Breaking Changes
       labels:
         - breaking-change
     - title: Features
