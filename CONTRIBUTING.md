@@ -4,7 +4,7 @@ Contributions are welcome! Packet: search first, then add evidence to an existin
 
 ## Development Setup
 
-See the [README](README.md#local-setup-develop--contribute) for full setup instructions.
+See the [README](README.md#setup-from-source-develop--contribute) for full setup instructions.
 
 ```bash
 git clone https://github.com/stickerdaniel/linkedin-mcp-server
