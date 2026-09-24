@@ -29,6 +29,14 @@ An MCP server that connects AI assistants like Claude to LinkedIn through your o
 [Try Unipile free for 7 days →](https://golink.onl/unipile-free-trial)
 </details>
 
+<br/>
+<details open>
+<summary><strong>Hosted LinkedIn MCP</strong></summary>
+<br/>
+
+> Prefer not to run a server? [**Cadenza**](https://cadenza.page) is the hosted LinkedIn MCP server for your agents, on web, desktop, and mobile. Set your own limits on LinkedIn actions and use your Sales Navigator, Recruiter, and InMail right from your agent.
+</details>
+
 ---
 
 <a id="installation-methods"></a>
