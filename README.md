@@ -42,25 +42,29 @@ An MCP server that connects AI assistants like Claude to LinkedIn through your o
 
 | Tool | Description |
 |------|-------------|
-| `get_person_profile` | Get profile info with explicit section selection (experience, education, interests, honors, languages, certifications, skills, projects, contact_info, posts) |
-| `get_my_profile` | Get the authenticated user's own LinkedIn profile (same sections as get_person_profile) |
-| `connect_with_person` | Send a connection request or accept an incoming one, with optional note |
-| `get_sidebar_profiles` | Extract profile URLs from sidebar recommendation sections ("More profiles for you", "Explore premium profiles", "People you may know") on a profile page |
-| `get_inbox` | List recent conversations from the LinkedIn messaging inbox |
-| `get_conversation` | Read a specific messaging conversation by username or thread ID |
+| `get_person_profile` | Read selected sections of a person's profile |
+| `get_my_profile` | Read selected sections of your own profile |
+| `connect_with_person` | Send or accept a connection request, optionally with a note |
+| `get_sidebar_profiles` | Find recommended profile links in a person's sidebar |
+| `get_inbox` | List recent messaging conversations |
+| `get_conversation` | Read a conversation by username or thread ID |
 | `search_conversations` | Search messages by keyword |
-| `send_message` | Compose/send a new message to a LinkedIn user (requires confirmation; profile-based targeting may open a separate DM instead of replying in an existing thread — see #483) |
-| `get_company_profile` | Extract company information with explicit section selection (posts, jobs); about-section references may include a `company_urn` entry carrying the numeric id used by LinkedIn's people-search `currentCompany` URL facet |
-| `get_company_posts` | Get recent posts from a company's LinkedIn feed |
-| `search_companies` | Search for companies on LinkedIn by keywords |
-| `get_company_employees` | List employees at a company from the /people/ page, with optional keyword filter |
-| `search_jobs` | Search for jobs with keywords and location filters |
-| `get_saved_jobs` | List job postings saved by the authenticated user |
-| `search_people` | Search for people by keywords, location, connection degree (1st/2nd/3rd), and current company |
-| `get_job_details` | Get detailed information about a specific job posting |
-| `get_feed` | Get recent posts from the authenticated user's home feed |
-| `search_posts` | Search posts/content globally by keyword (the "Posts" tab) with an optional recency filter (past-24h/past-week/past-month); returns unordered candidate permalinks in references |
-| `close_session` | Close browser session and clean up resources |
+| `send_message` | Send a message to a LinkedIn user after confirmation |
+| `get_company_profile` | Read selected sections of a company profile |
+| `get_company_posts` | Read recent posts from a company |
+| `search_companies` | Find companies by keyword |
+| `get_company_employees` | List a company's employees, optionally filtered by keyword |
+| `search_jobs` | Find jobs by keyword and location |
+| `get_saved_jobs` | List jobs you saved |
+| `search_people` | Find people by keyword, location, connection degree or company |
+| `get_job_details` | Read details of a job posting |
+| `get_feed` | Read recent posts from your home feed |
+| `search_posts` | Find posts by keyword, optionally filtered by recency |
+| `close_session` | Close the browser session and release resources |
+
+Profile tools let you select sections such as experience, education, interests, honors, languages, certifications, skills, projects, contact_info and posts. Company profile sections include posts and jobs. About-section references may include a `company_urn` with the numeric ID for LinkedIn's people-search `currentCompany` URL facet.
+
+`send_message` requires confirmation. Targeting a profile may open a separate DM rather than reply in an existing thread; see [#483](https://github.com/stickerdaniel/linkedin-mcp-server/issues/483). `search_posts` searches the Posts tab, supports past-24h, past-week and past-month filters, and returns unordered candidate permalinks in `references`.
 
 <br/>
 <br/>
