@@ -570,9 +570,9 @@ def test_label_workflow_matches_breaking_marker_without_normalizing() -> None:
         (
             "refactor(config)!: Change configuration",
             "breaking-change",
-            "⚠️ Breaking Changes",
+            "Breaking Changes",
         ),
-        ("feat!: Replace the public contract", "breaking-change", "⚠️ Breaking Changes"),
+        ("feat!: Replace the public contract", "breaking-change", "Breaking Changes"),
     ],
 )
 def test_pr_title_label_release_lifecycle(
@@ -678,9 +678,9 @@ def test_release_notes_put_breaking_changes_first() -> None:
 
     assert "breaking-change" not in exclude
     assert categories.startswith(
-        '    - title: "⚠️ Breaking Changes"\n      labels:\n        - breaking-change\n'
+        '    - title: "Breaking Changes"\n      labels:\n        - breaking-change\n'
     )
-    assert _release_category("breaking-change") == "⚠️ Breaking Changes"
+    assert _release_category("breaking-change") == "Breaking Changes"
     assert _release_category("refactoring") is None
 
 
