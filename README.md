@@ -663,6 +663,8 @@ LinkedIn scores the address a session signs in from. Your account's usual IP add
 
 With a paid provider, use a sticky residential session that holds one address (never per-request rotation). A WireGuard full tunnel or Tailscale exit node on your home network works when the server should use your usual home address.
 
+### Setup Help
+
 <details>
 <summary><b>🔧 Configuration</b></summary>
 
