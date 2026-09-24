@@ -251,6 +251,71 @@ def test_modified_fragment_that_is_not_a_text_file_is_rejected(
     assert _errors(result) == [_not_a_text_file("changelog.d/1076.fix.md")]
 
 
+# How the PR files API shows a gitlink (submodule), from pytorch/pytorch
+# pull requests 17184 (added) and 192366 (modified).
+_ADDED_GITLINK = (
+    "@@ -0,0 +1 @@\n+Subproject commit 58cbf0ee1310fc42df6e8e244db023d4da052e4d"
+)
+_MODIFIED_GITLINK = (
+    "@@ -1 +1 @@\n"
+    "-Subproject commit d03662f0984f652b60e7ddce53d3868002275197\n"
+    "+Subproject commit 97bf890db679505a14dfe547a5e77bb2bd05dc90"
+)
+
+
+@pytest.mark.parametrize(
+    "patch", [_ADDED_GITLINK, _MODIFIED_GITLINK], ids=["added", "modified"]
+)
+def test_gitlink_named_as_own_fragment_is_rejected(tmp_path: Path, patch: str) -> None:
+    result = _run(
+        tmp_path,
+        "feat: Add company search",
+        [_CODE, _file("changelog.d/1234.feat.md", patch=patch)],
+    )
+
+    assert result.returncode == 1
+    assert _errors(result) == [_not_a_text_file("changelog.d/1234.feat.md")]
+
+
+def test_gitlink_fragment_fails_an_exempt_title(tmp_path: Path) -> None:
+    result = _run(
+        tmp_path,
+        "docs: Explain setup",
+        [_file("changelog.d/1076.fix.md", "modified", _MODIFIED_GITLINK)],
+    )
+
+    assert result.returncode == 1
+    assert _errors(result) == [_not_a_text_file("changelog.d/1076.fix.md")]
+
+
+_DIRECTORY_LINK = f"@@ -0,0 +1 @@\n+notes\n{_NO_NEWLINE}"
+_REMOVED_README = _file("changelog.d/README.md", "removed", "@@ -1 +0,0 @@\n-Old.")
+
+
+def test_fragment_directory_replaced_by_a_link_fails(tmp_path: Path) -> None:
+    result = _run(
+        tmp_path,
+        "docs: Explain setup",
+        [_file("changelog.d", patch=_DIRECTORY_LINK), _REMOVED_README],
+    )
+
+    assert result.returncode == 1
+    assert _errors(result) == [
+        "The fragment directory changelog.d must stay a directory."
+    ]
+
+
+def test_removed_fragment_directory_entry_passes(tmp_path: Path) -> None:
+    result = _run(
+        tmp_path,
+        "docs: Explain setup",
+        [_file("changelog.d", "removed", "@@ -1 +0,0 @@\n-notes")],
+    )
+
+    assert result.returncode == 0, result.stdout
+    assert result.stdout == ""
+
+
 @pytest.mark.parametrize(
     "name",
     [
@@ -430,10 +495,10 @@ def test_unsafe_file_name_is_not_echoed(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("pr", "pages"),
     [
-        ({"title": "docs: Explain setup"}, [[]]),
-        ({"number": "1234", "title": "docs: Explain setup"}, [[]]),
-        ({"number": True, "title": "docs: Explain setup"}, [[]]),
-        ({"number": _NUMBER, "title": None}, [[]]),
+        ({"title": "docs: Explain setup", "changed_files": 0}, [[]]),
+        ({**_pr(0), "number": "1234"}, [[]]),
+        ({**_pr(0), "number": True}, [[]]),
+        ({**_pr(0), "title": None}, [[]]),
         ({"number": _NUMBER, "title": "docs: Explain setup"}, [[]]),
         (_pr(-1), [[]]),
         (_pr(True), [[]]),

@@ -37,6 +37,7 @@ INCOMPLETE_FILES = (
 )
 
 _NO_EOF_NEWLINE = "\\ No newline at end of file"
+_GITLINK = re.compile(r"\+Subproject commit [0-9a-f]{40}")
 
 # Echo a path only when it cannot carry a newline, a workflow command or a
 # bidirectional control character; the name comes from the pull request.
@@ -124,15 +125,19 @@ def _inventory_error(changed_files: int, files: list[dict[str, Any]]) -> str | N
 def _is_text_file(entry: dict[str, Any]) -> bool:
     """Whether the new side is a text file that ends in a newline.
 
-    The files API carries no file mode and renders an added symlink as its
-    target path without a final newline. towncrier would follow the link, so
-    that shape is refused. A marker after a removed line concerns the old
-    side only.
+    The files API carries no file mode, so both non-regular kinds are told
+    apart by their patch. A symlink shows its target without a final
+    newline, and towncrier would follow it. A gitlink (submodule) shows one
+    added ``Subproject commit`` line, and towncrier cannot read it. A marker
+    after a removed line concerns the old side only.
     """
     patch = entry.get("patch")
     if patch is None:
         return False
     lines = patch.splitlines()
+    added = [line for line in lines if line.startswith("+")]
+    if len(added) == 1 and _GITLINK.fullmatch(added[0]):
+        return False
     if len(lines) >= 2 and lines[-1] == _NO_EOF_NEWLINE:
         return not lines[-2].startswith(("+", " "))
     return True
@@ -174,6 +179,14 @@ def check(
     name_pattern = re.compile(
         r"[1-9][0-9]*\.(?:" + "|".join(re.escape(name) for name in types) + r")\.md"
     )
+
+    # The loop below only sees paths inside the directory, so a file, link
+    # or submodule replacing the directory itself would pass it unseen.
+    if any(
+        entry["filename"] == directory and entry["status"] != "removed"
+        for entry in files
+    ):
+        errors.append(f"The fragment directory {directory} must stay a directory.")
 
     # Every surviving fragment is checked, whatever the title says, so a
     # docs PR cannot slip a malformed file past the release build. Removals

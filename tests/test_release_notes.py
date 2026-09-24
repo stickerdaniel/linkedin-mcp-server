@@ -319,11 +319,11 @@ def _run_compose_step(
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
     """Run the workflow's own compose step in a repo that just bumped 4.26.0."""
     step = _step(_workflow()["jobs"]["check-version-bump"], "Compose release notes")
+    assert step["env"]["VERSION"] == _NEW_VERSION_OUTPUT
     step_env = {
         key: value.replace(_NEW_VERSION_OUTPUT, "4.26.0")
         for key, value in step["env"].items()
     }
-    assert "VERSION" in step_env
     assert not any("${{" in value for value in step_env.values()), step_env
 
     # The step calls plain python3; point it at this interpreter.
