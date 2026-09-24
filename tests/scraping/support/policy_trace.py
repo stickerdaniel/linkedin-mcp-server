@@ -618,7 +618,7 @@ def semantic_program_id(program: str) -> str:
         ("return {ids: ids, scoped", "job_ids"),
         ("promoted.push(id)", "job_promoted_ids"),
         ("Object.values(signals).some(Boolean)", "job_apply_ready"),
-        ("descriptionHeading, closedLines", "job_apply_signals"),
+        ("descriptionHeadings, closedLines", "job_apply_signals"),
         ("const heading = document.querySelector('main h1')", "profile_display_name"),
         ("main li label[aria-label]", "conversation_thread_refs"),
         ("isScrollable", "scroll_main_region"),

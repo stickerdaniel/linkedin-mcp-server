@@ -2,8 +2,12 @@
 
 import re
 
+from pathlib import Path
+
+from linkedin_mcp_server.scraping import text as text_module
 from linkedin_mcp_server.scraping.text import (
     DETAIL_CAPTURE_EN_US,
+    JOB_APPLY_EN_US,
     JOB_POSTING_EN_US,
     JOB_SEARCH_EN_US,
     JobPostingTextTable,
@@ -105,6 +109,32 @@ class TestJobPostingText:
         assert not JOB_POSTING_EN_US.has_description("Read About the job below")
         assert not JOB_POSTING_EN_US.has_description("Engineer\nAcme\nApply")
         assert not JOB_POSTING_EN_US.has_description("")
+
+
+class TestOneDescriptionHeadingTable:
+    """The heading that opens a description has one owner.
+
+    Two tables need it: `JobPostingTextTable` waits for it to know the
+    description has loaded, and `JobApplyTextTable` reads posting state above
+    it. They have to agree — a wait that succeeds on a heading the state read
+    does not know leaves every posting reading as `unknown`.
+    """
+
+    def test_the_apply_table_reads_the_posting_table_headings(self):
+        assert JOB_APPLY_EN_US.description_headings == (
+            JOB_POSTING_EN_US.description_headings
+        )
+
+    def test_the_heading_is_written_once(self):
+        """An equal copy passes every other assertion here and still drifts.
+
+        Identity cannot catch it: CPython gives two equal tuple constants in
+        one module the same object, so `is` holds for a re-typed literal too.
+        The source is what distinguishes reading the other table from writing
+        the words again.
+        """
+        source = Path(text_module.__file__).read_text(encoding="utf-8")
+        assert source.count('"About the job"') == 1
 
 
 class TestStripLinkedInNoise:
