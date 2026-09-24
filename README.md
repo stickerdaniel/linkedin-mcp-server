@@ -288,7 +288,10 @@ while a container is running.
 2. Click the downloaded `.mcpb` file to install it into Claude Desktop
 3. Call any LinkedIn tool
 
-On startup, the MCP Bundle starts preparing the shared Patchright Chromium browser cache in the background. If you call a tool too early, Claude will surface a setup-in-progress error. On the first tool call that needs authentication, the server opens a LinkedIn login browser window and asks you to retry after sign-in.
+On startup, the MCP Bundle prepares the shared Patchright Chromium browser cache in the background. On the first tool call that needs authentication, the server opens a LinkedIn login browser window.
+
+> [!NOTE]
+> Early tool calls may return a setup/authentication-in-progress error until browser setup or login finishes. Retry the tool call once the browser download or sign-in completes.
 
 ### Setup Help
 
