@@ -485,13 +485,15 @@ def _write_probe_summary(status: str, cleanup: str) -> None:
         )
 
 
-def _assert_probe_reaped_every_process(report: dict[str, object]) -> None:
+def _assert_probe_reaped_every_process(
+    report: dict[str, object], *, expected_fds: int = 2
+) -> None:
     assert report["spawned"] is True
     assert report["cleanup"] == "spawned and fully cleaned"
     assert report["leader"] != report["member"]
     assert report["reaped_leader"] is True
     assert report["reaped_member"] is True
-    assert report["closed_fds"] == 2
+    assert report["closed_fds"] == expected_fds
 
 
 def test_retained_leader_pidfd_signals_its_group_after_reaping(tmp_path: Path):
@@ -502,7 +504,11 @@ def test_retained_leader_pidfd_signals_its_group_after_reaping(tmp_path: Path):
         cleanup = cast(str, report["cleanup"])
         if report["status"] == "skip":
             if report["spawned"] is True:
-                _assert_probe_reaped_every_process(report)
+                if cast(str, report["reason"]).startswith("pidfd_open member:"):
+                    assert report["leader_cleanup_confirmed"] is True
+                    _assert_probe_reaped_every_process(report, expected_fds=1)
+                else:
+                    _assert_probe_reaped_every_process(report)
             else:
                 assert report["spawned"] is False
                 assert cleanup == "not spawned"
@@ -512,7 +518,69 @@ def test_retained_leader_pidfd_signals_its_group_after_reaping(tmp_path: Path):
         assert report["status"] == "passed"
         status = "SUPPORTED_OBSERVATION"
     finally:
-        _write_probe_summary(status, cleanup)
+        primary_error = sys.exc_info()[0]
+        try:
+            _write_probe_summary(status, cleanup)
+        except Exception:
+            if primary_error is not None and not issubclass(
+                primary_error, pytest.skip.Exception
+            ):
+                print("pidfd evidence summary unavailable", file=sys.stderr)
+            else:
+                raise RuntimeError("pidfd evidence summary unavailable") from None
+
+
+def test_member_open_refusal_reports_unsupported_after_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    summary = tmp_path / "summary"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    monkeypatch.setenv("LINKEDIN_MCP_TEST_PIDFD_MEMBER_OPEN_FAULT", "EPERM")
+
+    with pytest.raises(pytest.skip.Exception, match="pidfd_open member"):
+        test_retained_leader_pidfd_signals_its_group_after_reaping(tmp_path)
+
+    evidence = summary.read_text()
+    assert "status=UNSUPPORTED" in evidence
+    assert "cleanup=spawned and fully cleaned" in evidence
+
+
+def test_summary_failure_preserves_primary_probe_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    def fail_probe(_tmp_path: Path) -> dict[str, object]:
+        raise RuntimeError("probe crashed")
+
+    def fail_summary(_status: str, _cleanup: str) -> None:
+        raise OSError("private summary path")
+
+    monkeypatch.setattr(sys.modules[__name__], "_run_probe", fail_probe)
+    monkeypatch.setattr(sys.modules[__name__], "_write_probe_summary", fail_summary)
+
+    with pytest.raises(RuntimeError, match="^probe crashed$"):
+        test_retained_leader_pidfd_signals_its_group_after_reaping(tmp_path)
+    diagnostic = capsys.readouterr().err
+    assert "pidfd evidence summary unavailable" in diagnostic
+    assert "private summary path" not in diagnostic
+
+
+def test_summary_failure_rejects_successful_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "missing" / "summary"))
+
+    with pytest.raises(RuntimeError, match="^pidfd evidence summary unavailable$"):
+        test_retained_leader_pidfd_signals_its_group_after_reaping(tmp_path)
+
+
+def test_summary_failure_rejects_unsupported_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("LINKEDIN_MCP_TEST_PIDFD_NO_API", "1")
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "missing" / "summary"))
+
+    with pytest.raises(RuntimeError, match="^pidfd evidence summary unavailable$"):
+        test_retained_leader_pidfd_signals_its_group_after_reaping(tmp_path)
 
 
 @pytest.mark.parametrize("preflight", ["no_api", "ENOSYS", "EPERM"])
