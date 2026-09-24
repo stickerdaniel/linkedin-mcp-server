@@ -67,13 +67,15 @@
           "No longer accepting applications",
           "Not currently accepting applications"
         ],
-        "descriptionHeading": "About the job",
+        "descriptionHeadings": [
+          "About the job"
+        ],
         "externalLabel": "Apply"
       },
       "call": "get_job_apply_url",
       "kind": "wait_for_function",
       "operation": "job_apply_ready",
-      "program_digest": "8a8a6156fcb5",
+      "program_digest": "9bc185b7a908",
       "timeout_ms": 10000.0
     },
     {
@@ -84,13 +86,15 @@
           "No longer accepting applications",
           "Not currently accepting applications"
         ],
-        "descriptionHeading": "About the job",
+        "descriptionHeadings": [
+          "About the job"
+        ],
         "externalLabel": "Apply"
       },
       "call": "get_job_apply_url",
       "kind": "evaluate",
       "operation": "job_apply_signals",
-      "program_digest": "5065d4704b3b"
+      "program_digest": "df10af2cb5cf"
     }
   ],
   "result": {

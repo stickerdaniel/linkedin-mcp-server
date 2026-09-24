@@ -104,10 +104,13 @@ class JobApplyTextTable:
     # Apply, an anchor into the posting's own `/apply/` route that needs no
     # entry here.
     external_apply_label: str
-    # The heading that opens the description. Posting-state lines are read
-    # above it only, so the same words in the description or on the "More
-    # jobs" cards below it cannot pass for this posting's state.
-    description_heading: str
+    # The headings that open the description. Posting-state lines are read
+    # above the earliest of them only, so the same words in the description or
+    # on the "More jobs" cards below it cannot pass for this posting's state.
+    # Taken from `JobPostingTextTable` rather than written again: the same
+    # heading decides whether a description has loaded, and two copies of it
+    # can drift apart while both keep passing their own tests.
+    description_headings: tuple[str, ...]
     # Whole lines a posting shows once it stops taking applications.
     closed_lines: tuple[str, ...]
     # A line a posting shows once this account has applied. Anchored at both
@@ -118,7 +121,7 @@ class JobApplyTextTable:
 _JOB_APPLY_TEXT: dict[str, JobApplyTextTable] = {
     "en-US": JobApplyTextTable(
         external_apply_label="Apply",
-        description_heading="About the job",
+        description_headings=JOB_POSTING_EN_US.description_headings,
         closed_lines=(
             "No longer accepting applications",
             "Not currently accepting applications",

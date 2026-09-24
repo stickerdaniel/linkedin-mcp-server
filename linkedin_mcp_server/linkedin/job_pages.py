@@ -160,7 +160,7 @@ _EXTERNAL_APPLY_JS = r"""
     const walk = document.createTreeWalker(main, NodeFilter.SHOW_TEXT);
     let heading = null;
     while (walk.nextNode()) {
-        if ((walk.currentNode.nodeValue || '').trim() === descriptionHeading) {
+        if (descriptionHeadings.includes((walk.currentNode.nodeValue || '').trim())) {
             heading = walk.currentNode;
             break;
         }
@@ -180,7 +180,7 @@ EXTERNAL_APPLY_MARK = "data-mcp-external-apply"
 
 MARK_EXTERNAL_APPLY_JS = (
     """(opts) => {
-    const {externalLabel, descriptionHeading} = opts;
+    const {externalLabel, descriptionHeadings} = opts;
     const main = document.querySelector('main');
     if (!main) return false;
 """
@@ -201,7 +201,7 @@ MARK_EXTERNAL_APPLY_JS = (
 # control a `<button>` with no href whose text is the label.
 APPLY_SIGNALS_JS = (
     r"""(opts) => {
-    const {applyPath, externalLabel, descriptionHeading, closedLines, appliedPattern} = opts;
+    const {applyPath, externalLabel, descriptionHeadings, closedLines, appliedPattern} = opts;
     const main = document.querySelector('main');
     if (!main) return null;
     const pathOf = (anchor) => {
@@ -214,7 +214,7 @@ APPLY_SIGNALS_JS = (
 """
     + _EXTERNAL_APPLY_JS
     + r"""    const lines = (main.innerText || '').split('\n').map((line) => line.trim());
-    const end = lines.indexOf(descriptionHeading);
+    const end = lines.findIndex((line) => descriptionHeadings.includes(line));
     const top = end === -1 ? [] : lines.slice(0, end);
     const applied = new RegExp(appliedPattern);
     return {
@@ -398,7 +398,7 @@ class JobPageReader:
         opts = {
             "applyPath": f"/jobs/view/{job_id}/apply",
             "externalLabel": text.external_apply_label,
-            "descriptionHeading": text.description_heading,
+            "descriptionHeadings": list(text.description_headings),
             "closedLines": list(text.closed_lines),
             "appliedPattern": text.applied_pattern.pattern,
         }
@@ -471,7 +471,7 @@ class JobPageReader:
                 MARK_EXTERNAL_APPLY_JS,
                 {
                     "externalLabel": text.external_apply_label,
-                    "descriptionHeading": text.description_heading,
+                    "descriptionHeadings": list(text.description_headings),
                 },
             )
             if not marked:
