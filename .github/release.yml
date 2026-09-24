@@ -12,17 +12,17 @@ changelog:
     authors:
       - renovate[bot]
   categories:
-    - title: "⚠️ Breaking Changes"
+    - title: "Breaking Changes"
       labels:
         - breaking-change
-    - title: "🚀 Features"
+    - title: "Features"
       labels:
         - enhancement
         - feature
-    - title: "🐛 Bug Fixes"
+    - title: "Bug Fixes"
       labels:
         - bug
         - fix
-    - title: "📖 Other Changes"
+    - title: "Other Changes"
       labels:
         - "*"

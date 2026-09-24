@@ -501,6 +501,27 @@ jobs:
         with:
           name: github-release-assets
 
+      # GitHub places a supplied body above the notes it generates, which put
+      # the install steps before the changes. Generating them here lets the
+      # changes lead and the install steps follow, above the changelog link.
+      - name: Compose release notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+            -f tag_name="v$VERSION" --jq .body > CHANGES.md
+          awk -v install=RELEASE_NOTES.md '
+            function emit(line) {
+              while ((getline line < install) > 0) print line
+              print ""
+              done = 1
+            }
+            /^\*\*Full Changelog\*\*/ && !done { emit() }
+            { print }
+            END { if (!done) { print ""; emit() } }
+          ' CHANGES.md > RELEASE_BODY.md
+          grep -q "^## Install or update" RELEASE_BODY.md
+
       - name: Create GitHub Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -509,11 +530,11 @@ jobs:
           tag_name: v${{ env.VERSION }}
           files: |
             *.mcpb
-          generate_release_notes: true
+          generate_release_notes: false
           draft: false
           prerelease: false
           name: "v${{ env.VERSION }}"
-          body_path: RELEASE_NOTES.md
+          body_path: RELEASE_BODY.md
 
       - name: Summary
         run: |
