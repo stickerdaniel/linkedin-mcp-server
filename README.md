@@ -50,7 +50,7 @@ An MCP server that connects AI assistants like Claude to LinkedIn through your o
 | `get_conversation` | Read a messaging conversation by the other person's username or its thread ID. |
 | `search_conversations` | Search your LinkedIn messages by keyword to find matching conversations. |
 | `send_message` | Send after confirmation. Targeting a profile may start a separate DM instead of replying in a thread ([#483](https://github.com/stickerdaniel/linkedin-mcp-server/issues/483)). |
-| `get_company_profile` | Read selected company sections, including posts and jobs; `company_urn` in about references identifies the `currentCompany` search facet. |
+| `get_company_profile` | Read posts and jobs; about references can include a `company_urn` for the `currentCompany` search facet. |
 | `get_company_posts` | Read recent posts published on a company's LinkedIn page. |
 | `search_companies` | Find LinkedIn company profiles matching a keyword search. |
 | `get_company_employees` | List employees of a company, optionally narrowing the list by keyword. |
