@@ -476,13 +476,15 @@ def _write_probe_summary(status: str, cleanup: str) -> None:
     runner = os.environ.get("ImageOS", platform.system())
     if not re.fullmatch(r"[A-Za-z0-9._-]+", runner):
         runner = platform.system()
+    line = (
+        f"pidfd L1 | source={source} | runner={runner} "
+        f"| kernel={platform.release()} | arch={platform.machine()} "
+        f"| Python={platform.python_version()} | Patchright={version('patchright')} "
+        f"| status={status} | cleanup={cleanup}\n"
+    )
     with Path(summary).open("a", encoding="utf-8") as output:
-        output.write(
-            f"pidfd L1 | source={source} | runner={runner} "
-            f"| kernel={platform.release()} | arch={platform.machine()} "
-            f"| Python={platform.python_version()} | Patchright={version('patchright')} "
-            f"| status={status} | cleanup={cleanup}\n"
-        )
+        output.write(line)
+    print(line, end="")
 
 
 def _assert_probe_reaped_every_process(
@@ -528,6 +530,22 @@ def test_retained_leader_pidfd_signals_its_group_after_reaping(tmp_path: Path):
                 print("pidfd evidence summary unavailable", file=sys.stderr)
             else:
                 raise RuntimeError("pidfd evidence summary unavailable") from None
+
+
+def test_pidfd_evidence_log_matches_step_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+):
+    summary = tmp_path / "summary"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+
+    test_retained_leader_pidfd_signals_its_group_after_reaping(tmp_path)
+
+    evidence = summary.read_text()
+    assert capsys.readouterr().out == evidence
+    assert "status=SUPPORTED_OBSERVATION" in evidence
+    assert "cleanup=spawned and fully cleaned" in evidence
 
 
 def test_member_open_refusal_reports_unsupported_after_cleanup(
