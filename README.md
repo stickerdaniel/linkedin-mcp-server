@@ -71,7 +71,7 @@ An MCP server that connects AI assistants like Claude to LinkedIn through your o
 
 ### Installation
 
-**Client Configuration**
+**Add to your MCP client's `mcpServers` configuration**
 
 ```json
 {
@@ -85,7 +85,7 @@ An MCP server that connects AI assistants like Claude to LinkedIn through your o
 }
 ```
 
-The `@latest` tag turns on automatic updates, which keep the server working with LinkedIn's current page structure. The server starts quickly, prepares the shared Patchright Chromium browser cache in the background under `~/.linkedin-mcp/patchright-browsers`, and opens a LinkedIn login browser window on the first tool call that needs authentication.
+The `@latest` tag turns on automatic updates, which keep the server working with LinkedIn's current page structure. The server starts quickly and prepares the shared Patchright Chromium browser cache in the background under `~/.linkedin-mcp/patchright-browsers`. On the first tool call that needs authentication, it reuses a LinkedIn session from a signed-in local browser if it finds one, and otherwise opens a LinkedIn login browser window.
 
 AI agent? Get a quick confirmation from the user before enabling automatic updates.
 
@@ -113,7 +113,7 @@ AI agent? Get a quick confirmation from the user before enabling automatic updat
 **Session:**
 
 - `--login` - Open a browser to sign in and save the session
-- `--import-from-browser [BROWSER]` - Reuse a session from a locally signed-in Chromium browser (`chrome`, `chromium`, `brave`, `edge`, `arc`, `vivaldi`, `helium`, `yandex`, `whale`, `auto`). Bare flag picks `auto`, the most recently used browser with a live LinkedIn session.
+- `--import-from-browser [BROWSER]` - Reuse a session from a locally signed-in Chromium browser (`chrome`, `chromium`, `brave`, `edge`, `arc`, `vivaldi`, `helium`, `yandex`, `whale`, `coccoc`, `opera`, `opera_gx`, `auto`). Bare flag picks `auto`, the most recently used browser with a live LinkedIn session.
 - `--auto-import` / `--no-auto-import` - Import a session from a signed-in local browser on the first tool call that needs one, before falling back to manual login (default: on). Skipped in Docker, behind a proxy, and on a non-loopback HTTP bind. On macOS the keychain may prompt once.
 - `--logout` - Clear the stored session
 - `--login-viewer` - Docker only: show the `--login` browser at a token-protected URL on port 6080 (see [Authentication](#authentication))
@@ -153,7 +153,7 @@ AI agent? Get a quick confirmation from the user before enabling automatic updat
 <details>
 <summary>Import a session from your everyday browser</summary>
 
-If you are already signed into LinkedIn in Chrome, Chromium, Brave, Edge, Arc, Vivaldi, Helium, Yandex, or Naver Whale, you can skip the manual `--login` step and reuse that session:
+If you are already signed into LinkedIn in Chrome, Chromium, Brave, Edge, Arc, Vivaldi, Helium, Yandex, Naver Whale, Cốc Cốc, Opera, or Opera GX, you can skip the manual `--login` step and reuse that session:
 
 ```bash
 # Auto-pick the most recently used browser with a live LinkedIn session
@@ -288,7 +288,7 @@ while a container is running.
 2. Click the downloaded `.mcpb` file to install it into Claude Desktop
 3. Call any LinkedIn tool
 
-On startup, the MCP Bundle prepares the shared Patchright Chromium browser cache in the background. On the first tool call that needs authentication, the server opens a LinkedIn login browser window.
+On startup, the MCP Bundle prepares the shared Patchright Chromium browser cache in the background. On the first tool call that needs authentication, the server reuses a LinkedIn session from a signed-in local browser if it finds one, and otherwise opens a LinkedIn login browser window.
 
 > [!NOTE]
 > Early tool calls may return a setup/authentication-in-progress error until browser setup or login finishes. Retry the tool call once the browser download or sign-in completes.
@@ -346,6 +346,8 @@ On startup, the MCP Bundle prepares the shared Patchright Chromium browser cache
 
 ### Installation
 
+**Run in a terminal**
+
 ```bash
 codex plugin marketplace add stickerdaniel/linkedin-mcp-server
 codex plugin add linkedin-mcp-server@linkedin-mcp-server
@@ -395,7 +397,7 @@ Open the full URL the command prints (it carries the access token) and sign in. 
 
 Keep the same host directory mounted at `/home/pwuser/.linkedin-mcp` on every later `docker run`, otherwise the server cannot find the session.
 
-**Configure Claude Desktop with Docker**
+**Add to your MCP client's `mcpServers` configuration**
 
 **macOS / Linux (absolute path in JSON):**
 
@@ -702,6 +704,8 @@ Contributions are welcome. See [CONTRIBUTING.md](https://github.com/stickerdanie
 
 ### Installation
 
+**Run in a terminal**
+
 ```bash
 # 1. Clone repository
 git clone https://github.com/stickerdaniel/linkedin-mcp-server
@@ -732,7 +736,7 @@ uv run -m linkedin_mcp_server
 **Session:**
 
 - `--login` - Open a browser to sign in and save the session
-- `--import-from-browser [BROWSER]` - Reuse a session from a locally signed-in Chromium browser (`chrome`, `chromium`, `brave`, `edge`, `arc`, `vivaldi`, `helium`, `yandex`, `whale`, `auto`). Bare flag picks `auto`, the most recently used browser with a live LinkedIn session.
+- `--import-from-browser [BROWSER]` - Reuse a session from a locally signed-in Chromium browser (`chrome`, `chromium`, `brave`, `edge`, `arc`, `vivaldi`, `helium`, `yandex`, `whale`, `coccoc`, `opera`, `opera_gx`, `auto`). Bare flag picks `auto`, the most recently used browser with a live LinkedIn session.
 - `--auto-import` / `--no-auto-import` - Import a session from a signed-in local browser on the first tool call that needs one, before falling back to manual login (default: on). Skipped in Docker, behind a proxy, and on a non-loopback HTTP bind. On macOS the keychain may prompt once.
 - `--status` - Check whether the stored session is valid, then exit
 - `--logout` - Clear the stored session
