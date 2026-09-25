@@ -342,13 +342,16 @@ On startup, the MCP Bundle prepares the shared Patchright Chromium browser cache
 
 ## Codex Plugin
 
-This repository includes an opt-in Codex plugin that bundles the MCP server. Add the repository marketplace and install the
-plugin:
+**Prerequisites:** [Codex](https://github.com/openai/codex) and [uv](https://docs.astral.sh/uv/getting-started/installation/).
+
+### Installation
 
 ```bash
 codex plugin marketplace add stickerdaniel/linkedin-mcp-server
 codex plugin add linkedin-mcp-server@linkedin-mcp-server
 ```
+
+The plugin starts the server through `uvx`, pinned to the release it shipped with. On the first tool call that needs authentication, the server opens a LinkedIn login browser window.
 
 <br/>
 <br/>
