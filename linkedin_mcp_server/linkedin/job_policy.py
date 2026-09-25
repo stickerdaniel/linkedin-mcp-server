@@ -552,6 +552,17 @@ EASY_APPLY_SUBMIT_UNCONFIRMED = (
 )
 
 
+# The button-shaped Easy Apply (measured on 2026-09-25) opens a redesigned
+# dialog: a native `<dialog>` in the document rather than one inside a shadow
+# root, with no data attributes on its Next, Submit or Discard buttons. The form
+# programs read only the dialog the `/apply/` anchor opens, so they refuse
+# before opening this one rather than leave a draft they cannot find to discard.
+EASY_APPLY_BUTTON_UNREAD = (
+    "This posting's Easy Apply opens LinkedIn's redesigned dialog, which the "
+    "form tools cannot read yet. Nothing was opened."
+)
+
+
 EASY_APPLY_DRAFT_LEFT = (
     "The Easy Apply dialog could not be closed and its draft discarded, so "
     "LinkedIn may keep a saved application for this posting."
