@@ -1374,6 +1374,27 @@ class TestSendConfirmationDom:
         assert result["status"] == "send_unconfirmed"
         assert result["retry_safe"] is False
 
+    @pytest.mark.parametrize("confirm_send", [False, True])
+    async def test_enter_to_send_preference_is_reported(self, dom_page, confirm_send):
+        html = compose_page(
+            "document.getElementById('toggle').addEventListener('click', () => {"
+            "  document.body.dataset.clicked = 'true'; });"
+        ).replace(
+            '<button id="send" type="submit">Send</button>',
+            '<button id="toggle" type="button" class="msg-form__send-toggle">'
+            "Open send options</button>",
+        )
+
+        result = await send(dom_page, html, confirm_send=confirm_send)
+
+        assert result["status"] == "enter_to_send_enabled"
+        assert "Click Send to send" in result["message"]
+        assert result["recipient_selected"] is True
+        assert result["sent"] is False
+        assert result["retry_safe"] is True
+        assert await dom_page.evaluate("document.body.dataset.clicked") is None
+        assert await dom_page.locator("#composer").inner_text() == ""
+
     async def test_editor_replacement_after_submit_is_not_confirmed(self, dom_page):
         result = await send(dom_page, compose_page(REPLACED_EDITOR_SEND_JS))
 
