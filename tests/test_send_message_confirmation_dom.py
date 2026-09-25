@@ -1163,6 +1163,30 @@ class TestSendConfirmationDom:
         assert result["status"] == "send_unconfirmed"
         assert result["retry_safe"] is False
 
+    async def test_send_started_in_an_open_thread_route_is_confirmed(self, dom_page):
+        html = compose_page(
+            "history.replaceState({}, '', '/messaging/thread/2-open==/');"
+            + SERVER_REPLACEMENT_SEND_JS
+        )
+
+        result = await send(dom_page, html)
+
+        assert result["status"] == "sent"
+        assert result["sent"] is True
+
+    async def test_send_moving_to_another_thread_is_not_confirmed(self, dom_page):
+        html = compose_page(
+            "history.replaceState({}, '', '/messaging/thread/2-open==/');"
+            + PANE_REMOUNT_SEND_JS
+            + "remountTo('/messaging/thread/2-other==/', "
+            "['urn:li:msg_message:(self,server-first)']);"
+        )
+
+        result = await send(dom_page, html)
+
+        assert result["status"] == "send_unconfirmed"
+        assert result["retry_safe"] is False
+
     async def test_older_history_loaded_above_is_not_confirmed(self, dom_page):
         result = await send(dom_page, compose_page(OLDER_HISTORY_SEND_JS))
 
