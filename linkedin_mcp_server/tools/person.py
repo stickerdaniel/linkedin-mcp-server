@@ -98,9 +98,13 @@ def register_person_tools(
                 other sections, request heavy sections in a separate call.
 
         Returns:
-            Dict with url, sections (name -> raw text), and optional references.
+            Dict with url, sections (name -> raw text), and optional references and section_errors.
             Sections may be absent if extraction yielded no content for that page.
-            Includes unknown_sections list when unrecognised names are passed.
+            contact_info is read only from an accepted contact-overlay root. If no such root
+            is found, the section is omitted and section_errors explains the failure;
+            underlying profile text and links are never substituted. Existing suspected
+            rate-limit retry and stop behavior is retained.
+            Includes unknown_sections when unrecognised names are passed.
             The LLM should parse the raw text in each section.
         """
         try:
@@ -395,8 +399,14 @@ def register_person_tools(
             max_scrolls: Maximum pagination attempts per section (same as get_person_profile).
 
         Returns:
-            Dict with url, sections (name -> raw text), and optional references.
+            Dict with url, sections (name -> raw text), and optional references and section_errors.
             The url field reflects the resolved profile URL, revealing the real username.
+            Sections may be absent if extraction yielded no content for that page.
+            contact_info is read only from an accepted contact-overlay root. If no such root
+            is found, the section is omitted and section_errors explains the failure;
+            underlying profile text and links are never substituted. Existing suspected
+            rate-limit retry and stop behavior is retained.
+            Includes unknown_sections when unrecognised names are passed.
         """
         try:
             extractor = extractor or await get_ready_extractor(

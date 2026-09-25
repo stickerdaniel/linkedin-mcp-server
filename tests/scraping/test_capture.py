@@ -1508,11 +1508,12 @@ class TestExtractOverlay:
         "About\nAccessibility\nTalent Solutions"
     )
 
-    async def test_the_dialog_is_read_before_main_and_never_dismissed(self, mock_page):
+    async def test_the_dialog_is_read_and_never_dismissed(self, mock_page):
         """The contact-info overlay *is* the modal.
 
-        Dismissing it would destroy the content before the read, and the
-        fallback to ``main`` only applies once no dialog matched.
+        Dismissing it would destroy the content before the read. Only the two
+        overlay roots are offered, in priority order; ``main`` is the profile
+        underneath and never an overlay root (#1094).
         """
         mock_page.evaluate = AsyncMock(
             return_value={
@@ -1546,7 +1547,7 @@ class TestExtractOverlay:
         await_args = mock_page.evaluate.await_args
         assert await_args is not None
         assert await_args.args[1] == {
-            "selectors": ["dialog[open]", ".artdeco-modal__content", "main"]
+            "selectors": ["dialog[open]", ".artdeco-modal__content"]
         }
 
     async def test_a_noise_only_overlay_is_read_again_after_the_backoff(
@@ -1624,6 +1625,375 @@ class TestExtractOverlay:
         assert result.text == ""
         assert result.error == {"issue_template_path": "/tmp/issue.md"}
         assert diagnostics.call_args.kwargs["context"] == "extract_overlay"
+
+
+OVERLAY_ROOTS: tuple[str, ...] = ("dialog[open]", ".artdeco-modal__content")
+MAIN_ROOT: tuple[str, ...] = ("main",)
+
+
+def _raw_anchor(href: str, text: str) -> dict:
+    """One anchor as the shared root read reports it."""
+    return {
+        "href": href,
+        "text": text,
+        "aria_label": "",
+        "title": "",
+        "heading": "",
+        "in_article": False,
+        "in_nav": False,
+        "in_footer": False,
+    }
+
+
+class _RootReads:
+    """Answer the shared root read per selector list, in call order.
+
+    Keyed on the program and its selectors rather than on the call count: the
+    navigation lifecycle evaluates scripts of its own, and a bare sequence
+    would hand one of those a root read.
+    """
+
+    def __init__(self, answers: dict[tuple[str, ...], list[dict]]):
+        self._answers = {key: list(value) for key, value in answers.items()}
+        self.calls: list[tuple[str, ...]] = []
+
+    async def read(self, script, *args, **kwargs):
+        if "MAX_REFERENCE_ANCHORS" not in script:
+            return None
+        selectors = tuple(args[0]["selectors"])
+        self.calls.append(selectors)
+        return self._answers[selectors].pop(0)
+
+
+class TestMissingOverlayRoot:
+    """No overlay root means no contact content, never the page underneath."""
+
+    OVERLAY_URL = "https://www.linkedin.com/in/testuser/overlay/contact-info/"
+    NOISE_ONLY = TestExtractOverlay.NOISE_ONLY
+    PROFILE_TEXT = "Ada Lovelace\nAnalyst at Engines Ltd\nExperience\nEngines Ltd"
+    PROFILE_ANCHOR = _raw_anchor(
+        "https://www.linkedin.com/in/someone-else/", "Someone else"
+    )
+    MISSING_ROOT = {
+        "error_type": "OverlayRootNotFoundError",
+        "error_message": (
+            "No overlay root (dialog[open] or .artdeco-modal__content) matched "
+            "on https://www.linkedin.com/in/testuser/overlay/contact-info/; no "
+            "underlying-page text or links were returned for contact_info"
+        ),
+    }
+
+    @staticmethod
+    def body(text: str, references: list[dict] | None = None) -> dict:
+        return {"source": "body", "text": text, "references": references or []}
+
+    @staticmethod
+    def root(text: str, references: list[dict] | None = None) -> dict:
+        return {"source": "root", "text": text, "references": references or []}
+
+    @contextmanager
+    def browser_boundaries(self):
+        """Patch the rate-limit read and the backoff; refuse diagnostics.
+
+        A missing root is an expected outcome, so it must never depend on
+        writing an issue note: that write can fail, and its failure would
+        escape the section.
+        """
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.session.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
+                new_callable=AsyncMock,
+            ) as sleep,
+            patch(
+                "linkedin_mcp_server.scraping.capture.build_issue_diagnostics",
+                side_effect=PermissionError("diagnostic directory is unwritable"),
+            ) as diagnostics,
+        ):
+            yield sleep, diagnostics
+
+    async def test_body_content_is_refused_as_a_section_error(self, mock_page, caplog):
+        reads = _RootReads(
+            {
+                OVERLAY_ROOTS: [self.body(self.PROFILE_TEXT, [self.PROFILE_ANCHOR])],
+                MAIN_ROOT: [self.root(self.PROFILE_TEXT, [self.PROFILE_ANCHOR])],
+            }
+        )
+        mock_page.evaluate = AsyncMock(side_effect=reads.read)
+        capture = _capture(mock_page)
+
+        with (
+            self.browser_boundaries() as (sleep, diagnostics),
+            caplog.at_level(logging.WARNING, logger=capture_module.__name__),
+        ):
+            result = await capture._extract_overlay(
+                self.OVERLAY_URL, section_name="contact_info"
+            )
+
+        assert result.text == ""
+        assert result.references == []
+        assert result.error == self.MISSING_ROOT
+        assert reads.calls == [OVERLAY_ROOTS, MAIN_ROOT]
+        assert mock_page.goto.await_count == 1
+        sleep.assert_not_awaited()
+        diagnostics.assert_not_called()
+        warnings = [r for r in caplog.records if r.name == capture_module.__name__]
+        assert len(warnings) == 1
+
+    @pytest.mark.parametrize("body_text", ["", "  \n "], ids=["empty", "blank"])
+    @pytest.mark.parametrize("main_text", ["", "  \n "], ids=["no-main", "blank-main"])
+    async def test_an_empty_body_is_not_an_empty_overlay(
+        self, mock_page, body_text, main_text
+    ):
+        reads = _RootReads(
+            {
+                OVERLAY_ROOTS: [self.body(body_text)],
+                MAIN_ROOT: [self.body(main_text)],
+            }
+        )
+        mock_page.evaluate = AsyncMock(side_effect=reads.read)
+        capture = _capture(mock_page)
+
+        with self.browser_boundaries():
+            result = await capture._extract_overlay(
+                self.OVERLAY_URL, section_name="contact_info"
+            )
+
+        assert result.error == self.MISSING_ROOT
+        assert result.text == ""
+
+    @pytest.mark.parametrize("root_text", ["", "  \n "], ids=["empty", "blank"])
+    async def test_an_empty_accepted_root_is_empty_without_an_error(
+        self, mock_page, root_text
+    ):
+        reads = _RootReads({OVERLAY_ROOTS: [self.root(root_text)]})
+        mock_page.evaluate = AsyncMock(side_effect=reads.read)
+        capture = _capture(mock_page)
+
+        with self.browser_boundaries():
+            result = await capture._extract_overlay(
+                self.OVERLAY_URL, section_name="contact_info"
+            )
+
+        assert result == ExtractedSection(text="", references=[])
+        assert reads.calls == [OVERLAY_ROOTS]
+
+    @pytest.mark.parametrize(
+        "source",
+        [{}, {"source": None}, {"source": "main"}, {"source": "Root"}],
+        ids=["missing", "null", "unexpected", "wrong-case"],
+    )
+    @pytest.mark.parametrize(
+        "text", ["Email\nada@example.com", ""], ids=["content", "empty"]
+    )
+    async def test_an_unknown_source_fails_closed_without_a_second_read(
+        self, mock_page, source, text
+    ):
+        """Only ``root`` authorizes content, and only ``body`` earns the check.
+
+        Anything else is neither a matched overlay nor a confirmed miss, so it
+        is refused before the empty-text branch could call it an empty overlay.
+        """
+        primary = {"text": text, "references": [self.PROFILE_ANCHOR], **source}
+        # The main answer exists only so that a stray heuristic read is caught
+        # by the call assertion rather than by a missing stub.
+        reads = _RootReads(
+            {
+                OVERLAY_ROOTS: [primary],
+                MAIN_ROOT: [self.root(self.PROFILE_TEXT, [self.PROFILE_ANCHOR])],
+            }
+        )
+        mock_page.evaluate = AsyncMock(side_effect=reads.read)
+        capture = _capture(mock_page)
+
+        with self.browser_boundaries():
+            result = await capture._extract_overlay(
+                self.OVERLAY_URL, section_name="contact_info"
+            )
+
+        assert result.text == ""
+        assert result.references == []
+        assert result.error == self.MISSING_ROOT
+        assert reads.calls == [OVERLAY_ROOTS]
+
+    async def test_noise_only_main_under_a_missing_root_is_the_throttle_sentinel(
+        self, mock_page
+    ):
+        """Navigation text ahead of a noise-only ``main`` is the old throttle shape.
+
+        The heuristic used to read ``main`` when no dialog matched. Classifying
+        the whole body instead would see the navigation text and miss it.
+        """
+        page_text = "Home\nMy Network\n" + self.NOISE_ONLY
+        noise_anchor = _raw_anchor("https://www.linkedin.com/in/sidebar/", "Sidebar")
+        reads = _RootReads(
+            {
+                OVERLAY_ROOTS: [self.body(page_text, [noise_anchor])] * 2,
+                MAIN_ROOT: [self.root(self.NOISE_ONLY, [noise_anchor])] * 2,
+            }
+        )
+        mock_page.evaluate = AsyncMock(side_effect=reads.read)
+        capture = _capture(mock_page)
+
+        with self.browser_boundaries() as (sleep, diagnostics):
+            result = await capture._extract_overlay(
+                self.OVERLAY_URL, section_name="contact_info"
+            )
+
+        assert result == ExtractedSection(text=RATE_LIMITED_SECTION_TEXT, references=[])
+        assert reads.calls == [OVERLAY_ROOTS, MAIN_ROOT] * 2
+        assert mock_page.goto.await_count == 2
+        sleep.assert_awaited_once_with(RATE_LIMIT_RETRY_DELAY)
+        diagnostics.assert_not_called()
+
+    async def test_noise_ahead_of_a_substantive_main_is_not_a_throttle(self, mock_page):
+        page_text = self.NOISE_ONLY + "\n" + self.PROFILE_TEXT
+        reads = _RootReads(
+            {
+                # Twice, so a wrongly retried read fails on its assertions.
+                OVERLAY_ROOTS: [self.body(page_text, [self.PROFILE_ANCHOR])] * 2,
+                MAIN_ROOT: [self.root(self.PROFILE_TEXT, [self.PROFILE_ANCHOR])] * 2,
+            }
+        )
+        mock_page.evaluate = AsyncMock(side_effect=reads.read)
+        capture = _capture(mock_page)
+
+        with self.browser_boundaries() as (sleep, _diagnostics):
+            result = await capture._extract_overlay(
+                self.OVERLAY_URL, section_name="contact_info"
+            )
+
+        assert result.error == self.MISSING_ROOT
+        assert result.references == []
+        assert mock_page.goto.await_count == 1
+        sleep.assert_not_awaited()
+
+    async def test_a_throttled_miss_then_a_real_overlay_returns_the_overlay(
+        self, mock_page
+    ):
+        overlay_anchor = _raw_anchor(
+            "https://www.linkedin.com/in/overlay-only/", "Overlay profile"
+        )
+        reads = _RootReads(
+            {
+                OVERLAY_ROOTS: [
+                    self.body(self.NOISE_ONLY),
+                    self.root("Email\nada@example.com", [overlay_anchor]),
+                ],
+                MAIN_ROOT: [self.root(self.NOISE_ONLY, [self.PROFILE_ANCHOR])],
+            }
+        )
+        mock_page.evaluate = AsyncMock(side_effect=reads.read)
+        capture = _capture(mock_page)
+
+        with self.browser_boundaries() as (sleep, _diagnostics):
+            result = await capture._extract_overlay(
+                self.OVERLAY_URL, section_name="contact_info"
+            )
+
+        assert result.text == "Email\nada@example.com"
+        assert [reference["url"] for reference in result.references] == [
+            "/in/overlay-only/"
+        ]
+        assert result.error is None
+        assert mock_page.goto.await_count == 2
+        sleep.assert_awaited_once_with(RATE_LIMIT_RETRY_DELAY)
+
+    async def test_a_throttled_miss_then_an_ordinary_miss_stops_after_one_retry(
+        self, mock_page
+    ):
+        reads = _RootReads(
+            {
+                OVERLAY_ROOTS: [
+                    self.body(self.NOISE_ONLY),
+                    self.body(self.PROFILE_TEXT, [self.PROFILE_ANCHOR]),
+                ],
+                MAIN_ROOT: [
+                    self.root(self.NOISE_ONLY),
+                    self.root(self.PROFILE_TEXT, [self.PROFILE_ANCHOR]),
+                ],
+            }
+        )
+        mock_page.evaluate = AsyncMock(side_effect=reads.read)
+        capture = _capture(mock_page)
+
+        with self.browser_boundaries() as (sleep, diagnostics):
+            result = await capture._extract_overlay(
+                self.OVERLAY_URL, section_name="contact_info"
+            )
+
+        assert result.error == self.MISSING_ROOT
+        assert result.references == []
+        assert mock_page.goto.await_count == 2
+        sleep.assert_awaited_once_with(RATE_LIMIT_RETRY_DELAY)
+        diagnostics.assert_not_called()
+
+    async def test_a_rate_limit_error_still_propagates(self, mock_page):
+        from linkedin_mcp_server.core.exceptions import RateLimitError
+
+        capture = _capture(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.session.detect_rate_limit",
+                new_callable=AsyncMock,
+                side_effect=RateLimitError("Rate limited", suggested_wait_time=30),
+            ),
+            pytest.raises(RateLimitError),
+        ):
+            await capture._extract_overlay(
+                self.OVERLAY_URL, section_name="contact_info"
+            )
+
+    async def test_a_failing_throttle_read_keeps_the_generic_diagnostics(
+        self, mock_page
+    ):
+        async def evaluate(script, *args, **kwargs):
+            if "MAX_REFERENCE_ANCHORS" not in script:
+                return None
+            if args[0]["selectors"] == list(MAIN_ROOT):
+                raise RuntimeError("Execution context was destroyed")
+            return self.body(self.PROFILE_TEXT)
+
+        mock_page.evaluate = AsyncMock(side_effect=evaluate)
+        capture = _capture(mock_page)
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.session.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.capture.build_issue_diagnostics",
+                return_value={"issue_template_path": "/tmp/issue.md"},
+            ) as diagnostics,
+        ):
+            result = await capture._extract_overlay(
+                self.OVERLAY_URL, section_name="contact_info"
+            )
+
+        assert result.text == ""
+        assert result.error == {"issue_template_path": "/tmp/issue.md"}
+        assert diagnostics.call_args.kwargs["context"] == "extract_overlay"
+
+    async def test_cancellation_is_not_turned_into_a_missing_root(self, mock_page):
+        async def evaluate(script, *args, **kwargs):
+            if "MAX_REFERENCE_ANCHORS" not in script:
+                return None
+            raise asyncio.CancelledError
+
+        mock_page.evaluate = AsyncMock(side_effect=evaluate)
+        capture = _capture(mock_page)
+
+        with (
+            self.browser_boundaries(),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await capture._extract_overlay(
+                self.OVERLAY_URL, section_name="contact_info"
+            )
 
 
 class TestCapturePlans:

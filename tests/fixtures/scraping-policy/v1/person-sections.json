@@ -1184,8 +1184,7 @@
       "arg": {
         "selectors": [
           "dialog[open]",
-          ".artdeco-modal__content",
-          "main"
+          ".artdeco-modal__content"
         ]
       },
       "call": "scrape_person",
