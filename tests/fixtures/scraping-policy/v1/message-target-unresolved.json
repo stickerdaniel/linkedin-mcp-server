@@ -82,7 +82,7 @@
       "call": "send_message",
       "kind": "wait_for_function",
       "operation": "profile_message_target_ready",
-      "program_digest": "96d99936369a",
+      "program_digest": "2e8671b9803e",
       "section": "message",
       "timeout_ms": 1000
     },
@@ -90,7 +90,7 @@
       "call": "send_message",
       "kind": "evaluate",
       "operation": "profile_message_target",
-      "program_digest": "33b2fb160e45",
+      "program_digest": "b5aa14192092",
       "section": "message"
     }
   ],
