@@ -936,6 +936,23 @@ class TestCompanyTools:
         assert "pages_visited" not in result
         assert "sections_requested" not in result
 
+    async def test_get_company_posts_passes_max_scrolls(
+        self, mock_context, serve_extractor
+    ):
+        """Verify max_scrolls parameter is forwarded to extract_page."""
+        mock_extractor = _make_mock_extractor({})
+
+        from linkedin_mcp_server.tools.company import register_company_tools
+
+        mcp = FastMCP("test")
+        register_company_tools(mcp)
+
+        serve_extractor(mock_extractor)
+        tool_fn = await get_tool_fn(mcp, "get_company_posts")
+        await tool_fn("testcorp", mock_context, max_scrolls=25)
+
+        assert mock_extractor.extract_page.call_args.kwargs["max_scrolls"] == 25
+
     async def test_get_company_posts_omits_rate_limited_sentinel(
         self, mock_context, serve_extractor
     ):
