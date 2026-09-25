@@ -492,6 +492,7 @@ _MESSAGE_CONFIRMATION_PREPARE_JS = (
         );
         // Kept as an attribute: the readiness check runs in another world,
         // where properties set on elements here are not visible.
+        marker.setAttribute('data-linkedin-mcp-route', window.location.pathname);
         marker.setAttribute('data-linkedin-mcp-baseline', JSON.stringify(
             Array.from(state.baseline)
                 .map(node => (node.getAttribute('data-event-urn') || '').trim())
@@ -537,10 +538,11 @@ _MESSAGE_CONFIRMATION_READY_JS = (
         // exact-text node carrying a server URN that was absent before submit,
         // inside the conversation pane of the one composer the page now shows.
         // That node must be the newest message in the pane, so older history
-        // loaded later cannot stand in for it. A thread route only appears
-        // for the first message of a new thread, whose pane then holds that
-        // one message; a pane with other messages under a thread route is
-        // some other conversation.
+        // loaded later cannot stand in for it. A send that started on a
+        // thread route must stay on that thread. One that started on the
+        // compose route and now sits on a thread route is the first message
+        // of a new thread, whose pane holds that one message; a pane with
+        // other messages there is some other conversation.
         const serverAcknowledged = () => {
             const marker = Array.from(
                 arg.owner?.querySelectorAll('[data-linkedin-mcp-confirmation]') || []
@@ -564,11 +566,14 @@ _MESSAGE_CONFIRMATION_READY_JS = (
             const items = Array.from(
                 scope.querySelectorAll('[data-view-name="message-list-item"]')
             ).filter(visible);
-            if (
-                window.location.pathname.startsWith('/messaging/thread/') &&
-                items.length !== 1
-            ) {
-                return false;
+            const startPath = marker.getAttribute('data-linkedin-mcp-route') || '';
+            const path = window.location.pathname;
+            if (path.startsWith('/messaging/thread/')) {
+                if (startPath.startsWith('/messaging/thread/')) {
+                    if (path !== startPath) return false;
+                } else if (items.length !== 1) {
+                    return false;
+                }
             }
             const acknowledged = items.filter(node => {
                 const urn = (node.getAttribute('data-event-urn') || '').trim();
