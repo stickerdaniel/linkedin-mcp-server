@@ -24,7 +24,7 @@ An MCP server that connects AI assistants like Claude to LinkedIn through your o
   </picture>
 </a>
 
-> Prefer not to run a server? [**Cadenza**](https://cadenza.page) is the hosted LinkedIn MCP server for your agents, on web, desktop, and mobile. Set your own limits on LinkedIn actions and use your Sales Navigator, Recruiter, and InMail right from your agent.
+> Prefer not to run a server? [**Cadenza**](https://cadenza.page) is the hosted LinkedIn MCP server for your agents, on web, desktop, and mobile. Set your own limits on LinkedIn actions and use your Sales Navigator, Recruiter, and InMail.
 
 Use code <strong>FOUNDING20</strong> for 20% off your first year <a href="https://cadenza.page">Try Cadenza →</a>
 
