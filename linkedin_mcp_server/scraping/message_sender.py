@@ -82,22 +82,20 @@ _PROFILE_MESSAGE_TARGET_JS = r"""() => {
     const main = document.querySelector('main');
     if (!main) return {status: 'unresolved'};
 
-    // The top card is the first section that owns a heading. LinkedIn nests it
-    // inside a headingless wrapper section and has moved the name between h1
-    // and h2, so neither its depth nor its heading level is pinned. Sidebar
-    // sections are skipped: they carry other people's Message links and would
-    // be first while the top card is still rendering.
-    const ownHeadings = section => Array.from(
-        section.querySelectorAll('h1, h2, h3')
-    ).filter(heading => visible(heading) && heading.closest('section') === section);
+    // The top card is the first section that wraps no other section. LinkedIn
+    // nests it inside a wrapper section and has moved the name between h1 and
+    // h2, so neither its depth nor its heading level is pinned. It is chosen
+    // before its heading is checked, so a card whose name has not rendered yet
+    // stays unresolved instead of yielding to the next section. Sidebar
+    // sections are skipped: they carry other people's Message links.
     const section = Array.from(main.querySelectorAll('section')).find(
         element =>
             visible(element) &&
             !element.closest('aside') &&
-            ownHeadings(element).length > 0
+            !element.querySelector('section')
     );
     if (!section) return {status: 'unresolved'};
-    const headings = ownHeadings(section);
+    const headings = Array.from(section.querySelectorAll('h1, h2, h3')).filter(visible);
     const visibleComposeAnchors = Array.from(
         section.querySelectorAll('a[href*="/messaging/compose/"]')
     ).filter(anchor => visible(anchor) && anchor.closest('section') === section);
