@@ -282,7 +282,7 @@ while a container is running.
 
 **Prerequisites:** [Claude Desktop](https://claude.ai/download).
 
-**One-click installation** for Claude Desktop users:
+### Installation
 
 1. Download the latest `.mcpb` artifact from [releases](https://github.com/stickerdaniel/linkedin-mcp-server/releases/latest)
 2. Click the downloaded `.mcpb` file to install it into Claude Desktop
