@@ -16,7 +16,7 @@ a page-owning collaborator.
 | Module | Canonical public owners | Source classification |
 | --- | --- | --- |
 | `__init__` | _(no public definitions)_ | `browser-free` |
-| `capture` | `CaptureMode`, `CapturePlan`, `RATE_LIMIT_RETRY_DELAY`, `SectionCapture`, `capture_plan_for_url()` | `page-owning` |
+| `capture` | `CaptureMode`, `CapturePlan`, `OverlayRootNotFoundError`, `RATE_LIMIT_RETRY_DELAY`, `SectionCapture`, `capture_plan_for_url()` | `page-owning` |
 | `company` | `CompanyScraper` | `browser-free` |
 | `connection` | `ActionSignals`, `ConnectionState`, `detect_connection_state()` | `browser-free` |
 | `connection_actions` | `ACTION_SIGNALS_JS`, `CLICK_INCOMING_ACCEPT_JS`, `ConnectionActions`, `OPEN_MORE_BUTTON_JS`, `ReadMainProfile` | `page-owning` |

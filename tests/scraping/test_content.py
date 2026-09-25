@@ -38,7 +38,7 @@ async def test_root_content_filters_empty_href_before_resolution(mock_page):
 
 
 async def test_the_caller_selectors_reach_the_page_unchanged(mock_page):
-    """The overlay read names three roots in priority order.
+    """The overlay read names two accepted roots in priority order.
 
     A read that hard-codes ``main`` would still answer every profile-page
     caller, and only the contact-info overlay would come back as page chrome.
@@ -48,12 +48,10 @@ async def test_the_caller_selectors_reach_the_page_unchanged(mock_page):
     )
     reader = _reader(mock_page)
 
-    await reader._extract_root_content(
-        ["dialog[open]", ".artdeco-modal__content", "main"]
-    )
+    await reader._extract_root_content(["dialog[open]", ".artdeco-modal__content"])
 
     await_args = mock_page.evaluate.await_args
     assert await_args is not None
     assert await_args.args[1] == {
-        "selectors": ["dialog[open]", ".artdeco-modal__content", "main"]
+        "selectors": ["dialog[open]", ".artdeco-modal__content"]
     }
