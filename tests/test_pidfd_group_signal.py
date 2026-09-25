@@ -472,6 +472,24 @@ def _run_probe(
     return cast(dict[str, object], json.loads(result.stdout.splitlines()[-1]))
 
 
+def _run_spawning_probe(
+    tmp_path: Path,
+    fault: str | None = None,
+    **faults: str,
+) -> dict[str, object]:
+    """Run a probe whose injected fault needs the helper processes spawned.
+
+    The probe answers `skip` before spawning anything when this interpreter has
+    no pidfd API or the kernel refuses the preflight, and that report carries
+    none of the process keys a fault test reads. Some uv-managed CPython builds
+    ship without `os.pidfd_open`, so this is a supported setup, not a fault.
+    """
+    report = _run_probe(tmp_path, fault, **faults)
+    if report["spawned"] is False:
+        pytest.skip(cast(str, report["reason"]))
+    return report
+
+
 def _write_probe_summary(status: str, cleanup: str) -> None:
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if not summary:
@@ -599,11 +617,14 @@ def test_leader_open_refusal_reports_unsupported_after_cleanup(
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
     monkeypatch.setenv("LINKEDIN_MCP_TEST_PIDFD_LEADER_OPEN_FAULT", "EPERM")
 
-    with pytest.raises(pytest.skip.Exception, match="pidfd_open leader"):
+    with pytest.raises(pytest.skip.Exception) as skipped:
         test_retained_leader_pidfd_signals_its_group_after_reaping(tmp_path)
 
     evidence = summary.read_text()
     assert "status=UNSUPPORTED" in evidence
+    if "pidfd_open leader" not in str(skipped.value):
+        assert "cleanup=not spawned" in evidence
+        pytest.skip(str(skipped.value))
     assert "cleanup=spawned and fully cleaned" in evidence
 
 
@@ -611,7 +632,7 @@ def test_leader_open_refusal_reports_unsupported_after_cleanup(
 def test_leader_pidfd_open_failure_uses_leader_cleanup_contract(
     tmp_path: Path, leader_cleanup: str
 ):
-    report = _run_probe(
+    report = _run_spawning_probe(
         tmp_path, leader_open_fault="EPERM", leader_cleanup=leader_cleanup
     )
 
@@ -678,7 +699,7 @@ def test_preflight_unavailable_does_not_spawn(
 
 @pytest.mark.parametrize("fault", ["EINVAL", "ENOSYS", "EPERM"])
 def test_group_probe_skip_reaps_every_spawned_process(tmp_path: Path, fault: str):
-    report = _run_probe(tmp_path, fault)
+    report = _run_spawning_probe(tmp_path, fault)
 
     assert report["status"] == "skip"
     _assert_probe_reaped_every_process(report)
@@ -692,7 +713,7 @@ def test_member_pidfd_open_failure_uses_leader_cleanup_contract(
     fault: str,
     leader_cleanup: str,
 ):
-    report = _run_probe(
+    report = _run_spawning_probe(
         tmp_path,
         member_open_fault=fault,
         leader_cleanup=leader_cleanup,
