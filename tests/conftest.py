@@ -210,6 +210,54 @@ def isolate_profile_dir(ignore_the_developers_environment, tmp_path, monkeypatch
     return fake_profile
 
 
+#: The real state root, read before any test can move ``HOME``.
+_REAL_STATE_ROOT = os.path.realpath(os.path.expanduser("~/.linkedin-mcp"))
+
+
+@pytest.fixture(autouse=True)
+def no_owner_on_the_real_profile(monkeypatch):
+    """Fail a test that would start an owner process on the real state root.
+
+    The owner is a separate process, so none of the in-process patches in
+    ``isolate_profile_dir`` reach it: it takes its profile from the
+    configuration record on its standard input. An ``AppConfig()`` built in a
+    test names ``~/.linkedin-mcp/profile``, and an election that got as far as
+    spawning ran a real owner against it, which opened its trace directory
+    there and left a ``run-*/server.log`` behind on every full run, while
+    racing any server already holding that profile.
+
+    Checked at ``_spawn``, the last point before a child exists, and against
+    both the auth root and the configured profile, because the child reads its
+    state from one and its browser from the other. Reported at teardown as well
+    as raised: the election runs in a worker thread whose caller turns any
+    failure into "no owner", so a raise alone could pass unseen.
+    """
+    from linkedin_mcp_server import daemon_election
+
+    spawn = daemon_election._spawn
+    refused: list[str] = []
+
+    def guarded(auth_root, config, *args, **kwargs):
+        for what, path in (
+            ("auth root", auth_root),
+            ("profile", config.browser.user_data_dir),
+        ):
+            resolved = os.path.realpath(os.path.expanduser(str(path)))
+            if os.path.commonpath([resolved, _REAL_STATE_ROOT]) == _REAL_STATE_ROOT:
+                refused.append(f"{what} at {resolved}")
+                raise RuntimeError(f"refused to start an owner with {refused[-1]}")
+        return spawn(auth_root, config, *args, **kwargs)
+
+    monkeypatch.setattr(daemon_election, "_spawn", guarded)
+    yield
+    if refused:
+        pytest.fail(
+            f"A test tried to start an owner with its {refused[0]}, under the "
+            f"real {_REAL_STATE_ROOT}. Stub `daemon_election.obtain_owner`, or "
+            "elect with a configuration whose user_data_dir is under tmp_path."
+        )
+
+
 @pytest.fixture
 def profile_dir(isolate_profile_dir):
     """Create a non-empty profile directory."""
