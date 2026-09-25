@@ -201,6 +201,79 @@ REPLACED_OWNER_SEND_JS = """
 """
 
 
+# Measured on LinkedIn in September 2026: an open thread first renders a
+# placeholder with a client ID, then inserts a separate node with the server
+# message URN and removes the placeholder.
+SERVER_REPLACEMENT_SEND_JS = """
+  document.getElementById('send').addEventListener('click', event => {
+    event.preventDefault();
+    document.body.dataset.clicked = 'true';
+    const composer = document.getElementById('composer');
+    const text = composer.innerText;
+    const placeholder = messageItem(text, 'client-uuid');
+    document.getElementById('thread').appendChild(placeholder);
+    composer.textContent = '';
+    setTimeout(() => {
+      document.getElementById('thread').appendChild(
+        messageItem(text, 'urn:li:msg_message:(self,server-new)'));
+      placeholder.remove();
+    }, 50);
+  });
+"""
+
+# Measured on LinkedIn in September 2026: the first message of a new thread
+# moves the route to /messaging/thread/<id>/ and remounts the whole
+# conversation pane, composer included, with the message under its server URN.
+PANE_REMOUNT_SEND_JS = """
+  function remountTo(path, urns) {
+    document.getElementById('send').addEventListener('click', event => {
+      event.preventDefault();
+      document.body.dataset.clicked = 'true';
+      const text = document.getElementById('composer').innerText;
+      setTimeout(() => {
+        history.pushState({}, '', path);
+        const fresh = document.createElement('section');
+        fresh.id = 'conversation-remounted';
+        fresh.setAttribute('role', 'dialog');
+        fresh.innerHTML = '<div id="thread-remounted"></div>'
+          + '<form onsubmit="return false"><div role="textbox" '
+          + 'contenteditable="true" style="display:block;width:200px;'
+          + 'height:30px"></div><button type="submit">Send</button></form>';
+        for (const urn of urns) {
+          fresh.querySelector('#thread-remounted').appendChild(messageItem(text, urn));
+        }
+        document.getElementById('conversation').replaceWith(fresh);
+      }, 30);
+    });
+  }
+"""
+
+STALE_SERVER_NODE_SEND_JS = """
+  document.getElementById('send').addEventListener('click', event => {
+    event.preventDefault();
+    document.body.dataset.clicked = 'true';
+    const entry = document.querySelector('#thread [data-view-name="message-list-item"]');
+    const copy = entry.cloneNode(true);
+    entry.remove();
+    document.getElementById('thread').appendChild(copy);
+    document.getElementById('composer').textContent = '';
+  });
+"""
+
+TWO_SERVER_NODES_SEND_JS = """
+  document.getElementById('send').addEventListener('click', event => {
+    event.preventDefault();
+    document.body.dataset.clicked = 'true';
+    const composer = document.getElementById('composer');
+    for (const suffix of ['one', 'two']) {
+      document.getElementById('thread').appendChild(
+        messageItem(composer.innerText, `urn:li:msg_message:(self,${suffix})`));
+    }
+    composer.textContent = '';
+  });
+"""
+
+
 def history_item(path: str, *, hidden: bool = False) -> str:
     style = ' style="display:none"' if hidden else ""
     return f"""
@@ -1018,6 +1091,95 @@ class TestSendConfirmationDom:
         assert result["retry_safe"] is False
         assert await dom_page.locator("#outside .msg").count() == 1
         assert await dom_page.locator("#thread .msg").count() == 1
+
+    async def test_full_page_thread_beside_form_is_confirmed(self, dom_page):
+        # The messaging page has no dialog: the composer <form> is the owner
+        # and the message list is its sibling inside the conversation pane.
+        html = compose_page(ID_TRANSITION_SEND_JS).replace(
+            '<section id="conversation" role="dialog">', '<section id="conversation">'
+        )
+
+        result = await send(dom_page, html)
+
+        assert result["status"] == "sent"
+        assert result["sent"] is True
+
+    async def test_full_page_bubble_outside_pane_is_not_confirmed(self, dom_page):
+        html = (
+            compose_page(OUTSIDE_OWNER_SEND_JS)
+            .replace(
+                '<section id="conversation" role="dialog">',
+                '<section id="conversation">',
+            )
+            .replace("</section>", '</section><aside id="outside"></aside>')
+        )
+
+        result = await send(dom_page, html)
+
+        assert result["status"] == "send_unconfirmed"
+        assert result["sent"] is False
+        assert result["retry_safe"] is False
+
+    async def test_server_node_replacing_placeholder_is_confirmed(self, dom_page):
+        result = await send(dom_page, compose_page(SERVER_REPLACEMENT_SEND_JS))
+
+        assert result["status"] == "sent"
+        assert result["sent"] is True
+
+    async def test_new_thread_pane_remount_is_confirmed(self, dom_page):
+        html = compose_page(
+            PANE_REMOUNT_SEND_JS + "remountTo('/messaging/thread/2-abc==/', "
+            "['urn:li:msg_message:(self,server-first)']);"
+        )
+
+        result = await send(dom_page, html)
+
+        assert result["status"] == "sent"
+        assert result["sent"] is True
+
+    async def test_pane_remount_off_the_message_route_is_not_confirmed(self, dom_page):
+        html = compose_page(
+            PANE_REMOUNT_SEND_JS
+            + "remountTo('/feed/', ['urn:li:msg_message:(self,server-first)']);"
+        )
+
+        result = await send(dom_page, html)
+
+        assert result["status"] == "send_unconfirmed"
+        assert result["retry_safe"] is False
+
+    async def test_two_server_nodes_with_the_text_are_not_confirmed(self, dom_page):
+        result = await send(dom_page, compose_page(TWO_SERVER_NODES_SEND_JS))
+
+        assert result["status"] == "send_unconfirmed"
+        assert result["retry_safe"] is False
+
+    async def test_remounted_pane_with_two_server_nodes_is_not_confirmed(
+        self, dom_page
+    ):
+        html = compose_page(
+            PANE_REMOUNT_SEND_JS + "remountTo('/messaging/thread/2-abc==/', "
+            "['urn:li:msg_message:(self,one)', 'urn:li:msg_message:(self,two)']);"
+        )
+
+        result = await send(dom_page, html)
+
+        assert result["status"] == "send_unconfirmed"
+
+    async def test_rerendered_server_node_from_before_submit_is_not_confirmed(
+        self, dom_page
+    ):
+        # The thread already holds a message with the same text; LinkedIn
+        # re-rendering it must not read as an acknowledgement.
+        html = compose_page(STALE_SERVER_NODE_SEND_JS).replace(
+            'data-event-urn="existing-message-id"',
+            'data-event-urn="urn:li:msg_message:(self,old)"',
+        )
+
+        result = await send(dom_page, html)
+
+        assert result["status"] == "send_unconfirmed"
+        assert result["retry_safe"] is False
 
     async def test_editor_replacement_after_submit_is_not_confirmed(self, dom_page):
         result = await send(dom_page, compose_page(REPLACED_EDITOR_SEND_JS))

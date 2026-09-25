@@ -171,7 +171,7 @@
       "call": "send_message",
       "kind": "wait_for_function",
       "operation": "message_composer_ready",
-      "program_digest": "55fbb455644d",
+      "program_digest": "57a815f56f30",
       "section": "message",
       "timeout_ms": null
     },
@@ -183,7 +183,7 @@
       "call": "send_message",
       "kind": "evaluate",
       "operation": "message_composer_state",
-      "program_digest": "5b716974716a",
+      "program_digest": "1644bba653d7",
       "section": "message"
     },
     {
@@ -194,7 +194,7 @@
       "call": "send_message",
       "kind": "evaluate",
       "operation": "message_composer_state",
-      "program_digest": "5b716974716a",
+      "program_digest": "1644bba653d7",
       "section": "message"
     },
     {
@@ -208,7 +208,7 @@
       "call": "send_message",
       "kind": "evaluate_handle",
       "operation": "message_composer_owner",
-      "program_digest": "d311cb797c03",
+      "program_digest": "3dad4470556d",
       "section": "message"
     },
     {
@@ -256,7 +256,7 @@
       "call": "send_message",
       "kind": "evaluate",
       "operation": "message_confirmation_prepare",
-      "program_digest": "93a3ae384427",
+      "program_digest": "1ae5f6348136",
       "section": "message"
     },
     {
@@ -285,7 +285,7 @@
       "call": "send_message",
       "kind": "wait_for_function",
       "operation": "message_confirmation_ready",
-      "program_digest": "c5f34ff3f519",
+      "program_digest": "ebb1aaeca2b9",
       "section": "message",
       "timeout_ms": null
     },
@@ -299,7 +299,7 @@
       "call": "send_message",
       "kind": "evaluate",
       "operation": "message_confirmation_dispose",
-      "program_digest": "6b3c7d577da9",
+      "program_digest": "bd92ef816e24",
       "section": "message"
     },
     {
@@ -307,7 +307,7 @@
       "handle": "handle-1",
       "kind": "handle.evaluate",
       "operation": "message_composer_dispose",
-      "program_digest": "ec7c454e506b",
+      "program_digest": "195abada1200",
       "section": "message"
     },
     {
