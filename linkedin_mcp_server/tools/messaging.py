@@ -281,7 +281,11 @@ def register_messaging_tools(
         The recipient must be directly messageable from the profile page. If
         LinkedIn does not expose a normal Message action, use connect_with_person
         first, then retry send_message only after the connection request is
-        accepted. Recipient authorization comes from validating one
+        accepted. A ``status`` of ``enter_to_send_enabled`` means the account
+        has LinkedIn's "Press Enter to Send" preference on, which hides the Send
+        button; relay the returned instructions to the user, who switches it to
+        "Click Send to send" before retrying. The dry run (confirm_send False)
+        reports it too. Recipient authorization comes from validating one
         recipient-specific Message action carrying the target URN, then following
         its browser navigation and pinning the exact final route. Visible profile
         links or recipient URNs in the composer are optional corroboration; any

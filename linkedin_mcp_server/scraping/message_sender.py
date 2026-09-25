@@ -264,6 +264,11 @@ _MESSAGE_COMPOSER_INSPECT_JS = r"""
         const localScope = localScopes.find(scope => submitButtons(scope).length > 0)
             || localScopes[0];
         const buttons = submitButtons(localScope);
+        // With LinkedIn's "Press Enter to Send" preference the composer
+        // renders no Send button, only the send-options toggle.
+        const enterToSend = buttons.length === 0 && localScopes.some(scope =>
+            Array.from(scope.querySelectorAll('.msg-form__send-toggle')).some(visible)
+        );
         return {
             status: 'valid',
             editor,
@@ -271,6 +276,7 @@ _MESSAGE_COMPOSER_INSPECT_JS = r"""
             localScope,
             owner,
             buttons,
+            enterToSend,
             active: document.activeElement === editor,
             empty: !(editor.innerText || '').replace(/\s+/g, ' ').trim(),
             messageRoute: messageRoute(target),
@@ -592,6 +598,7 @@ _MESSAGE_COMPOSER_STATE_JS = (
             active: state.active === true,
             empty: state.empty === true,
             submitCount: state.buttons ? state.buttons.length : 0,
+            enterToSend: state.enterToSend === true,
             submitUsable: state.buttons?.length === 1 &&
                 !state.buttons[0].disabled &&
                 (state.buttons[0].getAttribute('aria-disabled') || '').toLowerCase()
@@ -985,6 +992,19 @@ def _profile_urn_from_compose_url(value: str, *, base: str | None = None) -> str
     if len(identifiers) != 1:
         return None
     return identifiers.pop()
+
+
+def _enter_to_send_result(url: str) -> dict[str, Any]:
+    """Report LinkedIn's "Press Enter to Send" preference as a user fix."""
+    return contracts.message_action_result(
+        url,
+        "enter_to_send_enabled",
+        "LinkedIn is set to 'Press Enter to Send', which hides the Send "
+        "button this tool clicks. In LinkedIn Messaging, open the '...' menu "
+        "next to 'Press Enter to Send', choose 'Click Send to send', then "
+        "retry. Nothing was sent.",
+        recipient_selected=True,
+    )
 
 
 def _message_page_url_is_safe(value: str, profile_urn: str) -> bool:
@@ -1468,6 +1488,8 @@ class MessageSender:
                 "The local composer did not identify exactly the requested profile.",
             )
         recipient_selected = True
+        if state.get("enterToSend") is True:
+            return _enter_to_send_result(self._page.url)
 
         if not confirm_send:
             return contracts.message_action_result(
@@ -1509,6 +1531,8 @@ class MessageSender:
                 "The verified message composer changed before text entry.",
                 recipient_selected=recipient_selected,
             )
+        if state.get("enterToSend") is True:
+            return _enter_to_send_result(self._page.url)
         if state.get("submitCount") != 1:
             return contracts.message_action_result(
                 self._page.url,
