@@ -24,8 +24,14 @@ pytestmark = [
 INVITE_DIALOG = """
   <div role="dialog" id="invite">
     <h2>Add a note to your invitation?</h2>
-    <button onclick="document.body.dataset.invite = 'note'">Add a note</button>
+    <button onclick="document.body.dataset.invite = 'note';
+      const note = document.createElement('textarea');
+      note.style.display = 'block';
+      document.getElementById('invite').insertBefore(note, this);
+      this.nextElementSibling.textContent = 'Send'">Add a note</button>
     <button onclick="document.body.dataset.invite = 'sent';
+      const note = document.querySelector('#invite textarea');
+      document.body.dataset.note = note ? note.value : '';
       document.getElementById('invite').remove()">Send without a note</button>
   </div>
 """
@@ -88,4 +94,19 @@ async def test_chat_overlay_alone_is_not_an_invite_dialog(dom_page):
     submitted, _, _ = await _actions(dom_page)._submit_invite_dialog(None)
 
     assert submitted is False
+    assert await dom_page.evaluate("document.body.dataset.chat") is None
+
+
+async def test_invite_note_is_sent_past_an_open_chat_overlay(dom_page):
+    await dom_page.set_content(
+        f"<!DOCTYPE html><html><body>{INVITE_DIALOG}{CHAT_OVERLAY}</body></html>"
+    )
+
+    submitted, note_sent, note_limit = await _actions(dom_page)._submit_invite_dialog(
+        "Hello"
+    )
+
+    assert (submitted, note_sent, note_limit) == (True, True, None)
+    assert await dom_page.evaluate("document.body.dataset.invite") == "sent"
+    assert await dom_page.evaluate("document.body.dataset.note") == "Hello"
     assert await dom_page.evaluate("document.body.dataset.chat") is None

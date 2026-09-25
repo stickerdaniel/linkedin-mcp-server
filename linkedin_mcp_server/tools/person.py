@@ -270,11 +270,12 @@ def register_person_tools(
             note_not_supported, custom_note_limit_reached,
             connected, or accepted.
 
-            ``connected`` means this call sent the invitation: the profile
-            now shows it pending, and the people are not yet 1st-degree
-            connections. ``pending`` means an invitation was already
-            outstanding before the call, and ``accepted`` means an incoming
-            invitation was accepted.
+            ``connected`` means this call submitted the invitation and the
+            re-read profile no longer exposes Connect; it does not mean a
+            1st-degree connection. The ``message`` names the state read after
+            the send, normally pending. ``pending`` means an invitation was
+            already outstanding before the call, and ``accepted`` means an
+            incoming invitation was accepted.
 
             When status is ``custom_note_limit_reached`` LinkedIn rejected
             personalized invite notes because the free note quota for the
