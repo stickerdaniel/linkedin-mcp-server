@@ -71,7 +71,7 @@ An MCP server that connects AI assistants like Claude to LinkedIn through your o
 
 ### Installation
 
-Add the server to your MCP client's configuration:
+**Add to your MCP client's `mcpServers` configuration**
 
 ```json
 {
@@ -346,7 +346,7 @@ On startup, the MCP Bundle prepares the shared Patchright Chromium browser cache
 
 ### Installation
 
-Run these commands in a terminal:
+**Run in a terminal**
 
 ```bash
 codex plugin marketplace add stickerdaniel/linkedin-mcp-server
@@ -397,9 +397,7 @@ Open the full URL the command prints (it carries the access token) and sign in. 
 
 Keep the same host directory mounted at `/home/pwuser/.linkedin-mcp` on every later `docker run`, otherwise the server cannot find the session.
 
-### Client configuration
-
-Add the server to your MCP client's configuration:
+**Add to your MCP client's `mcpServers` configuration**
 
 **macOS / Linux (absolute path in JSON):**
 
@@ -706,7 +704,7 @@ Contributions are welcome. See [CONTRIBUTING.md](https://github.com/stickerdanie
 
 ### Installation
 
-Run these commands in a terminal:
+**Run in a terminal**
 
 ```bash
 # 1. Clone repository
