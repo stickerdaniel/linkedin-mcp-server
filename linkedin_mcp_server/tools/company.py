@@ -6,9 +6,10 @@ with configurable section selection.
 """
 
 import logging
-from typing import Any
+from typing import Annotated, Any
 
 from fastmcp import Context, FastMCP
+from pydantic import Field
 
 from linkedin_mcp_server.callbacks import MCPContextProgressCallback
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
@@ -112,6 +113,7 @@ def register_company_tools(
     async def get_company_posts(
         company_name: str,
         ctx: Context,
+        max_scrolls: Annotated[int, Field(ge=1, le=50)] | None = None,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
@@ -120,6 +122,8 @@ def register_company_tools(
         Args:
             company_name: LinkedIn company name (e.g., "docker", "anthropic", "microsoft"). A full company URL is accepted too and is reduced to the slug.
             ctx: FastMCP context for progress reporting
+            max_scrolls: Maximum scroll-to-bottom iterations to load more posts.
+                Default (None) uses 10. Increase to read further back in the feed.
 
         Returns:
             Dict with url, sections (name -> raw text), and optional references.
@@ -137,7 +141,9 @@ def register_company_tools(
             )
 
             url = company_page_url(company_name, "/posts/")
-            extracted = await extractor.extract_page(url, section_name="posts")
+            extracted = await extractor.extract_page(
+                url, section_name="posts", max_scrolls=max_scrolls
+            )
 
             sections: dict[str, str] = {}
             references: dict[str, list[Reference]] = {}
