@@ -351,7 +351,7 @@ codex plugin marketplace add stickerdaniel/linkedin-mcp-server
 codex plugin add linkedin-mcp-server@linkedin-mcp-server
 ```
 
-The plugin runs a fixed server release through `uvx`. Each release updates that version, and Codex installs it the next time it starts. On the first tool call that needs authentication, the server opens a LinkedIn login browser window.
+The plugin runs a fixed server release through `uvx`. Each release updates that version, and Codex installs it the next time it starts. On the first tool call that needs authentication, the server reuses a LinkedIn session from a signed-in local browser if it finds one, and otherwise opens a LinkedIn login browser window.
 
 <br/>
 <br/>
