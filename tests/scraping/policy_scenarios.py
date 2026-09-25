@@ -987,6 +987,41 @@ async def _conversation_scenario(method: str) -> dict[str, Any]:
     )
 
 
+ROW_CLICK_STOPPED_OUTCOME = {
+    "rows": [
+        {"ariaLabel": "Select conversation with Ada Lovelace", "threadId": "2-ada"}
+    ],
+    "stoppedAt": {"ariaLabel": "Select conversation with Bob Stall", "position": 1},
+    "firstIndexGap": None,
+    "startThreadId": None,
+}
+
+
+async def _conversation_row_resolution_scenario() -> dict[str, Any]:
+    """`get_inbox` whose compose rows attach and whose second click stalls.
+
+    The scripted page records the submitted row program without running it;
+    the browser-DOM suite is what executes it.
+    """
+    name = "get_inbox__row_click_stopped"
+    recorder = TraceRecorder(name, _COMMON_ALLOWED)
+    clock = FakeClock(recorder)
+    page = _page(recorder)
+    page.script("evaluate:scroll_main_region", True, True)
+    page.script("evaluate:root_content", _root("Conversation content"))
+    page.script("wait_for_selector:conversation_rows", None)
+    page.script("evaluate:conversation_thread_refs", ROW_CLICK_STOPPED_OUTCOME)
+    extractor = _extractor(page)
+    async with boundaries(recorder, clock):
+        with recorder.context("get_inbox", "conversation"):
+            result = await extractor.get_inbox(limit=10)
+    page.assert_clean()
+    return recorder.trace(
+        {"method": "get_inbox", "arguments": {"limit": 10}},
+        _complete_mapping_result(result, section_names=list(result["sections"])),
+    )
+
+
 async def _facade_contract_trace() -> dict[str, Any]:
     global _TOOL_SCHEMAS
 
@@ -1115,6 +1150,9 @@ async def build_policy_traces() -> dict[str, dict[str, Any]]:
         "conversation.json": await _conversation_scenario("get_conversation"),
         "search-conversations.json": await _conversation_scenario(
             "search_conversations"
+        ),
+        "conversation-row-resolution.json": (
+            await _conversation_row_resolution_scenario()
         ),
     }
     return traces
