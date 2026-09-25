@@ -276,16 +276,15 @@ _MESSAGE_COMPOSER_INSPECT_JS = r"""
             messageRoute: messageRoute(target),
         };
     };
-    // The element whose subtree holds this conversation's message list. An
-    // overlay dialog holds both the list and the composer. On the full
-    // messaging page the owner is the composer <form> and the list is its
-    // sibling, so climb to the nearest ancestor that holds a message list,
-    // one editor, and stays below <main>. Otherwise keep the owner, which
-    // leaves the send unconfirmed rather than widening the scope.
+    // The element whose subtree holds this conversation's messages. An
+    // overlay dialog holds both the messages and the composer. On the full
+    // messaging page the owner is the composer <form> and the messages are
+    // in its sibling, so climb to the nearest ancestor that holds a message
+    // item, one editor, and stays below <main>. Otherwise keep the owner,
+    // which leaves the send unconfirmed rather than widening the scope.
     const threadScope = owner => {
         if (!owner || owner.matches('dialog, [role="dialog"]')) return owner;
-        const lists =
-            '.msg-s-message-list, [data-view-name="message-list-item"]';
+        const lists = '[data-view-name="message-list-item"]';
         let ancestor = owner.parentElement;
         while (ancestor && !ancestor.matches('main, body')) {
             const editors = ancestor.querySelectorAll(
@@ -537,6 +536,11 @@ _MESSAGE_CONFIRMATION_READY_JS = (
         // observed node or the pinned composer, so accept exactly one visible
         // exact-text node carrying a server URN that was absent before submit,
         // inside the conversation pane of the one composer the page now shows.
+        // That node must be the newest message in the pane, so older history
+        // loaded later cannot stand in for it. A thread route only appears
+        // for the first message of a new thread, whose pane then holds that
+        // one message; a pane with other messages under a thread route is
+        // some other conversation.
         const serverAcknowledged = () => {
             const marker = Array.from(
                 arg.owner?.querySelectorAll('[data-linkedin-mcp-confirmation]') || []
@@ -557,17 +561,23 @@ _MESSAGE_CONFIRMATION_READY_JS = (
                 return false;
             }
             const scope = threadScope(composer.owner);
-            const acknowledged = Array.from(
+            const items = Array.from(
                 scope.querySelectorAll('[data-view-name="message-list-item"]')
-            ).filter(node => {
+            ).filter(visible);
+            if (
+                window.location.pathname.startsWith('/messaging/thread/') &&
+                items.length !== 1
+            ) {
+                return false;
+            }
+            const acknowledged = items.filter(node => {
                 const urn = (node.getAttribute('data-event-urn') || '').trim();
                 return urn.startsWith('urn:li:msg_message:') &&
                     !baselineUrns.has(urn) &&
                     exactVisibleUnit(node);
             });
-            return new Set(
-                acknowledged.map(node => node.getAttribute('data-event-urn').trim())
-            ).size === 1 && acknowledged.length === 1;
+            return acknowledged.length === 1 &&
+                acknowledged[0] === items[items.length - 1];
         };
         if (!arg.owner?.isConnected) return serverAcknowledged();
         const markers = Array.from(
