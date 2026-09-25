@@ -725,3 +725,28 @@ def test_member_pidfd_open_failure_uses_leader_cleanup_contract(
     assert report["leader_cleanup_confirmed"] is True
     assert report["closed_fds"] == 1
     assert report["member_cleanup_pidfd_calls"] == 0
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    ["leader-summary", "leader-cleanup", "member-cleanup", "group-cleanup"],
+)
+def test_fault_tests_skip_when_preflight_has_no_api(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scenario: str
+) -> None:
+    monkeypatch.setenv("LINKEDIN_MCP_TEST_PIDFD_NO_API", "1")
+    with pytest.raises(pytest.skip.Exception, match="^Python has no pidfd API$"):
+        if scenario == "leader-summary":
+            test_leader_open_refusal_reports_unsupported_after_cleanup(
+                tmp_path, monkeypatch
+            )
+        elif scenario == "leader-cleanup":
+            test_leader_pidfd_open_failure_uses_leader_cleanup_contract(
+                tmp_path, "command"
+            )
+        elif scenario == "member-cleanup":
+            test_member_pidfd_open_failure_uses_leader_cleanup_contract(
+                tmp_path, "EPERM", "command"
+            )
+        else:
+            test_group_probe_skip_reaps_every_spawned_process(tmp_path, "EPERM")
