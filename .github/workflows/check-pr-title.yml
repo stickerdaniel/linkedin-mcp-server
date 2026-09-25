@@ -36,5 +36,26 @@ jobs:
             "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" \
             > "$RUNNER_TEMP/pull-request.json"
 
+      # The fragment requirement follows the title, and this workflow already
+      # reruns on every retitle. The PR's files are read as API data only; the
+      # checker and the towncrier config it reads come from the checkout above.
+      # Both fetches come first so that no step after the title validation
+      # holds a token.
+      - name: Fetch changed files
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          gh api --method GET --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" \
+            > "$RUNNER_TEMP/pull-request-files.json"
+
       - name: Validate current pull request title
         run: python3 scripts/check_pr_title.py --pr-json "$RUNNER_TEMP/pull-request.json"
+
+      - name: Require a changelog fragment
+        run: |
+          python3 scripts/check_changelog_fragment.py \
+            --pr-json "$RUNNER_TEMP/pull-request.json" \
+            --files-json "$RUNNER_TEMP/pull-request-files.json"

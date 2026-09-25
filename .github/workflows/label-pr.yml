@@ -4,11 +4,10 @@ on:
   pull_request_target:
     types: [opened, edited, reopened, synchronize]
 
-# Release notes are generated from labels (see .github/release.yml), and GitHub
-# offers no way to filter them by title or author. Without a label, a docs or
-# chore PR lands in the changelog as user-facing noise. This derives the label
-# from the conventional-commit type in the PR title so the filtering works
-# without anyone remembering to label by hand.
+# Labels are for triage: they let the PR list be filtered by kind of change.
+# Release notes do not read them; those come from changelog.d fragments. This
+# derives the label from the conventional-commit type in the PR title so the
+# filtering works without anyone remembering to label by hand.
 # pull_request_target is required so PRs from forks get a writable token.
 # It is safe here only because the job checks out the trusted workflow revision,
 # never the PR branch, and matches current API data against a fixed case list.

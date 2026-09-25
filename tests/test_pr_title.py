@@ -31,7 +31,6 @@ validate_title = cast(Callable[[str], str | None], _VALIDATOR.validate_title)
 
 _CHECK_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "check-pr-title.yml"
 _LABEL_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "label-pr.yml"
-_RELEASE_CONFIG = _REPO_ROOT / ".github" / "release.yml"
 _RELEASE_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "release.yml"
 _CHECKOUT = "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803"
 _DERIVED_LABELS = {
@@ -372,28 +371,6 @@ else:
     return result, set(state["labels"]), calls
 
 
-def _release_category(label: str) -> str | None:
-    release = _RELEASE_CONFIG.read_text(encoding="utf-8")
-    exclude, categories = release.split("  categories:\n", maxsplit=1)
-    excluded = {
-        line.removeprefix("      - ")
-        for line in exclude.splitlines()
-        if line.startswith("      - ")
-    }
-    if label in excluded:
-        return None
-
-    current_title: str | None = None
-    for line in categories.splitlines():
-        if line.startswith("    - title: "):
-            current_title = json.loads(line.removeprefix("    - title: "))
-        elif line.startswith("        - ") and current_title is not None:
-            category_label = line.removeprefix("        - ").strip('"')
-            if category_label in {label, "*"}:
-                return current_title
-    return None
-
-
 @pytest.mark.parametrize(
     "title",
     [
@@ -564,22 +541,17 @@ def test_label_workflow_matches_breaking_marker_without_normalizing() -> None:
 
 
 @pytest.mark.parametrize(
-    ("title", "expected_label", "expected_category"),
+    ("title", "expected_label"),
     [
-        ("refactor: Keep internals tidy", "refactoring", None),
-        (
-            "refactor(config)!: Change configuration",
-            "breaking-change",
-            "Breaking Changes",
-        ),
-        ("feat!: Replace the public contract", "breaking-change", "Breaking Changes"),
+        ("refactor: Keep internals tidy", "refactoring"),
+        ("refactor(config)!: Change configuration", "breaking-change"),
+        ("feat!: Replace the public contract", "breaking-change"),
     ],
 )
-def test_pr_title_label_release_lifecycle(
+def test_pr_title_label_lifecycle(
     tmp_path: Path,
     title: str,
     expected_label: str,
-    expected_category: str | None,
 ) -> None:
     assert validate_title(title) is None
     attached = (_DERIVED_LABELS - {expected_label}) | {"triage"}
@@ -588,7 +560,6 @@ def test_pr_title_label_release_lifecycle(
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert final_labels == {expected_label, "triage"}
-    assert _release_category(expected_label) == expected_category
     edited_labels = {call[-1] for call in calls}
     assert edited_labels == _DERIVED_LABELS
 
@@ -670,18 +641,6 @@ def test_label_workflow_removes_only_attached_stale_labels() -> None:
     assert "|| true" not in workflow
     assert "2>/dev/null" not in workflow
     assert "Labels outside this fixed derived set are untouched." in workflow
-
-
-def test_release_notes_put_breaking_changes_first() -> None:
-    release = _RELEASE_CONFIG.read_text(encoding="utf-8")
-    exclude, categories = release.split("  categories:\n", maxsplit=1)
-
-    assert "breaking-change" not in exclude
-    assert categories.startswith(
-        '    - title: "Breaking Changes"\n      labels:\n        - breaking-change\n'
-    )
-    assert _release_category("breaking-change") == "Breaking Changes"
-    assert _release_category("refactoring") is None
 
 
 def test_release_restores_pr_title_required_check() -> None:

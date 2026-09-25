@@ -93,5 +93,31 @@ dev = [
     "pytest-xdist>=3.8.0",
     "pyyaml>=6.0.3",
     "ruff==0.16.7",
+    "towncrier==26.9.0",
     "ty>=0.0.1a12",
 ]
+
+[tool.towncrier]
+directory = "changelog.d"
+filename = "CHANGELOG.md"
+start_string = "<!-- towncrier release notes start -->\n"
+title_format = "## {version} ({project_date})"
+issue_format = "[#{issue}](https://github.com/stickerdaniel/linkedin-mcp-server/pull/{issue})"
+# An empty list, not an absent key: only then does `towncrier build` refuse a
+# fragment of an unknown type instead of leaving it out in silence.
+ignore = []
+
+[[tool.towncrier.type]]
+directory = "breaking"
+name = "Breaking Changes"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "feat"
+name = "Features"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "fix"
+name = "Bug Fixes"
+showcontent = true
