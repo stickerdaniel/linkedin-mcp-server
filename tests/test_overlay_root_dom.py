@@ -171,6 +171,18 @@ class TestMissingRoot:
         assert result.text == RATE_LIMITED_SECTION_TEXT
         assert result.references == []
 
+    async def test_a_noise_only_page_without_main_is_the_throttle_sentinel(
+        self, dom_page
+    ):
+        capture = await load(
+            dom_page, "<p>More profiles for you<br>About<br>Accessibility</p>"
+        )
+
+        result = await capture._extract_overlay_content(OVERLAY_URL, "contact_info")
+
+        assert result.text == RATE_LIMITED_SECTION_TEXT
+        assert result.references == []
+
     async def test_noise_ahead_of_a_substantive_main_is_not_a_throttle(self, dom_page):
         capture = await load(
             dom_page,
