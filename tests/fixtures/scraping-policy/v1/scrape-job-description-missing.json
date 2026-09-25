@@ -102,7 +102,7 @@
   "result": {
     "section_errors": {
       "job_posting": {
-        "error_message": "The posting was read without its description, so the text holds only its header and company details. Calling again may return it.",
+        "error_message": "The captured posting text has no recognized description heading and may be incomplete. The text was kept; calling again may return more.",
         "error_type": "description_missing"
       }
     },

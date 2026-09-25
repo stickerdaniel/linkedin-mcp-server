@@ -50,8 +50,8 @@ def register_job_tools(
             the posting's "More jobs" list are references with context
             "similar job"; their ids work with get_job_details.
             section_errors.job_posting.error_type "description_missing" means
-            the posting was read without its "About the job" description;
-            calling again may return it.
+            the captured text lacks the expected "About the job" heading.
+            The text is kept but may be incomplete; calling again may return more.
         """
         try:
             job_id = normalize_job_id(job_id)

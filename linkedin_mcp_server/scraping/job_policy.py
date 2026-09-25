@@ -158,18 +158,13 @@ def dropped_filters_section_error(names: list[str], landed: str) -> dict[str, st
 
 
 def missing_description_section_error() -> dict[str, str]:
-    """The ``section_errors`` entry for a posting read without its description.
-
-    Reported rather than raised, and the text kept: the header, apply controls
-    and company details are still that posting. Without it a caller cannot tell
-    a description that had not rendered from a posting that has none, and a job
-    judged on its header alone reads as a poor fit rather than an unread one.
-    """
+    """Report an absent description heading without discarding captured text."""
     return {
         "error_type": "description_missing",
         "error_message": (
-            "The posting was read without its description, so the text holds "
-            "only its header and company details. Calling again may return it."
+            "The captured posting text has no recognized description heading "
+            "and may be incomplete. The text was kept; calling again may "
+            "return more."
         ),
     }
 
