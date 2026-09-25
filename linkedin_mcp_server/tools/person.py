@@ -270,6 +270,12 @@ def register_person_tools(
             note_not_supported, custom_note_limit_reached,
             connected, or accepted.
 
+            ``connected`` means this call sent the invitation: the profile
+            now shows it pending, and the people are not yet 1st-degree
+            connections. ``pending`` means an invitation was already
+            outstanding before the call, and ``accepted`` means an incoming
+            invitation was accepted.
+
             When status is ``custom_note_limit_reached`` LinkedIn rejected
             personalized invite notes because the free note quota for the
             account is exhausted. The ``message`` is the raw Premium dialog
