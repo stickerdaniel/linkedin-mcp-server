@@ -188,13 +188,51 @@
       "selector": "main li label[aria-label]",
       "state": "attached",
       "timeout_ms": 10000
+    },
+    {
+      "arg": {
+        "position": "bottom"
+      },
+      "call": "get_inbox",
+      "kind": "evaluate",
+      "operation": "scroll_main_region",
+      "program_digest": "2a74f7f069d9",
+      "section": "conversation"
+    },
+    {
+      "call": "get_inbox",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.5,
+      "section": "conversation"
+    },
+    {
+      "arg": {
+        "limit": 10,
+        "nameFilter": null
+      },
+      "call": "get_inbox",
+      "kind": "evaluate",
+      "operation": "conversation_thread_refs",
+      "program_digest": "2465aca3773b",
+      "section": "conversation"
     }
   ],
   "result": {
+    "references": {
+      "inbox": [
+        {
+          "context": "inbox",
+          "kind": "conversation",
+          "text": "Ada Lovelace",
+          "url": "/messaging/thread/2-ada/"
+        }
+      ]
+    },
     "section_errors": {
       "inbox": {
-        "error_message": "No conversation rows attached within 10 s after requesting https://www.linkedin.com/messaging/compose/, so no click-derived conversation references were produced. This can mean an empty list or a list that was unavailable. Inbox text and any anchor-derived references were read from https://www.linkedin.com/messaging/. Use get_conversation(thread_id=...) with a known thread id to bypass row attribution.",
-        "error_type": "conversation_rows_unavailable"
+        "error_message": "Click-derived conversation references stop before \"Bob Stall\": clicking that row did not open a different thread path within the poll budget. No later rows were clicked by this scan. Use get_conversation(thread_id=...) with a known thread id to bypass row attribution.",
+        "error_type": "thread_attribution_stopped"
       }
     },
     "section_names": [
@@ -205,6 +243,6 @@
     },
     "url": "https://www.linkedin.com/messaging/"
   },
-  "scenario": "get_inbox__baseline",
+  "scenario": "get_inbox__row_click_stopped",
   "schema_version": 1
 }

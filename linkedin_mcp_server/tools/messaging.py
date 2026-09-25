@@ -50,12 +50,24 @@ def register_messaging_tools(
         """
         List recent conversations from the LinkedIn messaging inbox.
 
+        The returned inbox text and result URL come from the ordinary messaging
+        inbox. Click-derived conversation references are collected separately
+        after requesting the compose page, which avoided inbox auto-opening on
+        the measured variant. A row contributes a click-derived reference only
+        after its click is followed by an observed different thread path. The
+        scan stops at its first unverifiable click. section_errors.inbox
+        reports that stop or unavailable scan rows; captured inbox text and
+        independently extracted anchors retain their normal handling. A known
+        thread_id can bypass row attribution when calling get_conversation.
+
         Args:
             ctx: FastMCP context for progress reporting
             limit: Maximum number of conversations to load (1-50, default 20)
 
         Returns:
-            Dict with url, sections (inbox -> raw text), and optional references.
+            Dict with url, sections (inbox -> raw text), optional references, and
+            optional section_errors (inbox -> why click-derived references are
+            incomplete).
         """
         try:
             extractor = extractor or await get_ready_extractor(
@@ -110,6 +122,15 @@ def register_messaging_tools(
         anchor hrefs or thread-id attributes, so this is the only available
         path. Each visit selects the row in the LinkedIn UI and may mark it
         as read. Pass thread_id directly to skip this enumeration.
+
+        Username resolution scans matching rows from a requested compose page
+        first. Its indexable sequence ends before the first unresolved click,
+        missing matching click target, or admitted row that fails the existing
+        exact display-name check. An index outside that verified prefix is
+        refused with its reason. Search is a fallback only when the inbox scan
+        has no observed matching result and no such barrier; it never
+        substitutes a result after a stopped or gapped inbox scan. Pass a known
+        thread_id to bypass username/index resolution.
 
         Args:
             ctx: FastMCP context for progress reporting
@@ -186,6 +207,13 @@ def register_messaging_tools(
         """
         Search messages by keyword.
 
+        Click-derived references require an observed different thread path
+        after each row click. The first unverifiable click stops further row
+        clicks and is reported in section_errors.search_results. Already-read
+        text and independently extracted anchors retain their normal handling.
+        A result without that diagnostic does not guarantee that every
+        conversation was enumerated.
+
         Args:
             keywords: Search keywords to filter conversations
             ctx: FastMCP context for progress reporting
@@ -195,7 +223,9 @@ def register_messaging_tools(
                 a low cap is preferable for noisy queries.
 
         Returns:
-            Dict with url, sections (search_results -> raw text), and optional references.
+            Dict with url, sections (search_results -> raw text), optional
+            references, and optional section_errors (search_results -> where
+            click-derived references stopped).
         """
         try:
             extractor = extractor or await get_ready_extractor(
