@@ -54,6 +54,21 @@ from linkedin_mcp_server.scraping.text import (
 logger = logging.getLogger(__name__)
 
 
+def _on_tracker_tab(url: str, stage: JobsTrackerStage) -> bool:
+    """Whether ``url`` is LinkedIn's own tracker, showing the ``stage`` tab.
+
+    Host and parsed path rather than a substring, so another origin serving
+    the same path is not the account's list. No ``?stage=`` is the saved tab.
+    """
+    parsed = urlparse(url)
+    landed_stage = parse_qs(parsed.query).get("stage", ["saved"])[0]
+    return (
+        parsed.netloc == "www.linkedin.com"
+        and parsed.path.rstrip("/") in SAVED_JOBS_PATHS
+        and landed_stage == stage
+    )
+
+
 class JobScraper:
     """Own every workflow whose subject is a LinkedIn job posting or list.
 
@@ -581,13 +596,7 @@ class JobScraper:
                 # The stage too: a tracker that dropped it shows another tab,
                 # and applied jobs would come back as saved ones. No
                 # parameter is the saved tab.
-                parsed_url = urlparse(capture.landed_url)
-                landed_stage = parse_qs(parsed_url.query).get("stage", ["saved"])[0]
-                if (
-                    parsed_url.netloc != "www.linkedin.com"
-                    or parsed_url.path.rstrip("/") not in SAVED_JOBS_PATHS
-                    or landed_stage != stage
-                ):
+                if not _on_tracker_tab(capture.landed_url, stage):
                     logger.debug(
                         "Unexpected page URL after saved-jobs extraction: %s "
                         "(requested %s) — skipping job ID extraction",
@@ -638,6 +647,18 @@ class JobScraper:
                 # read above is a whole navigation's worth of opportunity for
                 # the address to move, and the capture predates it.
                 landed_url = self._pages.current_url
+                # The tab too, for the same reason: a page-one address that
+                # lost `?stage=` has no `start` to fail on, and would hand the
+                # saved tab's ids back as the stage asked for.
+                if not _on_tracker_tab(landed_url, stage):
+                    logger.debug(
+                        "Saved-jobs page moved to %s while its page count "
+                        "was read (requested %s)",
+                        landed_url,
+                        url,
+                    )
+                    await self._navigator._raise_if_auth_barrier(landed_url)
+                    raise RuntimeError(f"Saved jobs page moved to {landed_url}")
                 landed_start = parse_qs(urlparse(landed_url).query).get("start", ["0"])[
                     0
                 ]

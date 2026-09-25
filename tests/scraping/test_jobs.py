@@ -2276,6 +2276,50 @@ class TestSearchJobs:
         assert "saved_jobs" in result["section_errors"]
         mock_ids.assert_not_awaited()
 
+    async def test_a_stage_lost_while_counting_pages_is_not_returned(self, mock_page):
+        """The page count is read after the landing check, and can move the page.
+
+        On page one there is no ``start`` for the offset check to fail on, so
+        only the stage says the saved tab is now the one being read.
+        """
+        scraper = _scraper(mock_page)
+
+        async def count_pages_and_move():
+            mock_page.url = "https://www.linkedin.com/jobs-tracker/"
+            return None
+
+        with (
+            patch.object(
+                scraper._pages,
+                "_extract_saved_jobs_page",
+                side_effect=self._navigating(mock_page, [extracted("Applied Job 1")]),
+            ),
+            patch.object(
+                scraper._pages,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["111"],
+            ) as mock_ids,
+            patch.object(
+                scraper._pages,
+                "_get_total_list_pages",
+                side_effect=count_pages_and_move,
+            ),
+            patch.object(
+                scraper._navigator, "_raise_if_auth_barrier", new_callable=AsyncMock
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await scraper.get_saved_jobs(max_pages=1, stage="applied")
+
+        assert result["job_ids"] == []
+        assert result["sections"] == {}
+        assert "saved_jobs" in result["section_errors"]
+        mock_ids.assert_not_awaited()
+
     async def test_a_login_redirect_raises_an_auth_error(self, mock_page):
         """A login wall reached mid-search is an expired session.
 
