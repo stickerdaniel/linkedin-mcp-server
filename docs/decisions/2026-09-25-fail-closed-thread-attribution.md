@@ -18,7 +18,9 @@ the unresolved click may still land and would then be credited to whichever row
 was being polled. A matching row without a click target is skipped; in a
 filtered scan it is recorded as the first index gap.
 
-Click scans start from a page that does not open a thread on its own:
+Click scans start from the pages below, chosen because none of them opened a
+thread on its own in the dated observation (see Evidence). That is not a
+guarantee for every variant; the per-row rule above still decides each row.
 
 | Caller | Text page | Scan page |
 |---|---|---|

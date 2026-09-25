@@ -572,6 +572,26 @@ class TestTheClickLoopAgainstRealDom:
         assert await clicked(dom_page) == ["A"]
         assert attributed(outcome) == [("A", "A")]
 
+    async def test_the_cap_counts_labels_the_name_filter_passes_over(self, dom_page):
+        """Under a filter, a label for someone else still spends the cap.
+
+        Alice takes the one considered position, so Bob lies outside the
+        window. Counting only matching labels would click Bob and mark his
+        thread read beyond the caller's budget.
+        """
+        await serve(
+            dom_page,
+            phased_sidebar([row("A", name="Alice"), row("B", name="Bob")]),
+            start=COMPOSE_URL,
+        )
+
+        outcome = await scan(dom_page, limit=1, name_filter="Bob")
+
+        assert await clicked(dom_page) == []
+        assert outcome.refs == []
+        assert stop_of(outcome) is None
+        assert gap_of(outcome) is None
+
     async def test_a_null_limit_visits_the_whole_sidebar(self, dom_page):
         """``None`` is every row, and it is what the resolver passes.
 
@@ -779,7 +799,9 @@ class TestThreadOwnershipAgainstRealDom:
 
         The release is keyed on C's click, so a loop that went on past the
         unresolved B would click C, B's navigation would land during C's
-        polls, and C would be handed B's thread.
+        polls, and C would be handed B's thread. B's dispatch is asserted so
+        the stop is known to face a navigation still pending, not a click
+        that did nothing.
         """
         await serve(
             dom_page,
@@ -798,7 +820,10 @@ class TestThreadOwnershipAgainstRealDom:
         assert attributed(outcome) == [("Alice", "A")]
         assert stop_of(outcome) == ("Select conversation with Bob", 1)
         assert await clicked(dom_page) == ["A", "B"]
-        assert not any(entry.get("land") == "B" for entry in await events(dom_page))
+        log = await events(dom_page)
+        assert {"dispatch": "B", "dest": "/messaging/thread/B/"} in log
+        assert not any(entry.get("land") == "B" for entry in log)
+        assert not any("orphan" in entry for entry in log)
 
     async def test_a_delayed_first_row_stops_before_any_later_click(self, dom_page):
         await serve(
@@ -812,7 +837,10 @@ class TestThreadOwnershipAgainstRealDom:
         assert attributed(outcome) == []
         assert stop_of(outcome) == ("Select conversation with A", 0)
         assert await clicked(dom_page) == ["A"]
-        assert not any(entry.get("land") == "A" for entry in await events(dom_page))
+        log = await events(dom_page)
+        assert {"dispatch": "A", "dest": "/messaging/thread/A/"} in log
+        assert not any(entry.get("land") == "A" for entry in log)
+        assert not any("orphan" in entry for entry in log)
 
     async def test_the_auto_opened_row_clicked_first_is_not_credited(self, dom_page):
         """Bare ``/messaging/`` opens a thread; its row's click moves nothing."""
@@ -986,6 +1014,15 @@ class TestThreadOwnershipAgainstRealDom:
         assert stop_of(outcome) is None
         assert await clicked(dom_page) == ["A", "B", "C"]
         assert await poll_delays(dom_page) == [100] * 4
+        assert await events(dom_page) == [
+            {"click": "A", "pre": "/messaging/compose/"},
+            {"land": "A", "path": "/messaging/thread/A/"},
+            {"click": "B", "pre": "/messaging/thread/A/"},
+            {"dispatch": "B", "dest": "/messaging/thread/B/"},
+            {"land": "B", "path": "/messaging/thread/B/"},
+            {"click": "C", "pre": "/messaging/thread/B/"},
+            {"land": "C", "path": "/messaging/thread/C/"},
+        ]
 
     async def test_a_later_row_that_never_lands_stops_before_the_next(self, dom_page):
         await serve(
@@ -1139,6 +1176,11 @@ class TestThreadOwnershipAgainstRealDom:
         assert attributed(outcome) == [("A", "B")]
         assert stop_of(outcome) is None
         assert await poll_delays(dom_page) == [100] * 12
+        assert await events(dom_page) == [
+            {"click": "A", "pre": "/messaging/compose/"},
+            {"dispatch": "A", "dest": "/messaging/thread/B/"},
+            {"land": "A", "path": "/messaging/thread/B/"},
+        ]
 
 
 class TestTheScrollWalkAgainstRealDom:

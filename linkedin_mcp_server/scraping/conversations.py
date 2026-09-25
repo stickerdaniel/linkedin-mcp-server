@@ -531,13 +531,15 @@ class ConversationReader:
         because LinkedIn renders the messaging sidebar with no anchor hrefs, no
         data-thread attributes, and no embedded URNs — clicking each row and
         reading the resulting SPA URL is the only available extraction path.
-        The compose page lists the inbox rows without opening a thread, which
-        bare `/messaging/` does. The inbox list is used before `?searchTerm=`
-        because LinkedIn's messaging search frequently returns "We didn't find
-        anything" for a participant whose thread is plainly present in the
-        inbox (issue #434). ``name_filter`` is passed to the enumerator so only
-        matching rows are clicked; clicking a row may mark it read, so
-        unrelated threads stay untouched.
+        The compose page is the scan destination because, in the dated
+        observation, it listed the inbox rows without opening a thread, while
+        bare `/messaging/` opened one. It is not guaranteed never to open a
+        thread; each row is still judged by its own click. The inbox list is
+        used before `?searchTerm=` because LinkedIn's messaging search
+        frequently returns "We didn't find anything" for a participant whose
+        thread is plainly present in the inbox (issue #434). ``name_filter`` is
+        passed to the enumerator so only matching rows are clicked; clicking a
+        row may mark it read, so unrelated threads stay untouched.
 
         Matches by case-insensitive equality on the cleaned participant name
         derived from the row's aria-label, which tolerates duplicate threads
@@ -601,8 +603,8 @@ class ConversationReader:
 
         ``index`` is 0-based over the verified prefix of matching rows from the
         compose-page scan, or from the search scan when the inbox scan found no
-        matching row and no barrier. Both render newest activity first. An
-        index at or past an incomplete prefix is refused rather than served
+        matching row and no barrier. Positions follow the observed scan order.
+        An index at or past an incomplete prefix is refused rather than served
         from a row that could not be verified.
         """
         if index < 0:
