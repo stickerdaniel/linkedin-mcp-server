@@ -140,7 +140,9 @@ async def test_company_posts_delegate_matches_registered_tool_consumer():
     delegate = getattr(extractor, TOOL_DELEGATES["get_company_posts"])
     delegate.assert_awaited_once()
     extractor.extract_page.assert_awaited_once_with(
-        "https://www.linkedin.com/company/example/posts/", section_name="posts"
+        "https://www.linkedin.com/company/example/posts/",
+        section_name="posts",
+        max_scrolls=None,
     )
     extractor.scrape_company.assert_not_awaited()
 
