@@ -239,13 +239,28 @@ PANE_REMOUNT_SEND_JS = """
           + '<form onsubmit="return false"><div role="textbox" '
           + 'contenteditable="true" style="display:block;width:200px;'
           + 'height:30px"></div><button type="submit">Send</button></form>';
-        for (const urn of urns) {
-          fresh.querySelector('#thread-remounted').appendChild(messageItem(text, urn));
+        for (const entry of urns) {
+          const [urn, otherText] = entry.split('|');
+          fresh.querySelector('#thread-remounted').appendChild(
+            messageItem(otherText || text, urn));
         }
         document.getElementById('conversation').replaceWith(fresh);
       }, 30);
     });
   }
+"""
+
+OLDER_HISTORY_SEND_JS = """
+  document.getElementById('send').addEventListener('click', event => {
+    event.preventDefault();
+    document.body.dataset.clicked = 'true';
+    const composer = document.getElementById('composer');
+    const thread = document.getElementById('thread');
+    thread.insertBefore(
+      messageItem(composer.innerText, 'urn:li:msg_message:(self,older)'),
+      thread.firstChild);
+    composer.textContent = '';
+  });
 """
 
 STALE_SERVER_NODE_SEND_JS = """
@@ -1141,6 +1156,26 @@ class TestSendConfirmationDom:
         html = compose_page(
             PANE_REMOUNT_SEND_JS
             + "remountTo('/feed/', ['urn:li:msg_message:(self,server-first)']);"
+        )
+
+        result = await send(dom_page, html)
+
+        assert result["status"] == "send_unconfirmed"
+        assert result["retry_safe"] is False
+
+    async def test_older_history_loaded_above_is_not_confirmed(self, dom_page):
+        result = await send(dom_page, compose_page(OLDER_HISTORY_SEND_JS))
+
+        assert result["status"] == "send_unconfirmed"
+        assert result["retry_safe"] is False
+
+    async def test_thread_route_with_other_history_is_not_confirmed(self, dom_page):
+        # A thread route with earlier messages is some other conversation:
+        # the first message of a new thread remounts a pane holding only it.
+        html = compose_page(
+            PANE_REMOUNT_SEND_JS + "remountTo('/messaging/thread/2-other==/', "
+            "['urn:li:msg_message:(other,old)|earlier message', "
+            "'urn:li:msg_message:(self,server-first)']);"
         )
 
         result = await send(dom_page, html)
