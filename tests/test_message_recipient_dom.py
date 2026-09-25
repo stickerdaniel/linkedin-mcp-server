@@ -295,6 +295,25 @@ class TestProfileMessageTargetDom:
 
         assert result["status"] == "unavailable"
 
+    async def test_sidebar_is_never_taken_for_an_unrendered_top_card(self, dom_page):
+        await _set_composer_content(
+            dom_page,
+            """<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>
+              <main><div><div>
+                <section><div></div></section>
+                <aside><section>
+                  <h2>People you may know</h2>
+                  <a href="/messaging/compose/?recipient=OTHER">Message</a>
+                </section></aside>
+              </div></div></main>
+            </body></html>
+            """,
+        )
+
+        result = await dom_page.evaluate(_PROFILE_MESSAGE_TARGET_JS)
+
+        assert result == {"status": "unresolved"}
+
     async def test_nested_top_card_with_two_headings_fails_closed(self, dom_page):
         await _set_composer_content(
             dom_page,
