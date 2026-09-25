@@ -47,6 +47,7 @@ from linkedin_mcp_server.linkedin.contracts import (
 )
 from linkedin_mcp_server.linkedin.identifiers import job_view_url
 from linkedin_mcp_server.linkedin.job_policy import (
+    EASY_APPLY_BUTTON_UNREAD,
     EASY_APPLY_DRAFT_LEFT,
     EASY_APPLY_NO_CONTROL,
     EASY_APPLY_SUBMIT_UNCONFIRMED,
@@ -1186,9 +1187,10 @@ class JobPageReader:
     async def _walk_easy_apply(self, job_id: str, steps: list[dict[str, Any]]) -> bool:
         """Open the dialog and read its steps into ``steps``; True when all were read."""
         page = self._session.page
-        await page.locator(f'main a[href*="/jobs/view/{job_id}/apply"]').first.click(
-            timeout=5000
-        )
+        route = page.locator(f'main a[href*="/jobs/view/{job_id}/apply"]')
+        if not await route.count():
+            raise RuntimeError(EASY_APPLY_BUTTON_UNREAD)
+        await route.first.click(timeout=5000)
         try:
             await page.wait_for_function(
                 EASY_APPLY_OPEN_JS, timeout=_EASY_APPLY_OPEN_TIMEOUT * 1000
@@ -1283,9 +1285,10 @@ class JobPageReader:
     ) -> _WalkOutcome:
         """Open the dialog, answer it step by step, and end on the last one."""
         page = self._session.page
-        await page.locator(f'main a[href*="/jobs/view/{job_id}/apply"]').first.click(
-            timeout=5000
-        )
+        route = page.locator(f'main a[href*="/jobs/view/{job_id}/apply"]')
+        if not await route.count():
+            raise RuntimeError(EASY_APPLY_BUTTON_UNREAD)
+        await route.first.click(timeout=5000)
         try:
             await page.wait_for_function(
                 EASY_APPLY_OPEN_JS, timeout=_EASY_APPLY_OPEN_TIMEOUT * 1000

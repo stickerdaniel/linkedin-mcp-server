@@ -1957,6 +1957,8 @@ class _Dialog:
         control = MagicMock()
         control.first = control
         if "/apply" in selector:
+            # The anchor-shaped Easy Apply, the only one the walk opens.
+            control.count = AsyncMock(return_value=1)
             control.click = AsyncMock(side_effect=self._open_dialog)
         elif selector == job_pages_module.EASY_APPLY_NEXT_SELECTOR:
             control.click = AsyncMock(side_effect=self._next)

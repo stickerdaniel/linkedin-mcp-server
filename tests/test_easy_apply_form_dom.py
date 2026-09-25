@@ -157,6 +157,10 @@ document.addEventListener('keydown', (event) => {
 """
 
 EASY_APPLY = '<a href="https://www.linkedin.com/jobs/view/123/apply/?openSDUIApplyFlow=true">Easy Apply</a>'
+EASY_APPLY_BUTTON = (
+    '<button type="button" aria-label="Easy Apply to this job">'
+    "<span>Easy Apply</span></button>"
+)
 EXTERNAL = (
     '<a target="_blank" href="https://www.linkedin.com/safety/go/'
     '?url=https%3A%2F%2Facme.example%2F">Apply</a>'
@@ -456,3 +460,17 @@ async def test_a_read_past_the_tool_deadline_still_discards_the_draft(dom_page):
     assert not await dialog_open(dom_page)
     assert "open" in await log(dom_page)
     assert (await log(dom_page))[-2:] == ["escape", "discard"]
+
+
+async def test_the_redesigned_easy_apply_is_refused_before_it_opens(dom_page):
+    """The button's dialog is not one the walk can discard, so it stays shut."""
+    html = posting(EASY_APPLY_BUTTON, [CONTACT]).replace(
+        "<script>",
+        "<script>document.querySelector('main button').addEventListener("
+        "'click', () => window.log.push('opened'));",
+        1,
+    )
+
+    with pytest.raises(RuntimeError, match="redesigned dialog"):
+        await read(dom_page, html)
+    assert await log(dom_page) == []
