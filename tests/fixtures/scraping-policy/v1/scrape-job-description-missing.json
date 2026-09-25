@@ -100,14 +100,20 @@
     }
   ],
   "result": {
+    "section_errors": {
+      "job_posting": {
+        "error_message": "The captured posting text has no recognized description heading and may be incomplete. The text was kept; calling again may return more.",
+        "error_type": "description_missing"
+      }
+    },
     "section_names": [
       "job_posting"
     ],
     "sections": {
-      "job_posting": "About the job\nResult content"
+      "job_posting": "Result content"
     },
     "url": "https://www.linkedin.com/jobs/view/123/"
   },
-  "scenario": "scrape_job__baseline",
+  "scenario": "scrape_job__description_missing",
   "schema_version": 1
 }

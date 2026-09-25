@@ -73,6 +73,16 @@ class JobPostingTextTable:
             "}"
         )
 
+    def has_description(self, text: str) -> bool:
+        """Whether extracted text holds a description heading as a line.
+
+        The test `readiness_expression` runs on the live page, applied to what
+        was read instead: a panel that rendered after the wait gave up still
+        counts, and one that never rendered is caught.
+        """
+        lines = {line.strip() for line in text.split("\n")}
+        return any(heading in lines for heading in self.description_headings)
+
 
 _JOB_POSTING_TEXT: dict[str, JobPostingTextTable] = {
     "en-US": JobPostingTextTable(description_headings=("About the job",)),
@@ -80,8 +90,8 @@ _JOB_POSTING_TEXT: dict[str, JobPostingTextTable] = {
 
 # Same locale contract as `DETAIL_CAPTURE_EN_US`: the context is forced to
 # en-US, so only this entry is ever used. A posting rendered in another
-# language never matches: it spends the full timeout and then extracts what
-# loaded, keeping the race the wait exists to close.
+# language never matches: it spends the full timeout, extracts what loaded,
+# and is reported as missing its description.
 JOB_POSTING_EN_US = _JOB_POSTING_TEXT["en-US"]
 
 # Patterns that mark the start of LinkedIn page chrome (sidebar/footer).

@@ -839,7 +839,12 @@ async def _single_capture_facade_scenario(method: str) -> dict[str, Any]:
     name = f"{method}__baseline"
     recorder = TraceRecorder(name, _COMMON_ALLOWED)
     clock = FakeClock(recorder)
-    page = _page(recorder).script("evaluate:root_content", _root("Result content"))
+    # A posting is only whole with its description heading; the other
+    # facades accept any text.
+    text = (
+        "About the job\nResult content" if method == "scrape_job" else "Result content"
+    )
+    page = _page(recorder).script("evaluate:root_content", _root(text))
     extractor = _extractor(page)
     arguments: dict[str, Any]
     async with boundaries(recorder, clock):
@@ -874,6 +879,23 @@ async def _single_capture_error_scenario() -> dict[str, Any]:
     page = _page(recorder).script(
         "evaluate:root_content", RuntimeError("synthetic capture failure")
     )
+    extractor = _extractor(page)
+    arguments = {"job_id": "123"}
+    async with boundaries(recorder, clock):
+        with recorder.context("scrape_job"):
+            result = await extractor.scrape_job(**arguments)
+    page.assert_clean()
+    return recorder.trace(
+        {"method": "scrape_job", "arguments": arguments},
+        _complete_mapping_result(result, section_names=list(result["sections"])),
+    )
+
+
+async def _description_missing_scenario() -> dict[str, Any]:
+    recorder = TraceRecorder("scrape_job__description_missing", _COMMON_ALLOWED)
+    clock = FakeClock(recorder)
+    # The header and company details rendered, the description panel did not.
+    page = _page(recorder).script("evaluate:root_content", _root("Result content"))
     extractor = _extractor(page)
     arguments = {"job_id": "123"}
     async with boundaries(recorder, clock):
@@ -1141,6 +1163,7 @@ async def build_policy_traces() -> dict[str, dict[str, Any]]:
         ),
         "scrape-job.json": await _single_capture_facade_scenario("scrape_job"),
         "scrape-job-error.json": await _single_capture_error_scenario(),
+        "scrape-job-description-missing.json": await _description_missing_scenario(),
         "search-people.json": await _single_capture_facade_scenario("search_people"),
         "search-companies.json": await _single_capture_facade_scenario(
             "search_companies"

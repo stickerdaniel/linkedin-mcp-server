@@ -189,8 +189,11 @@ async def test_scrape_job_traces_keep_success_and_error_results_separate():
     traces = await build_policy_traces()
     successful_job = traces["scrape-job.json"]["result"]
     failed_job = traces["scrape-job-error.json"]["result"]
+    headless_job = traces["scrape-job-description-missing.json"]["result"]
 
-    assert successful_job["sections"] == {"job_posting": "Result content"}
+    assert successful_job["sections"] == {
+        "job_posting": "About the job\nResult content"
+    }
     assert successful_job["section_names"] == ["job_posting"]
     assert "section_errors" not in successful_job
     assert failed_job["sections"] == {}
@@ -202,6 +205,12 @@ async def test_scrape_job_traces_keep_success_and_error_results_separate():
             "error_type": "RuntimeError",
         }
     }
+    # Kept, not dropped: the header and company details are still the posting.
+    assert headless_job["sections"] == {"job_posting": "Result content"}
+    assert (
+        headless_job["section_errors"]["job_posting"]["error_type"]
+        == "description_missing"
+    )
 
 
 async def test_facade_trace_detects_section_text_corruption():
