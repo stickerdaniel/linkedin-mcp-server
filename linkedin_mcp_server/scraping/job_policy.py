@@ -1,4 +1,4 @@
-"""Routing, paging and reporting policy for the job list workflows."""
+"""Routing, paging and reporting policy for the job workflows."""
 
 from __future__ import annotations
 
@@ -155,6 +155,18 @@ def dropped_filters_section_error(names: list[str], landed: str) -> dict[str, st
             'keywords instead, as in "remote python developer in France".'
         )
     return {"error_type": "filters_dropped", "error_message": message}
+
+
+def missing_description_section_error() -> dict[str, str]:
+    """Report an absent description heading without discarding captured text."""
+    return {
+        "error_type": "description_missing",
+        "error_message": (
+            "The captured posting text has no recognized description heading "
+            "and may be incomplete. The text was kept; calling again may "
+            "return more."
+        ),
+    }
 
 
 # LinkedIn's offset stride in the search URL. It is NOT how many cards a

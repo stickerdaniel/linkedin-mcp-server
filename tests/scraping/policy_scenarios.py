@@ -839,7 +839,12 @@ async def _single_capture_facade_scenario(method: str) -> dict[str, Any]:
     name = f"{method}__baseline"
     recorder = TraceRecorder(name, _COMMON_ALLOWED)
     clock = FakeClock(recorder)
-    page = _page(recorder).script("evaluate:root_content", _root("Result content"))
+    # A posting is only whole with its description heading; the other
+    # facades accept any text.
+    text = (
+        "About the job\nResult content" if method == "scrape_job" else "Result content"
+    )
+    page = _page(recorder).script("evaluate:root_content", _root(text))
     extractor = _extractor(page)
     arguments: dict[str, Any]
     async with boundaries(recorder, clock):
@@ -874,6 +879,23 @@ async def _single_capture_error_scenario() -> dict[str, Any]:
     page = _page(recorder).script(
         "evaluate:root_content", RuntimeError("synthetic capture failure")
     )
+    extractor = _extractor(page)
+    arguments = {"job_id": "123"}
+    async with boundaries(recorder, clock):
+        with recorder.context("scrape_job"):
+            result = await extractor.scrape_job(**arguments)
+    page.assert_clean()
+    return recorder.trace(
+        {"method": "scrape_job", "arguments": arguments},
+        _complete_mapping_result(result, section_names=list(result["sections"])),
+    )
+
+
+async def _description_missing_scenario() -> dict[str, Any]:
+    recorder = TraceRecorder("scrape_job__description_missing", _COMMON_ALLOWED)
+    clock = FakeClock(recorder)
+    # The header and company details rendered, the description panel did not.
+    page = _page(recorder).script("evaluate:root_content", _root("Result content"))
     extractor = _extractor(page)
     arguments = {"job_id": "123"}
     async with boundaries(recorder, clock):
@@ -983,6 +1005,41 @@ async def _conversation_scenario(method: str) -> dict[str, Any]:
     page.assert_clean()
     return recorder.trace(
         {"method": method, "arguments": arguments},
+        _complete_mapping_result(result, section_names=list(result["sections"])),
+    )
+
+
+ROW_CLICK_STOPPED_OUTCOME = {
+    "rows": [
+        {"ariaLabel": "Select conversation with Ada Lovelace", "threadId": "2-ada"}
+    ],
+    "stoppedAt": {"ariaLabel": "Select conversation with Bob Stall", "position": 1},
+    "firstIndexGap": None,
+    "startThreadId": None,
+}
+
+
+async def _conversation_row_resolution_scenario() -> dict[str, Any]:
+    """`get_inbox` whose compose rows attach and whose second click stalls.
+
+    The scripted page records the submitted row program without running it;
+    the browser-DOM suite is what executes it.
+    """
+    name = "get_inbox__row_click_stopped"
+    recorder = TraceRecorder(name, _COMMON_ALLOWED)
+    clock = FakeClock(recorder)
+    page = _page(recorder)
+    page.script("evaluate:scroll_main_region", True, True)
+    page.script("evaluate:root_content", _root("Conversation content"))
+    page.script("wait_for_selector:conversation_rows", None)
+    page.script("evaluate:conversation_thread_refs", ROW_CLICK_STOPPED_OUTCOME)
+    extractor = _extractor(page)
+    async with boundaries(recorder, clock):
+        with recorder.context("get_inbox", "conversation"):
+            result = await extractor.get_inbox(limit=10)
+    page.assert_clean()
+    return recorder.trace(
+        {"method": "get_inbox", "arguments": {"limit": 10}},
         _complete_mapping_result(result, section_names=list(result["sections"])),
     )
 
@@ -1106,6 +1163,7 @@ async def build_policy_traces() -> dict[str, dict[str, Any]]:
         ),
         "scrape-job.json": await _single_capture_facade_scenario("scrape_job"),
         "scrape-job-error.json": await _single_capture_error_scenario(),
+        "scrape-job-description-missing.json": await _description_missing_scenario(),
         "search-people.json": await _single_capture_facade_scenario("search_people"),
         "search-companies.json": await _single_capture_facade_scenario(
             "search_companies"
@@ -1115,6 +1173,9 @@ async def build_policy_traces() -> dict[str, dict[str, Any]]:
         "conversation.json": await _conversation_scenario("get_conversation"),
         "search-conversations.json": await _conversation_scenario(
             "search_conversations"
+        ),
+        "conversation-row-resolution.json": (
+            await _conversation_row_resolution_scenario()
         ),
     }
     return traces

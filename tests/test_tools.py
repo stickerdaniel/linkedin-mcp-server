@@ -1244,6 +1244,170 @@ class TestMessagingTools:
         assert result["sections"]["search_results"] == "Result 1\nResult 2"
         mock_extractor.search_conversations.assert_awaited_once_with("hello", limit=20)
 
+    @pytest.mark.parametrize(
+        ("tool", "section"),
+        [("get_inbox", "inbox"), ("search_conversations", "search_results")],
+    )
+    async def test_listing_section_errors_pass_through_unchanged(
+        self, mock_context, tool, section
+    ):
+        expected = {
+            "url": "https://www.linkedin.com/messaging/",
+            "sections": {section: "Ada Lovelace"},
+            "references": {
+                section: [
+                    {
+                        "kind": "conversation",
+                        "url": "/messaging/thread/2-ada/",
+                        "context": section,
+                        "text": "Ada Lovelace",
+                    }
+                ]
+            },
+            "section_errors": {
+                section: {
+                    "error_type": "thread_attribution_stopped",
+                    "error_message": "Click-derived conversation references stop.",
+                }
+            },
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, tool)
+        if tool == "get_inbox":
+            result = await tool_fn(mock_context, extractor=mock_extractor)
+        else:
+            result = await tool_fn("ada", mock_context, extractor=mock_extractor)
+
+        assert result == expected
+
+    @staticmethod
+    def _diagnostics_marker(monkeypatch):
+        """Stand in for the issue-report builder so no artifact is written."""
+        monkeypatch.setattr(
+            "linkedin_mcp_server.error_handler.build_issue_diagnostics",
+            lambda *args, **kwargs: {"marker": True},
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.error_handler.format_tool_error_with_diagnostics",
+            lambda message, diagnostics: f"{message}\n[issue diagnostics]",
+        )
+
+    async def test_a_scraper_error_from_get_conversation_keeps_diagnostics(
+        self, monkeypatch
+    ):
+        """Mapper control: the base scraper error takes the diagnostics path."""
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.core.exceptions import LinkedInScraperException
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        self._diagnostics_marker(monkeypatch)
+        mock_extractor = _make_mock_extractor({})
+        mock_extractor.get_conversation = AsyncMock(
+            side_effect=LinkedInScraperException("Could not verify index 0.")
+        )
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        with patch(
+            "linkedin_mcp_server.tools.messaging.get_ready_extractor",
+            AsyncMock(return_value=mock_extractor),
+        ):
+            with pytest.raises(ToolError) as raised:
+                await mcp.call_tool("get_conversation", {"linkedin_username": "jacki"})
+
+        assert str(raised.value) == "Could not verify index 0.\n[issue diagnostics]"
+
+    async def test_an_unverifiable_username_index_is_refused_with_diagnostics(
+        self, monkeypatch, mock_page
+    ):
+        """The real owner's refusal, through the registered tool and mapper.
+
+        Only the page boundaries and the scan outcome are scripted: the first
+        matching row's click did not open a different thread. The refusal must
+        name the reason and keep the issue diagnostics, which it loses if the
+        owner raises it as a caller-reference error.
+
+        The tool receives the conversation owner wired the way the facade wires
+        it; the facade's own delegation is covered by the facade contract tests
+        and this module may not import the facade.
+        """
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.scraping.content import PageContentReader
+        from linkedin_mcp_server.scraping.conversations import (
+            ConversationReader,
+            _StoppedRow,
+            _ThreadRefScan,
+        )
+        from linkedin_mcp_server.scraping.navigation import PageNavigator
+        from linkedin_mcp_server.scraping.profile_page import ProfilePageReader
+        from linkedin_mcp_server.scraping.session import ScrapingSession
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        async def no_message_target() -> Any:
+            raise AssertionError("the conversation owner reads no message target")
+
+        self._diagnostics_marker(monkeypatch)
+        session = ScrapingSession(mock_page)
+        extractor = ConversationReader(
+            session,
+            PageNavigator(session),
+            PageContentReader(session),
+            ProfilePageReader(session, no_message_target),
+        )
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+        stopped = _ThreadRefScan(
+            refs=[], stopped_at=_StoppedRow("Select conversation with Jacki", 0)
+        )
+        root = AsyncMock()
+        navigate = AsyncMock()
+
+        with (
+            patch(
+                "linkedin_mcp_server.tools.messaging.get_ready_extractor",
+                AsyncMock(return_value=extractor),
+            ),
+            patch.object(ScrapingSession, "check_rate_limit", new_callable=AsyncMock),
+            patch.object(ScrapingSession, "dismiss_modal", new_callable=AsyncMock),
+            patch.object(PageNavigator, "_navigate_to_page", navigate),
+            patch.object(
+                ProfilePageReader,
+                "_read_profile_display_name",
+                new_callable=AsyncMock,
+                return_value="Jacki",
+            ),
+            patch.object(
+                ConversationReader,
+                "_extract_conversation_thread_refs",
+                new_callable=AsyncMock,
+                return_value=stopped,
+            ),
+            patch.object(PageContentReader, "_extract_root_content", root),
+        ):
+            with pytest.raises(ToolError) as raised:
+                await mcp.call_tool("get_conversation", {"linkedin_username": "jacki"})
+
+        assert str(raised.value) == (
+            "Could not verify conversation index 0 for jacki: 0 conversation(s) "
+            "were verified before a matching row that did not open a different "
+            "thread within the poll budget. It may already be open, or the click "
+            "may not have navigated in time. Pass a known thread_id instead."
+            "\n[issue diagnostics]"
+        )
+        assert [call.args[0] for call in navigate.await_args_list] == [
+            "https://www.linkedin.com/in/jacki/",
+            "https://www.linkedin.com/messaging/compose/",
+        ]
+        root.assert_not_awaited()
+
     async def test_send_message_success(self, mock_context):
         expected = {
             "url": "https://www.linkedin.com/messaging/thread/abc123/",

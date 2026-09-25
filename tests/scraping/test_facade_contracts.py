@@ -21,7 +21,11 @@ from linkedin_mcp_server.scraping.capture import SectionCapture
 from linkedin_mcp_server.scraping.connection import ActionSignals
 from linkedin_mcp_server.scraping.connection_actions import ConnectionActions
 from linkedin_mcp_server.scraping.content import PageContentReader
-from linkedin_mcp_server.scraping.conversations import ConversationReader
+from linkedin_mcp_server.scraping.conversations import (
+    ConversationReader,
+    _ThreadRefScan,
+    _ThreadResolution,
+)
 from linkedin_mcp_server.scraping.extractor import (
     ExtractedSection,
     FilterValidationError,
@@ -362,7 +366,7 @@ async def test_facade_get_conversation_forwards_its_username_and_index(mock_page
             ConversationReader,
             "_resolve_conversation_thread_urls",
             new_callable=AsyncMock,
-            return_value=threads,
+            return_value=_ThreadResolution(threads),
         ),
         patch.object(
             PageContentReader,
@@ -403,7 +407,7 @@ async def test_facade_search_conversations_forwards_its_row_cap(mock_page):
             ConversationReader,
             "_extract_conversation_thread_refs",
             new_callable=AsyncMock,
-            return_value=[],
+            return_value=_ThreadRefScan(refs=[]),
         ) as refs,
     ):
         await extractor.search_conversations("engine", limit=7)

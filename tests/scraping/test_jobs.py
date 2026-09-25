@@ -157,6 +157,37 @@ class TestScrapeJob:
             "similar job",
         ]
 
+    async def test_scrape_job_reports_a_posting_without_its_description(
+        self, mock_page
+    ):
+        scraper = _scraper(mock_page)
+        with patch.object(
+            scraper._capture,
+            "capture",
+            new_callable=AsyncMock,
+            return_value=extracted("Software Engineer\nAcme\nEasy Apply"),
+        ):
+            result = await scraper.scrape_job("12345")
+
+        assert result["sections"] == {
+            "job_posting": "Software Engineer\nAcme\nEasy Apply"
+        }
+        error = result["section_errors"]["job_posting"]
+        assert error["error_type"] == "description_missing"
+
+    async def test_scrape_job_with_its_description_reports_nothing(self, mock_page):
+        scraper = _scraper(mock_page)
+        with patch.object(
+            scraper._capture,
+            "capture",
+            new_callable=AsyncMock,
+            return_value=extracted("Software Engineer\nAbout the job\nBuild agents"),
+        ):
+            result = await scraper.scrape_job("12345")
+
+        assert "job_posting" in result["sections"]
+        assert "section_errors" not in result
+
 
 class TestSearchJobs:
     """Tests for search_jobs with job ID extraction and pagination."""

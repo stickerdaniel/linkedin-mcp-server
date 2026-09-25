@@ -17,6 +17,7 @@ import pytest
 
 from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.scraping.company import CompanyScraper
+from linkedin_mcp_server.scraping.conversations import ConversationReader
 from linkedin_mcp_server.scraping.fields import COMPANY_SECTIONS, PERSON_SECTIONS
 from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.person import PersonScraper
@@ -188,8 +189,11 @@ async def test_scrape_job_traces_keep_success_and_error_results_separate():
     traces = await build_policy_traces()
     successful_job = traces["scrape-job.json"]["result"]
     failed_job = traces["scrape-job-error.json"]["result"]
+    headless_job = traces["scrape-job-description-missing.json"]["result"]
 
-    assert successful_job["sections"] == {"job_posting": "Result content"}
+    assert successful_job["sections"] == {
+        "job_posting": "About the job\nResult content"
+    }
     assert successful_job["section_names"] == ["job_posting"]
     assert "section_errors" not in successful_job
     assert failed_job["sections"] == {}
@@ -201,6 +205,12 @@ async def test_scrape_job_traces_keep_success_and_error_results_separate():
             "error_type": "RuntimeError",
         }
     }
+    # Kept, not dropped: the header and company details are still the posting.
+    assert headless_job["sections"] == {"job_posting": "Result content"}
+    assert (
+        headless_job["section_errors"]["job_posting"]["error_type"]
+        == "description_missing"
+    )
 
 
 async def test_facade_trace_detects_section_text_corruption():
@@ -250,6 +260,124 @@ async def test_facade_trace_detects_optional_key_drift():
         mutated = await build_policy_traces()
 
     assert '+    "section_errors": {}' in policy_trace_diff(mutated)
+
+
+_ROW_TRACE = "conversation-row-resolution.json"
+
+
+def _row_evaluation(trace: dict[str, Any]) -> dict[str, Any]:
+    return next(
+        event
+        for event in trace["events"]
+        if event.get("operation") == "conversation_thread_refs"
+    )
+
+
+async def test_row_click_trace_reads_text_before_scanning_compose():
+    """Text from bare `/messaging/`, then the click scan on the compose page.
+
+    The scripted page records the submitted row program without running it,
+    so this pins which program was sent and in what order, not what it does;
+    the browser-DOM suite executes it.
+    """
+    trace = (await build_policy_traces())[_ROW_TRACE]
+    events = trace["events"]
+    navigations = [
+        index for index, event in enumerate(events) if event["kind"] == "navigate"
+    ]
+    positions = _operation_positions(trace)
+    row_evaluation = _row_evaluation(trace)
+
+    assert [events[index]["requested_url"] for index in navigations] == [
+        "https://www.linkedin.com/messaging/",
+        "https://www.linkedin.com/messaging/compose/",
+    ]
+    assert (
+        positions["root_content"][0]
+        < navigations[1]
+        < positions["conversation_rows"][0]
+        < positions["conversation_thread_refs"][0]
+    )
+    assert row_evaluation["kind"] == "evaluate"
+    assert row_evaluation["program_digest"]
+    assert row_evaluation["arg"] == {"limit": 10, "nameFilter": None}
+    assert trace["result"]["url"] == "https://www.linkedin.com/messaging/"
+    assert trace["result"]["sections"] == {"inbox": "Conversation content"}
+    assert trace["result"]["references"] == {
+        "inbox": [
+            {
+                "kind": "conversation",
+                "url": "/messaging/thread/2-ada/",
+                "text": "Ada Lovelace",
+                "context": "inbox",
+            }
+        ]
+    }
+    assert trace["result"]["section_errors"] == {
+        "inbox": {
+            "error_type": "thread_attribution_stopped",
+            "error_message": (
+                'Click-derived conversation references stop before "Bob Stall": '
+                "clicking that row did not open a different thread path within "
+                "the poll budget. No later rows were clicked by this scan. Use "
+                "get_conversation(thread_id=...) with a known thread id to "
+                "bypass row attribution."
+            ),
+        }
+    }
+
+
+async def test_row_click_trace_detects_a_dropped_stop_diagnostic():
+    original = ConversationReader.get_inbox
+    removed: list[dict[str, Any]] = []
+
+    @wraps(original)
+    async def drop_errors(self: Any, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        result = await original(self, *args, **kwargs)
+        errors = result.pop("section_errors", None)
+        if errors:
+            removed.append(errors)
+        return result
+
+    with patch.object(ConversationReader, "get_inbox", drop_errors):
+        mutated = await build_policy_traces()
+
+    assert removed
+    difference = policy_trace_diff({_ROW_TRACE: mutated[_ROW_TRACE]})
+    assert f"--- {TRACE_ROOT / _ROW_TRACE}" in difference
+    assert '-    "section_errors": {' in difference
+
+
+async def test_row_click_trace_detects_a_changed_row_program():
+    """The digest follows the submitted program, not only its marker.
+
+    Twelve polls become eleven while the selector marker stays, so the
+    operation name alone would not notice. The behavioural twin is the
+    exact-budget case in the browser-DOM suite.
+    """
+    original = ScriptedPage.evaluate
+    replaced: list[str] = []
+
+    @wraps(original)
+    async def shorten_budget(
+        self: ScriptedPage, expression: str, *args: Any, **kwargs: Any
+    ) -> Any:
+        if "main li label[aria-label]" in expression and "waits < 12" in expression:
+            expression = expression.replace("waits < 12", "waits < 11")
+            replaced.append(expression)
+        return await original(self, expression, *args, **kwargs)
+
+    with patch.object(ScriptedPage, "evaluate", shorten_budget):
+        mutated = await build_policy_traces()
+
+    canonical = json.loads((TRACE_ROOT / _ROW_TRACE).read_text(encoding="utf-8"))
+    changed = _row_evaluation(mutated[_ROW_TRACE])
+    assert replaced
+    assert changed["operation"] == "conversation_thread_refs"
+    assert changed["program_digest"] != _row_evaluation(canonical)["program_digest"]
+    assert f"--- {TRACE_ROOT / _ROW_TRACE}" in policy_trace_diff(
+        {_ROW_TRACE: mutated[_ROW_TRACE]}
+    )
 
 
 async def test_section_navigation_and_callbacks_remain_one_to_one():
