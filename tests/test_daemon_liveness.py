@@ -1462,41 +1462,106 @@ class TestStandingDownForANewerBuild:
         await asyncio.wait_for(loop, timeout=5)
         assert server.should_exit is True
 
-    async def test_a_call_that_outlives_the_drain_is_reported_as_unknown(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
+    @staticmethod
+    async def _cut_at_the_end_of_the_drain(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, queued: bool
+    ) -> tuple[Any, list[str]]:
+        """Stand down with one admitted call that outlives a short drain.
+
+        Driven through the real serializing middleware and a real profile lease,
+        because the line between a call that never ran and one that may have
+        acted is drawn there. *queued* holds the serializing lock for the whole
+        drain, so the call never reaches its tool body; otherwise the body
+        starts and never finishes.
+        """
         from linkedin_mcp_server import daemon_liveness, daemon_owner
+        from linkedin_mcp_server.profile_lease import get_profile_lease
+        from linkedin_mcp_server.sequential_tool_middleware import (
+            SequentialToolExecutionMiddleware,
+        )
 
         monkeypatch.setattr(daemon_owner, "_TURNOVER_DRAIN_SECONDS", 0.2)
-        _mark_calls(monkeypatch)
-        running = asyncio.Event()
+        marker = _mark_calls(monkeypatch)
+        lease = get_profile_lease(tmp_path / "profile")
+        monkeypatch.setattr(
+            "linkedin_mcp_server.sequential_tool_middleware.get_profile_lease",
+            lambda: lease,
+        )
+        sequential = SequentialToolExecutionMiddleware()
+        ran: list[str] = []
+        body_started = asyncio.Event()
 
-        async def call_next(_context: Any) -> str:
-            running.set()
+        async def tool(_context: Any) -> str:
+            ran.append("the tool")
+            body_started.set()
             await asyncio.sleep(3600)  # the send that will not finish in time
             return "never reached"  # pragma: no cover
 
-        call = asyncio.create_task(
-            OwnerCallLivenessMiddleware().on_call_tool(_call_context(), call_next)  # ty: ignore
-        )
-        await asyncio.wait_for(running.wait(), timeout=5)
-        server = MagicMock()
-        server.should_exit = False
+        async def call_next(context: Any) -> Any:
+            return await sequential.on_call_tool(context, tool)  # ty: ignore
 
-        async def serves() -> None:
-            while not server.should_exit:
-                await asyncio.sleep(0.01)
+        liveness = daemon_liveness.get_liveness()
+        if queued:
+            await sequential._lock.acquire()
+        try:
+            call = asyncio.create_task(
+                OwnerCallLivenessMiddleware().on_call_tool(_call_context(), call_next)
+            )
+            if queued:
+                while marker not in liveness._waiting:
+                    await asyncio.sleep(0)
+            else:
+                await asyncio.wait_for(body_started.wait(), timeout=5)
+            server = MagicMock()
+            server.should_exit = False
 
-        await daemon_owner._serve_until_stopped(
-            server, asyncio.create_task(serves()), ["asked"], lock=None
-        )
-        result = await asyncio.wait_for(call, timeout=5)
+            async def serves() -> None:
+                while not server.should_exit:
+                    await asyncio.sleep(0.01)
+
+            await daemon_owner._serve_until_stopped(
+                server, asyncio.create_task(serves()), ["asked"], lock=None
+            )
+            result = await asyncio.wait_for(call, timeout=5)
+        finally:
+            if queued:
+                sequential._lock.release()
 
         assert server.should_exit is True
+        assert liveness.calls_in_flight() == 0
+        assert lease._refs == 0, "a cut call kept its profile reference"
+        return result, ran
+
+    async def test_a_call_whose_body_began_is_reported_as_unknown(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        result, ran = await self._cut_at_the_end_of_the_drain(
+            monkeypatch, tmp_path, queued=False
+        )
+
+        assert ran == ["the tool"]
         assert result.is_error is True
         assert result.structured_content["status"] == "outcome_unknown"
         assert result.structured_content["retry_safe"] is False
-        assert daemon_liveness.get_liveness().calls_in_flight() == 0
+
+    async def test_a_call_still_queued_is_answered_as_not_run(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        # Cut while waiting for the serializing lock, it never reached the
+        # browser. Calling that an unknown outcome would send the user to
+        # LinkedIn to look for an effect that cannot exist, and forbid a retry
+        # that is safe. It gets the signed retiring refusal instead, which a
+        # frontend reads as not sent and may repeat on a replacement.
+        from linkedin_mcp_server import daemon_liveness
+
+        daemon_liveness.get_liveness().serving_as("the-owner")
+        result, ran = await self._cut_at_the_end_of_the_drain(
+            monkeypatch, tmp_path, queued=True
+        )
+
+        assert ran == []
+        assert _refused_as_retiring(result, "the-owner")
+        assert result.structured_content is None
 
 
 class TestTheControlRoutes:

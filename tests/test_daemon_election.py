@@ -7860,6 +7860,10 @@ class TestPublishingLast:
             OwnerCallLivenessMiddleware,
             new_call_id,
         )
+        from linkedin_mcp_server.profile_lease import get_profile_lease
+        from linkedin_mcp_server.sequential_tool_middleware import (
+            SequentialToolExecutionMiddleware,
+        )
 
         order: list[str] = []
         observed: dict[str, object] = {}
@@ -7878,6 +7882,11 @@ class TestPublishingLast:
         monkeypatch.setattr(
             "fastmcp.server.dependencies.get_http_headers",
             lambda **_kw: {CALL_HEADER: marker},
+        )
+        lease = get_profile_lease(tmp_path / "held-profile")
+        monkeypatch.setattr(
+            "linkedin_mcp_server.sequential_tool_middleware.get_profile_lease",
+            lambda: lease,
         )
         calls: list[asyncio.Task[Any]] = []
 
@@ -7904,11 +7913,22 @@ class TestPublishingLast:
                     await release.wait()
                     return "the result"
 
+                # Through the real serializing middleware, so the call's body
+                # visibly begins and a cut reports an unknown outcome.
+                sequential = SequentialToolExecutionMiddleware()
+
+                async def through_the_lock(context: Any) -> Any:
+                    return await sequential.on_call_tool(context, work)  # ty: ignore
+
                 context = MagicMock()
                 context.message.name = "send_message"
+                context.fastmcp_context = None
                 calls.append(
                     asyncio.create_task(
-                        OwnerCallLivenessMiddleware().on_call_tool(context, work)  # ty: ignore
+                        OwnerCallLivenessMiddleware().on_call_tool(
+                            context,
+                            through_the_lock,
+                        )
                     )
                 )
                 while "ran" not in observed:

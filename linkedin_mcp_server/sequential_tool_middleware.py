@@ -16,6 +16,7 @@ from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.daemon_liveness import (
     abandoned_before_browser_work,
     abandoned_call_error,
+    browser_work_begins,
 )
 from linkedin_mcp_server.exceptions import BrowserBusyError
 from linkedin_mcp_server.profile_lease import get_profile_lease
@@ -125,6 +126,9 @@ class SequentialToolExecutionMiddleware(Middleware):
             lease.release()
             logger.info("Tool '%s' was abandoned before it began", tool_name)
             raise abandoned_call_error()
+        # From here on the call may act, so an owner that has to cut it off
+        # reports its outcome as unknown rather than as a call that never ran.
+        browser_work_begins()
 
         hold_started = time.perf_counter()
         try:

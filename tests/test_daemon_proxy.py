@@ -300,10 +300,10 @@ class TestCallingTheOwner:
         original_monitor = type(client)._await_with_session_monitoring
         monitor_calls = 0
 
-        async def monitor(self: Any, request: Any) -> Any:
+        async def monitor(self: Any, request: Any, **kwargs: Any) -> Any:
             nonlocal monitor_calls
             monitor_calls += 1
-            return await original_monitor(self, request)
+            return await original_monitor(self, request, **kwargs)
 
         monkeypatch.setattr(type(client), "_await_with_session_monitoring", monitor)
         seen_progress: list[tuple[float, float | None, str | None]] = []
@@ -3086,3 +3086,126 @@ class TestBurialAfterTheLastCheck:
         assert result.isError is False  # ty: ignore[unresolved-attribute]
         assert len(beats) - beats_at_burial >= 2, "the heartbeats stopped"
         assert set(beats) == {old.descriptor.instance_id}
+
+
+class TestTheSendBoundary:
+    """The last burial check runs where the session takes the request.
+
+    fastmcp's session monitor runs each request as a task of its own, so a
+    check made before handing it the request is older than the send by at
+    least one turn of the loop, and a burial already queued runs in that turn.
+    These queue the burial exactly there, with the real monitor and a real
+    in-process owner, and add no await of their own.
+    """
+
+    @pytest.mark.parametrize("buried", [True, False], ids=["buried", "control"])
+    async def test_a_burial_queued_as_the_monitor_takes_the_send_stops_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, buried: bool
+    ):
+        from linkedin_mcp_server.daemon_proxy import (
+            FrontendCallHeartbeatMiddleware,
+            OwnerFailure,
+            OwnerUnreachableError,
+        )
+
+        ran: list[str] = []
+        owner = FastMCP("owner")
+
+        @owner.tool(name="send_connection_request")
+        async def send() -> str:
+            ran.append("sent")
+            return "sent"
+
+        _reach_owners_in_process(monkeypatch, lambda _url: owner)
+        old = _attachment(tmp_path)
+        backend = _backend(old, tmp_path)
+        heartbeat = FrontendCallHeartbeatMiddleware(backend)
+        loop = asyncio.get_running_loop()
+
+        async def dispatch(_context: Any) -> Any:
+            client = backend.open_client(timeout=5.0)
+            async with client:
+                # The monitored path, not the one it takes with no session task.
+                assert client._session_state.session_task is not None
+                monitor = client._await_with_session_monitoring
+
+                async def burial_queued_first(coro: Any, **kwargs: Any) -> Any:
+                    if buried:
+                        loop.call_soon(
+                            backend.note_failure,
+                            old.descriptor.instance_id,
+                            OwnerFailure.RETIRING,
+                        )
+                    return await monitor(coro, **kwargs)
+
+                monkeypatch.setattr(
+                    client, "_await_with_session_monitoring", burial_queued_first
+                )
+                return await client.call_tool_mcp("send_connection_request", {})
+
+        context = MagicMock()
+        context.message.name = "send_connection_request"
+        if not buried:
+            result = await heartbeat.on_call_tool(context, dispatch)  # ty: ignore
+            assert ran == ["sent"]
+            assert getattr(result, "isError", None) is False
+            return
+
+        with pytest.raises(OwnerUnreachableError) as refused:
+            await heartbeat.on_call_tool(context, dispatch)  # ty: ignore
+
+        assert ran == [], "the request went to an owner written off before the send"
+        assert refused.value.nothing_was_sent is True
+        assert refused.value.instance_id == old.descriptor.instance_id
+        assert refused.value.classification is OwnerFailure.RETIRING
+
+    async def test_a_listing_to_an_owner_written_off_during_setup_is_not_sent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # An unbound listing picks its owner when the client is built. An owner
+        # written off while that client is being initialized gets no listing:
+        # a same-configuration older build stays attachable until it turns
+        # over, and its tool schemas may differ from its replacement's.
+        from fastmcp.server.middleware import Middleware as ServerMiddleware
+
+        from linkedin_mcp_server.daemon_proxy import (
+            OwnerFailure,
+            OwnerUnreachableError,
+        )
+
+        listed: list[str] = []
+
+        class CountsListings(ServerMiddleware):
+            async def on_list_tools(self, context: Any, call_next: Any) -> Any:
+                listed.append("tools/list")
+                return await call_next(context)
+
+        owner = FastMCP("owner")
+        owner.add_middleware(CountsListings())
+
+        @owner.tool
+        async def get_person_profile() -> str:
+            return "profile"
+
+        held = _HeldAtConnect(owner)
+        _reach_owners_in_process(monkeypatch, lambda _url: held)
+        attachment = _attachment(tmp_path)
+        backend = _backend(attachment, tmp_path)
+        client = backend.open_client(timeout=5.0)
+
+        async def listing() -> Any:
+            async with client:
+                return await client.list_tools_mcp()
+
+        listing_task = asyncio.create_task(listing())
+        await asyncio.wait_for(held.reached.wait(), timeout=5)
+        backend.note_failure(attachment.descriptor.instance_id, OwnerFailure.RETIRING)
+        held.release.set()
+
+        with pytest.raises(OwnerUnreachableError) as refused:
+            await asyncio.wait_for(listing_task, timeout=5)
+
+        assert listed == []
+        assert refused.value.nothing_was_sent is True
+        assert refused.value.instance_id == attachment.descriptor.instance_id
+        assert refused.value.classification is OwnerFailure.RETIRING

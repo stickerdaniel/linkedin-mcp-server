@@ -224,9 +224,18 @@ class CallLiveness:
     instance_id: str | None = None
 
     #: Calls this owner cut off itself while standing down, as opposed to calls
-    #: whose client went away. The middleware reports these as an unknown
-    #: outcome, because they may have acted and somebody is still waiting.
+    #: whose client went away. Somebody is still waiting for each, and what it
+    #: is told depends on ``_began``.
     _cut: set[str] = field(default_factory=set)
+
+    #: Calls whose tool body has begun: past the last abandonment check, holding
+    #: the profile, about to touch the browser. A call cut before this never ran
+    #: and may be repeated; a call cut after it may have acted.
+    _began: set[str] = field(default_factory=set)
+
+    def body_began(self, call_id: str) -> None:
+        """Note that *call_id* is past the point where it could still be refused."""
+        self._began.add(call_id)
 
     def serving_as(self, instance_id: str) -> None:
         """Name the instance whose refusals this tracker signs."""
@@ -357,6 +366,7 @@ class CallLiveness:
         """Stop counting for *call_id*, however its call ended."""
         self._waiting.pop(call_id, None)
         self._cut.discard(call_id)
+        self._began.discard(call_id)
 
     def abandoned(self, call_id: str) -> bool:
         """Whether *call_id* may no longer start browser work.
@@ -425,8 +435,9 @@ class CallLiveness:
         """Cancel every call still running because this owner is going away.
 
         Only after admission closed and the drain ran out. Each call cut here is
-        reported to its client as an unknown outcome rather than as abandoned,
-        because its client is still waiting and the call may already have acted.
+        answered rather than reported as abandoned, because its client is still
+        waiting: as not run if its body never began, and as an unknown outcome
+        if it did, since then it may already have acted.
         """
         cut = list(self._waiting)
         for call_id in cut:
@@ -465,6 +476,7 @@ def reset_liveness_for_testing() -> None:
     _liveness.retire_reason = None
     _liveness.instance_id = None
     _liveness._cut.clear()
+    _liveness._began.clear()
 
 
 def abandoned_before_browser_work() -> bool:
@@ -483,6 +495,19 @@ def abandoned_before_browser_work() -> bool:
     if call_id is None:
         return False
     return _liveness.abandoned(call_id)
+
+
+def browser_work_begins() -> None:
+    """Record that the call this task runs for is starting its tool body.
+
+    Called by the serializing middleware after its last abandonment check,
+    with nothing awaited in between, so the line it draws is exactly the one
+    between a call that was only ever queued and a call that may have acted.
+    Does nothing on a Direct server, which marks no calls.
+    """
+    call_id = _current_call.get()
+    if call_id is not None:
+        _liveness.body_began(call_id)
 
 
 def abandoned_call_error() -> ToolError:
@@ -573,7 +598,17 @@ class OwnerCallLivenessMiddleware(Middleware):
                 if running.cancelled() and call_id in _liveness._cut:
                     # Ours, and not because the client left: this owner is
                     # standing down and the drain ran out. The client is still
-                    # waiting, and the call may already have acted.
+                    # waiting, and what it may do next depends on whether the
+                    # call got as far as its tool body.
+                    if call_id not in _liveness._began:
+                        # Only ever queued, so nothing ran. The same signed
+                        # refusal a retiring owner gives a new call, which a
+                        # frontend already reads as not sent and may repeat.
+                        return _refusal(
+                            RETIRING,
+                            "The shared browser shut down before this call "
+                            "started. Nothing was run; retry it.",
+                        )
                     answer = unknown_outcome(
                         tool=context.message.name,
                         reason="it was replaced and stopped waiting for this call",

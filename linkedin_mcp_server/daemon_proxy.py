@@ -40,7 +40,7 @@ import contextvars
 import datetime
 import enum
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -429,31 +429,62 @@ def _tells_which_owner_failed() -> type:
             self,
             *args: Any,
             instance_id: str,
+            attachment: Attachment | None = None,
             binding: _CallBinding | None = None,
             still_usable: Callable[[Attachment], None] | None = None,
             **kwargs: Any,
         ) -> None:
             super().__init__(*args, **kwargs)
             self._instance_id = instance_id
+            self._attachment = attachment
             self._binding = binding
             self._still_usable = still_usable
 
-        def _claim_the_send(self) -> None:
-            """Mark the bound call as sent, unless its owner was written off first.
+        def _check_at_the_session(self, *, claims_the_call: bool) -> None:
+            """Refuse a request to a written-off owner, and claim the call if asked.
 
-            The last synchronous step before the tool request is handed to the
-            session, after every await of building and initializing the client.
-            A burial that landed during those awaits refuses the send, and the
-            refusal says nothing was sent, which is exactly true. Once claimed,
-            the call keeps its owner: a request already on its way must stay with
-            the owner whose heartbeats are keeping it alive.
+            Runs inside the coroutine the session monitor schedules, as its first
+            step before the session method: the last point at which this process
+            can still decline to send. Checking earlier and sending later is not
+            the same thing, because the monitor runs the request as a task of its
+            own and anything already queued runs first, another call's burial
+            included. A refusal here says nothing was sent, which is exactly true.
+
+            Every request is checked, listings too: an owner written off while
+            its client was being set up gets no request at all. *claims_the_call*
+            marks the bound tool call as sent, and from then on it keeps its
+            owner, because a request already on its way must stay with the owner
+            whose heartbeats are keeping it alive.
             """
             binding = self._binding
-            if binding is None or binding.dispatch.sent:
+            if binding is not None and binding.dispatch.sent:
                 return
-            if self._still_usable is not None:
-                self._still_usable(binding.attachment)
-            binding.dispatch.sent = True
+            target = binding.attachment if binding is not None else self._attachment
+            if self._still_usable is not None and target is not None:
+                self._still_usable(target)
+            if claims_the_call and binding is not None:
+                binding.dispatch.sent = True
+
+        async def _await_with_session_monitoring(
+            self, coro: Coroutine[Any, Any, Any], *, claims_the_call: bool = False
+        ) -> Any:
+            """The installed monitor, with the burial check moved inside its task.
+
+            Every request fastmcp's client makes goes through here, so this is
+            the one place that sees the send as it happens.
+            """
+
+            async def at_the_session() -> Any:
+                try:
+                    self._check_at_the_session(claims_the_call=claims_the_call)
+                except BaseException:
+                    # Never started, and closed so it is not reported as a
+                    # coroutine nobody awaited.
+                    coro.close()
+                    raise
+                return await coro
+
+            return await super()._await_with_session_monitoring(at_the_session())
 
         async def _saying_which_owner(
             self, operation: Awaitable[Any], *, nothing_was_sent: bool | None
@@ -608,9 +639,10 @@ def _tells_which_owner_failed() -> type:
                         if propagated_meta
                         else None
                     )
-                    # Nothing awaits between this and the session taking the
-                    # request, so a burial cannot land between check and send.
-                    self._claim_the_send()
+                    # Checked and claimed inside the monitored task, right
+                    # before the session takes the request, never out here: the
+                    # monitor schedules that task, and a burial queued meanwhile
+                    # runs first (`_check_at_the_session`).
                     result = await self._await_with_session_monitoring(
                         self.session.send_request(
                             mt.ClientRequest(
@@ -629,7 +661,8 @@ def _tells_which_owner_failed() -> type:
                             progress_callback=(
                                 progress_handler or self._progress_handler
                             ),
-                        )
+                        ),
+                        claims_the_call=True,
                     )
                     if result.isError and span.is_recording():
                         span.set_attribute("error.type", "tool_error")
@@ -925,7 +958,7 @@ class DaemonProxyBackend:
         # A bound call is addressed to the owner it was bound to, never to a
         # replacement that passed no preflight for it. Until its tool request
         # has actually been sent, that owner is asked about again here and once
-        # more at the send (`_claim_the_send`); after it, the call keeps its
+        # more at the send (`_check_at_the_session`); after it, the call keeps its
         # owner whatever happens to it. Anything unbound, a listing above all,
         # gets the owner a new call would get.
         if bound is None:
@@ -971,6 +1004,7 @@ class DaemonProxyBackend:
             # attachment as the URL and the token, so all three describe one owner
             # even while a replacement is being adopted concurrently.
             instance_id=attachment.descriptor.instance_id,
+            attachment=attachment,
             binding=bound,
             still_usable=self.refuse_if_written_off,
         )
