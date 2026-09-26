@@ -544,9 +544,10 @@ _MESSAGE_CONFIRMATION_READY_JS = (
                 identifier === arg.profileUrn || `/in/${identifier}/` === arg.profilePath
             );
         };
-        // LinkedIn heads a message with links to its sender's profile and
-        // leaves a follow-up from the same sender unheaded, so the sender of a
-        // node is the nearest item at or before it that links a profile. A
+        // LinkedIn heads a message with links to its sender's profile
+        // (measured). A follow-up from the same sender is assumed to be
+        // unheaded, so the sender of a node is the nearest item at or before
+        // it that links a profile. A
         // message from the recipient can carry the same text without this
         // submission ever reaching LinkedIn, so refuse a node the recipient
         // sent, or one whose sender cannot be found. Only the link path

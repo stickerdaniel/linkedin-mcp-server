@@ -1244,8 +1244,9 @@ class TestSendConfirmationDom:
         """A message from the recipient is no acknowledgement of this submit.
 
         The fixtures claim the algorithm plus the measured link shape (a sender
-        header linking ``/in/<profile URN>``, and follow-ups without one), not a
-        full copy of LinkedIn's markup.
+        header linking ``/in/<profile URN>``), not a full copy of LinkedIn's
+        markup. The unheaded follow-up is an assumption; no live thread showed
+        one yet.
         """
         html = compose_page(
             INCOMING_AFTER_NOOP_SEND_JS
