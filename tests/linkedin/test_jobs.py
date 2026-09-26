@@ -834,6 +834,7 @@ class TestSearchJobs:
 
         starts = [parse_qs(urlparse(url).query)["start"] for url in urls_visited]
         assert starts == [["50"], ["52"]]
+        assert result["url"] == urls_visited[0]
         assert result["job_ids"] == ["600", "700", "800"]
         assert result["pagination"] == {
             "pages_fetched": 2,
