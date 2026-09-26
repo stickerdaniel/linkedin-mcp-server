@@ -693,6 +693,7 @@ def semantic_program_id(program: str) -> str:
         ("delete owner.__linkedinMcpComposer", "message_composer_dispose"),
         ("names[0][0].setAttribute(mark", "thread_options"),
         ("archiveItems[0].setAttribute(mark", "thread_menu_items"),
+        ("addedTotal: added.length", "thread_menu_survey"),
         ("return {ids: ids, scoped", "job_ids"),
         ("promoted.push(id)", "job_promoted_ids"),
         ("signals.bounded && (signals.easy_apply", "job_apply_ready"),

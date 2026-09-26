@@ -211,11 +211,32 @@ async def test_a_click_that_did_not_hold_is_not_reported_archived(dom_page):
     assert await chosen(dom_page) == [["thread", ARCHIVE]]
 
 
-async def test_a_menu_with_neither_item_chooses_nothing(dom_page):
-    await serve(dom_page, thread_page(items="Mark as unread,Delete"))
+async def test_a_menu_with_neither_item_chooses_nothing_and_says_what_it_held(
+    dom_page,
+):
+    """The refusal quotes the menu, so a live run shows LinkedIn's real labels."""
+    await serve(dom_page, thread_page(items="Mark as unread,Move to inbox,Delete"))
+    menus_open: list[int] = []
 
-    with pytest.raises(LinkedInOperationError, match="did not offer exactly one"):
-        await archive(dom_page)
+    async def trace(page, step, *, extra=None):
+        menus_open.append(await page.locator('[role="menu"]').count())
+
+    with patch.object(conversations, "record_page_trace", side_effect=trace):
+        with pytest.raises(LinkedInOperationError) as raised:
+            await archive(dom_page)
+
+    message = str(raised.value)
+    assert "did not offer exactly one" in message
+    assert "Nothing was clicked" in message
+    assert "1 options button matched" in message
+    assert (
+        "added 3 visible item(s) in div[role=menu]: "
+        "'Mark as unread' (div[role=button]), 'Move to inbox' (div[role=button]), "
+        "'Delete' (div[role=button])"
+    ) in message
+    assert "aria-expanded=None" in message
+    assert menus_open == [1]
+    assert await dom_page.locator('[role="menu"]').count() == 0
     assert await chosen(dom_page) == []
 
 
@@ -230,8 +251,11 @@ async def test_a_menu_offering_both_items_chooses_nothing(dom_page):
 async def test_two_thread_option_buttons_are_not_guessed_at(dom_page):
     await serve(dom_page, thread_page(headers=2))
 
-    with pytest.raises(LinkedInOperationError, match="button could not be found"):
-        await archive(dom_page)
+    with patch.object(conversations, "record_page_trace", new_callable=AsyncMock):
+        with pytest.raises(
+            LinkedInOperationError, match="2 options button\\(s\\) matched"
+        ):
+            await archive(dom_page)
     assert await chosen(dom_page) == []
 
 

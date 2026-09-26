@@ -1042,6 +1042,7 @@ async def _archive_conversation_scenario(*, already: bool) -> dict[str, Any]:
     page.goto_landings.extend([thread] * loads)
     page.declare_locator("main button[data-mcp-thread-options]", "thread_options")
     page.script("evaluate:thread_options", *([THREAD_OPTIONS] * loads))
+    page.script("evaluate:thread_menu_survey", *([{"keys": []}] * loads))
     page.script("thread_options.click", *([None] * loads))
     archived = {"archive": 0, "unarchive": 1}
     if already:

@@ -15,6 +15,7 @@ from linkedin_mcp_server.core.exceptions import (
     InvalidReferenceError,
     LinkedInOperationError,
 )
+from linkedin_mcp_server.debug_trace import record_page_trace
 from linkedin_mcp_server.linkedin.content import PageContentReader
 from linkedin_mcp_server.linkedin.identifiers import (
     messaging_thread_url,
@@ -326,6 +327,71 @@ THREAD_MENU_ITEMS_JS = r"""(opts) => {
     return {archive: archiveItems.length, unarchive: unarchiveItems.length};
 }"""
 
+# Evidence for a menu the reads above could not use: every visible item-like
+# element with short text, innermost, as `tag|role|text`. Taken once before
+# the options button is clicked and once after, so the items the click added
+# are the menu, whatever element and role LinkedIn gave it. With ``before``,
+# also describes those new items, their closest common container, and the
+# marked options button. Read only; nothing is clicked or marked.
+THREAD_MENU_SURVEY_JS = r"""(opts) => {
+    const {before, mark} = opts;
+    const visible = (el) => {
+        const box = el.getBoundingClientRect();
+        return box.width > 0 && box.height > 0;
+    };
+    const squash = (value) => (value || '').replace(/\s+/g, ' ').trim();
+    const itemSelector = '[role="button"], [role="menuitem"], [role="menuitemradio"], '
+        + '[role="menuitemcheckbox"], [role="option"], button, a, li, [tabindex]';
+    const found = [...document.querySelectorAll(itemSelector)].filter(el => {
+        const text = squash(el.innerText);
+        return visible(el) && text && text.length <= 80;
+    });
+    const items = found.filter(el => !found.some(other => other !== el && el.contains(other)));
+    const keyOf = (el) => [
+        el.tagName.toLowerCase(), el.getAttribute('role') || '', squash(el.innerText),
+    ].join('|');
+    const keys = items.map(keyOf);
+    if (!before) return {keys};
+    const describe = (el) => {
+        if (!el) return null;
+        const role = el.getAttribute('role');
+        const classes = [...el.classList].slice(0, 3).map(name => '.' + name).join('');
+        return el.tagName.toLowerCase() + (role ? '[role=' + role + ']' : '')
+            + (el.id ? '#' + el.id : '') + classes;
+    };
+    const remaining = new Map();
+    for (const key of before) remaining.set(key, (remaining.get(key) || 0) + 1);
+    const added = items.filter(el => {
+        const key = keyOf(el);
+        const left = remaining.get(key) || 0;
+        if (left > 0) {
+            remaining.set(key, left - 1);
+            return false;
+        }
+        return true;
+    });
+    let container = added[0]?.parentElement || null;
+    while (container && !added.every(el => container.contains(el))) {
+        container = container.parentElement;
+    }
+    const trigger = document.querySelector('[' + mark + ']');
+    const controls = trigger?.getAttribute('aria-controls');
+    return {
+        keys,
+        added: added.slice(0, 25).map(el => ({
+            element: describe(el), text: squash(el.innerText),
+        })),
+        addedTotal: added.length,
+        container: describe(container),
+        trigger: trigger ? {
+            element: describe(trigger),
+            expanded: trigger.getAttribute('aria-expanded'),
+            haspopup: trigger.getAttribute('aria-haspopup'),
+            controls: describe(controls ? document.getElementById(controls) : null),
+        } : null,
+    };
+}"""
+
 # The attributes that tie a click to the element the read chose.
 _THREAD_OPTIONS_MARK = "data-mcp-thread-options"
 _THREAD_ARCHIVE_MARK = "data-mcp-thread-archive"
@@ -351,6 +417,30 @@ _ThreadArchiveState = Literal[
 class _ThreadArchiveRead:
     state: _ThreadArchiveState
     participant: str | None
+    # For a failed read, what the page showed instead, in error-message words.
+    evidence: str = ""
+
+
+def _menu_evidence(survey: dict[str, Any]) -> str:
+    """Say what the options button opened, from a survey taken after its click."""
+    trigger = survey.get("trigger") or {}
+    parts = [
+        f"The options button was {trigger.get('element')} with "
+        f"aria-expanded={trigger.get('expanded')!r}, "
+        f"aria-haspopup={trigger.get('haspopup')!r} and aria-controls naming "
+        f"{trigger.get('controls')}."
+    ]
+    added = survey.get("added") or []
+    if not added:
+        parts.append("Its click added no visible item to the page.")
+    else:
+        listed = ", ".join(f"{item['text']!r} ({item['element']})" for item in added)
+        total = survey.get("addedTotal", len(added))
+        parts.append(
+            f"Its click added {total} visible item(s) in {survey.get('container')}: "
+            f"{listed}."
+        )
+    return " ".join(parts)
 
 
 def _on_thread(url: str, thread_key: str) -> bool:
@@ -979,12 +1069,13 @@ class ConversationReader:
                 raise LinkedInOperationError(
                     f"Archive was chosen for thread {thread_key}, but after a "
                     f"reload its options menu {self._menu_finding(after.state)}."
+                    f"{after.evidence}"
                 )
             status = "archived"
         elif first.state != "archived":
             raise LinkedInOperationError(
                 f"Thread {thread_key} was not archived: its options menu "
-                f"{self._menu_finding(first.state)}."
+                f"{self._menu_finding(first.state)}.{first.evidence}"
             )
         return {
             "url": url,
@@ -1005,7 +1096,7 @@ class ConversationReader:
             )
         return (
             f"did not offer exactly one of {text.archive_item!r} or "
-            f"{text.unarchive_item!r}"
+            f"{text.unarchive_item!r}. Nothing was clicked"
         )
 
     async def _read_thread_archive_state(
@@ -1043,11 +1134,21 @@ class ConversationReader:
                 if options["triggers"] == 1:
                     break
             if self._session.monotonic() >= deadline:
-                return _ThreadArchiveRead("no_options", None)
+                await record_page_trace(
+                    page, "archive-conversation-no-options", extra=options
+                )
+                return _ThreadArchiveRead(
+                    "no_options",
+                    None,
+                    f" {options['triggers']} options button(s) matched.",
+                )
             await self._session.delay(_THREAD_POLL)
         name = options["name"] or ""
         participant = name[len(text.options_prefix) :].strip() or None
 
+        before = await page.evaluate(
+            THREAD_MENU_SURVEY_JS, {"before": None, "mark": _THREAD_OPTIONS_MARK}
+        )
         await page.locator(f"main button[{_THREAD_OPTIONS_MARK}]").click(timeout=5000)
         menu: dict[str, int] = {"archive": 0, "unarchive": 0}
         deadline = self._session.monotonic() + _THREAD_MENU_TIMEOUT
@@ -1067,7 +1168,19 @@ class ConversationReader:
             if self._session.monotonic() >= deadline:
                 break
             await self._session.delay(_THREAD_POLL)
-        await page.keyboard.press("Escape")
         if menu["archive"] == 0 and menu["unarchive"] == 1:
+            await page.keyboard.press("Escape")
             return _ThreadArchiveRead("archived", participant)
-        return _ThreadArchiveRead("no_item", participant)
+        # The menu is still open: read it and take its picture before closing.
+        survey = await page.evaluate(
+            THREAD_MENU_SURVEY_JS,
+            {"before": before["keys"], "mark": _THREAD_OPTIONS_MARK},
+        )
+        await record_page_trace(page, "archive-conversation-menu", extra=survey)
+        await page.keyboard.press("Escape")
+        return _ThreadArchiveRead(
+            "no_item",
+            participant,
+            f" 1 options button matched. {_menu_evidence(survey)} A screenshot "
+            "of the open menu is in the trace directory when tracing is on.",
+        )
