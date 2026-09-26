@@ -609,17 +609,15 @@ class Sampler:
             lifetime = current.identity if key[1] is not None and current else None
             in_row = current is not None and current.in_row
             fields = {failure.split(":", 1)[0] for failure in failed}
+            # A baseline process whose ancestry never resolved is judged like
+            # any other: being watched is a reason to read it again, never a
+            # reason to discount what cannot be seen.
             if lifetime is not None and lifetime in settled:
                 verdict = _UNRELATED
             elif process is not None and self._another_user(process):
                 verdict = _UNRELATED
                 if lifetime is not None:
                     self._unrelated.add(lifetime)
-            elif lifetime is not None and lifetime in self._watched:
-                # Running before any actor, its ancestry unresolved: it counts
-                # once it shows the browser, and is evidence until then.
-                shows = exe_read and bool(exe) and self.possible_browser(exe)
-                verdict = _POSSIBLE if shows else _EVIDENCE
             elif exe_read and not self.possible_browser(exe):
                 # Not a browser, whatever its arguments. Kept as evidence when
                 # it belongs to the row or its ancestry could not be read.

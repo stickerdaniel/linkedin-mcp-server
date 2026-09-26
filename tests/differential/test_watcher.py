@@ -795,7 +795,11 @@ def test_a_baseline_process_with_a_complete_ancestry_is_read_once(ancestry):
     assert reads["n"] == 1
 
 
-def test_a_watched_baseline_process_counts_only_once_it_shows_the_browser():
+def _watched_baseline_beside_a_browser(
+    exe: Any,
+) -> tuple[Sampler, Tracker]:
+    """A baseline orphan born after the harness, so watched, whose reads fail
+    while a readable browser runs on the row's profile beside it."""
     table: dict[int, dict[str, Any]] = {
         **_baseline_table(),
         60: {"start": 5.5, "ppid": 1, "exe": "/usr/bin/python3", "cmdline": ["x"]},
@@ -803,13 +807,32 @@ def test_a_watched_baseline_process_counts_only_once_it_shows_the_browser():
     sampler, tracker = _sampler(table, root=10), Tracker()
     _observe(sampler, tracker, 0.0)
     table[60]["cmdline"] = psutil.AccessDenied(60)
-    table[60]["exe"] = psutil.AccessDenied(60)
-    _observe(sampler, tracker, 1.0)
-    assert sampler.relevant_read_failures == []
-    table[60]["exe"] = BROWSER_EXE
-    _observe(sampler, tracker, 2.0)
+    table[60]["exe"] = exe
+    table[70] = {"start": 6.0, "ppid": 10, "cmdline": _chrome("/tmp/row")}
+    for step in range(1, 6):
+        _observe(sampler, tracker, float(step))
+    return sampler, tracker
+
+
+@pytest.mark.parametrize(
+    "exe",
+    [
+        pytest.param(psutil.AccessDenied(60), id="exe-denied"),
+        pytest.param("", id="exe-empty"),
+    ],
+)
+def test_a_watched_baseline_process_that_cannot_be_seen_keeps_o1_open(exe):
+    # Watched means read again, not discounted: with neither its executable
+    # nor its arguments visible it may be the second browser on the profile.
+    sampler, tracker = _watched_baseline_beside_a_browser(exe)
     assert [e["pid"] for e in sampler.relevant_read_failures] == [60]
     assert _judged(sampler, tracker)
+
+
+def test_a_watched_baseline_process_with_a_readable_other_exe_is_evidence_only():
+    sampler, tracker = _watched_baseline_beside_a_browser("/usr/bin/python3")
+    assert sampler.relevant_read_failures == []
+    assert _judged(sampler, tracker) == []
 
 
 def test_a_cached_exclusion_tied_to_the_harness_later_is_withdrawn():
