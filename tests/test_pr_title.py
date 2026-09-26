@@ -549,6 +549,7 @@ def test_label_workflow_matches_breaking_marker_without_normalizing() -> None:
         ("feat!: Replace the public contract", "breaking-change"),
         ("fix(deps): update all major dependencies (major)", "dependencies"),
         ("chore(deps): lock file maintenance", "dependencies"),
+        ("fix(deps)!: Drop the old runtime", "breaking-change"),
         ("fix(deps-dev): Keep the scope exact", "bug"),
         ("feat(deps): Add a dependency-backed feature", "enhancement"),
     ],
