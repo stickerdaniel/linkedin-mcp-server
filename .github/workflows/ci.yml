@@ -261,6 +261,59 @@ jobs:
           DISPLAY: ":99"
         run: uv run pytest --cov --cov-report=term-missing -n auto --dist loadgroup -v -s
 
+      # Release gate 1 of the default-on contract
+      # (docs/decisions/2026-09-26-daemon-default-on-contract.md): does the
+      # bundled browser accept a synthetic www.linkedin.com whose CA only this
+      # runner trusts? After the suite, so nothing above runs with an extra root
+      # in the store. The CA's key never leaves the issuing process, the CA is
+      # name-constrained to the synthetic names, and it expires within a day.
+      - name: Issue the synthetic origin certificates
+        run: uv run python tests/differential/synthetic_origin.py "$RUNNER_TEMP/synthetic-origin"
+
+      # The runner account's NSS database, which is where Chromium on Linux
+      # reads locally trusted roots. `~/.pki/nssdb` rather than the newer
+      # `~/.local/share/pki/nssdb`: since M146 Chromium prefers the old path
+      # whenever that directory exists, and older builds read nothing else, so
+      # creating it settles which database both read. The same step maps the
+      # synthetic names to loopback in the hosts file, so a browser that
+      # stopped using the proxy would reach a closed local port rather than
+      # LinkedIn. The guard refuses any machine that is not a disposable
+      # GitHub-hosted runner, `act` included.
+      - name: Trust the synthetic CA and fence off the real names
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_ACTIONS:-}" != true ] || [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ] || [ -n "${ACT:-}" ]; then
+            echo "Refusing to change a trust store outside a disposable GitHub-hosted runner" >&2
+            exit 1
+          fi
+          if ! command -v certutil >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq libnss3-tools
+          fi
+          db="$HOME/.pki/nssdb"
+          mkdir -p "$db"
+          if [ ! -f "$db/cert9.db" ]; then
+            certutil -d "sql:$db" -N --empty-password
+          fi
+          certutil -d "sql:$db" -A -t "C,," -n "linkedin-mcp synthetic origin test CA" -i "$RUNNER_TEMP/synthetic-origin/ca.pem"
+          echo "Trust store: NSS sql:$db"
+          certutil -d "sql:$db" -L
+          hosts="$(printf '\n127.0.0.1 www.linkedin.com static.licdn.com synthetic-canary.test\n::1 www.linkedin.com static.licdn.com synthetic-canary.test\n')"
+          printf '%s\n' "$hosts" | sudo tee -a /etc/hosts >/dev/null
+          echo "Hosts file:"; cat /etc/hosts
+
+      # The only step that opts in. A pass says the synthetic names resolved to
+      # loopback for the system and for an unproxied browser, the proxy refused
+      # a name it does not route before www.linkedin.com was named, the feed
+      # loaded under this run's CA, and a CA nobody trusted was still refused.
+      - name: Load the synthetic origin through the proxy
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+        timeout-minutes: 10
+        run: uv run pytest -v -s -o faulthandler_timeout=120 tests/differential/test_synthetic_origin.py
+
       - run: uv cache prune --ci
 
   # Everything here coordinates, protects or queries state through the operating
@@ -398,5 +451,92 @@ jobs:
           # that does not exist is the kind of thing someone later debugs.
           DISPLAY: ${{ runner.os == 'Linux' && ':99' || '' }}
         run: uv run pytest tests/test_browser_identity.py
+
+      # The synthetic origin gate from the Ubuntu job, on every other browser
+      # build. Last, so the containment and identity tests above run against an
+      # unmodified trust store.
+      - name: Issue the synthetic origin certificates
+        shell: bash
+        run: uv run python tests/differential/synthetic_origin.py "$RUNNER_TEMP/synthetic-origin"
+
+      # One store per platform, the one the bundled browser reads locally
+      # trusted roots from. Linux: the runner account's NSS database, for the
+      # reason given in the Ubuntu job. macOS: the admin trust domain in the
+      # System keychain; the user domain asks for interactive authorisation,
+      # which a runner cannot give, and passwordless sudo is what lets the
+      # admin domain through. Windows: LocalMachine\Root; adding to the
+      # CurrentUser root store raises a confirmation dialog nobody is there to
+      # answer. The two machine-wide stores, and the hosts file, are acceptable
+      # only because the guard admits nothing but a disposable GitHub-hosted
+      # runner.
+      - name: Trust the synthetic CA and fence off the real names
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_ACTIONS:-}" != true ] || [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ] || [ -n "${ACT:-}" ]; then
+            echo "Refusing to change a trust store outside a disposable GitHub-hosted runner" >&2
+            exit 1
+          fi
+          ca="$RUNNER_TEMP/synthetic-origin/ca.pem"
+          name="linkedin-mcp synthetic origin test CA"
+          case "$RUNNER_OS" in
+            Linux)
+              if ! command -v certutil >/dev/null; then
+                sudo apt-get update -qq
+                sudo apt-get install -y -qq libnss3-tools
+              fi
+              db="$HOME/.pki/nssdb"
+              mkdir -p "$db"
+              if [ ! -f "$db/cert9.db" ]; then
+                certutil -d "sql:$db" -N --empty-password
+              fi
+              certutil -d "sql:$db" -A -t "C,," -n "$name" -i "$ca"
+              echo "Trust store: NSS sql:$db"
+              certutil -d "sql:$db" -L
+              ;;
+            macOS)
+              sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "$ca"
+              echo "Trust store: admin trust settings, /Library/Keychains/System.keychain"
+              security dump-trust-settings -d | grep -F -A4 "$name"
+              ;;
+            Windows)
+              certutil.exe -addstore -f Root "$(cygpath -w "$ca")"
+              echo "Trust store: LocalMachine\\Root"
+              certutil.exe -store Root "$name"
+              ;;
+            *)
+              echo "No trust step for $RUNNER_OS" >&2
+              exit 1
+              ;;
+          esac
+          # The fence from the Ubuntu job. Each platform's resolver caches, so
+          # each is flushed after the hosts file changes.
+          hosts="$(printf '\n127.0.0.1 www.linkedin.com static.licdn.com synthetic-canary.test\n::1 www.linkedin.com static.licdn.com synthetic-canary.test\n')"
+          case "$RUNNER_OS" in
+            Linux)
+              printf '%s\n' "$hosts" | sudo tee -a /etc/hosts >/dev/null
+              cat /etc/hosts
+              ;;
+            macOS)
+              printf '%s\n' "$hosts" | sudo tee -a /etc/hosts >/dev/null
+              sudo dscacheutil -flushcache
+              sudo killall -HUP mDNSResponder
+              cat /etc/hosts
+              ;;
+            Windows)
+              hosts_file=/c/Windows/System32/drivers/etc/hosts
+              printf '%s\n' "$hosts" >> "$hosts_file"
+              MSYS_NO_PATHCONV=1 ipconfig.exe /flushdns
+              cat "$hosts_file"
+              ;;
+          esac
+
+      - name: Load the synthetic origin through the proxy
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+        timeout-minutes: 10
+        run: uv run pytest -v -s -o faulthandler_timeout=120 tests/differential/test_synthetic_origin.py
 
       - run: uv cache prune --ci
