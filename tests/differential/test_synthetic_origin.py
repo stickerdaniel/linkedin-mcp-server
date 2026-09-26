@@ -38,7 +38,7 @@ import socket
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -144,7 +144,12 @@ class _CanaryHandler(BaseHTTPRequestHandler):
         pass
 
 
-class _Canary(HTTPServer):
+class _Canary(ThreadingHTTPServer):
+    # Threaded, because a browser may open a connection it never sends on,
+    # and on a single thread that one socket would hold every later request
+    # and the shutdown behind it.
+    daemon_threads = True
+
     def __init__(self) -> None:
         super().__init__(("127.0.0.1", 0), _CanaryHandler)
         self.hosts: list[str] = []
@@ -161,6 +166,12 @@ def _canary() -> Iterator[_Canary]:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+async def _close_under(manager: BrowserManager, error: BaseException) -> None:
+    """Close after a failure, keeping that failure first but not the only word."""
+    if not await manager.close():
+        error.add_note("The browser's shutdown was not confirmed either.")
 
 
 async def _unproxied_browser_honours_the_hosts_file(tmp_path: Path) -> None:
@@ -180,9 +191,10 @@ async def _unproxied_browser_honours_the_hosts_file(tmp_path: Path) -> None:
                     f"loopback ({error}), so its resolver may not read the "
                     f"hosts file; stopping before www.linkedin.com is named"
                 )
-        finally:
-            closed = await manager.close()
-        assert closed, "the canary browser's shutdown was not confirmed"
+        except BaseException as error:
+            await _close_under(manager, error)
+            raise
+        assert await manager.close(), "the canary browser's shutdown was not confirmed"
         assert f"{CANARY_HOST}:{port}" in canary.hosts, canary.hosts
 
 
@@ -314,7 +326,8 @@ async def _measure(
         with pytest.raises(PlaywrightError, match="ERR_CERT_AUTHORITY_INVALID"):
             await page.goto("https://static.licdn.com/", timeout=_NAVIGATION_TIMEOUT_MS)
         assert not stranger.requests, "a certificate nobody trusts was accepted"
-    finally:
-        closed = await manager.close()
-    assert closed, "the browser's shutdown was not confirmed"
+    except BaseException as error:
+        await _close_under(manager, error)
+        raise
+    assert await manager.close(), "the browser's shutdown was not confirmed"
     return browser_version

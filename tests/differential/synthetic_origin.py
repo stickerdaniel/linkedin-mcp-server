@@ -56,8 +56,8 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 ALLOWED_HOSTS = ("www.linkedin.com", "static.licdn.com")
 
 #: Mapped to loopback next to the allowed names, and nothing else. Under the
-#: reserved ``.test`` domain, so a runner that lacks the mapping resolves it
-#: nowhere, while one that has it shows an unproxied browser honouring it.
+#: reserved ``.test`` domain, so no public name is involved; the CI step supplies
+#: the mapping, and a request reaching the canary's listener is the evidence.
 CANARY_HOST = "synthetic-canary.test"
 
 #: The subject the CI trust steps look the CA up by when they record the store.
