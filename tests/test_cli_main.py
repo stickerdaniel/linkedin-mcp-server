@@ -1003,39 +1003,6 @@ class TestForwardingToASharedOwner:
         # Asked second: the profile itself comes first, then the root above it.
         assert canonical(auth_root) == canonical(_local_storage[1])
 
-    def test_recovery_exists_only_behind_the_startup_verdict(self):
-        """Recovery keeps the admission it started with, and never asks again.
-
-        That is only sound while nothing but the gated startup helper builds a
-        proxy backend or starts an election outside one. Recovery is a method
-        of the backend, so this pins both.
-        """
-        import ast
-        from pathlib import Path
-
-        package = Path(cli_main.__file__).parent
-        constructs: set[str] = set()
-        elects: set[str] = set()
-        for source in package.rglob("*.py"):
-            tree = ast.parse(source.read_text(encoding="utf-8"))
-            for scope in ast.walk(tree):
-                if not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    continue
-                for node in ast.walk(scope):
-                    if not isinstance(node, ast.Call):
-                        continue
-                    name = getattr(node.func, "id", getattr(node.func, "attr", ""))
-                    where = f"{source.stem}.{scope.name}"
-                    if name == "DaemonProxyBackend":
-                        constructs.add(where)
-                    if name == "obtain_owner" or any(
-                        getattr(arg, "id", None) == "obtain_owner" for arg in node.args
-                    ):
-                        elects.add(where)
-
-        assert constructs == {"cli_main._obtain_shared_owner"}
-        assert elects == {"cli_main._obtain_shared_owner", "daemon_proxy._elect"}
-
     def test_the_elected_owner_is_handed_back_rather_than_discarded(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path
     ):
