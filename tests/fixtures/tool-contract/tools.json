@@ -14,7 +14,7 @@
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Archive one LinkedIn messaging thread, InMail included, by thread ID.\n\nOpens the thread, which marks it read, and chooses Archive from its\noptions menu. A thread whose menu already offers Unarchive is left\nalone and reported already_archived, so a repeated call never\nunarchives. The change is confirmed by loading the thread again.\nReversible on LinkedIn; a new message moves the thread back to the\ninbox.",
+    "description": "Archive one LinkedIn messaging thread, InMail included, by thread ID.\n\nOpens the thread, which marks it read, and chooses Archive from its\noptions menu. A thread whose menu already offers Restore is left\nalone and reported already_archived, so a repeated call never\nunarchives. The change is confirmed by loading the thread again.\nReversible on LinkedIn; a new message moves the thread back to the\ninbox.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {

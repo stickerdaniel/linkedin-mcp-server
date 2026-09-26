@@ -290,51 +290,46 @@ THREAD_OPTIONS_JS = r"""(opts) => {
     };
 }"""
 
-# The open options menu's items whose whole text is the archive or the
-# unarchive label. Items are whatever the menu renders as clickable
-# (`[role="button"]`, `[role="menuitem"]`, `button`), visible, outside the
-# sidebar rows and the message list, and innermost, so an item and its own
-# wrapper count once. The archive item is marked for the click only when it
-# is the one match.
+# The class LinkedIn gives each item of a thread's options dropdown, measured
+# on 2026-09-26: `div[role=button]` items (`div[role=link]` for Manage
+# settings) inside an artdeco dropdown. A class, because the items carry no
+# attribute that tells them from any other `[role=button]` the click reveals,
+# and a page-wide match picked up filter pills, message links and the footer.
+_THREAD_OPTION_SELECTOR = ".msg-thread-actions__dropdown-option"
+
+# The open dropdown's items whose whole text is the archive or the restore
+# label, visible and innermost, so an item and its own wrapper count once.
+# The archive item is marked for the click only when it is the one match.
 THREAD_MENU_ITEMS_JS = r"""(opts) => {
-    const {archive, unarchive, mark} = opts;
+    const {archive, restore, optionSelector, mark} = opts;
     const visible = (el) => {
         const box = el.getBoundingClientRect();
         return box.width > 0 && box.height > 0;
-    };
-    const inRow = (el) => {
-        const row = el.closest('li');
-        return !!(row && row.querySelector('label[aria-label]'));
     };
     const squash = (value) => (value || '').replace(/\s+/g, ' ').trim();
     for (const old of document.querySelectorAll('[' + mark + ']')) {
         old.removeAttribute(mark);
     }
-    const items = [
-        ...document.querySelectorAll('[role="button"], [role="menuitem"], button'),
-    ].filter(el =>
-        visible(el) &&
-        !inRow(el) &&
-        !el.closest('[data-view-name="message-list-item"]')
-    );
+    const items = [...document.querySelectorAll(optionSelector)].filter(visible);
     const labelled = (label) => {
         const found = items.filter(el => squash(el.innerText) === label);
         return found.filter(el => !found.some(other => other !== el && el.contains(other)));
     };
     const archiveItems = labelled(archive);
-    const unarchiveItems = labelled(unarchive);
+    const restoreItems = labelled(restore);
     if (archiveItems.length === 1) archiveItems[0].setAttribute(mark, '');
-    return {archive: archiveItems.length, unarchive: unarchiveItems.length};
+    return {archive: archiveItems.length, restore: restoreItems.length};
 }"""
 
-# Evidence for a menu the reads above could not use: every visible item-like
-# element with short text, innermost, as `tag|role|text`. Taken once before
-# the options button is clicked and once after, so the items the click added
-# are the menu, whatever element and role LinkedIn gave it. With ``before``,
-# also describes those new items, their closest common container, and the
-# marked options button. Read only; nothing is clicked or marked.
+# Evidence for a menu the reads above could not use. With ``before``, it
+# quotes the dropdown's own items when any are visible; otherwise every
+# visible item-like element with short text, innermost, that the click added,
+# found by comparing `tag|role|text` keys against a survey taken before the
+# click, whatever element and role LinkedIn gave the menu. Also describes the
+# quoted items' closest common container and the marked options button. Read
+# only; nothing is clicked or marked.
 THREAD_MENU_SURVEY_JS = r"""(opts) => {
-    const {before, mark} = opts;
+    const {before, optionSelector, mark} = opts;
     const visible = (el) => {
         const box = el.getBoundingClientRect();
         return box.width > 0 && box.height > 0;
@@ -361,7 +356,9 @@ THREAD_MENU_SURVEY_JS = r"""(opts) => {
     };
     const remaining = new Map();
     for (const key of before) remaining.set(key, (remaining.get(key) || 0) + 1);
-    const added = items.filter(el => {
+    const options = [...document.querySelectorAll(optionSelector)].filter(visible);
+    const dropdown = options.filter(el => !options.some(other => other !== el && el.contains(other)));
+    const added = dropdown.length ? dropdown : items.filter(el => {
         const key = keyOf(el);
         const left = remaining.get(key) || 0;
         if (left > 0) {
@@ -382,6 +379,7 @@ THREAD_MENU_SURVEY_JS = r"""(opts) => {
             element: describe(el), text: squash(el.innerText),
         })),
         addedTotal: added.length,
+        scope: dropdown.length ? 'dropdown' : 'click',
         container: describe(container),
         trigger: trigger ? {
             element: describe(trigger),
@@ -402,9 +400,9 @@ _THREAD_MENU_TIMEOUT = 5.0
 _THREAD_POLL = 0.25
 
 _ThreadArchiveState = Literal[
-    # The menu offers Archive, marked for the click, and not Unarchive.
+    # The menu offers Archive, marked for the click, and not Restore.
     "archivable",
-    # The menu offers Unarchive and not Archive.
+    # The menu offers Restore and not Archive.
     "archived",
     # No single options button could be told to be the thread's.
     "no_options",
@@ -436,9 +434,13 @@ def _menu_evidence(survey: dict[str, Any]) -> str:
     else:
         listed = ", ".join(f"{item['text']!r} ({item['element']})" for item in added)
         total = survey.get("addedTotal", len(added))
+        where = (
+            "The dropdown showed"
+            if survey.get("scope") == "dropdown"
+            else "No dropdown option was visible; its click added"
+        )
         parts.append(
-            f"Its click added {total} visible item(s) in {survey.get('container')}: "
-            f"{listed}."
+            f"{where} {total} visible item(s) in {survey.get('container')}: {listed}."
         )
     return " ".join(parts)
 
@@ -1040,9 +1042,9 @@ class ConversationReader:
 
         Opens ``/messaging/thread/<id>/``, which marks it read, and reads the
         menu before touching it: Archive toggles on LinkedIn, and an archived
-        thread's menu offers Unarchive in its place, so that item is never
+        thread's menu offers Restore in its place, so that item is never
         clicked and a thread already archived is reported as such. After the
-        click the thread is loaded again and its menu must offer Unarchive and
+        click the thread is loaded again and its menu must offer Restore and
         not Archive, because a click the page took is not yet a change
         LinkedIn kept.
 
@@ -1096,7 +1098,7 @@ class ConversationReader:
             )
         return (
             f"did not offer exactly one of {text.archive_item!r} or "
-            f"{text.unarchive_item!r}. Nothing was clicked"
+            f"{text.restore_item!r}. Nothing was clicked"
         )
 
     async def _read_thread_archive_state(
@@ -1147,34 +1149,44 @@ class ConversationReader:
         participant = name[len(text.options_prefix) :].strip() or None
 
         before = await page.evaluate(
-            THREAD_MENU_SURVEY_JS, {"before": None, "mark": _THREAD_OPTIONS_MARK}
+            THREAD_MENU_SURVEY_JS,
+            {
+                "before": None,
+                "optionSelector": _THREAD_OPTION_SELECTOR,
+                "mark": _THREAD_OPTIONS_MARK,
+            },
         )
         await page.locator(f"main button[{_THREAD_OPTIONS_MARK}]").click(timeout=5000)
-        menu: dict[str, int] = {"archive": 0, "unarchive": 0}
+        menu: dict[str, int] = {"archive": 0, "restore": 0}
         deadline = self._session.monotonic() + _THREAD_MENU_TIMEOUT
         while True:
             menu = await page.evaluate(
                 THREAD_MENU_ITEMS_JS,
                 {
                     "archive": text.archive_item,
-                    "unarchive": text.unarchive_item,
+                    "restore": text.restore_item,
+                    "optionSelector": _THREAD_OPTION_SELECTOR,
                     "mark": _THREAD_ARCHIVE_MARK,
                 },
             )
-            if menu["archive"] == 1 and menu["unarchive"] == 0:
+            if menu["archive"] == 1 and menu["restore"] == 0:
                 return _ThreadArchiveRead("archivable", participant)
-            if menu["archive"] == 0 and menu["unarchive"] == 1:
+            if menu["archive"] == 0 and menu["restore"] == 1:
                 break
             if self._session.monotonic() >= deadline:
                 break
             await self._session.delay(_THREAD_POLL)
-        if menu["archive"] == 0 and menu["unarchive"] == 1:
+        if menu["archive"] == 0 and menu["restore"] == 1:
             await page.keyboard.press("Escape")
             return _ThreadArchiveRead("archived", participant)
         # The menu is still open: read it and take its picture before closing.
         survey = await page.evaluate(
             THREAD_MENU_SURVEY_JS,
-            {"before": before["keys"], "mark": _THREAD_OPTIONS_MARK},
+            {
+                "before": before["keys"],
+                "optionSelector": _THREAD_OPTION_SELECTOR,
+                "mark": _THREAD_OPTIONS_MARK,
+            },
         )
         await record_page_trace(page, "archive-conversation-menu", extra=survey)
         await page.keyboard.press("Escape")
