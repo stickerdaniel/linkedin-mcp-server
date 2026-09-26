@@ -129,16 +129,20 @@ class TestConnectWithPerson:
         assert "preload/custom-invite" in await_args.args[0]
 
     async def test_connectable_send_failed_when_anchor_persists(self, mock_page):
-        """Dialog submitted but profile still exposes Connect → send_failed."""
+        """Profile still exposes Connect after the settle retry → send_failed."""
         text = "Jane\n\n· 3rd\n\nEngineer\n\nConnect\nMore\nAbout\n"
-        actions = _actions(mock_page, _reads(text, text))
+        actions = _actions(mock_page, _reads(text, text, text))
 
         with (
             patch.object(
                 actions,
                 "_read_action_signals",
                 new_callable=AsyncMock,
-                side_effect=[_signals(invite=True), _signals(invite=True)],
+                side_effect=[
+                    _signals(invite=True),
+                    _signals(invite=True),
+                    _signals(invite=True),
+                ],
             ),
             patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
             patch.object(
@@ -150,10 +154,52 @@ class TestConnectWithPerson:
                 new_callable=AsyncMock,
                 return_value=True,
             ),
+            patch(
+                "linkedin_mcp_server.scraping.connection_actions.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
         ):
             result = await actions.connect_with_person("testuser")
 
         assert result["status"] == "send_failed"
+
+    async def test_connectable_connected_on_settle_retry(self, mock_page):
+        """The first post-send read still renders Connect; the settle retry
+        sees the invitation pending and reports connected."""
+        text = "Jane\n\n· 2nd\n\nEngineer\n\nConnect\nMore\nAbout\n"
+        post = "Jane\n\n· 2nd\n\nEngineer\n\nMessage\nPending\nMore\nAbout\n"
+        actions = _actions(mock_page, _reads(text, text, post))
+
+        with (
+            patch.object(
+                actions,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                side_effect=[
+                    _signals(invite=True),
+                    _signals(invite=True),
+                    _signals(labeled_action=True),
+                ],
+            ),
+            patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                actions, "_dialog_is_open", new_callable=AsyncMock, return_value=True
+            ),
+            patch.object(
+                actions,
+                "_click_dialog_primary_button",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.connection_actions.asyncio.sleep",
+                new_callable=AsyncMock,
+            ) as mock_sleep,
+        ):
+            result = await actions.connect_with_person("testuser")
+
+        assert result["status"] == "connected"
+        mock_sleep.assert_awaited_once()
 
     async def test_connectable_no_dialog_returns_connect_unavailable(self, mock_page):
         """Deeplink opened but no dialog appeared → connect_unavailable."""
