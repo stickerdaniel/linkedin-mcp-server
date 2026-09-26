@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.scraping.connection import ActionSignals
@@ -768,19 +769,25 @@ class TestInviteDialog:
         # blocked result instead of (True, True, None) above.
         mock_message.assert_not_called()
 
+    @pytest.mark.parametrize(
+        "recount",
+        [1, RuntimeError("count failed")],
+        ids=["textarea-mounted", "recount-failed"],
+    )
     async def test_failed_fill_beside_a_mounted_textarea_is_not_a_note_limit(
-        self, mock_page
+        self, mock_page, recount
     ):
-        """A fill that fails while the textarea is still there sends nothing.
+        """A fill that fails while the textarea may still be there sends nothing.
 
         The Premium nudge banner is detectable throughout, so reading it
         after any failed fill reported ``custom_note_limit_reached`` for an
         account with quota left (observed live: the dialog said three
-        personalized invitations remained).
+        personalized invitations remained). A recount that fails proves no
+        absence, so it reports no quota either.
         """
         actions = _actions(mock_page)
         textarea = MagicMock()
-        textarea.count = AsyncMock(return_value=1)
+        textarea.count = AsyncMock(side_effect=[1, recount])
         mock_page.locator.return_value = textarea
 
         with (
