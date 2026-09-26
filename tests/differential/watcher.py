@@ -136,7 +136,7 @@ class ProcessRecord:
         return (self.pid, self.start)
 
     def as_event_fields(self) -> dict[str, Any]:
-        return {
+        fields: dict[str, Any] = {
             "pid": self.pid,
             "ppid": self.ppid,
             "start_identity": self.start,
@@ -144,6 +144,14 @@ class ProcessRecord:
             "cmdline": list(self.cmdline),
             "in_row": self.in_row,
         }
+        if not self.in_row:
+            # These events are published as CI evidence, and a process that is
+            # not the row's own may carry anything in its arguments, credentials
+            # included. Only the profile it names, if any, is kept.
+            fields["cmdline"] = []
+            fields["cmdline_withheld"] = True
+            fields["profile"] = self.profile
+        return fields
 
 
 def record(

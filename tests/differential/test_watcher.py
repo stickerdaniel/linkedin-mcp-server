@@ -26,7 +26,8 @@ import pytest
 
 import psutil
 
-from differential.events import read_jsonl
+from differential import harness
+from differential.events import EventLog, read_jsonl
 from differential.harness import watcher_failures
 from differential.watcher import (
     ProcessRecord,
@@ -979,3 +980,40 @@ def test_the_tracker_reports_an_exec_as_an_update():
     assert [(actor, kind) for actor, kind, _ in events][:1] == [
         ("browser", "process.update")
     ]
+
+
+def test_published_events_withhold_the_arguments_of_other_processes():
+    # watcher.jsonl is uploaded as CI evidence; a stranger's arguments may hold
+    # a credential, while the row's own actors are needed whole.
+    secret = "--token=not-for-the-artifact"
+    own = ["python", "-m", "linkedin_mcp_server"]
+    tracker = Tracker()
+    tracker.observe({}, t=0.0)
+    events = tracker.observe(
+        {
+            7: record(7, 1, 2.0, "/usr/bin/tool", ["tool", secret]),
+            8: record(8, 1, 2.0, "/usr/bin/python3", own, in_row=True),
+            9: _browser(9, 1, start=2.0),
+        },
+        t=1.0,
+    )
+    fields = {f["pid"]: f for _, kind, f in events if kind == "process.start"}
+    assert secret not in str(events)
+    assert fields[7]["cmdline"] == []
+    assert fields[8]["cmdline"] == own
+    assert fields[9]["profile"] == canonical_user_data_dir(PROFILE)
+
+
+def test_a_watcher_that_never_takes_its_baseline_is_stopped(tmp_path, monkeypatch):
+    # Detached from the row, it would otherwise sample until its own deadline
+    # after the row had already failed.
+    silent = tmp_path / "silent_watcher.py"
+    silent.write_text("import time\ntime.sleep(120)\n")
+    monkeypatch.setattr(harness, "WATCHER_SCRIPT", silent)
+    watcher = harness.Watcher(
+        tmp_path / "w", EventLog(tmp_path / "log", run="r"), experiment="K1", row="R"
+    )
+    with pytest.raises(RuntimeError, match="baseline"):
+        watcher.start(ready_seconds=0.5)
+    assert watcher._process is not None
+    assert watcher._process.poll() is not None

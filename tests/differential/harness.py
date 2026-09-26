@@ -514,6 +514,12 @@ class Watcher:
             if process.poll() is not None:
                 break
             time.sleep(0.05)
+        # Detached from the row, so nothing else would end it before its own
+        # deadline: a watcher that never took its baseline is stopped here.
+        if process.poll() is None:
+            process.kill()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=10)
         raise RuntimeError(
             f"the watcher did not take its baseline sample: "
             f"{self.stderr.read_text(errors='replace')[-2000:]}"
