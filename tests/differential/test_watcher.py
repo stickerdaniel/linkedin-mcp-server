@@ -1,11 +1,16 @@
 """The watcher finds a second browser on one profile, and only that.
 
-The logic runs on synthetic samples first. The last two cases run the real
-watcher process against stand-in "browsers": plain Python processes whose
-command line carries ``--user-data-dir=``, which is all the watcher reads. So
-they measure the sampling on this platform's process table without a browser,
-and a watcher that cannot see a process fails here rather than passing O1 in a
-native row by never seeing anything.
+The logic runs on synthetic samples and a modelled process table first. The
+process cases run the real watcher against stand-in "browsers": plain Python
+processes whose command line carries ``--user-data-dir=``, which is all the
+watcher reads, including one that only execs into that command line after
+three seconds. So they measure the sampling on this platform's process table
+without a browser, and a watcher that cannot see a process fails here rather
+than passing O1 in a native row by never seeing anything.
+
+A row actor whose metadata cannot be read is on record either way, and makes
+the census uncertain only once it has stayed alive and unreadable past the
+bound. On macOS that is exercised with the real setuid ``/bin/ps``.
 """
 
 from __future__ import annotations
@@ -345,41 +350,172 @@ class _FakeProcess:
         return cmdline
 
 
-def _sampler(table, *, root=1):
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 100.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _sampler(table, *, root=1, clock=None):
     return Sampler(
         root,
         own_pid=999,
         pids=lambda: list(table),
         open_process=lambda pid: _FakeProcess(table, pid),
+        clock=clock or _Clock(),
+        unreadable_bound=1.0,
     )
 
 
-def test_a_row_actor_whose_command_line_cannot_be_read_is_recorded():
-    table = {
-        1: {"start": 1.0, "ppid": 0, "cmdline": ["pytest"]},
-        50: {"start": 1.0, "ppid": 0, "cmdline": ["system-service"]},
-    }
-    sampler = _sampler(table)
-    sampler.sample()
-    table[2] = {"start": 2.0, "ppid": 1, "cmdline": psutil.AccessDenied(2)}
-    table[3] = {"start": 2.0, "ppid": 50, "cmdline": psutil.AccessDenied(3)}
-    sampler.sample()
-    sampler.sample()
-    assert [(f["pid"], f["failure"]) for f in sampler.relevant_read_failures] == [
-        (2, "cmdline: AccessDenied")
-    ]
-    failures = watcher_failures(
+def _healthy_summary(sampler: Sampler) -> list[str]:
+    return watcher_failures(
         {
             "stopped_by": "stop file",
             "observation_start": 0.0,
-            "observation_end": 10.0,
+            "observation_end": 1000.0,
             "max_gap_seconds": 0.1,
+            "unreadable_bound_seconds": sampler.unreadable_bound,
             "relevant_read_failures": sampler.relevant_read_failures,
         },
         actors_began=1.0,
-        actors_ended=9.0,
+        actors_ended=999.0,
     )
-    assert any("could not read" in failure for failure in failures)
+
+
+def _run_unreadable(clock: _Clock, table: dict, samples: int, *, then=None):
+    """Sample every 0.1 s for *samples* samples with pid 2 unreadable."""
+    sampler = _sampler(table, clock=clock)
+    sampler.sample()
+    table[2] = {"start": 2.0, "ppid": 1, "cmdline": psutil.AccessDenied(2)}
+    for _ in range(samples):
+        sampler.sample()
+        clock.now += 0.1
+    if then is not None:
+        then(table)
+    sampler.sample()
+    return sampler
+
+
+def _row_table() -> dict:
+    return {
+        1: {"start": 1.0, "ppid": 0, "cmdline": ["pytest"]},
+        50: {"start": 1.0, "ppid": 0, "cmdline": ["system-service"]},
+    }
+
+
+def test_an_unreadable_actor_that_exits_within_the_bound_is_only_evidence():
+    # The setuid /bin/ps on macOS: its arguments are withheld, and it is gone
+    # within a few samples.
+    clock = _Clock()
+    sampler = _run_unreadable(clock, _row_table(), 3, then=lambda table: table.pop(2))
+    (episode,) = sampler.read_failures
+    assert (episode["pid"], episode["failure"], episode["resolution"]) == (
+        2,
+        "cmdline: AccessDenied",
+        "exited",
+    )
+    assert episode["seconds"] <= 1.0
+    assert sampler.relevant_read_failures == []
+    assert _healthy_summary(sampler) == []
+
+
+def test_an_actor_unreadable_past_the_bound_makes_the_census_uncertain():
+    clock = _Clock()
+    sampler = _run_unreadable(clock, _row_table(), 15)
+    (episode,) = sampler.relevant_read_failures
+    assert episode["pid"] == 2 and episode["seconds"] > 1.0
+    assert episode["resolution"] == "open"
+    assert any("longer than 1.0s" in f for f in _healthy_summary(sampler))
+
+
+def test_an_actor_unreadable_past_the_bound_that_then_exits_still_counts():
+    clock = _Clock()
+    sampler = _run_unreadable(clock, _row_table(), 15, then=lambda t: t.pop(2))
+    (episode,) = sampler.relevant_read_failures
+    assert episode["resolution"] == "exited"
+    assert _healthy_summary(sampler)
+
+
+def test_an_actor_that_becomes_readable_within_the_bound_is_only_evidence():
+    clock = _Clock()
+
+    def readable(table):
+        table[2]["cmdline"] = ["python", "server"]
+
+    sampler = _run_unreadable(clock, _row_table(), 5, then=readable)
+    (episode,) = sampler.read_failures
+    assert episode["resolution"] == "readable"
+    assert sampler.relevant_read_failures == []
+    assert _healthy_summary(sampler) == []
+
+
+def test_an_unrelated_process_that_cannot_be_read_is_not_recorded():
+    clock = _Clock()
+    table = _row_table()
+    sampler = _sampler(table, clock=clock)
+    sampler.sample()
+    table[3] = {"start": 2.0, "ppid": 50, "cmdline": psutil.AccessDenied(3)}
+    for _ in range(20):
+        sampler.sample()
+        clock.now += 0.1
+    assert sampler.read_failures == []
+
+
+_ON_MACOS = pytest.mark.skipif(
+    sys.platform != "darwin", reason="setuid /bin/ps is macOS's"
+)
+
+
+@_ON_MACOS
+def test_the_real_setuid_ps_is_recorded_but_not_counted():
+    # What the product runs on macOS to read process ancestry. psutil cannot
+    # read the arguments of a setuid-root process, which is the real failure.
+    # Retried until a sample catches one alive, since a fast ps can live and
+    # die between two samples.
+    sampler = Sampler(os.getpid(), unreadable_bound=1.0)
+    sampler.sample()
+    caught: list[dict] = []
+    for _ in range(50):
+        ps = subprocess.Popen(
+            ["/bin/ps", "-A", "-o", "pid="], stdout=subprocess.DEVNULL
+        )
+        while ps.poll() is None:
+            sampler.sample()
+        ps.wait(timeout=10)
+        sampler.sample()
+        caught = [e for e in sampler.read_failures if e["pid"] == ps.pid]
+        if caught:
+            break
+    assert caught, "no sample caught a running /bin/ps in 50 tries"
+    assert caught[0]["failure"].startswith("cmdline")
+    assert caught[0]["resolution"] == "exited"
+    assert sampler.relevant_read_failures == []
+
+
+@_ON_MACOS
+def test_a_real_setuid_ps_held_past_the_bound_is_counted():
+    # Its output fills a pipe nobody reads, so it stays alive, and unreadable,
+    # for longer than the bound: the shape a hidden browser root would have.
+    sampler = Sampler(os.getpid(), unreadable_bound=1.0)
+    sampler.sample()
+    columns = ["-o", "command="] * 16
+    ps = subprocess.Popen(["/bin/ps", "-A", "-ww", *columns], stdout=subprocess.PIPE)
+    try:
+        began = time.monotonic()
+        while time.monotonic() - began < 1.6:
+            sampler.sample()
+            time.sleep(0.05)
+        assert ps.poll() is None, (
+            "ps finished before the bound; its output fit the pipe"
+        )
+    finally:
+        assert ps.stdout is not None
+        ps.stdout.read()
+        ps.wait(timeout=10)
+    sampler.sample()
+    assert [e["pid"] for e in sampler.relevant_read_failures] == [ps.pid]
 
 
 def test_actors_descend_from_the_root_and_are_re_read_every_sample():

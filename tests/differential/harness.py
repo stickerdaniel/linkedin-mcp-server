@@ -127,6 +127,8 @@ IDLE_TIMEOUT_SECONDS = 20.0
 #: over a second on these runners, before it can exit again, so a gap under a
 #: second cannot hide one that got that far. Twenty times the target interval,
 #: which leaves room for a busy runner without letting a stalled watcher pass.
+#: The same bound limits how long a row actor may stay alive and unreadable
+#: before the census counts as uncertain, for the same reason.
 MAX_WATCHER_GAP_SECONDS = 1.0
 
 _HOST_EXIT_SECONDS = 90.0
@@ -454,6 +456,8 @@ class Watcher:
             self._log.platform,
             "--root-pid",
             str(os.getpid()),
+            "--unreadable-bound",
+            str(MAX_WATCHER_GAP_SECONDS),
         ]
         detach: dict[str, Any] = (
             {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
@@ -522,11 +526,14 @@ def watcher_failures(
             f"the watcher's largest gap between samples was {gap}s, over the "
             f"{max_gap}s this row accepts"
         )
+    # Only a read failure that outlived the bound: a shorter one ended before a
+    # hidden browser could have got past its own startup. Every failure stays
+    # in the summary's ``read_failures`` either way.
     unread = summary.get("relevant_read_failures") or []
     if unread:
         failures.append(
-            f"the watcher could not read {len(unread)} row actors' metadata: "
-            f"{unread[:5]}"
+            f"the watcher could not read {len(unread)} row actors' metadata for "
+            f"longer than {summary.get('unreadable_bound_seconds')}s: {unread[:5]}"
         )
     return failures
 

@@ -27,9 +27,11 @@ it. Their identity is still checked on every sample.
 
 **Relevant means descended from the harness.** A process is a row actor when its
 parent, at first sight, is the harness (``--root-pid``) or another actor. A
-metadata read that fails for an actor is recorded in the summary, since a
-command line nobody could read is not a command line without the flag. The same
-failure for an unrelated process, say a protected system service, is not.
+metadata read that fails for an actor is recorded in the summary with how long
+it lasted, since a command line nobody could read is not a command line without
+the flag; it makes the census uncertain once the actor has stayed alive and
+unreadable past ``--unreadable-bound`` (see ``Sampler``). The same failure for
+an unrelated process, say a protected system service, is not recorded.
 
 What sampling cannot see: a process that lives and dies between two samples.
 The summary records when observation began and ended and the largest wall-clock
@@ -236,8 +238,19 @@ _UNREADABLE = (psutil.AccessDenied, OSError)
 class Sampler:
     """Reads the process table, re-reading every process that could still change.
 
-    *pids* and *open_process* are psutil's by default and are replaced in tests
-    to model a process table.
+    *pids*, *open_process* and *clock* are psutil's and the wall clock by
+    default, and are replaced in tests to model a process table.
+
+    **A failed read is uncertainty only while it could hide a browser.** Each
+    failed read of a row actor opens an episode for that process and field,
+    which a later successful read or the process's exit closes. An episode
+    counts against the census (``relevant_read_failures``) only once the
+    process has stayed alive and unreadable for longer than *unreadable_bound*:
+    the same argument as the watcher's gap bound, since a hidden second browser
+    is a Chromium launch that outlives its own startup. A short-lived helper
+    whose arguments the operating system withholds, such as the setuid
+    ``/bin/ps`` the product runs on macOS to read process ancestry, closes its
+    episode within a few samples and stays on record as evidence only.
     """
 
     def __init__(
@@ -247,17 +260,71 @@ class Sampler:
         own_pid: int | None = None,
         pids: Callable[[], Iterable[int]] = psutil.pids,
         open_process: Callable[[int], Any] = psutil.Process,
+        clock: Callable[[], float] = time.time,
+        unreadable_bound: float = 1.0,
     ) -> None:
         self.root_pid = root_pid
         self.own_pid = os.getpid() if own_pid is None else own_pid
         self._pids = pids
         self._open = open_process
+        self._clock = clock
+        self.unreadable_bound = unreadable_bound
         self._known: dict[int, ProcessRecord] = {}
         self._baseline: set[tuple[int, float]] | None = None
         self._row: set[tuple[int, float]] = set()
-        self._failed: set[tuple[int, float, str]] = set()
-        #: Failed metadata reads of row actors, once per process and field.
-        self.relevant_read_failures: list[dict[str, Any]] = []
+        self._episodes: dict[tuple[int, float, str], dict[str, Any]] = {}
+        self._closed: list[dict[str, Any]] = []
+
+    @property
+    def read_failures(self) -> list[dict[str, Any]]:
+        """Every failed-read episode of a row actor, with how long it lasted.
+
+        ``resolution`` says how an episode ended: ``readable`` or ``exited``,
+        or ``open`` when it was still unreadable at the last sample.
+        """
+        return [
+            *self._closed,
+            *(dict(e, resolution="open") for e in self._episodes.values()),
+        ]
+
+    @property
+    def relevant_read_failures(self) -> list[dict[str, Any]]:
+        """The episodes long enough to hide a browser root."""
+        return [e for e in self.read_failures if e["seconds"] > self.unreadable_bound]
+
+    def _track_failures(
+        self, sample: dict[int, ProcessRecord], failures: dict[int, list[str]]
+    ) -> None:
+        now = self._clock()
+        failing: set[tuple[int, float, str]] = set()
+        for pid, failed in failures.items():
+            process = sample[pid]
+            if not process.in_row:
+                continue
+            for field in failed:
+                key = (pid, process.start, field)
+                failing.add(key)
+                episode = self._episodes.setdefault(
+                    key,
+                    {
+                        "pid": pid,
+                        "start_identity": process.start,
+                        "failure": field,
+                        "exe": process.exe,
+                        "first": now,
+                        "last": now,
+                        "seconds": 0.0,
+                    },
+                )
+                episode["last"] = now
+                episode["seconds"] = round(now - episode["first"], 4)
+        for key in [key for key in self._episodes if key not in failing]:
+            pid, start, _ = key
+            alive = pid in sample and sample[pid].start == start
+            episode = self._episodes.pop(key)
+            self._closed.append(
+                dict(episode, resolution="readable" if alive else "exited")
+            )
 
     def _read(
         self, process: Any, known: ProcessRecord | None
@@ -322,18 +389,7 @@ class Sampler:
             if root is not None:
                 self._row.add(root.identity)
         self._classify(sample)
-        for pid, failed in failures.items():
-            process = sample[pid]
-            if not process.in_row:
-                continue
-            for field in failed:
-                key = (pid, process.start, field)
-                if key in self._failed:
-                    continue
-                self._failed.add(key)
-                self.relevant_read_failures.append(
-                    {"pid": pid, "start_identity": process.start, "failure": field}
-                )
+        self._track_failures(sample, failures)
         self._known = sample
         return sample
 
@@ -375,6 +431,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     # Its own deadline, so a harness that dies without writing the stop file
     # cannot leave this sampling for the rest of the runner's life.
     parser.add_argument("--deadline", type=float, default=900.0)
+    # How long a row actor may stay alive and unreadable before the census is
+    # uncertain. The harness passes the gap bound it judges the row by.
+    parser.add_argument("--unreadable-bound", type=float, default=1.0)
     args = parser.parse_args(argv)
 
     base = {
@@ -384,7 +443,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "platform": args.platform,
     }
     tracker = Tracker()
-    sampler = Sampler(args.root_pid)
+    sampler = Sampler(args.root_pid, unreadable_bound=args.unreadable_bound)
     began = time.monotonic()
     observation_start: float | None = None
     last_sample: float | None = None
@@ -445,6 +504,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "observation_start": observation_start,
                 "observation_end": last_sample,
                 "max_gap_seconds": round(max_gap, 4),
+                "unreadable_bound_seconds": args.unreadable_bound,
+                "read_failures": sampler.read_failures,
                 "relevant_read_failures": sampler.relevant_read_failures,
                 "max_roots": tracker.max_roots,
                 "violations": tracker.violations,
