@@ -888,8 +888,18 @@ class ConnectionActions:
             )
 
         verified = await self._read_main_profile(username)
-        verified_text = verified.get("sections", {}).get("main_profile", "")
         verified_signals = await self._read_action_signals(username)
+        if verified_signals.has_invite_anchor:
+            # The same settle retry as the accept path: an immediate re-read
+            # can still render Connect for an invitation LinkedIn already
+            # recorded (observed live 2026-09-26: send_failed, then Pending).
+            # Only a pending invitation is evidence it landed.
+            await asyncio.sleep(3.0)
+            retry = await self._read_main_profile(username)
+            retry_signals = await self._read_action_signals(username)
+            if connection.detect_connection_state(retry_signals) == "pending":
+                verified, verified_signals = retry, retry_signals
+        verified_text = verified.get("sections", {}).get("main_profile", "")
         verified_state = connection.detect_connection_state(verified_signals)
 
         if verified_signals.has_invite_anchor:
