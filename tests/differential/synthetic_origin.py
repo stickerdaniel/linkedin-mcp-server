@@ -14,13 +14,20 @@ reached anything. What it cannot see is traffic that never came to it, such as
 a lookup the browser resolved itself; that limit belongs in any claim built on
 the log.
 
+**So the real service is fenced off outside the browser as well.** The same CI
+step that trusts the CA maps every allowed name, and ``CANARY_HOST``, to
+loopback in the runner's hosts file. A browser that stopped using the proxy for
+some name would then reach a closed loopback port instead of LinkedIn. The
+test checks that mapping from outside the browser before any browser starts,
+and checks with the canary that the browser's own resolver honours it.
+
 **Trusting the CA is not this module's business.** It issues the certificates
 and serves them; installing the CA into a trust store is a CI step that runs
 only on a disposable GitHub-hosted runner. Nothing here touches a store, and
 the CA's private key is never written anywhere, so no second certificate can be
 minted under it once issuance returns. The CA is also name-constrained to the
-allowed names and expires within a day, which bounds what it vouches for even
-on the runner that trusts it.
+allowed names and the names below them, and expires within a day, which bounds
+what it vouches for even on the runner that trusts it.
 
 Run as a script to issue into a directory: ``python synthetic_origin.py DIR``.
 """
@@ -47,6 +54,11 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 #: The only names the proxy will tunnel. ``static.licdn.com`` is LinkedIn's
 #: asset host; nothing on the synthetic pages loads from it yet.
 ALLOWED_HOSTS = ("www.linkedin.com", "static.licdn.com")
+
+#: Mapped to loopback next to the allowed names, and nothing else. Under the
+#: reserved ``.test`` domain, so a runner that lacks the mapping resolves it
+#: nowhere, while one that has it shows an unproxied browser honouring it.
+CANARY_HOST = "synthetic-canary.test"
 
 #: The subject the CI trust steps look the CA up by when they record the store.
 CA_COMMON_NAME = "linkedin-mcp synthetic origin test CA"
@@ -113,8 +125,9 @@ def issue_certificates(
             ),
             critical=True,
         )
-        # A trusted root that can vouch only for the allowed names. Chromium
-        # enforces constraints carried by a locally trusted anchor.
+        # A trusted root that can vouch only for the allowed names and the
+        # names below them, since DNS constraints are subtrees (RFC 5280).
+        # Chromium enforces constraints carried by a locally trusted anchor.
         .add_extension(
             x509.NameConstraints(permitted_subtrees=names, excluded_subtrees=None),
             critical=True,

@@ -7,26 +7,44 @@ per-run CA the runner's trust store holds. Nothing in the source can promise
 that: which store the bundled Chromium reads is a fact about each platform's
 build, so this measures it on each CI leg before anything depends on it.
 
-Three requests, in an order that protects the real service. The first goes to
-a reserved ``.invalid`` name and must be refused *by the proxy*; if the proxy
-never hears of it, the browser is not using the proxy and the test stops before
-it names www.linkedin.com, which without the proxy would be the real site. It
-is a ``fetch`` rather than a navigation: a failed navigation commits its error
-page later, and that commit interrupted the next ``goto`` when measured. The
-second loads the synthetic feed. The third sends ``static.licdn.com`` to an
-origin whose CA nobody trusts, which must fail with an authority error: without
-that, a pass could also mean certificate checking is off.
+The real service is protected twice, and the test proves both before it names
+it. First, outside any browser: the operating system must resolve every
+synthetic name to loopback only, which the CI step arranges in the hosts file,
+and an unproxied browser must reach a loopback listener through the canary
+name, which shows its own resolver reads that file. A browser that bypassed the
+proxy would then find a closed loopback port rather than LinkedIn.
+
+Then three requests through the proxy. The first goes to a reserved
+``.invalid`` name and must be refused *by the proxy*, within a deadline; if the
+proxy never hears of it, the browser is not using the proxy and the test stops
+before it names www.linkedin.com. It is a ``fetch`` rather than a navigation: a
+failed navigation commits its error page later, and that commit interrupted the
+next ``goto`` when measured. The second loads the synthetic feed. The third
+sends ``static.licdn.com`` to an origin whose CA nobody trusts, which must fail
+with an authority error: without that, a pass could also mean certificate
+checking is off.
+
+Every browser the test starts must also confirm its shutdown.
 
 Runs only where CI opted in after trusting the CA. See ``synthetic_origin``.
 """
 
 from __future__ import annotations
 
+import asyncio
+import ipaddress
 import os
+import socket
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from typing import Any
 
 import pytest
 from cryptography import x509
+from cryptography.hazmat.primitives import hashes
 from cryptography.x509.oid import NameOID
 from patchright.async_api import Error as PlaywrightError
 from patchright.async_api import async_playwright
@@ -35,6 +53,7 @@ from differential.synthetic_origin import (
     ALLOWED_HOSTS,
     CA_COMMON_NAME,
     CA_FILE,
+    CANARY_HOST,
     FEED_MARKER,
     OPT_IN_ENV,
     EgressProxy,
@@ -60,9 +79,12 @@ pytestmark = [
 ]
 
 _NAVIGATION_TIMEOUT_MS = 30_000
+_CONTROL_TIMEOUT_MS = 10_000
+# Beyond the browser's own abort, for a driver call that never returns at all.
+_CONTROL_DEADLINE_S = 20
 
 
-def _manager(profile: Path, proxy_url: str) -> BrowserManager:
+def _manager(profile: Path, proxy_url: str | None) -> BrowserManager:
     """The product's launch, with the proxy set through its own setting."""
     config = BrowserConfig(proxy_server=proxy_url)
     config.validate()
@@ -88,6 +110,82 @@ def _common_name(pem: Path) -> str:
     return str(attribute.value)
 
 
+def _fingerprint(pem: Path) -> str:
+    certificate = x509.load_pem_x509_certificate(pem.read_bytes())
+    return certificate.fingerprint(hashes.SHA256()).hex()
+
+
+def _not_loopback(host: str) -> list[str]:
+    """What the operating system resolves *host* to besides loopback."""
+    try:
+        infos = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+    except socket.gaierror as error:
+        return [f"unresolved ({error})"]
+    return sorted(
+        {
+            str(info[4][0])
+            for info in infos
+            if not ipaddress.ip_address(info[4][0]).is_loopback
+        }
+    )
+
+
+class _CanaryHandler(BaseHTTPRequestHandler):
+    server: _Canary
+
+    def do_GET(self) -> None:
+        self.server.hosts.append(self.headers.get("Host", ""))
+        # 200 rather than 204, which aborts the navigation that asked for it.
+        self.send_response(200)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, format: str, *args: Any) -> None:
+        pass
+
+
+class _Canary(HTTPServer):
+    def __init__(self) -> None:
+        super().__init__(("127.0.0.1", 0), _CanaryHandler)
+        self.hosts: list[str] = []
+
+
+@contextmanager
+def _canary() -> Iterator[_Canary]:
+    server = _Canary()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+async def _unproxied_browser_honours_the_hosts_file(tmp_path: Path) -> None:
+    with _canary() as canary:
+        port = canary.server_address[1]
+        manager = _manager(tmp_path / "canary-profile", None)
+        await manager.start()
+        try:
+            try:
+                await manager.page.goto(
+                    f"http://{CANARY_HOST}:{port}/",
+                    timeout=_NAVIGATION_TIMEOUT_MS,
+                )
+            except PlaywrightError as error:
+                pytest.fail(
+                    f"an unproxied browser did not reach {CANARY_HOST} on "
+                    f"loopback ({error}), so its resolver may not read the "
+                    f"hosts file; stopping before www.linkedin.com is named"
+                )
+        finally:
+            closed = await manager.close()
+        assert closed, "the canary browser's shutdown was not confirmed"
+        assert f"{CANARY_HOST}:{port}" in canary.hosts, canary.hosts
+
+
 async def test_the_bundled_browser_loads_a_synthetic_origin_through_the_proxy(
     tmp_path, certificates, synthetic_egress
 ):
@@ -96,6 +194,19 @@ async def test_the_bundled_browser_loads_a_synthetic_origin_through_the_proxy(
     # to be the CA this run issued and the CI step trusted.
     assert _common_name(certificates / CA_FILE) == CA_COMMON_NAME
 
+    # Before any browser exists: were the real names fenced off?
+    unfenced = {
+        host: addresses
+        for host in (*ALLOWED_HOSTS, CANARY_HOST)
+        if (addresses := _not_loopback(host))
+    }
+    if unfenced:
+        pytest.fail(
+            f"the hosts file does not send these names to loopback only: "
+            f"{unfenced}; stopping before a browser starts"
+        )
+    await _unproxied_browser_honours_the_hosts_file(tmp_path)
+
     stranger_certificates = tmp_path / "stranger"
     issue_certificates(
         stranger_certificates, ca_common_name="linkedin-mcp untrusted stranger CA"
@@ -103,7 +214,7 @@ async def test_the_bundled_browser_loads_a_synthetic_origin_through_the_proxy(
     stranger = SyntheticOrigin(stranger_certificates)
     stranger.start()
     try:
-        await _measure(tmp_path, origin, proxy, stranger)
+        browser_version = await _measure(tmp_path, origin, proxy, stranger)
     finally:
         stranger.stop()
 
@@ -119,7 +230,8 @@ async def test_the_bundled_browser_loads_a_synthetic_origin_through_the_proxy(
     # Evidence for the run log, not an assertion: what the browser tried to
     # reach on its own and the proxy turned away.
     print(
-        "synthetic origin: forwarded "
+        f"synthetic origin: browser {browser_version}; CA sha256 "
+        f"{_fingerprint(certificates / CA_FILE)}; forwarded "
         f"{sorted({(d.host, d.port) for d in forwarded})}; refused "
         f"{sorted({d.target for d in proxy.refused()})}"
     )
@@ -130,7 +242,8 @@ async def _measure(
     origin: SyntheticOrigin,
     proxy: EgressProxy,
     stranger: SyntheticOrigin,
-) -> None:
+) -> str:
+    """Run the three proxied requests and return the browser's version."""
     # Settled before the launch, so everything after it fails rather than
     # skips: opting in is the promise that a browser is installed.
     executable = await _resolved_browser(
@@ -144,10 +257,25 @@ async def _measure(
     await manager.start()
     try:
         page = manager.page
+        browser = manager.context.browser
+        browser_version = browser.version if browser is not None else "unknown"
 
-        control = await page.evaluate(
-            "() => fetch('https://refused.invalid/').then(() => 'loaded', String)"
-        )
+        try:
+            control = await asyncio.wait_for(
+                page.evaluate(
+                    "timeout => fetch('https://refused.invalid/', "
+                    "{signal: AbortSignal.timeout(timeout)})"
+                    ".then(() => 'loaded', String)",
+                    _CONTROL_TIMEOUT_MS,
+                ),
+                _CONTROL_DEADLINE_S,
+            )
+        except TimeoutError:
+            pytest.fail(
+                f"the control request did not settle within "
+                f"{_CONTROL_DEADLINE_S}s; stopping before www.linkedin.com is "
+                f"named. Proxy log: {proxy.decisions}"
+            )
         assert control != "loaded", "a refused name loaded"
         assert any(
             decision.host == "refused.invalid" and not decision.forwarded
@@ -187,4 +315,6 @@ async def _measure(
             await page.goto("https://static.licdn.com/", timeout=_NAVIGATION_TIMEOUT_MS)
         assert not stranger.requests, "a certificate nobody trusts was accepted"
     finally:
-        await manager.close()
+        closed = await manager.close()
+    assert closed, "the browser's shutdown was not confirmed"
+    return browser_version
