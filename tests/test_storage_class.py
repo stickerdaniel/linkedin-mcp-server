@@ -438,9 +438,15 @@ class TestWindowsProviders:
         monkeypatch.setattr(
             storage_class, "_onedrive_registered_folders", lambda: list(registered)
         )
+        # What SHGetFolderPathW answers, by CSIDL. Empty unless a test says
+        # otherwise, so the real API on a Windows runner cannot fill a gap a
+        # test opened on purpose.
+        known: dict[int, str] = {}
+        monkeypatch.setattr(storage_class, "_known_folder", known.get)
         world.roaming = roaming
         world.local_app = local_app
         world.registered = registered
+        world.known = known
         return world
 
     @pytest.mark.parametrize(
@@ -491,17 +497,172 @@ class TestWindowsProviders:
 
         assert verdict.storage_class is SYNCED
 
-    def test_a_missing_appdata_means_dropbox_cannot_be_ruled_out(
-        self, windows, monkeypatch
+    @pytest.mark.parametrize(
+        ("variable", "csidl"), [("APPDATA", 0x001A), ("LOCALAPPDATA", 0x001C)]
+    )
+    def test_windows_names_a_folder_the_environment_left_out(
+        self, windows, monkeypatch, variable, csidl
     ):
-        monkeypatch.delenv("APPDATA")
+        # A host that starts the server with a reduced environment must not
+        # turn every root on the machine into UNKNOWN. The Dropbox config the
+        # known folder leads to is read, which is what proves it was used.
+        monkeypatch.delenv(variable)
+        answered = windows.root / "Known" / variable
+        windows.known[csidl] = str(answered)
+        dropbox = windows.root / "Dropbox"
+        dropbox.mkdir()
+        _write_info(
+            answered / "Dropbox" / "info.json", {"personal": {"path": str(dropbox)}}
+        )
+
+        assert storage_class._classify(windows.local, "win32").storage_class is LOCAL
+        assert (
+            storage_class._classify(dropbox / "profile", "win32").storage_class
+            is SYNCED
+        )
+
+    def test_the_environment_wins_over_the_known_folder(self, windows):
+        windows.known[0x001A] = str(windows.root / "elsewhere")
+        dropbox = windows.root / "Dropbox"
+        dropbox.mkdir()
+        _write_info(
+            windows.roaming / "Dropbox" / "info.json",
+            {"personal": {"path": str(dropbox)}},
+        )
+
+        verdict = storage_class._classify(dropbox / "profile", "win32")
+
+        assert verdict.storage_class is SYNCED
+
+    @pytest.mark.parametrize("variable", ["APPDATA", "LOCALAPPDATA"])
+    def test_a_folder_neither_source_can_name_is_unknown(
+        self, windows, monkeypatch, variable
+    ):
+        monkeypatch.setenv(variable, "relative\\AppData")
 
         verdict = storage_class._classify(windows.local, "win32")
 
         assert verdict.storage_class is UNKNOWN
+        assert "Dropbox" in verdict.reason
 
     def test_nothing_registered_leaves_the_volume_to_decide(self, windows):
         assert storage_class._classify(windows.local, "win32").storage_class is LOCAL
+
+
+class TestReaderFailures:
+    """A broken probe is named as one, and is never mistaken for a filesystem."""
+
+    @pytest.mark.parametrize(
+        ("raw", "name"),
+        [
+            (b"apfs" + b"\0" * 12, "apfs"),
+            (b"smbfs\0" + b"\xab" * 10, "smbfs"),
+            (b"x" * 15 + b"\0", "x" * 15),
+        ],
+    )
+    def test_a_plausible_fstypename_is_read(self, raw: bytes, name: str):
+        assert storage_class.darwin_fstypename(raw) == name
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            b"\0" * 16,  # empty
+            b"x" * 16,  # never terminated
+            b"\xff\x12\x80garbage\0\0\0\0\0\0\0",  # not ASCII
+            b"ap fs\0" + b"\0" * 10,  # not a name
+            b"\x01\x02\0" + b"\0" * 13,  # control bytes
+            b"apfs\0",  # wrong length
+        ],
+    )
+    def test_an_implausible_fstypename_is_no_name(self, raw: bytes):
+        assert storage_class.darwin_fstypename(raw) is None
+
+    @pytest.mark.parametrize(
+        "raw", [b"\0" * 16, b"\xff\xfegarbage\0" + b"\0" * 6, b"x" * 16]
+    )
+    def test_a_garbled_statfs_result_is_a_reader_failure(
+        self, monkeypatch, tmp_path: Path, raw: bytes
+    ):
+        # MNT_LOCAL set: only the name check stands between garbage and a
+        # verdict about a filesystem.
+        monkeypatch.setattr(storage_class, "_darwin_statfs", lambda _p: (raw, 0x1000))
+
+        verdict = storage_class._filesystem_class(tmp_path, "darwin")
+
+        assert verdict == Classification(
+            UNKNOWN, "macOS statfs returned an unreadable result"
+        )
+
+    def test_a_sound_statfs_result_is_trusted(self, monkeypatch, tmp_path: Path):
+        monkeypatch.setattr(
+            storage_class,
+            "_darwin_statfs",
+            lambda _p: (b"apfs" + b"\0" * 12, 0x1000),
+        )
+
+        verdict = storage_class._filesystem_class(tmp_path, "darwin")
+
+        assert verdict.storage_class is LOCAL
+
+    @pytest.mark.parametrize(
+        ("platform", "reader", "named"),
+        [
+            ("darwin", "_darwin_statfs", "macOS statfs probe failed (OSError)"),
+            (
+                "linux",
+                "_read_mountinfo",
+                "reading /proc/self/mountinfo failed (OSError)",
+            ),
+            ("win32", "_windows_volume_root", "Windows volume query failed (OSError)"),
+            ("win32", "_windows_drive_type", "Windows volume query failed (OSError)"),
+            ("win32", "_windows_filesystem", "Windows volume query failed (OSError)"),
+        ],
+    )
+    def test_a_raising_reader_is_named(
+        self, monkeypatch, tmp_path: Path, platform, reader, named
+    ):
+        def broken(*_args):
+            raise OSError(5, "Input/output error")
+
+        # The Windows readers after the failing one answer a fixed NTFS drive,
+        # so whichever step raises is the only reason for the verdict.
+        monkeypatch.setattr(storage_class, "_windows_volume_root", lambda _p: "C:\\")
+        monkeypatch.setattr(storage_class, "_windows_drive_type", lambda _r: 3)
+        monkeypatch.setattr(storage_class, "_windows_filesystem", lambda _r: "NTFS")
+        monkeypatch.setattr(storage_class, reader, broken)
+
+        verdict = storage_class._filesystem_class(tmp_path, platform)
+
+        assert verdict == Classification(UNKNOWN, named)
+
+    def test_the_windows_readers_answer_when_they_work(
+        self, monkeypatch, tmp_path: Path
+    ):
+        # The control for the row above: the same doubles, none raising.
+        monkeypatch.setattr(storage_class, "_windows_volume_root", lambda _p: "C:\\")
+        monkeypatch.setattr(storage_class, "_windows_drive_type", lambda _r: 3)
+        monkeypatch.setattr(storage_class, "_windows_filesystem", lambda _r: "NTFS")
+
+        verdict = storage_class._filesystem_class(tmp_path, "win32")
+
+        assert verdict.storage_class is LOCAL
+
+    def test_an_unreadable_mountinfo_is_a_reader_failure(
+        self, monkeypatch, tmp_path: Path
+    ):
+        monkeypatch.setattr(storage_class, "_read_mountinfo", lambda: "garbled")
+
+        verdict = storage_class._filesystem_class(tmp_path, "linux")
+
+        assert verdict.storage_class is UNKNOWN
+        assert verdict.reason == "reading /proc/self/mountinfo failed (ValueError)"
+
+    def test_an_unreadable_attribute_is_named(self, tmp_path: Path):
+        verdict = storage_class._filesystem_class(tmp_path / "absent", "win32")
+
+        assert verdict == Classification(
+            UNKNOWN, "reading Windows file attributes failed (FileNotFoundError)"
+        )
 
 
 class TestNativeRunner:

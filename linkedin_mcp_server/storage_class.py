@@ -138,6 +138,9 @@ _ONEDRIVE_VARIABLES = ("OneDrive", "OneDriveCommercial", "OneDriveConsumer")
 #: Far above any real ``info.json``; a larger file is not one Dropbox wrote.
 _DROPBOX_INFO_LIMIT = 1024 * 1024
 _ERROR_NO_MORE_ITEMS = 259
+#: Where Windows Dropbox keeps ``info.json``: the variable first, then the
+#: ``CSIDL`` Windows answers for it (``CSIDL_APPDATA``, ``CSIDL_LOCAL_APPDATA``).
+_WINDOWS_DROPBOX_FOLDERS = (("APPDATA", 0x001A), ("LOCALAPPDATA", 0x001C))
 
 
 class _ProviderUnreadable(Exception):
@@ -222,13 +225,54 @@ def _dropbox_info_files(platform: str, homes: Sequence[Path]) -> list[Path] | No
     be there is not an ``info.json`` known to be absent.
     """
     if platform == "win32":
-        folders = [os.environ.get(name, "") for name in ("APPDATA", "LOCALAPPDATA")]
-        if not all(folder and Path(folder).is_absolute() for folder in folders):
-            return None
-        return [Path(folder) / "Dropbox" / "info.json" for folder in folders]
+        files: list[Path] = []
+        for variable, csidl in _WINDOWS_DROPBOX_FOLDERS:
+            folder = _absolute(os.environ.get(variable, ""))
+            # An MCP host may start this server without these variables. The
+            # folders still exist, and Windows names them itself.
+            folder = folder or _absolute(_known_folder(csidl) or "")
+            if folder is None:
+                return None
+            files.append(folder / "Dropbox" / "info.json")
+        return files
     if not homes:
         return None
     return [home / ".dropbox" / "info.json" for home in homes]
+
+
+def _absolute(value: str) -> Path | None:
+    return Path(value) if value and Path(value).is_absolute() else None
+
+
+def _known_folder(csidl: int) -> str | None:  # pragma: no cover - Windows only
+    """Ask Windows for one of the current account's folders, or None.
+
+    The same call ``daemon_descriptor._account_home`` makes, for a different
+    folder. None on any failure: the caller decides what not knowing means.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        shell32 = getattr(ctypes, "WinDLL")("shell32", use_last_error=True)
+        get_folder = shell32.SHGetFolderPathW
+        get_folder.argtypes = [
+            wintypes.HWND,
+            ctypes.c_int,
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.LPWSTR,
+        ]
+        get_folder.restype = ctypes.c_long
+        buffer = ctypes.create_unicode_buffer(32768)
+        if get_folder(None, csidl, None, 0, buffer) != 0:
+            return None
+        return buffer.value or None
+    except Exception:
+        logger.debug("SHGetFolderPathW failed", exc_info=True)
+        return None
 
 
 def _onedrive_registered_folders() -> list[str]:  # pragma: no cover - Windows only
@@ -309,14 +353,35 @@ def dropbox_roots(info: Path) -> list[Path]:
 
 
 def _filesystem_class(existing: Path, platform: str) -> Classification:
+    """Ask the platform what *existing* is on.
+
+    A reader that fails says so by name. It is still ``UNKNOWN``, but a broken
+    probe is not evidence about the storage, and a report that read "unknown
+    filesystem" would send the diagnosis to the wrong place.
+    """
     if platform.startswith("linux"):
-        return linux_class(existing, parse_mountinfo(_read_mountinfo()))
+        try:
+            mounts = parse_mountinfo(_read_mountinfo())
+        except Exception as exc:
+            return _reader_failed("reading /proc/self/mountinfo", exc)
+        return linux_class(existing, mounts)
     if platform == "darwin":
-        name, flags = _darwin_statfs(existing)
+        try:
+            raw_name, flags = _darwin_statfs(existing)
+        except Exception as exc:
+            return _reader_failed("macOS statfs probe", exc)
+        name = darwin_fstypename(raw_name)
+        if name is None:
+            return _unknown("macOS statfs returned an unreadable result")
         return darwin_class(name, flags)
     if platform == "win32":
         return _windows_class(existing)
     return _unknown(f"storage is not classified on {platform}")
+
+
+def _reader_failed(what: str, exc: Exception) -> Classification:
+    logger.debug("%s failed", what, exc_info=True)
+    return _unknown(f"{what} failed ({type(exc).__name__})")
 
 
 # Linux --------------------------------------------------------------------------
@@ -400,6 +465,25 @@ _DARWIN_LOCAL = frozenset(("apfs", "hfs"))
 _MNT_LOCAL = 0x00001000
 
 
+#: ``MFSTYPENAMELEN``: the name and its terminating NUL.
+_MFSTYPENAMELEN = 16
+
+
+def darwin_fstypename(raw: bytes) -> str | None:
+    """The ``f_fstypename`` field as a name, or None if it cannot be one.
+
+    The kernel writes a short NUL-terminated ASCII name here. Anything else
+    means the structure was read at the wrong offsets, and those bytes say
+    nothing about the filesystem.
+    """
+    if len(raw) != _MFSTYPENAMELEN or b"\0" not in raw:
+        return None
+    name = raw.split(b"\0", 1)[0]
+    if not name or any(byte < 0x21 or byte > 0x7E for byte in name):
+        return None
+    return name.decode("ascii")
+
+
 def darwin_class(fstypename: str, flags: int) -> Classification:
     if not flags & _MNT_LOCAL:
         return Classification(StorageClass.NONLOCAL, f"{fstypename} filesystem")
@@ -408,14 +492,14 @@ def darwin_class(fstypename: str, flags: int) -> Classification:
     return _unknown(f"{fstypename} is not a filesystem known to be local")
 
 
-def _darwin_statfs(path: Path) -> tuple[str, int]:  # pragma: no cover - macOS only
-    """Return ``f_fstypename`` and ``f_flags`` from ``statfs(2)``.
+def _darwin_statfs(path: Path) -> tuple[bytes, int]:  # pragma: no cover - macOS
+    """Return the raw ``f_fstypename`` bytes and ``f_flags`` from ``statfs(2)``.
 
     ``os.statvfs`` carries neither. The structure is the 64-bit-inode layout
     from ``<sys/mount.h>``, which arm64 exports as ``statfs`` and x86_64 as
-    ``statfs$INODE64``; the plain x86_64 symbol has an older layout. A layout
-    read wrongly yields a type name outside the allow-list, so the mistake
-    lands on ``UNKNOWN`` rather than on ``LOCAL``.
+    ``statfs$INODE64``; the plain x86_64 symbol has an older layout. The name
+    is returned raw so :func:`darwin_fstypename` can tell a layout read at the
+    wrong offsets from a real filesystem name.
     """
     import ctypes
 
@@ -449,7 +533,11 @@ def _darwin_statfs(path: Path) -> tuple[str, int]:  # pragma: no cover - macOS o
     if function(os.fsencode(path), ctypes.byref(result)) != 0:
         error = ctypes.get_errno()
         raise OSError(error, os.strerror(error))
-    return result.f_fstypename.decode("ascii"), result.f_flags
+    # All sixteen bytes, not ``.value``, which stops at the first NUL and so
+    # would hide a name that never ends.
+    offset = _StatFs.f_fstypename.offset
+    raw_name = bytes(result)[offset : offset + _MFSTYPENAMELEN]
+    return raw_name, result.f_flags
 
 
 # Windows -----------------------------------------------------------------------
@@ -512,15 +600,24 @@ def windows_cloud_marker(
     return None
 
 
-def _windows_class(existing: Path) -> Classification:  # pragma: no cover - Windows
-    marker = windows_cloud_marker(existing, lambda candidate: os.lstat(candidate))
+def _windows_class(existing: Path) -> Classification:
+    try:
+        marker = windows_cloud_marker(existing, lambda candidate: os.lstat(candidate))
+    except Exception as exc:
+        return _reader_failed("reading Windows file attributes", exc)
     if marker is not None:
         return Classification(StorageClass.SYNCED, f"inside {marker}")
-    root = _windows_volume_root(existing)
-    drive_type = _windows_drive_type(root)
-    if drive_type not in (_DRIVE_FIXED, _DRIVE_RAMDISK):
-        return windows_volume_class(drive_type, None)
-    return windows_volume_class(drive_type, _windows_filesystem(root))
+    try:
+        root = _windows_volume_root(existing)
+        drive_type = _windows_drive_type(root)
+        filesystem = (
+            _windows_filesystem(root)
+            if drive_type in (_DRIVE_FIXED, _DRIVE_RAMDISK)
+            else None
+        )
+    except Exception as exc:
+        return _reader_failed("Windows volume query", exc)
+    return windows_volume_class(drive_type, filesystem)
 
 
 def _kernel32():  # pragma: no cover - Windows only
