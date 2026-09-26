@@ -366,13 +366,23 @@ class _FakeProcess:
         return _field(self._entry, "cmdline")
 
 
-def _sampler(table, *, root=1):
+#: The harness's user in the model; a table entry may name another in "user".
+HARNESS = "harness-user"
+
+
+def _user_of(process) -> object:
+    return process._entry.get("user", HARNESS)
+
+
+def _sampler(table, *, root=1, browser_exe=BROWSER_EXE):
     return Sampler(
         root,
         own_pid=999,
         pids=lambda: list(table),
         open_process=lambda pid: _FakeProcess(table, pid),
-        browser_exe=BROWSER_EXE,
+        user_of=_user_of,
+        user=HARNESS,
+        browser_exe=browser_exe,
         browser_dir=BROWSER_DIR,
     )
 
@@ -565,14 +575,7 @@ def test_the_resolved_browser_executable_counts_even_outside_the_browsers_dir():
     # A browser the product resolved somewhere else, such as a system install.
     elsewhere = "/Applications/Browser.app/Contents/MacOS/Browser"
     table = _row_table()
-    sampler = Sampler(
-        1,
-        own_pid=999,
-        pids=lambda: list(table),
-        open_process=lambda pid: _FakeProcess(table, pid),
-        browser_exe=elsewhere,
-        browser_dir=BROWSER_DIR,
-    )
+    sampler = _sampler(table, browser_exe=elsewhere)
     tracker = Tracker()
     _observe(sampler, tracker, 0.0)
     table[2] = {
@@ -585,23 +588,66 @@ def test_the_resolved_browser_executable_counts_even_outside_the_browsers_dir():
     assert [e["pid"] for e in sampler.relevant_read_failures] == [2]
 
 
-def test_an_unknown_actor_that_becomes_readable_is_resolved_but_recorded():
+def test_a_never_readable_process_that_becomes_readable_stays_uncertain():
+    # Its first observation failed, so nothing says what it was meanwhile;
+    # reading it later, or its exit, cannot show that no overlap happened.
+    table = _row_table()
+    sampler, tracker = _sampler(table), Tracker()
+    _observe(sampler, tracker, 0.0)
+    table[2] = {"start": 2.0, "ppid": 1, "exe": "/usr/bin/python3", "cmdline": ["py"]}
+    table[2]["start"] = psutil.AccessDenied(2)
+    _observe(sampler, tracker, 1.0)
+    table[2]["start"] = 2.0
+    _observe(sampler, tracker, 2.0)
+    table.pop(2)
+    _observe(sampler, tracker, 3.0)
+    (episode,) = sampler.relevant_read_failures
+    assert episode["pid"] == 2 and episode["resolution"] in ("readable", "exited")
+    assert _judged(sampler, tracker)
+
+
+def test_a_later_reading_that_shows_another_user_resolves_it():
+    table = _row_table()
+    sampler, tracker = _sampler(table), Tracker()
+    _observe(sampler, tracker, 0.0)
+    table[2] = {"start": 2.0, "ppid": 1, "open": psutil.AccessDenied(2)}
+    _observe(sampler, tracker, 1.0)
+    table[2] = {"start": 2.0, "ppid": 50, "cmdline": ["daemon"], "user": "root"}
+    _observe(sampler, tracker, 2.0)
+    (episode,) = sampler.read_failures
+    assert not episode["possible_browser"]
+    assert episode["resolved_by"] == "another user"
+    assert _judged(sampler, tracker) == []
+
+
+@pytest.mark.parametrize(
+    "unreadable",
+    [
+        pytest.param({"open": psutil.AccessDenied(2)}, id="open"),
+        pytest.param({"start": psutil.AccessDenied(2)}, id="create-time"),
+        pytest.param({"cmdline": psutil.AccessDenied(2)}, id="arguments"),
+    ],
+)
+def test_another_users_unreadable_process_does_not_count(unreadable):
     table = _row_table()
     sampler, tracker = _sampler(table), Tracker()
     _observe(sampler, tracker, 0.0)
     table[2] = {
         "start": 2.0,
-        "ppid": 1,
-        "exe": "/usr/bin/python3",
-        "cmdline": ["python"],
+        "ppid": 50,
+        "exe": BROWSER_EXE,
+        "cmdline": ["daemon"],
+        "user": "root",
+        **unreadable,
     }
-    table[2]["start"] = psutil.AccessDenied(2)
+    if "open" in unreadable:
+        # Opening failed, so nothing can say whose it is: that stays uncertain.
+        _observe(sampler, tracker, 1.0)
+        assert sampler.relevant_read_failures
+        return
     _observe(sampler, tracker, 1.0)
-    table[2]["start"] = 2.0
-    _observe(sampler, tracker, 2.0)
-    # Never known before the denied read, so nothing to keep; once readable it
-    # is an actor like any other and nothing is outstanding.
-    assert sampler.relevant_read_failures == []
+    assert sampler.read_failures == []
+    assert _judged(sampler, tracker) == []
 
 
 def test_an_unrelated_process_that_cannot_be_read_is_not_recorded():
@@ -626,54 +672,34 @@ def _real_sampler(tmp_path: Path) -> Sampler:
 
 
 @_ON_MACOS
-def test_the_real_setuid_ps_is_recorded_but_not_counted(tmp_path):
-    # What the product runs on macOS to read process ancestry. psutil cannot
-    # read the arguments of a setuid-root process; its executable it can.
-    # Retried until a sample catches one alive, since a fast ps can live and
-    # die between two samples.
-    sampler = _real_sampler(tmp_path)
-    sampler.sample()
-    caught: list[dict] = []
-    for _ in range(50):
-        ps = subprocess.Popen(
-            ["/bin/ps", "-A", "-o", "pid="], stdout=subprocess.DEVNULL
-        )
-        while ps.poll() is None:
-            sampler.sample()
-        ps.wait(timeout=10)
-        sampler.sample()
-        caught = [e for e in sampler.read_failures if e["pid"] == ps.pid]
-        if caught:
-            break
-    assert caught, "no sample caught a running /bin/ps in 50 tries"
-    assert caught[0]["exe"] == "/bin/ps"
-    assert any(f.startswith("cmdline") for f in caught[0]["failures"])
-    assert not caught[0]["possible_browser"]
-    assert sampler.relevant_read_failures == []
-
-
-@_ON_MACOS
 def test_a_real_setuid_ps_held_alive_is_recorded_but_not_counted(tmp_path):
-    # Its output fills a pipe nobody reads, so it stays alive and unreadable
-    # for as long as that lasts. Its lifetime is not the question; its
-    # executable is, and /bin/ps is not the row's browser.
+    # What the product runs on macOS to read process ancestry. psutil cannot
+    # read the arguments of a setuid-root process; its executable it can. Its
+    # output fills a pipe nobody reads, so it is provably alive while the
+    # sampler reads it; no race with a short-lived ps is involved.
     sampler = _real_sampler(tmp_path)
     sampler.sample()
     columns = ["-o", "command="] * 16
     ps = subprocess.Popen(["/bin/ps", "-A", "-ww", *columns], stdout=subprocess.PIPE)
     try:
         began = time.monotonic()
-        while time.monotonic() - began < 1.6:
+        while time.monotonic() - began < 1.0:
             sampler.sample()
             time.sleep(0.05)
         assert ps.poll() is None, "ps finished early; its output fit the pipe"
     finally:
+        # Bounded however the body ended: stop it, release the pipe, reap it.
+        if ps.poll() is None:
+            ps.kill()
         assert ps.stdout is not None
-        ps.stdout.read()
+        ps.stdout.close()
         ps.wait(timeout=10)
     sampler.sample()
     ours = [e for e in sampler.read_failures if e["pid"] == ps.pid]
-    assert ours and ours[0]["seconds"] > 1.0
+    assert ours, "the sampler read the held ps and recorded nothing"
+    assert ours[0]["exe"] == "/bin/ps"
+    assert any(f.startswith("cmdline") for f in ours[0]["failures"])
+    assert not ours[0]["possible_browser"]
     assert sampler.relevant_read_failures == []
 
 

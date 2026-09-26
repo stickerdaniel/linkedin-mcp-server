@@ -27,6 +27,7 @@ from differential.harness import (
     PostQuit,
     PublishedOwner,
     RowResult,
+    compare_to_direct,
     identify_owner,
     judge_row,
     preservation_refusals,
@@ -747,3 +748,101 @@ def test_two_browser_roots_fail_the_row_whether_or_not_one_is_readable(
     )
     assert not vector.o1_single_browser
     assert failures
+
+
+# --- First observations, judged against the Direct reference ---------------------
+
+
+def _first_observation_census(case: str) -> dict:
+    """The e1cc model: browser roots alive through five samples, then gone.
+
+    ``pid 2`` is the row's browser, readable unless *case* says how its very
+    first observation fails; ``pid 3`` is a second, readable root on the same
+    profile unless *case* is a one-root or non-browser control.
+    """
+    table: dict[int, dict[str, Any]] = {
+        1: {"start": 1.0, "ppid": 0, "cmdline": ["pytest"]}
+    }
+    sampler, tracker = _sampler(table), Tracker()
+    tracker.observe(sampler.sample(), 0.0)
+    chrome = [BROWSER_EXE, f"--user-data-dir={KEY}"]
+    table[2] = {"start": 2.0, "ppid": 1, "exe": BROWSER_EXE, "cmdline": chrome}
+    if case not in ("one-root", "other-user", "ps-exe"):
+        table[3] = {"start": 3.0, "ppid": 1, "exe": BROWSER_EXE, "cmdline": chrome}
+    if case == "open-denied":
+        table[3]["open"] = psutil.AccessDenied(3)
+    elif case == "create-time-denied":
+        table[3]["start"] = psutil.AccessDenied(3)
+    elif case == "browser-exe-ancestry-and-arguments-denied":
+        table[3].update(ppid=psutil.AccessDenied(3), cmdline=psutil.AccessDenied(3))
+    elif case == "open-oserror":
+        table[3]["open"] = OSError("synthetic read failure")
+    elif case == "other-user":
+        table[3] = {
+            "start": 3.0,
+            "ppid": 50,
+            "exe": BROWSER_EXE,
+            "cmdline": psutil.AccessDenied(3),
+            "user": "root",
+        }
+    elif case == "ps-exe":
+        table[3] = {
+            "start": 3.0,
+            "ppid": 1,
+            "exe": "/bin/ps",
+            "cmdline": psutil.AccessDenied(3),
+        }
+    for tick in range(1, 6):
+        tracker.observe(sampler.sample(), float(tick))
+    table.pop(2)
+    table.pop(3, None)
+    tracker.observe(sampler.sample(), 6.0)
+    return {
+        "stopped_by": "stop file",
+        "observation_start": 10.0,
+        "observation_end": 100.0,
+        "max_gap_seconds": 0.2,
+        "max_roots": dict(tracker.max_roots),
+        "read_failures": sampler.read_failures,
+        "relevant_read_failures": sampler.relevant_read_failures,
+    }
+
+
+def _judged(profile, case: str, *, daemon: bool):
+    return judge_row(
+        dataclasses.replace(
+            _healthy(profile, daemon=daemon),
+            browser_key=canonical_user_data_dir(KEY),
+            watcher=_first_observation_census(case),
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "open-denied",
+        "create-time-denied",
+        "browser-exe-ancestry-and-arguments-denied",
+        "open-oserror",
+        "two-readable-roots",
+    ],
+)
+def test_a_second_root_that_cannot_be_excluded_fails_o1_and_the_comparison(
+    profile, case
+):
+    direct, direct_failures = _judged(profile, "one-root", daemon=False)
+    assert direct_failures == [] and direct.o1_single_browser
+    vector, failures = _judged(profile, case, daemon=True)
+    assert not vector.o1_single_browser
+    assert failures
+    assert compare_to_direct(direct, vector)
+
+
+@pytest.mark.parametrize("case", ["one-root", "other-user", "ps-exe"])
+def test_what_can_be_excluded_leaves_a_single_root(profile, case):
+    direct, _ = _judged(profile, "one-root", daemon=False)
+    vector, failures = _judged(profile, case, daemon=True)
+    assert failures == []
+    assert vector.o1_single_browser
+    assert compare_to_direct(direct, vector) == []

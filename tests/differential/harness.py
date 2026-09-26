@@ -89,7 +89,13 @@ from differential.synthetic_origin import (
     EgressProxy,
     SyntheticOrigin,
 )
-from differential.watcher import USER_DATA_DIR_FLAG, canonical_user_data_dir
+from differential.watcher import (
+    USER_DATA_DIR_FLAG,
+    canonical_user_data_dir,
+    harness_user,
+    possible_browser,
+    process_user,
+)
 from linkedin_mcp_server import daemon_descriptor
 from linkedin_mcp_server.config.loaders import EnvironmentKeys
 
@@ -840,19 +846,77 @@ def host_failures(session: HostSession) -> list[str]:
 # --- Process helpers -----------------------------------------------------------
 
 
-def _profile_processes(account: ActorAccount) -> list[psutil.Process]:
-    """Every process, root or child, running a browser on this row's profile."""
-    found = []
-    for process in psutil.process_iter(["cmdline"]):
-        cmdline = process.info.get("cmdline") or ()
+@dataclass
+class ProfileCensus:
+    """The processes running a browser on the row's profile, and what is unknown.
+
+    ``complete`` only when every process could be judged: its command line
+    read, or it established as unrelated the way the watcher establishes it
+    (another user, or a readable executable that cannot be the browser). An
+    empty ``processes`` from an incomplete census is not an empty profile.
+    """
+
+    processes: list[Any] = field(default_factory=list)
+    #: Processes whose arguments could not be read and that were not excluded.
+    unresolved: list[int] = field(default_factory=list)
+
+    @property
+    def pids(self) -> list[int]:
+        return [process.pid for process in self.processes]
+
+    @property
+    def complete(self) -> bool:
+        return not self.unresolved
+
+
+def profile_census(
+    account: ActorAccount,
+    *,
+    browser_exe: str | None = None,
+    browser_dir: str | Path | None = None,
+    process_iter: Callable[..., Iterable[Any]] | None = None,
+    user: object | None = None,
+) -> ProfileCensus:
+    """Every process, root or child, running a browser on this row's profile.
+
+    ``process_iter`` reports a refused read as ``None`` in ``info``, which is
+    kept apart from a process that has no such argument.
+    """
+    owner = harness_user() if user is None else user
+    directory = str(browser_dir) if browser_dir is not None else None
+    census = ProfileCensus()
+    try:
+        processes = list(
+            (process_iter or psutil.process_iter)(["cmdline", "exe", "status"])
+        )
+    except psutil.Error:
+        return ProfileCensus(unresolved=[-1])
+    for process in processes:
+        info = getattr(process, "info", {}) or {}
+        cmdline = info.get("cmdline")
+        if info.get("status") == psutil.STATUS_ZOMBIE:
+            # Exited and not yet reaped: nothing is running there.
+            continue
+        if cmdline is None:
+            if (found := process_user(process)) is not None and found != owner:
+                continue
+            exe = info.get("exe")
+            if exe and not possible_browser(exe, browser_exe, directory):
+                continue
+            census.unresolved.append(process.pid)
+            continue
         for argument in cmdline:
             if not argument.startswith(USER_DATA_DIR_FLAG):
                 continue
             value = argument[len(USER_DATA_DIR_FLAG) :]
             if canonical_user_data_dir(value) == account.browser_key:
-                found.append(process)
+                census.processes.append(process)
             break
-    return found
+    return census
+
+
+def _profile_processes(account: ActorAccount) -> list[Any]:
+    return profile_census(account).processes
 
 
 def wait_for_no_browser(account: ActorAccount, seconds: float) -> list[int]:
@@ -1390,6 +1454,8 @@ def preservation_refusals(
     residual: Sequence[int],
     swept: Sequence[int],
     remaining: Sequence[int],
+    census_unresolved: Sequence[int] = (),
+    open_possible_browsers: Sequence[dict[str, Any]] = (),
 ) -> list[str]:
     """Why the post-quit session must not start, or nothing when it may.
 
@@ -1398,6 +1464,11 @@ def preservation_refusals(
     browser census empty and resolved; and cleanup finished without anything
     kept or killed. Launching another server to find out that authority was
     uncertain is exactly what this refuses.
+
+    Settled also means nothing unknown could still be on the profile: a census
+    whose arguments could not all be read is not an empty one, and a process
+    the watcher still holds as an unresolved possible browser is not gone. A
+    finished episode judged by its executable, such as ``/bin/ps``, is neither.
     """
     reasons = []
     if owner_exit not in (None, "exited"):
@@ -1412,6 +1483,15 @@ def preservation_refusals(
         reasons.append(f"cleanup had to kill browsers: {list(swept)}")
     if remaining:
         reasons.append(f"browsers still run on the profile: {list(remaining)}")
+    if census_unresolved:
+        reasons.append(
+            f"the profile census is incomplete; unreadable: {list(census_unresolved)}"
+        )
+    if open_possible_browsers:
+        reasons.append(
+            f"the watcher still holds unresolved possible browsers: "
+            f"{[e.get('pid') for e in open_possible_browsers]}"
+        )
     return reasons
 
 
@@ -1682,12 +1762,19 @@ async def measure_host_quit_row(
 
     host = result.host
     assert host is not None
+    census = profile_census(account, browser_exe=browser_exe, browser_dir=browsers)
     refusals = preservation_refusals(
         result.cleanup,
         owner_exit=(owner.get("exit") or {}).get("how") if daemon else None,
         residual=residual,
         swept=swept,
-        remaining=[process.pid for process in _profile_processes(account)],
+        remaining=census.pids,
+        census_unresolved=census.unresolved,
+        open_possible_browsers=[
+            episode
+            for episode in (result.watcher or {}).get("relevant_read_failures") or []
+            if episode.get("resolution") == "open"
+        ],
     )
     if daemon and identified is None:
         refusals.append("the row's owner was never identified")
