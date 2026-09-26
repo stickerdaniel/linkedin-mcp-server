@@ -1,9 +1,10 @@
 """Negative controls for the daemon-only regressions the default-on contract names.
 
 Each test here asserts the behaviour decided in
-``docs/decisions/2026-09-26-daemon-default-on-contract.md`` and is expected to
-fail against today's daemon. That failure is the witness: release gate 1 asks
-for a control that reproduces every specified regression at the current code.
+``docs/decisions/2026-09-26-daemon-default-on-contract.md``. A test still marked
+``xfail`` fails against the current daemon, and that failure is the witness
+release gate 1 asks for. The stage that fixes a regression removes its marker,
+and the test stays as the guard.
 
 Every one of them is source-model evidence. The real function runs, while the
 operating system, the network and the owner are doubles, so nothing here is a
@@ -85,7 +86,8 @@ def test_an_owner_never_names_its_own_group_to_the_guardian(
     Guards the contract bullet "The guardian receives no owner group for an
     owner process, which matches a Direct server that does not lead its process
     group". The elected owner starts its own session, so it leads its group,
-    and today the guardian is handed that group to kill on a crash.
+    and before this contract the guardian was handed that group to kill on a
+    crash.
     """
     set_process_role(ServerRole.OWNER)
     spawned: list[list[str]] = []
@@ -119,9 +121,10 @@ async def test_an_owner_exiting_after_an_unconfirmed_close_sends_no_signal(
     Guards "Browser that will not close": after an unconfirmed close the owner
     releases the daemon lock and exits at once, and sends no signal itself. The
     crash guardian and the per-launch Jobs are what end the browser, as they do
-    when a Direct host quits. Today the exit sweeps every registered POSIX group
-    by number and ends the owner's own group, or terminates the adopted Job's
-    members on Windows. No signal is delivered here: every one is recorded.
+    when a Direct host quits. Before this contract the exit swept every
+    registered POSIX group by number and ended the owner's own group, or
+    terminated the adopted Job's members on Windows. No signal is delivered
+    here: every one is recorded.
     """
     sent: list[tuple[str, int, int]] = []
     browser = {"alive": True}
@@ -144,7 +147,7 @@ async def test_an_owner_exiting_after_an_unconfirmed_close_sends_no_signal(
     if platform == "posix":
         # The owner leads its group, and one detached Chromium group is filed
         # under a launch marker with a leader whose identity still matches.
-        # That is the state in which today's sweep signals.
+        # That is the state in which the removed sweep signalled.
         monkeypatch.setattr(process_tree, "_IS_WINDOWS", False)
         # A Windows interpreter has no ``SIGKILL``. Every signal is intercepted
         # above, so the number only has to exist for the forced POSIX path.
@@ -241,10 +244,11 @@ def test_an_unanswered_job_membership_never_terminates_or_proves_the_drain(
 
     Guards "When the owner cannot tell whether a process belongs to another Job
     it holds on Windows, it neither terminates that process in the routine
-    drain nor declares the drain complete". Today ``_in_another_owned_job``
-    reads the failed ``IsProcessInJob`` as "not in another Job", so the member
-    is terminated and, once it has gone, the drain reports success. The Win32
-    APIs are doubles, so this runs on every platform.
+    drain nor declares the drain complete". Before this contract
+    ``_in_another_owned_job`` read the failed ``IsProcessInJob`` as "not in
+    another Job", so the member was terminated and, once it had gone, the drain
+    reported success. The Win32 APIs are doubles, so this runs on every
+    platform.
     """
     current = os.getpid()
     terminated: list[int] = []
