@@ -31,6 +31,21 @@ def _last_heard(liveness: CallLiveness, call_id: str, seconds_ago: float) -> Non
     liveness._waiting[call_id].last_heard -= seconds_ago
 
 
+def _idle_only_body(*, drop: str | None = None, **changes: Any) -> bytes:
+    """The idle-only retirement body for the owner "the-owner", as changed."""
+    import json
+
+    body: dict[str, Any] = {
+        "only_if_idle": True,
+        "protocol": PROTOCOL_VERSION,
+        "instance": "the-owner",
+    }
+    body.update(changes)
+    if drop is not None:
+        del body[drop]
+    return json.dumps(body).encode()
+
+
 class TestReadingTheMarker:
     """What counts as a call this build can be asked about."""
 
@@ -1630,64 +1645,213 @@ class TestTheControlRoutes:
             {"watched": True},
         )
 
-    @pytest.mark.parametrize(
-        "body",
-        [b'{"only_if_idle": true}', b"{}", b"not json", b" "],
-        ids=["idle only", "empty object", "malformed", "whitespace"],
-    )
-    async def test_a_stand_down_with_any_body_changes_nothing(self, body: bytes):
-        # Only the absent body is the unconditional stand-down. Everything else
-        # is some other request, and a failed one must not become that.
-        from linkedin_mcp_server import daemon_liveness
+    async def _stand_down(self, app: Any, body: Any = None) -> Any:
         from linkedin_mcp_server.daemon_owner import STAND_DOWN_PATH
 
-        asked: list[str] = []
-        app = self._app(stand_down=lambda: asked.append("asked"))
-
         async with self._client(app) as client:
-            response = await client.post(
+            return await client.post(
                 STAND_DOWN_PATH,
                 headers={"Authorization": f"Bearer {self.TOKEN}"},
                 content=body,
             )
 
+    @pytest.mark.parametrize(
+        "body",
+        [
+            b'{"only_if_idle": true}',
+            b"{}",
+            b"not json",
+            b" ",
+            b"\xff\xfe",
+            b"[]",
+            b"null",
+            b'"only_if_idle"',
+            _idle_only_body(only_if_idle=False),
+            _idle_only_body(only_if_idle=1),
+            _idle_only_body(protocol=True),
+            _idle_only_body(protocol=str(PROTOCOL_VERSION)),
+            _idle_only_body(protocol=PROTOCOL_VERSION - 1),
+            _idle_only_body(protocol=PROTOCOL_VERSION + 1),
+            _idle_only_body(instance="another-owner"),
+            _idle_only_body(instance=7),
+            _idle_only_body(instance=None),
+            _idle_only_body(force=True),
+            _idle_only_body(drop="instance"),
+            _idle_only_body(drop="protocol"),
+        ],
+        ids=[
+            "idle only alone",
+            "empty object",
+            "malformed",
+            "whitespace",
+            "not utf-8",
+            "array",
+            "null",
+            "string",
+            "only_if_idle false",
+            "only_if_idle as number",
+            "protocol as bool",
+            "protocol as text",
+            "older protocol",
+            "newer protocol",
+            "another instance",
+            "instance as number",
+            "instance null",
+            "an extra key",
+            "no instance",
+            "no protocol",
+        ],
+    )
+    async def test_a_stand_down_with_any_other_body_changes_nothing(self, body: bytes):
+        # Only the absent body is the unconditional stand-down, and only the
+        # exact idle-only body is the other request. Everything else is refused
+        # before any retirement state moves, and a failed request must never
+        # become the unconditional one.
+        from linkedin_mcp_server import daemon_liveness
+
+        liveness = daemon_liveness.get_liveness()
+        liveness.serving_as("the-owner")
+        asked: list[str] = []
+        app = self._app(stand_down=lambda: asked.append("asked"))
+
+        response = await self._stand_down(app, body)
+
         assert response.status_code == 400
         assert asked == []
-        assert daemon_liveness.get_liveness().retiring is False
+        assert liveness.retiring is False
+        assert liveness.retire_reason is None
+
+    async def test_an_idle_owner_retires_on_the_idle_only_request(self):
+        # Retirement and turnover both, in the request: a call arriving after
+        # the reply is refused, and the loop stands down on its next tick.
+        from linkedin_mcp_server import daemon_liveness
+
+        liveness = daemon_liveness.get_liveness()
+        liveness.serving_as("the-owner")
+        asked: list[str] = []
+        app = self._app(stand_down=lambda: asked.append("asked"))
+
+        response = await self._stand_down(app, _idle_only_body())
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "standing_down": True,
+            "retiring": True,
+            "instance": "the-owner",
+        }
+        assert asked == ["asked"]
+        assert liveness.retiring is True
+        assert liveness.retire_reason == "retire"
+
+        async def work() -> str:
+            return "ran"
+
+        assert liveness.admit(new_call_id(), work) is None
+
+    @pytest.mark.parametrize(
+        "busy_with", ["running", "queued", "setup"], ids=["running", "queued", "setup"]
+    )
+    async def test_a_busy_owner_refuses_and_changes_nothing(
+        self, busy_with: str, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import daemon_liveness, daemon_owner
+
+        liveness = daemon_liveness.get_liveness()
+        liveness.serving_as("the-owner")
+        if busy_with == "running":
+            liveness.watch(new_call_id(), MagicMock())
+            liveness.call_started()
+        elif busy_with == "queued":
+            # Admitted, so counted, and still waiting behind another call for
+            # the sequential lock: as busy as a running one.
+            liveness.call_started()
+        else:
+            monkeypatch.setattr(daemon_owner, "browser_setup_in_progress", lambda: True)
+        asked: list[str] = []
+        app = self._app(stand_down=lambda: asked.append("asked"))
+
+        response = await self._stand_down(app, _idle_only_body())
+
+        assert response.status_code == 409
+        assert response.json() == {"standing_down": False, "busy": True}
+        assert asked == []
+        assert liveness.retiring is False
+
+        async def work() -> str:
+            return "ran"
+
+        admitted = liveness.admit(new_call_id(), work)
+        assert admitted is not None, "a refused retirement closed admission"
+        await admitted
+
+    async def test_a_call_cannot_slip_in_between_the_verdict_and_the_retirement(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # A call arrives on the very next loop step after the owner looked for
+        # work. With nothing awaited between that look and the retirement it
+        # arrives to a retiring owner and is refused; with anything awaited in
+        # between it would be admitted by an owner that then says it is idle.
+        from linkedin_mcp_server import daemon_liveness
+
+        liveness = daemon_liveness.get_liveness()
+        liveness.serving_as("the-owner")
+        app = self._app(stand_down=lambda: None)
+        admitted: list[bool] = []
+        real_busy = liveness.busy
+
+        async def work() -> str:
+            return "ran"
+
+        def arrive() -> None:
+            admitted.append(liveness.admit(new_call_id(), work) is not None)
+
+        def busy(**kwargs: Any) -> bool:
+            verdict = real_busy(**kwargs)
+            asyncio.get_running_loop().call_soon(arrive)
+            return verdict
+
+        monkeypatch.setattr(liveness, "busy", busy)
+
+        response = await self._stand_down(app, _idle_only_body())
+        await asyncio.sleep(0)
+
+        assert admitted, "the arriving call never ran"
+        assert response.status_code == 200
+        assert admitted == [False], "a call was admitted by an owner that retired"
 
     async def test_the_body_is_read_whole_before_anything_is_decided(self):
-        # The body arrives in two parts with the owner suspended between them.
-        # Nothing may be decided while it is still arriving: a decision taken
-        # on the first part would read a body that has not finished as absent.
-        from linkedin_mcp_server.daemon_owner import STAND_DOWN_PATH
+        # The body arrives in two parts with the owner suspended between them,
+        # and a call is admitted meanwhile. Nothing may be decided while it is
+        # still arriving: a decision taken on the first part would read a body
+        # that has not finished as absent, and one taken before the call would
+        # retire an owner that is now busy.
+        from linkedin_mcp_server import daemon_liveness
 
+        liveness = daemon_liveness.get_liveness()
+        liveness.serving_as("the-owner")
         asked: list[str] = []
         app = self._app(stand_down=lambda: asked.append("asked"))
         arrived = asyncio.Event()
         more = asyncio.Event()
+        whole = _idle_only_body()
 
         async def body() -> Any:
             yield b""
             arrived.set()
             await more.wait()
-            yield b'{"only_if_idle": true}'
+            yield whole
 
-        async with self._client(app) as client:
-            sent = asyncio.create_task(
-                client.post(
-                    STAND_DOWN_PATH,
-                    headers={"Authorization": f"Bearer {self.TOKEN}"},
-                    content=body(),
-                )
-            )
-            await asyncio.wait_for(arrived.wait(), timeout=5)
-            await asyncio.sleep(0.05)
-            assert asked == [], "the stand-down was decided before the body ended"
-            more.set()
-            response = await asyncio.wait_for(sent, timeout=5)
+        sent = asyncio.create_task(self._stand_down(app, body()))
+        await asyncio.wait_for(arrived.wait(), timeout=5)
+        await asyncio.sleep(0.05)
+        assert asked == [], "the stand-down was decided before the body ended"
+        liveness.call_started()
+        more.set()
+        response = await asyncio.wait_for(sent, timeout=5)
 
-        assert response.status_code == 400
+        assert response.status_code == 409
         assert asked == []
+        assert liveness.retiring is False
 
     async def test_a_stand_down_without_a_body_is_the_unconditional_one(self):
         from linkedin_mcp_server.daemon_owner import STAND_DOWN_PATH

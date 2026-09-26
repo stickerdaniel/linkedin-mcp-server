@@ -178,11 +178,18 @@ class OwnerLookup:
         return self.state is OwnerState.ATTACHABLE
 
 
-def _inspect(auth_root: Path, profile: Path, config: AppConfig) -> OwnerLookup:
+def _inspect(
+    auth_root: Path, profile: Path, config: AppConfig, *, for_retirement: bool = False
+) -> OwnerLookup:
     """Read the descriptor once and say what it means.
 
     Order matters. The cheap, local checks come first, so a descriptor that
     already disqualifies itself is rejected before the token is read.
+
+    *for_retirement* asks whether the owner may be asked to retire, not whether
+    it may run this client's calls, so the configuration is not compared. An
+    owner of this profile, runtime and protocol with other settings is still the
+    owner of the browser a profile command is about to change.
     """
     descriptor = daemon_descriptor.read(auth_root)
     if descriptor is None:
@@ -231,8 +238,8 @@ def _inspect(auth_root: Path, profile: Path, config: AppConfig) -> OwnerLookup:
         )
 
     # Keyed with the token, so this can only run once the token is in hand.
-    if descriptor.config_fingerprint != daemon_descriptor.config_fingerprint(
-        config, key=token
+    if not for_retirement and descriptor.config_fingerprint != (
+        daemon_descriptor.config_fingerprint(config, key=token)
     ):
         return OwnerLookup(
             state=OwnerState.INCOMPATIBLE,
@@ -260,10 +267,18 @@ def _inspect(auth_root: Path, profile: Path, config: AppConfig) -> OwnerLookup:
 class _DescriptorInspector:
     """Reuse one native descriptor inspection until it has actually finished."""
 
-    def __init__(self, auth_root: Path, profile: Path, config: AppConfig) -> None:
+    def __init__(
+        self,
+        auth_root: Path,
+        profile: Path,
+        config: AppConfig,
+        *,
+        for_retirement: bool = False,
+    ) -> None:
         self._auth_root = auth_root
         self._profile = profile
         self._config = config
+        self._for_retirement = for_retirement
         self._generation = 0
         self._required_generation = 0
         self._pending: tuple[int, queue.Queue[OwnerLookup | BaseException]] | None = (
@@ -331,9 +346,18 @@ class _DescriptorInspector:
         def inspect() -> None:
             try:
                 try:
-                    value: OwnerLookup | BaseException = _inspect(
-                        self._auth_root, self._profile, self._config
-                    )
+                    value: OwnerLookup | BaseException
+                    # The election's reading is made exactly as it always was;
+                    # only a retirement lookup passes the flag.
+                    if self._for_retirement:
+                        value = _inspect(
+                            self._auth_root,
+                            self._profile,
+                            self._config,
+                            for_retirement=True,
+                        )
+                    else:
+                        value = _inspect(self._auth_root, self._profile, self._config)
                 except BaseException as exc:  # noqa: BLE001 - re-raised by the caller
                     value = exc
                 result.put(value)
@@ -367,6 +391,7 @@ def look_up_owner(
     *,
     wait_seconds: float = 0.0,
     ignore_instances: AbstractSet[str] = frozenset(),
+    for_retirement: bool = False,
     _inspector: _DescriptorInspector | None = None,
 ) -> OwnerLookup:
     """Read the descriptor until it is compatible or the budget runs out.
@@ -402,6 +427,10 @@ def look_up_owner(
     nothing better, the reading is returned exactly as before, so the caller's
     own downgrade is unchanged.
 
+    *for_retirement* is for a profile command deciding whether there is an owner
+    to ask to retire: the configuration is not compared (``_inspect``). It is
+    still only a reading of files, so nothing is contacted here either.
+
     Raises:
         ValueError: *wait_seconds* is not finite.
     """
@@ -415,7 +444,9 @@ def look_up_owner(
 
     wait_budget = max(wait_seconds, 0.0)
     deadline = time.monotonic() + wait_budget
-    inspector = _inspector or _DescriptorInspector(auth_root, profile, config)
+    inspector = _inspector or _DescriptorInspector(
+        auth_root, profile, config, for_retirement=for_retirement
+    )
     last_lookup: OwnerLookup | None = None
     while True:
         remaining = deadline - time.monotonic()
