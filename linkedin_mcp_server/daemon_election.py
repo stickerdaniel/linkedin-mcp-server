@@ -27,6 +27,7 @@ import threading
 import time
 import weakref
 from collections.abc import Callable
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, TypeVar, cast
@@ -271,6 +272,7 @@ def obtain_owner(
     deadline_seconds: float = DEFAULT_ELECTION_SECONDS,
     settlement_seconds: float = DEFAULT_SETTLEMENT_SECONDS,
     connect: Reachable | None = None,
+    buried: AbstractSet[str] = frozenset(),
 ) -> ElectionOutcome:
     """Return an owner to talk to, starting one if nobody else has.
 
@@ -279,6 +281,15 @@ def obtain_owner(
     gets at most one settlement budget from that failure, capped by the global
     deadline. Settlement never starts or turns over an owner; it only observes
     the canonical descriptor and authenticates a compatible endpoint.
+
+    *buried* names generations the caller has already found unusable, so they
+    are never contacted or returned here. A proxy recovering from an owner that
+    refused its calls passes them, because a retiring owner still answers the
+    ping this election probes with.
+
+    Returns at once, with nothing worth connecting to, when a live owner of this
+    build uses another configuration: that owner is left alone, and the caller
+    drives its own browser rather than waiting on the lock the owner holds.
     """
     entered = time.monotonic()
     active_deadline = entered + max(deadline_seconds, 0.0)
@@ -290,7 +301,8 @@ def obtain_owner(
     start_retry_seconds = _OWNER_START_RETRY_SECONDS
     reach = connect or _reachable
     inspector = _DescriptorInspector(auth_root, profile, config)
-    buried: set[str] = set()
+    # A copy, never the caller's own set: `_live_lookup` adds to it.
+    buried = set(buried)
     asked_for_turnover = False
     last_lookup = OwnerLookup(
         state=OwnerState.ABSENT,
@@ -340,7 +352,7 @@ def obtain_owner(
         if time.monotonic() >= active_deadline:
             return settle()
         lookup = look()
-        if lookup.worth_connecting:
+        if lookup.worth_connecting or lookup.live_rival:
             return ElectionOutcome(lookup, started_owner=started)
         if time.monotonic() >= active_deadline:
             return settle()
@@ -390,7 +402,7 @@ def obtain_owner(
         if remaining <= 0:
             return settle()
         lookup = look(min(_RETRY_SECONDS, remaining))
-        if lookup.worth_connecting:
+        if lookup.worth_connecting or lookup.live_rival:
             return ElectionOutcome(lookup, started_owner=started)
         if time.monotonic() >= active_deadline:
             return settle()
@@ -426,8 +438,30 @@ def _settle_owner(
         )
         if observed:
             last_lookup = lookup
-        if lookup.worth_connecting:
+        if lookup.worth_connecting or lookup.live_rival:
             return ElectionOutcome(lookup, started_owner=started)
+
+
+def _wants_a_decision(lookup: OwnerLookup) -> bool:
+    """Whether an unusable reading still needs the election to act on it.
+
+    A control-only pair is not an owner to attach to, but two kinds of it are
+    not merely something to wait out either. A protocol mismatch is an owner to
+    ask to stand down or to write off, and a same-build configuration mismatch
+    is an owner to probe: alive, it is left alone and the caller falls back at
+    once; gone, its descriptor is leftovers like any other. Every other
+    reading is paced exactly as before, which keeps a caller from spinning
+    through its backoff at read speed on a file it cannot use.
+    """
+    attachment = lookup.attachment
+    if attachment is None or not attachment.control_only:
+        return False
+    if lookup.mismatch is daemon_discovery.Mismatch.PROTOCOL:
+        return True
+    return (
+        lookup.mismatch is daemon_discovery.Mismatch.CONFIGURATION
+        and attachment.descriptor.package_version == __version__
+    )
 
 
 def _live_lookup(
@@ -500,7 +534,10 @@ def _live_lookup(
             lookup.attachment is not None
             and lookup.attachment.descriptor.instance_id in buried
         )
-        if lookup.worth_connecting and not ignored:
+        # Before the generic filter, not after it: a control-only reading is
+        # never worth connecting to, and discarded here it would never reach
+        # the turnover or the liveness probe below.
+        if (lookup.worth_connecting or _wants_a_decision(lookup)) and not ignored:
             break
         remaining = min(wait_deadline, deadline) - time.monotonic()
         if remaining <= 0:
@@ -517,7 +554,7 @@ def _live_lookup(
         time.sleep(min(daemon_discovery._ATTACH_POLL_SECONDS, remaining))
 
     attachment = lookup.attachment
-    assert attachment is not None  # worth_connecting implies one
+    assert attachment is not None  # both ways out of the loop imply one
     instance = attachment.descriptor.instance_id
     if instance in buried:
         return (
@@ -527,6 +564,16 @@ def _live_lookup(
             ),
             False,
             True,
+        )
+
+    if attachment.control_only:
+        return _decide_control_only(
+            lookup,
+            attachment,
+            reach,
+            buried,
+            may_ask_for_turnover=may_ask_for_turnover,
+            deadline=deadline,
         )
 
     stale = (
@@ -610,6 +657,107 @@ def _live_lookup(
     )
 
 
+def _decide_control_only(
+    lookup: OwnerLookup,
+    attachment: Attachment,
+    reach: Reachable,
+    buried: set[str],
+    *,
+    may_ask_for_turnover: bool,
+    deadline: float,
+) -> tuple[OwnerLookup, bool, bool]:
+    """Act on an owner this build may control but never give a tool call.
+
+    Nothing returned here is worth connecting to, whatever happens. The pair
+    was proved for its endpoint, profile, runtime and token, and that is enough
+    to send a stand-down request or a ping; it is not enough to forward a call.
+
+    **Another protocol.** An older owner is asked to stand down through the
+    control floor, the one route every protocol keeps. The same or a newer one
+    is left running. Either way this generation is written off, so the election
+    goes to the lock: after a turnover that is where the replacement starts,
+    and otherwise it ends in the caller's own browser for as long as that owner
+    lives.
+
+    **Same build, another configuration.** Probed, because a descriptor outlives
+    its writer and an owner that went idle leaves one behind on purpose.
+    Alive, it is a rival this frontend leaves alone, falling back at once.
+    Gone, it is buried like any leftovers so the lock can be taken. Silent,
+    nothing is recorded, exactly as for an attachable owner that has not
+    answered yet.
+    """
+    instance = attachment.descriptor.instance_id
+    if lookup.mismatch is daemon_discovery.Mismatch.PROTOCOL:
+        older = (
+            daemon_version.compare(
+                owner=attachment.descriptor.package_version, frontend=__version__
+            )
+            is daemon_version.Skew.OWNER_IS_STALE
+        )
+        asked = older and may_ask_for_turnover
+        if asked:
+            logger.info(
+                "The running daemon is version %s and speaks an older protocol; "
+                "asking it to hand the browser over",
+                attachment.descriptor.package_version,
+            )
+            _ask_to_stand_down(attachment)
+        elif not older:
+            logger.info(
+                "The running daemon speaks another protocol and is not older than "
+                "this build; leaving it alone"
+            )
+        buried.add(instance)
+        return (
+            OwnerLookup(
+                state=OwnerState.INCOMPATIBLE,
+                reason=lookup.reason,
+                mismatch=lookup.mismatch,
+            ),
+            asked,
+            True,
+        )
+
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return (
+            OwnerLookup(
+                state=OwnerState.INCOMPATIBLE,
+                reason="the published daemon was not probed before the deadline",
+                mismatch=lookup.mismatch,
+            ),
+            False,
+            True,
+        )
+    verdict = reach(attachment, min(_REACHABLE_SECONDS, remaining))
+    if verdict is Reach.ANSWERED:
+        logger.info(
+            "A shared browser owner with a different configuration is running; "
+            "leaving it alone"
+        )
+        return (
+            OwnerLookup(
+                state=OwnerState.INCOMPATIBLE,
+                reason="a live owner of this build uses a different configuration",
+                mismatch=lookup.mismatch,
+                live_rival=True,
+            ),
+            False,
+            True,
+        )
+    if verdict is Reach.REFUSED:
+        buried.add(instance)
+    return (
+        OwnerLookup(
+            state=OwnerState.INCOMPATIBLE,
+            reason=lookup.reason,
+            mismatch=lookup.mismatch,
+        ),
+        False,
+        True,
+    )
+
+
 def _ask_to_stand_down(attachment: Attachment) -> None:
     """Ask a superseded owner to give up the browser.
 
@@ -621,6 +769,11 @@ def _ask_to_stand_down(attachment: Attachment) -> None:
 
     Whether the owner *complied* is never assumed. The lock is what says the
     browser is free, and this function never claims otherwise.
+
+    Sent with no body, and that is the request's meaning rather than an
+    omission. The route and its bearer check are the control floor every tool
+    protocol keeps (``daemon_owner.STAND_DOWN_PATH``), and a bodyless request is
+    the one form of it an owner reads as unconditional.
     """
 
     descriptor = attachment.descriptor

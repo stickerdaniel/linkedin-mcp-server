@@ -14,6 +14,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from linkedin_mcp_server.daemon_descriptor import PROTOCOL_VERSION
 from linkedin_mcp_server.daemon_liveness import (
     CALL_HEADER,
     EXPIRY_SECONDS,
@@ -60,8 +61,9 @@ class TestReadingTheMarker:
     )
     def test_anything_else_is_no_marker(self, value: str | None):
         # Unreadable has to mean unmarked rather than "close enough": an
-        # unmarked call is never cancelled, and that is the safe direction. This
-        # arrives in a header from anything that can reach the port.
+        # unmarked call is refused before it runs, and that is the safe
+        # direction. This arrives in a header from anything that can reach the
+        # port.
         assert call_id_in(value) is None
 
     def test_two_calls_do_not_share_an_identifier(self):
@@ -153,24 +155,44 @@ class TestTheOwnerSideMiddleware:
             "fastmcp.server.dependencies.get_http_headers", lambda **_kw: headers
         )
 
-    async def test_an_unmarked_call_runs_and_is_never_watched(self, monkeypatch):
-        # The old-frontend direction of the compatibility claim. A frontend from
-        # before this existed sends no marker, and its calls must run exactly as
-        # they always did rather than becoming cancellable by anybody.
+    @pytest.mark.parametrize(
+        "headers",
+        [{}, {CALL_HEADER: "v2." + "a" * 32}],
+        ids=["no marker", "a marker this build cannot read"],
+    )
+    async def test_an_unmarked_call_is_refused_before_anything_runs(
+        self, monkeypatch, headers: dict[str, str]
+    ):
+        # A call the owner cannot identify is one it cannot cancel once its
+        # client goes. Refused, and refused before it is counted: an unmarked
+        # call is neither work nor a reason to stay.
         from linkedin_mcp_server import daemon_liveness
 
-        self._headers(monkeypatch, {})
+        self._headers(monkeypatch, headers)
         liveness = daemon_liveness.get_liveness()
+        liveness.serving_as("the-owner")
+        dispatched: list[str] = []
 
         async def call_next(_context: Any) -> str:
-            assert liveness._waiting == {}, "an unmarked call was watched"
+            dispatched.append("ran")
             return "the result"
 
         result = await OwnerCallLivenessMiddleware().on_call_tool(
             self._context(),
             call_next,  # ty: ignore
         )
-        assert result == "the result"
+
+        assert dispatched == []
+        assert result.is_error is True
+        assert result.meta == {
+            daemon_liveness.REFUSAL_KEY: {
+                "daemon": "unmarked_call",
+                "protocol": PROTOCOL_VERSION,
+                "instance": "the-owner",
+            }
+        }
+        assert liveness.calls_in_flight() == 0
+        assert liveness._waiting == {}
 
     async def test_a_marked_call_is_watched_while_it_runs(self, monkeypatch):
         from linkedin_mcp_server import daemon_liveness
@@ -280,15 +302,18 @@ class TestTheFrontendSide:
 
         Records which owner each beat was addressed to, which is the only way to
         see a beat that followed a replacement owner rather than staying with
-        the one running the call.
+        the one running the call. Answers with the body the owner's route sends
+        for a call it has not registered yet, which every preflight is.
         """
+        import httpx
+
         from linkedin_mcp_server.daemon_proxy import FrontendCallHeartbeatMiddleware
 
         middleware = FrontendCallHeartbeatMiddleware(backend)
 
-        async def beat(attachment: Any, call_id: str) -> int:
+        async def beat(attachment: Any, call_id: str) -> httpx.Response:
             beats.append((attachment.descriptor.instance_id, call_id))
-            return status
+            return httpx.Response(status, json={"watched": False})
 
         middleware._beat = beat  # ty: ignore[invalid-assignment]
         return middleware
@@ -321,35 +346,35 @@ class TestTheFrontendSide:
         )
         assert order == ["dispatch after 1 beats"]
 
-    async def test_an_owner_without_the_route_is_served_anyway(
+    async def test_an_owner_without_the_route_gets_no_call_and_no_beats(
         self, tmp_path: Path, quick_cadence: float
     ):
-        # The new-frontend direction of the compatibility claim. A 404 is an
-        # owner from before heartbeats existed, and its calls must go ahead
-        # unheard rather than fail.
+        # The reverse of what protocol 1 promised. A 404 used to be an owner
+        # from before heartbeats and was served unheard; now it is not an owner
+        # of this protocol at all, and a call it ran could never be cancelled.
+        from linkedin_mcp_server.daemon_proxy import (
+            OwnerFailure,
+            OwnerUnreachableError,
+        )
+
         backend = self._backend(tmp_path)
         beats: list[tuple[str, str]] = []
         middleware = self._middleware(backend, beats, status=404)
-
-        during: list[int] = []
+        dispatched: list[str] = []
 
         async def call_next(_context: Any) -> str:
-            # Counted while the call is still running. Afterwards proves
-            # nothing: the beater is cancelled when the call returns either
-            # way, so a beater that should never have started looks identical
-            # from outside.
-            await asyncio.sleep(quick_cadence * 6)
-            during.append(len(beats))
+            dispatched.append("ran")
             return "the result"
 
-        assert (
-            await middleware.on_call_tool(
-                self._context(),
-                call_next,
-            )
-            == "the result"
-        )
-        assert during == [1], "kept beating at an owner with no such route"
+        with pytest.raises(OwnerUnreachableError) as refused:
+            await middleware.on_call_tool(self._context(), call_next)
+
+        assert dispatched == []
+        assert refused.value.nothing_was_sent is True
+        assert refused.value.classification is OwnerFailure.ROUTE_MISSING
+        # Several cadences, and no beater was ever started.
+        await asyncio.sleep(quick_cadence * 6)
+        assert len(beats) == 1, "kept beating at an owner that got no call"
 
     async def test_the_marker_reaches_the_client_the_provider_builds(
         self, tmp_path: Path
@@ -736,21 +761,17 @@ class TestGoingAwayWhenNobodyNeedsIt:
         assert daemon_liveness.get_liveness().quiet_for() is None
         assert await self._run_loop(idle_timeout=0.05) is False
 
-    @pytest.mark.parametrize("marked", [True, False], ids=["marked", "unmarked"])
     async def test_a_call_in_flight_holds_the_door(
-        self, marked: bool, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch
     ):
-        # Both cases matter and only one is obvious. An unmarked call cannot be
-        # cancelled, and calling it idleness would exit in the middle of one,
-        # cutting off exactly the older frontends this build promises to serve.
-        #
         # Driven through the middleware rather than by calling the tracker here.
         # An earlier version of this test registered the call itself and stayed
-        # green when the middleware stopped counting unmarked calls at all,
-        # which is the whole thing it exists to catch.
+        # green when the middleware stopped counting calls at all, which is the
+        # whole thing it exists to catch. Only marked calls are left to count:
+        # an unmarked one is refused before it is admitted.
         from linkedin_mcp_server import daemon_liveness
 
-        headers = {CALL_HEADER: new_call_id()} if marked else {}
+        headers = {CALL_HEADER: new_call_id()}
         monkeypatch.setattr(
             "fastmcp.server.dependencies.get_http_headers", lambda **_kw: headers
         )
@@ -1074,3 +1095,685 @@ class TestAnAbandonedCallStillExpiresUnderTheLoop:
             await loop
 
         assert abandoned.cancelled(), "an abandoned call outlived the owner's loop"
+
+
+def _mark_calls(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Make every call in this test arrive carrying one fresh marker."""
+    marker = new_call_id()
+    monkeypatch.setattr(
+        "fastmcp.server.dependencies.get_http_headers",
+        lambda **_kw: {CALL_HEADER: marker},
+    )
+    return marker
+
+
+def _call_context() -> Any:
+    context = MagicMock()
+    context.message.name = "get_person_profile"
+    # No request context, so the serializing middleware reports no progress.
+    context.fastmcp_context = None
+    return context
+
+
+def _refused_as_retiring(result: Any, instance: str | None) -> bool:
+    from linkedin_mcp_server.daemon_liveness import REFUSAL_KEY
+
+    return getattr(result, "is_error", False) is True and (result.meta or {}).get(
+        REFUSAL_KEY
+    ) == {"daemon": "retiring", "protocol": PROTOCOL_VERSION, "instance": instance}
+
+
+class TestAdmissionAndRetirementAreOneDecision:
+    """Only two orderings exist: the call wins, or the retirement does.
+
+    Each ordering is forced with a barrier rather than left to timing, and the
+    refused side is checked for having left nothing behind: no count, no task,
+    no downstream call and no profile lease.
+    """
+
+    async def test_a_call_admitted_first_makes_retirement_see_busy(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import daemon_liveness
+
+        _mark_calls(monkeypatch)
+        liveness = daemon_liveness.get_liveness()
+        liveness.the_endpoint_is_live()
+        running = asyncio.Event()
+        release = asyncio.Event()
+
+        async def call_next(_context: Any) -> str:
+            running.set()
+            await release.wait()
+            return "the result"
+
+        call = asyncio.create_task(
+            OwnerCallLivenessMiddleware().on_call_tool(_call_context(), call_next)  # ty: ignore
+        )
+        await asyncio.wait_for(running.wait(), timeout=5)
+
+        assert liveness.try_retire("idle") is False
+        assert liveness.retiring is False
+
+        release.set()
+        assert await call == "the result"
+        assert liveness.try_retire("idle") is True
+
+    async def test_a_call_after_retirement_is_refused_and_leaves_nothing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Driven through the real serializing middleware, so a refused call
+        # that still reached anything below admission would be seen taking the
+        # lock or the profile lease.
+        from linkedin_mcp_server import daemon_liveness
+        from linkedin_mcp_server.sequential_tool_middleware import (
+            SequentialToolExecutionMiddleware,
+        )
+
+        _mark_calls(monkeypatch)
+        liveness = daemon_liveness.get_liveness()
+        liveness.serving_as("the-owner")
+        liveness.the_endpoint_is_live()
+        quiet_since = liveness._quiet_since
+        leases = MagicMock(name="get_profile_lease")
+        monkeypatch.setattr(
+            "linkedin_mcp_server.sequential_tool_middleware.get_profile_lease", leases
+        )
+        sequential = SequentialToolExecutionMiddleware()
+        ran: list[str] = []
+
+        async def tool(_context: Any) -> str:
+            ran.append("the tool")
+            return "the result"
+
+        async def call_next(context: Any) -> Any:
+            return await sequential.on_call_tool(context, tool)  # ty: ignore
+
+        tasks_before = len(asyncio.all_tasks())
+        assert liveness.try_retire("idle") is True
+
+        result = await OwnerCallLivenessMiddleware().on_call_tool(
+            _call_context(), call_next
+        )
+
+        assert _refused_as_retiring(result, "the-owner")
+        assert ran == []
+        leases.assert_not_called()
+        assert not sequential._lock.locked()
+        assert liveness.calls_in_flight() == 0
+        assert liveness._waiting == {}
+        assert liveness._quiet_since == quiet_since, "a refused call touched the clock"
+        assert len(asyncio.all_tasks()) == tasks_before, "a refused call left a task"
+
+    async def test_a_request_not_yet_admitted_is_refused_by_a_retirement(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Already in HTTP handling, with its task scheduled, but not yet at the
+        # admission check when the owner decides to go.
+        from linkedin_mcp_server import daemon_liveness
+
+        _mark_calls(monkeypatch)
+        liveness = daemon_liveness.get_liveness()
+        liveness.the_endpoint_is_live()
+        ran: list[str] = []
+
+        async def call_next(_context: Any) -> str:
+            ran.append("the tool")
+            return "the result"
+
+        arriving = asyncio.create_task(
+            OwnerCallLivenessMiddleware().on_call_tool(_call_context(), call_next)  # ty: ignore
+        )
+        assert liveness.try_retire("idle") is True
+
+        result = await arriving
+
+        assert _refused_as_retiring(result, None)
+        assert ran == []
+        assert liveness.calls_in_flight() == 0
+
+    async def test_a_queued_call_counts_as_busy(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        # Queued behind another call on the serializing lock, it holds no
+        # browser yet. Idle would be the wrong answer: it was admitted, and its
+        # client is waiting for it.
+        from linkedin_mcp_server import daemon_liveness
+        from linkedin_mcp_server.profile_lease import get_profile_lease
+        from linkedin_mcp_server.sequential_tool_middleware import (
+            SequentialToolExecutionMiddleware,
+        )
+
+        _mark_calls(monkeypatch)
+        liveness = daemon_liveness.get_liveness()
+        liveness.the_endpoint_is_live()
+        lease = get_profile_lease(tmp_path / "profile")
+        monkeypatch.setattr(
+            "linkedin_mcp_server.sequential_tool_middleware.get_profile_lease",
+            lambda: lease,
+        )
+        sequential = SequentialToolExecutionMiddleware()
+
+        async def tool(_context: Any) -> str:
+            return "the result"
+
+        async def call_next(context: Any) -> Any:
+            return await sequential.on_call_tool(context, tool)  # ty: ignore
+
+        await sequential._lock.acquire()
+        try:
+            queued = asyncio.create_task(
+                OwnerCallLivenessMiddleware().on_call_tool(_call_context(), call_next)
+            )
+            while liveness.calls_in_flight() == 0:
+                await asyncio.sleep(0)
+            await asyncio.sleep(0.05)
+            assert not queued.done(), "the call was not queued behind the lock"
+            assert lease._refs == 0, "the queued call already holds the profile"
+
+            assert liveness.try_retire("idle") is False
+        finally:
+            sequential._lock.release()
+        assert await asyncio.wait_for(queued, timeout=5) == "the result"
+
+    async def test_a_call_arriving_at_the_idle_decision_is_refused_or_keeps_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The owner's own loop, with a call arriving in the idle decision.
+
+        The call is scheduled from inside the loop's read of the idle clock,
+        so it is ready to run at whatever point the loop next yields. With the
+        check and the set in one step it never gets in before the owner has
+        closed admission; with any `await` between them it is admitted by an
+        owner that has already decided to exit.
+        """
+        from linkedin_mcp_server import daemon_liveness
+        from linkedin_mcp_server.daemon_owner import _serve_until_stopped
+
+        _mark_calls(monkeypatch)
+        liveness = daemon_liveness.get_liveness()
+        liveness.the_endpoint_is_live()
+        liveness._quiet_since = liveness._quiet_since - 60  # ty: ignore
+        ran: list[str] = []
+
+        async def call_next(_context: Any) -> str:
+            ran.append("the tool")
+            return "the result"
+
+        arriving: list[asyncio.Future[Any]] = []
+        read_the_clock = liveness.quiet_for
+
+        def a_call_arrives_as_the_clock_is_read() -> float | None:
+            if not arriving:
+                arriving.append(
+                    asyncio.ensure_future(
+                        OwnerCallLivenessMiddleware().on_call_tool(
+                            _call_context(),
+                            call_next,  # ty: ignore
+                        )
+                    )
+                )
+            return read_the_clock()
+
+        monkeypatch.setattr(liveness, "quiet_for", a_call_arrives_as_the_clock_is_read)
+        server = MagicMock()
+        server.should_exit = False
+
+        async def serves() -> None:
+            while not server.should_exit:
+                await asyncio.sleep(0.01)
+
+        serving = asyncio.create_task(serves())
+        await _serve_until_stopped(server, serving, [], 0.05, lock=None)
+        result = await arriving[0]
+
+        assert server.should_exit is True
+        assert ran == [], "a call was admitted by an owner that had decided to exit"
+        assert _refused_as_retiring(result, None)
+
+    async def test_retirement_never_resets(self, monkeypatch: pytest.MonkeyPatch):
+        from linkedin_mcp_server import daemon_liveness
+
+        liveness = daemon_liveness.get_liveness()
+        liveness.retire("turnover")
+        liveness.retire("idle")
+        liveness.call_started()
+        liveness.call_finished()
+        liveness.the_endpoint_is_live()
+
+        assert liveness.retiring is True
+        assert liveness.retire_reason == "turnover"
+        assert liveness.try_retire("idle") is True
+
+
+class TestEveryWayOutClosesAdmission:
+    """One test per reason an owner stops, each through the gate."""
+
+    @staticmethod
+    def _stopped_server() -> tuple[Any, Any]:
+        server = MagicMock()
+        server.should_exit = False
+
+        async def serves() -> None:
+            while not server.should_exit:
+                await asyncio.sleep(0.01)
+
+        return server, asyncio.create_task(serves())
+
+    async def test_idle(self):
+        from linkedin_mcp_server import daemon_liveness
+        from linkedin_mcp_server.daemon_owner import _serve_until_stopped
+
+        liveness = daemon_liveness.get_liveness()
+        liveness.the_endpoint_is_live()
+        liveness._quiet_since = liveness._quiet_since - 60  # ty: ignore
+        server, serving = self._stopped_server()
+
+        await _serve_until_stopped(server, serving, [], 0.05, lock=None)
+
+        assert server.should_exit is True
+        assert liveness.retire_reason == "idle"
+
+    async def test_turnover(self):
+        from linkedin_mcp_server import daemon_liveness
+        from linkedin_mcp_server.daemon_owner import _serve_until_stopped
+
+        liveness = daemon_liveness.get_liveness()
+        server, serving = self._stopped_server()
+
+        await _serve_until_stopped(server, serving, ["asked"], lock=None)
+
+        assert server.should_exit is True
+        assert liveness.retire_reason == "turnover"
+
+    async def test_wedged(self, monkeypatch: pytest.MonkeyPatch):
+        from linkedin_mcp_server import daemon_liveness, daemon_owner
+
+        monkeypatch.setattr(
+            daemon_owner, "stand_down_reason", lambda: "the browser cannot be driven"
+        )
+        liveness = daemon_liveness.get_liveness()
+        server, serving = self._stopped_server()
+
+        await daemon_owner._serve_until_stopped(server, serving, [], lock=None)
+
+        assert server.should_exit is True
+        assert liveness.retire_reason == "wedged"
+
+    def test_uncertain_publication(self, monkeypatch: pytest.MonkeyPatch):
+        from linkedin_mcp_server import daemon_liveness, daemon_owner
+
+        class Exited(BaseException):
+            pass
+
+        def exit_hard(_lock: object) -> None:
+            raise Exited
+
+        monkeypatch.setattr(daemon_owner, "_exit_hard", exit_hard)
+
+        with pytest.raises(Exited):
+            daemon_owner._exit_uncertain_publication("ambiguous", lock=None)
+
+        assert daemon_liveness.get_liveness().retire_reason == "uncertain publication"
+
+
+class TestStandingDownForANewerBuild:
+    """Turnover closes admission at once and drains for a bounded time."""
+
+    async def test_an_admitted_call_finishes_before_the_owner_stops(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import daemon_liveness
+        from linkedin_mcp_server.daemon_owner import _serve_until_stopped
+
+        _mark_calls(monkeypatch)
+        liveness = daemon_liveness.get_liveness()
+        running = asyncio.Event()
+        release = asyncio.Event()
+
+        async def call_next(_context: Any) -> str:
+            running.set()
+            await release.wait()
+            return "the result"
+
+        call = asyncio.create_task(
+            OwnerCallLivenessMiddleware().on_call_tool(_call_context(), call_next)  # ty: ignore
+        )
+        await asyncio.wait_for(running.wait(), timeout=5)
+        server = MagicMock()
+        server.should_exit = False
+
+        async def serves() -> None:
+            while not server.should_exit:
+                await asyncio.sleep(0.01)
+
+        loop = asyncio.create_task(
+            _serve_until_stopped(
+                server, asyncio.create_task(serves()), ["asked"], lock=None
+            )
+        )
+        await asyncio.sleep(0.3)
+
+        assert liveness.retiring is True
+        assert server.should_exit is False, "the owner stopped with a call running"
+
+        release.set()
+        assert await call == "the result"
+        await asyncio.wait_for(loop, timeout=5)
+        assert server.should_exit is True
+
+    async def test_a_call_that_outlives_the_drain_is_reported_as_unknown(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import daemon_liveness, daemon_owner
+
+        monkeypatch.setattr(daemon_owner, "_TURNOVER_DRAIN_SECONDS", 0.2)
+        _mark_calls(monkeypatch)
+        running = asyncio.Event()
+
+        async def call_next(_context: Any) -> str:
+            running.set()
+            await asyncio.sleep(3600)  # the send that will not finish in time
+            return "never reached"  # pragma: no cover
+
+        call = asyncio.create_task(
+            OwnerCallLivenessMiddleware().on_call_tool(_call_context(), call_next)  # ty: ignore
+        )
+        await asyncio.wait_for(running.wait(), timeout=5)
+        server = MagicMock()
+        server.should_exit = False
+
+        async def serves() -> None:
+            while not server.should_exit:
+                await asyncio.sleep(0.01)
+
+        await daemon_owner._serve_until_stopped(
+            server, asyncio.create_task(serves()), ["asked"], lock=None
+        )
+        result = await asyncio.wait_for(call, timeout=5)
+
+        assert server.should_exit is True
+        assert result.is_error is True
+        assert result.structured_content["status"] == "outcome_unknown"
+        assert result.structured_content["retry_safe"] is False
+        assert daemon_liveness.get_liveness().calls_in_flight() == 0
+
+
+class TestTheControlRoutes:
+    """The heartbeat's 409 and the stand-down route's body rule, on the real app."""
+
+    HOST = "127.0.0.1"
+    TOKEN = "the-owners-token"
+
+    def _app(self, stand_down: Any = None) -> Any:
+        from linkedin_mcp_server.config.schema import AppConfig
+        from linkedin_mcp_server.daemon_owner import create_owner_server
+
+        return create_owner_server(
+            config=AppConfig(),
+            token=self.TOKEN,
+            host=self.HOST,
+            port=51234,
+            stand_down=stand_down,
+        ).config.app
+
+    def _client(self, app: Any) -> Any:
+        import httpx
+
+        return httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url=f"http://{self.HOST}:51234",
+            trust_env=False,
+        )
+
+    async def test_a_retiring_owner_answers_an_unknown_call_with_a_signed_409(self):
+        from linkedin_mcp_server import daemon_liveness
+        from linkedin_mcp_server.daemon_liveness import HEARTBEAT_PATH
+
+        liveness = daemon_liveness.get_liveness()
+        liveness.serving_as("the-owner")
+        running = new_call_id()
+        liveness.watch(running, MagicMock())
+        app = self._app()
+
+        async with self._client(app) as client:
+
+            async def beat(marker: str) -> Any:
+                return await client.post(
+                    HEARTBEAT_PATH,
+                    headers={
+                        "Authorization": f"Bearer {self.TOKEN}",
+                        CALL_HEADER: marker,
+                    },
+                )
+
+            before = await beat(new_call_id())
+            liveness.retire("turnover")
+            refused = await beat(new_call_id())
+            still_running = await beat(running)
+
+        assert (before.status_code, before.json()) == (200, {"watched": False})
+        assert refused.status_code == 409
+        assert refused.json() == {
+            "daemon": "retiring",
+            "protocol": PROTOCOL_VERSION,
+            "instance": "the-owner",
+        }
+        # Its client is still waiting, so it is still heard.
+        assert (still_running.status_code, still_running.json()) == (
+            200,
+            {"watched": True},
+        )
+
+    @pytest.mark.parametrize(
+        "body",
+        [b'{"only_if_idle": true}', b"{}", b"not json", b" "],
+        ids=["idle only", "empty object", "malformed", "whitespace"],
+    )
+    async def test_a_stand_down_with_any_body_changes_nothing(self, body: bytes):
+        # Only the absent body is the unconditional stand-down. Everything else
+        # is some other request, and a failed one must not become that.
+        from linkedin_mcp_server import daemon_liveness
+        from linkedin_mcp_server.daemon_owner import STAND_DOWN_PATH
+
+        asked: list[str] = []
+        app = self._app(stand_down=lambda: asked.append("asked"))
+
+        async with self._client(app) as client:
+            response = await client.post(
+                STAND_DOWN_PATH,
+                headers={"Authorization": f"Bearer {self.TOKEN}"},
+                content=body,
+            )
+
+        assert response.status_code == 400
+        assert asked == []
+        assert daemon_liveness.get_liveness().retiring is False
+
+    async def test_the_body_is_read_whole_before_anything_is_decided(self):
+        # The body arrives in two parts with the owner suspended between them.
+        # Nothing may be decided while it is still arriving: a decision taken
+        # on the first part would read a body that has not finished as absent.
+        from linkedin_mcp_server.daemon_owner import STAND_DOWN_PATH
+
+        asked: list[str] = []
+        app = self._app(stand_down=lambda: asked.append("asked"))
+        arrived = asyncio.Event()
+        more = asyncio.Event()
+
+        async def body() -> Any:
+            yield b""
+            arrived.set()
+            await more.wait()
+            yield b'{"only_if_idle": true}'
+
+        async with self._client(app) as client:
+            sent = asyncio.create_task(
+                client.post(
+                    STAND_DOWN_PATH,
+                    headers={"Authorization": f"Bearer {self.TOKEN}"},
+                    content=body(),
+                )
+            )
+            await asyncio.wait_for(arrived.wait(), timeout=5)
+            await asyncio.sleep(0.05)
+            assert asked == [], "the stand-down was decided before the body ended"
+            more.set()
+            response = await asyncio.wait_for(sent, timeout=5)
+
+        assert response.status_code == 400
+        assert asked == []
+
+    async def test_a_stand_down_without_a_body_is_the_unconditional_one(self):
+        from linkedin_mcp_server.daemon_owner import STAND_DOWN_PATH
+
+        asked: list[str] = []
+        app = self._app(stand_down=lambda: asked.append("asked"))
+
+        async with self._client(app) as client:
+            response = await client.post(
+                STAND_DOWN_PATH, headers={"Authorization": f"Bearer {self.TOKEN}"}
+            )
+
+        assert response.status_code == 200
+        assert asked == ["asked"]
+
+
+class TestTheLastCheckBeforeBrowserWork:
+    """After every wait a call can spend queued, and before the browser."""
+
+    def test_a_direct_server_never_asks(self):
+        from linkedin_mcp_server.daemon_liveness import abandoned_before_browser_work
+
+        assert abandoned_before_browser_work() is False
+
+    async def test_a_call_id_the_tracker_does_not_know_is_abandoned(self):
+        # Not a fresh heartbeat: an absent entry was expired, or never admitted.
+        from linkedin_mcp_server import daemon_liveness
+
+        async def ask() -> bool:
+            daemon_liveness._current_call.set(new_call_id())
+            return daemon_liveness.abandoned_before_browser_work()
+
+        assert await asyncio.create_task(ask()) is True
+
+    async def test_an_entry_past_the_expiry_is_abandoned_before_the_scan(self):
+        from linkedin_mcp_server import daemon_liveness
+
+        liveness = daemon_liveness.get_liveness()
+        fresh, stale = new_call_id(), new_call_id()
+        liveness.watch(fresh, MagicMock())
+        liveness.watch(stale, MagicMock())
+        _last_heard(liveness, stale, EXPIRY_SECONDS + 1)
+
+        async def ask(call_id: str) -> bool:
+            daemon_liveness._current_call.set(call_id)
+            return daemon_liveness.abandoned_before_browser_work()
+
+        assert await asyncio.create_task(ask(fresh)) is False
+        assert await asyncio.create_task(ask(stale)) is True
+
+    @pytest.mark.parametrize("already_held", [False, True], ids=["fresh", "reentrant"])
+    async def test_an_abandoned_call_returns_its_lease_and_never_starts(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        already_held: bool,
+    ):
+        """Only the reference this call took goes back, and no browser work begins.
+
+        Driven the way it happens: the call is admitted and queued behind the
+        serializing lock, its client goes quiet while it waits, and it gets the
+        lock and the profile before any expiry scan runs.
+        """
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server import daemon_liveness
+        from linkedin_mcp_server.drivers import browser
+        from linkedin_mcp_server.profile_lease import get_profile_lease
+        from linkedin_mcp_server.sequential_tool_middleware import (
+            SequentialToolExecutionMiddleware,
+        )
+
+        marker = _mark_calls(monkeypatch)
+        liveness = daemon_liveness.get_liveness()
+        lease = get_profile_lease(tmp_path / "profile")
+        if already_held:
+            assert lease.try_acquire()
+        refs_before = lease._refs
+        monkeypatch.setattr(
+            "linkedin_mcp_server.sequential_tool_middleware.get_profile_lease",
+            lambda: lease,
+        )
+        counted: list[str] = []
+        monkeypatch.setattr(browser, "note_call_started", lambda: counted.append("+"))
+        monkeypatch.setattr(browser, "note_activity", lambda: counted.append("-"))
+        sequential = SequentialToolExecutionMiddleware()
+        ran: list[str] = []
+
+        async def tool(_context: Any) -> str:
+            ran.append("the tool")
+            return "the result"
+
+        async def call_next(context: Any) -> Any:
+            return await sequential.on_call_tool(context, tool)  # ty: ignore
+
+        await sequential._lock.acquire()
+        call = asyncio.create_task(
+            OwnerCallLivenessMiddleware().on_call_tool(_call_context(), call_next)
+        )
+        while marker not in liveness._waiting:
+            await asyncio.sleep(0)
+        _last_heard(liveness, marker, EXPIRY_SECONDS + 1)
+        sequential._lock.release()
+
+        with pytest.raises(ToolError, match="stopped waiting"):
+            await asyncio.wait_for(call, timeout=5)
+
+        assert ran == []
+        assert counted == [], "the browser-call count moved for a call that never ran"
+        assert lease._refs == refs_before
+        assert (lease._fd is not None) is already_held
+        if already_held:
+            lease.release()
+
+    async def test_a_call_cancelled_while_queued_takes_no_lease(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        from linkedin_mcp_server import daemon_liveness
+        from linkedin_mcp_server.profile_lease import get_profile_lease
+        from linkedin_mcp_server.sequential_tool_middleware import (
+            SequentialToolExecutionMiddleware,
+        )
+
+        marker = _mark_calls(monkeypatch)
+        liveness = daemon_liveness.get_liveness()
+        lease = get_profile_lease(tmp_path / "profile")
+        monkeypatch.setattr(
+            "linkedin_mcp_server.sequential_tool_middleware.get_profile_lease",
+            lambda: lease,
+        )
+        sequential = SequentialToolExecutionMiddleware()
+
+        async def tool(_context: Any) -> str:
+            return "the result"
+
+        async def call_next(context: Any) -> Any:
+            return await sequential.on_call_tool(context, tool)  # ty: ignore
+
+        await sequential._lock.acquire()
+        try:
+            call = asyncio.create_task(
+                OwnerCallLivenessMiddleware().on_call_tool(_call_context(), call_next)
+            )
+            while marker not in liveness._waiting:
+                await asyncio.sleep(0)
+            _last_heard(liveness, marker, EXPIRY_SECONDS + 1)
+            assert liveness.cancel_the_abandoned() == [marker]
+            with pytest.raises(Exception, match="stopped waiting"):
+                await asyncio.wait_for(call, timeout=5)
+        finally:
+            sequential._lock.release()
+
+        assert lease._refs == 0
+        assert liveness.calls_in_flight() == 0

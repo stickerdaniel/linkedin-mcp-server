@@ -71,6 +71,8 @@ from linkedin_mcp_server.daemon_lock import DaemonLock
 from linkedin_mcp_server.daemon_liveness import (
     CALL_HEADER,
     HEARTBEAT_PATH,
+    RETIRING,
+    CallLiveness,
     call_id_in,
     get_liveness,
 )
@@ -360,14 +362,13 @@ async def _probe(url: str, token: str) -> None:
         await client.ping()
 
 
-#: The route a newer frontend uses to ask a stale owner to stand down. Part of
-#: the daemon's own protocol, so a change to *this* route is a
-#: ``PROTOCOL_VERSION`` bump: every turnover depends on it, and a frontend that
-#: guessed wrong about it would wait out its whole budget against a held lock.
-#:
-#: Adding a route beside it is a different question, answered where the version
-#: is defined. The heartbeat route was added without a bump because both sides
-#: work without it; this one they do not.
+#: The route a newer frontend uses to ask a stale owner to stand down: the
+#: control floor. Its path, its bearer check and the meaning of a request with
+#: no body are frozen across tool protocol versions, and change only with a
+#: ``SCHEMA_VERSION`` bump. Every turnover depends on it, and it is the one thing
+#: a frontend may still do with an owner whose tool protocol it does not speak
+#: (``daemon.Attachment.control_only``), so a tool protocol bump that moved it
+#: would strand every owner already installed.
 STAND_DOWN_PATH = "/control/stand-down"
 
 
@@ -440,6 +441,14 @@ def create_owner_server(
             scheme, _, presented = header.partition(" ")
             if scheme.lower() != "bearer" or not _matches_token(presented, token):
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
+            # Read whole before anything changes, and only a request with no
+            # body at all is the unconditional stand-down. A body is some other
+            # request, and one this build does not serve must never be read as
+            # the one form that stops the owner regardless of its calls.
+            if await request.body():
+                return JSONResponse(
+                    {"error": "unsupported stand-down request"}, status_code=400
+                )
             stand_down()
             return JSONResponse({"standing_down": True})
 
@@ -455,7 +464,13 @@ def create_owner_server(
         A call this owner does not know gets ``watched: false`` rather than an
         error. It is the ordinary race, not a fault: a beat sent while the call
         was returning arrives after it was released, and the frontend has
-        nothing useful to do about that.
+        nothing useful to do about that. It is also every preflight, which is
+        sent before the call it names exists.
+
+        Except once this owner is retiring: then an unknown call gets 409 and a
+        signed body, so a frontend learns before dispatching anything that the
+        call would be refused. A call already admitted keeps getting 200 for as
+        long as it runs, because its client is still waiting.
         """
         header = request.headers.get("authorization", "")
         scheme, _, presented = header.partition(" ")
@@ -464,7 +479,19 @@ def create_owner_server(
         call_id = call_id_in(request.headers.get(CALL_HEADER))
         if call_id is None:
             return JSONResponse({"error": "no call named"}, status_code=400)
-        return JSONResponse({"watched": get_liveness().heard(call_id)})
+        liveness = get_liveness()
+        if liveness.heard(call_id):
+            return JSONResponse({"watched": True})
+        if liveness.retiring:
+            return JSONResponse(
+                {
+                    "daemon": RETIRING,
+                    "protocol": daemon_descriptor.PROTOCOL_VERSION,
+                    "instance": liveness.instance_id,
+                },
+                status_code=409,
+            )
+        return JSONResponse({"watched": False})
 
     app = mcp.http_app(
         path=MCP_PATH,
@@ -580,7 +607,13 @@ def _exit_uncertain_publication(_reason: str, *, lock: DaemonLock | None) -> NoR
     *lock* is handed down rather than looked up, for the reason it is handed
     down through :func:`_stop_within`: :func:`_exit_hard` frees the election
     before the process ends.
+
+    Admission closes first, for completeness rather than because a frontend is
+    likely to be there: the endpoint may already be named by a descriptor this
+    process could not confirm, and nothing new should start on the way out.
+    Closing it is a flag and nothing more, so the exit still performs no I/O.
     """
+    get_liveness().retire("uncertain publication")
     _exit_hard(lock)
     raise RuntimeError("The hard exit returned during uncertain publication")
 
@@ -851,10 +884,17 @@ async def _serve(
     sock = _bind_loopback()
     host, port = _endpoint_host(sock), sock.getsockname()[1]
 
+    # Before the server exists, so every refusal it can give names this owner.
+    get_liveness().serving_as(instance_id)
+
     # A list so the route can reach it before the server it belongs to exists.
     turnover: list[str] = []
 
     def stand_down() -> None:
+        # Admission closes in the request itself, not on the loop's next tick:
+        # a call arriving between the reply and the tick would otherwise be
+        # admitted by an owner that has already said it is leaving.
+        get_liveness().retire("turnover")
         turnover.append("asked")
 
     server = create_owner_server(
@@ -1016,6 +1056,12 @@ _STAND_DOWN_POLL_SECONDS = 0.1
 #: the lock for a user's whole session.
 _STAND_DOWN_SHUTDOWN_SECONDS = 30.0
 
+#: How long a call already admitted may keep running after a newer build asks
+#: this owner to stand down. Admission is closed for the whole of it. A call
+#: still running at the end is cut off and reported as an unknown outcome. The
+#: number is the policy the default-on contract states, not a measurement.
+_TURNOVER_DRAIN_SECONDS = 30.0
+
 #: The same bound for a startup that failed. Shorter, because nothing is being
 #: preserved: no client was ever told this owner existed, and the descriptor was
 #: never published.
@@ -1044,7 +1090,13 @@ async def _serve_until_stopped(
     goes away. Stopping mid-request would leave the caller unable to tell a
     completed handover from a refusal, and it would then wait for a lock this
     process had not yet freed.
+
+    Every way out goes through the admission gate first (``CallLiveness``), so
+    no call is admitted by an owner that has decided to leave. The idle exit is
+    the only one that asks: it closes admission only if nothing is in flight or
+    queued, in the same step as the check. The others close it regardless.
     """
+    liveness = get_liveness()
     while not serving.done():
         wedged = stand_down_reason()
         if wedged is not None:
@@ -1054,12 +1106,21 @@ async def _serve_until_stopped(
             # kernel frees the daemon lock and the next call elects an owner that
             # can open the profile. Nothing is lost, because the session lives on
             # disk rather than in this process.
+            #
+            # Admission closes first, so a frontend's preflight hears 409 and
+            # looks elsewhere instead of dispatching to a browser nobody can
+            # drive.
+            liveness.retire("wedged")
             logger.warning("Standing down: %s", wedged)
             server.should_exit = True
             await _stop_within(serving, _STAND_DOWN_SHUTDOWN_SECONDS, lock=lock)
             return
         if turnover:
+            # Already closed by the request itself; closed again here so the
+            # loop does not depend on how the request got in.
+            liveness.retire("turnover")
             logger.info("A newer build asked for the browser; standing down")
+            await _drain_admitted_calls(liveness, _TURNOVER_DRAIN_SECONDS)
             server.should_exit = True
             # Graceful, but not unconditionally. Uvicorn finishes the requests
             # in flight and runs the lifespan, which closes the browser, and
@@ -1078,15 +1139,16 @@ async def _serve_until_stopped(
         # Cheap enough to do on the same tick as the two questions above: one
         # dictionary scan over the calls in flight, on a process that is already
         # polling. A timer of its own would be a second thing to shut down.
-        liveness = get_liveness()
         liveness.cancel_the_abandoned()
         # And the third reason to go, after wedge and turnover. An owner holds
         # the daemon lock for the machine's uptime otherwise, having closed the
         # browser hours ago: the process is what the next election has to wait
         # for, not the Chromium it is no longer running.
         #
-        # `quiet_for` answers None while any call is in flight, marked or not,
-        # so this cannot cut one off. The stale descriptor is left behind
+        # `quiet_for` only says whether it is worth asking. What decides is
+        # `try_retire`, which checks for anything in flight or queued and closes
+        # admission in the same step, so a call cannot slip in between the
+        # decision and the exit. The stale descriptor is left behind
         # deliberately: the next election probes it, is refused, and elects a
         # replacement, whereas deleting it here would race whoever publishes
         # next.
@@ -1106,7 +1168,7 @@ async def _serve_until_stopped(
             idle_timeout > 0
             and quiet is not None
             and quiet >= quiet_required
-            and not browser_setup_in_progress()
+            and liveness.try_retire("idle", background_work=browser_setup_in_progress())
         ):
             logger.info("Nothing has needed the browser in %.0fs; exiting", quiet)
             server.should_exit = True
@@ -1122,6 +1184,34 @@ async def _serve_until_stopped(
                 "profile stays held until the browser is gone"
             )
             _exit_hard(lock)
+
+
+async def _drain_admitted_calls(liveness: CallLiveness, seconds: float) -> None:
+    """Let the calls already admitted finish, for up to *seconds*.
+
+    Admission is closed before this runs, so the count can only fall. The
+    ordinary duties of the loop continue meanwhile: a call whose client leaves
+    during the drain is still expired, and a browser that stops being drivable
+    ends the wait early, since nothing admitted could finish on it anyway.
+
+    What is still running at the end is cut off here rather than left for
+    uvicorn to drop with its connection, which would lose the answer along with
+    the call. Cut here, each one returns an unknown outcome, and uvicorn's
+    connection grace (``timeout_graceful_shutdown``) is what delivers it.
+    """
+    deadline = time.monotonic() + seconds
+    while liveness.calls_in_flight() > 0 and time.monotonic() < deadline:
+        if stand_down_reason() is not None:
+            break
+        liveness.cancel_the_abandoned()
+        await asyncio.sleep(_STAND_DOWN_POLL_SECONDS)
+    if liveness.calls_in_flight() > 0:
+        cut = liveness.cut_off_the_rest()
+        logger.warning(
+            "%d call(s) were still running when the stand-down drain ended; "
+            "their outcome is reported as unknown",
+            len(cut),
+        )
 
 
 async def _stop_within(

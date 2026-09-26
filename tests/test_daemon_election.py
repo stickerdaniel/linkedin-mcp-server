@@ -8925,3 +8925,196 @@ class TestTheHandshakeFrameIsNotPlatformTranslated:
             election_module._reported_owner_verdict(f"{frame}\r\n".encode(), nonce)
             is None
         ), "the carriage return stays part of the payload and matches no verdict"
+
+
+def _with_published_fields(auth_root: Path, **fields: object) -> None:
+    """Rewrite the published descriptor as another build would have written it."""
+    path = daemon_descriptor_module.descriptor_path(auth_root)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw.update(fields)
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+
+class TestAnOwnerThisBuildMayOnlyControl:
+    """Protocol and configuration mismatches, and the one route that survives them.
+
+    Each election runs with starting an owner stood in for, recorded rather than
+    spawned, so what is observed is whether the election contends for the lock,
+    and never a real child.
+    """
+
+    @staticmethod
+    def _elect(
+        auth_root: Path,
+        profile: Path,
+        config: AppConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        reach: Reach = Reach.ANSWERED,
+        buried: frozenset[str] = frozenset(),
+    ) -> tuple[ElectionOutcome, list[str], list[str], list[str]]:
+        asked: list[str] = []
+        probed: list[str] = []
+        contended: list[str] = []
+        monkeypatch.setattr(
+            election_module,
+            "_ask_to_stand_down",
+            lambda attachment: asked.append(attachment.descriptor.instance_id),
+        )
+
+        def start(*_args: object, **_kwargs: object) -> _Attempt:
+            contended.append("the lock")
+            return _Attempt.CONTENDED
+
+        monkeypatch.setattr(election_module, "_start_owner", start)
+
+        def connect(attachment: Attachment, _timeout: float) -> Reach:
+            probed.append(attachment.descriptor.instance_id)
+            return reach
+
+        outcome = obtain_owner(
+            auth_root,
+            profile,
+            config,
+            deadline_seconds=0.3,
+            settlement_seconds=0,
+            connect=connect,
+            buried=buried,
+        )
+        return outcome, asked, probed, contended
+
+    def test_an_older_protocol_owner_is_turned_over_and_never_attached(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        profile = _profile(tmp_path)
+        config = _config(profile)
+        auth_root = profile.parent
+        instance = _publish_stale_owner(
+            auth_root, profile, config, package_version="1.0.0"
+        )
+        _with_published_fields(
+            auth_root, protocol_version=daemon_descriptor_module.PROTOCOL_VERSION - 1
+        )
+
+        outcome, asked, probed, contended = self._elect(
+            auth_root, profile, config, monkeypatch
+        )
+
+        assert asked == [instance], "the older owner was not asked to stand down"
+        assert probed == [], "an owner of another protocol was probed for tools"
+        assert not outcome.worth_connecting
+        assert outcome.attachment_lookup.attachment is None
+        assert contended, "the election did not go on to the lock"
+
+    @pytest.mark.parametrize("package_version", [__version__, "99.0.0"])
+    def test_a_same_or_newer_protocol_mismatch_is_left_alone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, package_version: str
+    ):
+        # Written off and not asked: the election contends for a lock that owner
+        # holds, and while it lives that ends in this client's own browser.
+        profile = _profile(tmp_path)
+        config = _config(profile)
+        auth_root = profile.parent
+        _publish_stale_owner(
+            auth_root, profile, config, package_version=package_version
+        )
+        _with_published_fields(
+            auth_root, protocol_version=daemon_descriptor_module.PROTOCOL_VERSION + 1
+        )
+
+        outcome, asked, probed, contended = self._elect(
+            auth_root, profile, config, monkeypatch
+        )
+
+        assert asked == []
+        assert probed == []
+        assert not outcome.worth_connecting
+        assert outcome.attachment_lookup.attachment is None
+        assert not outcome.attachment_lookup.live_rival
+        assert contended, "the election did not go on to the lock"
+
+    def test_a_live_owner_of_this_build_with_another_configuration_is_left_alone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The contract's immediate fallback: probed once, found alive, and the
+        # election returns at once without contending for the lock it holds.
+        profile = _profile(tmp_path)
+        config = _config(profile)
+        theirs = _config(profile)
+        theirs.browser.headless = not config.browser.headless
+        auth_root = profile.parent
+        instance = _publish_stale_owner(auth_root, profile, theirs)
+
+        outcome, asked, probed, contended = self._elect(
+            auth_root, profile, config, monkeypatch
+        )
+
+        assert probed == [instance]
+        assert asked == [], "a same-build owner was asked to stand down"
+        assert outcome.attachment_lookup.live_rival is True
+        assert not outcome.worth_connecting
+        assert contended == [], "the election contended for a live rival's lock"
+
+    def test_a_dead_owner_of_another_configuration_is_leftovers(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # An owner that went idle leaves its descriptor behind on purpose. Read
+        # as a live rival, every later client with another configuration would
+        # drive its own browser for good.
+        profile = _profile(tmp_path)
+        config = _config(profile)
+        theirs = _config(profile)
+        theirs.browser.headless = not config.browser.headless
+        auth_root = profile.parent
+        instance = _publish_stale_owner(auth_root, profile, theirs)
+
+        outcome, _asked, probed, contended = self._elect(
+            auth_root, profile, config, monkeypatch, reach=Reach.REFUSED
+        )
+
+        assert probed == [instance], "a buried leftover was probed more than once"
+        assert not outcome.attachment_lookup.live_rival
+        assert contended, "the election did not take the lock from a corpse"
+
+    def test_another_builds_configuration_is_not_probed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Only the same build is a rival to leave alone. Anything else keeps the
+        # behaviour it had: wait on the lock.
+        profile = _profile(tmp_path)
+        config = _config(profile)
+        theirs = _config(profile)
+        theirs.browser.headless = not config.browser.headless
+        auth_root = profile.parent
+        _publish_stale_owner(auth_root, profile, theirs, package_version="1.0.0")
+
+        outcome, asked, probed, contended = self._elect(
+            auth_root, profile, config, monkeypatch
+        )
+
+        assert (asked, probed) == ([], [])
+        assert not outcome.attachment_lookup.live_rival
+        assert contended
+
+    def test_a_buried_owner_is_not_returned_even_though_it_answers(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # A retiring owner answers the ping this election probes with. The
+        # proxy that found it retiring passes it as buried, and it is neither
+        # probed nor returned; the control is the same owner not buried.
+        profile = _profile(tmp_path)
+        config = _config(profile)
+        auth_root = profile.parent
+        instance = _publish_stale_owner(auth_root, profile, config)
+
+        outcome, _asked, probed, contended = self._elect(
+            auth_root, profile, config, monkeypatch, buried=frozenset({instance})
+        )
+        control, *_ = self._elect(auth_root, profile, config, monkeypatch)
+
+        assert probed == []
+        assert not outcome.worth_connecting
+        assert contended
+        assert control.worth_connecting
+        assert control.attachment_lookup.attachment is not None
+        assert control.attachment_lookup.attachment.descriptor.instance_id == instance

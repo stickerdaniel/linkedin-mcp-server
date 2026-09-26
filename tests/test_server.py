@@ -56,6 +56,9 @@ def _a_backend() -> DaemonProxyBackend:
     attachment = MagicMock(name="attachment")
     attachment.descriptor.url = "http://127.0.0.1:1/mcp"
     attachment.token = "a-token"
+    # A mock answers every attribute with something truthy, and a truthy
+    # `control_only` is the one attachment a backend must refuse.
+    attachment.control_only = False
     return DaemonProxyBackend(
         attachment=attachment,
         auth_root=Path("/nonexistent"),
@@ -89,7 +92,20 @@ class _BackendReaching(DaemonProxyBackend):
 
 
 def _proxy_to(monkeypatch: pytest.MonkeyPatch, owner: FastMCP, **kwargs) -> FastMCP:
-    """Build a PROXY whose provider reaches *owner* in memory rather than over HTTP."""
+    """Build a PROXY whose provider reaches *owner* in memory rather than over HTTP.
+
+    The heartbeat preflight is answered in memory too, the way the owner's route
+    answers a call it has not registered yet. Without an answer the proxy would
+    refuse to dispatch, which is the contract and not what these tests are about.
+    """
+    import httpx
+
+    from linkedin_mcp_server.daemon_proxy import FrontendCallHeartbeatMiddleware
+
+    async def beat(_attachment: object, _call_id: str) -> httpx.Response:
+        return httpx.Response(200, json={"watched": False})
+
+    monkeypatch.setattr(FrontendCallHeartbeatMiddleware, "_beat", staticmethod(beat))
     return create_mcp_server(
         role=ServerRole.PROXY, proxy_backend=_BackendReaching(owner), **kwargs
     )
