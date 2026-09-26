@@ -139,7 +139,11 @@ async def test_company_posts_delegate_matches_registered_tool_consumer():
     )
     context = SimpleNamespace(report_progress=AsyncMock())
 
-    await tool.fn("example", context, extractor=extractor)
+    with patch(
+        "linkedin_mcp_server.tools.company.get_ready_extractor",
+        AsyncMock(return_value=extractor),
+    ):
+        await tool.fn("example", context)
 
     delegate = getattr(extractor, TOOL_DELEGATES["get_company_posts"])
     delegate.assert_awaited_once()

@@ -1,7 +1,8 @@
-"""Keep published FastMCP metadata compatible with the registered tools."""
+"""Keep published FastMCP metadata compatible with the code that uses it."""
 
 from __future__ import annotations
 
+import re
 import tomllib
 from pathlib import Path
 
@@ -62,16 +63,30 @@ def test_security_floors_are_published() -> None:
     assert _minimum(development["aiohttp"]) >= Version("3.14.3")
 
 
-def test_fastmcp_v4_is_excluded_while_exclude_args_is_used() -> None:
-    """FastMCP 4 removed the ``exclude_args`` decorator argument."""
-    tool_sources = (_REPO_ROOT / "linkedin_mcp_server" / "tools").glob("*.py")
-    legacy_sources = [
-        path.name
-        for path in tool_sources
-        if "exclude_args=" in path.read_text(encoding="utf-8")
-    ]
-    assert legacy_sources, (
-        "exclude_args has been migrated; remove this compatibility test and "
+#: What the daemon boundary still takes from MCP SDK v1 and httpx. FastMCP 4
+#: requires ``mcp>=2``, where the error is ``MCPError`` and ``ClientRequest`` is
+#: a union that cannot be constructed, and its HTTP client is ``httpx2``, whose
+#: exceptions an ``except httpx...`` does not catch.
+_SDK_V1_BOUNDARY = {
+    "direct httpx import": re.compile(
+        r"^\s*(?:import httpx|from httpx import)\b", re.MULTILINE
+    ),
+    "McpError import": re.compile(r"\bfrom mcp\.shared\.exceptions import McpError\b"),
+    "raw ClientRequest wrapper": re.compile(r"\bmt\.ClientRequest\("),
+}
+
+
+def test_fastmcp_v4_is_excluded_while_the_sdk_v1_boundary_remains() -> None:
+    """Temporary guard for #858, retired by the port that removes every marker."""
+    sources = sorted((_REPO_ROOT / "linkedin_mcp_server").rglob("*.py"))
+    remaining = {
+        f"{path.relative_to(_REPO_ROOT).as_posix()}: {marker}"
+        for path in sources
+        for marker, pattern in _SDK_V1_BOUNDARY.items()
+        if pattern.search(path.read_text(encoding="utf-8"))
+    }
+    assert remaining, (
+        "the SDK v1 boundary has been ported (#858); remove this test and "
         "review the FastMCP upper bound"
     )
 
@@ -84,5 +99,5 @@ def test_fastmcp_v4_is_excluded_while_exclude_args_is_used() -> None:
         if canonicalize_name(Requirement(raw).name) == "fastmcp"
     )
 
-    assert Version("4.0.0") not in fastmcp.specifier
-    assert Version("4.99.0") not in fastmcp.specifier
+    assert Version("4.0.0") not in fastmcp.specifier, sorted(remaining)
+    assert Version("4.99.0") not in fastmcp.specifier, sorted(remaining)

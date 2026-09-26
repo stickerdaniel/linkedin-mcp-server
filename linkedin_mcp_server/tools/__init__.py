@@ -16,7 +16,7 @@ Available Tools:
 
 Architecture:
 - FastMCP integration for MCP-compliant tool registration
-- Depends()-based dependency injection for browser/extractor setup
+- Each tool acquires its extractor through get_ready_extractor() at call time
 - ToolError-based error handling through centralized raise_tool_error()
 - Singleton driver pattern for session persistence
 - Structured data return format for consistent MCP responses

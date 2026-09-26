@@ -37,13 +37,11 @@ def register_company_tools(
         title="Get Company Profile",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"company", "scraping"},
-        exclude_args=["extractor"],
     )
     async def get_company_profile(
         company_name: str,
         ctx: Context,
         sections: str | None = None,
-        extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
         Get a specific company's LinkedIn profile.
@@ -73,9 +71,7 @@ def register_company_tools(
         try:
             # Validate before starting the browser; the scraper normalizes the original reference.
             normalize_company_identifier(company_name)
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="get_company_profile"
-            )
+            extractor = await get_ready_extractor(ctx, tool_name="get_company_profile")
             requested, unknown = parse_company_sections(sections)
 
             logger.info(
@@ -107,12 +103,10 @@ def register_company_tools(
         title="Get Company Posts",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"company", "scraping"},
-        exclude_args=["extractor"],
     )
     async def get_company_posts(
         company_name: str,
         ctx: Context,
-        extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
         Get recent posts from a company's LinkedIn feed.
@@ -127,9 +121,7 @@ def register_company_tools(
         """
         try:
             company_name = normalize_company_identifier(company_name)
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="get_company_posts"
-            )
+            extractor = await get_ready_extractor(ctx, tool_name="get_company_posts")
             logger.info("Scraping company posts: %s", company_name)
 
             await ctx.report_progress(
@@ -176,12 +168,10 @@ def register_company_tools(
         title="Search Companies",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"company", "search"},
-        exclude_args=["extractor"],
     )
     async def search_companies(
         keywords: str,
         ctx: Context,
-        extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
         Search for companies on LinkedIn.
@@ -195,9 +185,7 @@ def register_company_tools(
             The LLM should parse the raw text to extract individual companies and their pages.
         """
         try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="search_companies"
-            )
+            extractor = await get_ready_extractor(ctx, tool_name="search_companies")
             logger.info("Searching companies: keywords='%s'", keywords)
 
             await ctx.report_progress(
@@ -223,13 +211,11 @@ def register_company_tools(
         title="Get Company Employees",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"company", "scraping"},
-        exclude_args=["extractor"],
     )
     async def get_company_employees(
         company_name: str,
         ctx: Context,
         keywords: str | None = None,
-        extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
         List employees at a company from the LinkedIn /people/ page, including
@@ -262,7 +248,7 @@ def register_company_tools(
         try:
             # Preserve the reference for the scraper's single normalization pass.
             normalize_company_identifier(company_name)
-            extractor = extractor or await get_ready_extractor(
+            extractor = await get_ready_extractor(
                 ctx, tool_name="get_company_employees"
             )
             logger.info(
