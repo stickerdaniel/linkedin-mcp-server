@@ -11,7 +11,10 @@ os.environ["FASTMCP_MCP_CAMELCASE_COMPAT"] = "false"
 
 import pytest  # noqa: E402
 
-pytest_plugins = ("scraping.support.navigation",)
+# The differential accounting is a plugin rather than a directory conftest so
+# that it is loaded wherever those cases run, the xdist controller included,
+# and counts cases no fixture ever set up.
+pytest_plugins = ("scraping.support.navigation", "differential.accounting")
 
 
 @pytest.fixture(autouse=True)

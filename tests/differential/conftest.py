@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from differential.accounting import current
+from differential.events import EventLog
 from differential.synthetic_origin import (
     ALLOWED_HOSTS,
     CA_DIR_ENV,
@@ -22,6 +24,13 @@ from differential.synthetic_origin import (
 #: Read at import, because ``ignore_the_developers_environment`` deletes every
 #: ``LINKEDIN*`` variable before each test runs.
 _CA_DIR = os.environ.get(CA_DIR_ENV)
+
+
+@pytest.fixture
+def differential_run(request) -> EventLog:
+    """This run's event log, in the accounting plugin's evidence directory."""
+    accounting = current(request.config)
+    return EventLog(accounting.directory, accounting.run)
 
 
 @pytest.fixture
