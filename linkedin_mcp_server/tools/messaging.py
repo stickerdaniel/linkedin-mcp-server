@@ -302,9 +302,10 @@ def register_messaging_tools(
 
         Returns:
             Dict with url, status, message, recipient_selected, sent, and
-            retry_safe. ``sent`` is true only after the submitted message's DOM
-            node gains a different opaque event ID; this does not claim delivery
-            or read status. It is false both where nothing was submitted and
+            retry_safe. ``sent`` is true only after the thread shows the submitted
+            text under a new server message ID (or its DOM node gains a
+            different event ID); this does not claim delivery or read status.
+            It is false both where nothing was submitted and
             where the outcome is unknown. ``retry_safe`` separates the two: it
             is false from the moment a submission is attempted, and calling
             again while it is
