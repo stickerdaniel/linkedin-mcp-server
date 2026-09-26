@@ -883,8 +883,7 @@ class ConnectionActions:
         return _connection_result(
             url,
             "connected",
-            "Connection request sent."
-            + (f" State after send: {verified_state}." if verified_state else ""),
+            f"Connection request sent. State after send: {verified_state}.",
             note_sent=note_sent,
             profile=verified_text or page_text,
         )

@@ -217,7 +217,7 @@ async def test_connection_profile_read_resolves_the_facade_delegate_late(mock_pa
             "sections": {"main_profile": "Target profile"},
         }
     )
-    extractor.scrape_person = replacement  # ty: ignore[invalid-assignment]
+    extractor.scrape_person = replacement
     self_profile = ActionSignals(False, False, True, False, False, False)
 
     with patch.object(
@@ -545,7 +545,7 @@ async def test_incoming_verification_resolves_classifier_at_call_time(
     # Rebind after facade/action construction. Both the initial decision and the
     # post-accept verification must resolve the canonical owner dynamically.
     extractor = LinkedInExtractor(cast(Page, mock_page))
-    extractor.scrape_person = AsyncMock(  # ty: ignore[invalid-assignment]
+    extractor.scrape_person = AsyncMock(
         return_value={
             "url": "https://www.linkedin.com/in/target/",
             "sections": {"main_profile": "Target profile"},
@@ -586,7 +586,7 @@ async def test_submitted_invite_verification_resolves_classifier_at_call_time(
     # The fake navigator and submitter keep this entirely off LinkedIn while the
     # verification branch still performs both classifier calls.
     extractor = LinkedInExtractor(cast(Page, mock_page))
-    extractor.scrape_person = AsyncMock(  # ty: ignore[invalid-assignment]
+    extractor.scrape_person = AsyncMock(
         return_value={
             "url": "https://www.linkedin.com/in/target/",
             "sections": {"main_profile": "Target profile"},

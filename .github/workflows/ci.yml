@@ -286,11 +286,12 @@ jobs:
             browsers: ~/Library/Caches/ms-playwright
           - os: windows-latest
             browsers: ~\AppData\Local\ms-playwright
-          # Here for the browser rather than for the operating system.
-          # Patchright ships Chrome for Testing everywhere except Linux arm64,
-          # which gets Playwright's own Chromium build, and the release
-          # publishes an arm64 image. Without this leg an identity regression
-          # in that build reaches the container with both other jobs green.
+          # Here for the browser rather than for the operating system. The
+          # release publishes an arm64 image, and its browser is a separate
+          # build from every other leg's: Chrome for Testing for linux-arm64
+          # at the lock, Playwright's own Chromium through patchright 1.61.2.
+          # Without this leg an identity regression in that build reaches the
+          # container with both other jobs green.
           - os: ubuntu-24.04-arm
             browsers: ~/.cache/ms-playwright
     steps:
@@ -322,10 +323,9 @@ jobs:
       # The identity gate runs on every leg, because every leg's browser is a
       # different one from the Ubuntu job's. macOS is the only platform with a
       # hidden target, which is the whole reason the default mode can run
-      # without announcing itself as headless. Linux arm64 is the only platform
-      # whose bundle is Playwright's own Chromium rather than Chrome for
-      # Testing. Windows has its own binary, its own window manager and its own
-      # DPI handling, and the gate measures a headed window against the screen
+      # without announcing itself as headless. Linux arm64 runs the browser
+      # build the arm64 image ships. Windows has its own binary, its own window
+      # manager and its own DPI handling, and the gate measures a headed window against the screen
       # it stands on -- which is exactly where those differ. An earlier version
       # of this file left Windows out on the grounds that it falls back to
       # headless mode like Linux does; that is true of one case in that file

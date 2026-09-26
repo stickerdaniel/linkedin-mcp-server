@@ -566,7 +566,9 @@ def _start_canonical_read(
 
             complete = succeed
         with contextlib.suppress(RuntimeError):
-            loop.call_soon_threadsafe(complete)
+            # A lambda, because ty cannot solve call_soon_threadsafe's *args
+            # against a union of callbacks whose parameters have defaults.
+            loop.call_soon_threadsafe(lambda: complete())
 
     threading.Thread(target=read, name="daemon-canonical-read", daemon=True).start()
     return result
@@ -821,7 +823,9 @@ async def _read_control_until(
 
             complete = succeed
         with contextlib.suppress(RuntimeError):
-            loop.call_soon_threadsafe(complete)
+            # A lambda, because ty cannot solve call_soon_threadsafe's *args
+            # against a union of callbacks whose parameters have defaults.
+            loop.call_soon_threadsafe(lambda: complete())
 
     threading.Thread(target=read, name="daemon-control", daemon=True).start()
     return await asyncio.wait_for(result, max(deadline - time.monotonic(), 0.0))

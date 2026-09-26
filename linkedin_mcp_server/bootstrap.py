@@ -309,9 +309,9 @@ _MARKER_HELD = "\x00"
 #: and hit Python's 4300-digit integer limit on a long percentage. Bounded here,
 #: neither can be constructed.
 _PATCHRIGHT_PERCENT = re.compile(r"\|\s*(\d{1,3})%\s+of\s+([\d.]{1,15})\s*([KMG]i?B)")
-#: ``Downloading Chrome for Testing 149.0.7827.55 (…) from https://…``
+#: ``Downloading Chrome for Testing 153.0.8010.12 (…) from https://…``
 _PATCHRIGHT_DOWNLOAD = re.compile(r"^Downloading (.+?) from ")
-#: ``Chrome for Testing 149.0.7827.55 (…) downloaded to /…/chromium-1228``. The
+#: ``Chrome for Testing 153.0.8010.12 (…) downloaded to /…/chromium-1243``. The
 #: only completion signal there is when no percentage was ever reported.
 _PATCHRIGHT_DONE = re.compile(r" downloaded to ")
 _BINARY_UNITS = {"KiB": 1024, "MiB": 1024**2, "GiB": 1024**3}
@@ -761,7 +761,9 @@ async def _run_in_daemon_thread(
 
             complete = succeed
         try:
-            loop.call_soon_threadsafe(complete)
+            # A lambda, because ty cannot solve call_soon_threadsafe's *args
+            # against a union of callbacks whose parameters have defaults.
+            loop.call_soon_threadsafe(lambda: complete())
         except RuntimeError:
             if "value" in locals():
                 discard_safely(value)

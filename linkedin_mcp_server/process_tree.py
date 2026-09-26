@@ -715,7 +715,8 @@ def _drain_exclusions() -> frozenset[int]:
 def _patchright_driver_process(playwright: Any) -> Any:
     """The Node driver process behind one Patchright ``Playwright`` handle.
 
-    Measured against patchright 1.61.2 (``_impl/_transport.py``): the async
+    Measured against patchright 1.61.2 and 1.63.0 (``_impl/_transport.py``,
+    identical in both): the async
     driver is started by ``asyncio.create_subprocess_exec`` inside
     ``PipeTransport.connect`` and kept on the transport as ``_proc``, reached
     from the public object through ``_impl_obj._connection._transport``. Private
@@ -900,7 +901,7 @@ def drain_browser_process_marker(
     """Prove one browser launch left nothing of itself running.
 
     A Patchright close that returns normally is not that proof. Measured in the
-    driver it ships (1.61.2, ``packages/utils/processLauncher.ts`` in
+    driver it ships (1.61.2 and 1.63.0, ``packages/utils/processLauncher.ts`` in
     ``lib/coreBundle.js``): Chromium is spawned ``detached`` into its own POSIX
     group, and ``gracefullyClose`` waits for the *leader* it spawned to emit
     ``close`` and for the temporary directories to go. The one call that signals

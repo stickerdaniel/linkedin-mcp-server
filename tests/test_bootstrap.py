@@ -8080,7 +8080,7 @@ class TestPatchrightCommandTargetContract:
     def test_the_locked_release_is_the_one_this_contract_describes(self):
         import importlib.metadata
 
-        assert importlib.metadata.version("patchright") == "1.61.2"
+        assert importlib.metadata.version("patchright") == "1.63.0"
 
     def _assert_is_an_ffmpeg_directory(self, name: str) -> None:
         """Pin the kind, and the revision to one this browsers.json names.
@@ -8145,22 +8145,28 @@ class TestPatchrightCommandTargetContract:
         """The condition a POSIX dry-run cannot show, read from the resolver."""
         import patchright
 
-        bundle = (
-            Path(patchright.__file__).parent
-            / "driver"
-            / "package"
-            / "lib"
-            / "coreBundle.js"
-        ).read_text()
+        # Whitespace collapsed: 1.63.0 prints each of these on one line where
+        # 1.61.2 broke it after the condition, and the condition is the claim.
+        bundle = " ".join(
+            (
+                Path(patchright.__file__).parent
+                / "driver"
+                / "package"
+                / "lib"
+                / "coreBundle.js"
+            )
+            .read_text()
+            .split()
+        )
 
         assert (
-            'if (process.platform === "win32")\n'
-            '          executables.push(this.findExecutable("winldd"));' in bundle
+            'if (process.platform === "win32") '
+            'executables.push(this.findExecutable("winldd"));' in bundle
         )
         # And ffmpeg's condition beside it: any argument resolving to a browser.
         assert (
-            "if (executable?.browserName)\n"
-            '            executables.push(this.findExecutable("ffmpeg"));' in bundle
+            "if (executable?.browserName) "
+            'executables.push(this.findExecutable("ffmpeg"));' in bundle
         )
         # winldd carries no revisionOverrides, so its directory is the plain one.
         assert "revisionOverrides" not in _registry_entry("winldd")
