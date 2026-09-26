@@ -262,17 +262,20 @@ class ConversationActionTextTable:
     # each sidebar row carries one too.
     options_prefix: str
     # Whole visible text of the options menu item that archives the thread,
-    # and of the one an archived thread offers instead. Not measured live: a
-    # menu that offers neither is refused rather than read as either state.
+    # and of the one an archived thread offers instead. Restore was measured
+    # on 2026-09-26 on an archived InMail, whose menu read Label as Jobs, Mark
+    # as unread, Star, Mute, Restore, Report / Block, Delete conversation and
+    # Manage settings. Archive is not measured yet. A menu that offers neither
+    # is refused rather than read as either state.
     archive_item: str
-    unarchive_item: str
+    restore_item: str
 
 
 _CONVERSATION_ACTION_TEXT: dict[str, ConversationActionTextTable] = {
     "en-US": ConversationActionTextTable(
         options_prefix=_MESSAGING_CHROME_STRINGS["en"].thread_header_prefix,
         archive_item="Archive",
-        unarchive_item="Unarchive",
+        restore_item="Restore",
     ),
 }
 

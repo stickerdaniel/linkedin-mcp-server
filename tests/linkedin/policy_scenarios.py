@@ -1046,13 +1046,13 @@ async def _archive_conversation_scenario(*, already: bool) -> dict[str, Any]:
     page.script("evaluate:thread_options", *([THREAD_OPTIONS] * loads))
     page.script("evaluate:thread_menu_survey", *([{"keys": []}] * loads))
     page.script("thread_options.click", *([None] * loads))
-    archived = {"archive": 0, "unarchive": 1}
+    archived = {"archive": 0, "restore": 1}
     if already:
         page.script("evaluate:thread_menu_items", archived)
     else:
         page.declare_locator("[data-mcp-thread-archive]", "thread_archive_item")
         page.script(
-            "evaluate:thread_menu_items", {"archive": 1, "unarchive": 0}, archived
+            "evaluate:thread_menu_items", {"archive": 1, "restore": 0}, archived
         )
         page.script("thread_archive_item.click", None)
     extractor = _extractor(page)

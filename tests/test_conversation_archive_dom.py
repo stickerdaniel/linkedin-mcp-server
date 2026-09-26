@@ -7,7 +7,7 @@ navigation stubbed so every "reload" reads the same document. The markup
 carries only what the code reads: sidebar rows as ``<li>`` with a
 ``label[aria-label]`` and an options button of their own, the thread's options
 button named by screen-reader text, and a menu of ``[role="button"]`` items
-whose Archive and Unarchive swap with the thread's state. None of LinkedIn's
+whose Archive and Restore swap with the thread's state. None of LinkedIn's
 classes, so it is a claim about which signals are read, not about LinkedIn's
 layout, which is unmeasured for this menu.
 
@@ -40,10 +40,13 @@ pytestmark = [
 THREAD_URL = "https://www.linkedin.com/messaging/thread/2-abc/"
 PREFIX = CONVERSATION_ACTIONS_EN_US.options_prefix
 ARCHIVE = CONVERSATION_ACTIONS_EN_US.archive_item
-UNARCHIVE = CONVERSATION_ACTIONS_EN_US.unarchive_item
+RESTORE = CONVERSATION_ACTIONS_EN_US.restore_item
 
 # Any options button opens a menu for its own scope: the thread's toggles
 # `data-archived` on the body, a row's records the click and nothing else.
+# Items carry the dropdown-option class LinkedIn was measured to use, unless
+# the body says `data-plain`; `data-pill` makes the click also reveal an
+# Archive control outside the dropdown.
 # Every choice is recorded as an attribute rather than on `window`, because
 # patchright evaluates in an isolated world that never sees the page's globals.
 MENU_SCRIPT = """
@@ -61,27 +64,39 @@ for (const button of document.querySelectorAll('main button[data-options]')) {
         const scope = button.dataset.options;
         const archived = document.body.hasAttribute('data-archived');
         const labels = (document.body.dataset.items ||
-            (archived ? 'Mark as unread,UNARCHIVE,Delete' : 'Mark as unread,ARCHIVE,Delete'))
+            (archived ? 'Mark as unread,RESTORE,Delete' : 'Mark as unread,ARCHIVE,Delete'))
             .split(',');
         const menu = document.createElement('div');
         menu.setAttribute('role', 'menu');
         for (const label of labels) {
             const item = document.createElement('div');
             item.setAttribute('role', 'button');
+            if (!document.body.hasAttribute('data-plain')) {
+                item.className = 'msg-thread-actions__dropdown-option';
+            }
             item.innerHTML = '<div><p>' + label + '</p></div>';
             item.addEventListener('click', () => {
                 record([scope, label]);
                 menu.remove();
                 if (scope !== 'thread' || document.body.hasAttribute('data-refuse')) return;
                 if (label === 'ARCHIVE') document.body.setAttribute('data-archived', '');
-                if (label === 'UNARCHIVE') document.body.removeAttribute('data-archived');
+                if (label === 'RESTORE') document.body.removeAttribute('data-archived');
             });
             menu.appendChild(item);
         }
         document.body.appendChild(menu);
+        if (document.body.hasAttribute('data-pill') && !document.querySelector('[data-pill-item]')) {
+            // A control elsewhere on the page that the click happens to reveal.
+            const pill = document.createElement('button');
+            pill.setAttribute('role', 'button');
+            pill.setAttribute('data-pill-item', '');
+            pill.textContent = 'ARCHIVE';
+            pill.addEventListener('click', () => record(['pill', 'ARCHIVE']));
+            document.querySelector('main').appendChild(pill);
+        }
     });
 }
-""".replace("UNARCHIVE", UNARCHIVE).replace("ARCHIVE", ARCHIVE)
+""".replace("RESTORE", RESTORE).replace("ARCHIVE", ARCHIVE)
 
 
 def options(scope: str, names: str) -> str:
@@ -215,7 +230,9 @@ async def test_a_menu_with_neither_item_chooses_nothing_and_says_what_it_held(
     dom_page,
 ):
     """The refusal quotes the menu, so a live run shows LinkedIn's real labels."""
-    await serve(dom_page, thread_page(items="Mark as unread,Move to inbox,Delete"))
+    await serve(
+        dom_page, thread_page(body=" data-pill", items="Mark as unread,Star,Mute")
+    )
     menus_open: list[int] = []
 
     async def trace(page, step, *, extra=None):
@@ -229,10 +246,10 @@ async def test_a_menu_with_neither_item_chooses_nothing_and_says_what_it_held(
     assert "did not offer exactly one" in message
     assert "Nothing was clicked" in message
     assert "1 options button matched" in message
+    option = "div[role=button].msg-thread-actions__dropdown-option"
     assert (
-        "added 3 visible item(s) in div[role=menu]: "
-        "'Mark as unread' (div[role=button]), 'Move to inbox' (div[role=button]), "
-        "'Delete' (div[role=button])"
+        "The dropdown showed 3 visible item(s) in div[role=menu]: "
+        f"'Mark as unread' ({option}), 'Star' ({option}), 'Mute' ({option})."
     ) in message
     assert "aria-expanded=None" in message
     assert menus_open == [1]
@@ -240,8 +257,35 @@ async def test_a_menu_with_neither_item_chooses_nothing_and_says_what_it_held(
     assert await chosen(dom_page) == []
 
 
+async def test_without_dropdown_options_the_refusal_quotes_what_the_click_added(
+    dom_page,
+):
+    await serve(dom_page, thread_page(body=" data-plain", items="Mark as unread,Mute"))
+
+    with patch.object(conversations, "record_page_trace", new_callable=AsyncMock):
+        with pytest.raises(LinkedInOperationError) as raised:
+            await archive(dom_page)
+
+    assert (
+        "No dropdown option was visible; its click added 2 visible item(s) in "
+        "div[role=menu]: 'Mark as unread' (div[role=button]), "
+        "'Mute' (div[role=button])."
+    ) in str(raised.value)
+    assert await chosen(dom_page) == []
+
+
+async def test_an_archive_control_outside_the_dropdown_is_never_taken(dom_page):
+    """Only the dropdown's options count, so a revealed pill is not the item."""
+    await serve(dom_page, thread_page(body=" data-pill", items="Mark as unread"))
+
+    with patch.object(conversations, "record_page_trace", new_callable=AsyncMock):
+        with pytest.raises(LinkedInOperationError, match="did not offer"):
+            await archive(dom_page)
+    assert await chosen(dom_page) == []
+
+
 async def test_a_menu_offering_both_items_chooses_nothing(dom_page):
-    await serve(dom_page, thread_page(items=f"{ARCHIVE},{UNARCHIVE}"))
+    await serve(dom_page, thread_page(items=f"{ARCHIVE},{RESTORE}"))
 
     with pytest.raises(LinkedInOperationError, match="did not offer exactly one"):
         await archive(dom_page)

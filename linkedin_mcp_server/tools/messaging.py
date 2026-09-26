@@ -227,7 +227,7 @@ def register_messaging_tools(
         Archive one LinkedIn messaging thread, InMail included, by thread ID.
 
         Opens the thread, which marks it read, and chooses Archive from its
-        options menu. A thread whose menu already offers Unarchive is left
+        options menu. A thread whose menu already offers Restore is left
         alone and reported already_archived, so a repeated call never
         unarchives. The change is confirmed by loading the thread again.
         Reversible on LinkedIn; a new message moves the thread back to the
