@@ -1,0 +1,115 @@
+{
+  "call": {
+    "arguments": {
+      "thread_id": "2-abc"
+    },
+    "method": "archive_conversation"
+  },
+  "events": [
+    {
+      "call": "archive_conversation",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add"
+    },
+    {
+      "call": "archive_conversation",
+      "extra": {
+        "target_url": "https://www.linkedin.com/messaging/thread/2-abc/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto"
+    },
+    {
+      "call": "archive_conversation",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/messaging/thread/2-abc/",
+      "requested_url": "https://www.linkedin.com/messaging/thread/2-abc/",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "archive_conversation",
+      "description": "goto https://www.linkedin.com/messaging/thread/2-abc/",
+      "kind": "boundary.stabilize",
+      "result": null
+    },
+    {
+      "call": "archive_conversation",
+      "extra": {
+        "target_url": "https://www.linkedin.com/messaging/thread/2-abc/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto"
+    },
+    {
+      "call": "archive_conversation",
+      "kind": "boundary.auth_quick",
+      "result": null
+    },
+    {
+      "call": "archive_conversation",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove"
+    },
+    {
+      "call": "archive_conversation",
+      "kind": "boundary.rate_limit"
+    },
+    {
+      "call": "archive_conversation",
+      "dismissed": false,
+      "kind": "boundary.modal"
+    },
+    {
+      "arg": {
+        "mark": "data-mcp-thread-options",
+        "prefix": "Open the options list in your conversation with"
+      },
+      "call": "archive_conversation",
+      "kind": "evaluate",
+      "operation": "thread_options",
+      "program_digest": "a3fa721a9c99"
+    },
+    {
+      "call": "archive_conversation",
+      "kind": "locator.create",
+      "locator": "thread_options",
+      "parent": null,
+      "selector": "main button[data-mcp-thread-options]"
+    },
+    {
+      "call": "archive_conversation",
+      "kind": "locator.click",
+      "locator": "thread_options",
+      "timeout_ms": 5000
+    },
+    {
+      "arg": {
+        "archive": "Archive",
+        "mark": "data-mcp-thread-archive",
+        "unarchive": "Unarchive"
+      },
+      "call": "archive_conversation",
+      "kind": "evaluate",
+      "operation": "thread_menu_items",
+      "program_digest": "5ecc19a5b7b5"
+    },
+    {
+      "call": "archive_conversation",
+      "key": "Escape",
+      "kind": "keyboard.press"
+    }
+  ],
+  "result": {
+    "participant": "Ada Lovelace",
+    "status": "already_archived",
+    "thread_id": "2-abc",
+    "url": "https://www.linkedin.com/messaging/thread/2-abc/"
+  },
+  "scenario": "archive_conversation__already_archived",
+  "schema_version": 1
+}

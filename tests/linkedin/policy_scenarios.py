@@ -1025,6 +1025,44 @@ async def _conversation_scenario(method: str) -> dict[str, Any]:
     )
 
 
+THREAD_OPTIONS = {
+    "triggers": 1,
+    "name": "Open the options list in your conversation with Ada Lovelace",
+}
+
+
+async def _archive_conversation_scenario(*, already: bool) -> dict[str, Any]:
+    """Archive a thread, or find it archived and leave its menu untouched."""
+    outcome = "already_archived" if already else "archived"
+    recorder = TraceRecorder(f"archive_conversation__{outcome}", _COMMON_ALLOWED)
+    clock = FakeClock(recorder)
+    page = _page(recorder)
+    thread = "https://www.linkedin.com/messaging/thread/2-abc/"
+    loads = 1 if already else 2
+    page.goto_landings.extend([thread] * loads)
+    page.declare_locator("main button[data-mcp-thread-options]", "thread_options")
+    page.script("evaluate:thread_options", *([THREAD_OPTIONS] * loads))
+    page.script("thread_options.click", *([None] * loads))
+    archived = {"archive": 0, "unarchive": 1}
+    if already:
+        page.script("evaluate:thread_menu_items", archived)
+    else:
+        page.declare_locator("[data-mcp-thread-archive]", "thread_archive_item")
+        page.script(
+            "evaluate:thread_menu_items", {"archive": 1, "unarchive": 0}, archived
+        )
+        page.script("thread_archive_item.click", None)
+    extractor = _extractor(page)
+    arguments = {"thread_id": "2-abc"}
+    async with boundaries(recorder, clock):
+        with recorder.context("archive_conversation"):
+            result = await extractor.archive_conversation(**arguments)
+    page.assert_clean()
+    return recorder.trace(
+        {"method": "archive_conversation", "arguments": arguments}, result
+    )
+
+
 ROW_CLICK_STOPPED_OUTCOME = {
     "rows": [
         {"ariaLabel": "Select conversation with Ada Lovelace", "threadId": "2-ada"}
@@ -1109,6 +1147,7 @@ TOOL_FACADE_METHODS = {
     "read_person",
     "search_companies",
     "search_conversations",
+    "archive_conversation",
     "search_jobs",
     "search_people",
     "search_posts",
@@ -1197,6 +1236,12 @@ async def build_policy_traces() -> dict[str, dict[str, Any]]:
         ),
         "conversation-row-resolution.json": (
             await _conversation_row_resolution_scenario()
+        ),
+        "archive-conversation.json": await _archive_conversation_scenario(
+            already=False
+        ),
+        "archive-conversation-already.json": await _archive_conversation_scenario(
+            already=True
         ),
     }
     return traces
