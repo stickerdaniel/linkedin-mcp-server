@@ -1630,27 +1630,51 @@ class TestRetiringASharedBrowser:
         assert owner.requests == []
         assert self._session_intact()
 
-    @pytest.mark.parametrize("command", ["logout", "login", "import"])
-    def test_without_a_terminal_the_retirement_is_refused(self, command, capsys):
+    @pytest.mark.parametrize("command", ["login", "import"])
+    def test_without_a_terminal_nothing_is_asked_and_the_usual_checks_decide(
+        self, command, capsys
+    ):
+        # The record may be all an exited owner left. Without a terminal there
+        # is no consent, so nothing is sent, and the command goes on as a Direct
+        # server would: the profile lease decides.
         self.config.is_interactive = False
         self._seed_session()
         owner = self._owner()
-        self._answers("y")
+        prompts = self._answers()
 
-        if command == "logout":
-            code = self._logout()
-            ran = not self._session_intact()
-        elif command == "login":
+        if command == "login":
             code, creation = self._login()
             ran = creation.called
         else:
             code, run = self._import()
             ran = run.called
 
-        assert code == 1
-        assert not ran
+        assert code == 0
+        assert ran
+        assert prompts == []
         assert owner.requests == []
+        assert owner.liveness.retiring is False
         assert "needs an interactive terminal" in capsys.readouterr().out
+
+    def test_without_a_terminal_a_held_profile_still_refuses(self, capsys):
+        # A live owner holds the profile lease, and the usual check refuses as
+        # it would for a running Direct server. Nothing is sent to the owner.
+        self.config.is_interactive = False
+        self._seed_session()
+        owner = self._owner()
+        # Logout's own confirmation of the deletion still asks.
+        self._answers("y")
+        release = self._hold_the_profile()
+        try:
+            # Today's refusal for a profile a running server holds.
+            with pytest.raises(RuntimeError, match="in use by another process"):
+                self._logout()
+        finally:
+            release()
+
+        assert self._session_intact()
+        assert owner.requests == []
+        assert owner.liveness.retiring is False
 
     @pytest.mark.parametrize("command", ["login", "import"])
     def test_without_an_owner_nothing_is_asked_even_without_a_terminal(self, command):

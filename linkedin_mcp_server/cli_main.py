@@ -91,9 +91,8 @@ _RETIRE_PROMPT = (
     "Ask it to retire and continue? (y/N): "
 )
 _RETIRE_NEEDS_A_TERMINAL = (
-    "❌ Retiring the background shared browser needs an interactive terminal to "
-    "confirm. Run this command from a terminal, or wait for the shared browser "
-    "to exit."
+    "ℹ️  A shared browser is recorded for this profile, and retiring it needs an "
+    "interactive terminal to confirm. Continuing with the usual profile checks."
 )
 _RETIRE_UNREADABLE = (
     "ℹ️  A shared browser is recorded for this profile, but its record could not "
@@ -196,8 +195,11 @@ def _retire_a_shared_browser(config: AppConfig, retirement: _Retirement) -> bool
         return False
 
     if not config.is_interactive:
+        # Nothing to confirm with, so nothing is asked. Not a refusal: the record
+        # may be all an exited owner left, and the profile lease still keeps this
+        # command off a browser that is running, exactly as for a Direct server.
         print(_RETIRE_NEEDS_A_TERMINAL)
-        sys.exit(1)
+        return False
     try:
         answer = input(_RETIRE_PROMPT).strip().lower()
     except (KeyboardInterrupt, EOFError):
