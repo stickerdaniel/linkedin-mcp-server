@@ -13,7 +13,10 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import time
 from pathlib import Path
+
+import psutil
 
 from differential.harness import (
     READ_TOOL,
@@ -34,12 +37,14 @@ from contextlib import asynccontextmanager
 
 from fastmcp import FastMCP
 
-marker, ending = sys.argv[1], sys.argv[2]
+marker, ending, die = sys.argv[1], sys.argv[2], sys.argv[3]
 
 
 @asynccontextmanager
 async def closing(app):
     print("stand-in server up", file=sys.stderr, flush=True)
+    with open(die + ".pid", "w") as pid:
+        pid.write(str(os.getpid()))
     try:
         yield {}
     finally:
@@ -58,8 +63,13 @@ mcp = FastMCP("stand-in", lifespan=closing)
 @mcp.tool
 def %(tool)s(num_posts: int = 10) -> dict:
     if ending == "crash":
-        # Dies right after answering, long before the host quits.
-        threading.Timer(0.2, lambda: os._exit(9)).start()
+        # Dies by itself once the host has the answer, long before it quits.
+        def crash():
+            while not os.path.exists(die):
+                time.sleep(0.02)
+            os._exit(9)
+
+        threading.Thread(target=crash, daemon=True).start()
     return {"url": "https://www.linkedin.com/feed/", "sections": {"feed": marker}}
 
 
@@ -70,13 +80,28 @@ mcp.run(transport="stdio", show_banner=False)
 async def _session(tmp_path: Path, ending: str, seen: list[str] | None = None):
     script = tmp_path / "stand_in_server.py"
     script.write_text(_STAND_IN_SERVER)
+    die = tmp_path / "die"
 
     async def linger() -> None:
-        if ending == "crash":
-            await asyncio.sleep(2)
+        if ending != "crash":
+            return
+        # The answer is in: let the server die, and see it gone before the
+        # host quits.
+        pid = int(Path(f"{die}.pid").read_text())
+        die.touch()
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            try:
+                if psutil.Process(pid).status() == psutil.STATUS_ZOMBIE:
+                    break
+            except psutil.NoSuchProcess:
+                break
+            await asyncio.sleep(0.02)
+        # Time for the event loop to see the exit, as a host's would.
+        await asyncio.sleep(1)
 
     return await run_host_session(
-        [sys.executable, str(script), POST_MARKER, ending],
+        [sys.executable, str(script), POST_MARKER, ending, str(die)],
         env=dict(os.environ),
         cwd=tmp_path,
         on_stderr=(seen.append if seen is not None else lambda _line: None),

@@ -27,7 +27,9 @@ refused and the row's daemon directory is kept as evidence.
 **Host stub.** A real MCP client over stdio, spawning the server from this
 virtual environment the way a host does. It is not ``fastmcp``'s own stdio
 transport: that one starts the server in a new session and, when the client
-leaves, closes stdin and then escalates to signals after two seconds. A host
+leaves, closes stdin and then escalates to signals after two seconds (measured
+again under FastMCP 4, whose default also keeps the server running past the
+client unless ``keep_alive`` is off). A host
 quit is stdin EOF and a wait, and a server closing a browser takes longer than
 two seconds, so that transport would turn every host quit into a kill. This one
 starts the server in the harness's own process group, where the child of a host
@@ -70,7 +72,11 @@ import mcp.types as mcp_types
 import psutil
 from anyio.streams.text import TextReceiveStream
 from fastmcp import Client
-from fastmcp.client.transports.base import ClientTransport, SessionKwargs
+from fastmcp.client.transports.base import (
+    ClientTransport,
+    SessionKwargs,
+    TransportOptions,
+)
 from mcp import ClientSession
 from mcp.shared.message import SessionMessage
 from typing_extensions import Unpack
@@ -655,8 +661,12 @@ class HostQuitTransport(ClientTransport):
 
     @contextlib.asynccontextmanager
     async def connect_session(
-        self, **session_kwargs: Unpack[SessionKwargs]
+        self,
+        *,
+        transport_options: TransportOptions | None = None,
+        **session_kwargs: Unpack[SessionKwargs],
     ) -> AsyncIterator[ClientSession]:
+        options = transport_options or TransportOptions()
         process = await anyio.open_process(
             self.command,
             stdin=subprocess.PIPE,
@@ -685,9 +695,13 @@ class HostQuitTransport(ClientTransport):
                         for line in lines:
                             if not line.strip():
                                 continue
+                            # Parsed and written as the SDK's own stdio
+                            # client does (mcp/client/stdio.py).
                             try:
-                                message = mcp_types.JSONRPCMessage.model_validate_json(
-                                    line
+                                message = (
+                                    mcp_types.jsonrpc_message_adapter.validate_json(
+                                        line, by_name=False
+                                    )
                                 )
                             except Exception as exc:
                                 await read_send.send(exc)
@@ -702,7 +716,7 @@ class HostQuitTransport(ClientTransport):
                 ):
                     async for outgoing in write_receive:
                         data = outgoing.message.model_dump_json(
-                            by_alias=True, exclude_none=True
+                            by_alias=True, exclude_unset=True
                         )
                         await process.stdin.send((data + "\n").encode())
 
@@ -711,7 +725,7 @@ class HostQuitTransport(ClientTransport):
             tasks.start_soon(pump_stdin)
             tasks.start_soon(self._pump_stderr, process)
             try:
-                async with ClientSession(
+                async with options.session_class(
                     read_receive, write_send, **session_kwargs
                 ) as session:
                     yield session
@@ -728,13 +742,15 @@ def tool_summary(result: mcp_types.CallToolResult) -> dict[str, Any]:
         for block in result.content
         if isinstance(block, mcp_types.TextContent)
     ]
-    structured = result.structuredContent or {}
+    structured = result.structured_content
+    if not isinstance(structured, dict):
+        structured = {}
     if isinstance(structured.get("result"), dict):
         structured = structured["result"]
     sections = structured.get("sections")
     feed = sections.get("feed") if isinstance(sections, dict) else None
     return {
-        "is_error": bool(result.isError),
+        "is_error": bool(result.is_error),
         "sections": sorted(sections) if isinstance(sections, dict) else [],
         "section_errors": sorted(structured.get("section_errors") or {}),
         "read_the_post": isinstance(feed, str) and POST_MARKER in feed,
@@ -782,7 +798,10 @@ async def run_host_session(
         on_stderr(line)
 
     transport = HostQuitTransport(command, env=env, cwd=cwd, on_stderr=remember)
-    client = Client(transport, init_timeout=_INIT_SECONDS)
+    # The initialize handshake, as a host sends it. FastMCP 4's default probes
+    # server/discover first and settles on the 2026-07-28 era with a FastMCP 4
+    # server, a different path from the one every row so far measured.
+    client = Client(transport, init_timeout=_INIT_SECONDS, mode="legacy")
     try:
         async with client:
             result = await client.call_tool_mcp(
