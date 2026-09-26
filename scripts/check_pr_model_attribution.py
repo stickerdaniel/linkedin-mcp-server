@@ -17,7 +17,9 @@ _RESERVED_MINIMAL_RE = re.compile(r"\b(?:for|in|and|via)\b")
 # Macroscope writes its summary into the PR body after the author, between
 # these two markers, and appends the pair at the end when it finds none. The
 # block is the bot's text, not the author's, so it is dropped before the final
-# line is read; an attribution inside it does not count.
+# line is read; an attribution inside it does not count. An author can write
+# the markers too, which buys text after the attribution but never a missing
+# one; the two cannot be told apart, and disclosure is what the check guards.
 _MACROSCOPE_BLOCK_RE = re.compile(
     r"<!-- Macroscope's pull request summary starts here -->"
     r".*?"
