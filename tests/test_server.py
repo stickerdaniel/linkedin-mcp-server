@@ -1,4 +1,5 @@
 import asyncio
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -132,6 +133,63 @@ def _server_for(role: ServerRole) -> FastMCP:
 
     reset_process_role_for_testing()
     return create_mcp_server(role=role, **_extras_for(role))
+
+
+#: Every local tool as ``tools/list`` puts it on the wire. A difference is a
+#: change every client sees, so update the file only for an intended one.
+_TOOL_CONTRACT = Path(__file__).parent / "fixtures" / "tool-contract" / "tools.json"
+
+
+async def _served_tool_contract(
+    monkeypatch: pytest.MonkeyPatch, role: ServerRole
+) -> list[dict[str, Any]]:
+    """The tool list a client of *role* receives, in wire form, sorted by name.
+
+    Read through a real client rather than from ``list_tools()`` on the server,
+    because the wire form is the contract: aliases such as ``inputSchema`` and
+    ``_meta``, and every field the protocol carries, including ``outputSchema``.
+    The lifespan is stood in so no browser is installed, launched or closed.
+    """
+    for name in (
+        "initialize_bootstrap",
+        "get_runtime_policy",
+        "report_retained_browser_revisions_if_ready",
+    ):
+        monkeypatch.setattr(server_module, name, MagicMock())
+    for name in (
+        "start_background_browser_setup_if_needed",
+        "watch_for_handoff_requests",
+        "stop_background_browser_setup",
+        "close_browser",
+    ):
+        monkeypatch.setattr(server_module, name, AsyncMock())
+
+    async with Client(_server_for(role)) as client:
+        tools = await client.list_tools()
+    return sorted(
+        (
+            tool.model_dump(mode="json", by_alias=True, exclude_none=True)
+            for tool in tools
+        ),
+        key=lambda tool: tool["name"],
+    )
+
+
+class TestToolContract:
+    """The tools a client is offered, compared field by field with a fixture."""
+
+    @pytest.mark.parametrize(
+        "role", [role for role in ServerRole if role.drives_browser]
+    )
+    async def test_the_served_tools_match_the_recorded_contract(
+        self, monkeypatch: pytest.MonkeyPatch, role: ServerRole
+    ):
+        # Every field, not a projection of the ones expected to matter: an
+        # argument that leaks into `inputSchema`, a lost `outputSchema` or a
+        # changed safety annotation is a change every client sees.
+        recorded = json.loads(_TOOL_CONTRACT.read_text(encoding="utf-8"))
+
+        assert await _served_tool_contract(monkeypatch, role) == recorded
 
 
 class TestServerRoles:

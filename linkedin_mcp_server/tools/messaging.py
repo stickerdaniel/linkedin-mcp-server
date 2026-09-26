@@ -40,12 +40,10 @@ def register_messaging_tools(
         title="Get Inbox",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"messaging", "scraping"},
-        exclude_args=["extractor"],
     )
     async def get_inbox(
         ctx: Context,
         limit: Annotated[int, Field(ge=1, le=50)] = 20,
-        extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
         List recent conversations from the LinkedIn messaging inbox.
@@ -70,9 +68,7 @@ def register_messaging_tools(
             incomplete).
         """
         try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="get_inbox"
-            )
+            extractor = await get_ready_extractor(ctx, tool_name="get_inbox")
             logger.info("Fetching inbox (limit=%d)", limit)
 
             await ctx.report_progress(
@@ -102,14 +98,12 @@ def register_messaging_tools(
         # not seen is state, and losing it is not something a reader should do.
         annotations={"openWorldHint": True},
         tags={"messaging", "scraping"},
-        exclude_args=["extractor"],
     )
     async def get_conversation(
         ctx: Context,
         linkedin_username: str | None = None,
         thread_id: str | None = None,
         index: Annotated[int, Field(ge=0)] = 0,
-        extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
         Read a specific messaging conversation.
@@ -156,9 +150,7 @@ def register_messaging_tools(
                 thread_id = normalize_thread_id(thread_id)
             else:
                 linkedin_username = normalize_person_identifier(linkedin_username or "")
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="get_conversation"
-            )
+            extractor = await get_ready_extractor(ctx, tool_name="get_conversation")
             logger.info(
                 "Fetching conversation: username=%s, thread_id=%s, index=%d",
                 linkedin_username,
@@ -196,13 +188,11 @@ def register_messaging_tools(
         # documented in those terms.
         annotations={"openWorldHint": True},
         tags={"messaging", "search"},
-        exclude_args=["extractor"],
     )
     async def search_conversations(
         keywords: str,
         ctx: Context,
         limit: Annotated[int, Field(ge=1, le=50)] = 20,
-        extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
         Search messages by keyword.
@@ -228,9 +218,7 @@ def register_messaging_tools(
             click-derived references stopped).
         """
         try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="search_conversations"
-            )
+            extractor = await get_ready_extractor(ctx, tool_name="search_conversations")
             logger.info(
                 "Searching conversations: keywords='%s', limit=%d", keywords, limit
             )
@@ -258,7 +246,6 @@ def register_messaging_tools(
         title="Send Message",
         annotations={"destructiveHint": True, "openWorldHint": True},
         tags={"messaging", "actions"},
-        exclude_args=["extractor"],
     )
     async def send_message(
         linkedin_username: str,
@@ -266,7 +253,6 @@ def register_messaging_tools(
         confirm_send: bool,
         ctx: Context,
         profile_urn: str | None = None,
-        extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
         Compose and send a new message to a LinkedIn user.
@@ -329,9 +315,7 @@ def register_messaging_tools(
             linkedin_username = normalize_person_identifier(linkedin_username)
             if profile_urn is not None:
                 profile_urn = normalize_profile_urn(profile_urn)
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="send_message"
-            )
+            extractor = await get_ready_extractor(ctx, tool_name="send_message")
             logger.info(
                 "Sending message to %s (confirm_send=%s)",
                 linkedin_username,

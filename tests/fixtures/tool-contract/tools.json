@@ -1,0 +1,911 @@
+[
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "session"
+        ]
+      }
+    },
+    "annotations": {
+      "destructiveHint": true
+    },
+    "description": "Close the current browser session and clean up resources.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "name": "close_session",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Close Session"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "actions",
+          "person"
+        ]
+      }
+    },
+    "annotations": {
+      "destructiveHint": true,
+      "openWorldHint": true
+    },
+    "description": "Send a LinkedIn connection request or accept an incoming one.\n\nThe tool is annotated with destructiveHint so MCP clients will\nprompt for user confirmation before execution.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "linkedin_username": {
+          "description": "LinkedIn username (e.g., \"stickerdaniel\", \"williamhgates\"). A full profile URL is accepted too and is reduced to the username.",
+          "type": "string"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional note to include with the invitation"
+        }
+      },
+      "required": [
+        "linkedin_username"
+      ],
+      "type": "object"
+    },
+    "name": "connect_with_person",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Connect With Person"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "company",
+          "scraping"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "List employees at a company from the LinkedIn /people/ page, including\nthe demographics aggregate that this view exposes: where employees\nlive, where they studied, and a function breakdown (Engineering, Sales,\nOperations, etc.). The demographics are unique to this tool.\n\nFor filtered search by network degree (1st/2nd/3rd) or location, prefer\nsearch_people with current_company set to the company URN id. That path\nalso returns more result pages than the /people/ tab.\n\nThe optional keywords filter narrows results by name, title, or skill.\n\ncompany_name must be the exact LinkedIn URL slug (the path segment after\n/company/), not the display name. LinkedIn assigns unique slugs and the\ndisplay name often does not match. For example, the AI lab Anthropic\nlives at /company/anthropicresearch/, not /company/anthropic/. If you\nare unsure of the slug, call search_companies first and pick the slug\nfrom the returned references.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "company_name": {
+          "description": "LinkedIn company URL slug (e.g., \"docker\", \"anthropicresearch\", \"microsoft\"). A full company URL is accepted too and is reduced to the slug.",
+          "type": "string"
+        },
+        "keywords": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional filter by name, job title, or skill (e.g., \"engineer\", \"sales\")"
+        }
+      },
+      "required": [
+        "company_name"
+      ],
+      "type": "object"
+    },
+    "name": "get_company_employees",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Get Company Employees"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "company",
+          "scraping"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Get recent posts from a company's LinkedIn feed.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "company_name": {
+          "description": "LinkedIn company name (e.g., \"docker\", \"anthropic\", \"microsoft\"). A full company URL is accepted too and is reduced to the slug.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "company_name"
+      ],
+      "type": "object"
+    },
+    "name": "get_company_posts",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Get Company Posts"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "company",
+          "scraping"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Get a specific company's LinkedIn profile.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "company_name": {
+          "description": "LinkedIn company name (e.g., \"docker\", \"anthropic\", \"microsoft\"). A full company URL is accepted too and is reduced to the slug.",
+          "type": "string"
+        },
+        "sections": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Comma-separated list of extra sections to scrape.\nThe about page is always included.\nAvailable sections: posts, jobs\nExamples: \"posts\", \"posts,jobs\"\nDefault (None) scrapes only the about page."
+        }
+      },
+      "required": [
+        "company_name"
+      ],
+      "type": "object"
+    },
+    "name": "get_company_profile",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Get Company Profile"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "messaging",
+          "scraping"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": true
+    },
+    "description": "Read a specific messaging conversation.\n\nProvide either linkedin_username or thread_id to identify the conversation.\n\nWhen looked up by linkedin_username, resolution searches the messaging\ninbox for the participant's display name and click-visits every\nmatching row to capture its thread ID — LinkedIn's sidebar has no\nanchor hrefs or thread-id attributes, so this is the only available\npath. Each visit selects the row in the LinkedIn UI and may mark it\nas read. Pass thread_id directly to skip this enumeration.\n\nUsername resolution scans matching rows from a requested compose page\nfirst. Its indexable sequence ends before the first unresolved click,\nmissing matching click target, or admitted row that fails the existing\nexact display-name check. An index outside that verified prefix is\nrefused with its reason. Search is a fallback only when the inbox scan\nhas no observed matching result and no such barrier; it never\nsubstitutes a result after a stopped or gapped inbox scan. Pass a known\nthread_id to bypass username/index resolution.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "index": {
+          "default": 0,
+          "description": "0-based selector for which thread to open when the\nparticipant has multiple threads (e.g. an organic 1-on-1 plus\nan InMail). Ignored when thread_id is provided. To enumerate\nthread IDs first, call search_conversations.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "linkedin_username": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "LinkedIn username of the conversation participant; a full profile URL is accepted too"
+        },
+        "thread_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "LinkedIn messaging thread ID"
+        }
+      },
+      "type": "object"
+    },
+    "name": "get_conversation",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Get Conversation"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "feed",
+          "scraping"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Get posts from the authenticated user's LinkedIn feed.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "num_posts": {
+          "default": 10,
+          "description": "Number of posts to fetch (1-50, default 10).\n       Posts are loaded in batches of ~5 as the page scrolls,\n       so the actual count may slightly exceed the target.",
+          "maximum": 50,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "name": "get_feed",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Get Feed"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "messaging",
+          "scraping"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "List recent conversations from the LinkedIn messaging inbox.\n\nThe returned inbox text and result URL come from the ordinary messaging\ninbox. Click-derived conversation references are collected separately\nafter requesting the compose page, which avoided inbox auto-opening on\nthe measured variant. A row contributes a click-derived reference only\nafter its click is followed by an observed different thread path. The\nscan stops at its first unverifiable click. section_errors.inbox\nreports that stop or unavailable scan rows; captured inbox text and\nindependently extracted anchors retain their normal handling. A known\nthread_id can bypass row attribution when calling get_conversation.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "limit": {
+          "default": 20,
+          "description": "Maximum number of conversations to load (1-50, default 20)",
+          "maximum": 50,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "name": "get_inbox",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Get Inbox"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "job",
+          "scraping"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Get job details for a specific job posting on LinkedIn.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "job_id": {
+          "description": "LinkedIn job ID (e.g., \"4252026496\", \"3856789012\")",
+          "type": "string"
+        }
+      },
+      "required": [
+        "job_id"
+      ],
+      "type": "object"
+    },
+    "name": "get_job_details",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Get Job Details"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "person",
+          "scraping"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Get the authenticated user's own LinkedIn profile.\n\nNavigates to /in/me/ and resolves the redirect to obtain the real\nusername before scraping, so the url field in the result is the actual\nprofile URL (e.g. linkedin.com/in/johndoe/) rather than /in/me/.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "max_scrolls": {
+          "anyOf": [
+            {
+              "maximum": 50,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Maximum pagination attempts per section (same as get_person_profile)."
+        },
+        "sections": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Comma-separated list of extra sections to scrape.\nThe main profile page is always included.\nAvailable sections: experience, education, interests, honors, languages, certifications, skills, projects, contact_info, posts\nExamples: \"experience,education\", \"contact_info\", \"skills,projects\"\nDefault (None) scrapes only the main profile page."
+        }
+      },
+      "type": "object"
+    },
+    "name": "get_my_profile",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Get My Profile"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "person",
+          "scraping"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Get a specific person's LinkedIn profile.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "linkedin_username": {
+          "description": "LinkedIn username (e.g., \"stickerdaniel\", \"williamhgates\"). A full profile URL is accepted too and is reduced to the username.",
+          "type": "string"
+        },
+        "max_scrolls": {
+          "anyOf": [
+            {
+              "maximum": 50,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Maximum pagination attempts per section to load more content.\nOn detail sections (experience, certifications, skills, etc.) this\nis the max number of \"Show more\" button clicks. On activity/posts\nit is the max scroll-to-bottom iterations. Applies to all sections\nin this call. Default (None) uses 5 for detail sections and 10 for\nposts. Increase when a profile has many items in a section\n(e.g., 30+ certifications, max_scrolls=20). To avoid slowing down\nother sections, request heavy sections in a separate call."
+        },
+        "sections": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Comma-separated list of extra sections to scrape.\nThe main profile page is always included.\nAvailable sections: experience, education, interests, honors, languages, certifications, skills, projects, contact_info, posts\nExamples: \"experience,education\", \"contact_info\", \"skills,projects\", \"honors,languages\", \"posts\"\nDefault (None) scrapes only the main profile page."
+        }
+      },
+      "required": [
+        "linkedin_username"
+      ],
+      "type": "object"
+    },
+    "name": "get_person_profile",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Get Person Profile"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "job",
+          "scraping"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "List job postings saved by the authenticated LinkedIn user.\n\nReturns job_ids that can be passed to get_job_details for full info.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "max_pages": {
+          "default": 3,
+          "description": "Maximum number of saved-jobs pages to load (1-10, default 3)",
+          "maximum": 10,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "name": "get_saved_jobs",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Get Saved Jobs"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "person",
+          "scraping"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Get profile links from sidebar recommendation sections on a LinkedIn profile page.\n\nExtracts profiles from \"More profiles for you\", \"Explore premium profiles\",\nand \"People you may know\" sidebar sections. Follows \"Show all\" links to\nreturn the full list from each section. Sections that redirect to\nlinkedin.com/premium are skipped.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "linkedin_username": {
+          "description": "LinkedIn username of the profile page to scrape; a full profile URL is accepted too\n(e.g., \"stickerdaniel\", \"williamhgates\")",
+          "type": "string"
+        }
+      },
+      "required": [
+        "linkedin_username"
+      ],
+      "type": "object"
+    },
+    "name": "get_sidebar_profiles",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Get Sidebar Profiles"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "company",
+          "search"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Search for companies on LinkedIn.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "keywords": {
+          "description": "Search keywords (e.g., \"fintech\", \"anthropic\", \"electric vehicles\")",
+          "type": "string"
+        }
+      },
+      "required": [
+        "keywords"
+      ],
+      "type": "object"
+    },
+    "name": "search_companies",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Search Companies"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "messaging",
+          "search"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": true
+    },
+    "description": "Search messages by keyword.\n\nClick-derived references require an observed different thread path\nafter each row click. The first unverifiable click stops further row\nclicks and is reported in section_errors.search_results. Already-read\ntext and independently extracted anchors retain their normal handling.\nA result without that diagnostic does not guarantee that every\nconversation was enumerated.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "keywords": {
+          "description": "Search keywords to filter conversations",
+          "type": "string"
+        },
+        "limit": {
+          "default": 20,
+          "description": "Maximum number of search-result rows to enumerate as\nconversation references (1-50, default 20). Each enumeration\nselects the row in LinkedIn's UI and may mark it as read, so\na low cap is preferable for noisy queries.",
+          "maximum": 50,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "keywords"
+      ],
+      "type": "object"
+    },
+    "name": "search_conversations",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Search Conversations"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "job",
+          "search"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Search for jobs on LinkedIn.\n\nReturns job_ids that can be passed to get_job_details for full info.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "date_posted": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Filter by posting date (past_hour, past_24_hours, past_week, past_month)"
+        },
+        "easy_apply": {
+          "default": false,
+          "description": "Only show Easy Apply jobs (default false)",
+          "type": "boolean"
+        },
+        "experience_level": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Filter by experience level, comma-separated (internship, entry, associate, mid_senior, director, executive)"
+        },
+        "job_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Filter by job type, comma-separated (full_time, part_time, contract, temporary, volunteer, internship, other)"
+        },
+        "keywords": {
+          "description": "Search keywords (e.g., \"software engineer\", \"data scientist\")",
+          "type": "string"
+        },
+        "location": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional location filter (e.g., \"San Francisco\", \"Remote\")"
+        },
+        "max_pages": {
+          "default": 3,
+          "description": "Maximum number of result pages to load (1-10, default 3)",
+          "maximum": 10,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "sort_by": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Sort results (date, relevance)"
+        },
+        "work_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Filter by work type, comma-separated (on_site, remote, hybrid)"
+        }
+      },
+      "required": [
+        "keywords"
+      ],
+      "type": "object"
+    },
+    "name": "search_jobs",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Search Jobs"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "person",
+          "search"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Search for people on LinkedIn.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "current_company": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional current-employer filter. LinkedIn's\ncurrentCompany facet only filters on the numeric company URN id\n(e.g. \"1115\" for SAP); plain company names are accepted by the\nURL but ignored by LinkedIn and return the unfiltered result\nset. Look up a company's URN via get_company_profile -- it is\nexposed under references[\"about\"]. For company-wide employee\ndemographics (location/education/function breakdown) plus a\nslug-based lookup, use get_company_employees instead."
+        },
+        "keywords": {
+          "description": "Search keywords (e.g., \"software engineer\", \"recruiter at Google\")",
+          "type": "string"
+        },
+        "location": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional location filter (e.g., \"New York\", \"Remote\")"
+        },
+        "network": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional connection-degree filter. Each element is one of\n\"F\" (1st-degree), \"S\" (2nd-degree), \"O\" (3rd-degree and beyond).\nExample: [\"F\"] to only return 1st-degree connections. A single\ntoken (\"F\") or a comma-separated string (\"F,S\") is also\naccepted, for clients that cannot transmit an array."
+        }
+      },
+      "required": [
+        "keywords"
+      ],
+      "type": "object"
+    },
+    "name": "search_people",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Search People"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "post",
+          "search"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Search LinkedIn posts/content globally by keyword (the \"Posts\" tab).\n\nUse this to catch informal hiring posts (\"we're hiring\", \"Buscamos\n...\", \"estamos contratando\", \"join our team\") that often appear before\na formal job listing exists. This is global content search, distinct\nfrom get_feed (your own home feed) and get_company_posts (one\ncompany's page).",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "date_posted": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional recency filter. One of \"past-24h\",\n\"past-week\", \"past-month\"; the \"past_24_hours\" / \"past_week\" /\n\"past_month\" spellings used by search_jobs are accepted too.\nOmit for any time."
+        },
+        "keywords": {
+          "description": "Search keywords (e.g., \"Buscamos Unity\", \"AI automation hiring\")",
+          "type": "string"
+        },
+        "max_pages": {
+          "default": 3,
+          "description": "Scroll depth as result \"pages\" of ~5 scrolls each\n(1-10, default 3). Content search is an infinite scroll, so\nthis caps how far the page is scrolled rather than fetching\ndiscrete pages.",
+          "maximum": 10,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "keywords"
+      ],
+      "type": "object"
+    },
+    "name": "search_posts",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Search Posts"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "actions",
+          "messaging"
+        ]
+      }
+    },
+    "annotations": {
+      "destructiveHint": true,
+      "openWorldHint": true
+    },
+    "description": "Compose and send a new message to a LinkedIn user.\n\nProfile-based targeting opens LinkedIn's compose flow. It is not a safe\nreply path for an existing recruiter/InMail or messaging thread: it may\ncreate a separate DM even after you inspect that thread with\nget_conversation or search_conversations. Those tools only read an\nexisting thread; they do not send a reply. Until a thread-targeted send\npath is available, do not treat profile-based send_message as a reply.\n\nThe recipient must be directly messageable from the profile page. If\nLinkedIn does not expose a normal Message action, use connect_with_person\nfirst, then retry send_message only after the connection request is\naccepted. Recipient authorization comes from validating one\nrecipient-specific Message action carrying the target URN, then following\nits browser navigation and pinning the exact final route. Visible profile\nlinks or recipient URNs in the composer are optional corroboration; any\ncontradiction fails closed. No Voyager or other private API is used. This\nis a write operation when confirm_send is True.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "confirm_send": {
+          "description": "Must be True to send the message",
+          "type": "boolean"
+        },
+        "linkedin_username": {
+          "description": "LinkedIn username of the recipient; a full profile URL is accepted too",
+          "type": "string"
+        },
+        "message": {
+          "description": "Single-line message text to send. C0 control characters and\nDEL are rejected, including CR, LF, and tab.",
+          "type": "string"
+        },
+        "profile_urn": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional profile URN (e.g. ACoAAB...) to verify against\nthe URN exposed by the loaded profile before opening its Message\naction. It never bypasses recipient verification. Obtain via\nget_person_profile. Note: inbox may not always show all messages;\nuse search_conversations as a fallback."
+        }
+      },
+      "required": [
+        "linkedin_username",
+        "message",
+        "confirm_send"
+      ],
+      "type": "object"
+    },
+    "name": "send_message",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Send Message"
+  }
+]
