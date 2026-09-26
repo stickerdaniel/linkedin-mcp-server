@@ -223,13 +223,17 @@ def test_the_watcher_process_sees_one_browser_and_its_exit(tmp_path):
     # worker may be running the two-browser case beside this one.
     assert [v for v in summary["violations"] if v["profile"] == key] == []
     ours = f"--user-data-dir={profile}"
-    browser_pids = {
-        r["pid"]
+    parents = {
+        r["pid"]: r["ppid"]
         for r in records
         if r["kind"] == "process.start"
         and r["actor"] == "browser"
         and ours in r["cmdline"]
     }
-    assert len(browser_pids) == 1
-    assert browser_pids <= {r["pid"] for r in records if r["kind"] == "process.exit"}
-    assert os.getpid() not in browser_pids
+    # Roots only: on Windows a venv's python.exe is a launcher that runs the
+    # interpreter as its child with the same command line, so the one stand-in
+    # is two processes there.
+    roots = {pid for pid, ppid in parents.items() if ppid not in parents}
+    assert len(roots) == 1
+    assert set(parents) <= {r["pid"] for r in records if r["kind"] == "process.exit"}
+    assert os.getpid() not in parents
