@@ -240,6 +240,7 @@ class JobReader:
         easy_apply: bool = False,
         sort_by: str | None = None,
         tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS,
+        start: int = 0,
     ) -> dict[str, Any]:
         """Search for jobs with pagination and job ID extraction.
 
@@ -257,6 +258,9 @@ class JobReader:
             work_type: Filter by work type (on_site, remote, hybrid)
             easy_apply: Only show Easy Apply jobs
             sort_by: Sort results (date, relevance)
+            tool_timeout: Seconds the caller allows the whole search
+            start: Result offset of the first page, usually a previous
+                call's ``pagination.next_offset``
 
         Returns:
             {url, sections: {search_results: text}, job_ids: [str],
@@ -310,7 +314,7 @@ class JobReader:
         scroll_budget_left = SCROLL_BUDGET_TOTAL
         # The offset follows what the pages actually rendered. LinkedIn's own
         # stride would skip every result it renders beyond it.
-        offset = 0
+        offset = start
 
         # The next navigation is costed from the slowest one so far rather than
         # a constant: the real figure is 6.5s and the `goto` timeout alone is
@@ -527,7 +531,11 @@ class JobReader:
                         "Search page %d shows recommendations, not results",
                         page_num + 1,
                     )
-                    if not all_job_ids:
+                    # Only a search read from its first result can have
+                    # matched nothing. A resumed one reaching this page has
+                    # run past the end of a list an earlier call read from,
+                    # so it is complete like the case after real results.
+                    if not all_job_ids and start == 0:
                         section_errors["search_results"] = (
                             no_matching_jobs_section_error(keywords)
                         )
