@@ -1010,6 +1010,9 @@ class TestForwardingToASharedOwner:
         # PR the election ran and its result was thrown away, which looks
         # identical from the outside until nothing forwards.
         attachment = MagicMock(name="attachment")
+        # A mock answers every attribute truthily, and a truthy `control_only`
+        # is the one attachment the proxy backend refuses to be built around.
+        attachment.control_only = False
         monkeypatch.setattr(
             "linkedin_mcp_server.daemon_election.obtain_owner",
             lambda *_args, **_kwargs: self._outcome(attachment),
@@ -1068,6 +1071,9 @@ class TestForwardingToASharedOwner:
         config = self._config(daemon_enabled=True)
         _patch_main_dependencies(monkeypatch, config)
         attachment = MagicMock(name="attachment")
+        # A mock answers every attribute truthily, and a truthy `control_only`
+        # is the one attachment the proxy backend refuses to be built around.
+        attachment.control_only = False
         # Patched at the election rather than at the helper, so the real helper
         # runs. Stubbing `_obtain_shared_owner` would let it go on discarding the
         # outcome — the bug this PR fixes — while this test still passed.

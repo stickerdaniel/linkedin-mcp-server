@@ -95,6 +95,39 @@ class OwnerState(enum.Enum):
     UNTRUSTED = "untrusted"
 
 
+class Mismatch(enum.Enum):
+    """Which check an ``INCOMPATIBLE`` descriptor failed, as a fact to act on.
+
+    Typed rather than read out of the reason, which is prose for a log line and
+    free to change. The election acts on two of these differently from the
+    rest, and an English sentence is the wrong thing to key that on.
+    """
+
+    RUNTIME = "runtime"
+    PROFILE = "profile"
+    #: Same file format, another tool protocol. The owner may be asked to stand
+    #: down and may never be given a tool call.
+    PROTOCOL = "protocol"
+    #: Same protocol, another configuration fingerprint.
+    CONFIGURATION = "configuration"
+
+
+class DirectFallback(enum.Enum):
+    """Why an election ended at once in this client's own browser.
+
+    Two values because the probe can establish two different things, and the
+    second must not be reported as the first: silence is not proof that the
+    owner is alive, only that it is not one this client can use now.
+    """
+
+    #: The owner answered its probe.
+    LIVE_RIVAL = "a live owner of this build uses a different configuration"
+    #: The owner held its port and did not answer within the probe's budget.
+    SILENT_RIVAL = (
+        "an owner of this build with a different configuration did not answer"
+    )
+
+
 @dataclass(frozen=True)
 class Attachment:
     """An owner worth talking to, and the credential for doing so."""
@@ -105,6 +138,12 @@ class Attachment:
     #: drives a logged-in LinkedIn session, and the surrounding code logs whole
     #: objects at DEBUG while users paste those logs into issue reports.
     token: str = field(repr=False)
+    #: A pair proved for control and nothing else: the endpoint, profile,
+    #: runtime and token all passed, and the owner still may not run a tool for
+    #: this client. It comes only with an ``INCOMPATIBLE`` lookup, so it can ask
+    #: for turnover or be probed for liveness, and every consumer that would
+    #: dispatch a call refuses it (``daemon_proxy``).
+    control_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -119,6 +158,13 @@ class OwnerLookup:
     #: actionable if you can see which path — so it is DEBUG-grade detail and
     #: the callers here log it accordingly.
     reason: str = ""
+    #: Which check an ``INCOMPATIBLE`` reading failed, where one did.
+    mismatch: Mismatch | None = None
+    #: Set only by the election, and only after its one bounded probe of an
+    #: owner of this same build with another configuration: this client leaves
+    #: that owner alone and drives its own browser now, rather than waiting on a
+    #: lock the owner may hold. Which value says what the probe established.
+    fallback: DirectFallback | None = None
 
     @property
     def worth_connecting(self) -> bool:
@@ -149,6 +195,7 @@ def _inspect(auth_root: Path, profile: Path, config: AppConfig) -> OwnerLookup:
         return OwnerLookup(
             state=OwnerState.INCOMPATIBLE,
             reason="the published daemon belongs to another runtime",
+            mismatch=Mismatch.RUNTIME,
         )
 
     # The lock is per auth root, but a profile is what a browser opens. Two
@@ -158,6 +205,7 @@ def _inspect(auth_root: Path, profile: Path, config: AppConfig) -> OwnerLookup:
         return OwnerLookup(
             state=OwnerState.INCOMPATIBLE,
             reason="the published daemon serves a different profile",
+            mismatch=Mismatch.PROFILE,
         )
 
     # No endpoint check here: `from_mapping` already refuses a non-local host
@@ -166,15 +214,37 @@ def _inspect(auth_root: Path, profile: Path, config: AppConfig) -> OwnerLookup:
     # copy is what rots when the first moves.
     token = daemon_descriptor.read_token(auth_root, descriptor)
 
+    # After every identity check and the token, so a control-only pair is
+    # exactly as proved as an attachable one. `read` has already refused a
+    # schema this build cannot parse and a protocol below the control floor.
+    if descriptor.protocol_version != daemon_descriptor.PROTOCOL_VERSION:
+        return OwnerLookup(
+            state=OwnerState.INCOMPATIBLE,
+            attachment=Attachment(
+                descriptor=descriptor, token=token, control_only=True
+            ),
+            reason=(
+                f"the published daemon speaks protocol {descriptor.protocol_version} "
+                f"and this build speaks {daemon_descriptor.PROTOCOL_VERSION}"
+            ),
+            mismatch=Mismatch.PROTOCOL,
+        )
+
     # Keyed with the token, so this can only run once the token is in hand.
     if descriptor.config_fingerprint != daemon_descriptor.config_fingerprint(
         config, key=token
     ):
         return OwnerLookup(
             state=OwnerState.INCOMPATIBLE,
+            # Control only, so the election can ask whether this owner is
+            # alive before leaving it alone; a descriptor outlives its writer.
+            attachment=Attachment(
+                descriptor=descriptor, token=token, control_only=True
+            ),
             # Names no values: the shared fields include a proxy password and
             # the path to someone's profile.
             reason="the published daemon uses a different configuration",
+            mismatch=Mismatch.CONFIGURATION,
         )
 
     return OwnerLookup(

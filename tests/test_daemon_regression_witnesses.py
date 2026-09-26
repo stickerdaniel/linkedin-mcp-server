@@ -374,12 +374,6 @@ def test_a_custom_browser_keeps_the_direct_server(
     assert daemon_would_be_used(config) is shared
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="W-UNMARKED: a failed heartbeat preflight forwards the call "
-    "unmarked; fixed in P2",
-)
 @pytest.mark.parametrize("preflight", ["raises", "404"])
 async def test_a_failed_heartbeat_preflight_dispatches_no_tool_call(
     tmp_path: Path, preflight: str
@@ -399,11 +393,11 @@ async def test_a_failed_heartbeat_preflight_dispatches_no_tool_call(
 
     beats: list[str] = []
 
-    async def beat(_attachment: Any, call_id: str) -> int:
+    async def beat(_attachment: Any, call_id: str) -> httpx.Response:
         beats.append(call_id)
         if preflight == "raises":
             raise httpx.ConnectError("the owner refused the connection")
-        return 404
+        return httpx.Response(404)
 
     middleware._beat = beat  # ty: ignore[invalid-assignment]
     dispatched: list[str] = []
@@ -425,12 +419,6 @@ async def test_a_failed_heartbeat_preflight_dispatches_no_tool_call(
     _require_a_refusal(refused, result)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="W-OWNER-UNMARKED: the owner runs a call that carries no call id; "
-    "fixed in P2",
-)
 async def test_the_owner_refuses_a_call_without_a_marker(
     monkeypatch: pytest.MonkeyPatch,
 ):

@@ -12,7 +12,7 @@ import asyncio
 import datetime
 import inspect
 import threading
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import partial
@@ -192,8 +192,15 @@ def _reach_owners_in_process(monkeypatch: pytest.MonkeyPatch, owner_at) -> None:
 
     *owner_at* answers with a `FastMCP` to reach, a transport to use as it is, or
     `None` for an address nobody is serving.
+
+    The heartbeat preflight goes to the same place. An in-process owner has no
+    HTTP routes, so it answers the preflight the way the owner's own route
+    answers a call it has not registered yet; an address nobody serves refuses
+    the connection, which is what a departed owner's port does.
     """
     from fastmcp.client import transports
+
+    from linkedin_mcp_server.daemon_proxy import FrontendCallHeartbeatMiddleware
 
     def transport_for(url: str, **_ignored: Any) -> ClientTransport:
         reached = owner_at(url)
@@ -203,7 +210,15 @@ def _reach_owners_in_process(monkeypatch: pytest.MonkeyPatch, owner_at) -> None:
             return reached
         return FastMCPTransport(reached)
 
+    async def beat(attachment: Attachment, _call_id: str) -> httpx.Response:
+        if owner_at(attachment.descriptor.url) is None:
+            raise httpx.ConnectError(
+                f"nothing is listening on {attachment.descriptor.url}"
+            )
+        return httpx.Response(200, json={"watched": False})
+
     monkeypatch.setattr(transports, "StreamableHttpTransport", transport_for)
+    monkeypatch.setattr(FrontendCallHeartbeatMiddleware, "_beat", staticmethod(beat))
 
 
 class TestReachingTheOwner:
@@ -285,10 +300,10 @@ class TestCallingTheOwner:
         original_monitor = type(client)._await_with_session_monitoring
         monitor_calls = 0
 
-        async def monitor(self: Any, request: Any) -> Any:
+        async def monitor(self: Any, request: Any, **kwargs: Any) -> Any:
             nonlocal monitor_calls
             monitor_calls += 1
-            return await original_monitor(self, request)
+            return await original_monitor(self, request, **kwargs)
 
         monkeypatch.setattr(type(client), "_await_with_session_monitoring", monitor)
         seen_progress: list[tuple[float, float | None, str | None]] = []
@@ -1135,10 +1150,10 @@ class TestRepeatingOnlyWhatIsSafe:
         keys, so the names are pinned against their source here rather than
         left to drift until a client reads one of them and not the other.
         """
-        from linkedin_mcp_server.daemon_proxy import _unknown_outcome
+        from linkedin_mcp_server.daemon_liveness import unknown_outcome
         from linkedin_mcp_server.scraping.contracts import message_action_result
 
-        reported = _unknown_outcome(tool="send_message", reason="the owner went away")
+        reported = unknown_outcome(tool="send_message", reason="the owner went away")
         a_send = message_action_result("https://www.linkedin.com/in/x/", "sent", "ok")
 
         assert set(reported) <= set(a_send), (
@@ -2035,3 +2050,1192 @@ class TestRecoveringThroughTheWholeProxy:
         # The cancelled close never reached the session task. Clearing up after
         # the caller, not part of what this pins.
         await client.close()
+
+
+def _answers(**by_instance: Any):
+    """A heartbeat preflight that answers per owner, the way each owner would.
+
+    Keyed by instance id. A value is an `httpx.Response` to return or an
+    exception to raise, so every row of the classification table is the real
+    classifier reading a real response object.
+    """
+
+    async def beat(attachment: Attachment, _call_id: str) -> httpx.Response:
+        answer = by_instance[attachment.descriptor.instance_id]
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+    return beat
+
+
+def _watched() -> httpx.Response:
+    """What an owner's heartbeat route says about a call it has not seen yet."""
+    return httpx.Response(200, json={"watched": False})
+
+
+def _retiring(instance_id: str) -> httpx.Response:
+    """What a retiring owner signs, as its own heartbeat route sends it."""
+    return httpx.Response(
+        409,
+        json={
+            "daemon": "retiring",
+            "protocol": daemon_descriptor.PROTOCOL_VERSION,
+            "instance": instance_id,
+        },
+    )
+
+
+def _signed_refusal(kind: str, instance_id: str, *, protocol: object = None) -> Any:
+    """An owner's own refusal of a call, as `daemon_liveness` returns it."""
+    from linkedin_mcp_server.daemon_liveness import REFUSAL_KEY
+
+    return ToolResult(
+        content=[mt.TextContent(type="text", text="refused")],
+        meta={
+            REFUSAL_KEY: {
+                "daemon": kind,
+                "protocol": (
+                    daemon_descriptor.PROTOCOL_VERSION if protocol is None else protocol
+                ),
+                "instance": instance_id,
+            }
+        },
+        is_error=True,
+    )
+
+
+#: Every row of the preflight table: what came back, how it is classified, and
+#: whether the owner is written off for it. An exception is a preflight that
+#: got no answer at all.
+_PREFLIGHT_ROWS: list[tuple[str, Callable[[str], Any], str, bool]] = [
+    ("connect refused", lambda _i: httpx.ConnectError("refused"), "unreachable", False),
+    ("connect timeout", lambda _i: httpx.ConnectTimeout("slow"), "unreachable", False),
+    ("read timeout", lambda _i: httpx.ReadTimeout("silent"), "owner_error", False),
+    (
+        "protocol error",
+        lambda _i: httpx.RemoteProtocolError("garbled"),
+        "owner_error",
+        False,
+    ),
+    ("500", lambda _i: httpx.Response(500), "owner_error", False),
+    ("503", lambda _i: httpx.Response(503), "owner_error", False),
+    ("401", lambda _i: httpx.Response(401), "token_rejected", False),
+    ("404", lambda _i: httpx.Response(404), "route_missing", True),
+    ("409 retiring", _retiring, "retiring", True),
+    (
+        "409 for another owner",
+        lambda _i: _retiring(new_instance_id()),
+        "unexpected_status",
+        True,
+    ),
+    (
+        "409 of another protocol",
+        lambda i: httpx.Response(
+            409, json={"daemon": "retiring", "protocol": True, "instance": i}
+        ),
+        "unexpected_status",
+        True,
+    ),
+    ("409 unsigned", lambda _i: httpx.Response(409), "unexpected_status", True),
+    (
+        "302",
+        lambda _i: httpx.Response(302, headers={"location": "/"}),
+        "unexpected_status",
+        True,
+    ),
+    ("400", lambda _i: httpx.Response(400), "unexpected_status", True),
+    ("403", lambda _i: httpx.Response(403), "unexpected_status", True),
+    ("405", lambda _i: httpx.Response(405), "unexpected_status", True),
+    ("415", lambda _i: httpx.Response(415), "unexpected_status", True),
+    ("429", lambda _i: httpx.Response(429), "unexpected_status", True),
+    ("418", lambda _i: httpx.Response(418), "unexpected_status", True),
+    (
+        "200 not JSON",
+        lambda _i: httpx.Response(200, text="<html>hello</html>"),
+        "unexpected_status",
+        True,
+    ),
+    (
+        "200 without the heartbeat body",
+        lambda _i: httpx.Response(200, json={"ok": True}),
+        "unexpected_status",
+        True,
+    ),
+]
+
+
+class TestThePreflightDecides:
+    """No call leaves without a validated go-ahead from the owner it goes to.
+
+    One test per row of the preflight table, each driven through the real
+    heartbeat middleware with only the socket stood in for. What each pins is
+    the contract bullet that a failed preflight dispatches nothing, and that
+    its classification decides whether the owner is written off.
+    """
+
+    @staticmethod
+    def _context() -> MagicMock:
+        context = MagicMock()
+        context.message.name = "get_person_profile"
+        return context
+
+    async def test_a_validated_answer_dispatches_a_marked_call(self, tmp_path: Path):
+        from linkedin_mcp_server.daemon_proxy import (
+            FrontendCallHeartbeatMiddleware,
+            _call_being_made,
+        )
+
+        attachment = _attachment(tmp_path)
+        middleware = FrontendCallHeartbeatMiddleware(_backend(attachment, tmp_path))
+        middleware._beat = _answers(**{attachment.descriptor.instance_id: _watched()})
+        marked: list[str | None] = []
+
+        async def call_next(_context: Any) -> str:
+            bound = _call_being_made.get()
+            marked.append(None if bound is None else bound.call_id)
+            return "the result"
+
+        assert await middleware.on_call_tool(self._context(), call_next) == "the result"  # ty: ignore
+        assert len(marked) == 1 and marked[0] is not None, "the call went unmarked"
+
+    @pytest.mark.parametrize(
+        ("answer", "classification", "buries"),
+        [row[1:] for row in _PREFLIGHT_ROWS],
+        ids=[row[0] for row in _PREFLIGHT_ROWS],
+    )
+    async def test_a_failed_preflight_dispatches_nothing(
+        self,
+        tmp_path: Path,
+        answer: Callable[[str], Any],
+        classification: str,
+        buries: bool,
+    ):
+        from linkedin_mcp_server.daemon_proxy import (
+            FrontendCallHeartbeatMiddleware,
+            OwnerUnreachableError,
+        )
+
+        attachment = _attachment(tmp_path)
+        instance = attachment.descriptor.instance_id
+        middleware = FrontendCallHeartbeatMiddleware(_backend(attachment, tmp_path))
+        middleware._beat = _answers(**{instance: answer(instance)})
+        dispatched: list[str] = []
+
+        async def call_next(_context: Any) -> str:
+            dispatched.append("the tool call")
+            return "the result"
+
+        with pytest.raises(OwnerUnreachableError) as refused:
+            await middleware.on_call_tool(self._context(), call_next)  # ty: ignore
+
+        assert dispatched == []
+        # About the tool request, which never left, not the preflight exchange.
+        assert refused.value.nothing_was_sent is True
+        assert refused.value.instance_id == instance
+        assert refused.value.classification.value == classification
+        assert refused.value.classification.buries is buries
+
+    @pytest.mark.parametrize(
+        ("answer", "classification", "buries"),
+        [row[1:] for row in _PREFLIGHT_ROWS],
+        ids=[row[0] for row in _PREFLIGHT_ROWS],
+    )
+    async def test_recovery_carries_the_classification_into_the_election(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        answer: Callable[[str], Any],
+        classification: str,
+        buries: bool,
+    ):
+        """The classification travels on the failure and decides the burial.
+
+        A burying row writes the owner off before the election runs, and the
+        election is told to pass over it. Every row ends with the call made
+        once, on the replacement, and never on the owner that failed.
+        """
+        from linkedin_mcp_server.daemon_proxy import (
+            FrontendCallHeartbeatMiddleware,
+            FrontendOwnerRecoveryMiddleware,
+            _call_being_made,
+        )
+
+        failed = _attachment(tmp_path)
+        replacement = _attachment(tmp_path, port=failed.descriptor.port + 1)
+        failed_id = failed.descriptor.instance_id
+        backend = _backend(failed, tmp_path)
+        told_to_bury: list[set[str]] = []
+
+        def elect(*_args: Any, buried: Any = frozenset(), **_kwargs: Any):
+            told_to_bury.append(set(buried))
+            return _elected(replacement)
+
+        monkeypatch.setattr("linkedin_mcp_server.daemon_election.obtain_owner", elect)
+        heartbeat = FrontendCallHeartbeatMiddleware(backend)
+        heartbeat._beat = _answers(
+            **{
+                failed_id: answer(failed_id),
+                replacement.descriptor.instance_id: _watched(),
+            }
+        )
+        dispatched_to: list[str] = []
+
+        async def dispatch(_context: Any) -> str:
+            bound = _call_being_made.get()
+            assert bound is not None
+            dispatched_to.append(bound.attachment.descriptor.instance_id)
+            return "the result"
+
+        async def inner(context: Any) -> Any:
+            return await heartbeat.on_call_tool(context, dispatch)  # ty: ignore
+
+        result = await FrontendOwnerRecoveryMiddleware(backend).on_call_tool(
+            self._context(),
+            inner,
+        )
+
+        assert result == "the result"
+        assert dispatched_to == [replacement.descriptor.instance_id]
+        assert told_to_bury == [{failed_id} if buries else set()]
+        assert (failed_id in backend._unusable) is buries
+        assert backend.attachment.descriptor.instance_id == (
+            replacement.descriptor.instance_id
+        )
+
+
+class TestAnOwnersOwnRefusal:
+    """An owner that refused the call before it ran said so, and signed it."""
+
+    @staticmethod
+    async def _call(tmp_path: Path, result: Any) -> Any:
+        from linkedin_mcp_server.daemon_proxy import FrontendCallHeartbeatMiddleware
+
+        attachment = _attachment(tmp_path)
+        middleware = FrontendCallHeartbeatMiddleware(_backend(attachment, tmp_path))
+        middleware._beat = _answers(**{attachment.descriptor.instance_id: _watched()})
+
+        async def call_next(_context: Any) -> Any:
+            return result(attachment.descriptor.instance_id)
+
+        context = MagicMock()
+        context.message.name = "send_message"
+        try:
+            return await middleware.on_call_tool(context, call_next)  # ty: ignore
+        except Exception as escaped:
+            return _Escaped(escaped)
+
+    @pytest.mark.parametrize(
+        ("kind", "classification"),
+        [("retiring", "retiring"), ("unmarked_call", "unmarked_refused")],
+    )
+    async def test_a_signed_refusal_is_a_call_that_never_ran(
+        self, tmp_path: Path, kind: str, classification: str
+    ):
+        from linkedin_mcp_server.daemon_proxy import OwnerUnreachableError
+
+        answer = await self._call(
+            tmp_path, lambda instance: _signed_refusal(kind, instance)
+        )
+
+        assert isinstance(answer, _Escaped)
+        assert isinstance(answer.error, OwnerUnreachableError)
+        assert answer.error.nothing_was_sent is True
+        assert answer.error.classification.value == classification
+        assert answer.error.classification.buries
+
+    @pytest.mark.parametrize(
+        "forged",
+        [
+            lambda _instance: _signed_refusal("retiring", new_instance_id()),
+            lambda instance: _signed_refusal("retiring", instance, protocol=True),
+            lambda instance: _signed_refusal(
+                "retiring",
+                instance,
+                protocol=daemon_descriptor.PROTOCOL_VERSION - 1,
+            ),
+            lambda instance: _signed_refusal("some_new_refusal", instance),
+            lambda instance: ToolResult(
+                content=[mt.TextContent(type="text", text="done")],
+                meta=_signed_refusal("retiring", instance).meta,
+                is_error=False,
+            ),
+        ],
+        ids=[
+            "another owner",
+            "a boolean protocol",
+            "an older protocol",
+            "an unknown kind",
+            "not an error",
+        ],
+    )
+    async def test_anything_else_is_tool_data(self, tmp_path: Path, forged: Any):
+        # Only the owner this call went to can prove the call never ran. A
+        # marker from anyone else, or in any other shape, says nothing about
+        # dispatch, and treating it as proof would let a mutating call be sent
+        # twice.
+        answer = await self._call(tmp_path, forged)
+
+        assert isinstance(answer, ToolResult), f"treated as a refusal: {answer!r}"
+
+
+async def _until_true(condition: Callable[[], bool], *, seconds: float = 5.0) -> None:
+    """Yield to other tasks and threads until *condition* holds."""
+    deadline = asyncio.get_running_loop().time() + seconds
+    while not condition():
+        if asyncio.get_running_loop().time() > deadline:
+            pytest.fail("the condition never held")
+        await asyncio.sleep(0.01)
+
+
+class TestWritingAnOwnerOff:
+    """Durable burial, enforced wherever an attachment is used."""
+
+    async def test_a_burial_learned_during_an_election_wins(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The latest burial decides, not the one the running election knew.
+
+        One call fails in a way that says nothing about the owner and starts an
+        election. A second learns the owner is retiring and joins it. A
+        retiring owner still answers the probe, so that election finds it
+        again; its answer must not be adopted, and the second caller gets one
+        more election that knows.
+        """
+        from linkedin_mcp_server.daemon_proxy import OwnerFailure
+
+        retiring = _attachment(tmp_path)
+        replacement = _attachment(tmp_path, port=retiring.descriptor.port + 1)
+        retiring_id = retiring.descriptor.instance_id
+        backend = _backend(retiring, tmp_path)
+        holding = threading.Event()
+        told_to_bury: list[set[str]] = []
+
+        def elect(*_args: Any, buried: Any = frozenset(), **_kwargs: Any):
+            told_to_bury.append(set(buried))
+            if len(told_to_bury) == 1:
+                holding.wait(timeout=5)
+                return _elected(retiring)
+            return _elected(replacement)
+
+        monkeypatch.setattr("linkedin_mcp_server.daemon_election.obtain_owner", elect)
+
+        first = asyncio.create_task(
+            backend.recover(retiring_id, classification=OwnerFailure.OWNER_ERROR)
+        )
+        await _until_true(lambda: bool(told_to_bury))
+        joined = asyncio.create_task(
+            backend.recover(retiring_id, classification=OwnerFailure.RETIRING)
+        )
+        for _ in range(20):
+            await asyncio.sleep(0)
+        holding.set()
+        results = await asyncio.gather(first, joined)
+
+        assert told_to_bury == [set(), {retiring_id}]
+        assert all(
+            r is not None
+            and r.descriptor.instance_id == replacement.descriptor.instance_id
+            for r in results
+        ), "a caller was handed back the owner it had just found retiring"
+        assert backend.attachment.descriptor.instance_id == (
+            replacement.descriptor.instance_id
+        )
+
+    async def test_an_election_that_knew_everything_is_not_repeated(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The bound on the rule above: a second election only for news the
+        # first did not have. Finding nobody with full knowledge is an answer.
+        from linkedin_mcp_server.daemon_proxy import OwnerFailure
+
+        failed = _attachment(tmp_path)
+        backend = _backend(failed, tmp_path)
+        elections: list[set[str]] = []
+
+        def elect(*_args: Any, buried: Any = frozenset(), **_kwargs: Any):
+            elections.append(set(buried))
+            raise RuntimeError("nobody could be started")
+
+        monkeypatch.setattr("linkedin_mcp_server.daemon_election.obtain_owner", elect)
+
+        found = await backend.recover(
+            failed.descriptor.instance_id, classification=OwnerFailure.RETIRING
+        )
+
+        assert found is None
+        assert elections == [{failed.descriptor.instance_id}]
+
+    async def test_a_rejected_token_does_not_come_back_as_the_same_owner(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # A token is minted per instance and never changes, so the same owner
+        # found again carries the token it just refused. Retrying would be
+        # refused the same way; the recovery ends instead.
+        from linkedin_mcp_server.daemon_proxy import OwnerFailure
+
+        owner = _attachment(tmp_path)
+        backend = _backend(owner, tmp_path)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.daemon_election.obtain_owner",
+            lambda *_a, **_k: _elected(owner),
+        )
+
+        found = await backend.recover(
+            owner.descriptor.instance_id, classification=OwnerFailure.TOKEN_REJECTED
+        )
+
+        assert found is None
+
+    async def test_a_written_off_owner_gets_no_listing_and_no_new_call(
+        self, tmp_path: Path
+    ):
+        from linkedin_mcp_server.daemon_proxy import (
+            FrontendCallHeartbeatMiddleware,
+            OwnerFailure,
+            OwnerUnreachableError,
+        )
+
+        owner = _attachment(tmp_path)
+        backend = _backend(owner, tmp_path)
+        backend.note_failure(owner.descriptor.instance_id, OwnerFailure.RETIRING)
+
+        with pytest.raises(OwnerUnreachableError) as listing:
+            backend.open_client(timeout=1.0)
+        assert listing.value.nothing_was_sent is True
+        assert listing.value.classification is OwnerFailure.RETIRING
+
+        middleware = FrontendCallHeartbeatMiddleware(backend)
+        preflights: list[str] = []
+
+        async def beat(*_args: Any) -> httpx.Response:
+            preflights.append("preflight")
+            return _watched()
+
+        middleware._beat = beat  # ty: ignore[invalid-assignment]
+        dispatched: list[str] = []
+
+        async def call_next(_context: Any) -> str:
+            dispatched.append("the tool call")
+            return "the result"
+
+        with pytest.raises(OwnerUnreachableError):
+            await middleware.on_call_tool(MagicMock(), call_next)  # ty: ignore
+        assert preflights == [] and dispatched == []
+
+    async def test_a_bound_call_not_yet_sent_gets_no_client_for_a_written_off_owner(
+        self, tmp_path: Path
+    ):
+        # A binding is made before the client is built. Until the request has
+        # been sent, the owner it names is asked about again, and a burial that
+        # landed meanwhile refuses the client with a not-sent failure naming
+        # that owner rather than quietly swapping in another one.
+        from linkedin_mcp_server.daemon_proxy import (
+            OwnerFailure,
+            OwnerUnreachableError,
+            _call_being_made,
+            _CallBinding,
+        )
+
+        owner = _attachment(tmp_path)
+        backend = _backend(owner, tmp_path)
+        marked = _call_being_made.set(_CallBinding("v1." + "a" * 32, owner))
+        try:
+            backend.note_failure(owner.descriptor.instance_id, OwnerFailure.RETIRING)
+            with pytest.raises(OwnerUnreachableError) as refused:
+                backend.open_client(timeout=1.0)
+        finally:
+            _call_being_made.reset(marked)
+
+        assert refused.value.nothing_was_sent is True
+        assert refused.value.instance_id == owner.descriptor.instance_id
+        assert refused.value.classification is OwnerFailure.RETIRING
+
+    async def test_a_second_attempts_burial_is_kept_for_the_next_call(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The second failure is not recovered from, but what it learned about
+        # the replacement is not thrown away either.
+        from linkedin_mcp_server.daemon_proxy import (
+            FrontendOwnerRecoveryMiddleware,
+            OwnerFailure,
+            OwnerUnreachableError,
+        )
+
+        failed = _attachment(tmp_path)
+        replacement = _attachment(tmp_path, port=failed.descriptor.port + 1)
+        backend = _backend(failed, tmp_path)
+        elections = 0
+
+        def elect(*_args: Any, **_kwargs: Any):
+            nonlocal elections
+            elections += 1
+            return _elected(replacement)
+
+        monkeypatch.setattr("linkedin_mcp_server.daemon_election.obtain_owner", elect)
+        attempts = 0
+
+        async def call_next(_context: Any) -> Any:
+            nonlocal attempts
+            attempts += 1
+            owner = failed if attempts == 1 else replacement
+            raise OwnerUnreachableError(
+                instance_id=owner.descriptor.instance_id,
+                nothing_was_sent=True,
+                cause=RuntimeError("refused"),
+                classification=OwnerFailure.RETIRING,
+            )
+
+        with pytest.raises(OwnerUnreachableError):
+            await FrontendOwnerRecoveryMiddleware(backend).on_call_tool(
+                MagicMock(),
+                call_next,  # ty: ignore
+            )
+
+        assert attempts == 2
+        assert elections == 1, "the second failure elected again"
+        assert replacement.descriptor.instance_id in backend._unusable
+
+
+class TestControlOnlyNeverRunsATool:
+    """A pair proved for control is refused wherever a call could be sent."""
+
+    @staticmethod
+    def _control_only(tmp_path: Path) -> Attachment:
+        import dataclasses
+
+        return dataclasses.replace(_attachment(tmp_path), control_only=True)
+
+    def test_a_backend_cannot_be_built_around_one(self, tmp_path: Path):
+        with pytest.raises(ValueError, match="control only"):
+            _backend(self._control_only(tmp_path), tmp_path)
+
+    async def test_an_election_that_returns_one_is_not_adopted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        failed = _attachment(tmp_path)
+        backend = _backend(failed, tmp_path)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.daemon_election.obtain_owner",
+            lambda *_a, **_k: _elected(self._control_only(tmp_path)),
+        )
+
+        assert await backend.recover(failed.descriptor.instance_id) is None
+        assert backend.attachment is failed
+
+    def test_a_bound_call_cannot_open_a_client_to_one(self, tmp_path: Path):
+        from linkedin_mcp_server.daemon_proxy import _call_being_made, _CallBinding
+
+        backend = _backend(_attachment(tmp_path), tmp_path)
+        marked = _call_being_made.set(
+            _CallBinding("v1." + "b" * 32, self._control_only(tmp_path))
+        )
+        try:
+            with pytest.raises(ValueError, match="control only"):
+                backend.open_client(timeout=1.0)
+        finally:
+            _call_being_made.reset(marked)
+
+    async def test_a_call_is_not_preflighted_or_sent_to_one(self, tmp_path: Path):
+        from linkedin_mcp_server.daemon_proxy import FrontendCallHeartbeatMiddleware
+
+        backend = _backend(_attachment(tmp_path), tmp_path)
+        backend._attachment = self._control_only(tmp_path)
+        middleware = FrontendCallHeartbeatMiddleware(backend)
+        preflights: list[str] = []
+
+        async def beat(*_args: Any) -> httpx.Response:
+            preflights.append("preflight")
+            return _watched()
+
+        middleware._beat = beat  # ty: ignore[invalid-assignment]
+        dispatched: list[str] = []
+
+        async def call_next(_context: Any) -> str:
+            dispatched.append("the tool call")
+            return "the result"
+
+        with pytest.raises(ValueError, match="control only"):
+            await middleware.on_call_tool(MagicMock(), call_next)  # ty: ignore
+        assert preflights == [] and dispatched == []
+
+
+class TestWhatOneCallCanCost:
+    """The composed bound, counted through the three middlewares a proxy installs.
+
+    Auth repair outermost, then recovery, then the heartbeat. The longest
+    sequence that can still end: the first invocation fails once and is
+    recovered, its repeat comes back asking for a sign-in, and the read-only
+    replay fails twice. Every preflight, dispatch and election is counted
+    separately. The bound is at most four preflights, four dispatches and four
+    election joins; fewer elections run when no burial news arrives while one
+    is in flight, or when flights are shared.
+    """
+
+    async def test_without_late_burial_news_a_call_costs_two_elections(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import daemon_auth
+        from linkedin_mcp_server.daemon_auth import (
+            MARKER_KEY,
+            MARKER_VERSION,
+            FrontendAuthRepairMiddleware,
+        )
+        from linkedin_mcp_server.daemon_proxy import (
+            FrontendCallHeartbeatMiddleware,
+            FrontendOwnerRecoveryMiddleware,
+            OwnerUnreachableError,
+            _call_being_made,
+        )
+
+        owners = [_attachment(tmp_path, port=51300 + n) for n in range(4)]
+        backend = _backend(owners[0], tmp_path)
+        elections = 0
+
+        def elect(*_args: Any, **_kwargs: Any):
+            nonlocal elections
+            elections += 1
+            return _elected(owners[elections])
+
+        monkeypatch.setattr("linkedin_mcp_server.daemon_election.obtain_owner", elect)
+
+        async def repaired(*_args: Any) -> None:
+            return None
+
+        monkeypatch.setattr(daemon_auth, "_repair_auth_locally", repaired)
+
+        preflights: list[str] = []
+
+        async def beat(attachment: Attachment, _call_id: str) -> httpx.Response:
+            preflights.append(attachment.descriptor.instance_id)
+            return _watched()
+
+        heartbeat = FrontendCallHeartbeatMiddleware(backend)
+        heartbeat._beat = beat  # ty: ignore[invalid-assignment]
+        dispatches: list[str] = []
+
+        async def dispatch(_context: Any) -> Any:
+            bound = _call_being_made.get()
+            assert bound is not None
+            dispatches.append(bound.attachment.descriptor.instance_id)
+            if len(dispatches) == 2:
+                # The repeat reaches an owner whose session has expired.
+                return ToolResult(
+                    content=[mt.TextContent(type="text", text="sign in")],
+                    meta={
+                        MARKER_KEY: {
+                            "v": MARKER_VERSION,
+                            "reason": "stale",
+                            "replayable": True,
+                            "browser_open": False,
+                            "generation": None,
+                        }
+                    },
+                    is_error=True,
+                )
+            raise OwnerUnreachableError(
+                instance_id=bound.attachment.descriptor.instance_id,
+                nothing_was_sent=True,
+                cause=httpx.ConnectError("gone"),
+            )
+
+        recovery = FrontendOwnerRecoveryMiddleware(backend)
+
+        async def through_the_heartbeat(context: Any) -> Any:
+            return await heartbeat.on_call_tool(context, dispatch)  # ty: ignore
+
+        async def through_recovery(context: Any) -> Any:
+            return await recovery.on_call_tool(context, through_the_heartbeat)
+
+        tool = MagicMock()
+        tool.annotations = MagicMock(readOnlyHint=True)
+        context = MagicMock()
+        context.message.name = "get_person_profile"
+        context.fastmcp_context.fastmcp.get_tool = AsyncMock(return_value=tool)
+
+        with pytest.raises(OwnerUnreachableError):
+            await FrontendAuthRepairMiddleware(tool_timeout=30.0).on_call_tool(
+                context,
+                through_recovery,
+            )
+
+        assert len(preflights) == 4
+        assert len(dispatches) == 4
+        assert elections == 2
+        # Every dispatch followed a preflight to the same owner, in order.
+        assert dispatches == preflights
+
+    async def test_burial_news_during_each_election_raises_it_to_four(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The same sequence, with an owner written off while each recovery waits.
+
+        Each recovery may run one more election for news its first election did
+        not know, and auth repair can enter recovery twice, so four is the
+        ceiling. The news arrives from another thread, the way the event loop
+        would deliver another call's burial while the election runs.
+        """
+        from linkedin_mcp_server import daemon_auth
+        from linkedin_mcp_server.daemon_auth import (
+            MARKER_KEY,
+            MARKER_VERSION,
+            FrontendAuthRepairMiddleware,
+        )
+        from linkedin_mcp_server.daemon_proxy import (
+            FrontendCallHeartbeatMiddleware,
+            FrontendOwnerRecoveryMiddleware,
+            OwnerFailure,
+            OwnerUnreachableError,
+            _call_being_made,
+        )
+
+        owners = [_attachment(tmp_path, port=51400 + n) for n in range(3)]
+        backend = _backend(owners[0], tmp_path)
+        loop = asyncio.get_running_loop()
+        told_to_bury: list[int] = []
+
+        def elect(*_args: Any, buried: Any = frozenset(), **_kwargs: Any):
+            told_to_bury.append(len(buried))
+            number = len(told_to_bury)
+            if number in (1, 3):
+                # The owner this election is about to return is found retiring
+                # by another call while it runs.
+                owner = owners[(number - 1) // 2]
+                learned = threading.Event()
+
+                def learn() -> None:
+                    backend.note_failure(
+                        owner.descriptor.instance_id, OwnerFailure.RETIRING
+                    )
+                    learned.set()
+
+                loop.call_soon_threadsafe(learn)
+                assert learned.wait(timeout=5)
+                return _elected(owner)
+            return _elected(owners[number // 2])
+
+        monkeypatch.setattr("linkedin_mcp_server.daemon_election.obtain_owner", elect)
+
+        async def repaired(*_args: Any) -> None:
+            return None
+
+        monkeypatch.setattr(daemon_auth, "_repair_auth_locally", repaired)
+        preflights: list[str] = []
+
+        async def beat(attachment: Attachment, _call_id: str) -> httpx.Response:
+            preflights.append(attachment.descriptor.instance_id)
+            return _watched()
+
+        heartbeat = FrontendCallHeartbeatMiddleware(backend)
+        heartbeat._beat = beat  # ty: ignore[invalid-assignment]
+        dispatches: list[str] = []
+        written_off_at_dispatch: list[bool] = []
+
+        async def dispatch(_context: Any) -> Any:
+            bound = _call_being_made.get()
+            assert bound is not None
+            dispatches.append(bound.attachment.descriptor.instance_id)
+            written_off_at_dispatch.append(
+                bound.attachment.descriptor.instance_id in backend._unusable
+            )
+            if len(dispatches) == 2:
+                return ToolResult(
+                    content=[mt.TextContent(type="text", text="sign in")],
+                    meta={
+                        MARKER_KEY: {
+                            "v": MARKER_VERSION,
+                            "reason": "stale",
+                            "replayable": True,
+                            "browser_open": False,
+                            "generation": None,
+                        }
+                    },
+                    is_error=True,
+                )
+            raise OwnerUnreachableError(
+                instance_id=bound.attachment.descriptor.instance_id,
+                nothing_was_sent=True,
+                cause=httpx.ConnectError("gone"),
+            )
+
+        recovery = FrontendOwnerRecoveryMiddleware(backend)
+
+        async def through_the_heartbeat(context: Any) -> Any:
+            return await heartbeat.on_call_tool(context, dispatch)  # ty: ignore
+
+        async def through_recovery(context: Any) -> Any:
+            return await recovery.on_call_tool(context, through_the_heartbeat)
+
+        tool = MagicMock()
+        tool.annotations = MagicMock(readOnlyHint=True)
+        context = MagicMock()
+        context.message.name = "get_person_profile"
+        context.fastmcp_context.fastmcp.get_tool = AsyncMock(return_value=tool)
+
+        with pytest.raises(OwnerUnreachableError):
+            await FrontendAuthRepairMiddleware(tool_timeout=30.0).on_call_tool(
+                context,
+                through_recovery,
+            )
+
+        assert len(preflights) == 4
+        assert len(dispatches) == 4
+        assert told_to_bury == [0, 1, 1, 2]
+        assert dispatches == preflights
+        # No dispatch went to an owner already written off when it was sent.
+        assert written_off_at_dispatch == [False] * 4
+
+
+class _HeldAtConnect(FastMCPTransport):
+    """An owner whose connection is held open until a test lets it proceed.
+
+    The window between a call's binding and its send: the client is being built
+    and initialized, and another call can write the owner off meanwhile.
+    """
+
+    def __init__(self, server: FastMCP) -> None:
+        super().__init__(server)
+        self.reached = asyncio.Event()
+        self.release = asyncio.Event()
+
+    @asynccontextmanager
+    async def connect_session(self, **kwargs: Any) -> AsyncIterator[Any]:
+        self.reached.set()
+        await self.release.wait()
+        async with super().connect_session(**kwargs) as session:
+            yield session
+
+
+class TestBurialAfterTheLastCheck:
+    """An owner written off between a call's checks and its send gets no request.
+
+    Every check before an await is stale after it. These pin the two awaits a
+    new request crosses after choosing its owner, the preflight and the client
+    setup, and the control that a request already sent keeps its owner.
+    """
+
+    @staticmethod
+    def _context() -> MagicMock:
+        context = MagicMock()
+        context.message.name = "send_connection_request"
+        return context
+
+    async def test_a_burial_during_a_successful_preflight_stops_the_dispatch(
+        self, tmp_path: Path
+    ):
+        # The first call's preflight is held. Meanwhile a second call finds the
+        # same owner retiring, writes it off and recovers to a replacement.
+        # The first preflight then returns its go-ahead, which is older than
+        # that news.
+        from unittest.mock import patch
+
+        from linkedin_mcp_server import daemon_election
+        from linkedin_mcp_server.daemon_proxy import (
+            FrontendCallHeartbeatMiddleware,
+            FrontendOwnerRecoveryMiddleware,
+            OwnerFailure,
+            OwnerUnreachableError,
+            _call_being_made,
+        )
+
+        old = _attachment(tmp_path)
+        new = _attachment(tmp_path, port=old.descriptor.port + 1)
+        backend = _backend(old, tmp_path)
+        waiting, release = asyncio.Event(), asyncio.Event()
+
+        first = FrontendCallHeartbeatMiddleware(backend)
+
+        async def held_beat(_attachment: Attachment, _call_id: str) -> httpx.Response:
+            waiting.set()
+            await release.wait()
+            return _watched()
+
+        first._beat = held_beat  # ty: ignore[invalid-assignment]
+        dispatched: list[str] = []
+
+        async def dispatch(_context: Any) -> str:
+            bound = _call_being_made.get()
+            assert bound is not None
+            dispatched.append(bound.attachment.descriptor.instance_id)
+            return "the result"
+
+        call = asyncio.create_task(first.on_call_tool(self._context(), dispatch))  # ty: ignore
+        await asyncio.wait_for(waiting.wait(), timeout=5)
+
+        second = FrontendCallHeartbeatMiddleware(backend)
+        second._beat = _answers(
+            **{
+                old.descriptor.instance_id: _retiring(old.descriptor.instance_id),
+                new.descriptor.instance_id: _watched(),
+            }
+        )
+
+        async def inner(context: Any) -> Any:
+            return await second.on_call_tool(context, dispatch)  # ty: ignore
+
+        with patch.object(daemon_election, "obtain_owner", return_value=_elected(new)):
+            await FrontendOwnerRecoveryMiddleware(backend).on_call_tool(
+                self._context(),
+                inner,
+            )
+        assert old.descriptor.instance_id in backend._unusable
+
+        release.set()
+        with pytest.raises(OwnerUnreachableError) as refused:
+            await asyncio.wait_for(call, timeout=5)
+
+        assert dispatched == [new.descriptor.instance_id]
+        assert refused.value.nothing_was_sent is True
+        assert refused.value.instance_id == old.descriptor.instance_id
+        assert refused.value.classification is OwnerFailure.RETIRING
+
+    async def test_a_burial_during_client_setup_stops_the_send(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The call is bound and its client is being initialized when another
+        # call writes the owner off. The client is real and the owner is an
+        # in-process server, so a request that got through would run its tool.
+        from linkedin_mcp_server.daemon_proxy import (
+            FrontendCallHeartbeatMiddleware,
+            OwnerFailure,
+            OwnerUnreachableError,
+        )
+
+        ran: list[str] = []
+        owner = FastMCP("owner")
+
+        @owner.tool(name="send_connection_request")
+        async def send() -> str:
+            ran.append("sent")
+            return "sent"
+
+        held = _HeldAtConnect(owner)
+        _reach_owners_in_process(monkeypatch, lambda _url: held)
+        attachment = _attachment(tmp_path)
+        backend = _backend(attachment, tmp_path)
+        heartbeat = FrontendCallHeartbeatMiddleware(backend)
+
+        async def dispatch(_context: Any) -> Any:
+            client = backend.open_client(timeout=5.0)
+            async with client:
+                return await client.call_tool_mcp("send_connection_request", {})
+
+        call = asyncio.create_task(heartbeat.on_call_tool(self._context(), dispatch))  # ty: ignore
+        await asyncio.wait_for(held.reached.wait(), timeout=5)
+        backend.note_failure(attachment.descriptor.instance_id, OwnerFailure.RETIRING)
+        held.release.set()
+
+        with pytest.raises(OwnerUnreachableError) as refused:
+            await asyncio.wait_for(call, timeout=5)
+
+        assert ran == []
+        assert refused.value.nothing_was_sent is True
+        assert refused.value.instance_id == attachment.descriptor.instance_id
+        assert refused.value.classification is OwnerFailure.RETIRING
+
+    async def test_a_request_already_sent_keeps_its_owner_and_its_heartbeats(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The positive control. The request reached the owner and is running
+        # when the owner is written off and a replacement adopted. Moving its
+        # heartbeats, or refusing it now, would get a live call cancelled by the
+        # owner running it.
+        from linkedin_mcp_server.daemon_proxy import (
+            FrontendCallHeartbeatMiddleware,
+            OwnerFailure,
+        )
+
+        started, finish = asyncio.Event(), asyncio.Event()
+        owner = FastMCP("owner")
+
+        @owner.tool(name="send_connection_request")
+        async def send() -> str:
+            started.set()
+            await finish.wait()
+            return "sent"
+
+        _reach_owners_in_process(monkeypatch, lambda _url: owner)
+        monkeypatch.setattr("linkedin_mcp_server.daemon_proxy.HEARTBEAT_SECONDS", 0.05)
+        beats: list[str] = []
+
+        async def beat(attachment: Attachment, _call_id: str) -> httpx.Response:
+            beats.append(attachment.descriptor.instance_id)
+            return _watched()
+
+        monkeypatch.setattr(
+            FrontendCallHeartbeatMiddleware, "_beat", staticmethod(beat)
+        )
+        old = _attachment(tmp_path)
+        backend = _backend(old, tmp_path)
+        heartbeat = FrontendCallHeartbeatMiddleware(backend)
+
+        async def dispatch(_context: Any) -> Any:
+            client = backend.open_client(timeout=5.0)
+            async with client:
+                return await client.call_tool_mcp("send_connection_request", {})
+
+        call = asyncio.create_task(heartbeat.on_call_tool(self._context(), dispatch))  # ty: ignore
+        await asyncio.wait_for(started.wait(), timeout=5)
+        backend.note_failure(old.descriptor.instance_id, OwnerFailure.RETIRING)
+        backend._attachment = _attachment(tmp_path, port=old.descriptor.port + 1)
+        beats_at_burial = len(beats)
+        await asyncio.sleep(0.3)
+        finish.set()
+        result = await asyncio.wait_for(call, timeout=5)
+
+        assert result.isError is False  # ty: ignore[unresolved-attribute]
+        assert len(beats) - beats_at_burial >= 2, "the heartbeats stopped"
+        assert set(beats) == {old.descriptor.instance_id}
+
+
+class TestTheSendBoundary:
+    """The last burial check runs where the session takes the request.
+
+    fastmcp's session monitor runs each request as a task of its own, so a
+    check made before handing it the request is older than the send by at
+    least one turn of the loop, and a burial already queued runs in that turn.
+    These queue the burial exactly there, with the real monitor and a real
+    in-process owner, and add no await of their own.
+    """
+
+    async def test_a_request_the_monitor_never_starts_is_closed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The installed monitor refuses before starting its coroutine once the
+        # session has ended, and closes what it was given: the wrapper. The
+        # request the wrapper holds must be closed too, not left unawaited.
+        import inspect
+
+        from fastmcp.server.providers.proxy import ProxyClient
+
+        from linkedin_mcp_server.daemon_proxy import _tells_which_owner_failed
+
+        async def refuse_unstarted(_self, coro, **_kwargs):
+            coro.close()
+            raise RuntimeError("the session has already ended")
+
+        monkeypatch.setattr(
+            ProxyClient, "_await_with_session_monitoring", refuse_unstarted
+        )
+        client: Any = object.__new__(_tells_which_owner_failed())
+
+        async def request() -> str:
+            return "sent"
+
+        pending = request()
+        with pytest.raises(RuntimeError, match="already ended"):
+            await client._await_with_session_monitoring(pending)
+
+        assert inspect.getcoroutinestate(pending) == inspect.CORO_CLOSED
+
+    @pytest.mark.parametrize("buried", [True, False], ids=["buried", "control"])
+    async def test_a_burial_queued_as_the_monitor_takes_the_send_stops_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, buried: bool
+    ):
+        from linkedin_mcp_server.daemon_proxy import (
+            FrontendCallHeartbeatMiddleware,
+            OwnerFailure,
+            OwnerUnreachableError,
+        )
+
+        ran: list[str] = []
+        owner = FastMCP("owner")
+
+        @owner.tool(name="send_connection_request")
+        async def send() -> str:
+            ran.append("sent")
+            return "sent"
+
+        _reach_owners_in_process(monkeypatch, lambda _url: owner)
+        old = _attachment(tmp_path)
+        backend = _backend(old, tmp_path)
+        heartbeat = FrontendCallHeartbeatMiddleware(backend)
+        loop = asyncio.get_running_loop()
+
+        async def dispatch(_context: Any) -> Any:
+            client = backend.open_client(timeout=5.0)
+            async with client:
+                # The monitored path, not the one it takes with no session task.
+                assert client._session_state.session_task is not None
+                monitor = client._await_with_session_monitoring
+
+                async def burial_queued_first(coro: Any, **kwargs: Any) -> Any:
+                    if buried:
+                        loop.call_soon(
+                            backend.note_failure,
+                            old.descriptor.instance_id,
+                            OwnerFailure.RETIRING,
+                        )
+                    return await monitor(coro, **kwargs)
+
+                monkeypatch.setattr(
+                    client, "_await_with_session_monitoring", burial_queued_first
+                )
+                return await client.call_tool_mcp("send_connection_request", {})
+
+        context = MagicMock()
+        context.message.name = "send_connection_request"
+        if not buried:
+            result = await heartbeat.on_call_tool(context, dispatch)  # ty: ignore
+            assert ran == ["sent"]
+            assert getattr(result, "isError", None) is False
+            return
+
+        with pytest.raises(OwnerUnreachableError) as refused:
+            await heartbeat.on_call_tool(context, dispatch)  # ty: ignore
+
+        assert ran == [], "the request went to an owner written off before the send"
+        assert refused.value.nothing_was_sent is True
+        assert refused.value.instance_id == old.descriptor.instance_id
+        assert refused.value.classification is OwnerFailure.RETIRING
+
+    async def test_a_listing_to_an_owner_written_off_during_setup_is_not_sent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # An unbound listing picks its owner when the client is built. An owner
+        # written off while that client is being initialized gets no listing:
+        # a same-configuration older build stays attachable until it turns
+        # over, and its tool schemas may differ from its replacement's.
+        from fastmcp.server.middleware import Middleware as ServerMiddleware
+
+        from linkedin_mcp_server.daemon_proxy import (
+            OwnerFailure,
+            OwnerUnreachableError,
+        )
+
+        listed: list[str] = []
+
+        class CountsListings(ServerMiddleware):
+            async def on_list_tools(self, context: Any, call_next: Any) -> Any:
+                listed.append("tools/list")
+                return await call_next(context)
+
+        owner = FastMCP("owner")
+        owner.add_middleware(CountsListings())
+
+        @owner.tool
+        async def get_person_profile() -> str:
+            return "profile"
+
+        held = _HeldAtConnect(owner)
+        _reach_owners_in_process(monkeypatch, lambda _url: held)
+        attachment = _attachment(tmp_path)
+        backend = _backend(attachment, tmp_path)
+        client = backend.open_client(timeout=5.0)
+
+        async def listing() -> Any:
+            async with client:
+                return await client.list_tools_mcp()
+
+        listing_task = asyncio.create_task(listing())
+        await asyncio.wait_for(held.reached.wait(), timeout=5)
+        backend.note_failure(attachment.descriptor.instance_id, OwnerFailure.RETIRING)
+        held.release.set()
+
+        with pytest.raises(OwnerUnreachableError) as refused:
+            await asyncio.wait_for(listing_task, timeout=5)
+
+        assert listed == []
+        assert refused.value.nothing_was_sent is True
+        assert refused.value.instance_id == attachment.descriptor.instance_id
+        assert refused.value.classification is OwnerFailure.RETIRING

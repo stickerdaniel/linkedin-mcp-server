@@ -38,9 +38,10 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import datetime
+import enum
 import logging
-from collections.abc import Awaitable
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Coroutine
+from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
@@ -56,11 +57,16 @@ from opentelemetry.trace import Status, StatusCode
 
 from linkedin_mcp_server import daemon_owner
 from linkedin_mcp_server.daemon_auth import a_repeat_could_change_something
+from linkedin_mcp_server.daemon_descriptor import PROTOCOL_VERSION
 from linkedin_mcp_server.daemon_liveness import (
     CALL_HEADER,
     HEARTBEAT_PATH,
     HEARTBEAT_SECONDS,
+    REFUSAL_KEY,
+    RETIRING,
+    UNMARKED_CALL,
     new_call_id,
+    unknown_outcome,
 )
 
 if TYPE_CHECKING:
@@ -85,10 +91,24 @@ class _CallBinding:
     user as abandoned. That is reachable, because with no component cache every
     call re-lists first, and a replacement adopted between the two would move
     the backend underneath this call.
+
+    A binding is not yet a call in flight. It is made before the client is
+    built, initialized and asked to send, and an owner written off during any
+    of those awaits must not receive the request. *dispatch* records the one
+    moment the tool request was actually handed to the session; only from then
+    on does the call keep its owner whatever happens to it.
     """
 
     call_id: str
     attachment: Attachment
+    dispatch: _Dispatch = field(default_factory=lambda: _Dispatch())
+
+
+@dataclass
+class _Dispatch:
+    """Whether a bound call's tool request has been handed to its session."""
+
+    sent: bool = False
 
 
 #: The call the current task is making, for the factory to address and stamp.
@@ -141,6 +161,56 @@ _TIMEOUT_MARGIN_SECONDS = 30.0
 _NO_COMPONENT_CACHE = 0.0
 
 
+class OwnerFailure(enum.Enum):
+    """Why an owner could not take a call, in the terms recovery acts on.
+
+    Separate from whether anything was sent, which is its own field on
+    :class:`OwnerUnreachableError`: a burying failure is always one where the
+    tool request never left, but the two answer different questions.
+    """
+
+    #: No connection could be opened. Maybe gone, maybe restarting; the
+    #: election's own probe decides.
+    UNREACHABLE = "unreachable"
+    #: Connected, then no usable answer: a read timeout, a protocol error or a
+    #: 5xx. A stalled owner looks like this and may answer a moment later.
+    OWNER_ERROR = "owner_error"
+    #: 401. The token this frontend holds is not the one the process on that
+    #: port accepts, which usually means a different owner holds the port now.
+    TOKEN_REJECTED = "token_rejected"
+    #: 404 on the heartbeat route. Not an owner of this protocol.
+    ROUTE_MISSING = "route_missing"
+    #: This owner has closed admission and is on its way out.
+    RETIRING = "retiring"
+    #: This owner refused a call it could not identify.
+    UNMARKED_REFUSED = "unmarked_refused"
+    #: Any other answer. A same-protocol owner gives only 200, 401 and 409 on
+    #: the heartbeat route, so anything else is not this owner as this
+    #: frontend knows it.
+    UNEXPECTED_STATUS = "unexpected_status"
+
+    @property
+    def buries(self) -> bool:
+        """Whether this instance must never be dispatched to again.
+
+        The failures that say something about the owner rather than about one
+        moment of it. A retiring owner still answers the ping an election
+        probes with, so without this it would be found, attached to, and
+        refused again for as long as it took to leave.
+        """
+        return self in _BURYING
+
+
+_BURYING = frozenset(
+    {
+        OwnerFailure.ROUTE_MISSING,
+        OwnerFailure.RETIRING,
+        OwnerFailure.UNMARKED_REFUSED,
+        OwnerFailure.UNEXPECTED_STATUS,
+    }
+)
+
+
 class OwnerUnreachableError(Exception):
     """The owner a proxy is attached to could not be reached.
 
@@ -157,15 +227,41 @@ class OwnerUnreachableError(Exception):
     acknowledgement anywhere in the protocol, so after an ambiguous transport
     failure this process cannot tell whether the owner was still queued, already
     held the profile lease, or had finished the effect. Only when nothing left
-    this process is repeating a mutating call safe.
+    this process is repeating a mutating call safe. A failed heartbeat
+    preflight and an owner's own refusal both answer it for the tool request,
+    not for the control exchange that carried the news.
+
+    *classification* is carried to :meth:`DaemonProxyBackend.recover`, which is
+    where it decides whether the owner is written off. Derived from the cause
+    when not given, because every transport failure raised below already says
+    whether a connection was ever opened.
     """
 
     def __init__(
-        self, *, instance_id: str, nothing_was_sent: bool, cause: BaseException
+        self,
+        *,
+        instance_id: str,
+        nothing_was_sent: bool,
+        cause: BaseException,
+        classification: OwnerFailure | None = None,
     ) -> None:
-        super().__init__(f"The shared browser owner did not answer: {cause}")
+        if classification is None:
+            classification = (
+                OwnerFailure.UNREACHABLE
+                if _no_connection_was_established(cause)
+                else OwnerFailure.OWNER_ERROR
+            )
+        if classification in (OwnerFailure.UNREACHABLE, OwnerFailure.OWNER_ERROR):
+            message = f"The shared browser owner did not answer: {cause}"
+        else:
+            message = (
+                f"The shared browser owner could not take this call "
+                f"({classification.value}): {cause}"
+            )
+        super().__init__(message)
         self.instance_id = instance_id
         self.nothing_was_sent = nothing_was_sent
+        self.classification = classification
 
 
 def unreachable_owner_in(exc: BaseException) -> OwnerUnreachableError | None:
@@ -329,9 +425,77 @@ def _tells_which_owner_failed() -> type:
         can do is take that answer's place. See its own docstring.
         """
 
-        def __init__(self, *args: Any, instance_id: str, **kwargs: Any) -> None:
+        def __init__(
+            self,
+            *args: Any,
+            instance_id: str,
+            attachment: Attachment | None = None,
+            binding: _CallBinding | None = None,
+            still_usable: Callable[[Attachment], None] | None = None,
+            **kwargs: Any,
+        ) -> None:
             super().__init__(*args, **kwargs)
             self._instance_id = instance_id
+            self._attachment = attachment
+            self._binding = binding
+            self._still_usable = still_usable
+
+        def _check_at_the_session(self, *, claims_the_call: bool) -> None:
+            """Refuse a request to a written-off owner, and claim the call if asked.
+
+            Runs inside the coroutine the session monitor schedules, as its first
+            step before the session method: the last point at which this process
+            can still decline to send. Checking earlier and sending later is not
+            the same thing, because the monitor runs the request as a task of its
+            own and anything already queued runs first, another call's burial
+            included. A refusal here says nothing was sent, which is exactly true.
+
+            Every request is checked, listings too: an owner written off while
+            its client was being set up gets no request at all. *claims_the_call*
+            marks the bound tool call as sent, and from then on it keeps its
+            owner, because a request already on its way must stay with the owner
+            whose heartbeats are keeping it alive.
+            """
+            binding = self._binding
+            if binding is not None and binding.dispatch.sent:
+                return
+            target = binding.attachment if binding is not None else self._attachment
+            if self._still_usable is not None and target is not None:
+                self._still_usable(target)
+            if claims_the_call and binding is not None:
+                binding.dispatch.sent = True
+
+        async def _await_with_session_monitoring(
+            self, coro: Coroutine[Any, Any, Any], *, claims_the_call: bool = False
+        ) -> Any:
+            """The installed monitor, with the burial check moved inside its task.
+
+            Every request fastmcp's client makes goes through here, so this is
+            the one place that sees the send as it happens.
+            """
+
+            entered = False
+
+            async def at_the_session() -> Any:
+                nonlocal entered
+                entered = True
+                try:
+                    self._check_at_the_session(claims_the_call=claims_the_call)
+                except BaseException:
+                    # Never started, and closed so it is not reported as a
+                    # coroutine nobody awaited.
+                    coro.close()
+                    raise
+                return await coro
+
+            try:
+                return await super()._await_with_session_monitoring(at_the_session())
+            finally:
+                # The monitor can refuse before it starts the wrapper, when the
+                # session has already ended. It then closes the wrapper, which
+                # never reaches *coro*, so the request is closed here instead.
+                if not entered:
+                    coro.close()
 
         async def _saying_which_owner(
             self, operation: Awaitable[Any], *, nothing_was_sent: bool | None
@@ -486,6 +650,10 @@ def _tells_which_owner_failed() -> type:
                         if propagated_meta
                         else None
                     )
+                    # Checked and claimed inside the monitored task, right
+                    # before the session takes the request, never out here: the
+                    # monitor schedules that task, and a burial queued meanwhile
+                    # runs first (`_check_at_the_session`).
                     result = await self._await_with_session_monitoring(
                         self.session.send_request(
                             mt.ClientRequest(
@@ -504,7 +672,8 @@ def _tells_which_owner_failed() -> type:
                             progress_callback=(
                                 progress_handler or self._progress_handler
                             ),
-                        )
+                        ),
+                        claims_the_call=True,
                     )
                     if result.isError and span.is_recording():
                         span.set_attribute("error.type", "tool_error")
@@ -519,6 +688,40 @@ def _tells_which_owner_failed() -> type:
             return await self._saying_which_owner(send_request(), nothing_was_sent=None)
 
     return TellsWhichOwnerFailed
+
+
+#: How many elections one recovery may join. The second exists only for a
+#: caller whose burial the first election did not know about.
+_ELECTIONS_PER_RECOVERY = 2
+
+
+@dataclass(frozen=True)
+class _Flight:
+    """One election in progress, and which owners it was told to pass over."""
+
+    task: asyncio.Task[Attachment | None]
+    buried: frozenset[str]
+
+
+class _WrittenOff(Exception):
+    """The cause on a failure for an owner this process already wrote off."""
+
+    def __init__(self, classification: OwnerFailure) -> None:
+        super().__init__(f"the owner was already written off ({classification.value})")
+
+
+def _refuse_control_only(attachment: Attachment) -> None:
+    """Refuse to dispatch anything through a pair proved for control only.
+
+    Checked wherever an attachment becomes somewhere to send a call, not just
+    where it is produced. The lookup that makes one never marks it attachable,
+    and that is one rule in one place; this makes the prohibition hold even if
+    that place changes.
+    """
+    if attachment.control_only:
+        raise ValueError(
+            "A shared browser owner proved for control only cannot run tools"
+        )
 
 
 class DaemonProxyBackend:
@@ -541,6 +744,14 @@ class DaemonProxyBackend:
     Not frozen, unlike the ``Attachment`` it holds. The attachment is a proved
     fact about one owner and must not be edited; which attachment is current is
     exactly the thing that moves.
+
+    **Some owners are written off for good.** An owner that refused a call as
+    retiring, answered the heartbeat route with 404 or anything unexpected, or
+    refused an unmarked call is recorded in ``_unusable`` and never dispatched
+    to again by this process. Every consumer asks: a new call, a listing, an
+    election's result before it is adopted, and a caller that joined an election
+    already in progress. A call already running keeps the owner it was bound to,
+    because moving its heartbeats would get it cancelled by the owner running it.
     """
 
     def __init__(
@@ -551,6 +762,7 @@ class DaemonProxyBackend:
         profile: Path,
         config: AppConfig,
     ) -> None:
+        _refuse_control_only(attachment)
         self._attachment = attachment
         #: What an election needs, kept rather than looked up again.
         self.auth_root = auth_root
@@ -559,24 +771,84 @@ class DaemonProxyBackend:
         #: The one election in progress, or nothing. Only :meth:`recover` writes
         #: it, and only :meth:`_elect` writes ``_attachment``, which is what makes
         #: comparing instance ids a sound test of whether a failure is current.
-        self._electing: asyncio.Task[Attachment | None] | None = None
+        self._electing: _Flight | None = None
+        #: Owners this process will not dispatch to again, and why. Only grows.
+        self._unusable: dict[str, OwnerFailure] = {}
 
     @property
     def attachment(self) -> Attachment:
         """The owner to talk to right now."""
         return self._attachment
 
-    async def recover(self, failed_instance: str) -> Attachment | None:
+    def note_failure(self, instance_id: str, classification: OwnerFailure) -> None:
+        """Write *instance_id* off if *classification* says it is unusable.
+
+        Synchronous and first, before any election is joined or started, so a
+        burial this caller learned is part of every decision made after it.
+        """
+        if classification.buries and instance_id not in self._unusable:
+            logger.info(
+                "Not using this shared browser owner again (%s)", classification.value
+            )
+            self._unusable[instance_id] = classification
+
+    def attachment_for_a_call(self) -> Attachment:
+        """The owner a new call may be dispatched to, or a failure saying why not."""
+        attachment = self._attachment
+        self.refuse_if_written_off(attachment)
+        return attachment
+
+    def refuse_if_written_off(self, attachment: Attachment) -> None:
+        """Raise if a new request may not go to *attachment*, as of right now.
+
+        Asked again at every point a new request could still be stopped: when a
+        call picks its owner, after its preflight returns, when its client is
+        built, and at the send itself. Each of those follows an await during
+        which another call can write the owner off, and a check made before the
+        await says nothing about after it.
+
+        The failure says nothing was sent, which is true: nothing was. It names
+        the owner that was written off, not whichever replacement the backend
+        holds now, because that one has passed no preflight for this call.
+        """
+        _refuse_control_only(attachment)
+        instance = attachment.descriptor.instance_id
+        written_off = self._unusable.get(instance)
+        if written_off is not None:
+            raise OwnerUnreachableError(
+                instance_id=instance,
+                nothing_was_sent=True,
+                cause=_WrittenOff(written_off),
+                classification=written_off,
+            )
+
+    async def recover(
+        self,
+        failed_instance: str,
+        *,
+        classification: OwnerFailure = OwnerFailure.UNREACHABLE,
+    ) -> Attachment | None:
         """Find an owner to replace *failed_instance*, at most once at a time.
 
         Returns the attachment to use now, or ``None`` when none could be
         established.
+
+        *classification* is why the failed owner failed. One that buries it is
+        recorded before anything else happens (:meth:`note_failure`).
 
         **The identity check comes first, and it is what keeps a late failure
         cheap.** Several calls can be in flight against one owner. The first to
         fail elects a replacement; the others fail afterwards still carrying the
         old identity, and without this they would each elect again, against an
         owner that is already answering.
+
+        **The latest burial wins over an election already running.** A caller
+        that joins a flight started before it buried an owner cannot trust that
+        flight's answer, because the election ran without knowing: a retiring
+        owner still answers its probe. An answer naming a written-off owner is
+        refused, and if the flight did not know everything this caller knows,
+        one more flight is run with it. At most two per call here, so a
+        recovery cannot spin.
 
         **The election runs in a thread, and that is correctness rather than
         latency.** ``obtain_owner`` probes liveness through ``asyncio.run``, which
@@ -591,26 +863,54 @@ class DaemonProxyBackend:
         up must not clear this guard, or the next failure starts a second election
         while the first is still running.
         """
-        if self._attachment.descriptor.instance_id != failed_instance:
+        self.note_failure(failed_instance, classification)
+        current = self._attachment.descriptor.instance_id
+        if current != failed_instance and current not in self._unusable:
             # Somebody already replaced it. Nothing to do but use the answer.
             return self._attachment
 
-        electing = self._electing
-        if electing is None:
-            # Created and stored with no await in between, so two callers cannot
-            # both get past this and start one each.
-            electing = asyncio.create_task(self._elect(failed_instance))
-            self._electing = electing
-        # Shielded so this caller's deadline cannot cancel the shared election.
-        return await asyncio.shield(electing)
+        for _ in range(_ELECTIONS_PER_RECOVERY):
+            flight = self._electing
+            if flight is None:
+                # Created and stored with no await in between, so two callers
+                # cannot both get past this and start one each. The burial set
+                # is a snapshot, handed to a thread.
+                buried = frozenset(self._unusable)
+                flight = _Flight(asyncio.create_task(self._elect(buried)), buried)
+                self._electing = flight
+            # Shielded so this caller's deadline cannot cancel the shared election.
+            found = await asyncio.shield(flight.task)
+            if found is not None and found.descriptor.instance_id in self._unusable:
+                found = None
+            if found is not None:
+                if (
+                    classification is OwnerFailure.TOKEN_REJECTED
+                    and found.descriptor.instance_id == failed_instance
+                ):
+                    # A token is minted per instance and never changes, so the
+                    # same instance comes back with the same token that was just
+                    # refused. Another attempt would only be refused again.
+                    return None
+                return found
+            if self._unusable.keys() <= flight.buried:
+                # The election knew everything this caller knows. Its answer
+                # stands, and asking again would get the same one.
+                return None
+        return None
 
-    async def _elect(self, failed_instance: str) -> Attachment | None:
-        """Run one election and adopt what it finds."""
+    async def _elect(self, buried: frozenset[str]) -> Attachment | None:
+        """Run one election and adopt what it finds, unless it is written off."""
         from linkedin_mcp_server.daemon_election import obtain_owner
 
         try:
             outcome = await asyncio.to_thread(
-                obtain_owner, self.auth_root, self.profile, self.config
+                partial(
+                    obtain_owner,
+                    self.auth_root,
+                    self.profile,
+                    self.config,
+                    buried=buried,
+                )
             )
         except Exception:
             logger.warning(
@@ -622,18 +922,26 @@ class DaemonProxyBackend:
             # Only after the worker has ended, and only if this is still the
             # registered flight: a caller that timed out may already have left,
             # and a later election must not be cleared by an earlier one.
-            if self._electing is asyncio.current_task():
+            flight = self._electing
+            if flight is not None and flight.task is asyncio.current_task():
                 self._electing = None
 
         found = outcome.attachment_lookup.attachment
-        if not outcome.worth_connecting or found is None:
+        if not outcome.worth_connecting or found is None or found.control_only:
             logger.warning(
                 "No shared browser owner could be established (%s)",
                 outcome.attachment_lookup.state.value,
             )
             return None
 
-        if found.descriptor.instance_id != failed_instance:
+        # Against the latest set, not the snapshot the election ran with: an
+        # owner written off while it ran must not become the one every new call
+        # is sent to.
+        if found.descriptor.instance_id in self._unusable:
+            logger.info("The election found an owner already written off")
+            return None
+
+        if found.descriptor.instance_id != self._attachment.descriptor.instance_id:
             logger.info("Attached to a replacement shared browser owner")
             self._attachment = found
         return found
@@ -658,7 +966,20 @@ class DaemonProxyBackend:
         # dialled a replacement while its heartbeats stayed with the departing
         # owner would be cancelled by the owner actually running it.
         bound = _call_being_made.get()
-        attachment = bound.attachment if bound is not None else self._attachment
+        # A bound call is addressed to the owner it was bound to, never to a
+        # replacement that passed no preflight for it. Until its tool request
+        # has actually been sent, that owner is asked about again here and once
+        # more at the send (`_check_at_the_session`); after it, the call keeps its
+        # owner whatever happens to it. Anything unbound, a listing above all,
+        # gets the owner a new call would get.
+        if bound is None:
+            attachment = self.attachment_for_a_call()
+        else:
+            attachment = bound.attachment
+            if bound.dispatch.sent:
+                _refuse_control_only(attachment)
+            else:
+                self.refuse_if_written_off(attachment)
         # Verbatim, never rebuilt from host and port: the descriptor's own URL
         # already carries the MCP path and brackets an IPv6 literal, and FastMCP
         # deliberately does not rewrite the path it is given.
@@ -694,6 +1015,9 @@ class DaemonProxyBackend:
             # attachment as the URL and the token, so all three describe one owner
             # even while a replacement is being adopted concurrently.
             instance_id=attachment.descriptor.instance_id,
+            attachment=attachment,
+            binding=bound,
+            still_usable=self.refuse_if_written_off,
         )
 
 
@@ -724,38 +1048,6 @@ def create_proxy_provider(
     )
 
 
-# What a client is told when the owner vanished with a mutating call in flight.
-# A value of its own rather than messaging's `send_unconfirmed`, which already
-# says a submission was attempted: here even that is unknown, and the same answer
-# has to fit a connection request as well as a message.
-UNKNOWN_OUTCOME_STATUS = "outcome_unknown"
-
-
-def _unknown_outcome(*, tool: str, reason: str) -> dict[str, Any]:
-    """The structured half of an owner-loss failure, in terms a client knows.
-
-    The field names are `scraping.contracts.message_action_result`'s, so a client
-    that already reads `status` and `retry_safe` on a send needs nothing new for
-    this one. Built here rather than imported from there because no daemon module
-    reaches into `scraping/`: this is not a scraping outcome but the transport
-    saying it knows nothing, and it answers for every mutating tool.
-
-    `url`, `sent` and `recipient_selected` are left out rather than set to null.
-    `sent` is the one thing nobody here knows, and a null reads as a "no" to any
-    client that tests the value rather than the key's presence.
-    """
-    return {
-        "status": UNKNOWN_OUTCOME_STATUS,
-        "message": (
-            f"{tool} was in flight when the shared browser process went away "
-            f"({reason}). Whether the action reached LinkedIn is unknown. Check "
-            "LinkedIn before calling again, because a repeat may perform the "
-            "action a second time."
-        ),
-        "retry_safe": False,
-    }
-
-
 class FrontendOwnerRecoveryMiddleware(Middleware):
     """Find a replacement owner when this one is gone, and repeat what is safe.
 
@@ -782,6 +1074,16 @@ class FrontendOwnerRecoveryMiddleware(Middleware):
     registered, ``read_resource_mcp`` and ``get_prompt_mcp`` need the same
     treatment as the listings, along with ``on_read_resource`` and
     ``on_get_prompt`` here.
+
+    **What one tool call can cost, counted.** This middleware makes at most two
+    attempts per invocation. Each attempt is one
+    heartbeat preflight and at most one dispatch; only the first attempt's
+    failure recovers, joining at most :data:`_ELECTIONS_PER_RECOVERY`
+    elections, and the second's is recorded without electing. The auth-repair
+    middleware outside invokes this at most twice per client call, once and one
+    read-only replay. So one client call is at most four preflights, four
+    dispatches and four election joins, and never a third dispatch from one
+    invocation.
     """
 
     def __init__(self, backend: DaemonProxyBackend) -> None:
@@ -797,7 +1099,10 @@ class FrontendOwnerRecoveryMiddleware(Middleware):
             if failure is None:
                 raise
             logger.info("Listing failed against a departed owner; looking for another")
-            if await self._backend.recover(failure.instance_id) is None:
+            replacement = await self._backend.recover(
+                failure.instance_id, classification=failure.classification
+            )
+            if replacement is None:
                 raise
             # Unconditional, because listing changes nothing on LinkedIn. There is
             # no effect a second one could repeat.
@@ -865,7 +1170,7 @@ class FrontendOwnerRecoveryMiddleware(Middleware):
             "Owner lost mid-call; reporting an unknown outcome rather "
             "than repeating a call that could change something"
         )
-        answer = _unknown_outcome(tool=context.message.name, reason=str(failure))
+        answer = unknown_outcome(tool=context.message.name, reason=str(failure))
         return ToolResult(
             content=[mt.TextContent(type="text", text=answer["message"])],
             structured_content=answer,
@@ -886,7 +1191,11 @@ class FrontendOwnerRecoveryMiddleware(Middleware):
 
             # Before deciding whether to repeat anything: a replacement is worth
             # having for the *next* call even when this one cannot be repeated.
-            replacement = await self._backend.recover(failure.instance_id)
+            # The classification goes with it, so an owner that refused the call
+            # is written off before any election is joined.
+            replacement = await self._backend.recover(
+                failure.instance_id, classification=failure.classification
+            )
 
             # Asked before the replacement is looked at, because the answer does
             # not depend on it: whether the departed owner already acted is
@@ -939,7 +1248,15 @@ class FrontendOwnerRecoveryMiddleware(Middleware):
                 # third attempt would be a guess about an owner that has now
                 # failed twice, and the question it raises — whether the second
                 # attempt acted — is the one nothing here can answer.
+                #
+                # Recorded, though, without electing: an owner the repeat found
+                # retiring or wrong must not receive the next call either, and
+                # the next call's own recovery is what finds a replacement.
                 repeat = unreachable_owner_in(again)
+                if repeat is not None:
+                    self._backend.note_failure(
+                        repeat.instance_id, repeat.classification
+                    )
                 if repeat is not None and not repeat.nothing_was_sent:
                     # The answer the first attempt already has, rather than the
                     # same question put to an owner that has just died. Both
@@ -968,14 +1285,115 @@ class FrontendOwnerRecoveryMiddleware(Middleware):
                 raise
 
 
+class _NotAnOwnerAnswer(Exception):
+    """The cause on a preflight that was answered, but not with a go-ahead."""
+
+    def __init__(self, status: int, classification: OwnerFailure) -> None:
+        super().__init__(
+            f"the heartbeat preflight was answered with HTTP {status} "
+            f"({classification.value})"
+        )
+
+
+class _OwnerRefusedTheCall(Exception):
+    """The cause on a call the owner signed as never having reached a tool."""
+
+    def __init__(self, classification: OwnerFailure) -> None:
+        super().__init__(f"the owner refused the call ({classification.value})")
+
+
+def _json_object(response: httpx.Response) -> dict[str, Any] | None:
+    """The response body as a JSON object, or ``None`` for anything else."""
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    return body if isinstance(body, dict) else None
+
+
+def _signed_by(marker: object, attachment: Attachment, kind: str) -> bool:
+    """Whether *marker* is this owner's own refusal of the given *kind*.
+
+    Every field is checked against the owner this call was bound to. The
+    protocol is compared as an exact ``int`` because ``True == 1`` in Python,
+    and a marker from another owner, another protocol or of another shape is
+    not proof that this call never ran.
+    """
+    if not isinstance(marker, dict):
+        return False
+    protocol = marker.get("protocol")
+    return (
+        marker.get("daemon") == kind
+        and type(protocol) is int
+        and protocol == PROTOCOL_VERSION
+        and marker.get("instance") == attachment.descriptor.instance_id
+    )
+
+
+def _classify_preflight(
+    response: httpx.Response, attachment: Attachment
+) -> OwnerFailure | None:
+    """What a heartbeat preflight's answer means, or ``None`` to go ahead.
+
+    Total: every status has an outcome, and only one of them dispatches. A 200
+    must carry the body this owner's route sends, so a stranger on the port that
+    answers everything with 200 is not taken for the owner.
+    """
+    status = response.status_code
+    if status == 200:
+        body = _json_object(response)
+        if body is not None and isinstance(body.get("watched"), bool):
+            return None
+        return OwnerFailure.UNEXPECTED_STATUS
+    if status == 401:
+        return OwnerFailure.TOKEN_REJECTED
+    if status == 404:
+        return OwnerFailure.ROUTE_MISSING
+    if status == 409:
+        if _signed_by(_json_object(response), attachment, RETIRING):
+            return OwnerFailure.RETIRING
+        return OwnerFailure.UNEXPECTED_STATUS
+    if 500 <= status <= 599:
+        return OwnerFailure.OWNER_ERROR
+    return OwnerFailure.UNEXPECTED_STATUS
+
+
+_REFUSALS = {
+    RETIRING: OwnerFailure.RETIRING,
+    UNMARKED_CALL: OwnerFailure.UNMARKED_REFUSED,
+}
+
+
+def _owner_refused(result: object, attachment: Attachment) -> OwnerFailure | None:
+    """The owner's own refusal on *result*, if it is one it signed for this call.
+
+    Anything else is tool data, whatever it looks like, and proves nothing
+    about whether the tool ran.
+    """
+    if not isinstance(result, ToolResult) or not result.is_error:
+        return None
+    marker = (result.meta or {}).get(REFUSAL_KEY)
+    for kind, classification in _REFUSALS.items():
+        if _signed_by(marker, attachment, kind):
+            return classification
+    return None
+
+
 class FrontendCallHeartbeatMiddleware(Middleware):
-    """Say, for as long as this frontend is waiting, that it still is.
+    """Mark every call, and say for as long as this frontend waits that it still is.
 
     The other half of `daemon_liveness`. Cancellation does not cross the hop, so
     an owner cannot tell a call somebody wants from one whose client has gone;
     this is the frontend answering that question over and over until it stops
     caring, at which point the answer stops arriving and the owner draws the
     obvious conclusion.
+
+    **No call leaves unmarked.** The first beat is a preflight, and only a
+    validated 200 dispatches the call. Every other answer, and every failure to
+    get one, raises :class:`OwnerUnreachableError` with ``nothing_was_sent``
+    true and a classification, before the call is handed on. The same holds for
+    an owner that answered the call itself with its signed refusal: the tool
+    never ran, and recovery may repeat it.
 
     Innermost of the three a proxy installs, and that is what makes a replay
     behave: the recovery middleware sits outside, so a call it runs again enters
@@ -995,16 +1413,22 @@ class FrontendCallHeartbeatMiddleware(Middleware):
         # Captured once, and every beat for this call goes here even if another
         # call adopts a replacement owner meanwhile. Beating at the new owner
         # would name a call it has never heard of, while the owner actually
-        # running this one stopped being told about it.
-        attachment = self._backend.attachment
+        # running this one stopped being told about it. Refused here if the
+        # current owner was written off or proved for control only.
+        attachment = self._backend.attachment_for_a_call()
 
-        if not await self._route_exists(attachment, call_id):
-            return await call_next(context)
+        refused = await self._preflight(attachment, call_id)
+        if refused is not None:
+            raise refused
+        # Asked again, because the preflight was an await: another call may have
+        # found this owner retiring and written it off meanwhile. The go-ahead
+        # this preflight got is older than that news.
+        self._backend.refuse_if_written_off(attachment)
 
         beating = asyncio.create_task(self._keep_saying(attachment, call_id))
         marked = _call_being_made.set(_CallBinding(call_id, attachment))
         try:
-            return await call_next(context)
+            result = await call_next(context)
         finally:
             _call_being_made.reset(marked)
             # In a finally, and unconditionally: a task left running would go on
@@ -1012,36 +1436,57 @@ class FrontendCallHeartbeatMiddleware(Middleware):
             # exact state this exists to prevent.
             beating.cancel()
 
-    async def _route_exists(self, attachment: Attachment, call_id: str) -> bool:
-        """Beat once, to learn whether this owner understands heartbeats at all.
+        classification = _owner_refused(result, attachment)
+        if classification is not None:
+            logger.info(
+                "The shared browser owner refused the call before running it (%s)",
+                classification.value,
+            )
+            raise OwnerUnreachableError(
+                instance_id=attachment.descriptor.instance_id,
+                nothing_was_sent=True,
+                cause=_OwnerRefusedTheCall(classification),
+                classification=classification,
+            )
+        return result
 
-        A 404 is an owner from before this existed. It is served rather than
-        refused: the additions are optional in both directions, so the call goes
-        ahead unheard, exactly as every call did before this change.
+    async def _preflight(
+        self, attachment: Attachment, call_id: str
+    ) -> OwnerUnreachableError | None:
+        """Beat once before dispatching, and say why not if the call must not go.
 
-        Anything else that goes wrong here is reported and then ignored, and
-        that is deliberate. A 401 or a dead socket will stop the call itself a
-        moment later, with a classification this middleware has no business
-        second-guessing. Beating on regardless would only add a failing request
-        every two seconds to a call that is already failing.
+        Its not-sent answer is about the tool request, which this makes certain
+        has not left, and not about the preflight, which may well have arrived.
+        A connection that was never opened is ``UNREACHABLE``; one that opened
+        and then failed is ``OWNER_ERROR``. Neither buries the owner: a restart
+        or a stall looks like either, and the election's own probe decides.
         """
         try:
-            answered = await self._beat(attachment, call_id)
-        except Exception:
-            logger.debug(
-                "Could not reach the shared browser owner to say we are waiting",
+            response = await self._beat(attachment, call_id)
+        except Exception as exc:
+            logger.info(
+                "The shared browser owner did not answer the call preflight",
                 exc_info=True,
             )
-            return False
-        if answered == 404:
-            logger.debug("This shared browser owner predates heartbeats")
-            return False
-        if answered != 200:
-            logger.warning(
-                "The shared browser owner refused a heartbeat (HTTP %s)", answered
+            return OwnerUnreachableError(
+                instance_id=attachment.descriptor.instance_id,
+                nothing_was_sent=True,
+                cause=exc,
             )
-            return False
-        return True
+        classification = _classify_preflight(response, attachment)
+        if classification is None:
+            return None
+        logger.info(
+            "The shared browser owner refused the call preflight (HTTP %s, %s)",
+            response.status_code,
+            classification.value,
+        )
+        return OwnerUnreachableError(
+            instance_id=attachment.descriptor.instance_id,
+            nothing_was_sent=True,
+            cause=_NotAnOwnerAnswer(response.status_code, classification),
+            classification=classification,
+        )
 
     async def _keep_saying(self, attachment: Attachment, call_id: str) -> None:
         """Beat until cancelled, and never let a failed beat end the run.
@@ -1060,8 +1505,8 @@ class FrontendCallHeartbeatMiddleware(Middleware):
                 logger.debug("A heartbeat did not arrive", exc_info=True)
 
     @staticmethod
-    async def _beat(attachment: Attachment, call_id: str) -> int:
-        """One heartbeat, returning the owner's status code.
+    async def _beat(attachment: Attachment, call_id: str) -> httpx.Response:
+        """One heartbeat, returning the owner's answer with its body read.
 
         The address is the published one with its path replaced, rather than
         rebuilt from host and port: the descriptor's URL already brackets an
@@ -1082,5 +1527,6 @@ class FrontendCallHeartbeatMiddleware(Middleware):
             },
             timeout=httpx.Timeout(HEARTBEAT_SECONDS),
         ) as client:
-            response = await client.post(url)
-            return response.status_code
+            # Not streamed, so the body is read before the client closes and the
+            # response stays readable after it.
+            return await client.post(url)

@@ -13,6 +13,11 @@ from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
 
 from linkedin_mcp_server.config import get_config
+from linkedin_mcp_server.daemon_liveness import (
+    abandoned_before_browser_work,
+    abandoned_call_error,
+    browser_work_begins,
+)
 from linkedin_mcp_server.exceptions import BrowserBusyError
 from linkedin_mcp_server.profile_lease import get_profile_lease
 
@@ -111,6 +116,19 @@ class SequentialToolExecutionMiddleware(Middleware):
             # mask_error_details would otherwise hide the explanation.
             logger.info("Tool '%s' gave up waiting for the shared browser", tool_name)
             raise ToolError(str(BrowserBusyError()))
+
+        # After every wait this call can spend queued, and before the browser is
+        # touched: the last point at which an owner can still decline work its
+        # client has given up on. Nothing awaits between here and the body.
+        # Only the reference taken above is returned, and the browser-call count
+        # is left alone, because the body never began.
+        if abandoned_before_browser_work():
+            lease.release()
+            logger.info("Tool '%s' was abandoned before it began", tool_name)
+            raise abandoned_call_error()
+        # From here on the call may act, so an owner that has to cut it off
+        # reports its outcome as unknown rather than as a call that never ran.
+        browser_work_begins()
 
         hold_started = time.perf_counter()
         try:
