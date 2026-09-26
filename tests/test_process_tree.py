@@ -1216,17 +1216,23 @@ os._exit(0)
 
 
 @_POSIX_ONLY
-def test_registered_group_kill_revalidates_kernel_identity(
+def test_marked_group_kill_revalidates_kernel_identity(
     monkeypatch: pytest.MonkeyPatch,
 ):
     killed: list[tuple[int, signal.Signals]] = []
     original = dict(process_tree._registered_posix_groups)
     process_tree._registered_posix_groups.clear()
+
+    def marked(leader: str, members: dict[int, str]) -> Any:
+        return process_tree._PosixGroupRegistration(
+            leader, members, markers={"browser"}, proved_markers={"browser"}
+        )
+
     process_tree._registered_posix_groups.update(
         {
-            123: process_tree._PosixGroupRegistration("old", {124: "old-member"}),
-            456: process_tree._PosixGroupRegistration("gone", {457: "same-member"}),
-            789: process_tree._PosixGroupRegistration("gone", {790: "unknown-member"}),
+            123: marked("old", {124: "old-member"}),
+            456: marked("gone", {457: "same-member"}),
+            789: marked("gone", {790: "unknown-member"}),
         }
     )
     monkeypatch.setattr(
@@ -1241,11 +1247,17 @@ def test_registered_group_kill_revalidates_kernel_identity(
         "_posix_process_rows",
         lambda: {457: (1, 456, "same-member", "S"), 790: (1, 789, None, "S")},
     )
+    monkeypatch.setattr(
+        process_tree,
+        "_scan_marked_posix_processes",
+        lambda _marker: process_tree._MarkerScan((), True),
+    )
     monkeypatch.setattr(process_tree, "process_group_exists", lambda group: True)
+    monkeypatch.setattr(os, "getpgrp", lambda: 100)
     monkeypatch.setattr(os, "killpg", lambda group, sig: killed.append((group, sig)))
 
     try:
-        process_tree._kill_registered_process_groups()
+        process_tree._kill_marked_process_groups("browser")
     finally:
         process_tree._registered_posix_groups.clear()
         process_tree._registered_posix_groups.update(original)
@@ -1290,7 +1302,7 @@ def test_unknown_leader_identity_does_not_authenticate_a_reused_group(
 
 
 @_POSIX_ONLY
-def test_hard_exit_rescans_markers_for_later_browser_groups(
+def test_marked_kill_rescans_for_later_browser_groups(
     monkeypatch: pytest.MonkeyPatch,
 ):
     killed: list[tuple[int, signal.Signals]] = []
@@ -1315,7 +1327,7 @@ def test_hard_exit_rescans_markers_for_later_browser_groups(
     monkeypatch.setattr(os, "killpg", lambda group, sig: killed.append((group, sig)))
 
     try:
-        targeted = process_tree._kill_registered_process_groups()
+        targeted = process_tree._kill_marked_process_groups("launch-marker")
         registration = process_tree._registered_posix_groups[789]
     finally:
         process_tree._registered_posix_groups.clear()
@@ -1329,7 +1341,7 @@ def test_hard_exit_rescans_markers_for_later_browser_groups(
 
 
 @_POSIX_ONLY
-def test_hard_exit_waits_for_targeted_groups_to_disappear(
+def test_group_wait_polls_until_targeted_groups_disappear(
     monkeypatch: pytest.MonkeyPatch,
 ):
     checks = iter([True, True, False])
@@ -1361,7 +1373,7 @@ def test_hard_exit_waits_for_targeted_groups_to_disappear(
 
 
 @_POSIX_ONLY
-def test_hard_exit_stops_waiting_when_a_group_identity_is_reused(
+def test_group_wait_stops_when_a_group_identity_is_reused(
     monkeypatch: pytest.MonkeyPatch,
 ):
     snapshots = iter(
@@ -1389,40 +1401,6 @@ def test_hard_exit_stops_waiting_when_a_group_identity_is_reused(
     process_tree._wait_for_process_groups((456,))
 
     assert slept == [process_tree._JOB_POLL_SECONDS]
-
-
-@_POSIX_ONLY
-def test_posix_hard_exit_drains_browser_groups_before_owner_exit(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    events: list[object] = []
-    monkeypatch.setattr(os, "getpid", lambda: 100)
-    monkeypatch.setattr(os, "getpgrp", lambda: 100)
-    monkeypatch.setattr(
-        process_tree,
-        "_kill_registered_process_groups",
-        lambda: events.append("kill-browser") or (456,),
-    )
-    monkeypatch.setattr(
-        process_tree,
-        "_wait_for_process_groups",
-        lambda groups: events.append(("drain-browser", groups)),
-    )
-    monkeypatch.setattr(
-        os,
-        "killpg",
-        lambda group, sig: events.append(("kill-owner", group, sig)),
-    )
-    monkeypatch.setattr(os, "_exit", lambda status: events.append(("exit", status)))
-
-    process_tree.hard_exit_process_tree(7)
-
-    assert events == [
-        "kill-browser",
-        ("drain-browser", (456,)),
-        ("kill-owner", 100, signal.SIGKILL),
-        ("exit", 7),
-    ]
 
 
 @_POSIX_ONLY
@@ -2033,6 +2011,105 @@ def test_windows_marker_drain_reports_a_member_that_stays(
     assert terminated == [700]
 
 
+@pytest.mark.parametrize(
+    ("installer", "terminated_expected", "proved_expected"),
+    [
+        ("claims", [], True),
+        ("raises", [], False),
+        ("declines", [700], True),
+    ],
+)
+def test_windows_marker_drain_ends_only_a_member_every_held_job_declined(
+    monkeypatch: pytest.MonkeyPatch,
+    installer: str,
+    terminated_expected: list[int],
+    proved_expected: bool,
+):
+    """Membership in another held Job is a three-way answer.
+
+    Two Jobs are held besides the adopted one. A member one of them claims is
+    spared and the drain is proved. A member one of them could not be asked
+    about, while the other declined, may be the installer or a concurrent
+    launch: it is neither ended nor counted as gone, so the drain stays
+    unproven at its deadline. Only a member every held Job declined is ended.
+    """
+    current = os.getpid()
+    terminated: list[int] = []
+    asked: list[str] = []
+    clock = SimpleNamespace(now=0.0)
+
+    class ProcessHandle:
+        def __init__(self, process: int) -> None:
+            self.process = process
+
+        def Close(self) -> None:
+            pass
+
+    class Api:
+        @staticmethod
+        def OpenProcess(access: int, inherit: bool, process: int) -> ProcessHandle:
+            return ProcessHandle(process)
+
+        @staticmethod
+        def TerminateProcess(handle: ProcessHandle, status: int) -> None:
+            terminated.append(handle.process)
+
+    class Con:
+        PROCESS_TERMINATE = 1
+        PROCESS_QUERY_LIMITED_INFORMATION = 2
+
+    class Job:
+        JobObjectBasicProcessIdList = 3
+
+        @staticmethod
+        def QueryInformationJobObject(handle: int, information: int) -> tuple[int, ...]:
+            # The member leaves the Job only if something terminates it.
+            return (current,) if terminated else (current, 700)
+
+        @staticmethod
+        def IsProcessInJob(handle: ProcessHandle, job: Any) -> bool:
+            if job == 123:
+                return True
+            asked.append(job)
+            if job == "installer-job":
+                if installer == "raises":
+                    raise OSError("IsProcessInJob did not answer")
+                return installer == "claims"
+            return False
+
+    def sleep(seconds: float) -> None:
+        clock.now += seconds
+
+    monkeypatch.setattr(process_tree, "_IS_WINDOWS", True)
+    monkeypatch.setattr(process_tree, "_adopted_windows_job", 123)
+    monkeypatch.setattr(process_tree, "_adopted_windows_gate", None)
+    monkeypatch.setattr(
+        process_tree,
+        "_live_windows_jobs",
+        [
+            SimpleNamespace(job_handle="installer-job"),
+            SimpleNamespace(job_handle="launch-job"),
+        ],
+    )
+    monkeypatch.setattr(
+        process_tree, "_windows_modules", lambda: (Api(), Con(), Job(), object())
+    )
+    monkeypatch.setattr(
+        process_tree, "time", SimpleNamespace(monotonic=lambda: clock.now, sleep=sleep)
+    )
+
+    proved = process_tree.drain_browser_process_marker(
+        "browser", timeout=1.0, containment=_a_buried_browser_job()
+    )
+
+    if "installer-job" not in asked:
+        pytest.fail("the installer Job was never asked about the member")
+    if installer != "claims" and "launch-job" not in asked:
+        pytest.fail("the other held Job was never asked about the member")
+    assert terminated == terminated_expected
+    assert proved is proved_expected
+
+
 def test_linux_detached_discovery_does_not_need_ps(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(process_tree.sys, "platform", "linux")
     monkeypatch.setattr(
@@ -2046,7 +2123,7 @@ def test_linux_detached_discovery_does_not_need_ps(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(
         process_tree,
         "_ps_process_rows",
-        lambda: pytest.fail("Linux hard exit called ps"),
+        lambda: pytest.fail("Linux discovery called ps"),
     )
 
     assert process_tree._posix_detached_descendants(10, 10) == (
@@ -2067,7 +2144,13 @@ def test_linux_snapshot_needs_no_ps_binary():
 
 
 @_POSIX_ONLY
-def test_daemon_hard_exit_terminates_a_detached_descendant(tmp_path: Path):
+def test_daemon_hard_exit_signals_nothing_itself(tmp_path: Path):
+    """The owner leaves as a Direct host's server does: without a signal.
+
+    Its own status comes back rather than SIGKILL, so it did not end its group,
+    and a detached descendant it registered is still running, so it swept no
+    group either. Ending the browser is the crash guardian's marked drain.
+    """
     marker = tmp_path / "daemon-descendant.txt"
     script = r"""
 import subprocess
@@ -2117,8 +2200,8 @@ daemon_owner._exit_hard(None)
             pytest.fail("the daemon did not create its descendant")
 
         descendant_pid = int(marker.read_text())
-        assert process.wait(timeout=30) == -signal.SIGKILL
-        assert _wait_gone(descendant_pid)
+        assert process.wait(timeout=30) == 1
+        assert _alive(descendant_pid)
     finally:
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL)
@@ -2411,139 +2494,6 @@ print(browser.pid, flush=True)
         assert _wait_gone(browser_pid)
 
 
-@_POSIX_ONLY
-def test_registered_browser_group_survives_driver_reparenting(tmp_path: Path):
-    marker = tmp_path / "browser-pid.txt"
-    release = tmp_path / "release-driver"
-    script = r"""
-import subprocess
-import sys
-import time
-from pathlib import Path
-
-from linkedin_mcp_server import daemon_owner, process_tree
-
-driver_code = r'''
-import subprocess
-import sys
-import time
-from pathlib import Path
-
-browser = subprocess.Popen(
-    [sys.executable, "-c", "import time; time.sleep(600)"],
-    stdin=subprocess.DEVNULL,
-    stdout=subprocess.DEVNULL,
-    stderr=subprocess.DEVNULL,
-    start_new_session=True,
-)
-marker = Path(sys.argv[1])
-partial = marker.with_name(marker.name + ".partial")
-partial.write_text(str(browser.pid))
-partial.replace(marker)
-while not Path(sys.argv[2]).exists():
-    time.sleep(0.01)
-'''
-driver = subprocess.Popen([sys.executable, "-c", driver_code, sys.argv[1], sys.argv[2]])
-marker = Path(sys.argv[1])
-while not marker.exists():
-    time.sleep(0.01)
-process_tree.remember_detached_process_groups()
-Path(sys.argv[2]).touch()
-driver.wait(timeout=30)
-time.sleep(0.05)
-daemon_owner._exit_hard(None)
-"""
-    process = subprocess.Popen(
-        [sys.executable, "-c", script, str(marker), str(release)],
-        cwd=_REPO_ROOT,
-        start_new_session=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    try:
-        for _ in range(500):
-            if marker.exists():
-                break
-            if process.poll() is not None:
-                stderr = process.stderr.read() if process.stderr is not None else ""
-                pytest.fail(f"the driver exited before browser launch: {stderr!r}")
-            time.sleep(0.01)
-        else:
-            pytest.fail("the driver did not report its browser")
-
-        browser_pid = int(marker.read_text())
-        assert process.wait(timeout=30) == -signal.SIGKILL
-        assert _wait_gone(browser_pid)
-    finally:
-        if process.poll() is None:
-            os.killpg(process.pid, signal.SIGKILL)
-            process.wait(timeout=30)
-        browser_pid = locals().get("browser_pid")
-        if isinstance(browser_pid, int) and _alive(browser_pid):
-            os.kill(browser_pid, signal.SIGKILL)
-
-
-def test_adopted_windows_job_drains_every_other_process(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    current = os.getpid()
-    queries = iter([(current, 700), (current,)])
-    terminated: list[int] = []
-    closed: list[int] = []
-
-    class ProcessHandle:
-        def __init__(self, process: int) -> None:
-            self.process = process
-
-        def Close(self) -> None:
-            closed.append(self.process)
-
-    class Api:
-        @staticmethod
-        def OpenProcess(access: int, inherit: bool, process: int) -> ProcessHandle:
-            assert access == 3
-            assert inherit is False
-            return ProcessHandle(process)
-
-        @staticmethod
-        def TerminateProcess(handle: ProcessHandle, status: int) -> None:
-            assert status == 1
-            terminated.append(handle.process)
-
-    class Con:
-        PROCESS_TERMINATE = 1
-        PROCESS_QUERY_LIMITED_INFORMATION = 2
-
-    class Job:
-        JobObjectBasicProcessIdList = 3
-
-        @staticmethod
-        def QueryInformationJobObject(handle: int, information: int) -> tuple[int, ...]:
-            assert handle == 123
-            assert information == Job.JobObjectBasicProcessIdList
-            return next(queries)
-
-        @staticmethod
-        def IsProcessInJob(handle: ProcessHandle, job: int) -> bool:
-            assert job == 123
-            return handle.process == 700
-
-    original = process_tree._adopted_windows_job
-    process_tree._adopted_windows_job = 123
-    monkeypatch.setattr(
-        process_tree, "_windows_modules", lambda: (Api(), Con(), Job(), object())
-    )
-    monkeypatch.setattr(process_tree.time, "sleep", lambda _seconds: None)
-    try:
-        process_tree._drain_adopted_windows_job()
-    finally:
-        process_tree._adopted_windows_job = original
-
-    assert terminated == [700]
-    assert closed == [700]
-
-
 def test_adopted_windows_job_spares_the_gate_that_waits_on_it(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -2592,14 +2542,18 @@ def test_adopted_windows_job_spares_the_gate_that_waits_on_it(
         def IsProcessInJob(_handle: ProcessHandle, _job: int) -> bool:
             return True
 
+    monkeypatch.setattr(process_tree, "_IS_WINDOWS", True)
     monkeypatch.setattr(process_tree, "_adopted_windows_job", 123)
     monkeypatch.setattr(process_tree, "_adopted_windows_gate", gate)
+    monkeypatch.setattr(process_tree, "_live_windows_jobs", [])
     monkeypatch.setattr(
         process_tree, "_windows_modules", lambda: (Api(), Con(), Job(), object())
     )
     monkeypatch.setattr(process_tree.time, "sleep", lambda _seconds: None)
 
-    process_tree._drain_adopted_windows_job()
+    process_tree.drain_browser_process_marker(
+        "browser", containment=_a_buried_browser_job()
+    )
 
     assert terminated == [700], "the browser went and the gate stayed"
 
@@ -2639,51 +2593,35 @@ def test_adopted_windows_job_revalidates_process_membership(
         def IsProcessInJob(handle: ProcessHandle, job: int) -> bool:
             return False
 
-    original = process_tree._adopted_windows_job
-    process_tree._adopted_windows_job = 123
+    monkeypatch.setattr(process_tree, "_IS_WINDOWS", True)
+    monkeypatch.setattr(process_tree, "_adopted_windows_job", 123)
+    monkeypatch.setattr(process_tree, "_adopted_windows_gate", None)
+    monkeypatch.setattr(process_tree, "_live_windows_jobs", [])
     monkeypatch.setattr(
         process_tree, "_windows_modules", lambda: (Api(), Con(), Job(), object())
     )
     monkeypatch.setattr(process_tree.time, "sleep", lambda _seconds: None)
-    try:
-        process_tree._drain_adopted_windows_job()
-    finally:
-        process_tree._adopted_windows_job = original
+
+    process_tree.drain_browser_process_marker(
+        "browser", containment=_a_buried_browser_job()
+    )
 
     assert terminated == []
 
 
-def test_windows_hard_exit_drains_the_job_before_releasing_locks(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    events: list[object] = []
-    monkeypatch.setattr(process_tree, "_IS_WINDOWS", True)
-    monkeypatch.setattr(
-        process_tree,
-        "_drain_adopted_windows_job",
-        lambda: events.append("drain-job"),
-    )
-    monkeypatch.setattr(
-        process_tree.os, "_exit", lambda status: events.append(("exit", status))
-    )
-
-    process_tree.hard_exit_process_tree(7)
-
-    assert events == ["drain-job", ("exit", 7)]
-
-
 class TestWindowsJobObject:
     @_WINDOWS_ONLY
-    def test_owner_adoption_survives_parent_close_and_hard_exit_drains(
+    def test_an_adopted_owner_exit_leaves_its_descendants_to_job_rundown(
         self, tmp_path: Path
     ):
+        """The owner terminates nothing on the way out; closing the Job does."""
         script = r"""
 import os
 import subprocess
 import sys
 import time
 
-from linkedin_mcp_server.process_tree import WindowsJob, hard_exit_process_tree
+from linkedin_mcp_server.process_tree import WindowsJob
 
 name = sys.argv[1]
 WindowsJob.verify_current_process(name)
@@ -2695,7 +2633,7 @@ child = subprocess.Popen(
     stderr=subprocess.DEVNULL,
 )
 print(os.getpid(), child.pid, flush=True)
-hard_exit_process_tree(7)
+os._exit(7)
 """
         job = process_tree.WindowsJob.named("owner-integration")
         nonce = process_tree.release_nonce()
@@ -3349,15 +3287,14 @@ _ZOMBIE_HOLDER = (
     not sys.platform.startswith("linux"), reason="Linux procfs zombie states"
 )
 class TestALinuxZombieDoesNotHoldTheLocks:
-    """A grandchild nobody will reap must not stop the hard-exit drain.
+    """A grandchild nobody will reap must not keep a group wait going.
 
     ``/proc`` keeps a zombie's PGID and its start time, so every identity check
     in this module still recognises it, and ``waitpid`` cannot collect it when
     its parent is somebody else -- a container's PID 1, or any parent that does
-    not reap. ``_wait_for_process_groups`` takes no deadline on the hard-exit
-    path by design, because it holds the daemon and profile locks while it
-    waits, so before the run-state check it spun here forever: the owner never
-    killed its own group and never released the locks.
+    not reap. Before the run-state check ``_wait_for_process_groups`` never saw
+    such a group go: without a deadline it spun here forever, and a browser
+    close that passes one could never be confirmed.
     """
 
     @staticmethod
@@ -3409,9 +3346,7 @@ class TestALinuxZombieDoesNotHoldTheLocks:
             },
         )
 
-    def test_the_hard_exit_drain_stops_waiting_for_it(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
+    def test_the_group_wait_stops_waiting_for_it(self, monkeypatch: pytest.MonkeyPatch):
         zombie, identity, holder = self._a_zombie_in_its_own_group()
         try:
             self._register(monkeypatch, zombie, identity)
@@ -3421,8 +3356,7 @@ class TestALinuxZombieDoesNotHoldTheLocks:
 
             assert not thread.is_alive(), "the drain is still waiting for a zombie"
             # True, because the group *is* gone: what is left of it can neither
-            # open the profile nor be reaped by this owner. The hard exit goes
-            # on to kill its own group and release the locks.
+            # open the profile nor be reaped by this owner.
             assert answers == [True]
         finally:
             holder.kill()

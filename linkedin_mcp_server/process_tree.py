@@ -15,7 +15,9 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, NamedTuple, NoReturn
+from typing import Any, NamedTuple
+
+from linkedin_mcp_server.server_role import ServerRole, process_role
 
 logger = logging.getLogger(__name__)
 
@@ -38,11 +40,10 @@ class _PosixGroupRegistration:
     members: dict[int, str]
     markers: set[str] = field(default_factory=set)
     #: The markers a process in this group was seen *carrying*, rather than the
-    #: ones inferred from ancestry. A hard exit kills either kind, because by
-    #: then nothing this owner started may outlive it. One browser's close may
-    #: not: the installer supervisor is detached too, so it lands in ``markers``
-    #: for whichever launch happened to look while it ran, and killing it there
-    #: would end a download nobody asked to stop.
+    #: ones inferred from ancestry. Only these let one browser's close kill the
+    #: group: the installer supervisor is detached too, so it lands in
+    #: ``markers`` for whichever launch happened to look while it ran, and
+    #: killing it there would end a download nobody asked to stop.
     proved_markers: set[str] = field(default_factory=set)
 
 
@@ -101,7 +102,15 @@ def start_browser_guardian(lease_fd: int) -> None:
     # groups, so an unmarked survivor of the same crash, most likely the Node
     # driver, is left to exit on its own. That one holds no profile once its
     # Chromium is gone, which is why the trade goes this way.
-    protected_owner_group = owner_group if owner_group == owner_pid else 0
+    #
+    # Zero for a daemon owner too, although it leads its own session: the
+    # guardian must not get a group that a Direct server which does not lead
+    # its group would not give it.
+    protected_owner_group = (
+        owner_group
+        if owner_group == owner_pid and process_role() is not ServerRole.OWNER
+        else 0
+    )
     guardian = Path(__file__).with_name("process_guardian.py").resolve()
     process: subprocess.Popen[Any] | None = None
     try:
@@ -285,10 +294,9 @@ def _has_exited_unreaped(pid: int, state: str | None) -> bool:
     cannot touch the profile, and it cannot be waited for by this owner when its
     parent is somebody else -- a Chromium grandchild reparented to PID 1 in a
     container stays a zombie for as long as that PID 1 declines to reap. Without
-    this the hard-exit drain has nothing to end its loop on: ``/proc`` still
-    reports the PGID and the start time, so every identity check below keeps
-    answering that the group is alive, and the owner never kills its own group
-    or releases its locks.
+    this a group wait has nothing to end its loop on: ``/proc`` still reports
+    the PGID and the start time, so every identity check below keeps answering
+    that the group is alive, and the browser close is never confirmed.
 
     Only the kernel run state answers it, and only where a run state exists.
     Darwin needs no second answer: ``proc_pidinfo(PROC_PIDTBSDINFO)`` reads zero
@@ -474,7 +482,7 @@ def remember_detached_process_groups(marker: str | None = None) -> None:
 
 
 def forget_browser_process_marker(marker: str) -> None:
-    """Drop confirmed-gone browser registrations from future hard exits."""
+    """Drop confirmed-gone browser registrations from future drains."""
     _registered_browser_markers.discard(marker)
     for group, registration in tuple(_registered_posix_groups.items()):
         if marker not in registration.markers:
@@ -489,11 +497,11 @@ def _refresh_marked_process_groups(
     rows: dict[int, _ProcessRow],
     markers: tuple[str, ...] | None = None,
 ) -> None:
-    """Add every currently marked browser group to the hard-exit registry.
+    """Add every currently marked browser group to the group registry.
 
-    *markers* narrows the scan to one launch. A hard exit passes nothing and
-    takes every marker it knows; a single browser's close passes its own, so it
-    cannot adopt a sibling launch's group on the way past.
+    *markers* narrows the scan to one launch. Without it every marker known so
+    far is scanned; a single browser's close passes its own, so it cannot adopt
+    a sibling launch's group on the way past.
     """
     owner_group = os.getpgrp()
     grouped: dict[int, dict[int, str]] = {}
@@ -589,23 +597,6 @@ def _registered_group_still_matches(
     return False
 
 
-def _kill_registered_process_groups() -> tuple[int, ...]:
-    try:
-        rows = _posix_process_rows()
-    except OSError:
-        rows = {}
-    _refresh_marked_process_groups(rows)
-
-    targeted: list[int] = []
-    for group, registration in tuple(_registered_posix_groups.items()):
-        if not _registered_group_still_matches(group, registration, rows):
-            continue
-        targeted.append(group)
-        with contextlib.suppress(OSError):
-            os.killpg(group, signal.SIGKILL)
-    return tuple(targeted)
-
-
 def _wait_for_process_groups(
     groups: tuple[int, ...],
     *,
@@ -614,10 +605,9 @@ def _wait_for_process_groups(
 ) -> bool:
     """Keep the owner's locks until every targeted browser group is gone.
 
-    Returns whether they went. A hard exit passes no *deadline* and waits as
-    long as it takes, because it holds the daemon and profile locks while it
-    does. A single browser's close passes one: it has to return either way, and
-    an unproven drain is reported rather than waited out.
+    Returns whether they went. Without a *deadline* this waits as long as it
+    takes. A single browser's close passes one: it has to return either way,
+    and an unproven drain is reported rather than waited out.
     """
     remaining = set(groups)
     while remaining:
@@ -651,11 +641,11 @@ def _wait_for_process_groups(
 def _kill_marked_process_groups(marker: str) -> tuple[int, ...]:
     """Kill the groups this one launch marker is known to account for.
 
-    Narrower than the hard-exit sweep in two ways, because this runs while the
-    owner keeps living. Only groups whose marker was read off a process
-    environment are targeted, so a detached installer that ancestry happened to
-    file under this launch is left alone, and the owner's own group is never a
-    candidate however it got registered.
+    Narrow in two ways, because this runs while the owner keeps living. Only
+    groups whose marker was read off a process environment are targeted, so a
+    detached installer that ancestry happened to file under this launch is left
+    alone, and the owner's own group is never a candidate however it got
+    registered.
     """
     try:
         rows = _posix_process_rows()
@@ -720,47 +710,6 @@ def _drain_exclusions() -> frozenset[int]:
     if _adopted_windows_gate is not None:
         spared.add(_adopted_windows_gate)
     return frozenset(spared)
-
-
-def _drain_adopted_windows_job() -> None:
-    """Terminate every other Job member before this owner releases its locks."""
-    if _adopted_windows_job is None:
-        return
-    win32api, win32con, win32job, _winerror = _windows_modules()
-    spared = _drain_exclusions()
-    while True:
-        try:
-            members = win32job.QueryInformationJobObject(
-                _adopted_windows_job, win32job.JobObjectBasicProcessIdList
-            )
-        except BaseException:  # noqa: BLE001 - releasing the locks is less safe
-            time.sleep(_JOB_POLL_SECONDS)
-            continue
-        descendants = tuple(
-            int(process)
-            for process in members
-            if process is not None and int(process) not in spared
-        )
-        if not descendants:
-            return
-        for process in descendants:
-            handle: Any | None = None
-            try:
-                handle = win32api.OpenProcess(
-                    win32con.PROCESS_TERMINATE
-                    | win32con.PROCESS_QUERY_LIMITED_INFORMATION,
-                    False,
-                    process,
-                )
-                if win32job.IsProcessInJob(handle, _adopted_windows_job):
-                    win32api.TerminateProcess(handle, 1)
-            except BaseException:  # noqa: BLE001 - the next Job query proves exit
-                pass
-            finally:
-                if handle is not None:
-                    with contextlib.suppress(BaseException):
-                        handle.Close()
-        time.sleep(_JOB_POLL_SECONDS)
 
 
 def _patchright_driver_process(playwright: Any) -> Any:
@@ -852,8 +801,14 @@ def _drain_windows_browser_job(job: WindowsJob | None, deadline: float) -> bool:
     return True
 
 
-def _in_another_owned_job(win32job: Any, handle: Any) -> bool:
-    """Whether an adopted-Job member also sits in a Job this owner still holds."""
+def _in_another_owned_job(win32job: Any, handle: Any) -> bool | None:
+    """Whether an adopted-Job member also sits in a Job this owner still holds.
+
+    None when no held Job claimed it and at least one could not be asked. That
+    member may be the installer or a concurrent launch, so it is neither ended
+    nor counted as gone.
+    """
+    unanswered = False
     for job in tuple(_live_windows_jobs):
         job_handle = job.job_handle
         if job_handle is None:
@@ -862,8 +817,8 @@ def _in_another_owned_job(win32job: Any, handle: Any) -> bool:
             if win32job.IsProcessInJob(handle, job_handle):
                 return True
         except BaseException:  # noqa: BLE001 - an unanswered Job proves nothing
-            continue
-    return False
+            unanswered = True
+    return None if unanswered else False
 
 
 def _drain_adopted_windows_job_members(deadline: float) -> bool:
@@ -914,9 +869,14 @@ def _drain_adopted_windows_job_members(deadline: float) -> bool:
                     # The id left the Job between the query and here, so it
                     # names somebody else's process now.
                     continue
-                if _in_another_owned_job(win32job, handle):
+                elsewhere = _in_another_owned_job(win32job, handle)
+                if elsewhere:
                     continue
                 remaining += 1
+                if elsewhere is None:
+                    # Unclassified, so it keeps the drain unproven rather than
+                    # being ended on a guess.
+                    continue
                 win32api.TerminateProcess(handle, 1)
             except BaseException:  # noqa: BLE001 - the next Job query proves exit
                 remaining += 1
@@ -965,28 +925,6 @@ def drain_browser_process_marker(
         # machine for an answer that cannot be there.
         return True
     return _drain_marked_posix_groups(marker, deadline)
-
-
-def hard_exit_process_tree(status: int) -> NoReturn:
-    """Drain managed descendants before this process releases ownership locks."""
-    if _IS_WINDOWS:
-        _drain_adopted_windows_job()
-    else:
-        pid = os.getpid()
-        try:
-            process_group = os.getpgrp()
-            if process_group == pid:
-                # Chromium is deliberately spawned detached by Patchright. Kill and
-                # drain those groups while this owner still holds the daemon and
-                # profile locks, then end the owner's own group.
-                groups = _kill_registered_process_groups()
-                _wait_for_process_groups(groups)
-                os.killpg(process_group, signal.SIGKILL)
-        except OSError:
-            pass
-    # The Windows Job now contains only this owner. On POSIX this is the fallback
-    # when the caller was not launched as the expected group leader.
-    os._exit(status)
 
 
 def release_nonce() -> str:

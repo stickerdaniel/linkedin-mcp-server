@@ -77,12 +77,6 @@ class _Exited(BaseException):
     """Raised by the ``os._exit`` double, so the test outlives the exit."""
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="W-GUARDIAN: an owner that leads its group hands the guardian its "
-    "own group; fixed in P1",
-)
 def test_an_owner_never_names_its_own_group_to_the_guardian(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -116,12 +110,6 @@ def test_an_owner_never_names_its_own_group_to_the_guardian(
     assert spawned[0][-1] == "0"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="W-HARD-EXIT: after an unconfirmed close the owner sweeps "
-    "registered groups before exiting; fixed in P1",
-)
 @pytest.mark.parametrize("platform", ["posix", "windows"])
 async def test_an_owner_exiting_after_an_unconfirmed_close_sends_no_signal(
     monkeypatch: pytest.MonkeyPatch, platform: str
@@ -246,12 +234,6 @@ async def test_an_owner_exiting_after_an_unconfirmed_close_sends_no_signal(
     assert sent == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="W-JOB-QUERY: an unanswered Job membership query leads to "
-    "TerminateProcess and a proved drain; fixed in P1",
-)
 def test_an_unanswered_job_membership_never_terminates_or_proves_the_drain(
     monkeypatch: pytest.MonkeyPatch,
 ):
