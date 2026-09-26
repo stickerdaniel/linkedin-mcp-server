@@ -40,6 +40,7 @@ _DERIVED_LABELS = {
     "documentation",
     "refactoring",
     "chore",
+    "dependencies",
 }
 
 
@@ -546,6 +547,10 @@ def test_label_workflow_matches_breaking_marker_without_normalizing() -> None:
         ("refactor: Keep internals tidy", "refactoring"),
         ("refactor(config)!: Change configuration", "breaking-change"),
         ("feat!: Replace the public contract", "breaking-change"),
+        ("fix(deps): update all major dependencies (major)", "dependencies"),
+        ("chore(deps): lock file maintenance", "dependencies"),
+        ("fix(deps-dev): Keep the scope exact", "bug"),
+        ("feat(deps): Add a dependency-backed feature", "enhancement"),
     ],
 )
 def test_pr_title_label_lifecycle(
@@ -631,8 +636,8 @@ def test_label_workflow_removes_only_attached_stale_labels() -> None:
 
     assert '"breaking-change",' in workflow
     assert (
-        "for stale in breaking-change enhancement bug documentation refactoring chore;"
-        in workflow
+        "for stale in breaking-change enhancement bug documentation refactoring chore"
+        " dependencies;" in workflow
     )
     assert "ATTACHED_DERIVED=" in workflow
     assert 'if is_attached "$stale"; then' in workflow
