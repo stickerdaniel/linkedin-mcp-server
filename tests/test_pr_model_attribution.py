@@ -102,8 +102,27 @@ _LINE = "Generated with Claude Opus 5.5"
             "Macroscope opens with `<!-- Macroscope's pull request summary "
             f"starts here -->`.\n\n{_LINE}\n\n{_MACROSCOPE}"
         ),
+        (
+            "The block starts with:\n\n```\n"
+            "<!-- Macroscope's pull request summary starts here -->\n```\n\n"
+            f"{_LINE}\n\n{_MACROSCOPE}"
+        ),
+        (
+            f"## Summary\n\nDone.\n\n{_LINE}\n\n"
+            + _MACROSCOPE.replace(
+                "> [!NOTE]\n",
+                "> [!NOTE]\n> It skips `<!-- Macroscope's pull request summary "
+                "starts here -->` blocks.\n",
+            )
+        ),
     ],
-    ids=["summary-after", "summary-before", "marker-quoted-above"],
+    ids=[
+        "summary-after",
+        "summary-before",
+        "marker-quoted-above",
+        "marker-line-in-code-block",
+        "marker-quoted-inside",
+    ],
 )
 def test_ignores_the_macroscope_summary(body: str) -> None:
     assert attribution.has_model_attribution(body)
