@@ -88,6 +88,22 @@ class TestLinuxMounts:
         assert verdict.storage_class is expected
         assert fstype in verdict.reason
 
+    def test_an_escaped_byte_names_the_directory_that_byte_names(self):
+        # The kernel escapes bytes. /mnt/caf\351 is the directory whose name
+        # ends in the byte 0xE9, which is how the path being classified reads
+        # once os.fsdecode has turned its bytes into a str.
+        text = "\n".join(
+            [
+                "22 1 8:1 / / rw - ext4 /dev/sda1 rw",
+                "40 22 0:50 / /mnt/caf\\351 rw - nfs4 server:/x rw",
+            ]
+        )
+        path = PurePosixPath(os.fsdecode(b"/mnt/caf\xe9/profile"))
+
+        verdict = linux_class(path, parse_mountinfo(text))
+
+        assert verdict.storage_class is NONLOCAL
+
     def test_mount_points_match_whole_components(self):
         # /mnt/nfs-local shares a string prefix with the NFS mount at /mnt/nfs
         # and nothing else: it is on the root filesystem.
@@ -528,6 +544,21 @@ class TestWindowsProviders:
         _write_info(
             windows.roaming / "Dropbox" / "info.json",
             {"personal": {"path": str(dropbox)}},
+        )
+
+        verdict = storage_class._classify(dropbox / "profile", "win32")
+
+        assert verdict.storage_class is SYNCED
+
+    def test_a_known_folder_the_environment_points_away_from_is_read_too(self, windows):
+        # A launcher that points APPDATA elsewhere must not hide the
+        # configuration Dropbox wrote where Windows keeps the account's folder.
+        known = windows.root / "Known" / "Roaming"
+        windows.known[0x001A] = str(known)
+        dropbox = windows.root / "Dropbox"
+        dropbox.mkdir()
+        _write_info(
+            known / "Dropbox" / "info.json", {"personal": {"path": str(dropbox)}}
         )
 
         verdict = storage_class._classify(dropbox / "profile", "win32")

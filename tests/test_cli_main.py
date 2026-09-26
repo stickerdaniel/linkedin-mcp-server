@@ -1000,7 +1000,8 @@ class TestForwardingToASharedOwner:
 
         elected.assert_called_once()
         auth_root = elected.call_args.args[0]
-        assert canonical(auth_root) == canonical(_local_storage[0])
+        # Asked second: the profile itself comes first, then the root above it.
+        assert canonical(auth_root) == canonical(_local_storage[1])
 
     def test_recovery_exists_only_behind_the_startup_verdict(self):
         """Recovery keeps the admission it started with, and never asks again.

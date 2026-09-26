@@ -671,6 +671,7 @@ class TestStorageEligibility:
     @pytest.mark.parametrize(
         ("root", "label"),
         [
+            ("profile", "profile directory"),
             ("auth", "directory holding the profile"),
             ("state", "daemon state directory"),
         ],
@@ -685,9 +686,11 @@ class TestStorageEligibility:
         root: str,
         label: str,
     ):
-        auth_root = canonical(tmp_path / "auth")
-        state_root = canonical(daemon_descriptor_module.daemon_state_root())
-        target = auth_root if root == "auth" else state_root
+        target = {
+            "profile": canonical(tmp_path / "auth" / "profile"),
+            "auth": canonical(tmp_path / "auth"),
+            "state": canonical(daemon_descriptor_module.daemon_state_root()),
+        }[root]
         _storage_is(
             monkeypatch,
             lambda path: refused if path == target else StorageClass.LOCAL,
@@ -717,8 +720,10 @@ class TestStorageEligibility:
 
         assert applies is True
         assert caplog.records == []
-        # The auth root the election would be given, not the profile beneath it.
+        # The profile, which may itself be a mount point, and the auth root the
+        # election would be given above it.
         assert asked == [
+            canonical(tmp_path / "auth" / "profile"),
             canonical(tmp_path / "auth"),
             canonical(daemon_descriptor_module.daemon_state_root()),
         ]

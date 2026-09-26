@@ -473,7 +473,12 @@ def _storage_refusal(config: AppConfig) -> str | None:
     # same field of the configuration ``main`` installed before asking.
     try:
         profile = canonical(Path(config.browser.user_data_dir))
-        roots = [("directory holding the profile", auth_root_dir(profile))]
+        # The profile too, not only the directory above it: a profile that is
+        # itself a mount point can sit on other storage than its parent.
+        roots = [
+            ("profile directory", profile),
+            ("directory holding the profile", auth_root_dir(profile)),
+        ]
     except Exception as exc:
         return f"The profile directory could not be resolved ({type(exc).__name__})"
     try:

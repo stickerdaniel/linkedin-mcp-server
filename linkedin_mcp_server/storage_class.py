@@ -227,13 +227,20 @@ def _dropbox_info_files(platform: str, homes: Sequence[Path]) -> list[Path] | No
     if platform == "win32":
         files: list[Path] = []
         for variable, csidl in _WINDOWS_DROPBOX_FOLDERS:
-            folder = _absolute(os.environ.get(variable, ""))
-            # An MCP host may start this server without these variables. The
-            # folders still exist, and Windows names them itself.
-            folder = folder or _absolute(_known_folder(csidl) or "")
-            if folder is None:
+            # Both, not the first that answers. An MCP host may start this
+            # server without the variable, and a launcher may point it
+            # somewhere else; Dropbox wrote its file where Windows says.
+            folders = {
+                folder
+                for folder in (
+                    _absolute(os.environ.get(variable, "")),
+                    _absolute(_known_folder(csidl) or ""),
+                )
+                if folder is not None
+            }
+            if not folders:
                 return None
-            files.append(folder / "Dropbox" / "info.json")
+            files.extend(folder / "Dropbox" / "info.json" for folder in sorted(folders))
         return files
     if not homes:
         return None
@@ -393,7 +400,7 @@ _LINUX_NONLOCAL = frozenset(
     ("cifs", "9p", "virtiofs", "sshfs", "overlay", "fuse", "ceph", "glusterfs")
 )
 _LINUX_NONLOCAL_PREFIXES = ("nfs", "smb", "fuse.")
-_MOUNTINFO_ESCAPE = re.compile(r"\\([0-7]{3})")
+_MOUNTINFO_ESCAPE = re.compile(rb"\\([0-7]{3})")
 
 
 @dataclass(frozen=True)
@@ -426,10 +433,13 @@ def parse_mountinfo(text: str) -> list[Mount]:
             fstype = fields[separator + 1]
         except (ValueError, IndexError) as exc:
             raise ValueError("a mountinfo line does not parse") from exc
-        decoded = _MOUNTINFO_ESCAPE.sub(
-            lambda match: chr(int(match.group(1), 8)), mount_point
+        # The kernel escapes bytes, not characters: ``\377`` is the byte 0xFF.
+        # Decoded as a character it would name a different directory than the
+        # path being classified, which ``os.fsdecode`` produced from bytes.
+        raw = _MOUNTINFO_ESCAPE.sub(
+            lambda match: bytes([int(match.group(1), 8)]), os.fsencode(mount_point)
         )
-        mounts.append(Mount(PurePosixPath(decoded), fstype))
+        mounts.append(Mount(PurePosixPath(os.fsdecode(raw)), fstype))
     return mounts
 
 
