@@ -342,30 +342,29 @@ def test_an_unanswered_job_membership_never_terminates_or_proves_the_drain(
     assert proved is False
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="W-CHROME-PATH: a custom browser executable is still a daemon "
-    "candidate; fixed in P3",
+@pytest.mark.parametrize(
+    ("chrome_path", "shared"), [("/opt/custom/chrome", False), (None, True)]
 )
-def test_a_custom_browser_keeps_the_direct_server(monkeypatch: pytest.MonkeyPatch):
+def test_a_custom_browser_keeps_the_direct_server(
+    monkeypatch: pytest.MonkeyPatch, chrome_path: str | None, shared: bool
+):
     """W-CHROME-PATH (P3), source-model witness, not a native measurement.
 
     Guards the scope decision "Custom browsers": only the bundled browser runs
     in default daemon mode, and ``CHROME_PATH`` keeps today's Direct behaviour.
-    Every other gate is open here, so the custom executable is the only reason
-    left to refuse.
+    Every other gate is open here, and the bundled-browser case is the control:
+    it must still be shared, so another refusal cannot pass for this one.
     """
     monkeypatch.setattr(
         "linkedin_mcp_server.daemon.get_runtime_id", lambda: "linux-amd64-host"
     )
     config = AppConfig()
     config.server.daemon_enabled = True
-    config.browser.chrome_path = "/opt/custom/chrome"
+    config.browser.chrome_path = chrome_path
     if config.server.transport != "stdio":
         pytest.fail("the default transport is no longer stdio")
 
-    assert daemon_would_be_used(config) is False
+    assert daemon_would_be_used(config) is shared
 
 
 @pytest.mark.xfail(

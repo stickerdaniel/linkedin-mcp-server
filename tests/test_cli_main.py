@@ -899,6 +899,22 @@ class TestForwardingToASharedOwner:
         assert cli_main._obtain_shared_owner(config) is None
         asked.assert_not_called()
 
+    def test_no_owner_is_sought_for_a_custom_browser(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Only the bundled browser is shared; CHROME_PATH keeps the Direct server
+        # it had before. Nothing about the profile or an owner may be looked up.
+        asked = MagicMock()
+        looked_up = MagicMock()
+        monkeypatch.setattr("linkedin_mcp_server.daemon_election.obtain_owner", asked)
+        monkeypatch.setattr("linkedin_mcp_server.cli_main.get_profile_dir", looked_up)
+        config = self._config(daemon_enabled=True)
+        config.browser.chrome_path = "/opt/custom/chrome"
+
+        assert cli_main._obtain_shared_owner(config) is None
+        asked.assert_not_called()
+        looked_up.assert_not_called()
+
     def test_the_elected_owner_is_handed_back_rather_than_discarded(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path
     ):
