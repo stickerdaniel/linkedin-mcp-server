@@ -171,6 +171,89 @@ class TestRefusing:
         assert lookup.attachment is not None and lookup.attachment.control_only
 
 
+class TestLookingForAnOwnerToRetire:
+    """Which recorded owner a profile command may ask to retire.
+
+    The browser it is about to change, whatever that owner's settings: the
+    configuration decides whether this client may *use* an owner, and retiring
+    is not using it. Everything that makes the pair trustworthy still applies.
+    """
+
+    def test_an_owner_with_other_settings_is_found(self, tmp_path: Path):
+        profile = tmp_path / "profile"
+        token = _publish_owner(
+            tmp_path,
+            profile,
+            config=_config(profile, proxy_server="http://proxy.example:8080"),
+        )
+
+        lookup = look_up_owner(tmp_path, profile, _config(profile), for_retirement=True)
+
+        assert lookup.state is OwnerState.ATTACHABLE
+        assert lookup.attachment is not None
+        assert lookup.attachment.token == token
+        assert not lookup.attachment.control_only
+
+    def test_the_same_owner_is_still_refused_for_calls(self, tmp_path: Path):
+        # The positive control for the test above: without the flag the
+        # fingerprint does refuse, so it is the flag that lets the owner through.
+        profile = tmp_path / "profile"
+        _publish_owner(
+            tmp_path,
+            profile,
+            config=_config(profile, proxy_server="http://proxy.example:8080"),
+        )
+
+        lookup = look_up_owner(tmp_path, profile, _config(profile))
+
+        assert lookup.mismatch is Mismatch.CONFIGURATION
+
+    def test_an_owner_of_another_profile_is_not_found(self, tmp_path: Path):
+        theirs = tmp_path / "their-profile"
+        ours = tmp_path / "our-profile"
+        ours.mkdir()
+        _publish_owner(tmp_path, theirs, config=_config(ours))
+
+        lookup = look_up_owner(tmp_path, ours, _config(ours), for_retirement=True)
+
+        assert lookup.mismatch is Mismatch.PROFILE
+        assert lookup.attachment is None
+
+    def test_an_owner_of_another_runtime_is_not_found(self, tmp_path: Path):
+        profile = tmp_path / "profile"
+        _publish_owner(tmp_path, profile, runtime_id="docker-abc123")
+
+        lookup = look_up_owner(tmp_path, profile, _config(profile), for_retirement=True)
+
+        assert lookup.mismatch is Mismatch.RUNTIME
+        assert lookup.attachment is None
+
+    def test_an_owner_of_another_protocol_stays_control_only(self, tmp_path: Path):
+        profile = tmp_path / "profile"
+        _publish_owner(tmp_path, profile)
+        _rewrite_published(
+            tmp_path,
+            protocol_version=daemon_descriptor_module.PROTOCOL_VERSION - 1,
+        )
+
+        lookup = look_up_owner(tmp_path, profile, _config(profile), for_retirement=True)
+
+        assert lookup.mismatch is Mismatch.PROTOCOL
+        assert lookup.attachment is not None and lookup.attachment.control_only
+
+    def test_a_token_that_does_not_match_is_untrusted(self, tmp_path: Path):
+        profile = tmp_path / "profile"
+        _publish_owner(tmp_path, profile)
+        published = read(tmp_path)
+        assert published is not None
+        token_path(tmp_path, published.instance_id).write_text("another-token")
+
+        lookup = look_up_owner(tmp_path, profile, _config(profile), for_retirement=True)
+
+        assert lookup.state is OwnerState.UNTRUSTED
+        assert lookup.attachment is None
+
+
 def _rewrite_published(auth_root: Path, **fields: object) -> None:
     """Change fields of the published descriptor as another build would write them."""
     import json

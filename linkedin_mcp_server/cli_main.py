@@ -3,7 +3,9 @@
 import asyncio
 import logging
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NoReturn
 
@@ -15,13 +17,18 @@ from linkedin_mcp_server.bootstrap import (
 )
 from linkedin_mcp_server.core import AuthenticationError
 from linkedin_mcp_server.exceptions import (
+    BrowserBusyError,
     BrowserDowngradeError,
     ProfileRootRefusedError,
 )
 from linkedin_mcp_server.authentication import clear_auth_state
 from linkedin_mcp_server.config import get_config, set_config
 from linkedin_mcp_server.config.loaders import load_config
-from linkedin_mcp_server.config.schema import AppConfig, ConfigurationError
+from linkedin_mcp_server.config.schema import (
+    PROFILE_HANDOVER_WAIT_SECONDS,
+    AppConfig,
+    ConfigurationError,
+)
 from linkedin_mcp_server.drivers.browser import (
     experimental_persist_derived_runtime,
     close_browser,
@@ -37,6 +44,7 @@ from linkedin_mcp_server.login_viewer import (
     require_persistent_profile_mount,
 )
 from linkedin_mcp_server.profile_claim import ensure_profile_claim
+from linkedin_mcp_server import session_state
 from linkedin_mcp_server.session_state import (
     get_runtime_id,
     is_container_runtime,
@@ -51,6 +59,7 @@ from linkedin_mcp_server.server import ServerRole, create_mcp_server
 from linkedin_mcp_server.setup import run_profile_creation
 
 if TYPE_CHECKING:
+    from linkedin_mcp_server.daemon import Attachment
     from linkedin_mcp_server.daemon_proxy import DaemonProxyBackend
 
 logger = logging.getLogger(__name__)
@@ -75,6 +84,237 @@ def choose_transport_interactive() -> Literal["stdio", "streamable-http"]:
         raise KeyboardInterrupt("Transport selection cancelled by user")
 
     return answers["transport"]
+
+
+_RETIRE_PROMPT = (
+    "A shared browser may be running in the background for this profile. "
+    "Ask it to retire and continue? (y/N): "
+)
+_RETIRE_NEEDS_A_TERMINAL = (
+    "ℹ️  A shared browser is recorded for this profile, and retiring it needs an "
+    "interactive terminal to confirm. Continuing with the usual profile checks."
+)
+_RETIRE_UNREADABLE = (
+    "ℹ️  A shared browser is recorded for this profile, but its record could not "
+    "be read, so it cannot be asked to retire."
+)
+_RETIRE_OTHER_PROTOCOL = (
+    "ℹ️  The shared browser recorded for this profile speaks another protocol, "
+    "so this build cannot ask it to retire. If it is still running, wait for it "
+    "to exit."
+)
+_RETIRE_NO_CONNECTION = (
+    "ℹ️  No connection could be established to the recorded shared-browser "
+    "endpoint. Continuing with the usual profile checks."
+)
+_RETIRE_BUSY = (
+    "❌ A background shared browser for this profile is busy with another "
+    "client's call. Wait for it to finish and retry. To keep future sessions "
+    "from sharing a browser, start them with --no-daemon; that does not stop "
+    "the one running now."
+)
+_RETIRE_REJECTED = (
+    "❌ The shared browser did not accept this client's credentials; it may "
+    "have been replaced. Retry."
+)
+# Scoped to this command's own operation. Never "nothing was changed": an owner
+# that accepted and then answered badly may already be closing its browser,
+# which exports the session as it goes.
+_RETIRE_UNEXPECTED = (
+    "❌ The shared browser answered in a way this build does not recognise. "
+    "This command has not performed the requested profile operation, but the "
+    "shared browser may have begun retiring. Retry in a moment."
+)
+_RETIRE_NO_ANSWER = (
+    "❌ Asked the shared browser to retire but got no answer. It may be "
+    "retiring now. This command has not performed the requested profile "
+    "operation. Retry in a moment."
+)
+_RETIRE_INTERRUPTED = (
+    "❌ Cancelled. The shared browser was asked to retire and may be retiring now."
+)
+
+#: How long the owner has to answer. It decides without waiting on anything, so
+#: this bounds a hung process, not a slow decision.
+_RETIRE_REPLY_SECONDS = 5.0
+
+
+@dataclass
+class _Retirement:
+    """Whether this command has asked a shared browser to retire.
+
+    Set once the user has confirmed and before the request is built, so from
+    then on nothing may describe the request as unsent, whatever is interrupted:
+    the send, the reply, reading it, or the command's own wait and operation.
+    """
+
+    requested: bool = False
+
+
+@contextmanager
+def _reporting_a_confirmed_retirement() -> Iterator[_Retirement]:
+    """Say that retirement may have begun if the command is interrupted after asking.
+
+    Wraps the whole of a profile command from the retirement lookup onwards, so
+    there is no gap between the request and the command's own work for an
+    interrupt to fall through. An interrupt before the request, including at
+    the prompt, is not this one's to report: nothing was sent.
+    """
+    retirement = _Retirement()
+    try:
+        yield retirement
+    except KeyboardInterrupt:
+        if not retirement.requested:
+            raise
+        print(f"\n{_RETIRE_INTERRUPTED}")
+        sys.exit(130)
+
+
+def _retire_a_shared_browser(config: AppConfig, retirement: _Retirement) -> bool:
+    """Ask an idle shared browser to retire, if there is one and the user agrees.
+
+    For ``--logout``, ``--login`` and ``--import-from-browser``, which change a
+    profile a shared browser may be holding. True means the owner agreed and is
+    retiring, so the caller waits a bounded time for the profile instead of
+    demanding it. False means there was nothing to ask, and the command goes on
+    exactly as it would without a daemon: the profile lease is what keeps it off
+    a browser that is still running. Every refusal exits here.
+
+    Call it inside ``_reporting_a_confirmed_retirement``, with the command's
+    own work, and pass that scope's *retirement*.
+
+    Nothing is contacted before the user answers. The lookup reads files only,
+    and a process that would never use a shared browser does not even do that.
+    """
+    from linkedin_mcp_server.daemon import daemon_would_be_used
+
+    if not daemon_would_be_used(config):
+        return False
+    attachment = _owner_to_retire(config)
+    if attachment is None:
+        return False
+
+    if not config.is_interactive:
+        # Nothing to confirm with, so nothing is asked. Not a refusal: the record
+        # may be all an exited owner left, and the profile lease still keeps this
+        # command off a browser that is running, exactly as for a Direct server.
+        print(_RETIRE_NEEDS_A_TERMINAL)
+        return False
+    try:
+        answer = input(_RETIRE_PROMPT).strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        print("\n❌ Operation cancelled")
+        sys.exit(0)
+    if answer not in ("y", "yes"):
+        print("❌ Operation cancelled")
+        sys.exit(0)
+
+    retirement.requested = True
+    return _ask_to_retire(attachment)
+
+
+def _owner_to_retire(config: AppConfig) -> "Attachment | None":
+    """The recorded owner of this profile that may be asked to retire, if any.
+
+    A reading of files and nothing more, so it says what is recorded rather than
+    what is running: an owner that exited leaves its record behind.
+    """
+    from linkedin_mcp_server.daemon import (
+        Mismatch,
+        OwnerState,
+        look_up_owner,
+    )
+    from linkedin_mcp_server.session_state import auth_root_dir
+
+    profile = get_profile_dir()
+    try:
+        lookup = look_up_owner(
+            auth_root_dir(profile), profile, config, for_retirement=True
+        )
+    except Exception:
+        logger.debug("The shared browser record could not be read", exc_info=True)
+        print(_RETIRE_UNREADABLE)
+        return None
+    if lookup.state is OwnerState.UNTRUSTED:
+        logger.debug("Shared browser record detail: %s", lookup.reason)
+        print(_RETIRE_UNREADABLE)
+        return None
+    if lookup.mismatch is Mismatch.PROTOCOL:
+        print(_RETIRE_OTHER_PROTOCOL)
+        return None
+    attachment = lookup.attachment
+    if (
+        lookup.state is not OwnerState.ATTACHABLE
+        or attachment is None
+        or attachment.control_only
+    ):
+        # Nothing recorded, or an owner of another runtime or profile: not the
+        # browser this command is about to change.
+        return None
+    return attachment
+
+
+def _ask_to_retire(attachment: "Attachment") -> bool:
+    """Send the idle-only retirement and act on the answer.
+
+    Idle-only, and never anything else: a failure here is reported, not retried
+    as the unconditional stand-down, which would cut off another client's call.
+    An interrupt is left to the caller's ``_reporting_a_confirmed_retirement``,
+    which covers reading the reply as well as sending the request.
+    """
+    from urllib.parse import urlsplit, urlunsplit
+
+    import httpx
+
+    from linkedin_mcp_server import daemon_owner
+
+    instance = attachment.descriptor.instance_id
+    parts = urlsplit(attachment.descriptor.url)
+    url = urlunsplit((parts.scheme, parts.netloc, daemon_owner.STAND_DOWN_PATH, "", ""))
+    try:
+        with daemon_owner.direct_http_client(timeout=_RETIRE_REPLY_SECONDS) as client:
+            response = client.post(
+                url,
+                headers={"Authorization": f"Bearer {attachment.token}"},
+                json=daemon_owner.idle_only_request(instance),
+            )
+    except (httpx.ConnectError, httpx.ConnectTimeout):
+        # No connection was made, so this request was not delivered. That is
+        # all it proves: not that the owner is gone, only that it was not asked.
+        # Refusing here would refuse every run after an owner exits, since it
+        # leaves its record behind, so the command goes on as it would without
+        # a daemon and the lease decides whether the profile is free.
+        logger.debug("The shared browser could not be reached", exc_info=True)
+        print(_RETIRE_NO_CONNECTION)
+        return False
+    except Exception:
+        logger.debug("The retirement request got no answer", exc_info=True)
+        print(_RETIRE_NO_ANSWER)
+        sys.exit(1)
+
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    if not isinstance(payload, dict):
+        payload = {}
+    if (
+        response.status_code == 200
+        and payload.get("standing_down") is True
+        and payload.get("retiring") is True
+        and payload.get("instance") == instance
+    ):
+        print("ℹ️  The shared browser is retiring; waiting for it to let go.")
+        return True
+    if response.status_code == 409 and payload.get("busy") is True:
+        print(_RETIRE_BUSY)
+        sys.exit(1)
+    if response.status_code == 401:
+        print(_RETIRE_REJECTED)
+        sys.exit(1)
+    logger.debug("Unexpected retirement answer: %s", response.status_code)
+    print(_RETIRE_UNEXPECTED)
+    sys.exit(1)
 
 
 def clear_profile_and_exit() -> None:
@@ -113,7 +353,24 @@ def clear_profile_and_exit() -> None:
         print("\n❌ Operation cancelled")
         sys.exit(0)
 
-    if clear_auth_state(get_profile_dir()):
+    # After the deletion prompt, which it does not replace: agreeing to retire a
+    # browser is not agreeing to delete a session.
+    with _reporting_a_confirmed_retirement() as retirement:
+        if _retire_a_shared_browser(config, retirement):
+            try:
+                cleared = session_state.clear_auth_state(
+                    get_profile_dir(), wait_seconds=PROFILE_HANDOVER_WAIT_SECONDS
+                )
+            except RuntimeError as e:
+                # The profile did not come free in time: a successor may have
+                # taken it, or the retiring browser is slow to close. Nothing
+                # was deleted.
+                print(f"❌ {e}")
+                sys.exit(1)
+        else:
+            cleared = clear_auth_state(get_profile_dir())
+
+    if cleared:
         print("✅ LinkedIn authentication state cleared successfully!")
     else:
         print("❌ Failed to clear authentication state")
@@ -134,10 +391,14 @@ def get_profile_and_exit() -> None:
     version = get_version()
     logger.info(f"LinkedIn MCP Server v{version} - Session Creation mode")
 
+    # The login already waits for the profile (`setup.interactive_login`), which
+    # is the whole of what a retiring owner needs from it.
     user_data_dir = config.browser.user_data_dir
-    success = run_profile_creation(
-        user_data_dir, login_viewer=config.server.login_viewer
-    )
+    with _reporting_a_confirmed_retirement() as retirement:
+        _retire_a_shared_browser(config, retirement)
+        success = run_profile_creation(
+            user_data_dir, login_viewer=config.server.login_viewer
+        )
 
     sys.exit(0 if success else 1)
 
@@ -168,22 +429,39 @@ def import_from_browser_and_exit() -> None:
         NoLinkedInSessionFoundError,
     )
 
-    if config.is_interactive:
-        print(
-            "ℹ️  macOS may prompt to allow keychain access to the browser's "
-            "Safe Storage."
-        )
-    try:
-        ok = asyncio.run(
-            import_session_from_browser(selector, user_data_dir=user_data_dir)
-        )
-    except NoLinkedInSessionFoundError as e:
-        print(f"❌ {e}")
-        print("   Log into LinkedIn in your browser first, or run with --login.")
-        sys.exit(1)
-    except (CookieDecryptionError, AuthenticationError) as e:
-        print(f"❌ Could not import session: {e}")
-        sys.exit(1)
+    with _reporting_a_confirmed_retirement() as retirement:
+        # Only a retiring owner is waited for, at the import's own first claim
+        # on the profile. Without one the import demands the profile as it
+        # always has.
+        retiring = _retire_a_shared_browser(config, retirement)
+        if config.is_interactive:
+            print(
+                "ℹ️  macOS may prompt to allow keychain access to the browser's "
+                "Safe Storage."
+            )
+        try:
+            ok = asyncio.run(
+                import_session_from_browser(
+                    selector,
+                    user_data_dir=user_data_dir,
+                    profile_wait_seconds=(
+                        PROFILE_HANDOVER_WAIT_SECONDS if retiring else 0.0
+                    ),
+                )
+            )
+        except BrowserBusyError as e:
+            if not retiring:
+                raise
+            # The profile did not come free in time. Nothing was imported.
+            print(f"❌ {e}")
+            sys.exit(1)
+        except NoLinkedInSessionFoundError as e:
+            print(f"❌ {e}")
+            print("   Log into LinkedIn in your browser first, or run with --login.")
+            sys.exit(1)
+        except (CookieDecryptionError, AuthenticationError) as e:
+            print(f"❌ Could not import session: {e}")
+            sys.exit(1)
 
     if ok:
         print(f"✅ Imported and validated LinkedIn session into {user_data_dir}")

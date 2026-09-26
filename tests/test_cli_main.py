@@ -1222,3 +1222,929 @@ class TestConfigurationErrorAtStartup:
             cli_main.main([])
 
         assert capsys.readouterr().out == ""
+
+
+class _Owner:
+    """A published owner of the test profile, served by the real route.
+
+    The route and its ``CallLiveness`` are the owner's own. Only the socket is
+    replaced: the CLI's HTTP client is handed a transport that runs each
+    request through the owner's ASGI app, and records it. *answer* replaces the
+    app for the rows a same-build owner never gives.
+    """
+
+    HOST = "127.0.0.1"
+
+    def __init__(
+        self, monkeypatch, home, profile, *, token_seen_by_owner=None, bridged=True
+    ):
+        import httpx
+
+        from linkedin_mcp_server import daemon_descriptor, daemon_liveness
+        from linkedin_mcp_server.daemon_owner import create_owner_server
+        from linkedin_mcp_server.session_state import auth_root_dir, get_runtime_id
+
+        self.events: list[tuple] = []
+        self.requests: list[tuple[str, str, bytes]] = []
+        self.turnover: list[str] = []
+        self.answer = None
+        self.instance = daemon_descriptor.new_instance_id()
+        self.token = daemon_descriptor.new_token()
+        self.port = 49152
+        profile.mkdir(parents=True, exist_ok=True)
+        auth_root = auth_root_dir(profile)
+        daemon_descriptor.publish(
+            auth_root,
+            daemon_descriptor.build(
+                instance_id=self.instance,
+                package_version="4.20.0",
+                runtime_id=get_runtime_id(),
+                profile=profile,
+                host=self.HOST,
+                port=self.port,
+                path="/mcp",
+                token=self.token,
+                # Another configuration than the client's: retirement is about
+                # the browser, not about whether this client could use it.
+                config=AppConfig(),
+                log_path=auth_root / "daemon.log",
+            ),
+            self.token,
+        )
+        self.liveness = daemon_liveness.get_liveness()
+        self.liveness.serving_as(self.instance)
+
+        def stand_down() -> None:
+            # What `run_owner`'s own callback does.
+            self.liveness.retire("turnover")
+            self.turnover.append("asked")
+
+        self.app = create_owner_server(
+            config=AppConfig(),
+            token=token_seen_by_owner or self.token,
+            host=self.HOST,
+            port=self.port,
+            stand_down=stand_down,
+        ).config.app
+        owner = self
+
+        class Bridge(httpx.BaseTransport):
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                body = request.read()
+                owner.events.append(("request",))
+                owner.requests.append((request.method, request.url.path, body))
+                if owner.answer is not None:
+                    return owner.answer(request)
+                return owner._through_the_app(request, body)
+
+        if bridged:
+            monkeypatch.setattr(
+                "linkedin_mcp_server.daemon_owner.direct_http_client",
+                lambda *, timeout: httpx.Client(
+                    transport=Bridge(), trust_env=False, timeout=timeout
+                ),
+            )
+
+    def _through_the_app(self, request, body):
+        import asyncio
+
+        import httpx
+
+        async def forward():
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=self.app),
+                base_url=f"http://{self.HOST}:{self.port}",
+                trust_env=False,
+            ) as client:
+                response = await client.request(
+                    request.method,
+                    request.url.path,
+                    headers={
+                        key: value
+                        for key, value in request.headers.items()
+                        if key.lower() != "host"
+                    },
+                    content=body,
+                )
+                return response.status_code, response.headers, response.content
+
+        status, headers, content = asyncio.run(forward())
+        return httpx.Response(
+            status,
+            headers={"content-type": headers.get("content-type", "")},
+            content=content,
+        )
+
+    def sent_only_the_idle_only_request(self) -> bool:
+        from linkedin_mcp_server.daemon_owner import STAND_DOWN_PATH
+
+        return [(m, path, json.loads(body)) for m, path, body in self.requests] == [
+            (
+                "POST",
+                STAND_DOWN_PATH,
+                {
+                    "only_if_idle": True,
+                    "protocol": _protocol(),
+                    "instance": self.instance,
+                },
+            )
+        ]
+
+
+def _protocol() -> int:
+    from linkedin_mcp_server.daemon_descriptor import PROTOCOL_VERSION
+
+    return PROTOCOL_VERSION
+
+
+class TestRetiringASharedBrowser:
+    """--logout, --login and --import-from-browser under a shared browser.
+
+    The contract: ask only after the user confirms, retire only an owner with
+    nothing in flight or queued, never fall back to the unconditional
+    stand-down, never describe a request that may have been sent as unsent,
+    and change the profile only once its lease is held.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _machine(self, monkeypatch, tmp_path, isolate_profile_dir):
+        from linkedin_mcp_server import daemon_descriptor
+        from linkedin_mcp_server.storage_class import Classification, StorageClass
+
+        # Every daemon file under a home of this test's own, never the real one.
+        self.home = tmp_path / "home"
+        self.home.mkdir()
+        monkeypatch.setattr(daemon_descriptor, "_account_home", lambda: self.home)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.storage_class.classify",
+            lambda path: Classification(StorageClass.LOCAL, "local test filesystem"),
+        )
+        self.profile = isolate_profile_dir
+        self.config = AppConfig()
+        self.config.is_interactive = True
+        self.config.server.daemon_enabled = True
+        self.config.browser.user_data_dir = str(self.profile)
+        monkeypatch.setattr(cli_main, "get_config", lambda: self.config)
+        monkeypatch.setattr(cli_main, "configure_logging", lambda **_kwargs: None)
+        monkeypatch.setattr(cli_main, "get_version", lambda: "4.0.0")
+        monkeypatch.setattr(cli_main, "set_headless", lambda _x: None)
+        monkeypatch.setattr(cli_main, "configure_browser_environment", lambda: None)
+        self.events: list[tuple] = []
+        self.monkeypatch = monkeypatch
+
+    # -- helpers ----------------------------------------------------------- #
+
+    def _seed_session(self) -> None:
+        from linkedin_mcp_server.session_state import source_state_path
+
+        (self.profile / "Default").mkdir(parents=True, exist_ok=True)
+        (self.profile / "Default" / "Cookies").write_text("placeholder")
+        source_state_path(self.profile).write_text("{}")
+
+    def _session_intact(self) -> bool:
+        from linkedin_mcp_server.session_state import source_state_path
+
+        return (self.profile / "Default" / "Cookies").exists() and source_state_path(
+            self.profile
+        ).exists()
+
+    def _answers(self, *answers, events=None) -> list[str]:
+        prompts: list[str] = []
+        queue = list(answers)
+        log = self.events if events is None else events
+
+        def ask(prompt: str = "") -> str:
+            prompts.append(prompt)
+            log.append(("prompt", prompt))
+            answer = queue.pop(0)
+            if isinstance(answer, BaseException):
+                raise answer
+            log.append(("answer", answer))
+            return answer
+
+        self.monkeypatch.setattr("builtins.input", ask)
+        return prompts
+
+    def _owner(self, **kwargs) -> _Owner:
+        owner = _Owner(self.monkeypatch, self.home, self.profile, **kwargs)
+        self.events = owner.events
+        return owner
+
+    @staticmethod
+    def _exit_code(command) -> object:
+        """How *command* ended. An interrupt that escapes is an answer too.
+
+        Caught rather than let through: pytest treats a KeyboardInterrupt as the
+        user stopping the whole run, not as this test failing.
+        """
+        try:
+            command()
+        except SystemExit as exit_info:
+            return exit_info.code
+        except KeyboardInterrupt:
+            return "escaped KeyboardInterrupt"
+        pytest.fail("the command returned instead of exiting")
+
+    def _logout(self) -> object:
+        return self._exit_code(cli_main.clear_profile_and_exit)
+
+    def _login(self, creation: MagicMock | None = None) -> tuple[object, MagicMock]:
+        creation = creation or MagicMock(return_value=True)
+        self.monkeypatch.setattr(cli_main, "run_profile_creation", creation)
+        return self._exit_code(cli_main.get_profile_and_exit), creation
+
+    def _import(self, run: AsyncMock | None = None) -> tuple[object, AsyncMock]:
+        self.config.server.import_from_browser = "chrome"
+        run = run or AsyncMock(return_value=True)
+        self.monkeypatch.setattr(
+            "linkedin_mcp_server.browser_import.orchestrate.import_session_from_browser",
+            run,
+        )
+        return self._exit_code(cli_main.import_from_browser_and_exit), run
+
+    def _command(self, command: str) -> tuple[object, bool]:
+        """Run *command*; return its exit and whether its profile operation ran."""
+        if command == "logout":
+            cleared = MagicMock(return_value=True)
+            self.monkeypatch.setattr(
+                "linkedin_mcp_server.session_state.clear_auth_state", cleared
+            )
+            return self._logout(), cleared.called
+        if command == "login":
+            code, creation = self._login()
+            return code, creation.called
+        code, run = self._import()
+        return code, run.called
+
+    @staticmethod
+    def _retirement_prompts(prompts: list[str]) -> list[str]:
+        return [p for p in prompts if "retire" in p]
+
+    # -- step 0: eligibility ----------------------------------------------- #
+
+    def test_a_process_that_would_not_share_never_looks(self, capsys):
+        # Nothing read, nothing created: not even the daemon state directory.
+        self.config.server.daemon_enabled = False
+        self._seed_session()
+        owner = self._owner()
+        looked = MagicMock(side_effect=AssertionError("looked for an owner"))
+        self.monkeypatch.setattr("linkedin_mcp_server.daemon.look_up_owner", looked)
+        entries_before = sorted(p.name for p in self.home.rglob("*"))
+        prompts = self._answers("y")
+
+        assert self._logout() == 0
+
+        looked.assert_not_called()
+        assert self._retirement_prompts(prompts) == []
+        assert owner.requests == []
+        assert not self._session_intact()
+        assert sorted(p.name for p in self.home.rglob("*")) == entries_before
+
+    # -- step 1: the lookup ------------------------------------------------ #
+
+    @pytest.mark.parametrize("recorded", ["nothing", "another profile", "runtime"])
+    def test_no_owner_of_this_profile_leaves_the_command_as_it_was(
+        self, recorded, capsys
+    ):
+        self._seed_session()
+        owner = None
+        if recorded != "nothing":
+            owner = self._owner()
+            from linkedin_mcp_server import daemon_descriptor
+            from linkedin_mcp_server.session_state import auth_root_dir
+
+            path = daemon_descriptor.descriptor_path(auth_root_dir(self.profile))
+            raw = json.loads(path.read_text())
+            if recorded == "another profile":
+                sibling = self.profile.parent / "sibling"
+                sibling.mkdir()
+                raw["profile_identity"] = daemon_descriptor.profile_identity(sibling)
+            else:
+                raw["runtime_id"] = "docker-abc123"
+            path.write_text(json.dumps(raw))
+        prompts = self._answers("y")
+
+        assert self._logout() == 0
+
+        assert self._retirement_prompts(prompts) == []
+        assert owner is None or owner.requests == []
+        assert not self._session_intact()
+        assert "shared browser" not in capsys.readouterr().out
+
+    @pytest.mark.parametrize("damage", ["corrupt", "token", "raises"])
+    def test_an_unreadable_record_is_said_once_and_the_lease_decides(
+        self, damage, capsys
+    ):
+        from linkedin_mcp_server import daemon_descriptor
+        from linkedin_mcp_server.session_state import auth_root_dir
+
+        self._seed_session()
+        owner = self._owner()
+        auth_root = auth_root_dir(self.profile)
+        if damage == "corrupt":
+            daemon_descriptor.descriptor_path(auth_root).write_text("{not json")
+        elif damage == "token":
+            daemon_descriptor.token_path(auth_root, owner.instance).write_text("x")
+        else:
+            self.monkeypatch.setattr(
+                "linkedin_mcp_server.daemon.look_up_owner",
+                MagicMock(side_effect=OSError("state storage went away")),
+            )
+        prompts = self._answers("y")
+
+        assert self._logout() == 0
+
+        out = capsys.readouterr().out
+        assert out.count("its record could not be read") == 1
+        assert self._retirement_prompts(prompts) == []
+        assert owner.requests == []
+        assert not self._session_intact()
+
+    def test_an_owner_of_another_protocol_is_never_asked(self, capsys):
+        from linkedin_mcp_server import daemon_descriptor
+        from linkedin_mcp_server.session_state import auth_root_dir
+
+        self._seed_session()
+        owner = self._owner()
+        path = daemon_descriptor.descriptor_path(auth_root_dir(self.profile))
+        raw = json.loads(path.read_text())
+        raw["protocol_version"] = _protocol() - 1
+        path.write_text(json.dumps(raw))
+        prompts = self._answers("y")
+
+        assert self._logout() == 0
+
+        out = capsys.readouterr().out
+        assert "speaks another protocol" in out
+        # A record is not a process: the line may not claim it is running.
+        assert "is running" not in out
+        assert self._retirement_prompts(prompts) == []
+        assert owner.requests == []
+
+    # -- step 2: the confirmation ------------------------------------------ #
+
+    def test_nothing_is_sent_before_the_user_answers(self):
+        self._seed_session()
+        owner = self._owner()
+        self._answers("y", "y")
+
+        assert self._logout() == 0
+        assert owner.sent_only_the_idle_only_request()
+
+        asked = next(
+            i
+            for i, event in enumerate(self.events)
+            if event[0] == "prompt" and "retire" in event[1]
+        )
+        assert self.events[asked + 1] == ("answer", "y")
+        assert ("request",) in self.events
+        assert ("request",) not in self.events[: asked + 2]
+
+    @pytest.mark.parametrize(
+        "answer",
+        ["n", "", KeyboardInterrupt(), EOFError()],
+        ids=["no", "enter", "interrupt", "eof"],
+    )
+    def test_declining_sends_nothing_and_changes_nothing(self, answer, capsys):
+        self._seed_session()
+        owner = self._owner()
+        prompts = self._answers("y", answer)
+
+        assert self._logout() == 0
+
+        assert len(self._retirement_prompts(prompts)) == 1
+        assert owner.requests == []
+        assert owner.liveness.retiring is False
+        assert self._session_intact()
+        assert "cancelled" in capsys.readouterr().out.lower()
+
+    def test_logout_still_asks_about_deleting_first(self, capsys):
+        # Agreeing to retire a browser is not agreeing to delete a session.
+        self._seed_session()
+        owner = self._owner()
+        prompts = self._answers("n")
+
+        assert self._logout() == 0
+
+        assert self._retirement_prompts(prompts) == []
+        assert owner.requests == []
+        assert self._session_intact()
+
+    @pytest.mark.parametrize("command", ["login", "import"])
+    def test_without_a_terminal_nothing_is_asked_and_the_usual_checks_decide(
+        self, command, capsys
+    ):
+        # The record may be all an exited owner left. Without a terminal there
+        # is no consent, so nothing is sent, and the command goes on as a Direct
+        # server would: the profile lease decides.
+        self.config.is_interactive = False
+        self._seed_session()
+        owner = self._owner()
+        prompts = self._answers()
+
+        if command == "login":
+            code, creation = self._login()
+            ran = creation.called
+        else:
+            code, run = self._import()
+            ran = run.called
+
+        assert code == 0
+        assert ran
+        assert prompts == []
+        assert owner.requests == []
+        assert owner.liveness.retiring is False
+        assert "needs an interactive terminal" in capsys.readouterr().out
+
+    def test_without_a_terminal_a_held_profile_still_refuses(self, capsys):
+        # A live owner holds the profile lease, and the usual check refuses as
+        # it would for a running Direct server. Nothing is sent to the owner.
+        self.config.is_interactive = False
+        self._seed_session()
+        owner = self._owner()
+        # Logout's own confirmation of the deletion still asks.
+        self._answers("y")
+        release = self._hold_the_profile()
+        try:
+            # Today's refusal for a profile a running server holds.
+            with pytest.raises(RuntimeError, match="in use by another process"):
+                self._logout()
+        finally:
+            release()
+
+        assert self._session_intact()
+        assert owner.requests == []
+        assert owner.liveness.retiring is False
+
+    @pytest.mark.parametrize("command", ["login", "import"])
+    def test_without_an_owner_nothing_is_asked_even_without_a_terminal(self, command):
+        self.config.is_interactive = False
+        prompts = self._answers()
+
+        if command == "login":
+            code, creation = self._login()
+            assert creation.called
+        else:
+            code, run = self._import()
+            assert run.await_args is not None
+            assert run.await_args.kwargs["profile_wait_seconds"] == 0.0
+
+        assert code == 0
+        assert prompts == []
+
+    # -- steps 3 to 5 against the real route ------------------------------- #
+
+    def test_an_idle_owner_retires_and_the_profile_is_cleared_once_held(self):
+        from linkedin_mcp_server.profile_lease import ProfileLease, get_profile_lease
+
+        self._seed_session()
+        owner = self._owner()
+        self._answers("y", "y")
+        taken: list[int] = []
+        real_try_acquire = ProfileLease.try_acquire
+
+        def counted(lease):
+            granted = real_try_acquire(lease)
+            if granted:
+                taken.append(lease._refs)
+            return granted
+
+        self.monkeypatch.setattr(ProfileLease, "try_acquire", counted)
+
+        assert self._logout() == 0
+
+        assert owner.sent_only_the_idle_only_request()
+        assert owner.liveness.retiring is True
+        assert owner.liveness.retire_reason == "retire"
+        assert owner.turnover == ["asked"]
+        # One reference, taken once, in the one place the logout takes it.
+        assert taken == [1]
+        assert not self._session_intact()
+        assert not get_profile_lease(self.profile).held
+
+    @pytest.mark.parametrize("busy_with", ["running", "queued"])
+    def test_a_busy_owner_is_left_alone_and_nothing_changes(self, busy_with, capsys):
+        import os
+
+        self._seed_session()
+        owner = self._owner()
+        if busy_with == "running":
+            owner.liveness.watch("v1." + "a" * 32, MagicMock())
+        owner.liveness.call_started()
+        self._answers("y", "y")
+
+        assert self._logout() == 1
+
+        out = capsys.readouterr().out
+        assert "busy with another client's call" in out
+        # The owner's pid is on record (the descriptor was built in this
+        # process), and no line about it may name it.
+        said = [line for line in out.splitlines() if "shared browser" in line]
+        assert said and not any(str(os.getpid()) in line for line in said)
+        assert owner.sent_only_the_idle_only_request()
+        assert owner.liveness.retiring is False
+        assert owner.turnover == []
+        assert self._session_intact()
+
+    def test_a_busy_owner_blocks_login_and_import_too(self, capsys):
+        import os
+
+        owner = self._owner()
+        owner.liveness.call_started()
+        self._answers("y", "y")
+
+        login_code, creation = self._login()
+        import_code, run = self._import()
+
+        assert (login_code, import_code) == (1, 1)
+        assert not creation.called
+        assert not run.called
+        # Nothing else is printed before the refusal on these two paths.
+        assert str(os.getpid()) not in capsys.readouterr().out
+
+    def test_login_starts_after_an_idle_owner_retires(self):
+        owner = self._owner()
+        self._answers("y")
+
+        code, creation = self._login()
+
+        assert code == 0
+        assert owner.sent_only_the_idle_only_request()
+        creation.assert_called_once()
+
+    def test_import_waits_for_the_profile_after_an_idle_owner_retires(self):
+        from linkedin_mcp_server.config.schema import PROFILE_HANDOVER_WAIT_SECONDS
+
+        owner = self._owner()
+        self._answers("y")
+
+        code, run = self._import()
+
+        assert code == 0
+        assert owner.sent_only_the_idle_only_request()
+        assert run.await_args is not None
+        assert run.await_args.kwargs["profile_wait_seconds"] == (
+            PROFILE_HANDOVER_WAIT_SECONDS
+        )
+
+    def test_credentials_the_owner_rejects(self, capsys):
+        self._seed_session()
+        owner = self._owner(token_seen_by_owner="a-token-it-was-never-given")
+        self._answers("y", "y")
+
+        assert self._logout() == 1
+
+        assert "did not accept this client's credentials" in capsys.readouterr().out
+        assert owner.sent_only_the_idle_only_request()
+        assert owner.liveness.retiring is False
+        assert self._session_intact()
+
+    # -- step 4: every other answer ---------------------------------------- #
+
+    @pytest.mark.parametrize(
+        ("status", "body"),
+        [
+            (200, {"standing_down": True}),
+            (200, {"standing_down": True, "instance": "@"}),
+            (200, {"standing_down": True, "retiring": False, "instance": "@"}),
+            (200, {"retiring": True, "instance": "@"}),
+            (200, {"standing_down": True, "retiring": True, "instance": "another"}),
+            (200, {"standing_down": True, "retiring": True}),
+            (200, b"not json"),
+            (200, b"[]"),
+            (409, {"standing_down": False}),
+            (409, {"daemon": "retiring"}),
+            (400, {"error": "unsupported stand-down request"}),
+            (404, b"Not Found"),
+            (405, b"Method Not Allowed"),
+            (403, b""),
+            (500, b"Internal Server Error"),
+            (302, b""),
+        ],
+        ids=[
+            "200 from an owner that ignored the body",
+            "200 without retiring",
+            "200 not retiring",
+            "200 not standing down",
+            "200 for another instance",
+            "200 naming no instance",
+            "200 not json",
+            "200 not an object",
+            "409 not busy",
+            "409 retiring marker",
+            "400",
+            "404",
+            "405",
+            "403",
+            "500",
+            "302",
+        ],
+    )
+    def test_an_answer_this_build_does_not_recognise(self, status, body, capsys):
+        import httpx
+
+        self._seed_session()
+        owner = self._owner()
+
+        def answer(request):
+            # "@" is the instance the request named, so a row that fails only
+            # on another field is not also refused for naming another owner.
+            if not isinstance(body, dict):
+                return httpx.Response(status, content=body)
+            named = json.loads(request.content)["instance"]
+            return httpx.Response(
+                status,
+                json={k: named if v == "@" else v for k, v in body.items()},
+            )
+
+        owner.answer = answer
+        self._answers("y", "y")
+
+        assert self._logout() == 1
+
+        out = capsys.readouterr().out
+        assert "does not recognise" in out
+        assert "may have begun retiring" in out
+        # About this command's own operation, never about the owner's: one that
+        # accepted may already be closing its browser and exporting the session.
+        assert "This command has not performed the requested profile operation" in out
+        assert "Nothing on the profile was changed" not in out
+        assert owner.sent_only_the_idle_only_request(), "fell back to another request"
+        assert self._session_intact()
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            "ReadTimeout",
+            "RemoteProtocolError",
+            "ReadError",
+            "WriteError",
+            "PoolTimeout",
+        ],
+    )
+    def test_a_lost_answer_is_never_reported_as_unsent(self, failure, capsys):
+        import httpx
+
+        self._seed_session()
+        owner = self._owner()
+        # Accepted by the real route first, then lost: the owner is retiring
+        # while this command can only say it did not do its own part.
+        forward = owner._through_the_app
+
+        def lost(request):
+            forward(request, request.content)
+            raise getattr(httpx, failure)("gone", request=request)
+
+        owner.answer = lost
+        self._answers("y", "y")
+
+        assert self._logout() == 1
+
+        out = capsys.readouterr().out
+        assert "got no answer" in out
+        assert "may be retiring now" in out
+        assert "This command has not performed the requested profile operation" in out
+        assert "Nothing on the profile was changed" not in out
+        assert "not sent" not in out and "unsent" not in out
+        assert owner.sent_only_the_idle_only_request()
+        assert owner.liveness.retiring is True
+        assert self._session_intact()
+
+    def test_an_interrupt_after_sending_says_it_may_be_retiring(self, capsys):
+        self._seed_session()
+        owner = self._owner()
+
+        def interrupted(request):
+            raise KeyboardInterrupt
+
+        owner.answer = interrupted
+        self._answers("y", "y")
+
+        assert self._logout() == 130
+
+        assert "may be retiring now" in capsys.readouterr().out
+        assert self._session_intact()
+
+    def test_a_refused_connection_leaves_the_command_as_it_was(self, capsys):
+        # An owner that exited leaves its record behind, and every command
+        # after it would otherwise be refused until something replaced it.
+        # No connection proves this request was not delivered, and no more than
+        # that; the lease still decides.
+        import socket
+
+        self._seed_session()
+        # The real client, against a real closed port.
+        self._owner(bridged=False)
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            closed = probe.getsockname()[1]
+        from linkedin_mcp_server import daemon_descriptor
+        from linkedin_mcp_server.session_state import auth_root_dir
+
+        path = daemon_descriptor.descriptor_path(auth_root_dir(self.profile))
+        raw = json.loads(path.read_text())
+        raw["port"] = closed
+        path.write_text(json.dumps(raw))
+        self._answers("y", "y")
+
+        assert self._logout() == 0
+
+        out = capsys.readouterr().out
+        assert "No connection could be established" in out
+        assert "Continuing with the usual profile checks" in out
+        assert not self._session_intact()
+
+    @pytest.mark.parametrize("failure", ["ConnectTimeout", "ConnectError"])
+    def test_no_connection_is_not_read_as_an_owner_that_is_gone(self, failure, capsys):
+        # A connect timeout is not a refusal: something may hold the port and
+        # not have answered in time. The wording is only what both establish,
+        # that this request was not delivered, and the lease still decides.
+        import httpx
+
+        self._seed_session()
+        owner = self._owner()
+
+        def unreachable(request):
+            raise getattr(httpx, failure)("no connection", request=request)
+
+        owner.answer = unreachable
+        self._answers("y", "y")
+
+        assert self._logout() == 0
+
+        out = capsys.readouterr().out
+        assert "No connection could be established" in out
+        assert "not listening" not in out and "nothing to retire" not in out
+        assert owner.sent_only_the_idle_only_request(), "retried another request"
+        assert owner.liveness.retiring is False
+        assert not self._session_intact()
+
+    # -- step 5: the profile ------------------------------------------------ #
+
+    def _hold_the_profile(self):
+        from linkedin_mcp_server.profile_lease import (
+            _release_locked_fd,
+            acquire_locked_fd,
+            get_profile_lease,
+        )
+
+        fd = acquire_locked_fd(
+            get_profile_lease(self.profile)._lease_path, exclusive=True
+        )
+        assert fd is not None
+        released: list[bool] = []
+
+        def release() -> None:
+            if not released:
+                released.append(True)
+                _release_locked_fd(fd)
+
+        return release
+
+    def test_a_profile_that_does_not_come_free_is_left_untouched(self, capsys):
+        # A successor may win the lease between the reply and the wait, and
+        # then admit a real call. Timing out safely is an allowed outcome.
+        from linkedin_mcp_server.profile_lease import get_profile_lease
+
+        self._seed_session()
+        owner = self._owner()
+        self.monkeypatch.setattr(cli_main, "PROFILE_HANDOVER_WAIT_SECONDS", 0.3)
+        release = self._hold_the_profile()
+        self._answers("y", "y")
+        try:
+            assert self._logout() == 1
+        finally:
+            release()
+
+        assert "in use by another process" in capsys.readouterr().out
+        assert owner.liveness.retiring is True
+        assert self._session_intact()
+        assert not get_profile_lease(self.profile).held
+
+    def test_a_profile_the_retiring_owner_lets_go_of_is_cleared(self):
+        import threading
+
+        self._seed_session()
+        self._owner()
+        release = self._hold_the_profile()
+        timer = threading.Timer(0.3, release)
+        timer.start()
+        self._answers("y", "y")
+        try:
+            assert self._logout() == 0
+        finally:
+            timer.cancel()
+            release()
+
+        assert not self._session_intact()
+
+    @pytest.mark.parametrize("command", ["logout", "login", "import"])
+    def test_an_interrupt_while_waiting_says_it_may_be_retiring(self, command, capsys):
+        self._seed_session()
+        self._owner()
+        self._answers("y", "y")
+        if command == "logout":
+            self.monkeypatch.setattr(
+                "linkedin_mcp_server.session_state.clear_auth_state",
+                MagicMock(side_effect=KeyboardInterrupt),
+            )
+            code = self._logout()
+        elif command == "login":
+            code, _creation = self._login(MagicMock(side_effect=KeyboardInterrupt))
+        else:
+            code, _run = self._import(AsyncMock(side_effect=KeyboardInterrupt))
+
+        assert code == 130
+        assert "may be retiring now" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("command", ["logout", "login", "import"])
+    @pytest.mark.parametrize(
+        "moment",
+        ["reading the reply", "acknowledging it", "handing over to the wait"],
+    )
+    def test_an_interrupt_after_an_accepted_reply_says_it_may_be_retiring(
+        self, command, moment, capsys
+    ):
+        # The owner has already accepted: nothing about the interrupt can undo
+        # that, and the user must not be left to think cancelling the command
+        # cancelled the retirement.
+        import builtins
+
+        import httpx
+
+        self._seed_session()
+        owner = self._owner()
+        self._answers("y", "y")
+        if moment == "reading the reply":
+
+            def interrupted_json(self, **kwargs):
+                raise KeyboardInterrupt
+
+            self.monkeypatch.setattr(httpx.Response, "json", interrupted_json)
+        elif moment == "acknowledging it":
+            real_print = builtins.print
+
+            def interrupted_print(*args, **kwargs):
+                if args and "waiting for it to let go" in str(args[0]):
+                    raise KeyboardInterrupt
+                real_print(*args, **kwargs)
+
+            self.monkeypatch.setattr(builtins, "print", interrupted_print)
+        else:
+            real_retire = cli_main._retire_a_shared_browser
+
+            def interrupted_on_return(*args, **kwargs):
+                real_retire(*args, **kwargs)
+                raise KeyboardInterrupt
+
+            self.monkeypatch.setattr(
+                cli_main, "_retire_a_shared_browser", interrupted_on_return
+            )
+
+        code, operated = self._command(command)
+
+        assert code == 130
+        assert "may be retiring now" in capsys.readouterr().out
+        assert owner.sent_only_the_idle_only_request(), "retried another request"
+        assert owner.liveness.retiring is True
+        assert owner.turnover == ["asked"]
+        assert not operated
+        assert self._session_intact()
+
+    def test_an_interrupt_before_anything_was_asked_is_not_reported_as_one(
+        self, capsys
+    ):
+        # The control for the scope above: while the record is still being
+        # read nothing has been sent, so there is no retirement to report and
+        # the interrupt goes on exactly as it did before.
+        self._seed_session()
+        owner = self._owner()
+        self.monkeypatch.setattr(
+            "linkedin_mcp_server.daemon.look_up_owner",
+            MagicMock(side_effect=KeyboardInterrupt),
+        )
+        prompts = self._answers("y")
+
+        assert self._logout() == "escaped KeyboardInterrupt"
+
+        assert "may be retiring" not in capsys.readouterr().out
+        assert self._retirement_prompts(prompts) == []
+        assert owner.requests == []
+        assert self._session_intact()
+
+    def test_an_import_whose_profile_stays_busy_is_refused_plainly(self, capsys):
+        from linkedin_mcp_server.exceptions import BrowserBusyError
+
+        self._owner()
+        self._answers("y")
+        self.config.server.import_from_browser = "chrome"
+        self.monkeypatch.setattr(
+            "linkedin_mcp_server.browser_import.orchestrate.import_session_from_browser",
+            AsyncMock(side_effect=BrowserBusyError("Another LinkedIn MCP client")),
+        )
+
+        with pytest.raises(SystemExit) as exit_info:
+            cli_main.import_from_browser_and_exit()
+
+        assert exit_info.value.code == 1
+        assert "Another LinkedIn MCP client" in capsys.readouterr().out

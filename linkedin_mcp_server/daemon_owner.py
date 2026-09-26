@@ -39,6 +39,7 @@ import contextlib
 import errno
 import hashlib
 import hmac
+import json
 import logging
 import os
 import queue
@@ -369,6 +370,10 @@ async def _probe(url: str, token: str) -> None:
 #: a frontend may still do with an owner whose tool protocol it does not speak
 #: (``daemon.Attachment.control_only``), so a tool protocol bump that moved it
 #: would strand every owner already installed.
+#:
+#: The one body it accepts is the idle-only retirement a confirmed profile
+#: command sends (``idle_only_request``). It never falls back to the bodiless
+#: form: a body this owner cannot read exactly is refused with nothing changed.
 STAND_DOWN_PATH = "/control/stand-down"
 
 
@@ -389,6 +394,41 @@ def _matches_token(presented: str, expected: str) -> bool:
     return hmac.compare_digest(
         hashlib.sha256(presented.strip().encode("utf-8", "surrogatepass")).digest(),
         hashlib.sha256(expected.encode("utf-8")).digest(),
+    )
+
+
+#: The one body the stand-down route accepts, and the keys it must have exactly.
+_IDLE_ONLY_KEYS = frozenset({"only_if_idle", "protocol", "instance"})
+
+
+def idle_only_request(instance_id: str) -> dict[str, Any]:
+    """The body that asks an owner to retire only if nothing is in flight."""
+    return {
+        "only_if_idle": True,
+        "protocol": daemon_descriptor.PROTOCOL_VERSION,
+        "instance": instance_id,
+    }
+
+
+def _is_idle_only_request(body: bytes, instance_id: str | None) -> bool:
+    """Whether *body* is exactly an idle-only retirement addressed to this owner.
+
+    Exact, because anything looser is a request this owner would be guessing
+    at, and the only safe answer to a guess is to change nothing. A bool is an
+    ``int`` in Python, so ``protocol: true`` is refused by type, not by value.
+    """
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        return False
+    return (
+        isinstance(payload, dict)
+        and payload.keys() == _IDLE_ONLY_KEYS
+        and payload["only_if_idle"] is True
+        and type(payload["protocol"]) is int
+        and payload["protocol"] == daemon_descriptor.PROTOCOL_VERSION
+        and instance_id is not None
+        and payload["instance"] == instance_id
     )
 
 
@@ -430,6 +470,10 @@ def create_owner_server(
         async def stand_down_route(request: Request) -> JSONResponse:
             """Give up the browser so a newer build can take over.
 
+            Or, with the idle-only body, so a profile command the user confirmed
+            can change the profile: then only if nothing is in flight or queued,
+            and a busy owner answers 409 with nothing changed.
+
             The token is checked here rather than left to the server's auth
             provider. Measured on 3.4.4: a custom route is mounted outside the
             authentication middleware, so an unauthenticated POST to this path
@@ -445,12 +489,37 @@ def create_owner_server(
             # body at all is the unconditional stand-down. A body is some other
             # request, and one this build does not serve must never be read as
             # the one form that stops the owner regardless of its calls.
-            if await request.body():
+            body = await request.body()
+            if not body:
+                stand_down()
+                return JSONResponse({"standing_down": True})
+            liveness = get_liveness()
+            if not _is_idle_only_request(body, liveness.instance_id):
                 return JSONResponse(
                     {"error": "unsupported stand-down request"}, status_code=400
                 )
+            # A profile command the user confirmed, asking only if nobody else
+            # would lose a call. Nothing awaits from the check to the reply, so a
+            # call cannot be admitted between the verdict and the retirement: it
+            # is either counted before and makes this busy, or refused after.
+            # Busy is asked first and on its own: an owner already retiring for
+            # another reason still has calls it is draining, and the user agreed
+            # only to retiring an owner nobody is using.
+            setup = browser_setup_in_progress()
+            if liveness.busy(background_work=setup) or not liveness.try_retire(
+                "retire", background_work=setup
+            ):
+                return JSONResponse(
+                    {"standing_down": False, "busy": True}, status_code=409
+                )
             stand_down()
-            return JSONResponse({"standing_down": True})
+            return JSONResponse(
+                {
+                    "standing_down": True,
+                    "retiring": True,
+                    "instance": liveness.instance_id,
+                }
+            )
 
     @mcp.custom_route(HEARTBEAT_PATH, methods=["POST"])
     async def heartbeat_route(request: Request) -> JSONResponse:
@@ -1240,7 +1309,10 @@ async def _turn_over(
     # Already closed by the request itself; closed again here so this does not
     # depend on how the request got in.
     liveness.retire("turnover")
-    logger.info("A newer build asked for the browser; standing down")
+    if liveness.retire_reason == "retire":
+        logger.info("A profile command asked for the browser; standing down")
+    else:
+        logger.info("A newer build asked for the browser; standing down")
     await _drain_admitted_calls(liveness, _TURNOVER_DRAIN_SECONDS)
     server.should_exit = True
     # Graceful, but not unconditionally. Uvicorn finishes the requests in flight
