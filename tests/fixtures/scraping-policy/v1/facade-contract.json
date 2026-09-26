@@ -50,7 +50,7 @@
       },
       "get_saved_jobs": {
         "coroutine": true,
-        "signature": "(self, max_pages: 'int' = 3) -> 'dict[str, Any]'"
+        "signature": "(self, max_pages: 'int' = 3, stage: 'JobsTrackerStage' = 'saved') -> 'dict[str, Any]'"
       },
       "get_sidebar_profiles": {
         "coroutine": true,
@@ -425,10 +425,21 @@
           "properties": {
             "max_pages": {
               "default": 3,
-              "description": "Maximum number of saved-jobs pages to load (1-10, default 3)",
+              "description": "Maximum number of tracker pages to load (1-10, default 3)",
               "maximum": 10,
               "minimum": 1,
               "type": "integer"
+            },
+            "stage": {
+              "default": "saved",
+              "description": "Tracker tab: saved (default), in_progress, applied or\narchived. applied lists Easy Apply submissions and external\napplications the user confirmed to LinkedIn.",
+              "enum": [
+                "saved",
+                "in_progress",
+                "applied",
+                "archived"
+              ],
+              "type": "string"
             }
           },
           "type": "object"
