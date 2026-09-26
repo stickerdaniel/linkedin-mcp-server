@@ -130,6 +130,8 @@ class ProcessRecord:
     profile: str | None = None
     #: Descended from the harness, so one of the row's actors.
     in_row: bool = False
+    #: The venv interpreter a framework build was started as (``LAUNCHER_ENV``).
+    launcher: str | None = None
 
     @property
     def identity(self) -> tuple[int, float]:
@@ -144,6 +146,8 @@ class ProcessRecord:
             "cmdline": list(self.cmdline),
             "in_row": self.in_row,
         }
+        if self.launcher is not None:
+            fields["launcher"] = self.launcher
         if not self.in_row:
             # These events are published as CI evidence, and a process that is
             # not the row's own may carry anything in its arguments, credentials
@@ -151,6 +155,7 @@ class ProcessRecord:
             fields["cmdline"] = []
             fields["cmdline_withheld"] = True
             fields["profile"] = self.profile
+            fields.pop("launcher", None)
         return fields
 
 
@@ -162,9 +167,34 @@ def record(
     cmdline: Sequence[str],
     *,
     in_row: bool = False,
+    launcher: str | None = None,
 ) -> ProcessRecord:
     cmdline = tuple(cmdline)
-    return ProcessRecord(pid, ppid, start, exe, cmdline, user_data_dir(cmdline), in_row)
+    return ProcessRecord(
+        pid, ppid, start, exe, cmdline, user_data_dir(cmdline), in_row, launcher
+    )
+
+
+#: Set by a macOS framework build's ``bin/python`` stub to the path it was
+#: started as before it re-executes ``Python.app``, whose binary is then both
+#: the process's executable and its ``argv[0]``. For a venv that path is the
+#: venv's interpreter, and it is the only place the venv still shows.
+LAUNCHER_ENV = "__PYVENV_LAUNCHER__"
+
+#: Only a server's own processes are asked for it, and only for that variable:
+#: an environment can hold credentials, and nothing else of it is kept.
+_SERVER_MODULE = "linkedin_mcp_server"
+
+
+def read_launcher(process: Any, cmdline: Sequence[str]) -> str | None:
+    """The venv interpreter a server process was started as, if it says so."""
+    if not any(_SERVER_MODULE in argument for argument in cmdline):
+        return None
+    try:
+        value = process.environ().get(LAUNCHER_ENV)
+    except (psutil.Error, OSError, AttributeError):
+        return None
+    return value or None
 
 
 def classify(process: ProcessRecord) -> str:
@@ -483,6 +513,12 @@ class Sampler:
                 ppid, exe, cmdline, failed, exe_read = self._read(process, known)
             except psutil.NoSuchProcess:
                 continue
+            # Read once per lifetime and command line: it is fixed at exec.
+            launcher = (
+                known.launcher
+                if known is not None and known.cmdline == cmdline
+                else read_launcher(process, cmdline)
+            )
             sample[pid] = record(
                 pid,
                 -1 if ppid is None else ppid,
@@ -490,6 +526,7 @@ class Sampler:
                 exe,
                 cmdline,
                 in_row=known is not None and known.in_row,
+                launcher=launcher,
             )
             if failed:
                 parent_read = not any(f.startswith("ppid") for f in failed)

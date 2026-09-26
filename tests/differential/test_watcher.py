@@ -373,6 +373,11 @@ class _FakeProcess:
     def cmdline(self):
         return _field(self._entry, "cmdline")
 
+    def environ(self):
+        self._entry.setdefault("environ_reads", 0)
+        self._entry["environ_reads"] += 1
+        return _field({"environ": self._entry.get("environ", {})}, "environ")
+
 
 #: The harness's user in the model; a table entry may name another in "user".
 HARNESS = "harness-user"
@@ -954,6 +959,63 @@ def test_a_real_setuid_ps_held_alive_is_recorded_but_not_counted(tmp_path):
     assert any(f.startswith("cmdline") for f in ours[0]["failures"])
     assert not ours[0]["possible_browser"]
     assert sampler.relevant_read_failures == []
+
+
+# The macOS runner's framework Python, as the E1d packets recorded it: the
+# venv's stub re-executes this, which becomes both exe and argv[0].
+FRAMEWORK_PYTHON = (
+    "/Library/Frameworks/Python.framework/Versions/3.13/Resources/"
+    "Python.app/Contents/MacOS/Python"
+)
+BASELINE_VENV_PYTHON = "/tmp/differential-baseline/checkout/.venv/bin/python"
+
+
+def test_a_server_process_records_the_venv_it_was_launched_as_and_nothing_else():
+    table = _row_table()
+    sampler, tracker = _sampler(table), Tracker()
+    _observe(sampler, tracker, 0.0)
+    table[2] = {
+        "start": 2.0,
+        "ppid": 1,
+        "exe": FRAMEWORK_PYTHON,
+        "cmdline": [FRAMEWORK_PYTHON, "-m", "linkedin_mcp_server"],
+        "environ": {
+            "__PYVENV_LAUNCHER__": BASELINE_VENV_PYTHON,
+            "PROXY_PASSWORD": "synthetic-secret",
+        },
+    }
+    events = _observe(sampler, tracker, 1.0)
+    (start,) = [e[2] for e in events if e[1] == "process.start" and e[2]["pid"] == 2]
+    assert start["launcher"] == BASELINE_VENV_PYTHON
+    assert "synthetic-secret" not in repr(events)
+    for tick in (2.0, 3.0):
+        _observe(sampler, tracker, tick)
+    # Fixed at exec, so read once for as long as the command line holds.
+    assert table[2]["environ_reads"] == 1
+
+
+def test_a_process_that_is_not_a_server_is_never_asked_for_its_environment():
+    table = _row_table()
+    sampler, tracker = _sampler(table), Tracker()
+    _observe(sampler, tracker, 0.0)
+    table[2] = {"start": 2.0, "ppid": 1, "cmdline": ["node", "run-driver"]}
+    _observe(sampler, tracker, 1.0)
+    assert "environ_reads" not in table[2]
+    assert sampler.sample()[2].launcher is None
+
+
+def test_an_unreadable_environment_leaves_no_launcher():
+    table = _row_table()
+    sampler, tracker = _sampler(table), Tracker()
+    _observe(sampler, tracker, 0.0)
+    table[2] = {
+        "start": 2.0,
+        "ppid": 1,
+        "cmdline": [FRAMEWORK_PYTHON, "-m", "linkedin_mcp_server"],
+        "environ": psutil.AccessDenied(2),
+    }
+    _observe(sampler, tracker, 1.0)
+    assert sampler.sample()[2].launcher is None
 
 
 def test_actors_descend_from_the_root_and_are_re_read_every_sample():

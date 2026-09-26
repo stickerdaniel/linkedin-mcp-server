@@ -92,6 +92,12 @@ def row(tmp_path, monkeypatch, profile):
     monkeypatch.setattr(harness, "Watcher", _Watcher)
     monkeypatch.setattr(harness, "run_host_session", host)
     monkeypatch.setattr(harness, "identify_owner", lambda *a, **k: (owner, None))
+    # A published descriptor, which is what the row looks for before reading.
+    published = tmp_path / "descriptor.json"
+    published.write_text("{}")
+    monkeypatch.setattr(
+        harness.daemon_descriptor, "descriptor_path", lambda _root: published
+    )
     monkeypatch.setattr(
         harness.daemon_descriptor,
         "read",

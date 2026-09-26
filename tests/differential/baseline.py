@@ -24,7 +24,13 @@ The executable psutil reports is no help here: a venv's interpreter is a link
 to the same base Python for both checkouts. On Windows the venv's
 ``python.exe`` is a launcher that starts the base interpreter as its child, so
 the rule asks for at least one frontend (and owner) record naming the baseline
-interpreter and for none naming the candidate's, not for every record to.
+interpreter and for none naming the candidate's, not for every record to. On
+macOS with a framework build (the runner's python.org Python) neither the
+executable nor ``argv[0]`` names the venv: the venv's ``bin/python`` stub
+re-executes ``Python.app``, whose binary becomes both. It leaves the venv path
+in ``__PYVENV_LAUNCHER__``, which the watcher records for a server's
+processes as ``launcher`` (``watcher.read_launcher``), so the rule reads that
+as well as ``argv[0]``.
 
 Run as a script, it prepares the runtime: ``python baseline.py DIRECTORY``.
 """
@@ -302,11 +308,27 @@ def stage_frozen_session(
 # --- Which interpreter the row's actors ran ------------------------------------
 
 
-def _argv0(record: dict[str, Any]) -> str | None:
+def _spelled(path: str) -> str:
+    """One spelling of an interpreter path, without following the file itself.
+
+    The directory is resolved, so ``/var`` and ``/private/var`` on macOS agree,
+    and the name is kept: a venv's ``bin/python`` is a link to the base
+    interpreter, and following it would lose which venv it belongs to.
+    """
+    absolute = os.path.abspath(path)
+    directory = os.path.realpath(os.path.dirname(absolute))
+    return os.path.normcase(os.path.join(directory, os.path.basename(absolute)))
+
+
+def _interpreters(record: dict[str, Any]) -> list[str]:
+    """Every interpreter path a watcher record names: argv[0], and the launcher."""
+    named = []
     cmdline = record.get("cmdline")
-    if not isinstance(cmdline, list) or not cmdline:
-        return None
-    return os.path.normcase(os.path.abspath(str(cmdline[0])))
+    if isinstance(cmdline, list) and cmdline:
+        named.append(str(cmdline[0]))
+    if isinstance(record.get("launcher"), str) and record["launcher"]:
+        named.append(record["launcher"])
+    return [_spelled(path) for path in named]
 
 
 def _under(path: str, root: str) -> bool:
@@ -325,13 +347,13 @@ def interpreter_failures(
 ) -> list[str]:
     """Why the watcher's records do not show the row ran *runtime*'s code.
 
-    A frontend or owner the row started whose interpreter lies in the
-    candidate's environment is candidate code in a baseline row. At least one
-    frontend, and one owner when an owner is expected, must name the baseline
-    interpreter itself.
+    A frontend or owner the row started that names an interpreter in the
+    candidate's environment, by ``argv[0]`` or by launcher, is candidate code
+    in a baseline row, whatever else it names. At least one frontend, and one
+    owner when an owner is expected, must name the baseline interpreter.
     """
-    baseline = os.path.normcase(os.path.abspath(runtime.python))
-    candidate = os.path.normcase(os.path.abspath(candidate_prefix))
+    baseline = _spelled(runtime.python)
+    candidate = os.path.normcase(os.path.realpath(candidate_prefix))
     seen: dict[str, int] = {"frontend": 0, "owner": 0}
     failures = []
     for record in records:
@@ -342,15 +364,14 @@ def interpreter_failures(
         actor = str(record.get("actor"))
         if actor not in seen:
             continue
-        argv0 = _argv0(record)
-        if argv0 is None:
-            continue
-        if _under(argv0, candidate):
+        named = _interpreters(record)
+        foreign = [path for path in named if _under(path, candidate)]
+        if foreign:
             failures.append(
                 f"the {actor} (pid {record.get('pid')}) ran the candidate's "
-                f"interpreter {argv0} in a baseline row"
+                f"interpreter {foreign[0]} in a baseline row"
             )
-        elif argv0 == baseline:
+        elif baseline in named:
             seen[actor] += 1
     if not seen["frontend"]:
         failures.append(

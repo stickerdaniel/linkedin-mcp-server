@@ -114,6 +114,7 @@ from differential.synthetic_origin import (
     SyntheticOrigin,
 )
 from differential.watcher import (
+    LAUNCHER_ENV,
     USER_DATA_DIR_FLAG,
     another_user,
     canonical_user_data_dir,
@@ -174,7 +175,11 @@ _STDERR_EOF_SECONDS = 10.0
 _FORWARDING_LINE = "Forwarding to the shared browser owner"
 _IDLE_EXIT_LINE = "Nothing has needed the browser in"
 _OWNER_MODULE = "linkedin_mcp_server.daemon_owner"
-_FOREIGN_CODE = frozenset({"PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "VIRTUAL_ENV"})
+#: ``__PYVENV_LAUNCHER__`` included: a framework build takes its venv from it,
+#: so the harness's own value would hand a baseline actor the candidate's venv.
+_FOREIGN_CODE = frozenset(
+    {"PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "VIRTUAL_ENV", LAUNCHER_ENV}
+)
 
 
 class ContainmentError(RuntimeError):
@@ -1535,8 +1540,11 @@ def judge_row(observed: Observations) -> tuple[RowVector, list[str]]:
     )
     if not expect_owner and observed.daemon and observed.daemon_state_existed:
         # Enabled but ineligible: no coordination effect at all, state included.
+        # The harness only ever tests for this directory and never creates it
+        # on such a row, so an actor of the row did.
         failures.append(
-            "a row that must stay Direct left daemon state for its auth root"
+            f"a row that must stay Direct left daemon state for its auth root: "
+            f"{observed.cleanup.directory}"
         )
     if observed.daemon and expect_owner:
         owner_published = bool(owner.get("pid"))
@@ -1875,10 +1883,13 @@ async def measure_host_quit_row(
     async def find_the_owner() -> None:
         nonlocal identified
         # A Direct server publishes nothing; a descriptor here would be one.
+        # Only looked at, never read into being: ``daemon_descriptor.read``
+        # prepares the daemon directory before it reads, so calling it on a
+        # row that must leave no daemon state would create that state itself.
         owner["descriptor_present"] = daemon_descriptor.descriptor_path(
             account.auth_root
         ).exists()
-        if not daemon:
+        if not daemon or not owner["descriptor_present"]:
             return
         try:
             published = daemon_descriptor.read(account.auth_root)

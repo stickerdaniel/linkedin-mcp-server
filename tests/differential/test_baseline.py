@@ -268,6 +268,116 @@ def test_a_baseline_row_that_ran_candidate_code_is_refused(
     assert any(reported in failure for failure in failures), failures
 
 
+#: The macOS runner's framework Python, as the first E1d packets recorded it
+#: for every baseline frontend and owner: exe and argv[0] alike.
+FRAMEWORK = (
+    "/Library/Frameworks/Python.framework/Versions/3.13/Resources/"
+    "Python.app/Contents/MacOS/Python"
+)
+
+
+def _framework(actor: str, launcher: str, *, pid: int) -> dict[str, Any]:
+    return {**_start(actor, FRAMEWORK, pid=pid), "launcher": launcher}
+
+
+def test_a_framework_build_is_identified_by_its_launcher(tmp_path):
+    runtime = _runtime(tmp_path)
+    records = [
+        _framework("frontend", runtime.python, pid=10),
+        _framework("owner", runtime.python, pid=11),
+    ]
+    assert (
+        interpreter_failures(
+            records, runtime, candidate_prefix=CANDIDATE_PREFIX, owner_expected=True
+        )
+        == []
+    )
+    # Without the launcher that is exactly what failed on the first run.
+    bare = [_start("frontend", FRAMEWORK, pid=10)]
+    failures = interpreter_failures(
+        bare, runtime, candidate_prefix=CANDIDATE_PREFIX, owner_expected=False
+    )
+    assert any("no frontend the watcher saw" in f for f in failures)
+
+
+@pytest.mark.parametrize(
+    "records",
+    [
+        pytest.param(
+            lambda b, c: [
+                _framework("frontend", b, pid=10),
+                _framework("owner", c, pid=11),
+            ],
+            id="candidate-owner-by-launcher",
+        ),
+        pytest.param(
+            lambda b, c: [
+                # Names the baseline in argv[0] and the candidate as launcher:
+                # the candidate direction wins.
+                {**_start("frontend", b, pid=10), "launcher": c},
+                _framework("owner", b, pid=11),
+            ],
+            id="baseline-argv0-candidate-launcher",
+        ),
+    ],
+)
+def test_a_framework_candidate_is_still_refused(tmp_path, records):
+    runtime = _runtime(tmp_path)
+    failures = interpreter_failures(
+        records(runtime.python, _candidate_python()),
+        runtime,
+        candidate_prefix=CANDIDATE_PREFIX,
+        owner_expected=True,
+    )
+    assert any("ran the candidate's interpreter" in f for f in failures), failures
+
+
+def test_the_same_interpreter_under_another_spelling_of_its_directory_counts(
+    tmp_path,
+):
+    # macOS reaches a temporary directory as /var and as /private/var.
+    real = tmp_path / "real"
+    (real / "checkout" / ".venv" / "bin").mkdir(parents=True)
+    alias = tmp_path / "alias"
+    alias.symlink_to(real, target_is_directory=True)
+    python = str(real / "checkout" / ".venv" / "bin" / "python")
+    runtime = Runtime(python, real / "checkout", real / "ms-playwright", PIN)
+    record = _start(
+        "frontend", str(alias / "checkout" / ".venv" / "bin" / "python"), pid=1
+    )
+    assert (
+        interpreter_failures(
+            [record], runtime, candidate_prefix=CANDIDATE_PREFIX, owner_expected=False
+        )
+        == []
+    )
+
+
+async def test_an_ineligible_row_never_reads_daemon_state_into_being(
+    row, tmp_path, monkeypatch
+):
+    """The first E1d run's H-R12 K3 failure: the harness made the directory.
+
+    ``daemon_descriptor.read`` prepares the daemon directory before it reads.
+    Called on a row that must stay Direct, it created the state the row is
+    then failed for. It may be called only once a descriptor exists.
+    """
+    reads: list[Any] = []
+    descriptor = tmp_path / "not-yet-published.json"
+    monkeypatch.setattr(
+        harness.daemon_descriptor, "descriptor_path", lambda _root: descriptor
+    )
+    monkeypatch.setattr(
+        harness.daemon_descriptor, "read", lambda root: reads.append(root)
+    )
+    await row(processes=[], summary={}, expect_owner=False)
+    assert reads == []
+    # The control: once one is published, the daemon row does read it.
+    descriptor.write_text("{}")
+    await row(processes=[], summary={})
+    assert len(reads) == 1
+
+
 async def test_the_row_fails_when_its_frozen_actors_ran_candidate_code(row, tmp_path):
     runtime = _runtime(tmp_path)
     clean = [
@@ -293,6 +403,7 @@ def test_a_frozen_actor_environment_carries_no_foreign_code(tmp_path, monkeypatc
     monkeypatch.setattr(daemon_descriptor, "_account_home", lambda: home)
     monkeypatch.setenv("PYTHONPATH", str(harness.REPO_ROOT))
     monkeypatch.setenv("VIRTUAL_ENV", sys.prefix)
+    monkeypatch.setenv("__PYVENV_LAUNCHER__", _candidate_python())
     (tmp_path / "auth").mkdir()
     account = claim_account(tmp_path / "auth" / "profile")
     env = actor_environment(
@@ -303,6 +414,7 @@ def test_a_frozen_actor_environment_carries_no_foreign_code(tmp_path, monkeypatc
         chrome_path="/b/chrome",
     )
     assert "PYTHONPATH" not in env and "VIRTUAL_ENV" not in env
+    assert "__PYVENV_LAUNCHER__" not in env
     assert env["CHROME_PATH"] == "/b/chrome"
     assert "CHROME_PATH" not in actor_environment(
         account, "http://127.0.0.1:9", daemon=True, browsers=tmp_path / "b"
