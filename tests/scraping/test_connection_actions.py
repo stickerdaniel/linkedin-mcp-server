@@ -852,6 +852,43 @@ class TestInviteDialog:
         assert result == (False, False, PREMIUM_MESSAGE)
         mock_dismiss.assert_awaited_once()
 
+    async def test_failed_fill_beside_a_hidden_textarea_is_a_note_limit(
+        self, mock_page
+    ):
+        """A textarea the upsell left mounted but hidden is no note field."""
+        actions = _actions(mock_page)
+        mounted = MagicMock()
+        mounted.count = AsyncMock(return_value=1)
+        shown = MagicMock()
+        shown.count = AsyncMock(return_value=0)
+
+        def locator_for(selector: str):
+            return shown if "visible" in selector else mounted
+
+        mock_page.locator.side_effect = locator_for
+
+        with (
+            patch.object(
+                actions, "_dialog_is_open", new_callable=AsyncMock, return_value=True
+            ),
+            patch.object(
+                actions,
+                "_fill_dialog_textarea",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch.object(
+                actions,
+                "_get_premium_upsell_message",
+                new_callable=AsyncMock,
+                return_value=PREMIUM_MESSAGE,
+            ),
+            patch.object(actions, "_dismiss_dialog", new_callable=AsyncMock),
+        ):
+            result = await actions._submit_invite_dialog("Hello")
+
+        assert result == (False, False, PREMIUM_MESSAGE)
+
     async def test_reports_premium_after_send_click_failure(self, mock_page):
         """Premium upsell intercepting the Send click is a note-limit block.
 

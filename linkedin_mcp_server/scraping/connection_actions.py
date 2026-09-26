@@ -566,19 +566,22 @@ class ConnectionActions:
             if not note_filled:
                 # Same gate as the reveal step: the Premium nudge banner sits
                 # beside a live textarea, so a failed fill is a quota block
-                # only once the upsell has replaced the textarea. A count that
-                # fails proves no absence, so it claims no block either.
+                # only once no visible textarea is left. A count that fails
+                # proves no absence, so it claims no block either: a false
+                # block invites the caller to resend without the note.
                 try:
-                    textarea_mounted = (
+                    textarea_visible = (
                         await self._session.page.locator(
-                            _DIALOG_TEXTAREA_SELECTOR
+                            f"{_DIALOG_TEXTAREA_SELECTOR} >> visible=true"
                         ).count()
                         > 0
                     )
                 except Exception:
-                    textarea_mounted = True
-                if textarea_mounted:
-                    logger.info("Invite note fill failed beside a mounted textarea")
+                    textarea_visible = True
+                if textarea_visible:
+                    logger.info(
+                        "Invite note fill failed without evidence of a quota block"
+                    )
                     await self._dismiss_dialog()
                     return False, False, None
                 note_limit_message = await self._get_premium_upsell_message()
