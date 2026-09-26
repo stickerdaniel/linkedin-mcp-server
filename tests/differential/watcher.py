@@ -18,27 +18,36 @@ the default-on contract forbids.
 **Nothing a row could still change is settled by age.** A process can exec at
 any moment of its life, and a forked child shows its parent's command line
 until it does, which is how the Node driver starts Chromium on POSIX. So every
-row actor, and every process that appeared after the first sample, has its
-executable and command line read again on every sample for as long as it
-lives, and a change is reported as ``process.update``. Only a process that was
-already running at the first sample *and* does not descend from the harness is
-read once: nothing the row starts is among them. Its identity is still checked
-on every sample.
+row actor, and every process that appeared after the first sample and was not
+established as unrelated, has its executable and command line read again on
+every sample for as long as it lives, and a change is reported as
+``process.update``. Its identity is checked on every sample either way.
 
 **Relevant means descended from the harness.** A process is a row actor when it
 descends from the harness (``--root-pid``), whether it was already running at
 the first sample, as a staging leftover would be, or appeared later.
 
-**A row actor nobody can identify stays in the census as unknown.** Losing a
-process (``NoSuchProcess``, or a pid whose create time changed) is an exit.
-Being refused a read (``AccessDenied``, ``OSError``) is not: the actor keeps its
-last reading and is counted as unknown, which leaves O1 unestablished, unless
-the same sample read its executable and that executable cannot be the row's
-browser (``--browser-exe``, or anything under ``--browser-dir``). That is how
-the setuid ``/bin/ps`` the product runs on macOS, whose arguments psutil cannot
-read, is told apart from a browser whose arguments are hidden. Every failed
-read is recorded in the summary either way, with the executable, the fields,
-how long it lasted and how it ended.
+**Unrelated has to be established; not being able to attribute is not it.** A
+process is established as unrelated to the row when
+
+* its owning user can be read and is not the harness's user (the real uid on
+  POSIX, the user name on Windows), since no actor runs as anyone else; or
+* it was running at the first sample and its ancestry, read then, does not lead
+  to the harness; or
+* its executable, read in the same sample, is neither the row's browser
+  (``--browser-exe``) nor anything under the managed browsers
+  (``--browser-dir``). That is the setuid ``/bin/ps`` the product runs on
+  macOS: psutil cannot read its arguments, and it cannot be a browser.
+
+Losing a process (``NoSuchProcess``, or a pid whose create time changed) is an
+exit. Any other process whose identity, parent or arguments cannot be read, or
+that cannot be opened at all, is an **unresolved possible actor**: it is kept in
+the census, recorded, and leaves O1 unestablished for the row. That record stays
+even if the process later becomes readable or exits, since a later reading
+cannot show what it did while unreadable; only a later reading that establishes
+it as unrelated by its user resolves it. Every failed read is recorded in the
+summary, with the executable when known, the fields, how long it lasted, how it
+ended and whether it could have been a browser.
 
 What sampling cannot see: a process that lives and dies between two samples.
 The summary records when observation began and ended and the largest wall-clock
@@ -247,16 +256,60 @@ def _real(path: str) -> str:
     return os.path.normcase(os.path.realpath(path))
 
 
+def possible_browser(
+    exe: str | None, browser_exe: str | None, browser_dir: str | None
+) -> bool:
+    """Whether an executable could be the row's browser. Unknown is yes."""
+    if not exe:
+        return True
+    if browser_exe is None and browser_dir is None:
+        return True
+    real = _real(exe)
+    if browser_exe is not None and real == _real(browser_exe):
+        return True
+    if browser_dir is not None:
+        directory = _real(browser_dir)
+        try:
+            if os.path.commonpath([real, directory]) == directory:
+                return True
+        except ValueError:
+            pass
+    return False
+
+
+def process_user(process: Any) -> object | None:
+    """Who owns a process, or None if that cannot be read.
+
+    The real uid on POSIX, which a setuid executable does not change, and the
+    user name on Windows.
+    """
+    try:
+        if os.name == "nt":
+            return process.username()
+        return process.uids().real
+    except (psutil.Error, OSError, AttributeError):
+        return None
+
+
+def harness_user() -> object | None:
+    if os.name == "nt":
+        return process_user(psutil.Process())
+    return os.getuid()
+
+
+#: How a failed reading of one process was judged.
+_UNRELATED = "unrelated"
+_EVIDENCE = "evidence"
+_POSSIBLE = "possible"
+
+
 class Sampler:
-    """Reads the process table, re-reading every process that could still change.
+    """Reads the process table, keeping what cannot be excluded as a possible actor.
 
-    *pids*, *open_process* and *clock* are psutil's and the wall clock by
-    default, and are replaced in tests to model a process table.
-
-    *browser_exe* and *browser_dir* name what the row's browser runs: its
-    resolved executable, and the directory the managed browsers are installed
-    in. A row actor whose metadata cannot be read is cleared only by an
-    executable read in the same sample that is neither of those.
+    *pids*, *open_process*, *clock* and *user_of* are psutil's, the wall clock
+    and ``process_user`` by default, and are replaced in tests to model a
+    process table. *browser_exe* and *browser_dir* name what the row's browser
+    runs. *user* is the harness's user, as *user_of* reports it.
     """
 
     def __init__(
@@ -267,6 +320,8 @@ class Sampler:
         pids: Callable[[], Iterable[int]] = psutil.pids,
         open_process: Callable[[int], Any] = psutil.Process,
         clock: Callable[[], float] = time.time,
+        user_of: Callable[[Any], object | None] = process_user,
+        user: object | None = None,
         browser_exe: str | None = None,
         browser_dir: str | None = None,
     ) -> None:
@@ -275,37 +330,32 @@ class Sampler:
         self._pids = pids
         self._open = open_process
         self._clock = clock
-        self.browser_exe = _real(browser_exe) if browser_exe else None
-        self.browser_dir = _real(browser_dir) if browser_dir else None
+        self._user_of = user_of
+        self.user = harness_user() if user is None else user
+        self.browser_exe = browser_exe
+        self.browser_dir = browser_dir
         self._known: dict[int, ProcessRecord] = {}
         self._baseline: set[tuple[int, float]] | None = None
         self._row: set[tuple[int, float]] = set()
-        self._episodes: dict[tuple[int, float], dict[str, Any]] = {}
+        #: Identities established as unrelated; read once, identity-checked.
+        self._unrelated: set[tuple[int, float]] = set()
+        self._episodes: dict[tuple[int, float | None], dict[str, Any]] = {}
         self._closed: list[dict[str, Any]] = []
 
     def possible_browser(self, exe: str | None) -> bool:
-        """Whether an executable could be the row's browser. Unknown is yes."""
-        if not exe:
-            return True
-        real = _real(exe)
-        if self.browser_exe is None and self.browser_dir is None:
-            return True
-        if self.browser_exe is not None and real == self.browser_exe:
-            return True
-        if self.browser_dir is not None:
-            try:
-                if os.path.commonpath([real, self.browser_dir]) == self.browser_dir:
-                    return True
-            except ValueError:
-                pass
-        return False
+        return possible_browser(exe, self.browser_exe, self.browser_dir)
+
+    def _another_user(self, process: Any) -> bool:
+        owner = self._user_of(process)
+        return owner is not None and self.user is not None and owner != self.user
 
     @property
     def read_failures(self) -> list[dict[str, Any]]:
-        """Every failed-read episode of a row actor.
+        """Every failed-read episode that was not established as unrelated.
 
-        ``resolution`` says how an episode ended: ``readable`` or ``exited``,
-        or ``open`` when it was still unreadable at the last sample.
+        ``resolution`` says how an episode ended: ``readable``, ``exited``, or
+        ``open`` when it was still unreadable at the last sample.
+        ``possible_browser`` says whether it leaves O1 unestablished.
         """
         open_ = [
             dict(e, failures=sorted(e["failures"]), resolution="open")
@@ -315,14 +365,14 @@ class Sampler:
 
     @property
     def relevant_read_failures(self) -> list[dict[str, Any]]:
-        """The episodes where the actor could have been a hidden browser root."""
+        """The episodes that could have hidden a browser root."""
         return [e for e in self.read_failures if e["possible_browser"]]
 
     def _read(
         self, process: Any, known: ProcessRecord | None
-    ) -> tuple[int, str | None, tuple[str, ...], list[str], bool]:
+    ) -> tuple[int | None, str | None, tuple[str, ...], list[str], bool]:
         failures: list[str] = []
-        ppid = known.ppid if known is not None else -1
+        ppid = known.ppid if known is not None else None
         exe = known.exe if known is not None else None
         cmdline = known.cmdline if known is not None else ()
         exe_read = False
@@ -344,32 +394,62 @@ class Sampler:
     def sample(self) -> dict[int, ProcessRecord]:
         first = self._baseline is None
         sample: dict[int, ProcessRecord] = {}
-        # pid -> (failed fields, whether the executable was read this sample)
-        failures: dict[int, tuple[list[str], bool]] = {}
+        # pid -> (episode key, failed fields, exe, exe read now, process or None,
+        #         parent read)
+        failures: dict[int, tuple[Any, list[str], str | None, bool, Any, bool]] = {}
+        opened: dict[int, Any] = {}
         for pid in self._pids():
             known = self._known.get(pid)
             try:
-                # Reads the create time, which is what separates a recycled pid
-                # from the process already known under it.
                 process = self._open(pid)
+            except psutil.NoSuchProcess:
+                continue
+            except _UNREADABLE as exc:
+                if known is not None and known.identity in self._unrelated:
+                    sample[pid] = known
+                    continue
+                if known is not None:
+                    sample[pid] = known
+                key = known.identity if known is not None else (pid, None)
+                exe = known.exe if known is not None else None
+                failures[pid] = (
+                    key,
+                    [f"open: {type(exc).__name__}"],
+                    exe,
+                    False,
+                    None,
+                    False,
+                )
+                continue
+            opened[pid] = process
+            try:
+                # The create time is what separates a recycled pid from the
+                # process already known under it.
                 start = process.create_time()
             except psutil.NoSuchProcess:
                 continue
             except _UNREADABLE as exc:
-                # Present but unidentifiable. A known row actor keeps its last
-                # reading and is unknown; anything else cannot be attributed.
-                if known is not None and known.in_row:
+                if known is not None and known.identity in self._unrelated:
                     sample[pid] = known
-                    failures[pid] = ([f"identity: {type(exc).__name__}"], False)
+                    continue
+                if self._another_user(process):
+                    continue
+                if known is not None:
+                    sample[pid] = known
+                key = known.identity if known is not None else (pid, None)
+                exe = known.exe if known is not None else None
+                failures[pid] = (
+                    key,
+                    [f"identity: {type(exc).__name__}"],
+                    exe,
+                    False,
+                    process,
+                    False,
+                )
                 continue
             if known is not None and known.start != start:
                 known = None
-            if (
-                known is not None
-                and not known.in_row
-                and self._baseline is not None
-                and known.identity in self._baseline
-            ):
+            if known is not None and known.identity in self._unrelated:
                 sample[pid] = known
                 continue
             try:
@@ -378,59 +458,133 @@ class Sampler:
                 continue
             sample[pid] = record(
                 pid,
-                ppid,
+                -1 if ppid is None else ppid,
                 start,
                 exe,
                 cmdline,
                 in_row=known is not None and known.in_row,
             )
             if failed:
-                failures[pid] = (failed, exe_read)
+                parent_read = not any(f.startswith("ppid") for f in failed)
+                failures[pid] = (
+                    (pid, start),
+                    failed,
+                    exe,
+                    exe_read,
+                    process,
+                    parent_read,
+                )
         if first:
             self._baseline = {process.identity for process in sample.values()}
             root = sample.get(self.root_pid)
             if root is not None:
                 self._row.add(root.identity)
         self._classify(sample)
-        self._track_failures(sample, failures)
+        verdicts = self._judge(sample, failures, first)
+        if first:
+            # Running before any actor, not descended from the harness, and
+            # judged by a parent read now: established unrelated.
+            for pid, process in sample.items():
+                if process.in_row or pid == self.own_pid:
+                    continue
+                if pid not in failures or failures[pid][5]:
+                    self._unrelated.add(process.identity)
+        self._track(sample, verdicts)
+        self._resolve_by_user(sample, opened)
         self._known = sample
         return sample
 
-    def _track_failures(
+    def _resolve_by_user(
+        self, sample: dict[int, ProcessRecord], opened: dict[int, Any]
+    ) -> None:
+        """Resolve a possible-actor record once a reading shows another user owns it.
+
+        The only later reading that resolves one: a process cannot change its
+        real owner, so this says what it was while it was unreadable too.
+        Becoming readable, or exiting, says nothing of the kind.
+        """
+        records = [*self._episodes.items(), *((None, e) for e in self._closed)]
+        for key, episode in records:
+            if not episode["possible_browser"]:
+                continue
+            pid = episode["pid"]
+            process = opened.get(pid)
+            current = sample.get(pid)
+            if process is None or current is None:
+                continue
+            start = episode["start_identity"]
+            if start is not None and start != current.start:
+                continue
+            if self._another_user(process):
+                episode["possible_browser"] = False
+                episode["resolved_by"] = "another user"
+                self._unrelated.add(current.identity)
+
+    def _judge(
         self,
         sample: dict[int, ProcessRecord],
-        failures: dict[int, tuple[list[str], bool]],
+        failures: dict[int, tuple[Any, list[str], str | None, bool, Any, bool]],
+        first: bool,
+    ) -> dict[Any, tuple[str, int, str | None, list[str]]]:
+        """Judge each failed reading: unrelated, evidence only, or a possible actor."""
+        verdicts: dict[Any, tuple[str, int, str | None, list[str]]] = {}
+        for pid, (key, failed, exe, exe_read, process, parent_read) in failures.items():
+            current = sample.get(pid)
+            in_row = current is not None and current.in_row
+            fields = {failure.split(":", 1)[0] for failure in failed}
+            if first and current is not None and not in_row and parent_read:
+                # Running before any actor, and its ancestry, read now, does
+                # not lead to the harness.
+                verdict = _UNRELATED
+            elif process is not None and self._another_user(process):
+                verdict = _UNRELATED
+                if current is not None:
+                    self._unrelated.add(current.identity)
+            elif exe_read and not self.possible_browser(exe):
+                # Not a browser, whatever its arguments. Kept as evidence when
+                # it belongs to the row or its ancestry could not be read.
+                verdict = _EVIDENCE if (in_row or not parent_read) else _UNRELATED
+            elif fields <= {"exe"}:
+                # Parent and arguments were read, so the census sees it whole.
+                verdict = _EVIDENCE if in_row else _UNRELATED
+            else:
+                verdict = _POSSIBLE
+            verdicts[key] = (verdict, pid, exe, failed)
+        return verdicts
+
+    def _track(
+        self,
+        sample: dict[int, ProcessRecord],
+        verdicts: dict[Any, tuple[str, int, str | None, list[str]]],
     ) -> None:
         now = self._clock()
-        failing: set[tuple[int, float]] = set()
-        for pid, (failed, exe_read) in failures.items():
-            process = sample[pid]
-            if not process.in_row:
+        failing: set[Any] = set()
+        for key, (verdict, pid, exe, failed) in verdicts.items():
+            if verdict == _UNRELATED:
                 continue
-            key = process.identity
             failing.add(key)
             episode = self._episodes.setdefault(
                 key,
                 {
                     "pid": pid,
-                    "start_identity": process.start,
-                    "exe": process.exe,
+                    "start_identity": key[1],
+                    "exe": exe,
                     "failures": set(),
                     "first": now,
                     "possible_browser": False,
                 },
             )
             episode["failures"].update(failed)
-            episode["exe"] = process.exe
+            if exe:
+                episode["exe"] = exe
             episode["last"] = now
             episode["seconds"] = round(now - episode["first"], 4)
-            # Cleared only by an executable read now that cannot be the browser.
-            if not exe_read or self.possible_browser(process.exe):
+            if verdict == _POSSIBLE:
                 episode["possible_browser"] = True
         for key in [key for key in self._episodes if key not in failing]:
-            pid, start = key
-            alive = pid in sample and sample[pid].start == start
             episode = self._episodes.pop(key)
+            present = sample.get(key[0])
+            alive = present is not None and key[1] in (None, present.start)
             self._closed.append(
                 dict(
                     episode,
