@@ -196,7 +196,7 @@ Live checks share one LinkedIn account, so every session counts toward the
 same limits. One tool call can cost several browser actions:
 `get_person_profile` loads one page per section and a second one for a
 section LinkedIn rate-limits, `send_message` takes three, and
-`connect_with_person` up to six.
+`connect_with_person` up to seven.
 
 - Per tool: at most 10 calls a minute and 100 a day.
 - Profiles: at most one page load a second for `get_person_profile` and

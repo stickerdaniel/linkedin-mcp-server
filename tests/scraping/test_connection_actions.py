@@ -178,7 +178,7 @@ class TestConnectWithPerson:
                 side_effect=[
                     _signals(invite=True),
                     _signals(invite=True),
-                    _signals(labeled_action=True),
+                    _signals(labeled_anchor=True),
                 ],
             ),
             patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
@@ -199,7 +199,39 @@ class TestConnectWithPerson:
             result = await actions.connect_with_person("testuser")
 
         assert result["status"] == "connected"
+        assert "pending" in result["message"]
         mock_sleep.assert_awaited_once()
+
+    async def test_unreadable_settle_retry_keeps_send_failed(self, mock_page):
+        """A retry that reads no state is no evidence the invitation landed."""
+        text = "Jane\n\n· 2nd\n\nEngineer\n\nConnect\nMore\nAbout\n"
+        actions = _actions(mock_page, _reads(text, text, ""))
+
+        with (
+            patch.object(
+                actions,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                side_effect=[_signals(invite=True), _signals(invite=True), _signals()],
+            ),
+            patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                actions, "_dialog_is_open", new_callable=AsyncMock, return_value=True
+            ),
+            patch.object(
+                actions,
+                "_click_dialog_primary_button",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.connection_actions.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await actions.connect_with_person("testuser")
+
+        assert result["status"] == "send_failed"
 
     async def test_connectable_no_dialog_returns_connect_unavailable(self, mock_page):
         """Deeplink opened but no dialog appeared → connect_unavailable."""
