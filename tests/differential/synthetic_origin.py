@@ -35,11 +35,13 @@ Run as a script to issue into a directory: ``python synthetic_origin.py DIR``.
 from __future__ import annotations
 
 import datetime
+import ipaddress
 import select
 import socket
 import ssl
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -66,6 +68,16 @@ CA_COMMON_NAME = "linkedin-mcp synthetic origin test CA"
 #: Present on the synthetic ``/feed/`` page and on nothing LinkedIn serves.
 FEED_MARKER = "linkedin-mcp-synthetic-feed-7f3c"
 
+#: In the text of the synthetic feed's one post. ``get_feed`` returns it only
+#: if the product's own extractor read the page.
+POST_MARKER = "linkedin-mcp-synthetic-post-5d2e"
+
+#: A permalink in the shape ``scraping.feed_payload.POST_SLUG_URL_RE`` reads out
+#: of the ``/feed/`` document. It is never requested: nothing follows it.
+SYNTHETIC_POST_URL = (
+    "https://www.linkedin.com/posts/synthetic-author-activity-7000000000000000001-synth"
+)
+
 #: Set only by the CI step that runs a native row, right after a step that
 #: trusted the run's CA on a disposable GitHub-hosted runner. Never set it on a
 #: workstation: the rows need a trust-store change nothing here will make.
@@ -78,11 +90,73 @@ CA_FILE = "ca.pem"
 LEAF_FILE = "leaf.pem"
 LEAF_KEY_FILE = "leaf-key.pem"
 
+_POST_FILLER = (
+    "This post exists only on a loopback origin the differential harness "
+    "serves, so that the feed tool has something of its own to read. "
+) * 3
+
+# The least a signed-in feed needs for the product's checks, element by element.
+# No asset, script or frame, so nothing on it sends the browser anywhere but
+# this origin (at most a favicon lookup here), and the fence around the real
+# names stays the whole boundary the rows need.
+#
+# * The title is not one ``core.auth._LOGIN_TITLE_PATTERNS`` names, and the URL
+#   is not an auth blocker, so ``_detect_auth_barrier`` (quick and full, used by
+#   ``drivers.browser._feed_auth_succeeds`` and by the navigator) finds nothing.
+# * No ``#rememberme-div``: ``resolve_remember_me_prompt`` times out and returns
+#   False, and the barrier check has no account picker to report.
+# * The body text avoids every ``_AUTH_BARRIER_TEXT_MARKERS`` pair.
+# * ``nav a[href*="/feed"]`` is the selector ``core.auth.is_logged_in`` takes
+#   as signed in; the URL fallback there would also accept the non-empty body.
+# * ``<main>`` makes ``detect_rate_limit`` skip its body-text heuristic, and is
+#   what ``FeedScraper`` waits for and reads; its text is over the 200
+#   characters that end ``FeedScraper``'s content wait at once.
+# * The permalink sits in the document itself, which ``FeedScraper`` reads for
+#   ``POST_SLUG_URL_RE`` because ``/feed/`` is a feed payload URL, so one post
+#   is captured before the first scroll and the scroll loop stops there.
 _FEED_PAGE = (
-    "<!doctype html><html><head><meta charset='utf-8'>"
-    "<title>Synthetic feed</title></head>"
-    f"<body><main id='synthetic-feed'>{FEED_MARKER}</main></body></html>"
+    "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+    "<title>Feed | LinkedIn</title></head><body>"
+    "<nav aria-label='Primary'><a href='/feed/'>Home</a></nav>"
+    f"<main id='synthetic-feed'><p>{FEED_MARKER}</p>"
+    f"<article><a href='{SYNTHETIC_POST_URL}'>Synthetic Author</a>"
+    f"<p>{POST_MARKER} {_POST_FILLER}</p></article></main>"
+    "</body></html>"
 ).encode()
+
+
+def fence_breaches(hosts: tuple[str, ...] | None = None) -> dict[str, list[str]]:
+    """Each fenced name the operating system resolves to anything but loopback.
+
+    Empty is the fence holding. An unresolvable name is a breach as well: the CI
+    step maps every one of them, so a name it cannot resolve is a step that did
+    not run.
+    """
+    breaches: dict[str, list[str]] = {}
+    for host in hosts or (*ALLOWED_HOSTS, CANARY_HOST):
+        try:
+            infos = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+        except socket.gaierror as error:
+            breaches[host] = [f"unresolved ({error})"]
+            continue
+        outside = sorted(
+            {
+                str(info[4][0])
+                for info in infos
+                if not ipaddress.ip_address(info[4][0]).is_loopback
+            }
+        )
+        if outside:
+            breaches[host] = outside
+    return breaches
+
+
+def cookie_names(header: str | None) -> tuple[str, ...]:
+    """The cookie names in a ``Cookie`` header. Values are never kept."""
+    if not header:
+        return ()
+    names = {part.split("=", 1)[0].strip() for part in header.split(";") if "=" in part}
+    return tuple(sorted(name for name in names if name))
 
 
 def issue_certificates(
@@ -195,6 +269,10 @@ class OriginRequest:
     server_name: str | None
     host: str | None
     path: str
+    #: Names only, from the ``Cookie`` header: which session the browser sent.
+    cookie_names: tuple[str, ...] = ()
+    #: Wall-clock arrival, comparable with the harness's event log.
+    t: float = 0.0
 
 
 class _OriginHandler(BaseHTTPRequestHandler):
@@ -207,6 +285,8 @@ class _OriginHandler(BaseHTTPRequestHandler):
                 server_name=getattr(self.connection, "_synthetic_server_name", None),
                 host=self.headers.get("Host"),
                 path=self.path,
+                cookie_names=cookie_names(self.headers.get("Cookie")),
+                t=time.time(),
             )
         )
         if self.path.split("?", 1)[0] == "/feed/":
