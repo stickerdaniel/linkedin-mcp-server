@@ -163,9 +163,20 @@ class TestConnectWithPerson:
 
         assert result["status"] == "send_failed"
 
-    async def test_connectable_connected_on_settle_retry(self, mock_page):
+    @pytest.mark.parametrize(
+        ("retry_signals", "state"),
+        [
+            (_signals(labeled_anchor=True), "pending"),
+            (_signals(compose=True), "already_connected"),
+        ],
+        ids=["pending", "accepted-meanwhile"],
+    )
+    async def test_connectable_connected_on_settle_retry(
+        self, mock_page, retry_signals, state
+    ):
         """The first post-send read still renders Connect; the settle retry
-        sees the invitation pending and reports connected."""
+        sees the invitation pending (or already accepted) and reports
+        connected."""
         text = "Jane\n\n· 2nd\n\nEngineer\n\nConnect\nMore\nAbout\n"
         post = "Jane\n\n· 2nd\n\nEngineer\n\nMessage\nPending\nMore\nAbout\n"
         actions = _actions(mock_page, _reads(text, text, post))
@@ -178,7 +189,7 @@ class TestConnectWithPerson:
                 side_effect=[
                     _signals(invite=True),
                     _signals(invite=True),
-                    _signals(labeled_anchor=True),
+                    retry_signals,
                 ],
             ),
             patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
@@ -199,7 +210,7 @@ class TestConnectWithPerson:
             result = await actions.connect_with_person("testuser")
 
         assert result["status"] == "connected"
-        assert "pending" in result["message"]
+        assert state in result["message"]
         mock_sleep.assert_awaited_once()
 
     @pytest.mark.parametrize(
