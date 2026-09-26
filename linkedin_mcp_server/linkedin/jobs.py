@@ -623,7 +623,9 @@ class JobReader:
             stop_reason = "max_pages"
 
         result: dict[str, Any] = {
-            "url": base_url,
+            # The first page this call asked for, so a resumed search names
+            # the offset it read from rather than the search's first page.
+            "url": base_url if start == 0 else f"{base_url}&start={start}",
             "sections": {"search_results": "\n---\n".join(page_texts)}
             if page_texts
             else {},
