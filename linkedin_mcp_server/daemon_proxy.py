@@ -474,7 +474,11 @@ def _tells_which_owner_failed() -> type:
             the one place that sees the send as it happens.
             """
 
+            entered = False
+
             async def at_the_session() -> Any:
+                nonlocal entered
+                entered = True
                 try:
                     self._check_at_the_session(claims_the_call=claims_the_call)
                 except BaseException:
@@ -484,7 +488,14 @@ def _tells_which_owner_failed() -> type:
                     raise
                 return await coro
 
-            return await super()._await_with_session_monitoring(at_the_session())
+            try:
+                return await super()._await_with_session_monitoring(at_the_session())
+            finally:
+                # The monitor can refuse before it starts the wrapper, when the
+                # session has already ended. It then closes the wrapper, which
+                # never reaches *coro*, so the request is closed here instead.
+                if not entered:
+                    coro.close()
 
         async def _saying_which_owner(
             self, operation: Awaitable[Any], *, nothing_was_sent: bool | None

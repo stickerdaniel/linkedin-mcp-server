@@ -3098,6 +3098,36 @@ class TestTheSendBoundary:
     in-process owner, and add no await of their own.
     """
 
+    async def test_a_request_the_monitor_never_starts_is_closed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The installed monitor refuses before starting its coroutine once the
+        # session has ended, and closes what it was given: the wrapper. The
+        # request the wrapper holds must be closed too, not left unawaited.
+        import inspect
+
+        from fastmcp.server.providers.proxy import ProxyClient
+
+        from linkedin_mcp_server.daemon_proxy import _tells_which_owner_failed
+
+        async def refuse_unstarted(_self, coro, **_kwargs):
+            coro.close()
+            raise RuntimeError("the session has already ended")
+
+        monkeypatch.setattr(
+            ProxyClient, "_await_with_session_monitoring", refuse_unstarted
+        )
+        client: Any = object.__new__(_tells_which_owner_failed())
+
+        async def request() -> str:
+            return "sent"
+
+        pending = request()
+        with pytest.raises(RuntimeError, match="already ended"):
+            await client._await_with_session_monitoring(pending)
+
+        assert inspect.getcoroutinestate(pending) == inspect.CORO_CLOSED
+
     @pytest.mark.parametrize("buried", [True, False], ids=["buried", "control"])
     async def test_a_burial_queued_as_the_monitor_takes_the_send_stops_it(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, buried: bool

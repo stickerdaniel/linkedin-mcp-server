@@ -1279,10 +1279,10 @@ async def _drain_admitted_calls(liveness: CallLiveness, seconds: float) -> None:
         await asyncio.sleep(_STAND_DOWN_POLL_SECONDS)
     if liveness.calls_in_flight() > 0:
         cut = liveness.cut_off_the_rest()
+        # Neutral on purpose: a call still queued is answered as not run, and
+        # only one whose body began as an unknown outcome.
         logger.warning(
-            "%d call(s) were still running when the stand-down drain ended; "
-            "their outcome is reported as unknown",
-            len(cut),
+            "Requested stand-down cancellation of %d pending call(s)", len(cut)
         )
 
 
