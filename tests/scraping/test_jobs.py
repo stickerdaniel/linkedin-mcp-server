@@ -23,11 +23,16 @@ from linkedin_mcp_server.scraping.contracts import (
     RATE_LIMITED_SECTION_TEXT,
     ExtractedSection,
 )
-from linkedin_mcp_server.scraping.job_pages import JobPageCapture, JobPageReader
+from linkedin_mcp_server.scraping.job_pages import (
+    JobApplyRead,
+    JobPageCapture,
+    JobPageReader,
+)
 from linkedin_mcp_server.scraping.jobs import JobScraper
 from linkedin_mcp_server.scraping.link_metadata import Reference
 from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.session import ScrapingSession
+from linkedin_mcp_server.scraping.text import JOB_APPLY_EN_US
 from scraping.support.navigation import navigate
 
 
@@ -187,6 +192,57 @@ class TestScrapeJob:
 
         assert "job_posting" in result["sections"]
         assert "section_errors" not in result
+
+
+class TestGetJobApplyUrl:
+    URL = "https://www.linkedin.com/jobs/view/12345/"
+
+    @staticmethod
+    def _reading(scraper, **kwargs):
+        return patch.object(
+            scraper._pages, "read_apply_link", new_callable=AsyncMock, **kwargs
+        )
+
+    async def test_an_external_posting_answers_with_the_employer_link(self, mock_page):
+        scraper = _scraper(mock_page)
+        read = JobApplyRead("external", "https://jobs.example.com/1")
+        with self._reading(scraper, return_value=read) as reader:
+            result = await scraper.get_job_apply_url("12345")
+
+        reader.assert_awaited_once_with(self.URL, "12345", JOB_APPLY_EN_US)
+        assert result == {
+            "url": self.URL,
+            "apply": {"type": "external", "url": "https://jobs.example.com/1"},
+        }
+
+    async def test_a_posting_without_a_link_carries_its_type_alone(self, mock_page):
+        scraper = _scraper(mock_page)
+        with self._reading(scraper, return_value=JobApplyRead("easy_apply")):
+            result = await scraper.get_job_apply_url("12345")
+
+        assert result == {"url": self.URL, "apply": {"type": "easy_apply"}}
+
+    async def test_an_external_apply_that_led_nowhere_says_so(self, mock_page):
+        scraper = _scraper(mock_page)
+        with self._reading(scraper, return_value=JobApplyRead("external")):
+            result = await scraper.get_job_apply_url("12345")
+
+        assert result["apply"] == {"type": "external"}
+        assert result["section_errors"]["apply"]["error_type"] == "apply_link_missing"
+
+    async def test_a_failed_read_is_a_section_error_and_no_type(self, mock_page):
+        scraper = _scraper(mock_page)
+        with self._reading(scraper, side_effect=RuntimeError("context destroyed")):
+            result = await scraper.get_job_apply_url("12345")
+
+        assert "apply" not in result
+        assert "apply" in result["section_errors"]
+
+    async def test_an_expired_session_reaches_the_relogin_path(self, mock_page):
+        scraper = _scraper(mock_page)
+        with self._reading(scraper, side_effect=AuthenticationError("expired")):
+            with pytest.raises(AuthenticationError):
+                await scraper.get_job_apply_url("12345")
 
 
 class TestSearchJobs:

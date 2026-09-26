@@ -1,0 +1,108 @@
+{
+  "call": {
+    "arguments": {
+      "job_id": "123"
+    },
+    "method": "get_job_apply_url"
+  },
+  "events": [
+    {
+      "call": "get_job_apply_url",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add"
+    },
+    {
+      "call": "get_job_apply_url",
+      "extra": {
+        "target_url": "https://www.linkedin.com/jobs/view/123/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto"
+    },
+    {
+      "call": "get_job_apply_url",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/jobs/view/123/",
+      "requested_url": "https://www.linkedin.com/jobs/view/123/",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "get_job_apply_url",
+      "description": "goto https://www.linkedin.com/jobs/view/123/",
+      "kind": "boundary.stabilize",
+      "result": null
+    },
+    {
+      "call": "get_job_apply_url",
+      "extra": {
+        "target_url": "https://www.linkedin.com/jobs/view/123/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto"
+    },
+    {
+      "call": "get_job_apply_url",
+      "kind": "boundary.auth_quick",
+      "result": null
+    },
+    {
+      "call": "get_job_apply_url",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove"
+    },
+    {
+      "call": "get_job_apply_url",
+      "kind": "boundary.rate_limit"
+    },
+    {
+      "arg": {
+        "appliedPattern": "^(?:Application submitted|Applied \\d+ ?[a-z]+ ago)$",
+        "applyPath": "/jobs/view/123/apply",
+        "closedLines": [
+          "No longer accepting applications",
+          "Not currently accepting applications"
+        ],
+        "descriptionHeadings": [
+          "About the job"
+        ],
+        "externalLabel": "Apply"
+      },
+      "call": "get_job_apply_url",
+      "kind": "wait_for_function",
+      "operation": "job_apply_ready",
+      "program_digest": "9bc185b7a908",
+      "timeout_ms": 10000.0
+    },
+    {
+      "arg": {
+        "appliedPattern": "^(?:Application submitted|Applied \\d+ ?[a-z]+ ago)$",
+        "applyPath": "/jobs/view/123/apply",
+        "closedLines": [
+          "No longer accepting applications",
+          "Not currently accepting applications"
+        ],
+        "descriptionHeadings": [
+          "About the job"
+        ],
+        "externalLabel": "Apply"
+      },
+      "call": "get_job_apply_url",
+      "kind": "evaluate",
+      "operation": "job_apply_signals",
+      "program_digest": "df10af2cb5cf"
+    }
+  ],
+  "result": {
+    "apply": {
+      "type": "easy_apply"
+    },
+    "url": "https://www.linkedin.com/jobs/view/123/"
+  },
+  "scenario": "get_job_apply_url__easy_apply",
+  "schema_version": 1
+}

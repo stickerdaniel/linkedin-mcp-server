@@ -32,6 +32,7 @@ from linkedin_mcp_server.scraping.job_policy import (
     SCROLL_BUDGET_TOTAL,
     SCROLL_DEADLINE_MAX,
     SEARCH_TIMEOUT_FRACTION,
+    apply_link_missing_section_error,
     dropped_filters_section_error,
     dropped_offset_section_error,
     label_similar_jobs,
@@ -45,8 +46,10 @@ from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.search_urls import build_job_search_url
 from linkedin_mcp_server.scraping.session import NAV_DELAY
 from linkedin_mcp_server.scraping.text import (
+    JOB_APPLY_EN_US,
     JOB_POSTING_EN_US,
     JOB_SEARCH_EN_US,
+    JobApplyTextTable,
     JobSearchTextTable,
 )
 
@@ -70,11 +73,13 @@ class JobScraper:
         capture: SectionCapture,
         pages: JobPageReader,
         search_text: JobSearchTextTable = JOB_SEARCH_EN_US,
+        apply_text: JobApplyTextTable = JOB_APPLY_EN_US,
     ):
         self._navigator = navigator
         self._capture = capture
         self._pages = pages
         self._search_text = search_text
+        self._apply_text = apply_text
 
     async def scrape_job(self, job_id: str) -> dict[str, Any]:
         """Scrape a single job posting.
@@ -114,6 +119,42 @@ class JobScraper:
             result["references"] = references
         if section_errors:
             result["section_errors"] = section_errors
+        return result
+
+    async def get_job_apply_url(self, job_id: str) -> dict[str, Any]:
+        """Read how a posting takes applications and where the employer's form is.
+
+        Returns:
+            {url, apply: {type, url?}}, or {url, section_errors} when the
+            posting could not be read. An external posting whose Apply
+            revealed no link carries a section error beside its type.
+        """
+        job_id = normalize_job_id(job_id)
+        url = job_view_url(job_id, "/")
+        try:
+            read = await self._pages.read_apply_link(url, job_id, self._apply_text)
+        except LinkedInScraperException:
+            raise
+        except Exception as e:
+            logger.warning("Failed to read how %s takes applications: %s", url, e)
+            return {
+                "url": url,
+                "section_errors": {
+                    "apply": build_issue_diagnostics(
+                        e,
+                        context="get_job_apply_url",
+                        target_url=url,
+                        section_name="apply",
+                    )
+                },
+            }
+
+        apply: dict[str, str] = {"type": read.type}
+        result: dict[str, Any] = {"url": url, "apply": apply}
+        if read.url is not None:
+            apply["url"] = read.url
+        elif read.type == "external":
+            result["section_errors"] = {"apply": apply_link_missing_section_error()}
         return result
 
     async def search_jobs(
