@@ -194,8 +194,8 @@ curl -s -X POST http://127.0.0.1:8000/mcp \
 
 ## Live Request Limits
 
-Live checks share one LinkedIn account, so these limits hold across all
-sessions and tools together. One tool call can cost several browser actions:
+Live checks share one LinkedIn account, so every session counts toward the
+same limits. One tool call can cost several browser actions:
 `get_person_profile` loads one page per section, `send_message` takes three,
 and `connect_with_person` up to six.
 
