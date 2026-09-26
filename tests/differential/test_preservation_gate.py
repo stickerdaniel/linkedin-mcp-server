@@ -11,10 +11,17 @@ post-quit session was started.
 
 from __future__ import annotations
 
+import contextlib
+import functools
+import os
+import subprocess
+import sys
+import time
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
+import psutil
 import pytest
 
 from differential import harness
@@ -230,9 +237,177 @@ def test_other_users_and_known_non_browsers_leave_the_census_complete(
         process_iter=lambda *a, **k: [
             _process(3, cmdline=None, user="root"),
             _process(4, cmdline=None, exe="/bin/ps"),
-            # Exited, not yet reaped: psutil cannot read its arguments either.
-            _process(6, cmdline=None, status="zombie"),
         ],
         user=ME,
     )
     assert census.complete and census.pids == []
+
+
+@pytest.mark.parametrize(
+    ("user", "unresolved"),
+    [
+        pytest.param("root", [7], id="another-user-but-own-user-unknown"),
+        pytest.param(ME, [7], id="same-user"),
+    ],
+)
+def test_an_unknown_harness_user_excludes_nobody_by_user(
+    tmp_path, monkeypatch, user, unresolved
+):
+    monkeypatch.setattr(harness, "process_user", lambda process: process.user)
+    monkeypatch.setattr(harness, "harness_user", lambda: None)
+    account = harness.ActorAccount(tmp_path / "auth" / "profile")
+    census = harness.profile_census(
+        account,
+        browser_exe="/b/chrome",
+        process_iter=lambda *a, **k: [
+            _process(7, cmdline=None, exe="/b/chrome", user=user)
+        ],
+    )
+    assert census.unresolved == unresolved
+
+
+def test_a_known_other_user_is_excluded_from_the_census(tmp_path, monkeypatch):
+    monkeypatch.setattr(harness, "process_user", lambda process: process.user)
+    account = harness.ActorAccount(tmp_path / "auth" / "profile")
+    census = harness.profile_census(
+        account,
+        browser_exe="/b/chrome",
+        process_iter=lambda *a, **k: [
+            _process(7, cmdline=None, exe="/b/chrome", user="root")
+        ],
+        user=ME,
+    )
+    assert census.complete
+
+
+@pytest.mark.parametrize(
+    ("linux", "threads", "complete"),
+    [
+        pytest.param(True, 1, True, id="linux-leader-alone"),
+        pytest.param(True, 2, False, id="linux-leader-with-live-threads"),
+        pytest.param(True, None, False, id="linux-threads-unreadable"),
+        pytest.param(False, 2, True, id="macos-or-windows"),
+        pytest.param(False, None, True, id="macos-or-windows-threads-unreadable"),
+    ],
+)
+def test_a_zombie_leaves_the_census_only_once_the_whole_process_exited(
+    tmp_path, monkeypatch, linux, threads, complete
+):
+    monkeypatch.setattr(harness, "process_user", lambda process: process.user)
+    monkeypatch.setattr(
+        harness,
+        "exited_zombie",
+        functools.partial(
+            harness.exited_zombie, linux=linux, threads_of=lambda _: threads
+        ),
+    )
+    account = harness.ActorAccount(tmp_path / "auth" / "profile")
+    census = harness.profile_census(
+        account,
+        process_iter=lambda *a, **k: [_process(6, cmdline=[], status="zombie")],
+        user=ME,
+    )
+    assert census.complete is complete
+    assert census.unresolved == ([] if complete else [6])
+
+
+def _status(pid: int, want: str, seconds: float = 10.0) -> bool:
+    """Wait, without reaping, until *pid* reports *want*."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            if psutil.Process(pid).status() == want:
+                return True
+        except psutil.NoSuchProcess:
+            return False
+        time.sleep(0.02)
+    return False
+
+
+# The leader ends with pthread_exit while a worker thread keeps the process,
+# and the lock it took, alive. Python cannot end its main thread on its own
+# (the interpreter waits for the others), so libc does it.
+_ZOMBIE_LEADER = """
+import ctypes, fcntl, os, sys, threading
+lock = open(sys.argv[1], "w")
+fcntl.flock(lock, fcntl.LOCK_EX)
+try:
+    pthread_exit = ctypes.CDLL(None).pthread_exit
+except AttributeError:
+    print("no pthread_exit", flush=True)
+    sys.exit(0)
+pthread_exit.argtypes = [ctypes.c_void_p]
+started = threading.Event()
+def worker():
+    started.set()
+    sys.stdin.buffer.read(1)
+    os._exit(0)
+threading.Thread(target=worker).start()
+started.wait()
+print("ready", flush=True)
+pthread_exit(None)
+"""
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="a zombie leader with live threads is Linux's; elsewhere a zombie "
+    "has exited as a whole",
+)
+def test_a_real_zombie_leader_with_a_live_thread_stays_unresolved(tmp_path):
+    import fcntl
+
+    account = harness.ActorAccount(tmp_path / "auth" / "profile")
+    lockfile = tmp_path / "lock"
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            _ZOMBIE_LEADER,
+            str(lockfile),
+            f"--user-data-dir={account.profile}",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+    )
+    try:
+        assert child.stdout is not None
+        line = child.stdout.readline().decode().strip()
+        if line == "no pthread_exit":
+            pytest.skip("libc exports no pthread_exit to ctypes here")
+        assert line == "ready"
+        assert _status(child.pid, psutil.STATUS_ZOMBIE), "the leader never exited"
+        with lockfile.open("w") as other:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        census = harness.profile_census(account)
+        assert child.pid in census.unresolved
+        assert not census.complete
+    finally:
+        # Bounded however the body ended: release the worker, then force it.
+        with contextlib.suppress(OSError, ValueError):
+            assert child.stdin is not None
+            child.stdin.write(b"x")
+            child.stdin.close()
+        try:
+            child.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait(timeout=10)
+        if child.stdout is not None:
+            child.stdout.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="psutil reports no zombie on Windows")
+def test_a_real_fully_exited_unreaped_child_leaves_the_census(tmp_path):
+    account = harness.ActorAccount(tmp_path / "auth" / "profile")
+    child = subprocess.Popen(
+        [sys.executable, "-c", "pass", f"--user-data-dir={account.profile}"]
+    )
+    try:
+        assert _status(child.pid, psutil.STATUS_ZOMBIE), "it never became a zombie"
+        census = harness.profile_census(account)
+        assert child.pid not in census.unresolved
+        assert child.pid not in census.pids
+    finally:
+        child.wait(timeout=10)

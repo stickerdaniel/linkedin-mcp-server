@@ -18,9 +18,9 @@ the default-on contract forbids.
 **Nothing a row could still change is settled by age.** A process can exec at
 any moment of its life, and a forked child shows its parent's command line
 until it does, which is how the Node driver starts Chromium on POSIX. So every
-row actor, and every process that appeared after the first sample and was not
-established as unrelated, has its executable and command line read again on
-every sample for as long as it lives, and a change is reported as
+row actor, and every process not established as unrelated, has its executable
+and command line read again on every sample for as long as it lives, and a
+change is reported as
 ``process.update``. Its identity is checked on every sample either way.
 
 **Relevant means descended from the harness.** A process is a row actor when it
@@ -32,22 +32,36 @@ process is established as unrelated to the row when
 
 * its owning user can be read and is not the harness's user (the real uid on
   POSIX, the user name on Windows), since no actor runs as anyone else; or
-* it was running at the first sample and its ancestry, read then, does not lead
-  to the harness; or
+* it was running at the first sample and its whole ancestry, read then, ends
+  at the top of the process tree without passing the harness: every parent
+  present and older than its child, and the last one either the child of pid
+  0 or older than the harness when it is the child of pid 1, since an orphan
+  of the harness is adopted there; or
 * its executable, read in the same sample, is neither the row's browser
   (``--browser-exe``) nor anything under the managed browsers
   (``--browser-dir``). That is the setuid ``/bin/ps`` the product runs on
   macOS: psutil cannot read its arguments, and it cannot be a browser.
+
+**An exclusion belongs to one lifetime.** The first two last: they are kept by
+pid *and* create time, and apply only in a sample that read that same create
+time, so a pid that cannot be identified now is not covered by what was
+established about an earlier process there. The third holds for its sample
+only, since the process can exec later. Evidence that ties a kept exclusion to
+the harness withdraws it. A process already running at the first sample whose
+ancestry could not be completed is not excluded but read again on every
+sample, and counts as a possible actor once it shows the browser.
 
 Losing a process (``NoSuchProcess``, or a pid whose create time changed) is an
 exit. Any other process whose identity, parent or arguments cannot be read, or
 that cannot be opened at all, is an **unresolved possible actor**: it is kept in
 the census, recorded, and leaves O1 unestablished for the row. That record stays
 even if the process later becomes readable or exits, since a later reading
-cannot show what it did while unreadable; only a later reading that establishes
-it as unrelated by its user resolves it. Every failed read is recorded in the
-summary, with the executable when known, the fields, how long it lasted, how it
-ended and whether it could have been a browser.
+cannot show what it did while unreadable. Only a later reading of the same
+lifetime, its create time equal to the one recorded, that shows another user
+resolves it; a record without a create time has no lifetime to match and
+stays. Every failed read is recorded in the summary, with the executable when
+known, the fields, how long it lasted, how it ended and whether it could have
+been a browser.
 
 What sampling cannot see: a process that lives and dies between two samples.
 The summary records when observation began and ended and the largest wall-clock
@@ -297,6 +311,14 @@ def harness_user() -> object | None:
     return os.getuid()
 
 
+def another_user(found: object | None, harness: object | None) -> bool:
+    """Whether a process's user is established as not the harness's.
+
+    Only when both are known: an unknown on either side is not a difference.
+    """
+    return found is not None and harness is not None and found != harness
+
+
 #: How a failed reading of one process was judged.
 _UNRELATED = "unrelated"
 _EVIDENCE = "evidence"
@@ -339,6 +361,8 @@ class Sampler:
         self._row: set[tuple[int, float]] = set()
         #: Identities established as unrelated; read once, identity-checked.
         self._unrelated: set[tuple[int, float]] = set()
+        #: First-sample identities whose ancestry could not be completed.
+        self._watched: set[tuple[int, float]] = set()
         self._episodes: dict[tuple[int, float | None], dict[str, Any]] = {}
         self._closed: list[dict[str, Any]] = []
 
@@ -346,8 +370,7 @@ class Sampler:
         return possible_browser(exe, self.browser_exe, self.browser_dir)
 
     def _another_user(self, process: Any) -> bool:
-        owner = self._user_of(process)
-        return owner is not None and self.user is not None and owner != self.user
+        return another_user(self._user_of(process), self.user)
 
     @property
     def read_failures(self) -> list[dict[str, Any]]:
@@ -397,31 +420,29 @@ class Sampler:
         # pid -> (episode key, failed fields, exe, exe read now, process or None,
         #         parent read)
         failures: dict[int, tuple[Any, list[str], str | None, bool, Any, bool]] = {}
-        opened: dict[int, Any] = {}
+        # pid -> the process whose create time this sample read.
+        identified: dict[int, Any] = {}
         for pid in self._pids():
             known = self._known.get(pid)
+            # When opening or identifying fails, whatever runs at the pid now is
+            # unverified: the failure is keyed without a create time, and no
+            # exclusion established for an earlier process there applies.
             try:
                 process = self._open(pid)
             except psutil.NoSuchProcess:
                 continue
             except _UNREADABLE as exc:
-                if known is not None and known.identity in self._unrelated:
-                    sample[pid] = known
-                    continue
                 if known is not None:
                     sample[pid] = known
-                key = known.identity if known is not None else (pid, None)
-                exe = known.exe if known is not None else None
                 failures[pid] = (
-                    key,
+                    (pid, None),
                     [f"open: {type(exc).__name__}"],
-                    exe,
+                    known.exe if known is not None else None,
                     False,
                     None,
                     False,
                 )
                 continue
-            opened[pid] = process
             try:
                 # The create time is what separates a recycled pid from the
                 # process already known under it.
@@ -429,24 +450,22 @@ class Sampler:
             except psutil.NoSuchProcess:
                 continue
             except _UNREADABLE as exc:
-                if known is not None and known.identity in self._unrelated:
-                    sample[pid] = known
-                    continue
                 if self._another_user(process):
+                    # Established for this sample only: there is no create
+                    # time to keep it by.
                     continue
                 if known is not None:
                     sample[pid] = known
-                key = known.identity if known is not None else (pid, None)
-                exe = known.exe if known is not None else None
                 failures[pid] = (
-                    key,
+                    (pid, None),
                     [f"identity: {type(exc).__name__}"],
-                    exe,
+                    known.exe if known is not None else None,
                     False,
                     process,
                     False,
                 )
                 continue
+            identified[pid] = process
             if known is not None and known.start != start:
                 known = None
             if known is not None and known.identity in self._unrelated:
@@ -480,40 +499,96 @@ class Sampler:
             if root is not None:
                 self._row.add(root.identity)
         self._classify(sample)
-        verdicts = self._judge(sample, failures, first)
+        # Whatever the harness turned out to own is no longer excluded.
+        row = {process.identity for process in sample.values() if process.in_row}
+        self._unrelated -= row
+        self._watched -= row
+        settled: set[tuple[int, float]] = set()
         if first:
-            # Running before any actor, not descended from the harness, and
-            # judged by a parent read now: established unrelated.
-            for pid, process in sample.items():
-                if process.in_row or pid == self.own_pid:
+            settled = self._settled_ancestry(sample)
+            for pid in identified:
+                process = sample.get(pid)
+                if process is None or process.in_row or pid == self.own_pid:
                     continue
-                if pid not in failures or failures[pid][5]:
-                    self._unrelated.add(process.identity)
+                if process.identity not in settled:
+                    self._watched.add(process.identity)
+        verdicts = self._judge(sample, failures, settled)
+        # Running before any actor, its whole ancestry read now and not
+        # leading to the harness: established unrelated.
+        self._unrelated |= settled
         self._track(sample, verdicts)
-        self._resolve_by_user(sample, opened)
+        self._resolve_by_user(sample, identified)
         self._known = sample
         return sample
 
+    def _settled_ancestry(
+        self, sample: dict[int, ProcessRecord]
+    ) -> set[tuple[int, float]]:
+        """The identities whose ancestry, read in this sample, ends away from the harness.
+
+        Every parent has to be in the sample and no younger than its child: a
+        parent that could not be read, or a younger process at the parent's
+        pid, leaves the ancestry open. It ends at a child of pid 0 (or a pid
+        that is its own parent), or at a child of pid 1 older than the
+        harness, because pid 1 also adopts every orphan, the harness's
+        included.
+        """
+        root = sample.get(self.root_pid)
+        born = root.start if root is not None else None
+        memo: dict[int, bool] = {}
+        for pid in sample:
+            chain: list[int] = []
+            current = pid
+            while True:
+                if current in memo:
+                    settled = memo[current]
+                    break
+                process = sample[current]
+                if process.in_row or current == self.own_pid or current in chain:
+                    settled = False
+                    break
+                chain.append(current)
+                if process.ppid in (0, current):
+                    settled = True
+                    break
+                if process.ppid == 1:
+                    settled = born is not None and process.start <= born
+                    break
+                parent = sample.get(process.ppid)
+                if parent is None or parent.start > process.start:
+                    settled = False
+                    break
+                current = process.ppid
+            for member in chain:
+                memo[member] = settled
+        return {
+            process.identity
+            for pid, process in sample.items()
+            if memo.get(pid) and pid != self.own_pid
+        }
+
     def _resolve_by_user(
-        self, sample: dict[int, ProcessRecord], opened: dict[int, Any]
+        self, sample: dict[int, ProcessRecord], identified: dict[int, Any]
     ) -> None:
         """Resolve a possible-actor record once a reading shows another user owns it.
 
-        The only later reading that resolves one: a process cannot change its
-        real owner, so this says what it was while it was unreadable too.
-        Becoming readable, or exiting, says nothing of the kind.
+        The only later reading that resolves one, and only for the lifetime the
+        record names: a process cannot change its real owner, so this says
+        what it was while it was unreadable too. A record without a create
+        time cannot be matched to any later process at its pid. Becoming
+        readable, or exiting, says nothing of the kind.
         """
-        records = [*self._episodes.items(), *((None, e) for e in self._closed)]
-        for key, episode in records:
+        records = [*self._episodes.values(), *self._closed]
+        for episode in records:
             if not episode["possible_browser"]:
                 continue
-            pid = episode["pid"]
-            process = opened.get(pid)
-            current = sample.get(pid)
-            if process is None or current is None:
-                continue
             start = episode["start_identity"]
-            if start is not None and start != current.start:
+            if start is None:
+                continue
+            pid = episode["pid"]
+            process = identified.get(pid)
+            current = sample.get(pid)
+            if process is None or current is None or current.start != start:
                 continue
             if self._another_user(process):
                 episode["possible_browser"] = False
@@ -524,22 +599,27 @@ class Sampler:
         self,
         sample: dict[int, ProcessRecord],
         failures: dict[int, tuple[Any, list[str], str | None, bool, Any, bool]],
-        first: bool,
+        settled: set[tuple[int, float]],
     ) -> dict[Any, tuple[str, int, str | None, list[str]]]:
         """Judge each failed reading: unrelated, evidence only, or a possible actor."""
         verdicts: dict[Any, tuple[str, int, str | None, list[str]]] = {}
         for pid, (key, failed, exe, exe_read, process, parent_read) in failures.items():
             current = sample.get(pid)
+            # Set only when this sample read the create time of *current*.
+            lifetime = current.identity if key[1] is not None and current else None
             in_row = current is not None and current.in_row
             fields = {failure.split(":", 1)[0] for failure in failed}
-            if first and current is not None and not in_row and parent_read:
-                # Running before any actor, and its ancestry, read now, does
-                # not lead to the harness.
+            if lifetime is not None and lifetime in settled:
                 verdict = _UNRELATED
             elif process is not None and self._another_user(process):
                 verdict = _UNRELATED
-                if current is not None:
-                    self._unrelated.add(current.identity)
+                if lifetime is not None:
+                    self._unrelated.add(lifetime)
+            elif lifetime is not None and lifetime in self._watched:
+                # Running before any actor, its ancestry unresolved: it counts
+                # once it shows the browser, and is evidence until then.
+                shows = exe_read and bool(exe) and self.possible_browser(exe)
+                verdict = _POSSIBLE if shows else _EVIDENCE
             elif exe_read and not self.possible_browser(exe):
                 # Not a browser, whatever its arguments. Kept as evidence when
                 # it belongs to the row or its ancestry could not be read.

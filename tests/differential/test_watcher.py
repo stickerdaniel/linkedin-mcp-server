@@ -8,9 +8,9 @@ three seconds. So they measure the sampling on this platform's process table
 without a browser, and a watcher that cannot see a process fails here rather
 than passing O1 in a native row by never seeing anything.
 
-A row actor whose metadata cannot be read is on record either way, and makes
-the census uncertain only once it has stayed alive and unreadable past the
-bound. On macOS that is exercised with the real setuid ``/bin/ps``.
+A process whose metadata cannot be read is on record either way, and makes the
+census uncertain unless it is established as unrelated for the lifetime read.
+On macOS the non-browser case is exercised with the real setuid ``/bin/ps``.
 """
 
 from __future__ import annotations
@@ -180,6 +180,10 @@ def _start_watcher(tmp_path: Path, *, deadline: float = 60) -> subprocess.Popen:
             str(os.getpid()),
             "--deadline",
             str(deadline),
+            # Judged as the harness judges: without it every unreadable
+            # process, such as a parallel test's held /bin/ps, could be one.
+            "--browser-dir",
+            str(tmp_path / "ms-playwright"),
         ]
     )
     limit = time.monotonic() + 15
@@ -357,7 +361,7 @@ class _FakeProcess:
         return _field(self._entry, "start")
 
     def ppid(self):
-        return self._entry["ppid"]
+        return _field(self._entry, "ppid")
 
     def exe(self):
         return _field({"exe": self._entry.get("exe", "/usr/bin/python3")}, "exe")
@@ -606,18 +610,224 @@ def test_a_never_readable_process_that_becomes_readable_stays_uncertain():
     assert _judged(sampler, tracker)
 
 
-def test_a_later_reading_that_shows_another_user_resolves_it():
+def _unattributed(user: object | None) -> dict[str, Any]:
+    """A process whose executable and arguments cannot be read, nor its user
+    when *user* is None."""
+    return {
+        "start": 2.0,
+        "ppid": 50,
+        "exe": psutil.AccessDenied(2),
+        "cmdline": psutil.AccessDenied(2),
+        "user": user,
+    }
+
+
+def test_a_later_reading_of_the_same_lifetime_that_shows_another_user_resolves_it():
     table = _row_table()
     sampler, tracker = _sampler(table), Tracker()
     _observe(sampler, tracker, 0.0)
-    table[2] = {"start": 2.0, "ppid": 1, "open": psutil.AccessDenied(2)}
+    table[2] = _unattributed(None)
     _observe(sampler, tracker, 1.0)
-    table[2] = {"start": 2.0, "ppid": 50, "cmdline": ["daemon"], "user": "root"}
+    assert [e["pid"] for e in sampler.relevant_read_failures] == [2]
+    table[2]["user"] = "root"
     _observe(sampler, tracker, 2.0)
     (episode,) = sampler.read_failures
+    assert episode["start_identity"] == 2.0
     assert not episode["possible_browser"]
     assert episode["resolved_by"] == "another user"
     assert _judged(sampler, tracker) == []
+
+
+def test_another_users_later_process_at_the_pid_resolves_nothing():
+    # The e1ce model: the first record has no create time, or a different one,
+    # so nothing ties the later process to what ran there while unreadable.
+    for first, later_start in (({"open": psutil.AccessDenied(2)}, 2.0), ({}, 5.0)):
+        table = _row_table()
+        sampler, tracker = _sampler(table), Tracker()
+        _observe(sampler, tracker, 0.0)
+        table[2] = {**_unattributed(None), **first}
+        _observe(sampler, tracker, 1.0)
+        table.pop(2)
+        _observe(sampler, tracker, 2.0)
+        table[2] = {"start": later_start, "ppid": 50, "cmdline": ["d"], "user": "root"}
+        _observe(sampler, tracker, 3.0)
+        assert [e["pid"] for e in sampler.relevant_read_failures] == [2]
+        assert _judged(sampler, tracker)
+
+
+@pytest.mark.parametrize(
+    "unverified",
+    [
+        pytest.param({"open": psutil.AccessDenied(50)}, id="open-denied"),
+        pytest.param({"start": psutil.AccessDenied(50)}, id="create-time-denied"),
+        pytest.param({"open": OSError("synthetic")}, id="open-oserror"),
+    ],
+)
+def test_a_cached_exclusion_does_not_cover_an_unverified_process_at_its_pid(
+    unverified,
+):
+    # pid 50 is established unrelated at the first sample. Whatever runs there
+    # once its identity cannot be read is not covered by that.
+    table = _row_table()
+    sampler, tracker = _sampler(table), Tracker()
+    _observe(sampler, tracker, 0.0)
+    _observe(sampler, tracker, 1.0)
+    assert sampler.read_failures == []
+    table[50] = {
+        "start": 3.0,
+        "ppid": 1,
+        "exe": BROWSER_EXE,
+        "cmdline": _chrome("/tmp/e1ce-profile"),
+        **unverified,
+    }
+    _observe(sampler, tracker, 2.0)
+    (episode,) = sampler.relevant_read_failures
+    assert episode["pid"] == 50 and episode["start_identity"] is None
+    assert _judged(sampler, tracker)
+
+
+def test_a_cached_exclusion_holds_while_the_create_time_matches():
+    table = _row_table()
+    sampler, tracker = _sampler(table), Tracker()
+    _observe(sampler, tracker, 0.0)
+    table[50]["cmdline"] = psutil.AccessDenied(50)
+    _observe(sampler, tracker, 1.0)
+    assert sampler.read_failures == []
+    assert _judged(sampler, tracker) == []
+
+
+def _baseline_table() -> dict[int, dict[str, Any]]:
+    """pid 1 is init and pid 10 the harness, which started at 5.0."""
+    return {
+        1: {"start": 0.0, "ppid": 0, "cmdline": ["init"]},
+        10: {"start": 5.0, "ppid": 1, "cmdline": ["pytest"]},
+    }
+
+
+@pytest.mark.parametrize(
+    "ancestry",
+    [
+        pytest.param(
+            {
+                59: {"start": 5.2, "ppid": 10, "open": psutil.NoSuchProcess(59)},
+                60: {"start": 5.5, "ppid": 59, "cmdline": ["leftover"]},
+            },
+            id="parent-vanished",
+        ),
+        pytest.param(
+            {
+                59: {"start": 5.2, "ppid": 10, "open": psutil.AccessDenied(59)},
+                60: {"start": 5.5, "ppid": 59, "cmdline": ["leftover"]},
+            },
+            id="parent-unopenable",
+        ),
+        pytest.param(
+            {60: {"start": 5.5, "ppid": 1, "cmdline": ["leftover"]}},
+            id="adopted-by-init-after-the-harness-began",
+        ),
+        pytest.param(
+            {
+                # Itself settled, but born after 60: not 60's parent.
+                59: {"start": 5.8, "ppid": 0, "cmdline": ["younger"]},
+                60: {"start": 5.5, "ppid": 59, "cmdline": ["leftover"]},
+            },
+            id="younger-process-at-the-parent-pid",
+        ),
+        pytest.param(
+            {60: {"start": 5.5, "ppid": psutil.AccessDenied(60), "cmdline": ["x"]}},
+            id="parent-unreadable",
+        ),
+    ],
+)
+def test_a_baseline_process_with_an_open_ancestry_is_watched(ancestry):
+    # The e1ce model: at the first sample it is not a known harness
+    # descendant, but nothing shows it is not one, so it is read again on
+    # every sample and counted once it becomes a browser beside the row's own.
+    profile = "/tmp/e1ce-profile"
+    table = {**_baseline_table(), **ancestry}
+    sampler, tracker = _sampler(table, root=10), Tracker()
+    _observe(sampler, tracker, 0.0)
+    table.pop(59, None)
+    table[60] = {
+        "start": 5.5,
+        "ppid": 1,
+        "exe": BROWSER_EXE,
+        "cmdline": _chrome(profile),
+    }
+    table[70] = {
+        "start": 6.0,
+        "ppid": 10,
+        "exe": BROWSER_EXE,
+        "cmdline": _chrome(profile),
+    }
+    _observe(sampler, tracker, 1.0)
+    assert tracker.max_roots[canonical_user_data_dir(profile)] == 2
+
+
+@pytest.mark.parametrize(
+    "ancestry",
+    [
+        pytest.param({60: {"start": 4.0, "ppid": 1, "cmdline": ["d"]}}, id="init"),
+        pytest.param(
+            {
+                59: {"start": 3.0, "ppid": 1, "cmdline": ["launcher"]},
+                60: {"start": 5.5, "ppid": 59, "cmdline": ["d"]},
+            },
+            id="through-an-older-parent",
+        ),
+        pytest.param({60: {"start": 5.5, "ppid": 0, "cmdline": ["d"]}}, id="pid-0"),
+    ],
+)
+def test_a_baseline_process_with_a_complete_ancestry_is_read_once(ancestry):
+    table = {**_baseline_table(), **ancestry}
+    reads = {"n": 0}
+
+    class Counting(dict):
+        def __getitem__(self, key):
+            if key == "cmdline":
+                reads["n"] += 1
+            return super().__getitem__(key)
+
+    table[60] = Counting(table[60])
+    sampler = _sampler(table, root=10)
+    for _ in range(5):
+        sampler.sample()
+    assert reads["n"] == 1
+
+
+def test_a_watched_baseline_process_counts_only_once_it_shows_the_browser():
+    table: dict[int, dict[str, Any]] = {
+        **_baseline_table(),
+        60: {"start": 5.5, "ppid": 1, "exe": "/usr/bin/python3", "cmdline": ["x"]},
+    }
+    sampler, tracker = _sampler(table, root=10), Tracker()
+    _observe(sampler, tracker, 0.0)
+    table[60]["cmdline"] = psutil.AccessDenied(60)
+    table[60]["exe"] = psutil.AccessDenied(60)
+    _observe(sampler, tracker, 1.0)
+    assert sampler.relevant_read_failures == []
+    table[60]["exe"] = BROWSER_EXE
+    _observe(sampler, tracker, 2.0)
+    assert [e["pid"] for e in sampler.relevant_read_failures] == [60]
+    assert _judged(sampler, tracker)
+
+
+def test_a_cached_exclusion_tied_to_the_harness_later_is_withdrawn():
+    # pid 51's parent recorded at the first sample turns out to be a row
+    # actor: from then on 51 is read again like any actor.
+    profile = "/tmp/e1ce-profile"
+    table = {
+        **_row_table(),
+        52: {"start": 0.5, "ppid": 0, "cmdline": ["parent"]},
+        51: {"start": 0.8, "ppid": 52, "cmdline": ["child"]},
+    }
+    sampler, tracker = _sampler(table), Tracker()
+    _observe(sampler, tracker, 0.0)
+    table[52] = {"start": 3.0, "ppid": 1, "cmdline": ["row-actor"]}
+    _observe(sampler, tracker, 1.0)
+    table[51]["cmdline"] = _chrome(profile)
+    _observe(sampler, tracker, 2.0)
+    assert tracker.max_roots.get(canonical_user_data_dir(profile)) == 1
 
 
 @pytest.mark.parametrize(
@@ -648,6 +858,22 @@ def test_another_users_unreadable_process_does_not_count(unreadable):
     _observe(sampler, tracker, 1.0)
     assert sampler.read_failures == []
     assert _judged(sampler, tracker) == []
+
+
+def test_an_unknown_harness_user_excludes_nobody_by_user():
+    table = _row_table()
+    sampler, tracker = _sampler(table), Tracker()
+    sampler.user = None
+    _observe(sampler, tracker, 0.0)
+    table[2] = {
+        "start": 2.0,
+        "ppid": 50,
+        "exe": BROWSER_EXE,
+        "cmdline": psutil.AccessDenied(2),
+        "user": "root",
+    }
+    _observe(sampler, tracker, 1.0)
+    assert [e["pid"] for e in sampler.relevant_read_failures] == [2]
 
 
 def test_an_unrelated_process_that_cannot_be_read_is_not_recorded():

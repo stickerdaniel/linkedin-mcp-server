@@ -846,3 +846,92 @@ def test_what_can_be_excluded_leaves_a_single_root(profile, case):
     assert failures == []
     assert vector.o1_single_browser
     assert compare_to_direct(direct, vector) == []
+
+
+# --- Exclusions bound to one lifetime, judged against the Direct reference ------
+
+
+def _lifetime_census(case: str) -> dict:
+    """The e1ce models: a readable root (pid 3) and, unless *case* is the
+    one-root control, a second root at pid 2 whose exclusion rests on
+    evidence about another lifetime, or on an ancestry that was never
+    complete. pid 1 is init and pid 10 the harness.
+    """
+    chrome = [BROWSER_EXE, f"--user-data-dir={KEY}"]
+
+    def browser(start: float, ppid: int = 10) -> dict[str, Any]:
+        return {"start": start, "ppid": ppid, "exe": BROWSER_EXE, "cmdline": chrome}
+
+    table: dict[int, dict[str, Any]] = {
+        1: {"start": 0.0, "ppid": 0, "cmdline": ["init"]},
+        10: {"start": 5.0, "ppid": 1, "cmdline": ["pytest"]},
+    }
+    if case.startswith("cached-unrelated"):
+        table[2] = {"start": 0.2, "ppid": 0, "cmdline": ["daemon"], "user": "root"}
+    if case == "incomplete-baseline-ancestry":
+        # A staging leftover whose parent vanished before the first sample.
+        table[9] = {"start": 5.1, "ppid": 10, "open": psutil.NoSuchProcess(9)}
+        table[2] = {"start": 5.3, "ppid": 9, "cmdline": ["python", "pre-exec"]}
+    sampler, tracker = _sampler(table, root=10), Tracker()
+    tracker.observe(sampler.sample(), 0.0)
+    table[3] = browser(6.0)
+    if case == "two-readable-roots":
+        table[2] = browser(6.0)
+    elif case in ("unknown-stays-unknown", "unknown-pid-reused-by-another-user"):
+        table[2] = {**browser(6.0), "open": psutil.AccessDenied(2)}
+    elif case == "cached-unrelated-pid-reused-open-denied":
+        table[2] = {**browser(6.0), "open": psutil.AccessDenied(2)}
+    elif case == "cached-unrelated-pid-reused-create-time-denied":
+        table[2] = {**browser(6.0), "start": psutil.AccessDenied(2)}
+    elif case == "incomplete-baseline-ancestry":
+        table.pop(9)
+        table[2] = browser(5.3, ppid=1)
+    for tick in (1.0, 2.0, 3.0):
+        tracker.observe(sampler.sample(), tick)
+    for pid in (2, 3):
+        table.pop(pid, None)
+    tracker.observe(sampler.sample(), 4.0)
+    if case == "unknown-pid-reused-by-another-user":
+        table[2] = {"start": 15.0, "ppid": 0, "cmdline": ["daemon"], "user": "root"}
+        tracker.observe(sampler.sample(), 5.0)
+        table.pop(2)
+        tracker.observe(sampler.sample(), 6.0)
+    return {
+        "stopped_by": "stop file",
+        "observation_start": 10.0,
+        "observation_end": 100.0,
+        "max_gap_seconds": 0.2,
+        "max_roots": dict(tracker.max_roots),
+        "read_failures": sampler.read_failures,
+        "relevant_read_failures": sampler.relevant_read_failures,
+    }
+
+
+def _judged_lifetime(profile, case: str, *, daemon: bool):
+    return judge_row(
+        dataclasses.replace(
+            _healthy(profile, daemon=daemon),
+            browser_key=canonical_user_data_dir(KEY),
+            watcher=_lifetime_census(case),
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "two-readable-roots",
+        "unknown-stays-unknown",
+        "unknown-pid-reused-by-another-user",
+        "cached-unrelated-pid-reused-open-denied",
+        "cached-unrelated-pid-reused-create-time-denied",
+        "incomplete-baseline-ancestry",
+    ],
+)
+def test_an_exclusion_about_another_lifetime_fails_o1_and_the_comparison(profile, case):
+    direct, direct_failures = _judged_lifetime(profile, "one-root", daemon=False)
+    assert direct_failures == [] and direct.o1_single_browser
+    vector, failures = _judged_lifetime(profile, case, daemon=True)
+    assert not vector.o1_single_browser
+    assert failures
+    assert compare_to_direct(direct, vector)

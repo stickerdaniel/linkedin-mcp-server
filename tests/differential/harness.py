@@ -91,6 +91,7 @@ from differential.synthetic_origin import (
 )
 from differential.watcher import (
     USER_DATA_DIR_FLAG,
+    another_user,
     canonical_user_data_dir,
     harness_user,
     possible_browser,
@@ -852,8 +853,9 @@ class ProfileCensus:
 
     ``complete`` only when every process could be judged: its command line
     read, or it established as unrelated the way the watcher establishes it
-    (another user, or a readable executable that cannot be the browser). An
-    empty ``processes`` from an incomplete census is not an empty profile.
+    (another user, or a readable executable that cannot be the browser), or,
+    for a zombie, the whole process shown to have exited. An empty
+    ``processes`` from an incomplete census is not an empty profile.
     """
 
     processes: list[Any] = field(default_factory=list)
@@ -867,6 +869,39 @@ class ProfileCensus:
     @property
     def complete(self) -> bool:
         return not self.unresolved
+
+
+def thread_count(process: Any) -> int | None:
+    """How many threads a process has, or None if that cannot be read."""
+    try:
+        return process.num_threads()
+    except (psutil.Error, OSError):
+        pass
+    try:
+        return len(os.listdir(f"/proc/{process.pid}/task"))
+    except OSError:
+        return None
+
+
+def exited_zombie(
+    process: Any,
+    *,
+    linux: bool | None = None,
+    threads_of: Callable[[Any], int | None] = thread_count,
+) -> bool:
+    """Whether a process reported as a zombie has exited as a whole.
+
+    On Linux the status is the thread-group leader's. A leader that ended with
+    ``pthread_exit`` is a zombie while the process's other threads run on and
+    keep every descriptor and lock it holds, so only a thread count of one,
+    the dead leader alone, shows the process gone; an unreadable count shows
+    nothing. On macOS a process becomes a zombie only once its last thread has
+    exited, and psutil never reports the status on Windows, so there the
+    status is enough.
+    """
+    if not (sys.platform.startswith("linux") if linux is None else linux):
+        return True
+    return threads_of(process) == 1
 
 
 def profile_census(
@@ -895,10 +930,14 @@ def profile_census(
         info = getattr(process, "info", {}) or {}
         cmdline = info.get("cmdline")
         if info.get("status") == psutil.STATUS_ZOMBIE:
-            # Exited and not yet reaped: nothing is running there.
+            # Exited and not yet reaped, then nothing is running there; but
+            # a zombie leader can still have threads that hold the profile.
+            if exited_zombie(process) or another_user(process_user(process), owner):
+                continue
+            census.unresolved.append(process.pid)
             continue
         if cmdline is None:
-            if (found := process_user(process)) is not None and found != owner:
+            if another_user(process_user(process), owner):
                 continue
             exe = info.get("exe")
             if exe and not possible_browser(exe, browser_exe, directory):
