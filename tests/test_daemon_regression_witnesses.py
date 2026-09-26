@@ -41,6 +41,7 @@ from linkedin_mcp_server.daemon_proxy import (
     FrontendCallHeartbeatMiddleware,
     OwnerUnreachableError,
 )
+from linkedin_mcp_server.storage_class import Classification, StorageClass
 from linkedin_mcp_server.server_role import (
     ServerRole,
     a_held_profile_means_this_owner_must_go,
@@ -353,10 +354,16 @@ def test_a_custom_browser_keeps_the_direct_server(
     Guards the scope decision "Custom browsers": only the bundled browser runs
     in default daemon mode, and ``CHROME_PATH`` keeps today's Direct behaviour.
     Every other gate is open here, and the bundled-browser case is the control:
-    it must still be shared, so another refusal cannot pass for this one.
+    it must still be shared, so another refusal cannot pass for this one. That
+    includes storage, which is made explicitly local: whatever this runner's
+    real directories are, a storage refusal must not stand in for this one.
     """
     monkeypatch.setattr(
         "linkedin_mcp_server.daemon.get_runtime_id", lambda: "linux-amd64-host"
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.storage_class.classify",
+        lambda _path: Classification(StorageClass.LOCAL, "local test filesystem"),
     )
     config = AppConfig()
     config.server.daemon_enabled = True

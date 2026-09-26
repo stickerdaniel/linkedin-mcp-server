@@ -45,10 +45,11 @@ from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from linkedin_mcp_server import daemon_descriptor
+from linkedin_mcp_server import daemon_descriptor, storage_class
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon_descriptor import DaemonDescriptor, DescriptorError
-from linkedin_mcp_server.session_state import get_runtime_id
+from linkedin_mcp_server.session_state import auth_root_dir, canonical, get_runtime_id
+from linkedin_mcp_server.storage_class import StorageClass
 
 logger = logging.getLogger(__name__)
 
@@ -395,9 +396,28 @@ def look_up_owner(
 def daemon_would_be_used(config: AppConfig) -> bool:
     """Whether this process is even a candidate for sharing a browser.
 
-    Separate from finding an owner, because it depends on nothing outside the
-    configuration and rules out the two cases where the question is moot.
+    Separate from finding an owner, and it never raises: every refusal, and
+    every failure to decide, is today's Direct server. A refusal happens before
+    any daemon state is prepared, locked, read or spawned, because the caller
+    returns on it before importing the election.
+
+    Recovery does not ask again. ``DaemonProxyBackend`` is built only by
+    ``cli_main._obtain_shared_owner`` after this returned True, and it keeps
+    the configuration admitted then, so no proxy exists to recover for a
+    process refused here.
     """
+    try:
+        return _daemon_would_be_used(config)
+    except Exception:
+        logger.warning(
+            "Could not decide whether to share a browser; this server drives "
+            "its own browser"
+        )
+        logger.debug("Daemon eligibility failure", exc_info=True)
+        return False
+
+
+def _daemon_would_be_used(config: AppConfig) -> bool:
     if not config.server.daemon_enabled:
         return False
     # An explicit HTTP bind is already one server for many clients, so there is
@@ -429,4 +449,50 @@ def daemon_would_be_used(config: AppConfig) -> bool:
             "of sharing one"
         )
         return False
+    refusal = _storage_refusal(config)
+    if refusal is not None:
+        logger.warning(
+            "%s; this server drives its own browser instead of sharing one",
+            refusal,
+        )
+        return False
     return True
+
+
+def _storage_refusal(config: AppConfig) -> str | None:
+    """Why the daemon's roots are not on local storage, or None if both are.
+
+    Two roots, because either one carries the coordination: the auth root holds
+    the profile the owner drives, and the state root the lock, descriptor and
+    token every process reads. Only paths are computed here. Nothing is created
+    under either, since creating state for a daemon that will not run is the
+    effect this refusal exists to prevent.
+    """
+    # The auth root the election would use: ``_obtain_shared_owner`` passes
+    # ``auth_root_dir(get_profile_dir())``, and ``get_profile_dir`` is this
+    # same field of the configuration ``main`` installed before asking.
+    try:
+        profile = canonical(Path(config.browser.user_data_dir))
+        # The profile too, not only the directory above it: a profile that is
+        # itself a mount point can sit on other storage than its parent.
+        roots = [
+            ("profile directory", profile),
+            ("directory holding the profile", auth_root_dir(profile)),
+        ]
+    except Exception as exc:
+        return f"The profile directory could not be resolved ({type(exc).__name__})"
+    try:
+        # Computes a path and creates nothing; ``prepare_daemon_state`` is
+        # what creates it, and only an admitted process reaches that.
+        roots.append(("daemon state directory", daemon_descriptor.daemon_state_root()))
+    except Exception as exc:
+        return f"The daemon state directory could not be located ({type(exc).__name__})"
+
+    for label, root in roots:
+        verdict = storage_class.classify(root)
+        if verdict.storage_class is not StorageClass.LOCAL:
+            return (
+                f"The {label} is on {verdict.storage_class.value} storage "
+                f"({verdict.reason})"
+            )
+    return None
