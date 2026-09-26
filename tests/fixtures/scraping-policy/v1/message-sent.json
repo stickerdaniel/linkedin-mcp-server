@@ -171,7 +171,7 @@
       "call": "send_message",
       "kind": "wait_for_function",
       "operation": "message_composer_ready",
-      "program_digest": "55fbb455644d",
+      "program_digest": "8e4815139f78",
       "section": "message",
       "timeout_ms": null
     },
@@ -183,7 +183,7 @@
       "call": "send_message",
       "kind": "evaluate",
       "operation": "message_composer_state",
-      "program_digest": "5b716974716a",
+      "program_digest": "db21dfedb136",
       "section": "message"
     },
     {
@@ -194,7 +194,7 @@
       "call": "send_message",
       "kind": "evaluate",
       "operation": "message_composer_state",
-      "program_digest": "5b716974716a",
+      "program_digest": "db21dfedb136",
       "section": "message"
     },
     {
@@ -208,7 +208,7 @@
       "call": "send_message",
       "kind": "evaluate_handle",
       "operation": "message_composer_owner",
-      "program_digest": "d311cb797c03",
+      "program_digest": "b5dda9009ba4",
       "section": "message"
     },
     {
@@ -276,7 +276,7 @@
       "call": "send_message",
       "kind": "evaluate",
       "operation": "message_confirmation_prepare",
-      "program_digest": "93a3ae384427",
+      "program_digest": "ff16c7cb6c9b",
       "section": "message"
     },
     {
@@ -305,7 +305,7 @@
       "call": "send_message",
       "kind": "wait_for_function",
       "operation": "message_confirmation_ready",
-      "program_digest": "c5f34ff3f519",
+      "program_digest": "d73f9923a5a9",
       "section": "message",
       "timeout_ms": null
     },
