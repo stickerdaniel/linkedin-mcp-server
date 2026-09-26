@@ -983,6 +983,73 @@ class TestServingTheOwnersTools:
         assert result.structured_content == {"the": "structured half"}
         assert any("the text half" in getattr(c, "text", "") for c in result.content)
 
+    @_HOP_ERAS
+    async def test_meta_and_progress_cross_the_production_proxy(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        legacy_only: bool,
+        protocol: str,
+    ):
+        """The caller's `_meta` and the owner's progress, through the real proxy.
+
+        The frontend server, its provider and the backend's own client, with
+        only the socket replaced. On the 2026-07-28 era the provider calls the
+        owner session itself and never reaches `call_tool_mcp`, so the tests of
+        that method say nothing about this path: here the caller's marker and
+        trace context are read at the owner by value, and progress the owner
+        reports is read at the caller's handler.
+        """
+        from linkedin_mcp_server.server import create_mcp_server
+        from linkedin_mcp_server.server_role import ServerRole
+
+        received: list[dict[str, Any]] = []
+        owner = FastMCP("owner")
+
+        @owner.tool(name="send_connection_request")
+        async def send(message: str, ctx: Context) -> str:
+            request_context = ctx.request_context
+            assert request_context is not None
+            received.append(dict(request_context.meta or {}))
+            await ctx.report_progress(progress=7, total=10, message="forwarded")
+            return message
+
+        sessions = _sessions_opened(monkeypatch)
+        _reach_owners_in_process(
+            monkeypatch, lambda _url: owner, legacy_only=legacy_only
+        )
+        proxy = create_mcp_server(
+            role=ServerRole.PROXY,
+            proxy_backend=_backend(_attachment(tmp_path), tmp_path),
+            tool_timeout=5.0,
+        )
+        seen: list[tuple[float, float | None, str | None]] = []
+
+        async def record(
+            progress: float, total: float | None, message: str | None
+        ) -> None:
+            seen.append((progress, total, message))
+
+        trace_id = "0af7651916cd43dd8448eb211c80319c"
+        async with Client(proxy, progress_handler=record) as client:
+            result = await client.call_tool(
+                "send_connection_request",
+                {"message": "hi"},
+                meta={
+                    "marker": "carried",
+                    "traceparent": f"00-{trace_id}-b7ad6b7169203331-01",
+                },
+            )
+
+        assert result.data == "hi"
+        called = [s for s in sessions if s.tool_request_started]
+        assert [s.protocol_version for s in called] == [protocol]
+        (meta,) = received
+        assert meta.get("marker") == "carried", meta
+        # The same trace, whichever span the proxy stamped as the parent.
+        assert meta.get("traceparent", "").split("-")[1:2] == [trace_id], meta
+        assert (7.0, 10.0, "forwarded") in seen, seen
+
     async def test_the_owners_tool_schema_survives_the_hop(self):
         # A client picks tools by title and annotations, so losing them changes
         # which tool an agent chooses even though every call still works.
@@ -1888,6 +1955,87 @@ class TestRecoveringThroughTheWholeProxy:
             listed = {tool.name for tool in await client.list_tools()}
 
         assert listed == {"the_replacements_tool"}
+        assert elections() == 1
+
+    async def test_a_lookup_that_loses_its_session_runs_the_call_once_elsewhere(
+        self, monkeypatch: pytest.MonkeyPatch, _upgraded
+    ):
+        """The provider's lookup inside a mutating call ends before any tool request.
+
+        A forwarded call first looks its tool up, on a session of its own that
+        is already bound to the call. Here that session ends under the lookup,
+        before a tool request exists. Nothing that could act has left, so the
+        one run the user asked for belongs to the replacement.
+
+        The client's session state is cleared by the time the failure is
+        reported, so the no-send answer has to come from the session the client
+        entered on. Read from the cleared state instead, the call looks as if
+        it may have been sent, and the user is told to check LinkedIn for an
+        action neither owner ran.
+        """
+        backend, elected, _replacement, elections = _upgraded
+        original_runs: list[str] = []
+        replacement_runs: list[str] = []
+        at_the_failure: list[tuple[bool, bool]] = []
+        clients: list[Any] = []
+        open_client = backend.open_client
+
+        def recording(*, timeout: float) -> Any:
+            client = open_client(timeout=timeout)
+            clients.append(client)
+            return client
+
+        monkeypatch.setattr(backend, "open_client", recording)
+
+        class EndsItsSessionAtTheLookup(_OnTheRealSession):
+            def adjust(self, session: Any) -> None:
+                async def lost(*_args: Any, **_kwargs: Any) -> NoReturn:
+                    (client,) = [
+                        c for c in clients if c._session_state.session is session
+                    ]
+                    at_the_failure.append(
+                        (client._binding is not None, session.tool_request_started)
+                    )
+                    # Ends the client's session runner the way a lost owner
+                    # connection does, with this listing still waiting.
+                    client._session_state.stop_event.set()
+                    await asyncio.Event().wait()
+                    raise AssertionError("the listing was never given up on")
+
+                session.list_tools = lost
+
+        def owner_recording(runs: list[str]) -> FastMCP:
+            owner = FastMCP("owner")
+
+            @owner.tool(name="send_connection_request")
+            async def send(message: str) -> str:
+                runs.append(message)
+                return message
+
+            return owner
+
+        original = EndsItsSessionAtTheLookup(owner_recording(original_runs))
+        replacement = owner_recording(replacement_runs)
+        _reach_owners_in_process(
+            monkeypatch,
+            lambda url: original if url == elected.descriptor.url else replacement,
+        )
+
+        async with Client(self._proxy(backend)) as client:
+            result = await asyncio.wait_for(
+                client.call_tool(
+                    "send_connection_request", {"message": "hi"}, raise_on_error=False
+                ),
+                timeout=10,
+            )
+
+        # The fault this pins really happened where it matters: inside the
+        # bound call, before its tool request.
+        assert at_the_failure == [(True, False)]
+        assert original_runs == []
+        assert replacement_runs == ["hi"], result
+        assert result.is_error is False
+        assert result.data == "hi"
         assert elections() == 1
 
     async def test_an_owner_that_answers_with_an_error_elects_nothing(
@@ -4497,9 +4645,15 @@ class TestTheHeadersTheOwnerReceives:
 
 
 #: A stand-in owner process: a real HTTP server with the owner's bearer check
-#: and heartbeat route, and one mutating tool that appends a line per run to a
-#: file, naming the protocol the request arrived on. "hold" keeps the call
-#: running until the process is killed.
+#: and heartbeat route, and one mutating tool that appends one record per run
+#: to a file, naming the protocol the request arrived on and its argument.
+#: "hold" keeps the call running until the process is killed.
+#:
+#: It reports to its parent in whole lines on stdout, each flushed only once
+#: what it announces is complete: ``READY <json>`` once it serves, and
+#: ``EFFECT <record>`` once that record is written and the file closed. A line
+#: without its newline is never a frame, so a child descheduled halfway
+#: through a write cannot be read as having said anything.
 _OWNER_PROCESS = """
 import asyncio, json, socket, sys
 from pathlib import Path
@@ -4516,11 +4670,17 @@ root, token, behaviour = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
 mcp = FastMCP("owner", auth=_StaticTokenAuth(token))
 
 
+def say(frame):
+    sys.stdout.write(frame + "\\n")
+    sys.stdout.flush()
+
+
 @mcp.tool(annotations={"destructiveHint": True})
 async def send_connection_request(message: str) -> dict[str, str]:
-    protocol = get_http_headers().get("mcp-protocol-version", "")
+    record = get_http_headers().get("mcp-protocol-version", "") + " " + message
     with (root / "effects.txt").open("a") as effects:
-        effects.write(protocol + "\\n")
+        effects.write(record + "\\n")
+    say("EFFECT " + record)
     if behaviour == "hold":
         await asyncio.Event().wait()
     return {"status": "sent"}
@@ -4547,8 +4707,7 @@ async def main():
             await serving
             raise RuntimeError("the owner stopped before it started")
         await asyncio.sleep(0.01)
-    port = listener.getsockname()[1]
-    (root / "ready.json").write_text(json.dumps({"port": port}))
+    say("READY " + json.dumps({"port": listener.getsockname()[1]}))
     await serving
 
 
@@ -4556,51 +4715,110 @@ asyncio.run(main())
 """
 
 
-class TestAnOwnerProcessKilledMidCall:
-    """A real owner process killed after it took a mutating call.
+class _OwnerProcess:
+    """A running stand-in owner, and the frames it has reported so far.
 
-    Everything the other loss tests stand in for is real here: a separate
-    process on a loopback socket, killed by the operating system while its
-    tool is running, on the 2026-07-28 era. The only question is the one the
-    recovery acts on, answered by counting runs on each owner.
+    A reader thread drains the child's output, keeps every line in the log for
+    a failure message, and queues each whole frame. Waiting for one is a
+    blocking read with a deadline, never a fixed pause, and the child's exit
+    ends the wait at once.
+    """
+
+    def __init__(self, root: Path, behaviour: str, token: str) -> None:
+        import os
+        import queue
+        import subprocess
+        import sys
+        import threading
+
+        self.root = root
+        script = root / "owner.py"
+        script.write_text(_OWNER_PROCESS, encoding="utf-8")
+        self._frames: queue.Queue[str | None] = queue.Queue()
+        self._log: list[str] = []
+        self.process = subprocess.Popen(
+            [sys.executable, str(script), str(root), token, behaviour],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env={**os.environ, "USER_DATA_DIR": str(root / "profile")},
+            text=True,
+            encoding="utf-8",
+        )
+        self._reader = threading.Thread(target=self._read, daemon=True)
+        self._reader.start()
+
+    def _read(self) -> None:
+        stream = self.process.stdout
+        assert stream is not None
+        for line in stream:
+            self._log.append(line)
+            if line.endswith("\n") and line.startswith(("READY ", "EFFECT ")):
+                self._frames.put(line[:-1])
+        self._frames.put(None)
+
+    def wait_for(self, kind: str, *, seconds: float) -> str:
+        """The payload of the next *kind* frame, or a failure naming why not."""
+        import queue
+        import time
+
+        deadline = time.monotonic() + seconds
+        while True:
+            remaining = deadline - time.monotonic()
+            assert remaining > 0, f"no {kind} frame from the owner: {self.log()}"
+            try:
+                frame = self._frames.get(timeout=remaining)
+            except queue.Empty:
+                continue
+            assert frame is not None, f"the owner exited before {kind}: {self.log()}"
+            if frame.startswith(kind + " "):
+                return frame[len(kind) + 1 :]
+
+    def log(self) -> str:
+        return "".join(self._log)
+
+    def stop(self) -> None:
+        if self.process.poll() is None:
+            self.process.kill()
+        self.process.wait(timeout=10)
+        self._reader.join(timeout=10)
+
+
+class TestAnOwnerProcessKilledMidCall:
+    """A stand-in owner process killed after it took a mutating call.
+
+    What is real here is the transport and the process loss: a separate
+    process serving HTTP on a loopback socket, killed by the operating system
+    while its tool is running, on the 2026-07-28 era, with the production
+    frontend, its recovery and its client in front of it. The owner itself is
+    a stand-in rather than the owner's own server assembly (no call
+    admission, lease or signed refusals; a minimal heartbeat route), and the
+    election is replaced by a known replacement: those halves are witnessed
+    in `TestAForwardedCallThroughTheRealOwner` and the election tests. The
+    only question here is the one the recovery acts on, answered by counting
+    complete run records on each owner.
     """
 
     @staticmethod
     def _spawn(
-        root: Path, behaviour: str, processes: list[Any]
-    ) -> tuple[Any, Attachment]:
+        root: Path, behaviour: str, owners: list[_OwnerProcess]
+    ) -> tuple[_OwnerProcess, Attachment]:
         import dataclasses
-        import os
-        import subprocess
-        import sys
-        import time
 
         root.mkdir(parents=True)
-        script = root / "owner.py"
-        script.write_text(_OWNER_PROCESS, encoding="utf-8")
         token = new_token()
-        log = (root / "owner.log").open("w")
-        environment = {**os.environ, "USER_DATA_DIR": str(root / "profile")}
-        process = subprocess.Popen(
-            [sys.executable, str(script), str(root), token, behaviour],
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            env=environment,
-        )
-        processes.append((process, log))
-        deadline = time.monotonic() + 30
-        while not (root / "ready.json").exists():
-            assert process.poll() is None, (root / "owner.log").read_text()
-            assert time.monotonic() < deadline, "the owner never started"
-            time.sleep(0.02)
-        port = json.loads((root / "ready.json").read_text())["port"]
+        owner = _OwnerProcess(root, behaviour, token)
+        owners.append(owner)
+        port = json.loads(owner.wait_for("READY", seconds=30))["port"]
         attachment = dataclasses.replace(_attachment(root, port=port), token=token)
-        return process, attachment
+        return owner, attachment
 
     @staticmethod
     def _runs(root: Path) -> list[str]:
+        """Every complete run record, and nothing a write left half done."""
         effects = root / "effects.txt"
-        return effects.read_text().splitlines() if effects.exists() else []
+        if not effects.exists():
+            return []
+        return effects.read_text(encoding="utf-8").split("\n")[:-1]
 
     async def test_the_call_is_reported_as_unknown_and_never_repeated(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -4608,11 +4826,11 @@ class TestAnOwnerProcessKilledMidCall:
         from linkedin_mcp_server.server import create_mcp_server
         from linkedin_mcp_server.server_role import ServerRole
 
-        processes: list[Any] = []
+        owners: list[_OwnerProcess] = []
         try:
-            original, attachment = self._spawn(tmp_path / "original", "hold", processes)
+            original, attachment = self._spawn(tmp_path / "original", "hold", owners)
             _replacement, standby = self._spawn(
-                tmp_path / "replacement", "answer", processes
+                tmp_path / "replacement", "answer", owners
             )
             elections: list[object] = []
 
@@ -4636,22 +4854,20 @@ class TestAnOwnerProcessKilledMidCall:
                         raise_on_error=False,
                     )
                 )
-                deadline = asyncio.get_running_loop().time() + 15
-                while not self._runs(tmp_path / "original"):
-                    assert not calling.done(), calling
-                    assert asyncio.get_running_loop().time() < deadline
-                    await asyncio.sleep(0.02)
-                original.kill()
-                original.wait(timeout=10)
+                # Killed only once the owner has reported a complete record of
+                # the run, so the kill lands on a call that has acted.
+                effect = await asyncio.to_thread(
+                    original.wait_for, "EFFECT", seconds=15
+                )
+                assert effect == "2026-07-28 hello"
+                assert not calling.done(), calling
+                original.stop()
                 result = await asyncio.wait_for(calling, timeout=20)
         finally:
-            for process, log in processes:
-                if process.poll() is None:
-                    process.kill()
-                    process.wait(timeout=10)
-                log.close()
+            for owner in owners:
+                owner.stop()
 
-        assert self._runs(tmp_path / "original") == ["2026-07-28"]
+        assert self._runs(tmp_path / "original") == ["2026-07-28 hello"]
         assert self._runs(tmp_path / "replacement") == [], "the call was sent again"
         assert result.is_error is True
         assert result.structured_content is not None
