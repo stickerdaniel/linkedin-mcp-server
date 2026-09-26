@@ -107,6 +107,53 @@ def test_fix_deps_requires_a_fix_fragment(tmp_path: Path) -> None:
     assert "changelog.d/1234.fix.md" in _errors(result)[0]
 
 
+_RENOVATE = {"login": "renovate[bot]", "type": "Bot"}
+_RENOVATE_TITLE = "fix(deps): update dependency fastmcp to v4"
+
+
+def _renovate_pr(files: list[dict[str, Any]], user: Any = _RENOVATE) -> dict:
+    return {
+        "number": _NUMBER,
+        "title": _RENOVATE_TITLE,
+        "changed_files": len(files),
+        "user": user,
+    }
+
+
+def test_renovate_needs_no_fragment(tmp_path: Path) -> None:
+    files = [_CODE]
+    result = _run(tmp_path, _RENOVATE_TITLE, files, pr=_renovate_pr(files))
+
+    assert result.returncode == 0, result.stdout
+    assert result.stdout == ""
+
+
+@pytest.mark.parametrize(
+    "user",
+    [
+        {"login": "renovate[bot]", "type": "User"},
+        {"login": "renovate", "type": "Bot"},
+        {"login": "stickerdaniel", "type": "User"},
+        "renovate[bot]",
+    ],
+)
+def test_only_the_renovate_app_is_exempt(tmp_path: Path, user: Any) -> None:
+    files = [_CODE]
+    result = _run(tmp_path, _RENOVATE_TITLE, files, pr=_renovate_pr(files, user))
+
+    assert result.returncode == 1
+    assert "changelog.d/1234.fix.md" in _errors(result)[0]
+
+
+def test_renovate_fragment_is_still_checked(tmp_path: Path) -> None:
+    files = [_CODE, _file("changelog.d/1234.fix.md", patch="@@ -0,0 +1 @@\n+")]
+    result = _run(tmp_path, _RENOVATE_TITLE, files, pr=_renovate_pr(files))
+
+    assert result.returncode == 1
+    [error] = _errors(result)
+    assert "is empty" in error
+
+
 @pytest.mark.parametrize(
     "title",
     [
