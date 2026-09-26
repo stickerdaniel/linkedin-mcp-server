@@ -1430,28 +1430,51 @@ class TestRetiringASharedBrowser:
         self.events = owner.events
         return owner
 
+    @staticmethod
+    def _exit_code(command) -> object:
+        """How *command* ended. An interrupt that escapes is an answer too.
+
+        Caught rather than let through: pytest treats a KeyboardInterrupt as the
+        user stopping the whole run, not as this test failing.
+        """
+        try:
+            command()
+        except SystemExit as exit_info:
+            return exit_info.code
+        except KeyboardInterrupt:
+            return "escaped KeyboardInterrupt"
+        pytest.fail("the command returned instead of exiting")
+
     def _logout(self) -> object:
-        with pytest.raises(SystemExit) as exit_info:
-            cli_main.clear_profile_and_exit()
-        return exit_info.value.code
+        return self._exit_code(cli_main.clear_profile_and_exit)
 
-    def _login(self) -> tuple[object, MagicMock]:
-        creation = MagicMock(return_value=True)
+    def _login(self, creation: MagicMock | None = None) -> tuple[object, MagicMock]:
+        creation = creation or MagicMock(return_value=True)
         self.monkeypatch.setattr(cli_main, "run_profile_creation", creation)
-        with pytest.raises(SystemExit) as exit_info:
-            cli_main.get_profile_and_exit()
-        return exit_info.value.code, creation
+        return self._exit_code(cli_main.get_profile_and_exit), creation
 
-    def _import(self) -> tuple[object, AsyncMock]:
+    def _import(self, run: AsyncMock | None = None) -> tuple[object, AsyncMock]:
         self.config.server.import_from_browser = "chrome"
-        run = AsyncMock(return_value=True)
+        run = run or AsyncMock(return_value=True)
         self.monkeypatch.setattr(
             "linkedin_mcp_server.browser_import.orchestrate.import_session_from_browser",
             run,
         )
-        with pytest.raises(SystemExit) as exit_info:
-            cli_main.import_from_browser_and_exit()
-        return exit_info.value.code, run
+        return self._exit_code(cli_main.import_from_browser_and_exit), run
+
+    def _command(self, command: str) -> tuple[object, bool]:
+        """Run *command*; return its exit and whether its profile operation ran."""
+        if command == "logout":
+            cleared = MagicMock(return_value=True)
+            self.monkeypatch.setattr(
+                "linkedin_mcp_server.session_state.clear_auth_state", cleared
+            )
+            return self._logout(), cleared.called
+        if command == "login":
+            code, creation = self._login()
+            return code, creation.called
+        code, run = self._import()
+        return code, run.called
 
     @staticmethod
     def _retirement_prompts(prompts: list[str]) -> list[str]:
@@ -1818,6 +1841,10 @@ class TestRetiringASharedBrowser:
         out = capsys.readouterr().out
         assert "does not recognise" in out
         assert "may have begun retiring" in out
+        # About this command's own operation, never about the owner's: one that
+        # accepted may already be closing its browser and exporting the session.
+        assert "This command has not performed the requested profile operation" in out
+        assert "Nothing on the profile was changed" not in out
         assert owner.sent_only_the_idle_only_request(), "fell back to another request"
         assert self._session_intact()
 
@@ -1836,8 +1863,12 @@ class TestRetiringASharedBrowser:
 
         self._seed_session()
         owner = self._owner()
+        # Accepted by the real route first, then lost: the owner is retiring
+        # while this command can only say it did not do its own part.
+        forward = owner._through_the_app
 
         def lost(request):
+            forward(request, request.content)
             raise getattr(httpx, failure)("gone", request=request)
 
         owner.answer = lost
@@ -1848,8 +1879,11 @@ class TestRetiringASharedBrowser:
         out = capsys.readouterr().out
         assert "got no answer" in out
         assert "may be retiring now" in out
+        assert "This command has not performed the requested profile operation" in out
+        assert "Nothing on the profile was changed" not in out
         assert "not sent" not in out and "unsent" not in out
         assert owner.sent_only_the_idle_only_request()
+        assert owner.liveness.retiring is True
         assert self._session_intact()
 
     def test_an_interrupt_after_sending_says_it_may_be_retiring(self, capsys):
@@ -1867,10 +1901,11 @@ class TestRetiringASharedBrowser:
         assert "may be retiring now" in capsys.readouterr().out
         assert self._session_intact()
 
-    def test_an_owner_that_is_not_listening_leaves_the_command_as_it_was(self, capsys):
+    def test_a_refused_connection_leaves_the_command_as_it_was(self, capsys):
         # An owner that exited leaves its record behind, and every command
         # after it would otherwise be refused until something replaced it.
-        # Refused to connect proves nothing was sent; the lease still decides.
+        # No connection proves this request was not delivered, and no more than
+        # that; the lease still decides.
         import socket
 
         self._seed_session()
@@ -1890,7 +1925,34 @@ class TestRetiringASharedBrowser:
 
         assert self._logout() == 0
 
-        assert "is not listening" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "No connection could be established" in out
+        assert "Continuing with the usual profile checks" in out
+        assert not self._session_intact()
+
+    @pytest.mark.parametrize("failure", ["ConnectTimeout", "ConnectError"])
+    def test_no_connection_is_not_read_as_an_owner_that_is_gone(self, failure, capsys):
+        # A connect timeout is not a refusal: something may hold the port and
+        # not have answered in time. The wording is only what both establish,
+        # that this request was not delivered, and the lease still decides.
+        import httpx
+
+        self._seed_session()
+        owner = self._owner()
+
+        def unreachable(request):
+            raise getattr(httpx, failure)("no connection", request=request)
+
+        owner.answer = unreachable
+        self._answers("y", "y")
+
+        assert self._logout() == 0
+
+        out = capsys.readouterr().out
+        assert "No connection could be established" in out
+        assert "not listening" not in out and "nothing to retire" not in out
+        assert owner.sent_only_the_idle_only_request(), "retried another request"
+        assert owner.liveness.retiring is False
         assert not self._session_intact()
 
     # -- step 5: the profile ------------------------------------------------ #
@@ -1964,26 +2026,87 @@ class TestRetiringASharedBrowser:
             )
             code = self._logout()
         elif command == "login":
-            self.monkeypatch.setattr(
-                cli_main,
-                "run_profile_creation",
-                MagicMock(side_effect=KeyboardInterrupt),
-            )
-            with pytest.raises(SystemExit) as exit_info:
-                cli_main.get_profile_and_exit()
-            code = exit_info.value.code
+            code, _creation = self._login(MagicMock(side_effect=KeyboardInterrupt))
         else:
-            self.config.server.import_from_browser = "chrome"
-            self.monkeypatch.setattr(
-                "linkedin_mcp_server.browser_import.orchestrate.import_session_from_browser",
-                AsyncMock(side_effect=KeyboardInterrupt),
-            )
-            with pytest.raises(SystemExit) as exit_info:
-                cli_main.import_from_browser_and_exit()
-            code = exit_info.value.code
+            code, _run = self._import(AsyncMock(side_effect=KeyboardInterrupt))
 
         assert code == 130
         assert "may be retiring now" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("command", ["logout", "login", "import"])
+    @pytest.mark.parametrize(
+        "moment",
+        ["reading the reply", "acknowledging it", "handing over to the wait"],
+    )
+    def test_an_interrupt_after_an_accepted_reply_says_it_may_be_retiring(
+        self, command, moment, capsys
+    ):
+        # The owner has already accepted: nothing about the interrupt can undo
+        # that, and the user must not be left to think cancelling the command
+        # cancelled the retirement.
+        import builtins
+
+        import httpx
+
+        self._seed_session()
+        owner = self._owner()
+        self._answers("y", "y")
+        if moment == "reading the reply":
+
+            def interrupted_json(self, **kwargs):
+                raise KeyboardInterrupt
+
+            self.monkeypatch.setattr(httpx.Response, "json", interrupted_json)
+        elif moment == "acknowledging it":
+            real_print = builtins.print
+
+            def interrupted_print(*args, **kwargs):
+                if args and "waiting for it to let go" in str(args[0]):
+                    raise KeyboardInterrupt
+                real_print(*args, **kwargs)
+
+            self.monkeypatch.setattr(builtins, "print", interrupted_print)
+        else:
+            real_retire = cli_main._retire_a_shared_browser
+
+            def interrupted_on_return(*args, **kwargs):
+                real_retire(*args, **kwargs)
+                raise KeyboardInterrupt
+
+            self.monkeypatch.setattr(
+                cli_main, "_retire_a_shared_browser", interrupted_on_return
+            )
+
+        code, operated = self._command(command)
+
+        assert code == 130
+        assert "may be retiring now" in capsys.readouterr().out
+        assert owner.sent_only_the_idle_only_request(), "retried another request"
+        assert owner.liveness.retiring is True
+        assert owner.turnover == ["asked"]
+        assert not operated
+        assert self._session_intact()
+
+    def test_an_interrupt_before_anything_was_asked_is_not_reported_as_one(
+        self, capsys
+    ):
+        # The control for the scope above: while the record is still being
+        # read nothing has been sent, so there is no retirement to report and
+        # the interrupt goes on exactly as it did before.
+        self._seed_session()
+        owner = self._owner()
+        self.monkeypatch.setattr(
+            "linkedin_mcp_server.daemon.look_up_owner",
+            MagicMock(side_effect=KeyboardInterrupt),
+        )
+        prompts = self._answers("y")
+
+        assert self._logout() == "escaped KeyboardInterrupt"
+
+        assert "may be retiring" not in capsys.readouterr().out
+        assert self._retirement_prompts(prompts) == []
+        assert owner.requests == []
+        assert self._session_intact()
 
     def test_an_import_whose_profile_stays_busy_is_refused_plainly(self, capsys):
         from linkedin_mcp_server.exceptions import BrowserBusyError
