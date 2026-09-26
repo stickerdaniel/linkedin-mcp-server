@@ -225,8 +225,16 @@ def check(
         elif entry["status"] == "added" and not _has_added_text(entry):
             errors.append(f"{_shown(path)} is empty. Write one user-facing sentence.")
 
-    required = None if exempt else _required_type(title)
+    required = _required_type(title)
     if required is None:
+        return errors
+    # The exemption waives a missing fragment, not a mismatched one: a fragment
+    # somebody added to an exempt PR still has to match its title.
+    own = f"{prefix}{number}."
+    if exempt and not any(
+        entry["filename"].startswith(own) and entry["status"] == "added"
+        for entry in files
+    ):
         return errors
 
     # The files API compares against the base, so this PR's own fragment is

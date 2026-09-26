@@ -145,6 +145,21 @@ def test_only_the_renovate_app_is_exempt(tmp_path: Path, user: Any) -> None:
     assert "changelog.d/1234.fix.md" in _errors(result)[0]
 
 
+@pytest.mark.parametrize(
+    ("fragment", "passes"),
+    [("changelog.d/1234.fix.md", True), ("changelog.d/1234.feat.md", False)],
+)
+def test_a_fragment_on_a_renovate_pr_must_match_its_title(
+    tmp_path: Path, fragment: str, passes: bool
+) -> None:
+    files = [_CODE, _file(fragment)]
+    result = _run(tmp_path, _RENOVATE_TITLE, files, pr=_renovate_pr(files))
+
+    assert (result.returncode == 0) is passes, result.stdout
+    if not passes:
+        assert "changelog.d/1234.fix.md" in _errors(result)[0]
+
+
 def test_renovate_fragment_is_still_checked(tmp_path: Path) -> None:
     files = [_CODE, _file("changelog.d/1234.fix.md", patch="@@ -0,0 +1 @@\n+")]
     result = _run(tmp_path, _RENOVATE_TITLE, files, pr=_renovate_pr(files))
