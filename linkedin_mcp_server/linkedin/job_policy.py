@@ -229,17 +229,13 @@ SCROLL_BUDGET_TOTAL = 60.0
 # developer search take 83s in total, 6.5s each, so this leaves the normal case
 # untouched and only catches a run that is genuinely running out.
 #
-# This predicts, it does not guarantee. Only the decision to *start* a page is
-# bounded; once started, a page runs to its own timeouts, and `goto` alone
-# allows 30s. The reserve is what covers that gap, and it has three claims on
-# it: the extraction and assembly after the last navigation, a page slower than
-# every page before it, and the browser startup inside `get_ready_extractor`,
-# which FastMCP is already timing before this budget begins. A page that
-# overruns the reserve is still cancelled and still loses every page gathered.
-# Bounding that too means handing the remaining budget down into navigation
-# and the rate-limit retry; see #754 rather than the margin. Scrolling is
-# already handed a deadline, so it takes what is left of this budget when
-# that is less than its own cap.
+# The prediction decides whether to *start* a page. Once started, the page is
+# handed the end of this budget: `goto` times out at it rather than after its
+# own 30s, the scroll takes what is left of it after navigating, and the
+# rate-limit retry is not started unless its backoff and a page fit before it.
+# The reserve still covers what runs past the end regardless: the `<main>`
+# wait and the settle after a redirect, each on its own short timeout, and the
+# extraction and assembly after the last navigation.
 #
 # The timeout arrives as an argument so this budget matches the timeout the
 # server registered for the tool, including directly constructed servers.

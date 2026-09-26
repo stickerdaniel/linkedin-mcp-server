@@ -419,6 +419,78 @@ class TestRememberMeRetriesOnlyOnce:
         assert mock_page.goto.await_count == 2
         assert mock_resolve.await_count == 1
 
+    async def test_a_deadline_shortens_the_goto_timeout(self, mock_page, monkeypatch):
+        """A page admitted with four seconds left may not navigate for thirty."""
+        monkeypatch.setattr(session_module.time, "monotonic", lambda: 10.0)
+        navigator = PageNavigator(PageSession(mock_page))
+
+        with patch(
+            "linkedin_mcp_server.linkedin.navigation.detect_auth_barrier_quick",
+            new_callable=AsyncMock,
+            return_value=None,
+        ):
+            await navigator._navigate_to_page(
+                "https://www.linkedin.com/jobs/search/?keywords=test", deadline=14.0
+            )
+            await navigator._navigate_to_page(
+                "https://www.linkedin.com/jobs/search/?keywords=test", deadline=100.0
+            )
+            await navigator._navigate_to_page(
+                "https://www.linkedin.com/jobs/search/?keywords=test", deadline=9.0
+            )
+
+        # Shortened, never lengthened, and never zero, which Playwright reads
+        # as no timeout at all.
+        assert [call.kwargs["timeout"] for call in mock_page.goto.await_args_list] == [
+            4000.0,
+            30000,
+            1.0,
+        ]
+
+    @pytest.mark.parametrize("prompt_after", ["failed_goto", "barrier"])
+    async def test_the_remember_me_retry_gets_only_what_is_left(
+        self, mock_page, monkeypatch, prompt_after
+    ):
+        """The retry works its timeout out again rather than inheriting one.
+
+        Both places that retry behind the prompt: after a `goto` that failed
+        and after one that landed on a barrier. Carrying the first attempt's
+        relative timeout into the retry lets it spend the same four seconds
+        twice.
+        """
+        now = [0.0]
+        monkeypatch.setattr(session_module.time, "monotonic", lambda: now[0])
+        navigator = PageNavigator(PageSession(mock_page))
+
+        async def goto(*args, **kwargs):
+            if mock_page.goto.await_count == 1:
+                now[0] += 2.5
+                if prompt_after == "failed_goto":
+                    raise Exception("net::ERR_TOO_MANY_REDIRECTS")
+
+        mock_page.goto = AsyncMock(side_effect=goto)
+        barriers = ["remember me", None] if prompt_after == "barrier" else [None]
+        with (
+            patch(
+                "linkedin_mcp_server.linkedin.navigation.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch(
+                "linkedin_mcp_server.linkedin.navigation.detect_auth_barrier_quick",
+                new_callable=AsyncMock,
+                side_effect=barriers,
+            ),
+        ):
+            await navigator._goto_with_auth_checks(
+                "https://www.linkedin.com/jobs/search/?keywords=test", deadline=4.0
+            )
+
+        assert [call.kwargs["timeout"] for call in mock_page.goto.await_args_list] == [
+            4000.0,
+            1500.0,
+        ]
+
 
 class TestWatchingNavigations:
     def test_records_main_frame_hops_without_deduplicating_and_cleans_up(
