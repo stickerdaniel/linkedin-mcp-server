@@ -253,6 +253,33 @@ _MESSAGING_CHROME_STRINGS: dict[str, _MessagingChromeTable] = {
 }
 
 
+@dataclass(frozen=True)
+class ConversationActionTextTable:
+    """Visible-text policy for acting on an opened conversation thread."""
+
+    # Start of the accessible name of a thread's options button, followed by
+    # the participants. The line the chrome table pins the thread header on;
+    # each sidebar row carries one too.
+    options_prefix: str
+    # Whole visible text of the options menu item that archives the thread,
+    # and of the one an archived thread offers instead. Not measured live: a
+    # menu that offers neither is refused rather than read as either state.
+    archive_item: str
+    unarchive_item: str
+
+
+_CONVERSATION_ACTION_TEXT: dict[str, ConversationActionTextTable] = {
+    "en-US": ConversationActionTextTable(
+        options_prefix=_MESSAGING_CHROME_STRINGS["en"].thread_header_prefix,
+        archive_item="Archive",
+        unarchive_item="Unarchive",
+    ),
+}
+
+# Same locale contract as `DETAIL_CAPTURE_EN_US`.
+CONVERSATION_ACTIONS_EN_US = _CONVERSATION_ACTION_TEXT["en-US"]
+
+
 def strip_conversation_chrome(text: str, locale: str = "en") -> str:
     """Trim messaging chrome around an opened conversation thread.
 

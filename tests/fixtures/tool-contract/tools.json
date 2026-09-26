@@ -3,6 +3,42 @@
     "_meta": {
       "fastmcp": {
         "tags": [
+          "actions",
+          "messaging"
+        ]
+      }
+    },
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Archive one LinkedIn messaging thread, InMail included, by thread ID.\n\nOpens the thread, which marks it read, and chooses Archive from its\noptions menu. A thread whose menu already offers Unarchive is left\nalone and reported already_archived, so a repeated call never\nunarchives. The change is confirmed by loading the thread again.\nReversible on LinkedIn; a new message moves the thread back to the\ninbox.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "thread_id": {
+          "description": "LinkedIn messaging thread ID, as get_inbox,\nsearch_conversations or get_conversation return it",
+          "type": "string"
+        }
+      },
+      "required": [
+        "thread_id"
+      ],
+      "type": "object"
+    },
+    "name": "archive_conversation",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Archive Conversation"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
           "session"
         ]
       }

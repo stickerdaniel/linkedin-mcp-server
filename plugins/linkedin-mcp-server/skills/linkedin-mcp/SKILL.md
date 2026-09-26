@@ -44,7 +44,8 @@ instances, clear profiles, or replace the user's browser session.
 - Jobs: `search_jobs`, `get_saved_jobs`, `get_job_details`, and
   `get_job_apply_url`.
 - Content: `get_feed` and `search_posts`.
-- Messages: `get_inbox`, `get_conversation`, and `search_conversations`.
+- Messages: `get_inbox`, `get_conversation`, `search_conversations`, and
+  `archive_conversation`.
 - Writes: `send_message` and `connect_with_person`, subject to the explicit
   authorization rules above.
 - Session: `get_session_status` says whether a login is saved without opening

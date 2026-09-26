@@ -250,6 +250,10 @@ class LinkedInExtractor:
         """Search messages by keyword."""
         return await self._conversations.search_conversations(keywords, limit)
 
+    async def archive_conversation(self, thread_id: str) -> dict[str, Any]:
+        """Archive one messaging thread by its thread id."""
+        return await self._conversations.archive_conversation(thread_id)
+
     async def send_message(
         self,
         linkedin_username: str,

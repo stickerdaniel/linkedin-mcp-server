@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Literal
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, unquote, urlparse
 
 import logging
 import re
@@ -29,8 +29,10 @@ from linkedin_mcp_server.linkedin.link_metadata import (
 )
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
 from linkedin_mcp_server.linkedin.profile_page import ProfilePageReader
-from linkedin_mcp_server.linkedin.session import PageSession
+from linkedin_mcp_server.linkedin.session import NAV_DELAY, PageSession
 from linkedin_mcp_server.linkedin.text import (
+    CONVERSATION_ACTIONS_EN_US,
+    ConversationActionTextTable,
     strip_conversation_chrome,
     strip_linkedin_noise,
 )
@@ -244,6 +246,124 @@ def _unverified_index_message(
     return message + " Pass a known thread_id instead."
 
 
+# The opened thread's options button, found by its accessible name: the
+# `aria-label` or the screen-reader text inside it, whichever carries the
+# table's prefix. The chrome table found that name in the page's innerText,
+# so it is at least there as text. Every sidebar row holds one too, inside the `<li>` whose
+# `label[aria-label]` names the row, so those are skipped, and more than one
+# left is refused rather than guessed at. Marked for the click only when
+# exactly one matches.
+THREAD_OPTIONS_JS = r"""(opts) => {
+    const {prefix, mark} = opts;
+    const main = document.querySelector('main');
+    if (!main) return null;
+    const visible = (el) => {
+        const box = el.getBoundingClientRect();
+        return box.width > 0 && box.height > 0;
+    };
+    const inRow = (el) => {
+        const row = el.closest('li');
+        return !!(row && row.querySelector('label[aria-label]'));
+    };
+    const squash = (value) => (value || '').replace(/\s+/g, ' ').trim();
+    for (const old of document.querySelectorAll('[' + mark + ']')) {
+        old.removeAttribute(mark);
+    }
+    const names = [];
+    for (const button of main.querySelectorAll('button')) {
+        if (!visible(button) || inRow(button)) continue;
+        // The shortest match is the name alone, without the icon's text.
+        const name = [
+            button.getAttribute('aria-label'),
+            ...[button, ...button.querySelectorAll('*')].map(el => el.textContent),
+        ]
+            .map(squash)
+            .filter(value => value.startsWith(prefix))
+            .sort((left, right) => left.length - right.length)[0];
+        if (name) names.push([button, name]);
+    }
+    if (names.length === 1) names[0][0].setAttribute(mark, '');
+    return {
+        triggers: names.length,
+        name: names.length === 1 ? names[0][1] : null,
+    };
+}"""
+
+# The open options menu's items whose whole text is the archive or the
+# unarchive label. Items are whatever the menu renders as clickable
+# (`[role="button"]`, `[role="menuitem"]`, `button`), visible, outside the
+# sidebar rows and the message list, and innermost, so an item and its own
+# wrapper count once. The archive item is marked for the click only when it
+# is the one match.
+THREAD_MENU_ITEMS_JS = r"""(opts) => {
+    const {archive, unarchive, mark} = opts;
+    const visible = (el) => {
+        const box = el.getBoundingClientRect();
+        return box.width > 0 && box.height > 0;
+    };
+    const inRow = (el) => {
+        const row = el.closest('li');
+        return !!(row && row.querySelector('label[aria-label]'));
+    };
+    const squash = (value) => (value || '').replace(/\s+/g, ' ').trim();
+    for (const old of document.querySelectorAll('[' + mark + ']')) {
+        old.removeAttribute(mark);
+    }
+    const items = [
+        ...document.querySelectorAll('[role="button"], [role="menuitem"], button'),
+    ].filter(el =>
+        visible(el) &&
+        !inRow(el) &&
+        !el.closest('[data-view-name="message-list-item"]')
+    );
+    const labelled = (label) => {
+        const found = items.filter(el => squash(el.innerText) === label);
+        return found.filter(el => !found.some(other => other !== el && el.contains(other)));
+    };
+    const archiveItems = labelled(archive);
+    const unarchiveItems = labelled(unarchive);
+    if (archiveItems.length === 1) archiveItems[0].setAttribute(mark, '');
+    return {archive: archiveItems.length, unarchive: unarchiveItems.length};
+}"""
+
+# The attributes that tie a click to the element the read chose.
+_THREAD_OPTIONS_MARK = "data-mcp-thread-options"
+_THREAD_ARCHIVE_MARK = "data-mcp-thread-archive"
+
+# How long the thread gets to render its options button, and its menu to open.
+_THREAD_READY_TIMEOUT = 10.0
+_THREAD_MENU_TIMEOUT = 5.0
+_THREAD_POLL = 0.25
+
+_ThreadArchiveState = Literal[
+    # The menu offers Archive, marked for the click, and not Unarchive.
+    "archivable",
+    # The menu offers Unarchive and not Archive.
+    "archived",
+    # No single options button could be told to be the thread's.
+    "no_options",
+    # The menu showed neither item, or both, or one of them twice.
+    "no_item",
+]
+
+
+@dataclass(frozen=True)
+class _ThreadArchiveRead:
+    state: _ThreadArchiveState
+    participant: str | None
+
+
+def _on_thread(url: str, thread_key: str) -> bool:
+    """Whether ``url`` is the thread ``thread_key``, compared decoded."""
+    parsed = urlparse(url)
+    match = re.fullmatch(r"/messaging/thread/([^/]+)/?", parsed.path)
+    return (
+        parsed.netloc == "www.linkedin.com"
+        and match is not None
+        and unquote(match.group(1)) == thread_key
+    )
+
+
 class ConversationReader:
     """Own every workflow whose subject is a LinkedIn messaging thread.
 
@@ -262,11 +382,13 @@ class ConversationReader:
         navigator: PageNavigator,
         content: PageContentReader,
         profile_page: ProfilePageReader,
+        action_text: ConversationActionTextTable = CONVERSATION_ACTIONS_EN_US,
     ):
         self._session = session
         self._navigator = navigator
         self._content = content
         self._profile_page = profile_page
+        self._action_text = action_text
 
     @staticmethod
     def _single_section_result(
@@ -822,3 +944,130 @@ class ConversationReader:
         if section_errors:
             result["section_errors"] = section_errors
         return result
+
+    async def archive_conversation(self, thread_id: str) -> dict[str, Any]:
+        """Archive one messaging thread from its own options menu.
+
+        Opens ``/messaging/thread/<id>/``, which marks it read, and reads the
+        menu before touching it: Archive toggles on LinkedIn, and an archived
+        thread's menu offers Unarchive in its place, so that item is never
+        clicked and a thread already archived is reported as such. After the
+        click the thread is loaded again and its menu must offer Unarchive and
+        not Archive, because a click the page took is not yet a change
+        LinkedIn kept.
+
+        Returns:
+            {url, thread_id, participant, status: "archived" | "already_archived"}
+        """
+        thread_key = unquote(normalize_thread_id(thread_id))
+        url = messaging_thread_url(thread_key, "/")
+        first = await self._read_thread_archive_state(url, thread_key)
+        status = "already_archived"
+        if first.state == "archivable":
+            if not _on_thread(self._session.page.url, thread_key):
+                await self._session.page.keyboard.press("Escape")
+                raise LinkedInOperationError(
+                    f"Thread {thread_key} was left for {self._session.page.url} "
+                    "before Archive could be chosen. Nothing was clicked."
+                )
+            await self._session.page.locator(f"[{_THREAD_ARCHIVE_MARK}]").click(
+                timeout=5000
+            )
+            await self._session.delay(NAV_DELAY)
+            after = await self._read_thread_archive_state(url, thread_key)
+            if after.state != "archived":
+                raise LinkedInOperationError(
+                    f"Archive was chosen for thread {thread_key}, but after a "
+                    f"reload its options menu {self._menu_finding(after.state)}."
+                )
+            status = "archived"
+        elif first.state != "archived":
+            raise LinkedInOperationError(
+                f"Thread {thread_key} was not archived: its options menu "
+                f"{self._menu_finding(first.state)}."
+            )
+        return {
+            "url": url,
+            "thread_id": thread_key,
+            "participant": first.participant,
+            "status": status,
+        }
+
+    def _menu_finding(self, state: _ThreadArchiveState) -> str:
+        """What a failed read found, in the words of the error it ends up in."""
+        text = self._action_text
+        if state == "archivable":
+            return f"still offers {text.archive_item!r}"
+        if state == "no_options":
+            return (
+                "button could not be found: no single button named "
+                f"{text.options_prefix!r} outside the conversation list"
+            )
+        return (
+            f"did not offer exactly one of {text.archive_item!r} or "
+            f"{text.unarchive_item!r}"
+        )
+
+    async def _read_thread_archive_state(
+        self, url: str, thread_key: str
+    ) -> _ThreadArchiveRead:
+        """Open the thread's options menu and read which archive item it offers.
+
+        Raises when the navigation ends anywhere but that thread, after
+        offering the page to the auth-barrier check: LinkedIn sends an id it
+        does not know elsewhere, and that page's menu belongs to another
+        thread. Leaves the menu open with the Archive item marked when the
+        state is ``archivable``, and closes it otherwise.
+        """
+        text = self._action_text
+        page = self._session.page
+        await self._navigator._navigate_to_page(url)
+        await self._session.check_rate_limit()
+        if not _on_thread(page.url, thread_key):
+            await self._navigator._raise_if_auth_barrier(page.url)
+            raise LinkedInOperationError(
+                f"Thread {thread_key} could not be opened: the navigation ended "
+                f"on {page.url}."
+            )
+        await self._session.dismiss_modal()
+
+        options: dict[str, Any] = {"triggers": 0, "name": None}
+        deadline = self._session.monotonic() + _THREAD_READY_TIMEOUT
+        while True:
+            found = await page.evaluate(
+                THREAD_OPTIONS_JS,
+                {"prefix": text.options_prefix, "mark": _THREAD_OPTIONS_MARK},
+            )
+            if isinstance(found, dict):
+                options = found
+                if options["triggers"] == 1:
+                    break
+            if self._session.monotonic() >= deadline:
+                return _ThreadArchiveRead("no_options", None)
+            await self._session.delay(_THREAD_POLL)
+        name = options["name"] or ""
+        participant = name[len(text.options_prefix) :].strip() or None
+
+        await page.locator(f"main button[{_THREAD_OPTIONS_MARK}]").click(timeout=5000)
+        menu: dict[str, int] = {"archive": 0, "unarchive": 0}
+        deadline = self._session.monotonic() + _THREAD_MENU_TIMEOUT
+        while True:
+            menu = await page.evaluate(
+                THREAD_MENU_ITEMS_JS,
+                {
+                    "archive": text.archive_item,
+                    "unarchive": text.unarchive_item,
+                    "mark": _THREAD_ARCHIVE_MARK,
+                },
+            )
+            if menu["archive"] == 1 and menu["unarchive"] == 0:
+                return _ThreadArchiveRead("archivable", participant)
+            if menu["archive"] == 0 and menu["unarchive"] == 1:
+                break
+            if self._session.monotonic() >= deadline:
+                break
+            await self._session.delay(_THREAD_POLL)
+        await page.keyboard.press("Escape")
+        if menu["archive"] == 0 and menu["unarchive"] == 1:
+            return _ThreadArchiveRead("archived", participant)
+        return _ThreadArchiveRead("no_item", participant)
