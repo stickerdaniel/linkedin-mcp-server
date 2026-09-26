@@ -14,6 +14,16 @@ from typing import Any
 _PREFIX = "Generated with "
 _PLACEHOLDER_RE = re.compile(r"<[^>]*>|\[[^]]*]")
 _RESERVED_MINIMAL_RE = re.compile(r"\b(?:for|in|and|via)\b")
+# Macroscope writes its summary into the PR body after the author, between
+# these two markers, and appends the pair at the end when it finds none. The
+# block is the bot's text, not the author's, so it is dropped before the final
+# line is read; an attribution inside it does not count.
+_MACROSCOPE_BLOCK_RE = re.compile(
+    r"<!-- Macroscope's pull request summary starts here -->"
+    r".*?"
+    r"<!-- Macroscope's pull request summary ends here -->",
+    re.DOTALL,
+)
 _ERROR = (
     "Model attribution is required as the final non-empty PR body line. "
     'Model-only is the minimum, with an optional final period: "Generated with '
@@ -65,6 +75,7 @@ def has_model_attribution(body: str | None) -> bool:
     """Check the final non-empty line of a pull request body."""
     if not body:
         return False
+    body = _MACROSCOPE_BLOCK_RE.sub("", body)
     lines = [line.strip() for line in body.splitlines() if line.strip()]
     return bool(lines) and is_valid_attribution(lines[-1])
 
