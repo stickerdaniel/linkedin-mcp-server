@@ -6,6 +6,7 @@ input: incremental
 include:
   - "linkedin_mcp_server/scraping/**"
   - "linkedin_mcp_server/tools/**"
+  - "linkedin_mcp_server/core/**"
 requires:
   - lint-and-check
 maxBudgetPerRun: 3
