@@ -41,9 +41,9 @@ import datetime
 import enum
 import logging
 from collections.abc import Awaitable, Callable, Coroutine
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 import httpx2
 import mcp.types as mt
@@ -53,6 +53,7 @@ from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.telemetry import inject_trace_context
 from fastmcp.tools import ToolResult
 from fastmcp.utilities.timeout import normalize_timeout_to_seconds
+from mcp import ClientSession
 from opentelemetry.trace import Status, StatusCode
 
 from linkedin_mcp_server import daemon_owner
@@ -73,6 +74,9 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from fastmcp.server.providers.proxy import ProxyClient, ProxyProvider
+    from mcp.shared.dispatcher import ProgressFnT
+    from mcp.shared.message import ClientMessageMetadata
+    from pydantic import BaseModel, TypeAdapter
 
     from linkedin_mcp_server.config.schema import AppConfig
     from linkedin_mcp_server.daemon import Attachment
@@ -109,6 +113,67 @@ class _Dispatch:
     """Whether a bound call's tool request has been handed to its session."""
 
     sent: bool = False
+
+
+_ResultT = TypeVar("_ResultT", bound="BaseModel")
+
+
+class ClaimsTheToolRequest(ClientSession):
+    """The owner session, which notes a tool request as the SDK takes it.
+
+    Both protocol eras end here. On the 2026-07-28 era ``ProxyTool.run`` calls
+    ``session.call_tool`` itself and never reaches the client's
+    ``call_tool_mcp``, so a claim made in the client would miss the one request
+    that matters. ``send_request`` is where every tool request enters the SDK,
+    in either era, with no await in front of it.
+
+    *tool_request_started* is this session's own record and is kept whether or
+    not a heartbeat binding was handed over. A missing binding means nobody
+    else is watching, never that nothing was sent. With one, the bound call's
+    dispatch is marked as well, so its owner stays fixed from here on.
+
+    Claimed is a superset of written: the SDK still serializes the request and
+    can fail or be cancelled before a byte leaves. What matters is that nothing
+    can take effect at the owner before the claim.
+    """
+
+    #: Handed over by the client once the session exists, and never read back
+    #: from the context variable: see ``_CallBinding``.
+    binding: _CallBinding | None = None
+    tool_request_started: bool = False
+
+    async def send_request(
+        self,
+        request: mt.ClientRequest | mt.Request[Any, Any],
+        result_type: type[_ResultT] | TypeAdapter[_ResultT],
+        request_read_timeout_seconds: float | None = None,
+        metadata: ClientMessageMetadata | None = None,
+        progress_callback: ProgressFnT | None = None,
+    ) -> _ResultT:
+        # Before the first await, which is the dispatcher's. Listings and
+        # negotiation change nothing and stay unclaimed, so they may be repeated.
+        if isinstance(request, mt.CallToolRequest):
+            self.tool_request_started = True
+            if self.binding is not None:
+                self.binding.dispatch.sent = True
+        return await super().send_request(
+            request,
+            result_type,
+            request_read_timeout_seconds,
+            metadata,
+            progress_callback,
+        )
+
+    async def validate_tool_result(self, name: str, result: mt.CallToolResult) -> None:
+        """Accept the owner's answer as it arrived.
+
+        The SDK's own check lists tools first whenever this fresh session has no
+        output schema cached, which is every time. A failure in that second
+        request would replace an answer to a call that may already have changed
+        LinkedIn, and would look safe to repeat. The owner validates its
+        declared output schemas before answering, and a proxy only relays.
+        """
+        return None
 
 
 #: The call the current task is making, for the factory to address and stamp.
@@ -296,6 +361,10 @@ def _no_connection_was_established(exc: BaseException) -> bool:
 
     ``ConnectError`` and ``ConnectTimeout`` are the two that mean the connection
     itself was never established, so nothing on it can have been sent.
+
+    It classifies a failure and no longer answers whether a tool request was
+    sent. A session makes several requests, and a failed connect found after
+    the tool request entered it may belong to a later one.
     """
     import httpx2
 
@@ -385,7 +454,7 @@ def _the_owner_answered(exc: BaseException) -> bool:
 
     Nothing here says whether the tool request left this process, and nothing
     may read it that way. That is ``nothing_was_sent``, answered by the
-    boundary or by :func:`_no_connection_was_established`, and an error the
+    boundary and the session's own record, and an error the
     client invented after the request went out leaves it false: a call that
     could change something is then reported as an unknown outcome and never
     repeated.
@@ -433,28 +502,32 @@ def _tells_which_owner_failed() -> type:
     class TellsWhichOwnerFailed(ProxyClient):
         """A ``ProxyClient`` that says which owner failed, and whether it heard.
 
-        The connect is one boundary and every discovery listing is another, and
+        The connect is one boundary and every request after it is another, and
         the listings are the ones that are easy to miss. ``ProxyTool.run`` is
-        factory, then ``async with client``, then ``call_tool_mcp`` — but
+        factory, then ``async with client``, then the call — but
         ``ProxyProvider._list_tools`` runs ``client.list_tools()`` *after* a
         successful enter, and its three siblings do the same for resources,
-        templates and prompts. An owner that dies between the initialize and the
-        list request raises out of neither the enter nor the call, so without
-        these that failure would carry no owner identity and discovery could
-        never recover.
+        templates and prompts. An owner that dies between the negotiation and
+        the list request raises out of neither the enter nor the call, so
+        without these that failure would carry no owner identity and discovery
+        could never recover.
 
         The dispatch answer differs by boundary, and being precise beats being
         uniformly cautious:
 
         * ``__aenter__`` — nothing was sent, *whatever* the exception. Not
-          because the exception says so but because of where it happened:
-          ``call_tool_mcp`` is inside the ``async with`` block and cannot have
-          run. An initialize that reached the owner is still not a tool call.
-        * the listings — listing changes nothing, so a caller may always repeat
-          one and the answer is the same as an enter failure.
-        * ``call_tool_mcp`` — only a failure to establish the connection proves
-          it. A read timeout or a protocol error may mean the owner is scraping
-          right now.
+          because the exception says so but because of where it happened: the
+          call is inside the ``async with`` block and cannot have run. A
+          negotiation that reached the owner is still not a tool call.
+        * every request after it — the session monitor answers from the
+          session's own record (:class:`ClaimsTheToolRequest`). Until a tool
+          request entered the session nothing that could act was sent, which
+          is what makes a listing repeatable. From then on nothing here proves
+          it did not arrive, and no exception is read as that proof: a
+          ``ConnectError`` surfacing afterwards may belong to a later exchange
+          on the same session rather than to the tool request.
+        * the listing methods — also tagged around the monitor, for a failure
+          that happens outside it. Listing changes nothing.
 
         ``__aexit__`` is a boundary of the opposite kind and tags nothing: it
         runs once the operation has an answer, so the only thing a failure there
@@ -471,13 +544,26 @@ def _tells_which_owner_failed() -> type:
             **kwargs: Any,
         ) -> None:
             super().__init__(*args, **kwargs)
+            # After `ProxyClient.__init__`, which installs its own forwarding
+            # session class last and would overwrite one passed in. Replaced
+            # rather than rebuilt, so header forwarding and every other option
+            # it set are kept.
+            options = self._transport_options
+            assert options is not None
+            self._transport_options = replace(
+                options, session_class=ClaimsTheToolRequest
+            )
             self._instance_id = instance_id
             self._attachment = attachment
             self._binding = binding
             self._still_usable = still_usable
+            #: The session this client entered on, kept for what it recorded
+            #: sending: the client's own session state is cleared as soon as
+            #: that session ends, and a failure is often reported after that.
+            self._entered_on: ClaimsTheToolRequest | None = None
 
-        def _check_at_the_session(self, *, claims_the_call: bool) -> None:
-            """Refuse a request to a written-off owner, and claim the call if asked.
+        def _check_at_the_session(self) -> None:
+            """Refuse a request to a written-off owner.
 
             Runs inside the coroutine the session monitor schedules, as its first
             step before the session method: the last point at which this process
@@ -487,10 +573,10 @@ def _tells_which_owner_failed() -> type:
             included. A refusal here says nothing was sent, which is exactly true.
 
             Every request is checked, listings too: an owner written off while
-            its client was being set up gets no request at all. *claims_the_call*
-            marks the bound tool call as sent, and from then on it keeps its
-            owner, because a request already on its way must stay with the owner
-            whose heartbeats are keeping it alive.
+            its client was being set up gets no request at all. A bound call
+            whose tool request was already sent is not checked again, because a
+            request already on its way must stay with the owner whose heartbeats
+            are keeping it alive.
             """
             binding = self._binding
             if binding is not None and binding.dispatch.sent:
@@ -498,25 +584,23 @@ def _tells_which_owner_failed() -> type:
             target = binding.attachment if binding is not None else self._attachment
             if self._still_usable is not None and target is not None:
                 self._still_usable(target)
-            if claims_the_call and binding is not None:
-                binding.dispatch.sent = True
 
         async def _await_with_session_monitoring(
-            self, coro: Coroutine[Any, Any, Any], *, claims_the_call: bool = False
+            self, coro: Coroutine[Any, Any, Any]
         ) -> Any:
             """The installed monitor, with the burial check moved inside its task.
 
-            Every request fastmcp's client makes goes through here, so this is
-            the one place that sees the send as it happens.
+            Every request fastmcp's client makes goes through here, the tool
+            request of both eras included, so this is the one place that sees
+            the send as it happens and can say whether it had begun.
             """
-
             entered = False
 
             async def at_the_session() -> Any:
                 nonlocal entered
                 entered = True
                 try:
-                    self._check_at_the_session(claims_the_call=claims_the_call)
+                    self._check_at_the_session()
                 except BaseException:
                     # Never started, and closed so it is not reported as a
                     # coroutine nobody awaited.
@@ -526,6 +610,23 @@ def _tells_which_owner_failed() -> type:
 
             try:
                 return await super()._await_with_session_monitoring(at_the_session())
+            except OwnerUnreachableError:
+                # Already ours, from the check above. Tagging twice would bury
+                # the answer it recorded.
+                raise
+            except Exception as exc:
+                if _the_owner_answered(exc):
+                    raise
+                # Only the session's own record proves nothing was sent. With no
+                # session entered there is no record, and that is not proof.
+                session = self._entered_on
+                raise OwnerUnreachableError(
+                    instance_id=self._instance_id,
+                    nothing_was_sent=(
+                        session is not None and not session.tool_request_started
+                    ),
+                    cause=exc,
+                ) from exc
             finally:
                 # The monitor can refuse before it starts the wrapper, when the
                 # session has already ended. It then closes the wrapper, which
@@ -534,13 +635,9 @@ def _tells_which_owner_failed() -> type:
                     coro.close()
 
         async def _saying_which_owner(
-            self, operation: Awaitable[Any], *, nothing_was_sent: bool | None
+            self, operation: Awaitable[Any], *, nothing_was_sent: bool
         ) -> Any:
-            """Await *operation*, tagging a departed owner with its identity.
-
-            *nothing_was_sent* is the boundary's own answer where the boundary
-            knows it, and ``None`` where only the cause chain can say.
-            """
+            """Await *operation*, tagging a departed owner with its identity."""
             try:
                 return await operation
             except OwnerUnreachableError:
@@ -552,18 +649,41 @@ def _tells_which_owner_failed() -> type:
                     raise
                 raise OwnerUnreachableError(
                     instance_id=self._instance_id,
-                    nothing_was_sent=(
-                        _no_connection_was_established(exc)
-                        if nothing_was_sent is None
-                        else nothing_was_sent
-                    ),
+                    nothing_was_sent=nothing_was_sent,
                     cause=exc,
                 ) from exc
 
         async def __aenter__(self) -> Any:
-            return await self._saying_which_owner(
+            entered = await self._saying_which_owner(
                 super().__aenter__(), nothing_was_sent=True
             )
+            try:
+                # The session the transport really built, not whatever the
+                # options asked for. A transport that ignored `session_class`
+                # would leave the tool request unclaimed, and an attribute set
+                # on the wrong object would hide that.
+                session = self.session
+                if not isinstance(session, ClaimsTheToolRequest):
+                    raise TypeError(
+                        "The owner connection was not given the session that "
+                        f"claims its tool requests: {type(session).__name__}"
+                    )
+                # After the negotiation, which sends no tool request, and before
+                # anything the caller does with the client. The binding read
+                # once in `open_client`, never the context variable again.
+                session.binding = self._binding
+                self._entered_on = session
+            except BaseException as failed:
+                # A failed enter gets no exit of its own, and this one had
+                # already connected.
+                await self.__aexit__(type(failed), failed, failed.__traceback__)
+                raise
+            logger.debug(
+                "Talking to the shared browser owner %s on protocol %s",
+                self._instance_id,
+                self.protocol_version,
+            )
+            return entered
 
         async def __aexit__(
             self,
@@ -661,66 +781,54 @@ def _tells_which_owner_failed() -> type:
             timeout: datetime.timedelta | float | int | None = None,
             meta: dict[str, Any] | None = None,
         ) -> mt.CallToolResult:
-            """Call the owner without discovering its schema after it answers.
+            """Call the owner in one monitored request, and stop at its answer.
 
-            ``ClientSession.call_tool`` validates a successful result by listing
-            tools when this fresh session has no cached output schema. A failure in
-            that second request replaces an answer to a call that may already have
-            changed LinkedIn, and its ``ConnectError`` then looks safe to repeat.
-            The owner already validates declared output schemas before answering;
-            this boundary only needs the protocol result it received.
+            The handshake era's path through ``ProxyTool.run``; on the
+            2026-07-28 era the provider calls the session itself and never comes
+            here. FastMCP's own version awaits the monitor a second time once
+            the answer is in, to drive a multi-round request this owner never
+            makes, and a session failure during that second await would replace
+            an answer to a call that may already have changed LinkedIn. So this
+            makes the same session call the other era makes, once.
             """
-
-            async def send_request() -> mt.CallToolResult:
-                with client_span(
-                    f"tools/call {name}",
-                    "tools/call",
-                    name,
-                    session_id=self.transport.get_session_id(),
-                    tool_name=name,
-                ) as span:
-                    logger.debug("[%s] called call_tool: %s", self.name, name)
-                    # The injected trace context goes out with the caller's
-                    # own `_meta`, never the caller's alone.
-                    propagated_meta = inject_trace_context(meta)
-                    request_meta = cast(
-                        "mt.RequestParamsMeta | None",
-                        propagated_meta if propagated_meta else None,
+            with client_span(
+                f"tools/call {name}",
+                "tools/call",
+                name,
+                session_id=self.transport.get_session_id(),
+                tool_name=name,
+            ) as span:
+                logger.debug("[%s] called call_tool: %s", self.name, name)
+                # The injected trace context goes out with the caller's own
+                # `_meta`, never the caller's alone.
+                propagated_meta = inject_trace_context(meta)
+                request_meta = cast(
+                    "mt.RequestParamsMeta | None",
+                    propagated_meta if propagated_meta else None,
+                )
+                # Checked inside the monitored task, right before the session
+                # takes the request, never out here: the monitor schedules that
+                # task, and a burial queued meanwhile runs first
+                # (`_check_at_the_session`).
+                answer = await self._await_with_session_monitoring(
+                    self.session.call_tool(
+                        name,
+                        arguments,
+                        read_timeout_seconds=normalize_timeout_to_seconds(timeout),
+                        progress_callback=progress_handler or self._progress_handler,
+                        meta=request_meta,
                     )
-                    # Checked and claimed inside the monitored task, right
-                    # before the session takes the request, never out here: the
-                    # monitor schedules that task, and a burial queued meanwhile
-                    # runs first (`_check_at_the_session`).
-                    result = await self._await_with_session_monitoring(
-                        self.session.send_request(
-                            mt.CallToolRequest(
-                                params=mt.CallToolRequestParams(
-                                    name=name,
-                                    arguments=arguments,
-                                    _meta=request_meta,
-                                )
-                            ),
-                            mt.CallToolResult,
-                            request_read_timeout_seconds=(
-                                normalize_timeout_to_seconds(timeout)
-                            ),
-                            progress_callback=(
-                                progress_handler or self._progress_handler
-                            ),
-                        ),
-                        claims_the_call=True,
-                    )
-                    if result.is_error and span.is_recording():
-                        span.set_attribute("error.type", "tool_error")
-                        description = ""
-                        if result.content and isinstance(
-                            result.content[0], mt.TextContent
-                        ):
-                            description = result.content[0].text
-                        span.set_status(Status(StatusCode.ERROR, description))
-                    return result
-
-            return await self._saying_which_owner(send_request(), nothing_was_sent=None)
+                )
+                # Nothing else: the session refuses a multi-round or claimed
+                # answer unless asked to allow one, and this does not ask.
+                result = cast("mt.CallToolResult", answer)
+                if result.is_error and span.is_recording():
+                    span.set_attribute("error.type", "tool_error")
+                    description = ""
+                    if result.content and isinstance(result.content[0], mt.TextContent):
+                        description = result.content[0].text
+                    span.set_status(Status(StatusCode.ERROR, description))
+                return result
 
     return TellsWhichOwnerFailed
 
@@ -1039,13 +1147,14 @@ class DaemonProxyBackend:
                 # configured proxy is for LinkedIn's traffic, not for this hop.
                 httpx_client_factory=daemon_owner.direct_async_http_client,
             ),
-            # The handshake era, named even though `ProxyClient` defaults to it
-            # today, so a changed default cannot move this hop. On the
-            # 2026-07-28 era `ProxyTool.run` sends the call through
-            # `session.call_tool` and never reaches `call_tool_mcp` above, so
-            # the send would go out unclaimed. Moving this hop to the new era is
-            # planned separately (#623) and needs that claim first.
-            mode="legacy",
+            # The 2026-07-28 era with an owner that offers it, the handshake
+            # with one that does not. Named because `ProxyClient` pins the
+            # handshake when left alone. Safe on either era only because the
+            # tool request is claimed in the session (`ClaimsTheToolRequest`):
+            # on this era `ProxyTool.run` calls `session.call_tool` and never
+            # reaches `call_tool_mcp`, so a claim made in the client would let
+            # the send go out unclaimed.
+            mode="auto",
             # Load-bearing rather than tuning. Measured twice against a real
             # owner: with no timeout here, a call that outlives the underlying
             # HTTP read timeout never returns at all — still hanging when an

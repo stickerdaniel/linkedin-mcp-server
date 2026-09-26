@@ -229,28 +229,47 @@ class TestToolContract:
     ):
         """The list a client of the frontend sees is the owner's own.
 
-        Through the production client the backend builds, on the era it pins,
-        with only the socket replaced by the owner in memory. A field the hop
-        drops or rewrites (an annotation, an output schema, a title) would
-        leave the owner's list correct and the one clients actually read wrong.
+        Through the production client the backend builds, on the era it
+        negotiates, with only the socket replaced by the owner in memory. A
+        field the hop drops or rewrites (an annotation, an output schema, a
+        title) would leave the owner's list correct and the one clients
+        actually read wrong.
+
+        The hop's own era is checked too, because the frontend's says nothing
+        about it: an owner able to speak the 2026-07-28 era is spoken to in it
+        whichever era the client in front chose, and a hop still on the
+        handshake would pass the comparison above unchanged.
         """
+        from contextlib import asynccontextmanager
+
         from fastmcp.client import transports
         from fastmcp.client.transports import FastMCPTransport
 
         from linkedin_mcp_server.server_role import reset_process_role_for_testing
+
+        hop: list[Any] = []
+
+        class RecordsTheHop(FastMCPTransport):
+            @asynccontextmanager
+            async def connect_session(self, **kwargs: Any):
+                async with super().connect_session(**kwargs) as session:
+                    hop.append(session)
+                    yield session
 
         _stand_in_the_lifespan(monkeypatch)
         owner = _server_for(ServerRole.OWNER)
         monkeypatch.setattr(
             transports,
             "StreamableHttpTransport",
-            lambda *_args, **_kwargs: FastMCPTransport(owner),
+            lambda *_args, **_kwargs: RecordsTheHop(owner),
         )
         reset_process_role_for_testing()
         proxy = create_mcp_server(role=ServerRole.PROXY, proxy_backend=_a_backend())
         recorded = json.loads(_TOOL_CONTRACT.read_text(encoding="utf-8"))
 
         assert await _wire_tools(proxy, mode, protocol) == recorded
+        assert hop, "the proxy never reached its owner"
+        assert {session.protocol_version for session in hop} == {"2026-07-28"}
 
 
 class TestServerRoles:

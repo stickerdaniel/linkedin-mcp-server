@@ -9,7 +9,9 @@ arriving, or a dead owner that looks like a server with no tools.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import inspect
+import json
 import threading
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -29,6 +31,7 @@ from fastmcp.client.transports import (
     FastMCPTransport,
     StreamableHttpTransport,
 )
+from fastmcp.server.middleware import Middleware
 from fastmcp.server.providers.proxy import ProxyClient, ProxyProvider
 from fastmcp.tools import ToolResult
 
@@ -107,27 +110,41 @@ class _NothingIsListening(ClientTransport):
         yield  # noqa: W0101 - unreachable, and an async generator needs one
 
 
-class _GoesAwayAfterInitialize(FastMCPTransport):
-    """An owner that answers the initialize and is gone before the next request.
+class _OnTheRealSession(FastMCPTransport):
+    """An in-process owner whose client session is changed in place, never wrapped.
 
-    The window that neither the connect nor the tool call can see, and the only
-    reason the listing boundaries are wrapped at all.
+    The client has to get the session it asked for: the claim on a tool request
+    lives in that session's class (`ClaimsTheToolRequest`), and a client handed
+    anything else refuses it at entry. A wrapper would also miss what it claims
+    to watch, because the SDK's `call_tool` reaches `send_request` through its
+    own `self`. So a fault is set as an attribute of the real session, where
+    the SDK's calls through `self` and fastmcp's listings both find it — the
+    way fastmcp itself replaces `send_discover` while it negotiates.
+
+    Set before the negotiation, which uses neither method changed here.
     """
 
     @asynccontextmanager
     async def connect_session(self, **kwargs: Any) -> AsyncIterator[Any]:
         async with super().connect_session(**kwargs) as session:
-            yield _AnsweredOnceAndStopped(session)
+            self.adjust(session)
+            yield session
+
+    def adjust(self, session: Any) -> None:
+        """Change *session* in place, before anything is asked of it."""
 
 
-class _AnsweredOnceAndStopped:
-    """A session that completes the handshake and then answers nothing.
+class _GoesAwayAfterInitialize(_OnTheRealSession):
+    """An owner that answers the negotiation and is gone before the next request.
+
+    The window that neither the connect nor the tool call can see, and the only
+    reason the listing boundaries are tagged at all.
 
     Deliberately not the exception a real owner produces, and reality has three
     shapes rather than one. Measured with the client the provider builds: an
     owner already gone at connect time fails in `__aenter__` as `RuntimeError`
     over `httpx2.ConnectError`; one that goes away in this window, after the
-    initialize and before the request on that same session, raises
+    negotiation and before the request on that same session, raises
     `anyio.BrokenResourceError` or `ClosedResourceError` depending on timing; one
     that goes away with a request outstanding comes back as an `MCPError` the
     session invented. The first and third have their own tests.
@@ -138,17 +155,14 @@ class _AnsweredOnceAndStopped:
     cause chain instead would pass against the real shapes and fail here.
     """
 
-    def __init__(self, session: Any) -> None:
-        self._session = session
+    def adjust(self, session: Any) -> None:
+        async def list_tools(*_args: Any, **_kwargs: Any) -> NoReturn:
+            raise httpx2.RemoteProtocolError("the owner closed the connection")
 
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._session, name)
-
-    async def list_tools(self, *_args: Any, **_kwargs: Any):
-        raise httpx2.RemoteProtocolError("the owner closed the connection")
+        session.list_tools = list_tools
 
 
-class _AnswersWhenTold(FastMCPTransport):
+class _AnswersWhenTold(_OnTheRealSession):
     """An owner whose listing is held open for as long as a test needs it."""
 
     def __init__(self, server: FastMCP) -> None:
@@ -156,32 +170,20 @@ class _AnswersWhenTold(FastMCPTransport):
         self.reached = asyncio.Event()
         self.release = asyncio.Event()
 
-    @asynccontextmanager
-    async def connect_session(self, **kwargs: Any) -> AsyncIterator[Any]:
-        async with super().connect_session(**kwargs) as session:
-            yield _WaitsBeforeListing(session, self.reached, self.release)
+    def adjust(self, session: Any) -> None:
+        list_tools = session.list_tools
+
+        async def held(*args: Any, **kwargs: Any) -> Any:
+            self.reached.set()
+            await self.release.wait()
+            return await list_tools(*args, **kwargs)
+
+        session.list_tools = held
 
 
-class _WaitsBeforeListing:
-    """A session that reports it was asked, then waits to be let go."""
-
-    def __init__(
-        self, session: Any, reached: asyncio.Event, release: asyncio.Event
-    ) -> None:
-        self._session = session
-        self._reached = reached
-        self._release = release
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._session, name)
-
-    async def list_tools(self, *args: Any, **kwargs: Any):
-        self._reached.set()
-        await self._release.wait()
-        return await self._session.list_tools(*args, **kwargs)
-
-
-def _reach_owners_in_process(monkeypatch: pytest.MonkeyPatch, owner_at) -> None:
+def _reach_owners_in_process(
+    monkeypatch: pytest.MonkeyPatch, owner_at, *, legacy_only: bool = False
+) -> None:
     """Reach in-process owners, but only at the address production chose.
 
     Only the socket is stood in for. The URL is still built by production code
@@ -196,6 +198,10 @@ def _reach_owners_in_process(monkeypatch: pytest.MonkeyPatch, owner_at) -> None:
     HTTP routes, so it answers the preflight the way the owner's own route
     answers a call it has not registered yet; an address nobody serves refuses
     the connection, which is what a departed owner's port does.
+
+    *legacy_only* keeps every owner reached here to the handshake era, the way
+    an owner that cannot serve the 2026-07-28 one does; left false, an
+    in-process owner negotiates that era.
     """
     from fastmcp.client import transports
 
@@ -205,9 +211,14 @@ def _reach_owners_in_process(monkeypatch: pytest.MonkeyPatch, owner_at) -> None:
         reached = owner_at(url)
         if reached is None:
             return _NothingIsListening(url)
-        if isinstance(reached, ClientTransport):
-            return reached
-        return FastMCPTransport(reached)
+        transport = (
+            reached
+            if isinstance(reached, ClientTransport)
+            else FastMCPTransport(reached)
+        )
+        if legacy_only:
+            transport.legacy_only = True
+        return transport
 
     async def beat(attachment: Attachment, _call_id: str) -> httpx2.Response:
         if owner_at(attachment.descriptor.url) is None:
@@ -272,20 +283,83 @@ class TestReachingTheOwner:
         assert isinstance(client, ProxyClient)
 
 
+#: Both eras the owner hop can negotiate with an in-process owner, with the
+#: protocol each must actually land on. The handshake era is reached the way a
+#: client reaches it with an owner that cannot serve the other one: through a
+#: transport that says so, which `mode="auto"` honours without probing.
+_HOP_ERAS = pytest.mark.parametrize(
+    ("legacy_only", "protocol"),
+    [(False, "2026-07-28"), (True, "2025-11-25")],
+    ids=["2026-07-28 era", "handshake era"],
+)
+
+
+def _sessions_opened(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """Every owner session built from here on, kept after it closes.
+
+    Read off the constructor of the session class the client installs, so a
+    client that installed some other class shows up as no sessions at all.
+    """
+    from linkedin_mcp_server.daemon_proxy import ClaimsTheToolRequest
+
+    opened: list[Any] = []
+    construct = ClaimsTheToolRequest.__init__
+
+    def recording(self: Any, *args: Any, **kwargs: Any) -> None:
+        construct(self, *args, **kwargs)
+        opened.append(self)
+
+    monkeypatch.setattr(ClaimsTheToolRequest, "__init__", recording)
+    return opened
+
+
 class TestCallingTheOwner:
-    async def test_meta_timeout_progress_and_monitoring_reach_send_request(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    @_HOP_ERAS
+    @pytest.mark.parametrize(
+        ("timeout", "asked", "waited"),
+        [
+            (2.5, 2.5, 2.5),
+            (datetime.timedelta(seconds=2.5), 2.5, 2.5),
+            (3, 3.0, 3.0),
+            (None, None, 72.0),
+        ],
+        ids=["float", "timedelta", "int", "the forwarding deadline"],
+    )
+    async def test_meta_timeout_and_progress_reach_the_sdk(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        legacy_only: bool,
+        protocol: str,
+        timeout: Any,
+        asked: float | None,
+        waited: float,
     ):
+        """What `call_tool_mcp` hands the SDK, read where the SDK takes it.
+
+        The deadline in seconds as a float, because the dispatcher adds it to
+        a float clock; none at all when the caller named none, so the request
+        waits on the session's own, which is the forwarding deadline this
+        backend's provider sets (`tool_timeout` 42 plus the margin). The
+        caller's `_meta` with the injected trace context, both by value. And
+        the progress handler, proved by progress the owner actually reported
+        arriving at it.
+        """
         owner = FastMCP("owner")
 
         @owner.tool
-        async def report() -> str:
+        async def report(ctx: Context) -> str:
+            await ctx.report_progress(progress=7, total=10, message="forwarded")
             return "sent"
 
         transport = _RecordsCallRequest(owner)
+        transport.legacy_only = legacy_only
         _reach_owners_in_process(monkeypatch, lambda _url: transport)
-        client = _backend(_attachment(tmp_path), tmp_path).open_client(timeout=1.0)
-
+        provider = create_proxy_provider(
+            _backend(_attachment(tmp_path), tmp_path), tool_timeout=42.0
+        )
+        client = provider.client_factory()
+        assert isinstance(client, ProxyClient)
         injected: list[dict[str, Any] | None] = []
 
         def inject(meta: dict[str, Any] | None) -> dict[str, Any]:
@@ -295,18 +369,6 @@ class TestCallingTheOwner:
         monkeypatch.setattr(
             "linkedin_mcp_server.daemon_proxy.inject_trace_context", inject
         )
-
-        original_monitor = type(client)._await_with_session_monitoring
-        monitor_calls = 0
-        claims: list[bool] = []
-
-        async def monitor(self: Any, request: Any, **kwargs: Any) -> Any:
-            nonlocal monitor_calls
-            monitor_calls += 1
-            claims.append(kwargs.get("claims_the_call", False))
-            return await original_monitor(self, request, **kwargs)
-
-        monkeypatch.setattr(type(client), "_await_with_session_monitoring", monitor)
         seen_progress: list[tuple[float, float | None, str | None]] = []
 
         async def record(
@@ -315,33 +377,29 @@ class TestCallingTheOwner:
             seen_progress.append((progress, total, message))
 
         async with client:
-            monitor_calls = 0
-            claims.clear()
+            assert client.protocol_version == protocol
             result = await client.call_tool_mcp(
                 "report",
                 {},
-                timeout=2.5,
+                timeout=timeout,
                 progress_handler=record,
                 meta={"marker": "carried"},
             )
 
         assert result.is_error is False
         assert injected == [{"marker": "carried"}]
-        assert transport.request is not None
-        # The bare request, as SDK v2 takes it, and its `_meta` as it goes on
-        # the wire: the caller's marker and the injected trace context together.
         assert type(transport.request) is mt.CallToolRequest
-        wire = transport.request.model_dump(by_alias=True, exclude_none=True)
-        assert wire["params"]["_meta"] == {
+        # As the request entered the SDK, before it stamps anything of its own.
+        sent = transport.request.model_dump(by_alias=True, exclude_none=True)
+        assert sent["params"]["_meta"] == {
             "marker": "carried",
             "traceparent": "00-trace-span-01",
         }
-        assert transport.timeout == 2.5
-        assert type(transport.timeout) is float
+        assert transport.timeout == asked
+        assert type(transport.timeout) is type(asked)
+        assert transport.deadline == waited
         assert transport.progress_callback is record
         assert seen_progress == [(7.0, 10.0, "forwarded")]
-        assert monitor_calls == 1
-        assert claims == [True], "the send went out without claiming the call"
 
     async def test_the_clients_progress_handler_reaches_send_request(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -349,7 +407,8 @@ class TestCallingTheOwner:
         owner = FastMCP("owner")
 
         @owner.tool
-        async def report() -> str:
+        async def report(ctx: Context) -> str:
+            await ctx.report_progress(progress=7, total=10, message="forwarded")
             return "sent"
 
         transport = _RecordsCallRequest(owner)
@@ -370,9 +429,56 @@ class TestCallingTheOwner:
         assert transport.progress_callback is record
         assert seen == [(7.0, 10.0, "forwarded")]
 
+    async def test_an_answer_in_hand_outlives_the_session_that_brought_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Nothing that can fail runs between the owner's answer and the caller.
+
+        The session here is gone from the moment the answer arrived: every
+        monitored request after it fails the way the installed monitor fails
+        one on an ended session. FastMCP's own `call_tool_mcp` makes a second
+        such request once the answer is in, to drive a multi-round call this
+        owner never makes, and that failure would stand in for an answer to a
+        call that has already acted.
+        """
+        from mcp import MCPError
+
+        ran: list[str] = []
+        owner = FastMCP("owner")
+
+        @owner.tool(name="send_connection_request")
+        async def send() -> str:
+            ran.append("sent")
+            return "sent"
+
+        _reach_owners_in_process(monkeypatch, lambda _url: owner)
+        client = _backend(_attachment(tmp_path), tmp_path).open_client(timeout=5.0)
+        monitor = ProxyClient._await_with_session_monitoring
+        answered: list[object] = []
+
+        async def ended_once_answered(self: Any, coro: Any) -> Any:
+            if answered:
+                coro.close()
+                raise MCPError(code=mt.CONNECTION_CLOSED, message="Connection closed")
+            answer = await monitor(self, coro)
+            answered.append(answer)
+            return answer
+
+        monkeypatch.setattr(
+            ProxyClient, "_await_with_session_monitoring", ended_once_answered
+        )
+
+        async with client:
+            result = await client.call_tool_mcp("send_connection_request", {})
+
+        assert result.is_error is False
+        assert ran == ["sent"]
+
     def test_the_sdk_boundary_keeps_the_expected_signature(self, tmp_path: Path):
         from fastmcp.client.mixins.tools import ClientToolsMixin
         from mcp import ClientSession
+
+        from linkedin_mcp_server.daemon_proxy import ClaimsTheToolRequest
 
         client = _backend(_attachment(tmp_path), tmp_path).open_client(timeout=1.0)
         boundary = inspect.signature(type(client).call_tool_mcp)
@@ -394,30 +500,38 @@ class TestCallingTheOwner:
             assert parameter.kind is upstream.parameters[name].kind
             assert parameter.default == upstream.parameters[name].default
 
+        # The claim overrides the one method every tool request enters, and
+        # passes each argument on by position, so both have to agree with the
+        # SDK's own on names, order and defaults.
+        claimed = inspect.signature(ClaimsTheToolRequest.send_request)
         send_request = inspect.signature(ClientSession.send_request)
-        assert list(send_request.parameters) == [
-            "self",
-            "request",
-            "result_type",
-            "request_read_timeout_seconds",
-            "metadata",
-            "progress_callback",
-        ]
-        assert all(
-            parameter.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
-            for parameter in send_request.parameters.values()
+        assert (
+            list(claimed.parameters)
+            == list(send_request.parameters)
+            == [
+                "self",
+                "request",
+                "result_type",
+                "request_read_timeout_seconds",
+                "metadata",
+                "progress_callback",
+            ]
         )
-        assert [
-            parameter.default for parameter in send_request.parameters.values()
-        ] == [
-            inspect.Parameter.empty,
-            inspect.Parameter.empty,
-            inspect.Parameter.empty,
-            None,
-            None,
-            None,
-        ]
-        assert mt.CallToolRequestParams.model_fields["meta"].alias == "_meta"
+        for signature in (claimed, send_request):
+            assert all(
+                parameter.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+                for parameter in signature.parameters.values()
+            )
+            assert [
+                parameter.default for parameter in signature.parameters.values()
+            ] == [
+                inspect.Parameter.empty,
+                inspect.Parameter.empty,
+                inspect.Parameter.empty,
+                None,
+                None,
+                None,
+            ]
 
 
 class TestKeepingTheTokenOffTheNetwork:
@@ -1431,116 +1545,107 @@ class TestRepeatingOnlyWhatIsSafe:
         assert attempts == 1
 
 
+class _OwnerRefuses(Middleware):
+    """The owner answering one kind of request with a JSON-RPC error of its own.
+
+    Raised in the owner's outermost middleware, where the server sends an
+    `MCPError` on with its code and message intact in both eras, rather than
+    in a tool body, where fastmcp would shape it into a tool result first.
+    """
+
+    def __init__(self, *, code: int, message: str, fails: str) -> None:
+        self._code = code
+        self._message = message
+        self._fails = fails
+
+    def _refuse(self) -> NoReturn:
+        from mcp import MCPError
+
+        raise MCPError(code=self._code, message=self._message)
+
+    async def on_list_tools(self, context: Any, call_next: Any) -> Any:
+        if self._fails == "list":
+            self._refuse()
+        return await call_next(context)
+
+    async def on_call_tool(self, context: Any, call_next: Any) -> Any:
+        if self._fails == "call":
+            self._refuse()
+        return await call_next(context)
+
+
 class _AnswersWithAnError(FastMCPTransport):
     """An owner whose listing or call comes back as a JSON-RPC error.
 
     The code is the whole point. A client cannot tell from the type whether the
     owner said no or whether the session gave up waiting and wrote the error
-    itself, and only the second is a departure.
+    itself, and only the second is a departure. The owner sends these itself
+    here, so what they pin is the rule applied to a pair, not where the pair
+    came from: `TestTheSdksOwnHttpErrors` makes the SDK write its own.
     """
 
     def __init__(
         self, server: FastMCP, *, code: int, message: str, fails: str = "list"
     ) -> None:
         super().__init__(server)
-        self._code = code
-        self._message = message
-        self._fails = fails
-
-    @asynccontextmanager
-    async def connect_session(self, **kwargs: Any) -> AsyncIterator[Any]:
-        async with super().connect_session(**kwargs) as session:
-            yield _FailsOneRequest(session, self._code, self._message, self._fails)
+        server.add_middleware(_OwnerRefuses(code=code, message=message, fails=fails))
 
 
-class _FailsOneRequest:
-    """A session that answers one kind of request with a JSON-RPC error."""
-
-    def __init__(self, session: Any, code: int, message: str, fails: str) -> None:
-        self._session = session
-        self._code = code
-        self._message = message
-        self._fails = fails
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._session, name)
-
-    def _refuse(self):
-        from mcp import MCPError
-
-        return MCPError(code=self._code, message=self._message)
-
-    async def list_tools(self, *args: Any, **kwargs: Any):
-        if self._fails == "list":
-            raise self._refuse()
-        return await self._session.list_tools(*args, **kwargs)
-
-    async def send_request(self, request: Any, *args: Any, **kwargs: Any):
-        if self._fails == "call" and isinstance(request, mt.CallToolRequest):
-            raise self._refuse()
-        return await self._session.send_request(request, *args, **kwargs)
-
-
-class _DiesAsTheCallsSessionCloses(FastMCPTransport):
+class _DiesAsTheCallsSessionCloses(_OnTheRealSession):
     """An owner whose session fails to close, after a call was made on it.
 
     The two halves of the displacement, in the order that does the damage.
     `ProxyTool.run` makes its call inside `async with client`
-    (`fastmcp/server/providers/proxy.py:181`), and `Client._disconnect` awaits
-    the session task under `suppress(asyncio.CancelledError)`
-    (`fastmcp/client/client.py:672-676`), so an ordinary exception from that
-    task leaves the context manager after the call has already decided its
-    outcome, and replaces whatever that was.
+    (`fastmcp/server/providers/proxy.py`), and `Client._disconnect` awaits the
+    session task under `suppress(asyncio.CancelledError)`
+    (`fastmcp/client/client.py`), so an ordinary exception from that task
+    leaves the context manager after the call has already decided its outcome,
+    and replaces whatever that was.
 
-    *refusing* is the code and message the call comes back with, or `None` for a
-    call that succeeds. With a failure in flight it is the tag that gets
-    replaced, and with none it is the result.
+    *refusing* is the code and message the owner answers the call with, or
+    `None` for a call that succeeds. With a failure in flight it is the tag
+    that gets replaced, and with none it is the result.
 
     Only a session that was asked to call dies while closing. Every upstream
     operation opens a client of its own, so a transport that killed every
     session would fail the lookup in front of the call and the call would never
-    be reached.
+    be reached. The call is counted where the SDK takes it, on the real
+    session, and *closing_failures* says whether the failure this exists for
+    was actually raised: a count kept anywhere the call does not pass would
+    leave it silently unraised.
     """
 
     def __init__(
         self, server: FastMCP, *, refusing: tuple[int, str] | None = None
     ) -> None:
         super().__init__(server)
-        self._refusing = refusing
+        if refusing is not None:
+            code, message = refusing
+            server.add_middleware(
+                _OwnerRefuses(code=code, message=message, fails="call")
+            )
+        self.closing_failures = 0
 
     @asynccontextmanager
     async def connect_session(self, **kwargs: Any) -> AsyncIterator[Any]:
+        calls = 0
         async with super().connect_session(**kwargs) as session:
-            calling = _CallsOnThisSession(session, self._refusing)
-            yield calling
-        if calling.calls:
+            send_request = session.send_request
+
+            async def counting(request: Any, *args: Any, **kwargs: Any) -> Any:
+                nonlocal calls
+                if isinstance(request, mt.CallToolRequest):
+                    calls += 1
+                return await send_request(request, *args, **kwargs)
+
+            session.send_request = counting
+            yield session
+        if calls:
+            self.closing_failures += 1
             raise httpx2.ReadError("the owner went away as the session closed")
 
 
-class _CallsOnThisSession:
-    """A session that records the calls it was asked for, and may refuse them."""
-
-    def __init__(self, session: Any, refusing: tuple[int, str] | None) -> None:
-        self._session = session
-        self._refusing = refusing
-        self.calls = 0
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._session, name)
-
-    async def send_request(self, request: Any, *args: Any, **kwargs: Any):
-        from mcp import MCPError
-
-        if not isinstance(request, mt.CallToolRequest):
-            return await self._session.send_request(request, *args, **kwargs)
-        self.calls += 1
-        if self._refusing is None:
-            return await self._session.send_request(request, *args, **kwargs)
-        code, message = self._refusing
-        raise MCPError(code=code, message=message)
-
-
-class _DiscoveryFailsAfterMutation(FastMCPTransport):
+class _DiscoveryFailsAfterMutation(_OnTheRealSession):
     """An owner that answers a call, then cannot answer schema discovery."""
 
     def __init__(self, server: FastMCP, ran: list[str]) -> None:
@@ -1548,84 +1653,79 @@ class _DiscoveryFailsAfterMutation(FastMCPTransport):
         self._ran = ran
         self.discovery_attempts = 0
 
-    @asynccontextmanager
-    async def connect_session(self, **kwargs: Any) -> AsyncIterator[Any]:
-        async with super().connect_session(**kwargs) as session:
-            yield _FailsListingAfterMutation(session, self)
+    def adjust(self, session: Any) -> None:
+        # Only the session that made the call loses its owner. The frontend's
+        # own client lists again after a call to read the output schema, on a
+        # session of its own, and that one is not what this is about.
+        send_request = session.send_request
+        list_tools = session.list_tools
+        called = False
+
+        async def noting_the_call(request: Any, *args: Any, **kwargs: Any) -> Any:
+            nonlocal called
+            if isinstance(request, mt.CallToolRequest):
+                called = True
+            return await send_request(request, *args, **kwargs)
+
+        async def gone_once_it_ran(*args: Any, **kwargs: Any) -> Any:
+            if called and self._ran:
+                self.discovery_attempts += 1
+                raise httpx2.ConnectError("the owner left after answering the call")
+            return await list_tools(*args, **kwargs)
+
+        session.send_request = noting_the_call
+        session.list_tools = gone_once_it_ran
 
 
-class _FailsListingAfterMutation:
-    def __init__(self, session: Any, transport: _DiscoveryFailsAfterMutation) -> None:
-        self._session = session
-        self._list_tools = session.list_tools
-        self._transport = transport
-        self._called = False
+class _RecordsCallRequest(_OnTheRealSession):
+    """Record the tool request at two layers of the session that sends it.
 
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._session, name)
-
-    async def call_tool(self, *args: Any, **kwargs: Any):
-        self._called = True
-        self._session.list_tools = self.list_tools
-        return await self._session.call_tool(*args, **kwargs)
-
-    async def send_request(self, request: Any, *args: Any, **kwargs: Any):
-        if isinstance(request, mt.CallToolRequest):
-            self._called = True
-            self._session.list_tools = self.list_tools
-        return await self._session.send_request(request, *args, **kwargs)
-
-    async def list_tools(self, *args: Any, **kwargs: Any):
-        if self._called and self._transport._ran:
-            self._transport.discovery_attempts += 1
-            raise httpx2.ConnectError("the owner left after answering the call")
-        return await self._list_tools(*args, **kwargs)
-
-
-class _RecordsCallRequest(FastMCPTransport):
-    """Record the protocol request sent by the owner-tagging client."""
+    Where it enters the SDK (`send_request`, before the SDK stamps anything on
+    it) for what the client asked for, and where the session hands it to its
+    dispatcher for the deadline that request actually waits on, which is the
+    session's own when the call names none.
+    """
 
     def __init__(self, server: FastMCP) -> None:
         super().__init__(server)
         self.request: mt.CallToolRequest | None = None
         self.timeout: float | None = None
         self.progress_callback: Any = None
+        self.deadline: object = "never reached"
 
-    @asynccontextmanager
-    async def connect_session(self, **kwargs: Any) -> AsyncIterator[Any]:
-        async with super().connect_session(**kwargs) as session:
-            yield _RecordsCallSend(session, self)
+    def adjust(self, session: Any) -> None:
+        send_request = session.send_request
+        dispatcher = session._dispatcher
+        send_raw_request = dispatcher.send_raw_request
 
+        async def entering(
+            request: Any,
+            result_type: Any,
+            request_read_timeout_seconds: float | None = None,
+            metadata: Any = None,
+            progress_callback: Any = None,
+        ) -> Any:
+            if isinstance(request, mt.CallToolRequest):
+                self.request = request
+                self.timeout = request_read_timeout_seconds
+                self.progress_callback = progress_callback
+            return await send_request(
+                request,
+                result_type,
+                request_read_timeout_seconds,
+                metadata,
+                progress_callback,
+            )
 
-class _RecordsCallSend:
-    def __init__(self, session: Any, transport: _RecordsCallRequest) -> None:
-        self._session = session
-        self._transport = transport
+        async def dispatched(
+            method: str, params: Any, opts: Any = None, **kwargs: Any
+        ) -> Any:
+            if method == "tools/call":
+                self.deadline = (opts or {}).get("timeout")
+            return await send_raw_request(method, params, opts, **kwargs)
 
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._session, name)
-
-    async def send_request(
-        self,
-        request: Any,
-        result_type: Any,
-        request_read_timeout_seconds: float | None = None,
-        metadata: Any = None,
-        progress_callback: Any = None,
-    ) -> Any:
-        if result_type is mt.CallToolResult:
-            self._transport.request = request
-            self._transport.timeout = request_read_timeout_seconds
-            self._transport.progress_callback = progress_callback
-            if progress_callback is not None:
-                await progress_callback(7.0, 10.0, "forwarded")
-        return await self._session.send_request(
-            request,
-            result_type,
-            request_read_timeout_seconds=request_read_timeout_seconds,
-            metadata=metadata,
-            progress_callback=progress_callback,
-        )
+        session.send_request = entering
+        dispatcher.send_raw_request = dispatched
 
 
 class TestRecoveringThroughTheWholeProxy:
@@ -1734,17 +1834,24 @@ class TestRecoveringThroughTheWholeProxy:
         assert result.data == "get_person_profile"
         assert elections() == 1
 
+    @_HOP_ERAS
     async def test_an_answer_is_not_replaced_by_schema_discovery(
-        self, monkeypatch: pytest.MonkeyPatch, _upgraded
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        _upgraded,
+        legacy_only: bool,
+        protocol: str,
     ):
         """A completed mutation must not be rediscovered and sent again."""
         backend, elected, _replacement, elections = _upgraded
         ran: list[str] = []
         before = _DiscoveryFailsAfterMutation(self._mutating_owner(ran), ran)
         after = self._mutating_owner(ran)
+        sessions = _sessions_opened(monkeypatch)
         _reach_owners_in_process(
             monkeypatch,
             lambda url: before if url == elected.descriptor.url else after,
+            legacy_only=legacy_only,
         )
 
         async with Client(self._proxy(backend)) as client:
@@ -1757,6 +1864,7 @@ class TestRecoveringThroughTheWholeProxy:
         )
         assert elections() == 0, "schema discovery stood a replacement owner up"
         assert before.discovery_attempts == 0
+        assert {session.protocol_version for session in sessions} == {protocol}
 
     async def test_an_owner_that_dies_after_the_handshake_is_still_recovered(
         self, monkeypatch: pytest.MonkeyPatch, _upgraded
@@ -1875,8 +1983,13 @@ class TestRecoveringThroughTheWholeProxy:
         assert listed == {"the_replacements_tool"}
         assert elections() == 1
 
+    @_HOP_ERAS
     async def test_a_mutating_call_that_timed_out_is_not_repeated(
-        self, monkeypatch: pytest.MonkeyPatch, _upgraded
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        _upgraded,
+        legacy_only: bool,
+        protocol: str,
     ):
         """A timeout is a departure and still no licence to run the call again.
 
@@ -1902,9 +2015,11 @@ class TestRecoveringThroughTheWholeProxy:
             fails="call",
         )
         after = self._mutating_owner(ran)
+        sessions = _sessions_opened(monkeypatch)
         _reach_owners_in_process(
             monkeypatch,
             lambda url: gone if url == elected.descriptor.url else after,
+            legacy_only=legacy_only,
         )
 
         async with Client(self._proxy(backend)) as client:
@@ -1931,9 +2046,15 @@ class TestRecoveringThroughTheWholeProxy:
         assert (
             backend.attachment.descriptor.instance_id != elected.descriptor.instance_id
         )
+        assert {session.protocol_version for session in sessions} == {protocol}
 
+    @_HOP_ERAS
     async def test_a_tag_the_closing_session_replaced_is_still_found(
-        self, monkeypatch: pytest.MonkeyPatch, _upgraded
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        _upgraded,
+        legacy_only: bool,
+        protocol: str,
     ):
         """The owner-loss failure a departing owner's own cleanup buries.
 
@@ -1958,9 +2079,11 @@ class TestRecoveringThroughTheWholeProxy:
             ),
         )
         after = self._mutating_owner(ran)
+        sessions = _sessions_opened(monkeypatch)
         _reach_owners_in_process(
             monkeypatch,
             lambda url: gone if url == elected.descriptor.url else after,
+            legacy_only=legacy_only,
         )
 
         async with Client(self._proxy(backend)) as client:
@@ -1976,9 +2099,16 @@ class TestRecoveringThroughTheWholeProxy:
         assert result.structured_content["retry_safe"] is False
         assert ran == [], "a call that may already have run was sent again"
         assert elections() == 1
+        assert gone.closing_failures == 1, "the session closed without failing"
+        assert {session.protocol_version for session in sessions} == {protocol}
 
+    @_HOP_ERAS
     async def test_an_answer_survives_a_session_that_fails_to_close(
-        self, monkeypatch: pytest.MonkeyPatch, _upgraded
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        _upgraded,
+        legacy_only: bool,
+        protocol: str,
     ):
         """The same displacement with nothing in flight: the result is replaced.
 
@@ -1992,7 +2122,10 @@ class TestRecoveringThroughTheWholeProxy:
         backend, _elected, _replacement, elections = _upgraded
         ran: list[str] = []
         dying = _DiesAsTheCallsSessionCloses(self._mutating_owner(ran))
-        _reach_owners_in_process(monkeypatch, lambda _url: dying)
+        sessions = _sessions_opened(monkeypatch)
+        _reach_owners_in_process(
+            monkeypatch, lambda _url: dying, legacy_only=legacy_only
+        )
 
         async with Client(self._proxy(backend)) as client:
             result = await client.call_tool(
@@ -2005,6 +2138,8 @@ class TestRecoveringThroughTheWholeProxy:
         assert result.data == "sent"
         assert ran == ["sent"], "the owner did not run the call exactly once"
         assert elections() == 0, "a closing failure stood a replacement up"
+        assert dying.closing_failures == 1, "the session closed without failing"
+        assert {session.protocol_version for session in sessions} == {protocol}
 
     async def test_a_caller_that_gives_up_at_the_close_stays_cancelled(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -3108,34 +3243,43 @@ class TestTheSendBoundary:
     """
 
     async def test_a_request_the_monitor_never_starts_is_closed(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
         # The installed monitor refuses before starting its coroutine once the
         # session has ended, and closes what it was given: the wrapper. The
-        # request the wrapper holds must be closed too, not left unawaited.
-        import inspect
+        # request the wrapper holds must be closed too, not left unawaited, and
+        # a request that never started was never sent.
+        from linkedin_mcp_server.daemon_proxy import OwnerUnreachableError
 
-        from fastmcp.server.providers.proxy import ProxyClient
+        ran: list[str] = []
+        owner = FastMCP("owner")
 
-        from linkedin_mcp_server.daemon_proxy import _tells_which_owner_failed
+        @owner.tool(name="send_connection_request")
+        async def send() -> str:
+            ran.append("sent")
+            return "sent"
 
-        async def refuse_unstarted(_self, coro, **_kwargs):
+        _reach_owners_in_process(monkeypatch, lambda _url: owner)
+        client = _backend(_attachment(tmp_path), tmp_path).open_client(timeout=5.0)
+
+        async def refuse_unstarted(_self: Any, coro: Any) -> NoReturn:
             coro.close()
             raise RuntimeError("the session has already ended")
 
-        monkeypatch.setattr(
-            ProxyClient, "_await_with_session_monitoring", refuse_unstarted
-        )
-        client: Any = object.__new__(_tells_which_owner_failed())
-
-        async def request() -> str:
-            return "sent"
-
-        pending = request()
-        with pytest.raises(RuntimeError, match="already ended"):
-            await client._await_with_session_monitoring(pending)
+        async with client:
+            monkeypatch.setattr(
+                ProxyClient, "_await_with_session_monitoring", refuse_unstarted
+            )
+            pending = client.session.call_tool("send_connection_request", {})
+            with pytest.raises(OwnerUnreachableError) as refused:
+                await client._await_with_session_monitoring(pending)
+            started = getattr(client.session, "tool_request_started", None)
 
         assert inspect.getcoroutinestate(pending) == inspect.CORO_CLOSED
+        assert started is False
+        assert refused.value.nothing_was_sent is True
+        assert isinstance(refused.value.__cause__, RuntimeError)
+        assert ran == []
 
     @pytest.mark.parametrize("buried", [True, False], ids=["buried", "control"])
     async def test_a_burial_queued_as_the_monitor_takes_the_send_stops_it(
@@ -3198,6 +3342,45 @@ class TestTheSendBoundary:
         assert refused.value.instance_id == old.descriptor.instance_id
         assert refused.value.classification is OwnerFailure.RETIRING
 
+    async def test_a_call_already_sent_is_not_refused_on_its_own_client(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Once the bound call's tool request is out, its owner is fixed, and a
+        # later request on the same client goes to that owner even after it was
+        # written off: refusing it would abandon a call the owner may still be
+        # running for this frontend.
+        from linkedin_mcp_server.daemon_proxy import (
+            OwnerFailure,
+            _call_being_made,
+            _CallBinding,
+        )
+
+        owner = FastMCP("owner")
+
+        @owner.tool(name="send_connection_request")
+        async def send() -> str:
+            return "sent"
+
+        _reach_owners_in_process(monkeypatch, lambda _url: owner)
+        attachment = _attachment(tmp_path)
+        backend = _backend(attachment, tmp_path)
+        binding = _CallBinding("a-call", attachment)
+        marked = _call_being_made.set(binding)
+        try:
+            client = backend.open_client(timeout=5.0)
+        finally:
+            _call_being_made.reset(marked)
+
+        async with client:
+            await client.call_tool_mcp("send_connection_request", {})
+            backend.note_failure(
+                attachment.descriptor.instance_id, OwnerFailure.RETIRING
+            )
+            listed = await client.list_tools()
+
+        assert binding.dispatch.sent is True
+        assert [tool.name for tool in listed] == ["send_connection_request"]
+
     async def test_a_listing_to_an_owner_written_off_during_setup_is_not_sent(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
@@ -3248,6 +3431,341 @@ class TestTheSendBoundary:
         assert refused.value.nothing_was_sent is True
         assert refused.value.instance_id == attachment.descriptor.instance_id
         assert refused.value.classification is OwnerFailure.RETIRING
+
+
+def _causes(failure: BaseException) -> list[type[BaseException]]:
+    """The type of every exception in *failure*'s ``__cause__`` chain."""
+    chain: list[type[BaseException]] = []
+    current: BaseException | None = failure
+    while current is not None:
+        chain.append(type(current))
+        current = current.__cause__
+    return chain
+
+
+class _HandsOverAWrapper(FastMCPTransport):
+    """A transport that gives the client something other than the session it built.
+
+    What a transport that ignored the requested session class would amount
+    to, and what a wrapping test double used to be. Setting the binding on
+    this object would succeed and claim nothing.
+    """
+
+    def __init__(self, server: FastMCP) -> None:
+        super().__init__(server)
+        self.closed = False
+
+    @asynccontextmanager
+    async def connect_session(self, **kwargs: Any) -> AsyncIterator[Any]:
+        try:
+            async with super().connect_session(**kwargs) as session:
+                yield _Delegating(session)
+        finally:
+            self.closed = True
+
+
+class _Delegating:
+    def __init__(self, session: Any) -> None:
+        self._session = session
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._session, name)
+
+
+class TestTheSessionClaimsTheToolRequest:
+    """The tool request is claimed where the SDK takes it, in either era.
+
+    On the 2026-07-28 era the provider calls the session itself and never
+    reaches the client's `call_tool_mcp`, so the claim has to live on the
+    session, and only the tool request may make it: a listing or the
+    negotiation changes nothing and stays repeatable.
+    """
+
+    @staticmethod
+    def _bound_client(backend: DaemonProxyBackend, attachment: Attachment) -> Any:
+        """A client opened the way a forwarded call opens one, and its binding."""
+        from linkedin_mcp_server.daemon_proxy import _call_being_made, _CallBinding
+
+        binding = _CallBinding("a-call", attachment)
+        marked = _call_being_made.set(binding)
+        try:
+            return backend.open_client(timeout=5.0), binding
+        finally:
+            _call_being_made.reset(marked)
+
+    @pytest.mark.parametrize("over", ["memory", "http"])
+    @_HOP_ERAS
+    async def test_the_client_talks_through_the_session_that_claims(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        over: str,
+        legacy_only: bool,
+        protocol: str,
+    ):
+        """The session the client ends up with, and what it has claimed when.
+
+        Read where the owner takes the call, before it acts: in the tool body
+        of an in-process owner, and as the request arrives at one over HTTP.
+        """
+        from linkedin_mcp_server.daemon_proxy import ClaimsTheToolRequest
+
+        attachment = _attachment(tmp_path)
+        backend = _backend(attachment, tmp_path)
+        seen_by_the_owner: list[tuple[bool, bool]] = []
+
+        def witness() -> None:
+            seen_by_the_owner.append(
+                (binding.dispatch.sent, client.session.tool_request_started)
+            )
+
+        if over == "memory":
+            owner = FastMCP("owner")
+
+            @owner.tool(name="send_connection_request")
+            async def send() -> str:
+                witness()
+                return "sent"
+
+            _reach_owners_in_process(
+                monkeypatch, lambda _url: owner, legacy_only=legacy_only
+            )
+        else:
+            http_owner = _OwnerOverHttp(
+                era="handshake" if legacy_only else "2026-07-28"
+            )
+            http_owner.on_call = witness
+            _serve_over_http(monkeypatch, lambda _address: http_owner)
+        client, binding = self._bound_client(backend, attachment)
+
+        async with client:
+            session = client.session
+            assert type(session) is ClaimsTheToolRequest
+            assert session.binding is binding
+            # The option layer the proxy set is kept, not rebuilt around the
+            # session class: forwarding is what carries the caller's headers.
+            assert client._transport_options.forward_incoming_headers is True
+            assert client.protocol_version == protocol
+            assert not binding.dispatch.sent, "the negotiation claimed the call"
+            assert not session.tool_request_started
+            await client.list_tools()
+            assert not binding.dispatch.sent, "a listing claimed the call"
+            assert not session.tool_request_started
+            result = await client.call_tool_mcp("send_connection_request", {})
+
+        assert result.is_error is False
+        assert seen_by_the_owner == [(True, True)]
+
+    @_HOP_ERAS
+    async def test_the_provider_claims_the_call_on_either_path(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        legacy_only: bool,
+        protocol: str,
+    ):
+        """Through the whole proxy, where the era decides the provider's path.
+
+        On the handshake era `ProxyTool.run` goes through `call_tool_mcp`; on
+        the 2026-07-28 era it calls the session directly. Both have to arrive
+        claimed, and every listing around them unclaimed.
+        """
+        from linkedin_mcp_server.server import create_mcp_server
+        from linkedin_mcp_server.server_role import ServerRole
+
+        sessions = _sessions_opened(monkeypatch)
+        at_the_effect: list[list[tuple[bool, bool | None]]] = []
+        owner = FastMCP("owner")
+
+        @owner.tool(name="send_connection_request")
+        async def send(message: str) -> str:
+            at_the_effect.append(
+                [
+                    (
+                        session.tool_request_started,
+                        None
+                        if session.binding is None
+                        else session.binding.dispatch.sent,
+                    )
+                    for session in sessions
+                ]
+            )
+            return message
+
+        _reach_owners_in_process(
+            monkeypatch, lambda _url: owner, legacy_only=legacy_only
+        )
+        backend = _backend(_attachment(tmp_path), tmp_path)
+        proxy = create_mcp_server(
+            role=ServerRole.PROXY, proxy_backend=backend, tool_timeout=5.0
+        )
+
+        async with Client(proxy) as client:
+            result = await client.call_tool(
+                "send_connection_request", {"message": "hi"}
+            )
+
+        assert result.data == "hi"
+        # One session took the tool request, and it was claimed for the bound
+        # call before the owner acted. Every other one only listed, the
+        # provider's own lookup inside the same call among them.
+        (seen,) = at_the_effect
+        assert [started for started, _sent in seen].count(True) == 1, seen
+        assert (True, True) in seen, seen
+        called = [s for s in sessions if s.tool_request_started]
+        assert [s.protocol_version for s in called] == [protocol]
+        assert len(sessions) > len(called), "no listing went through a session"
+
+    async def test_a_session_the_client_did_not_ask_for_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Refused at entry, and the connection it came on is closed.
+
+        A client whose transport ignored the session class would send its
+        tool request unclaimed. It fails before the caller can use it, and a
+        failed entry gets no exit of its own, so it closes what it opened.
+        """
+        ran: list[str] = []
+        owner = FastMCP("owner")
+
+        @owner.tool(name="send_connection_request")
+        async def send() -> str:
+            ran.append("sent")
+            return "sent"
+
+        transport = _HandsOverAWrapper(owner)
+        _reach_owners_in_process(monkeypatch, lambda _url: transport)
+        attachment = _attachment(tmp_path)
+        client, _binding = self._bound_client(
+            _backend(attachment, tmp_path), attachment
+        )
+
+        with pytest.raises(TypeError, match="claims its tool requests"):
+            async with client:
+                await client.call_tool_mcp("send_connection_request", {})
+
+        assert transport.closed, "the refused connection was left open"
+        assert ran == []
+
+    async def test_a_session_that_died_of_a_failed_connect_is_no_proof(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A connect error the session died of says nothing about the request.
+
+        The owner is acting on the call when the session task ends in a
+        connect error, and the monitor reports that error as the cause. It is
+        about some later exchange on the session, not the tool request, and
+        read as proof it would let a call that ran be sent again.
+
+        The session task is stood in for at the one place the monitor reads
+        it, because a real transport fails the outstanding request first and
+        the monitor then never sees the connect error at all.
+        """
+        from linkedin_mcp_server.daemon_proxy import OwnerUnreachableError
+
+        ran: list[str] = []
+        died: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        owner = FastMCP("owner")
+
+        @owner.tool(name="send_connection_request")
+        async def send() -> str:
+            ran.append("sent")
+            died.set_exception(httpx2.ConnectError("could not reach the owner again"))
+            await asyncio.Event().wait()
+            return "never"
+
+        _reach_owners_in_process(monkeypatch, lambda _url: owner)
+        attachment = _attachment(tmp_path)
+        client, binding = self._bound_client(_backend(attachment, tmp_path), attachment)
+
+        async with client:
+            running = client._session_state.session_task
+            client._session_state.session_task = died
+            try:
+                with pytest.raises(OwnerUnreachableError) as failed:
+                    await client.call_tool_mcp("send_connection_request", {})
+            finally:
+                client._session_state.session_task = running
+
+        assert ran == ["sent"]
+        assert binding.dispatch.sent is True
+        assert failed.value.nothing_was_sent is False
+        # The fault this pins was really delivered: a connect error, in the
+        # chain the tag was made from.
+        assert httpx2.ConnectError in _causes(failed.value), _causes(failed.value)
+
+    async def test_what_a_session_sent_outlives_the_session(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A request after the session ended still knows the call went out.
+
+        The call ran and answered, and then the session ended. The client
+        clears its session state as it does, and a monitored request made
+        afterwards is refused before it starts. Nothing being left to read at
+        that point is not evidence that nothing was sent: this client did send
+        a tool request, and the refusal has to say it may have arrived.
+        """
+        from linkedin_mcp_server.daemon_proxy import OwnerUnreachableError
+
+        ran: list[str] = []
+        owner = FastMCP("owner")
+
+        @owner.tool(name="send_connection_request")
+        async def send() -> str:
+            ran.append("sent")
+            return "sent"
+
+        _reach_owners_in_process(monkeypatch, lambda _url: owner)
+        client = _backend(_attachment(tmp_path), tmp_path).open_client(timeout=5.0)
+
+        async def later() -> str:
+            return "never reached"
+
+        async with client:
+            await client.call_tool_mcp("send_connection_request", {})
+            running = client._session_state.session_task
+            assert running is not None
+            client._session_state.stop_event.set()
+            await asyncio.wait_for(asyncio.wait([running]), timeout=5)
+            assert client._session_state.session is None
+            with pytest.raises(OwnerUnreachableError) as refused:
+                await client._await_with_session_monitoring(later())
+
+        assert ran == ["sent"]
+        assert refused.value.nothing_was_sent is False
+
+    async def test_a_caller_that_gives_up_mid_call_stays_cancelled(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Giving up while the owner works is a cancellation, not an owner loss.
+
+        Converted into a tagged failure it would be recovered from, and a
+        caller that had walked away would be answered or, worse, repeated for.
+        """
+        started = asyncio.Event()
+        owner = FastMCP("owner")
+
+        @owner.tool(name="send_connection_request")
+        async def send() -> str:
+            started.set()
+            await asyncio.Event().wait()
+            return "never"
+
+        _reach_owners_in_process(monkeypatch, lambda _url: owner)
+        attachment = _attachment(tmp_path)
+        client, binding = self._bound_client(_backend(attachment, tmp_path), attachment)
+
+        async def call() -> Any:
+            async with client:
+                return await client.call_tool_mcp("send_connection_request", {})
+
+        calling = asyncio.create_task(call())
+        await asyncio.wait_for(started.wait(), timeout=5)
+        calling.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await calling
+
+        assert binding.dispatch.sent is True
 
 
 #: How each SDK-written stand-in is provoked: what the owner's side of the HTTP
@@ -3304,6 +3822,15 @@ class _OwnerOverHttp:
     *effects* counts the tool calls this owner ran. *session* decides whether
     the initialize hands out a session id, which is what decides whether the
     SDK reads a 404 as a lost session or as an unknown method.
+
+    *era* is what the owner speaks. ``"2026-07-28"`` answers ``server/discover``
+    with a result that passes the strict schema of that version, and stamps
+    every later result the way that version requires; a result missing those
+    fields is not evidence of the era, and a client quietly takes the
+    handshake instead (``fastmcp.client.client._conformant_discover_only``).
+    ``"handshake"`` answers ``server/discover`` as an unknown method, which is
+    what an owner of that era sends. *methods* is every JSON-RPC method that
+    arrived, in order.
     """
 
     def __init__(
@@ -3311,11 +3838,16 @@ class _OwnerOverHttp:
         *,
         fail: dict[str, Callable[[dict[str, Any]], Any]] | None = None,
         session: bool = True,
+        era: str = "2026-07-28",
     ) -> None:
         self.fail = dict(fail or {})
         self.session = session
+        self.era = era
         self.effects = 0
         self.requests: list[httpx2.Request] = []
+        self.methods: list[str] = []
+        #: Called as a tool request arrives, before it runs.
+        self.on_call: Callable[[], None] | None = None
 
     async def __call__(self, request: httpx2.Request) -> httpx2.Response:
         import json
@@ -3330,6 +3862,9 @@ class _OwnerOverHttp:
         body = json.loads(request.content)
         if "id" not in body:
             return httpx2.Response(202)
+        self.methods.append(body["method"])
+        if body["method"] == "tools/call" and self.on_call is not None:
+            self.on_call()
         failing = self.fail.get(body["method"])
         if failing is not None:
             answer = failing(body)
@@ -3339,9 +3874,19 @@ class _OwnerOverHttp:
     def answer(self, body: dict[str, Any]) -> httpx2.Response:
         """What a healthy owner sends back for *body*."""
         method = body["method"]
+        modern = self.era == "2026-07-28"
         headers: dict[str, str] = {}
-        if method == "initialize":
+        if method == "server/discover" and modern:
             result: dict[str, Any] = {
+                "supportedVersions": ["2026-07-28"],
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "owner", "version": "1"},
+                "resultType": "complete",
+                "ttlMs": 0,
+                "cacheScope": "private",
+            }
+        elif method == "initialize":
+            result = {
                 "protocolVersion": body["params"]["protocolVersion"],
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": "owner", "version": "1"},
@@ -3354,9 +3899,13 @@ class _OwnerOverHttp:
                 "inputSchema": {"type": "object"},
             }
             result = {"tools": [tool]}
+            if modern:
+                result.update(resultType="complete", ttlMs=0, cacheScope="private")
         elif method == "tools/call":
             self.effects += 1
             result = {"content": [{"type": "text", "text": "sent"}]}
+            if modern:
+                result["resultType"] = "complete"
         else:
             error = {"code": mt.METHOD_NOT_FOUND, "message": "Method not found"}
             return httpx2.Response(
@@ -3406,6 +3955,16 @@ def _address(attachment: Attachment) -> str:
     return f"{attachment.descriptor.host}:{attachment.descriptor.port}"
 
 
+#: Both eras an owner at the far end of HTTP may speak, and the protocol the
+#: hop must land on with each. Written out rather than read back, so an owner
+#: stand-in that silently fell back could not pass as the modern case.
+_OWNER_ERAS = pytest.mark.parametrize(
+    ("era", "protocol"),
+    [("2026-07-28", "2026-07-28"), ("handshake", "2025-11-25")],
+    ids=["2026-07-28 owner", "handshake owner"],
+)
+
+
 class TestTheSdksOwnHttpErrors:
     """SDK v2 answers a failed HTTP exchange with an error it writes itself.
 
@@ -3416,8 +3975,10 @@ class TestTheSdksOwnHttpErrors:
     written there: a hand-made ``MCPError`` would pin the rule and not the
     provenance it is about.
 
-    Each phase separately. Entry and listing may always be repeated and say
-    so; once the tool request was claimed nothing here proves it did not
+    Each phase separately, against an owner of each era. Entry fails only when
+    every way in does: on this client that is the discovery probe and the
+    handshake it falls back to. Entry and listing may always be repeated and
+    say so; once the tool request was claimed nothing here proves it did not
     arrive, so the call says it may have.
     """
 
@@ -3428,20 +3989,30 @@ class TestTheSdksOwnHttpErrors:
         phase: str,
         respond: Callable[[dict[str, Any]], Any],
         *,
+        era: str,
         session: bool = True,
-    ) -> tuple[BaseException, _OwnerOverHttp]:
-        method = {"entry": "initialize", "list": "tools/list", "call": "tools/call"}
-        owner = _OwnerOverHttp(fail={method[phase]: respond}, session=session)
+    ) -> tuple[BaseException, _OwnerOverHttp, str | None]:
+        methods = {
+            "entry": ("server/discover", "initialize"),
+            "list": ("tools/list",),
+            "call": ("tools/call",),
+        }
+        owner = _OwnerOverHttp(
+            fail=dict.fromkeys(methods[phase], respond), session=session, era=era
+        )
         _serve_over_http(monkeypatch, lambda _address: owner)
         client = _backend(_attachment(tmp_path), tmp_path).open_client(timeout=2.0)
+        protocol: str | None = None
         with pytest.raises(Exception) as failed:
             async with client:
+                protocol = client.protocol_version
                 if phase == "list":
                     await client.list_tools_mcp()
                 elif phase == "call":
                     await client.call_tool_mcp("send_connection_request", {})
-        return failed.value, owner
+        return failed.value, owner, protocol
 
+    @_OWNER_ERAS
     @pytest.mark.parametrize("phase", ["entry", "list", "call"])
     @pytest.mark.parametrize("stand_in", sorted(_STAND_INS))
     async def test_a_stand_in_is_not_taken_for_the_owners_answer(
@@ -3450,14 +4021,16 @@ class TestTheSdksOwnHttpErrors:
         monkeypatch: pytest.MonkeyPatch,
         phase: str,
         stand_in: str,
+        era: str,
+        protocol: str,
     ):
         from linkedin_mcp_server.daemon_proxy import (
             OwnerFailure,
             OwnerUnreachableError,
         )
 
-        failure, owner = await self._fail_at(
-            tmp_path, monkeypatch, phase, _STAND_INS[stand_in]
+        failure, owner, negotiated = await self._fail_at(
+            tmp_path, monkeypatch, phase, _STAND_INS[stand_in], era=era
         )
 
         assert isinstance(failure, OwnerUnreachableError), (
@@ -3468,18 +4041,24 @@ class TestTheSdksOwnHttpErrors:
         # the call had claimed a request, and nothing says it did not arrive.
         assert failure.nothing_was_sent is (phase != "call")
         assert owner.effects == 0
+        assert negotiated == (None if phase == "entry" else protocol)
 
     @pytest.mark.parametrize("phase", ["list", "call"])
     @pytest.mark.parametrize(
-        ("session", "written"),
-        [(True, "Session terminated"), (False, "Not Found")],
-        ids=["with a session", "before a session"],
+        ("era", "session", "written"),
+        [
+            ("handshake", True, "Session terminated"),
+            ("handshake", False, "Not Found"),
+            ("2026-07-28", False, "Not Found"),
+        ],
+        ids=["with a session", "before a session", "the 2026-07-28 era"],
     )
     async def test_a_404_is_a_stand_in_with_a_session_and_without(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         phase: str,
+        era: str,
         session: bool,
         written: str,
     ):
@@ -3487,20 +4066,27 @@ class TestTheSdksOwnHttpErrors:
 
         With a session the SDK writes ``INVALID_REQUEST`` "Session terminated";
         without one, ``METHOD_NOT_FOUND`` "Not Found", whose code is also how a
-        server says it has no listing of a kind.
+        server says it has no listing of a kind. The 2026-07-28 era has no
+        session at all, so only the second can happen there.
         """
         from linkedin_mcp_server.daemon_proxy import OwnerUnreachableError
 
-        failure, _owner = await self._fail_at(
-            tmp_path, monkeypatch, phase, _STAND_INS["404"], session=session
+        failure, _owner, _protocol = await self._fail_at(
+            tmp_path, monkeypatch, phase, _STAND_INS["404"], era=era, session=session
         )
 
         assert isinstance(failure, OwnerUnreachableError), failure
         assert str(failure.__cause__) == written
 
+    @_OWNER_ERAS
     @pytest.mark.parametrize("phase", ["entry", "list", "call"])
     async def test_a_real_refusal_in_an_error_status_is_the_owners_answer(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        phase: str,
+        era: str,
+        protocol: str,
     ):
         """A JSON-RPC error body survives a non-2xx status, and is an answer.
 
@@ -3509,8 +4095,8 @@ class TestTheSdksOwnHttpErrors:
         """
         from mcp import MCPError
 
-        failure, owner = await self._fail_at(
-            tmp_path, monkeypatch, phase, _a_genuine_refusal
+        failure, owner, _protocol = await self._fail_at(
+            tmp_path, monkeypatch, phase, _a_genuine_refusal, era=era
         )
 
         assert isinstance(failure, MCPError), (
@@ -3520,8 +4106,9 @@ class TestTheSdksOwnHttpErrors:
         assert failure.message == "Some other refusal"
         assert owner.effects == 0
 
+    @_OWNER_ERAS
     async def test_a_call_that_outlived_the_deadline_is_not_the_owners_answer(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, era: str, protocol: str
     ):
         """The session's own deadline: ``REQUEST_TIMEOUT``, not HTTP 408."""
         from linkedin_mcp_server.daemon_proxy import OwnerUnreachableError
@@ -3530,16 +4117,221 @@ class TestTheSdksOwnHttpErrors:
             await asyncio.sleep(30)
             raise AssertionError("the call was not given up on")
 
-        owner = _OwnerOverHttp(fail={"tools/call": never})
+        owner = _OwnerOverHttp(fail={"tools/call": never}, era=era)
         _serve_over_http(monkeypatch, lambda _address: owner)
         client = _backend(_attachment(tmp_path), tmp_path).open_client(timeout=0.3)
+        negotiated: str | None = None
 
         with pytest.raises(OwnerUnreachableError) as failed:
             async with client:
+                negotiated = client.protocol_version
                 await client.call_tool_mcp("send_connection_request", {})
 
         assert getattr(failed.value.__cause__, "code", None) == mt.REQUEST_TIMEOUT
         assert failed.value.nothing_was_sent is False
+        assert negotiated == protocol
+
+    @_OWNER_ERAS
+    @pytest.mark.parametrize("stand_in", ["500", "sse ended"])
+    async def test_an_unbound_call_that_ran_is_not_reported_unsent(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        stand_in: str,
+        era: str,
+        protocol: str,
+    ):
+        """A client with no call bound to it still knows what it sent.
+
+        The binding belongs to a call the heartbeat middleware is watching, and
+        a client can be opened without one. Its absence says nobody else is
+        keeping count, never that no tool request went out: the owner here ran
+        it before its answer was lost.
+        """
+        from linkedin_mcp_server.daemon_proxy import OwnerUnreachableError
+
+        owner = _OwnerOverHttp(era=era)
+        owner.fail["tools/call"] = owner.after_running(_STAND_INS[stand_in])
+        _serve_over_http(monkeypatch, lambda _address: owner)
+        client = _backend(_attachment(tmp_path), tmp_path).open_client(timeout=2.0)
+        negotiated: str | None = None
+
+        with pytest.raises(OwnerUnreachableError) as failed:
+            async with client:
+                negotiated = client.protocol_version
+                await client.call_tool_mcp("send_connection_request", {})
+
+        assert owner.effects == 1
+        assert failed.value.nothing_was_sent is False
+        assert negotiated == protocol
+
+
+class TestHowTheHopIsNegotiated:
+    """Which era the owner hop lands on, and what it sends to get there.
+
+    The client probes ``server/discover`` and takes the 2026-07-28 era from an
+    owner that answers it properly, and the handshake from one that does not.
+    Only a modern-only owner with no version in common is a refusal.
+    """
+
+    @staticmethod
+    async def _call_through(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, owner: _OwnerOverHttp
+    ) -> tuple[str | None, mt.CallToolResult]:
+        _serve_over_http(monkeypatch, lambda _address: owner)
+        client = _backend(_attachment(tmp_path), tmp_path).open_client(timeout=2.0)
+        async with client:
+            protocol = client.protocol_version
+            result = await client.call_tool_mcp("send_connection_request", {})
+        return protocol, result
+
+    async def test_a_modern_owner_is_spoken_to_in_its_era(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        owner = _OwnerOverHttp()
+
+        protocol, result = await self._call_through(tmp_path, monkeypatch, owner)
+
+        assert protocol == "2026-07-28"
+        assert result.is_error is False
+        assert owner.methods == ["server/discover", "tools/call"]
+        assert owner.effects == 1
+
+    async def test_a_discovery_short_of_the_strict_schema_is_not_the_modern_era(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Why the stand-in owner stamps what it does.
+
+        A discovery result missing the fields the 2026-07-28 schema requires
+        of it still parses, and the client falls back to the handshake rather
+        than adopt an era every later answer would fail. An owner stand-in
+        written that way would test the handshake while claiming the other.
+        """
+        owner = _OwnerOverHttp()
+
+        def lax(body: dict[str, Any]) -> httpx2.Response:
+            result = {
+                key: value
+                for key, value in json.loads(owner.answer(body).content)[
+                    "result"
+                ].items()
+                if key not in {"resultType", "ttlMs", "cacheScope"}
+            }
+            return httpx2.Response(
+                200, json={"jsonrpc": "2.0", "id": body["id"], "result": result}
+            )
+
+        owner.fail["server/discover"] = lax
+
+        protocol, result = await self._call_through(tmp_path, monkeypatch, owner)
+
+        assert protocol == "2025-11-25"
+        assert result.is_error is False
+        assert owner.methods[:2] == ["server/discover", "initialize"]
+
+    @pytest.mark.parametrize("refusal", ["500", "an unknown method"])
+    async def test_a_refused_discovery_falls_back_to_the_handshake(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refusal: str
+    ):
+        """A discovery that fails is not an entry that fails.
+
+        The handshake is tried next, and an owner that answers it is entered
+        in that era: the only kind of owner an older build is.
+        """
+        owner = _OwnerOverHttp(era="handshake")
+        if refusal == "500":
+            owner.era = "2026-07-28"
+            owner.fail["server/discover"] = _STAND_INS["500"]
+
+        protocol, result = await self._call_through(tmp_path, monkeypatch, owner)
+
+        assert protocol == "2025-11-25"
+        assert result.is_error is False
+        assert owner.methods[:2] == ["server/discover", "initialize"]
+        assert owner.effects == 1
+
+    async def test_an_owner_with_no_way_in_is_not_entered(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server.daemon_proxy import OwnerUnreachableError
+
+        owner = _OwnerOverHttp(
+            fail={
+                "server/discover": _STAND_INS["500"],
+                "initialize": _STAND_INS["500"],
+            }
+        )
+
+        with pytest.raises(OwnerUnreachableError) as failed:
+            await self._call_through(tmp_path, monkeypatch, owner)
+
+        assert failed.value.nothing_was_sent is True
+        assert owner.methods == ["server/discover", "initialize"]
+        assert owner.effects == 0
+
+    async def test_a_modern_only_owner_sharing_no_version_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The one discovery answer that ends the connection instead.
+
+        An owner that names only modern versions this client does not speak
+        has said it cannot be talked to at all, and falling back to a
+        handshake it does not serve would only hide that. It is its answer,
+        so it is not retagged as a departure.
+        """
+        from mcp import MCPError
+
+        def only_a_later_version(body: dict[str, Any]) -> httpx2.Response:
+            error = {
+                "code": mt.UNSUPPORTED_PROTOCOL_VERSION,
+                "message": "Unsupported protocol version",
+                "data": {"supported": ["2099-01-01"], "requested": "2026-07-28"},
+            }
+            return httpx2.Response(
+                200, json={"jsonrpc": "2.0", "id": body["id"], "error": error}
+            )
+
+        owner = _OwnerOverHttp(fail={"server/discover": only_a_later_version})
+
+        with pytest.raises(MCPError) as refused:
+            await self._call_through(tmp_path, monkeypatch, owner)
+
+        assert refused.value.code == mt.UNSUPPORTED_PROTOCOL_VERSION
+        assert owner.methods == ["server/discover"]
+        assert owner.effects == 0
+
+    async def test_an_unsupported_listing_is_an_empty_answer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """An owner with no resources says so, and that is not a departure.
+
+        Its unknown-method answer is a real JSON-RPC error, which the provider
+        turns into an empty list; the SDK's own "Not Found" for a 404 shares
+        the code and is the departure instead.
+        """
+        from linkedin_mcp_server.server import create_mcp_server
+        from linkedin_mcp_server.server_role import ServerRole
+
+        owner = _OwnerOverHttp()
+        _serve_over_http(monkeypatch, lambda _address: owner)
+        elected = _attachment(tmp_path)
+        backend = _backend(elected, tmp_path)
+        elections: list[object] = []
+        monkeypatch.setattr(
+            "linkedin_mcp_server.daemon_election.obtain_owner",
+            lambda *_a, **_k: elections.append(1),
+        )
+        proxy = create_mcp_server(
+            role=ServerRole.PROXY, proxy_backend=backend, tool_timeout=1.0
+        )
+
+        async with Client(proxy) as client:
+            assert await client.list_resources() == []
+            assert await client.list_prompts() == []
+
+        assert "resources/list" in owner.methods
+        assert elections == []
+        assert backend.attachment is elected
 
 
 class TestWhatTheOwnerDidBeforeItWentAway:
@@ -3576,19 +4368,22 @@ class TestWhatTheOwnerDidBeforeItWentAway:
         _serve_over_http(monkeypatch, owners.__getitem__)
         return _backend(elected, tmp_path)
 
+    @_OWNER_ERAS
     async def test_a_call_that_never_left_runs_once_on_the_replacement(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, era: str, protocol: str
     ):
         """Gone after the lookup, before the call's own client could connect.
 
-        The call's client fails its initialize, before any tool request exists,
-        so the one run the user asked for belongs to the replacement.
+        The call's client fails its negotiation, before any tool request
+        exists, so the one run the user asked for belongs to the replacement.
         """
-        original = _OwnerOverHttp()
-        replacement = _OwnerOverHttp()
+        original = _OwnerOverHttp(era=era)
+        replacement = _OwnerOverHttp(era=era)
+        sessions = _sessions_opened(monkeypatch)
 
         def gone_after_the_lookup(body: dict[str, Any]) -> httpx2.Response:
             del original.fail["tools/list"]
+            original.fail["server/discover"] = _refused
             original.fail["initialize"] = _refused
             return original.answer(body)
 
@@ -3603,15 +4398,24 @@ class TestWhatTheOwnerDidBeforeItWentAway:
         assert result.is_error is False, result
         assert original.effects == 0
         assert replacement.effects == 1, "the call that never left was not run"
+        called = [s for s in sessions if s.tool_request_started]
+        assert [s.protocol_version for s in called] == [protocol]
 
+    @_OWNER_ERAS
     @pytest.mark.parametrize("stand_in", ["500", "sse ended"])
     async def test_a_call_that_ran_is_reported_and_never_repeated(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stand_in: str
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        stand_in: str,
+        era: str,
+        protocol: str,
     ):
         """The owner ran the call, and its answer was lost on the way back."""
-        original = _OwnerOverHttp()
+        original = _OwnerOverHttp(era=era)
         original.fail["tools/call"] = original.after_running(_STAND_INS[stand_in])
-        replacement = _OwnerOverHttp()
+        replacement = _OwnerOverHttp(era=era)
+        sessions = _sessions_opened(monkeypatch)
         backend = self._two_owners(tmp_path, monkeypatch, original, replacement)
 
         async with Client(self._proxy(backend)) as client:
@@ -3625,6 +4429,8 @@ class TestWhatTheOwnerDidBeforeItWentAway:
         assert result.structured_content is not None
         assert result.structured_content["status"] == "outcome_unknown"
         assert result.structured_content["retry_safe"] is False
+        called = [s for s in sessions if s.tool_request_started]
+        assert [s.protocol_version for s in called] == [protocol]
 
 
 class TestTheHeadersTheOwnerReceives:
@@ -3636,8 +4442,9 @@ class TestTheHeadersTheOwnerReceives:
     the transport's constructor arguments say nothing about that.
     """
 
+    @_OWNER_ERAS
     async def test_the_owners_credential_and_the_bound_call_arrive(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, era: str, protocol: str
     ):
         from fastmcp.utilities.tests import asgi_client
 
@@ -3645,7 +4452,7 @@ class TestTheHeadersTheOwnerReceives:
         from linkedin_mcp_server.server import create_mcp_server
         from linkedin_mcp_server.server_role import ServerRole
 
-        owner = _OwnerOverHttp()
+        owner = _OwnerOverHttp(era=era)
         _serve_over_http(monkeypatch, lambda _address: owner)
         attachment = _attachment(tmp_path)
         proxy = create_mcp_server(
@@ -3679,3 +4486,175 @@ class TestTheHeadersTheOwnerReceives:
         assert call.headers[CALL_HEADER] != "forged-by-the-caller"
         for request in owner.requests:
             assert "frontend-credential" not in str(request.headers), request.url
+        # The era the hop spoke, as the owner sees it on the request. On the
+        # 2026-07-28 era the owner routes and validates on these headers, and
+        # there is no session to name.
+        assert call.headers["mcp-protocol-version"] == protocol
+        if era == "2026-07-28":
+            assert call.headers["mcp-method"] == "tools/call"
+            assert call.headers["mcp-name"] == "send_connection_request"
+            assert "mcp-session-id" not in call.headers
+
+
+#: A stand-in owner process: a real HTTP server with the owner's bearer check
+#: and heartbeat route, and one mutating tool that appends a line per run to a
+#: file, naming the protocol the request arrived on. "hold" keeps the call
+#: running until the process is killed.
+_OWNER_PROCESS = """
+import asyncio, json, socket, sys
+from pathlib import Path
+
+import uvicorn
+from fastmcp import FastMCP
+from fastmcp.server.dependencies import get_http_headers
+from starlette.responses import JSONResponse
+
+from linkedin_mcp_server.daemon_liveness import HEARTBEAT_PATH
+from linkedin_mcp_server.server import _StaticTokenAuth
+
+root, token, behaviour = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+mcp = FastMCP("owner", auth=_StaticTokenAuth(token))
+
+
+@mcp.tool(annotations={"destructiveHint": True})
+async def send_connection_request(message: str) -> dict[str, str]:
+    protocol = get_http_headers().get("mcp-protocol-version", "")
+    with (root / "effects.txt").open("a") as effects:
+        effects.write(protocol + "\\n")
+    if behaviour == "hold":
+        await asyncio.Event().wait()
+    return {"status": "sent"}
+
+
+@mcp.custom_route(HEARTBEAT_PATH, methods=["POST"])
+async def heartbeat(request):
+    if request.headers.get("authorization") != f"Bearer {token}":
+        return JSONResponse({}, status_code=401)
+    return JSONResponse({"watched": False})
+
+
+async def main():
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(64)
+    config = uvicorn.Config(
+        mcp.http_app(path="/mcp"), log_level="error", access_log=False
+    )
+    server = uvicorn.Server(config)
+    serving = asyncio.create_task(server.serve(sockets=[listener]))
+    while not server.started:
+        if serving.done():
+            await serving
+            raise RuntimeError("the owner stopped before it started")
+        await asyncio.sleep(0.01)
+    port = listener.getsockname()[1]
+    (root / "ready.json").write_text(json.dumps({"port": port}))
+    await serving
+
+
+asyncio.run(main())
+"""
+
+
+class TestAnOwnerProcessKilledMidCall:
+    """A real owner process killed after it took a mutating call.
+
+    Everything the other loss tests stand in for is real here: a separate
+    process on a loopback socket, killed by the operating system while its
+    tool is running, on the 2026-07-28 era. The only question is the one the
+    recovery acts on, answered by counting runs on each owner.
+    """
+
+    @staticmethod
+    def _spawn(
+        root: Path, behaviour: str, processes: list[Any]
+    ) -> tuple[Any, Attachment]:
+        import dataclasses
+        import os
+        import subprocess
+        import sys
+        import time
+
+        root.mkdir(parents=True)
+        script = root / "owner.py"
+        script.write_text(_OWNER_PROCESS, encoding="utf-8")
+        token = new_token()
+        log = (root / "owner.log").open("w")
+        environment = {**os.environ, "USER_DATA_DIR": str(root / "profile")}
+        process = subprocess.Popen(
+            [sys.executable, str(script), str(root), token, behaviour],
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            env=environment,
+        )
+        processes.append((process, log))
+        deadline = time.monotonic() + 30
+        while not (root / "ready.json").exists():
+            assert process.poll() is None, (root / "owner.log").read_text()
+            assert time.monotonic() < deadline, "the owner never started"
+            time.sleep(0.02)
+        port = json.loads((root / "ready.json").read_text())["port"]
+        attachment = dataclasses.replace(_attachment(root, port=port), token=token)
+        return process, attachment
+
+    @staticmethod
+    def _runs(root: Path) -> list[str]:
+        effects = root / "effects.txt"
+        return effects.read_text().splitlines() if effects.exists() else []
+
+    async def test_the_call_is_reported_as_unknown_and_never_repeated(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server.server import create_mcp_server
+        from linkedin_mcp_server.server_role import ServerRole
+
+        processes: list[Any] = []
+        try:
+            original, attachment = self._spawn(tmp_path / "original", "hold", processes)
+            _replacement, standby = self._spawn(
+                tmp_path / "replacement", "answer", processes
+            )
+            elections: list[object] = []
+
+            def elect(*_args: Any, **_kwargs: Any) -> Any:
+                elections.append(1)
+                return _elected(standby)
+
+            monkeypatch.setattr(
+                "linkedin_mcp_server.daemon_election.obtain_owner", elect
+            )
+            backend = _backend(attachment, tmp_path / "original")
+            proxy = create_mcp_server(
+                role=ServerRole.PROXY, proxy_backend=backend, tool_timeout=5.0
+            )
+
+            async with Client(proxy) as client:
+                calling = asyncio.create_task(
+                    client.call_tool(
+                        "send_connection_request",
+                        {"message": "hello"},
+                        raise_on_error=False,
+                    )
+                )
+                deadline = asyncio.get_running_loop().time() + 15
+                while not self._runs(tmp_path / "original"):
+                    assert not calling.done(), calling
+                    assert asyncio.get_running_loop().time() < deadline
+                    await asyncio.sleep(0.02)
+                original.kill()
+                original.wait(timeout=10)
+                result = await asyncio.wait_for(calling, timeout=20)
+        finally:
+            for process, log in processes:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=10)
+                log.close()
+
+        assert self._runs(tmp_path / "original") == ["2026-07-28"]
+        assert self._runs(tmp_path / "replacement") == [], "the call was sent again"
+        assert result.is_error is True
+        assert result.structured_content is not None
+        assert result.structured_content["status"] == "outcome_unknown"
+        assert result.structured_content["retry_safe"] is False
+        assert elections == [1]

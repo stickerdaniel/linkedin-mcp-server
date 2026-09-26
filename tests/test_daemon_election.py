@@ -4752,6 +4752,264 @@ class TestAtomicStartupCommit:
 
 
 @pytest.mark.slow
+class TestAForwardedCallThroughTheRealOwner:
+    """A forwarded call on the 2026-07-28 era, through the owner's real HTTP server.
+
+    The owner is ``daemon_owner.create_owner_server`` on loopback in this
+    process: its token check, the call admission that wants every call marked,
+    the sequential middleware and the profile lease are all production's. What
+    is stood in is the browser (lifespan and the bookkeeping around a call) and
+    the owner's tools: it gets one synthetic tool, which takes an argument
+    because the owner's own argument check lists its tools before dispatching a
+    2026-07-28 call and skips that for a call with no arguments. The frontend
+    in front of it is the production proxy, over a real socket. No browser, no
+    profile contents and no account state are used; the profile is an empty
+    directory this test claims.
+    """
+
+    async def test_a_forwarded_call_is_routed_admitted_and_kept_in_turn(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        import linkedin_mcp_server.server as server_module
+        from fastmcp import Client
+        from fastmcp.client.transports import StreamableHttpTransport
+        from fastmcp.server.dependencies import get_http_headers
+        from fastmcp.server.middleware import Middleware
+
+        from linkedin_mcp_server import update_check
+        from linkedin_mcp_server.config import set_config
+        from linkedin_mcp_server.daemon_liveness import (
+            CALL_HEADER,
+            REFUSAL_KEY,
+            UNMARKED_CALL,
+            get_liveness,
+        )
+        from linkedin_mcp_server.daemon_proxy import (
+            FrontendCallHeartbeatMiddleware,
+            _call_being_made,
+        )
+        from linkedin_mcp_server.drivers import browser
+        from linkedin_mcp_server.profile_claim import ensure_profile_claim
+        from linkedin_mcp_server.server_role import (
+            ServerRole,
+            reset_process_role_for_testing,
+        )
+
+        # Claimed while empty, before anything is created in it: the lease and
+        # the owner refuse an auth root that holds files that are not theirs.
+        auth_root = tmp_path / "auth"
+        auth_root.mkdir()
+        profile = auth_root / "profile"
+        ensure_profile_claim(profile)
+        profile.mkdir(exist_ok=True)
+        config = _config(profile)
+        config.server.tool_timeout_seconds = 10
+        set_config(config)
+
+        async def nothing(*_a: Any, **_k: Any) -> None:
+            return None
+
+        for name in (
+            "initialize_bootstrap",
+            "get_runtime_policy",
+            "report_retained_browser_revisions_if_ready",
+        ):
+            monkeypatch.setattr(server_module, name, lambda *_a, **_k: None)
+        for name in (
+            "start_background_browser_setup_if_needed",
+            "watch_for_handoff_requests",
+            "stop_background_browser_setup",
+            "close_browser",
+        ):
+            monkeypatch.setattr(server_module, name, nothing)
+        monkeypatch.setattr(browser, "note_call_started", lambda: None)
+        monkeypatch.setattr(browser, "note_activity", lambda: None)
+        monkeypatch.setattr(browser, "release_profile_if_idle_or_requested", nothing)
+        monkeypatch.setattr(update_check, "prime_from_cache", lambda: None)
+        monkeypatch.setattr(update_check, "refresh_latest_version", nothing)
+        monkeypatch.setattr(update_check, "pending_update_notice", lambda: None)
+        elections: list[object] = []
+        monkeypatch.setattr(
+            election_module, "obtain_owner", lambda *_a, **_k: elections.append(1)
+        )
+
+        held, release = asyncio.Event(), asyncio.Event()
+        bodies: list[dict[str, Any]] = []
+        listings: list[dict[str, Any]] = []
+
+        class NotesItsListings(Middleware):
+            async def on_list_tools(self, context: Any, call_next: Any) -> Any:
+                headers = get_http_headers()
+                while_held = held.is_set() and not release.is_set()
+                listed = await call_next(context)
+                # Recorded once the listing has completed, not when it began.
+                listings.append(
+                    {"method": headers.get("mcp-method"), "while_held": while_held}
+                )
+                return listed
+
+        build = server_module.create_mcp_server
+
+        def an_owner_with_a_synthetic_tool(*args: Any, **kwargs: Any) -> Any:
+            mcp = build(*args, **kwargs)
+            if kwargs.get("role") is ServerRole.OWNER:
+
+                @mcp.tool(
+                    name="hold_the_browser", annotations={"destructiveHint": True}
+                )
+                async def hold_the_browser(value: str) -> dict[str, str]:
+                    headers = get_http_headers()
+                    bodies.append(
+                        {
+                            "value": value,
+                            "call": headers.get(CALL_HEADER),
+                            "version": headers.get("mcp-protocol-version"),
+                            "method": headers.get("mcp-method"),
+                            "name": headers.get("mcp-name"),
+                            "session": headers.get("mcp-session-id"),
+                        }
+                    )
+                    if value == "first":
+                        held.set()
+                        await release.wait()
+                    return {"value": value}
+
+                mcp.add_middleware(NotesItsListings())
+            return mcp
+
+        monkeypatch.setattr(
+            server_module, "create_mcp_server", an_owner_with_a_synthetic_tool
+        )
+
+        # What the frontend marked each call with, at its preflight and as the
+        # tool request leaves, with the bound call's claim at that moment.
+        preflights: list[str] = []
+        beat = FrontendCallHeartbeatMiddleware._beat
+
+        async def noting_the_preflight(attachment: Attachment, call_id: str) -> Any:
+            preflights.append(call_id)
+            return await beat(attachment, call_id)
+
+        monkeypatch.setattr(
+            FrontendCallHeartbeatMiddleware, "_beat", staticmethod(noting_the_preflight)
+        )
+        leaving: list[tuple[str | None, str | None, bool]] = []
+        direct = daemon_owner.direct_async_http_client
+
+        async def note_a_tool_request(request: Any) -> None:
+            if request.method == "POST" and b'"tools/call"' in request.content:
+                bound = _call_being_made.get()
+                leaving.append(
+                    (
+                        request.headers.get(CALL_HEADER),
+                        None if bound is None else bound.call_id,
+                        bound is not None and bound.dispatch.sent,
+                    )
+                )
+
+        def watched_client(**kwargs: Any) -> Any:
+            client = direct(**kwargs)
+            client.event_hooks["request"].append(note_a_tool_request)
+            return client
+
+        monkeypatch.setattr(daemon_owner, "direct_async_http_client", watched_client)
+
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(64)
+        attachment = _attachment_for(profile, config, listener.getsockname()[1])
+        get_liveness().serving_as(attachment.descriptor.instance_id)
+        server = daemon_owner.create_owner_server(
+            config=config,
+            token=attachment.token,
+            host="127.0.0.1",
+            port=attachment.descriptor.port,
+        )
+        serving = asyncio.create_task(server.serve(sockets=[listener]))
+        calls: list[asyncio.Task[Any]] = []
+        try:
+            await daemon_owner._await_started(server, serving)
+            reset_process_role_for_testing()
+            frontend = build(
+                role=ServerRole.PROXY,
+                proxy_backend=_proxy_backend_for(attachment),
+                tool_timeout=10.0,
+            )
+            async with Client(frontend) as client:
+                first = asyncio.create_task(
+                    client.call_tool("hold_the_browser", {"value": "first"})
+                )
+                calls.append(first)
+                await asyncio.wait_for(held.wait(), timeout=10)
+                second = asyncio.create_task(
+                    client.call_tool("hold_the_browser", {"value": "second"})
+                )
+                calls.append(second)
+                await _until(
+                    lambda: get_liveness().calls_in_flight() == 2 or second.done(),
+                    seconds=10,
+                )
+                # The second call was admitted while the first holds the lease,
+                # after the owner's own schema listing for it had completed, and
+                # its body waits its turn.
+                assert not second.done(), _outcome(second)
+                assert get_liveness().calls_in_flight() == 2
+                assert [body["value"] for body in bodies] == ["first"]
+                assert {"method": "tools/call", "while_held": True} in listings, (
+                    listings
+                )
+                release.set()
+                answers = await asyncio.wait_for(asyncio.gather(first, second), 10)
+
+            # A call without the marker, straight at the owner: refused with the
+            # owner's signed marker before the body could run.
+            unmarked = Client(
+                StreamableHttpTransport(
+                    attachment.descriptor.url,
+                    auth=attachment.token,
+                    httpx_client_factory=direct,
+                ),
+                timeout=10,
+            )
+            async with unmarked:
+                refused = await unmarked.call_tool(
+                    "hold_the_browser", {"value": "unmarked"}, raise_on_error=False
+                )
+        finally:
+            release.set()
+            for call in calls:
+                if not call.done():
+                    call.cancel()
+            await asyncio.gather(*calls, return_exceptions=True)
+            server.should_exit = True
+            await asyncio.wait_for(serving, timeout=10)
+            listener.close()
+
+        assert [answer.structured_content for answer in answers] == [
+            {"value": "first"},
+            {"value": "second"},
+        ]
+        assert [body["value"] for body in bodies] == ["first", "second"]
+        for body in bodies:
+            assert body["version"] == "2026-07-28", body
+            assert body["method"] == "tools/call", body
+            assert body["name"] == "hold_the_browser", body
+            assert body["session"] is None, body
+        # Each body ran under the call id its own preflight named, two calls
+        # two ids, and each tool request left carrying it, already claimed.
+        first_call, second_call = (body["call"] for body in bodies)
+        assert first_call != second_call
+        assert first_call == preflights[0]
+        assert second_call in preflights
+        assert (first_call, first_call, True) in leaving, leaving
+        assert (second_call, second_call, True) in leaving, leaving
+        assert refused.is_error is True
+        assert refused.meta is not None
+        assert refused.meta[REFUSAL_KEY]["daemon"] == UNMARKED_CALL
+        assert get_liveness().calls_in_flight() == 0
+        assert elections == [], "a healthy owner was replaced"
+
+
 class TestRealOwner:
     """The whole thing, with a real detached process on the other end.
 
