@@ -202,8 +202,8 @@ and `connect_with_person` up to six.
 - Per tool: at most 10 calls a minute and 100 a day.
 - Profiles: at most one page load a second for `get_person_profile` and
   `get_company_profile`, counted per section.
-- Invitations: at most 30 a day, 10 seconds apart. Only a call that reports
-  `connected` sent one.
+- Invitations: at most 30 a day, 10 seconds apart. Count every call that reports
+  `connected` or `send_failed`, since a failed send may still have gone out.
 - On a login challenge, a CAPTCHA, or a rate-limit page, stop all live checks
   for 24 hours.
 
