@@ -18,9 +18,13 @@ from pathlib import Path
 
 import pytest
 
+import psutil
+
 from differential.events import read_jsonl
+from differential.harness import watcher_failures
 from differential.watcher import (
     ProcessRecord,
+    Sampler,
     Tracker,
     browser_roots,
     canonical_user_data_dir,
@@ -148,7 +152,7 @@ def _stand_in_browser(profile: Path) -> subprocess.Popen[bytes]:
     )
 
 
-def _run_watcher(tmp_path: Path, profile: Path, browsers: int) -> list[dict]:
+def _start_watcher(tmp_path: Path, *, deadline: float = 60) -> subprocess.Popen:
     out, stop = tmp_path / "watcher.jsonl", tmp_path / "watcher.stop"
     watcher = subprocess.Popen(
         [
@@ -166,25 +170,40 @@ def _run_watcher(tmp_path: Path, profile: Path, browsers: int) -> list[dict]:
             "watcher-unit",
             "--platform",
             "test",
+            "--root-pid",
+            str(os.getpid()),
             "--deadline",
-            "60",
+            str(deadline),
         ]
     )
+    limit = time.monotonic() + 15
+    while not any(r["kind"] == "watcher.ready" for r in read_jsonl(out)):
+        assert time.monotonic() < limit, "the watcher never took its baseline"
+        time.sleep(0.05)
+    return watcher
+
+
+def _stop_watcher(tmp_path: Path, watcher: subprocess.Popen) -> list[dict]:
+    # Long enough for the exits to land in a sample before it stops.
+    time.sleep(0.5)
+    (tmp_path / "watcher.stop").touch()
+    watcher.wait(timeout=15)
+    return read_jsonl(tmp_path / "watcher.jsonl")
+
+
+def _run_watcher(tmp_path: Path, profile: Path, browsers: int) -> list[dict]:
+    watcher = _start_watcher(tmp_path)
     started: list[subprocess.Popen[bytes]] = []
     try:
-        deadline = time.monotonic() + 15
-        while not any(r["kind"] == "watcher.ready" for r in read_jsonl(out)):
-            assert time.monotonic() < deadline, "the watcher never took its baseline"
-            time.sleep(0.05)
         for _ in range(browsers):
             started.append(_stand_in_browser(profile))
         key = canonical_user_data_dir(str(profile))
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline:
+        limit = time.monotonic() + 15
+        while time.monotonic() < limit:
             if any(
                 r["kind"] == "browser.roots"
                 and len(r["roots"].get(key, [])) == browsers
-                for r in read_jsonl(out)
+                for r in read_jsonl(tmp_path / "watcher.jsonl")
             ):
                 break
             time.sleep(0.05)
@@ -192,11 +211,7 @@ def _run_watcher(tmp_path: Path, profile: Path, browsers: int) -> list[dict]:
         for process in started:
             process.kill()
             process.wait(timeout=10)
-        # Long enough for the exits to land in a sample before it stops.
-        time.sleep(0.5)
-        stop.touch()
-        watcher.wait(timeout=15)
-    return read_jsonl(out)
+    return _stop_watcher(tmp_path, watcher)
 
 
 def test_the_watcher_process_reports_two_browsers_on_one_profile(tmp_path):
@@ -237,3 +252,158 @@ def test_the_watcher_process_sees_one_browser_and_its_exit(tmp_path):
     assert len(roots) == 1
     assert set(parents) <= {r["pid"] for r in records if r["kind"] == "process.exit"}
     assert os.getpid() not in parents
+
+
+_DELAYED_EXEC = """
+import os
+import sys
+import time
+
+time.sleep(3)
+profile = os.environ["STAND_IN_PROFILE"]
+os.execv(sys.executable, [sys.executable, sys.argv[1], "--user-data-dir=" + profile])
+"""
+
+_AFTER_EXEC = "import time\ntime.sleep(3)\n"
+
+
+def test_a_process_that_execs_into_a_browser_late_is_still_seen(tmp_path):
+    # Nothing in the first three seconds names the profile on the command
+    # line; the environment carries it, and only the exec puts it there.
+    profile = tmp_path / "profile"
+    before, after = tmp_path / "before_exec.py", tmp_path / "after_exec.py"
+    before.write_text(_DELAYED_EXEC)
+    after.write_text(_AFTER_EXEC)
+    watcher = _start_watcher(tmp_path)
+    try:
+        stand_in = subprocess.Popen(
+            [sys.executable, str(before), str(after)],
+            env={**os.environ, "STAND_IN_PROFILE": str(profile)},
+        )
+        try:
+            stand_in.wait(timeout=30)
+        finally:
+            if stand_in.poll() is None:
+                stand_in.kill()
+    finally:
+        records = _stop_watcher(tmp_path, watcher)
+    (summary,) = [r for r in records if r["kind"] == "watcher.summary"]
+    key = canonical_user_data_dir(str(profile))
+    assert summary["max_roots"].get(key) == 1, summary["max_roots"]
+    assert any(
+        r["kind"] in ("process.update", "process.start")
+        and r["actor"] == "browser"
+        and f"--user-data-dir={profile}" in r["cmdline"]
+        for r in records
+    )
+
+
+def test_a_watcher_that_stops_early_cannot_carry_o1(tmp_path):
+    watcher = _start_watcher(tmp_path, deadline=1)
+    watcher.wait(timeout=15)
+    ended = time.time()
+    records = read_jsonl(tmp_path / "watcher.jsonl")
+    (summary,) = [r for r in records if r["kind"] == "watcher.summary"]
+    assert summary["stopped_by"] == "deadline"
+    failures = watcher_failures(
+        summary, actors_began=summary["observation_start"], actors_ended=ended + 5
+    )
+    assert any("stopped by 'deadline'" in failure for failure in failures)
+    assert any("ended before" in failure for failure in failures)
+
+
+def test_a_watcher_stopped_on_request_after_the_actors_is_healthy(tmp_path):
+    watcher = _start_watcher(tmp_path)
+    began = time.time()
+    time.sleep(0.3)
+    ended = time.time()
+    records = _stop_watcher(tmp_path, watcher)
+    (summary,) = [r for r in records if r["kind"] == "watcher.summary"]
+    assert summary["observation_start"] <= began
+    assert summary["observation_end"] >= ended
+    assert watcher_failures(summary, actors_began=began, actors_ended=ended) == []
+
+
+class _FakeProcess:
+    def __init__(self, table, pid):
+        self.pid = pid
+        self._entry = table[pid]
+
+    def create_time(self):
+        return self._entry["start"]
+
+    def ppid(self):
+        return self._entry["ppid"]
+
+    def exe(self):
+        return "/bin/stand-in"
+
+    def cmdline(self):
+        cmdline = self._entry["cmdline"]
+        if isinstance(cmdline, Exception):
+            raise cmdline
+        return cmdline
+
+
+def _sampler(table, *, root=1):
+    return Sampler(
+        root,
+        own_pid=999,
+        pids=lambda: list(table),
+        open_process=lambda pid: _FakeProcess(table, pid),
+    )
+
+
+def test_a_row_actor_whose_command_line_cannot_be_read_is_recorded():
+    table = {
+        1: {"start": 1.0, "ppid": 0, "cmdline": ["pytest"]},
+        50: {"start": 1.0, "ppid": 0, "cmdline": ["system-service"]},
+    }
+    sampler = _sampler(table)
+    sampler.sample()
+    table[2] = {"start": 2.0, "ppid": 1, "cmdline": psutil.AccessDenied(2)}
+    table[3] = {"start": 2.0, "ppid": 50, "cmdline": psutil.AccessDenied(3)}
+    sampler.sample()
+    sampler.sample()
+    assert [(f["pid"], f["failure"]) for f in sampler.relevant_read_failures] == [
+        (2, "cmdline: AccessDenied")
+    ]
+    failures = watcher_failures(
+        {
+            "stopped_by": "stop file",
+            "observation_start": 0.0,
+            "observation_end": 10.0,
+            "max_gap_seconds": 0.1,
+            "relevant_read_failures": sampler.relevant_read_failures,
+        },
+        actors_began=1.0,
+        actors_ended=9.0,
+    )
+    assert any("could not read" in failure for failure in failures)
+
+
+def test_actors_descend_from_the_root_and_are_re_read_every_sample():
+    table = {1: {"start": 1.0, "ppid": 0, "cmdline": ["pytest"]}}
+    sampler = _sampler(table)
+    sampler.sample()
+    table[2] = {"start": 2.0, "ppid": 1, "cmdline": ["python", "server"]}
+    table[3] = {"start": 2.0, "ppid": 2, "cmdline": ["node", "run-driver"]}
+    first = sampler.sample()
+    assert first[1].in_row and first[2].in_row and first[3].in_row
+    # An exec long after first sight still lands.
+    table[3]["cmdline"] = ["chrome", "--user-data-dir=/tmp/row"]
+    for _ in range(100):
+        later = sampler.sample()
+    assert later[3].profile == canonical_user_data_dir("/tmp/row")
+
+
+def test_the_tracker_reports_an_exec_as_an_update():
+    tracker = Tracker()
+    tracker.observe({}, t=0.0)
+    tracker.observe({7: record(7, 1, 2.0, None, ["python", "stand-in"])}, t=1.0)
+    events = tracker.observe(
+        {7: record(7, 1, 2.0, None, ["chrome", f"--user-data-dir={PROFILE}"])}, t=2.0
+    )
+    assert [(actor, kind) for actor, kind, _ in events][:1] == [
+        ("browser", "process.update")
+    ]

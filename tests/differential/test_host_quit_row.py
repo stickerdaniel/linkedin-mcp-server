@@ -1,13 +1,17 @@
 """Row H-R1 in K1, K3 and K0: one host starts, reads once, and quits.
 
-K1 runs the server Direct (``DAEMON_ENABLED=false``), K3 through the shared
-owner (``true``), and K0 runs K3 a second time and requires the same outcome
-vector, which is what says the harness measures the product rather than its
-own noise. K3 is then held to K1 on O1 and O4.
+K1 here is the **same-revision Direct reference**: this checkout's server with
+``DAEMON_ENABLED=false``. It is not the plan's frozen-baseline K1, which, with
+K2, is a later stage. K3 runs the same checkout through the shared owner
+(``true``), and K0 runs K3 a second time. K0 passes only when the repeat meets
+every expectation of its own row *and* reads exactly as K3 did, mode and health
+included, which is what says the harness measures the product rather than its
+own noise. K3 is then held to the Direct reference on O1 and O4.
 
 The cases share one module-level record of vectors and run in file order, so
-the comparisons read what the earlier cases measured in this same process. A
-comparison whose input did not run fails rather than passing on nothing.
+the comparisons read what the earlier cases measured in this same process.
+Only a result with no failures is recorded, and a comparison whose input is
+missing fails rather than passing on nothing.
 
 Each case gets a fresh temporary auth root from the suite's own
 ``isolate_profile_dir`` and a fresh synthetic origin, and checks the hosts-file
@@ -16,7 +20,8 @@ in ``test_synthetic_origin.py`` runs first in CI and proves the unproxied
 browser honours that fence; this row relies on it and re-checks only the
 system's answer.
 
-Runs only where CI opted in after trusting the CA. See ``synthetic_origin``.
+Runs only where CI opted in after trusting the CA, and never under xdist: the
+evidence packet of a run is one process's. See ``synthetic_origin``.
 """
 
 from __future__ import annotations
@@ -31,10 +36,10 @@ from differential.harness import (
     ROW_H_R1,
     RowResult,
     RowVector,
-    compare_repeat,
     compare_to_direct,
     default_browsers_path,
     measure_host_quit_row,
+    repeat_verdict,
 )
 from differential.synthetic_origin import (
     OPT_IN_ENV,
@@ -58,7 +63,7 @@ pytestmark = [
     ),
 ]
 
-#: Vectors measured so far in this process, by experiment.
+#: Valid results measured so far in this process, by experiment.
 _VECTORS: dict[str, RowVector] = {}
 
 
@@ -71,6 +76,8 @@ async def _run(
     log: EventLog,
     monkeypatch: pytest.MonkeyPatch,
 ) -> RowResult:
+    if os.environ.get("PYTEST_XDIST_WORKER"):
+        pytest.fail("the native rows run without xdist; one process owns a packet")
     breaches = fence_breaches()
     if breaches:
         pytest.fail(
@@ -91,12 +98,12 @@ async def _run(
         log=log,
         work_dir=log.directory / "rows" / experiment,
     )
-    print(f"H-R1 {experiment} ({result.mode}): {result.vector}")
+    print(f"H-R1 {result.label}: {result.vector}")
     return result
 
 
 @pytest.mark.differential_row(row=ROW_H_R1, experiment="K1", column="integrated")
-async def test_direct_host_starts_reads_and_quits(
+async def test_direct_reference_host_starts_reads_and_quits(
     isolate_profile_dir, synthetic_egress, differential_run, monkeypatch
 ):
     result = await _run(
@@ -107,9 +114,9 @@ async def test_direct_host_starts_reads_and_quits(
         log=differential_run,
         monkeypatch=monkeypatch,
     )
+    assert not result.failures, result.report()
     assert result.vector is not None
     _VECTORS["K1"] = result.vector
-    assert not result.failures, result.report()
 
 
 @pytest.mark.differential_row(row=ROW_H_R1, experiment="K3", column="integrated")
@@ -124,18 +131,18 @@ async def test_daemon_host_starts_reads_and_quits(
         log=differential_run,
         monkeypatch=monkeypatch,
     )
+    assert not result.failures, result.report()
     assert result.vector is not None
     _VECTORS["K3"] = result.vector
-    assert not result.failures, result.report()
 
 
 @pytest.mark.differential_row(row=ROW_H_R1, experiment="K0", column="integrated")
 async def test_the_daemon_row_repeats_identically(
     isolate_profile_dir, synthetic_egress, differential_run, monkeypatch
 ):
-    first = _VECTORS.get("K3")
-    if first is None:
-        pytest.fail("K3 produced no vector in this run, so there is nothing to repeat")
+    reference = _VECTORS.get("K3")
+    if reference is None:
+        pytest.fail("K3 produced no valid result in this run, so nothing to repeat")
     result = await _run(
         "K0",
         daemon=True,
@@ -144,17 +151,16 @@ async def test_the_daemon_row_repeats_identically(
         log=differential_run,
         monkeypatch=monkeypatch,
     )
-    assert result.vector is not None
-    differences = compare_repeat(first, result.vector)
-    assert not differences, f"K0: the same row read differently twice: {differences}"
+    problems = repeat_verdict(reference, result)
+    assert not problems, f"K0: {problems}\n{result.report()}"
 
 
-def test_the_daemon_is_no_worse_than_direct_on_this_row():
+def test_the_daemon_is_no_worse_than_the_direct_reference_on_this_row():
     direct, daemon = _VECTORS.get("K1"), _VECTORS.get("K3")
     if direct is None or daemon is None:
         pytest.fail(
-            f"K1 and K3 must both have run in this process first; have "
+            f"K1 and K3 must both have passed in this process first; have "
             f"{sorted(_VECTORS)}"
         )
     differences = compare_to_direct(direct, daemon)
-    assert not differences, f"K3 differs from K1: {differences}"
+    assert not differences, f"K3 differs from the Direct reference: {differences}"
