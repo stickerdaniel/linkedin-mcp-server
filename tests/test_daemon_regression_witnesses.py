@@ -239,7 +239,10 @@ async def test_an_owner_exiting_after_an_unconfirmed_close_sends_no_signal(
     with pytest.raises(_Exited):
         await daemon_owner._stop_within(serving, 1.0, lock=lock)
 
-    assert released == ["daemon-lock"]
+    # Releasing the lock is required of the fix too, but it is not the witness:
+    # an AssertionError here would pass for the signal regression.
+    if released != ["daemon-lock"]:
+        pytest.fail(f"the daemon lock was not released: {released!r}")
     assert sent == []
 
 
