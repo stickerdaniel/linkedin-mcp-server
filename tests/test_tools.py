@@ -1542,6 +1542,27 @@ class TestJobTools:
         assert "search_results" in result["sections"]
         assert "pages_visited" not in result
 
+    async def test_search_jobs_passes_on_the_offset_to_resume_from(
+        self, mock_context, serve_extractor
+    ):
+        mock_extractor = _make_mock_extractor(
+            {
+                "url": "https://www.linkedin.com/jobs/search/?keywords=python",
+                "sections": {"search_results": "Job 1"},
+            }
+        )
+
+        from linkedin_mcp_server.tools.job import register_job_tools
+
+        mcp = FastMCP("test")
+        register_job_tools(mcp)
+
+        serve_extractor(mock_extractor)
+        tool_fn = await get_tool_fn(mcp, "search_jobs")
+        await tool_fn("python", mock_context, start=37)
+
+        assert mock_extractor.search_jobs.await_args.kwargs["start"] == 37
+
     async def test_search_jobs_is_bounded_by_the_registered_timeout(
         self, mock_context, serve_extractor
     ):

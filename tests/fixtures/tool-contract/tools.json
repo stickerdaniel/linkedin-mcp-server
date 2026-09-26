@@ -923,6 +923,12 @@
           "default": null,
           "description": "Sort results (date, relevance). Classic search only."
         },
+        "start": {
+          "default": 0,
+          "description": "Result offset to begin at (default 0). Pass a previous\ncall's pagination.next_offset, with the same search\narguments, to continue where it stopped. Results can shift\nbetween calls, so a continuation may repeat a job id.",
+          "minimum": 0,
+          "type": "integer"
+        },
         "work_type": {
           "anyOf": [
             {
