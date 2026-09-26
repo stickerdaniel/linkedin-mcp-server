@@ -280,16 +280,16 @@ _MESSAGE_COMPOSER_INSPECT_JS = r"""
     // overlay dialog holds both the messages and the composer. On the full
     // messaging page the owner is the composer <form> and the messages are
     // in its sibling, so climb to the nearest ancestor that holds a message
-    // item, one editor, and stays below <main>. Otherwise keep the owner,
-    // which leaves the send unconfirmed rather than widening the scope.
+    // item, one visible editor, and stays below <main>. Otherwise keep the
+    // owner, which leaves the send unconfirmed rather than widening the scope.
     const threadScope = owner => {
         if (!owner || owner.matches('dialog, [role="dialog"]')) return owner;
         const lists = '[data-view-name="message-list-item"]';
         let ancestor = owner.parentElement;
         while (ancestor && !ancestor.matches('main, body')) {
-            const editors = ancestor.querySelectorAll(
+            const editors = Array.from(ancestor.querySelectorAll(
                 '[role="textbox"][contenteditable="true"]'
-            );
+            )).filter(visible);
             if (editors.length !== 1) return owner;
             if (ancestor.querySelector(lists)) return ancestor;
             ancestor = ancestor.parentElement;
@@ -529,6 +529,37 @@ _MESSAGE_CONFIRMATION_READY_JS = (
                 )
             ).length === 1;
         };
+        const itemSelector = '[data-view-name="message-list-item"]';
+        const linksRecipient = anchor => {
+            let path;
+            try {
+                path = new URL(
+                    anchor.getAttribute('href') || '', window.location.href
+                ).pathname;
+            } catch {
+                return false;
+            }
+            const identifier = /^\/in\/([^/]+)/.exec(path)?.[1];
+            return !!identifier && (
+                identifier === arg.profileUrn || `/in/${identifier}/` === arg.profilePath
+            );
+        };
+        // LinkedIn heads a message with links to its sender's profile and
+        // leaves a follow-up from the same sender unheaded, so the sender of a
+        // node is the nearest item at or before it that links a profile. A
+        // message from the recipient can carry the same text without this
+        // submission ever reaching LinkedIn, so refuse a node the recipient
+        // sent, or one whose sender cannot be found. Only the link path
+        // counts, never its text.
+        const sentByRecipient = (scope, node) => {
+            const all = Array.from(scope.querySelectorAll(itemSelector));
+            const sender = all.slice(0, all.indexOf(node) + 1).reverse().find(
+                item => item.querySelector('a[href*="/in/"]')
+            );
+            return !sender || Array.from(
+                sender.querySelectorAll('a[href*="/in/"]')
+            ).some(linksRecipient);
+        };
         // LinkedIn acknowledges a send by rendering a node whose event ID is
         // a server message URN. In an open thread it inserts that node and
         // removes its client-side placeholder; the first message of a new
@@ -542,7 +573,8 @@ _MESSAGE_CONFIRMATION_READY_JS = (
         // thread route must stay on that thread. One that started on the
         // compose route and now sits on a thread route is the first message
         // of a new thread, whose pane holds that one message; a pane with
-        // other messages there is some other conversation.
+        // other messages there is some other conversation, and so is one
+        // whose header does not link the recipient.
         const serverAcknowledged = () => {
             const marker = Array.from(
                 arg.owner?.querySelectorAll('[data-linkedin-mcp-confirmation]') || []
@@ -564,14 +596,20 @@ _MESSAGE_CONFIRMATION_READY_JS = (
             }
             const scope = threadScope(composer.owner);
             const items = Array.from(
-                scope.querySelectorAll('[data-view-name="message-list-item"]')
+                scope.querySelectorAll(itemSelector)
             ).filter(visible);
             const startPath = marker.getAttribute('data-linkedin-mcp-route') || '';
             const path = window.location.pathname;
             if (path.startsWith('/messaging/thread/')) {
                 if (startPath.startsWith('/messaging/thread/')) {
                     if (path !== startPath) return false;
-                } else if (items.length !== 1) {
+                } else if (
+                    items.length !== 1 ||
+                    !Array.from(scope.querySelectorAll('a[href*="/in/"]')).some(
+                        anchor => !anchor.closest(itemSelector) &&
+                            linksRecipient(anchor)
+                    )
+                ) {
                     return false;
                 }
             }
@@ -582,7 +620,8 @@ _MESSAGE_CONFIRMATION_READY_JS = (
                     exactVisibleUnit(node);
             });
             return acknowledged.length === 1 &&
-                acknowledged[0] === items[items.length - 1];
+                acknowledged[0] === items[items.length - 1] &&
+                !sentByRecipient(scope, acknowledged[0]);
         };
         if (!arg.owner?.isConnected) return serverAcknowledged();
         const markers = Array.from(
