@@ -155,6 +155,55 @@ async def test_an_auth_root_above_the_real_root_is_refused(
     await _refused_before_anything(tmp_path, monkeypatch, link / "profile")
 
 
+def _profile_link(tmp_path: Path, target: Path) -> Path:
+    """An allowed-looking auth root whose profile itself is a link to *target*."""
+    auth = tmp_path / "allowed-auth"
+    auth.mkdir()
+    target.mkdir(parents=True, exist_ok=True)
+    _symlink_or_skip(auth / "profile", target)
+    return auth / "profile"
+
+
+async def test_a_profile_that_links_to_the_protected_profile_is_refused(
+    tmp_path, monkeypatch, fake_home
+):
+    link = _profile_link(tmp_path, fake_home / REAL_AUTH_ROOT_NAME / "profile")
+    await _refused_before_anything(tmp_path, monkeypatch, link)
+    assert (fake_home / REAL_AUTH_ROOT_NAME / "sentinel").read_text() == (
+        "the user's session"
+    )
+
+
+async def test_a_profile_that_links_to_a_nested_protected_profile_is_refused(
+    tmp_path, monkeypatch, fake_home
+):
+    target = fake_home / REAL_AUTH_ROOT_NAME / "nested" / "profile"
+    await _refused_before_anything(
+        tmp_path, monkeypatch, _profile_link(tmp_path, target)
+    )
+
+
+async def test_a_profile_whose_resolved_parent_holds_the_protected_root_is_refused(
+    tmp_path, monkeypatch, fake_home
+):
+    # Resolved, the profile sits in the home, so its auth root is the home.
+    target = fake_home / "profile-in-home"
+    await _refused_before_anything(
+        tmp_path, monkeypatch, _profile_link(tmp_path, target)
+    )
+
+
+def test_a_profile_that_links_somewhere_distinct_is_accepted_as_resolved(
+    tmp_path, fake_home
+):
+    target = tmp_path / "elsewhere" / "profile"
+    link = _profile_link(tmp_path, target)
+    account = claim_account(link)
+    # The account carries exactly the path that was checked: the resolved one.
+    assert account.profile == Path(os.path.realpath(target))
+    assert account.auth_root == Path(os.path.realpath(target.parent))
+
+
 async def test_the_home_as_the_auth_root_is_refused(tmp_path, monkeypatch, fake_home):
     await _refused_before_anything(tmp_path, monkeypatch, fake_home / "profile")
 

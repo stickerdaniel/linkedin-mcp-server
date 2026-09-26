@@ -20,6 +20,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -329,137 +330,287 @@ def test_a_watcher_stopped_on_request_after_the_actors_is_healthy(tmp_path):
     assert watcher_failures(summary, actors_began=began, actors_ended=ended) == []
 
 
+BROWSER_DIR = "/opt/ms-playwright"
+BROWSER_EXE = f"{BROWSER_DIR}/chromium-1/chrome-linux/chrome"
+
+
+def _field(entry, name):
+    value = entry[name]
+    if isinstance(value, BaseException):
+        raise value
+    return value
+
+
 class _FakeProcess:
+    """A modelled psutil.Process. Any field may be an exception to raise."""
+
     def __init__(self, table, pid):
         self.pid = pid
+        if pid not in table:
+            raise psutil.NoSuchProcess(pid)
         self._entry = table[pid]
+        opening = self._entry.get("open")
+        if isinstance(opening, BaseException):
+            raise opening
 
     def create_time(self):
-        return self._entry["start"]
+        return _field(self._entry, "start")
 
     def ppid(self):
         return self._entry["ppid"]
 
     def exe(self):
-        return "/bin/stand-in"
+        return _field({"exe": self._entry.get("exe", "/usr/bin/python3")}, "exe")
 
     def cmdline(self):
-        cmdline = self._entry["cmdline"]
-        if isinstance(cmdline, Exception):
-            raise cmdline
-        return cmdline
+        return _field(self._entry, "cmdline")
 
 
-class _Clock:
-    def __init__(self) -> None:
-        self.now = 100.0
-
-    def __call__(self) -> float:
-        return self.now
-
-
-def _sampler(table, *, root=1, clock=None):
+def _sampler(table, *, root=1):
     return Sampler(
         root,
         own_pid=999,
         pids=lambda: list(table),
         open_process=lambda pid: _FakeProcess(table, pid),
-        clock=clock or _Clock(),
-        unreadable_bound=1.0,
+        browser_exe=BROWSER_EXE,
+        browser_dir=BROWSER_DIR,
     )
 
 
-def _healthy_summary(sampler: Sampler) -> list[str]:
+def _summary(sampler: Sampler, tracker: Tracker) -> dict:
+    return {
+        "stopped_by": "stop file",
+        "observation_start": 0.0,
+        "observation_end": 1000.0,
+        "max_gap_seconds": 0.1,
+        "max_roots": dict(tracker.max_roots),
+        "read_failures": sampler.read_failures,
+        "relevant_read_failures": sampler.relevant_read_failures,
+    }
+
+
+def _judged(sampler: Sampler, tracker: Tracker) -> list[str]:
     return watcher_failures(
-        {
-            "stopped_by": "stop file",
-            "observation_start": 0.0,
-            "observation_end": 1000.0,
-            "max_gap_seconds": 0.1,
-            "unreadable_bound_seconds": sampler.unreadable_bound,
-            "relevant_read_failures": sampler.relevant_read_failures,
-        },
-        actors_began=1.0,
-        actors_ended=999.0,
+        _summary(sampler, tracker), actors_began=1.0, actors_ended=999.0
     )
 
 
-def _run_unreadable(clock: _Clock, table: dict, samples: int, *, then=None):
-    """Sample every 0.1 s for *samples* samples with pid 2 unreadable."""
-    sampler = _sampler(table, clock=clock)
-    sampler.sample()
-    table[2] = {"start": 2.0, "ppid": 1, "cmdline": psutil.AccessDenied(2)}
-    for _ in range(samples):
-        sampler.sample()
-        clock.now += 0.1
-    if then is not None:
-        then(table)
-    sampler.sample()
-    return sampler
+def _observe(sampler: Sampler, tracker: Tracker, t: float):
+    return tracker.observe(sampler.sample(), t)
 
 
-def _row_table() -> dict:
+def _chrome(profile: str) -> list[str]:
+    return [BROWSER_EXE, f"--user-data-dir={profile}"]
+
+
+def _row_table() -> dict[int, dict[str, Any]]:
     return {
         1: {"start": 1.0, "ppid": 0, "cmdline": ["pytest"]},
         50: {"start": 1.0, "ppid": 0, "cmdline": ["system-service"]},
     }
 
 
-def test_an_unreadable_actor_that_exits_within_the_bound_is_only_evidence():
-    # The setuid /bin/ps on macOS: its arguments are withheld, and it is gone
-    # within a few samples.
-    clock = _Clock()
-    sampler = _run_unreadable(clock, _row_table(), 3, then=lambda table: table.pop(2))
-    (episode,) = sampler.read_failures
-    assert (episode["pid"], episode["failure"], episode["resolution"]) == (
-        2,
-        "cmdline: AccessDenied",
-        "exited",
+@pytest.mark.parametrize(
+    "denied",
+    [
+        pytest.param({"start": psutil.AccessDenied(2)}, id="create-time"),
+        pytest.param({"open": psutil.AccessDenied(2)}, id="open"),
+        pytest.param({"start": OSError("denied")}, id="create-time-oserror"),
+    ],
+)
+def test_a_known_actor_whose_identity_cannot_be_read_stays_unknown(denied):
+    table = _row_table()
+    sampler, tracker = _sampler(table), Tracker()
+    _observe(sampler, tracker, 0.0)
+    table[2] = {"start": 2.0, "ppid": 1, "cmdline": ["python", "pre-exec"]}
+    _observe(sampler, tracker, 1.0)
+    table[2].update(denied)
+    events = _observe(sampler, tracker, 2.0)
+    # Still present, not an exit: a denied read is not a disappearance.
+    assert not [e for e in events if e[1] == "process.exit" and e[2]["pid"] == 2]
+    (episode,) = sampler.relevant_read_failures
+    assert episode["pid"] == 2 and episode["possible_browser"]
+    assert any(
+        "anything but a possible browser" in f for f in _judged(sampler, tracker)
     )
-    assert episode["seconds"] <= 1.0
-    assert sampler.relevant_read_failures == []
-    assert _healthy_summary(sampler) == []
 
 
-def test_an_actor_unreadable_past_the_bound_makes_the_census_uncertain():
-    clock = _Clock()
-    sampler = _run_unreadable(clock, _row_table(), 15)
-    (episode,) = sampler.relevant_read_failures
-    assert episode["pid"] == 2 and episode["seconds"] > 1.0
-    assert episode["resolution"] == "open"
-    assert any("longer than 1.0s" in f for f in _healthy_summary(sampler))
+def test_a_vanished_actor_is_an_exit_not_an_unknown():
+    table = _row_table()
+    sampler, tracker = _sampler(table), Tracker()
+    _observe(sampler, tracker, 0.0)
+    table[2] = {"start": 2.0, "ppid": 1, "cmdline": ["python", "server"]}
+    _observe(sampler, tracker, 1.0)
+    table[2]["open"] = psutil.NoSuchProcess(2)
+    events = _observe(sampler, tracker, 2.0)
+    assert [e[1] for e in events if e[2].get("pid") == 2] == ["process.exit"]
+    assert sampler.read_failures == []
 
 
-def test_an_actor_unreadable_past_the_bound_that_then_exits_still_counts():
-    clock = _Clock()
-    sampler = _run_unreadable(clock, _row_table(), 15, then=lambda t: t.pop(2))
-    (episode,) = sampler.relevant_read_failures
-    assert episode["resolution"] == "exited"
-    assert _healthy_summary(sampler)
+def test_two_roots_one_unreadable_fails_the_row_judgement():
+    # The e1cb model: an actor becomes a browser on the row's profile and then
+    # cannot be identified, while a second browser on the profile stays
+    # readable. The readable one alone reads as one root; the unknown one must
+    # keep O1 from being established.
+    profile = "/tmp/e1cb-profile"
+    table = _row_table()
+    sampler, tracker = _sampler(table), Tracker()
+    _observe(sampler, tracker, 0.0)
+    table[2] = {"start": 2.0, "ppid": 1, "cmdline": ["python", "pre-exec"]}
+    _observe(sampler, tracker, 1.0)
+    table[2].update(start=psutil.AccessDenied(2), cmdline=_chrome(profile))
+    table[3] = {
+        "start": 3.0,
+        "ppid": 1,
+        "exe": BROWSER_EXE,
+        "cmdline": _chrome(profile),
+    }
+    _observe(sampler, tracker, 2.0)
+    assert _judged(sampler, tracker)
 
 
-def test_an_actor_that_becomes_readable_within_the_bound_is_only_evidence():
-    clock = _Clock()
+def test_two_readable_roots_are_counted_as_two():
+    profile = "/tmp/e1cb-profile"
+    table = _row_table()
+    sampler, tracker = _sampler(table), Tracker()
+    _observe(sampler, tracker, 0.0)
+    for pid in (2, 3):
+        table[pid] = {
+            "start": 2.0,
+            "ppid": 1,
+            "exe": BROWSER_EXE,
+            "cmdline": _chrome(profile),
+        }
+    _observe(sampler, tracker, 1.0)
+    assert tracker.max_roots[canonical_user_data_dir(profile)] == 2
+    assert _judged(sampler, tracker) == []
 
-    def readable(table):
-        table[2]["cmdline"] = ["python", "server"]
 
-    sampler = _run_unreadable(clock, _row_table(), 5, then=readable)
+def test_a_first_sample_harness_descendant_that_execs_into_a_browser_is_seen():
+    # A staging leftover, already running when the watcher starts.
+    profile = "/tmp/e1cb-profile"
+    table = _row_table()
+    table[2] = {"start": 0.5, "ppid": 1, "cmdline": ["leftover"]}
+    sampler, tracker = _sampler(table), Tracker()
+    first = sampler.sample()
+    tracker.observe(first, 0.0)
+    assert first[2].in_row
+    table[2]["cmdline"] = _chrome(profile)
+    _observe(sampler, tracker, 1.0)
+    assert tracker.max_roots[canonical_user_data_dir(profile)] == 1
+
+
+def test_a_first_sample_unrelated_process_is_read_once():
+    table = _row_table()
+    reads = {"n": 0}
+    original = table[50]
+
+    class Counting(dict):
+        def __getitem__(self, key):
+            if key == "cmdline":
+                reads["n"] += 1
+            return super().__getitem__(key)
+
+    table[50] = Counting(original)
+    sampler = _sampler(table)
+    for _ in range(5):
+        sampler.sample()
+    assert reads["n"] == 1
+
+
+def test_an_unreadable_actor_whose_exe_is_not_the_browser_is_only_evidence():
+    # The macOS setuid /bin/ps, modelled: its executable reads, its arguments
+    # do not, and it is not the row's browser.
+    table = _row_table()
+    sampler, tracker = _sampler(table), Tracker()
+    _observe(sampler, tracker, 0.0)
+    table[2] = {
+        "start": 2.0,
+        "ppid": 1,
+        "exe": "/bin/ps",
+        "cmdline": psutil.AccessDenied(2),
+    }
+    _observe(sampler, tracker, 1.0)
+    table.pop(2)
+    _observe(sampler, tracker, 2.0)
     (episode,) = sampler.read_failures
-    assert episode["resolution"] == "readable"
+    assert episode["exe"] == "/bin/ps" and episode["resolution"] == "exited"
+    assert episode["failures"] == ["cmdline: AccessDenied"]
+    assert not episode["possible_browser"]
+    assert _judged(sampler, tracker) == []
+
+
+@pytest.mark.parametrize(
+    "exe",
+    [
+        pytest.param(BROWSER_EXE, id="the-browser-exe"),
+        pytest.param(
+            f"{BROWSER_DIR}/chromium-1/chrome-linux/chrome_crashpad",
+            id="under-browser-dir",
+        ),
+        pytest.param(psutil.AccessDenied(2), id="unreadable-exe"),
+    ],
+)
+def test_an_unreadable_actor_that_could_be_the_browser_counts(exe):
+    table = _row_table()
+    sampler, tracker = _sampler(table), Tracker()
+    _observe(sampler, tracker, 0.0)
+    table[2] = {"start": 2.0, "ppid": 1, "exe": exe, "cmdline": psutil.AccessDenied(2)}
+    _observe(sampler, tracker, 1.0)
+    assert [e["pid"] for e in sampler.relevant_read_failures] == [2]
+    assert _judged(sampler, tracker)
+
+
+def test_the_resolved_browser_executable_counts_even_outside_the_browsers_dir():
+    # A browser the product resolved somewhere else, such as a system install.
+    elsewhere = "/Applications/Browser.app/Contents/MacOS/Browser"
+    table = _row_table()
+    sampler = Sampler(
+        1,
+        own_pid=999,
+        pids=lambda: list(table),
+        open_process=lambda pid: _FakeProcess(table, pid),
+        browser_exe=elsewhere,
+        browser_dir=BROWSER_DIR,
+    )
+    tracker = Tracker()
+    _observe(sampler, tracker, 0.0)
+    table[2] = {
+        "start": 2.0,
+        "ppid": 1,
+        "exe": elsewhere,
+        "cmdline": psutil.AccessDenied(2),
+    }
+    _observe(sampler, tracker, 1.0)
+    assert [e["pid"] for e in sampler.relevant_read_failures] == [2]
+
+
+def test_an_unknown_actor_that_becomes_readable_is_resolved_but_recorded():
+    table = _row_table()
+    sampler, tracker = _sampler(table), Tracker()
+    _observe(sampler, tracker, 0.0)
+    table[2] = {
+        "start": 2.0,
+        "ppid": 1,
+        "exe": "/usr/bin/python3",
+        "cmdline": ["python"],
+    }
+    table[2]["start"] = psutil.AccessDenied(2)
+    _observe(sampler, tracker, 1.0)
+    table[2]["start"] = 2.0
+    _observe(sampler, tracker, 2.0)
+    # Never known before the denied read, so nothing to keep; once readable it
+    # is an actor like any other and nothing is outstanding.
     assert sampler.relevant_read_failures == []
-    assert _healthy_summary(sampler) == []
 
 
 def test_an_unrelated_process_that_cannot_be_read_is_not_recorded():
-    clock = _Clock()
     table = _row_table()
-    sampler = _sampler(table, clock=clock)
+    sampler = _sampler(table)
     sampler.sample()
     table[3] = {"start": 2.0, "ppid": 50, "cmdline": psutil.AccessDenied(3)}
-    for _ in range(20):
+    for _ in range(5):
         sampler.sample()
-        clock.now += 0.1
     assert sampler.read_failures == []
 
 
@@ -468,13 +619,19 @@ _ON_MACOS = pytest.mark.skipif(
 )
 
 
+def _real_sampler(tmp_path: Path) -> Sampler:
+    browsers = tmp_path / "ms-playwright"
+    browsers.mkdir()
+    return Sampler(os.getpid(), browser_dir=str(browsers))
+
+
 @_ON_MACOS
-def test_the_real_setuid_ps_is_recorded_but_not_counted():
+def test_the_real_setuid_ps_is_recorded_but_not_counted(tmp_path):
     # What the product runs on macOS to read process ancestry. psutil cannot
-    # read the arguments of a setuid-root process, which is the real failure.
+    # read the arguments of a setuid-root process; its executable it can.
     # Retried until a sample catches one alive, since a fast ps can live and
     # die between two samples.
-    sampler = Sampler(os.getpid(), unreadable_bound=1.0)
+    sampler = _real_sampler(tmp_path)
     sampler.sample()
     caught: list[dict] = []
     for _ in range(50):
@@ -489,16 +646,18 @@ def test_the_real_setuid_ps_is_recorded_but_not_counted():
         if caught:
             break
     assert caught, "no sample caught a running /bin/ps in 50 tries"
-    assert caught[0]["failure"].startswith("cmdline")
-    assert caught[0]["resolution"] == "exited"
+    assert caught[0]["exe"] == "/bin/ps"
+    assert any(f.startswith("cmdline") for f in caught[0]["failures"])
+    assert not caught[0]["possible_browser"]
     assert sampler.relevant_read_failures == []
 
 
 @_ON_MACOS
-def test_a_real_setuid_ps_held_past_the_bound_is_counted():
-    # Its output fills a pipe nobody reads, so it stays alive, and unreadable,
-    # for longer than the bound: the shape a hidden browser root would have.
-    sampler = Sampler(os.getpid(), unreadable_bound=1.0)
+def test_a_real_setuid_ps_held_alive_is_recorded_but_not_counted(tmp_path):
+    # Its output fills a pipe nobody reads, so it stays alive and unreadable
+    # for as long as that lasts. Its lifetime is not the question; its
+    # executable is, and /bin/ps is not the row's browser.
+    sampler = _real_sampler(tmp_path)
     sampler.sample()
     columns = ["-o", "command="] * 16
     ps = subprocess.Popen(["/bin/ps", "-A", "-ww", *columns], stdout=subprocess.PIPE)
@@ -507,19 +666,21 @@ def test_a_real_setuid_ps_held_past_the_bound_is_counted():
         while time.monotonic() - began < 1.6:
             sampler.sample()
             time.sleep(0.05)
-        assert ps.poll() is None, (
-            "ps finished before the bound; its output fit the pipe"
-        )
+        assert ps.poll() is None, "ps finished early; its output fit the pipe"
     finally:
         assert ps.stdout is not None
         ps.stdout.read()
         ps.wait(timeout=10)
     sampler.sample()
-    assert [e["pid"] for e in sampler.relevant_read_failures] == [ps.pid]
+    ours = [e for e in sampler.read_failures if e["pid"] == ps.pid]
+    assert ours and ours[0]["seconds"] > 1.0
+    assert sampler.relevant_read_failures == []
 
 
 def test_actors_descend_from_the_root_and_are_re_read_every_sample():
-    table = {1: {"start": 1.0, "ppid": 0, "cmdline": ["pytest"]}}
+    table: dict[int, dict[str, Any]] = {
+        1: {"start": 1.0, "ppid": 0, "cmdline": ["pytest"]}
+    }
     sampler = _sampler(table)
     sampler.sample()
     table[2] = {"start": 2.0, "ppid": 1, "cmdline": ["python", "server"]}
