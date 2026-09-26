@@ -37,8 +37,11 @@ from differential.harness import (
     k2_r12_verdict,
 )
 from differential import test_preservation_gate as gate
+from differential import test_watcher as watcher_tests
 from differential.test_row_judgement import _healthy
-from linkedin_mcp_server import daemon_descriptor
+from differential.test_watcher import GRAMMAR, _shape
+from differential.watcher import OWNER_MODULE
+from linkedin_mcp_server import daemon_descriptor, process_tree
 
 # The row entry with every launch replaced, and its staged profile.
 row = gate.row
@@ -605,6 +608,171 @@ async def test_a_direct_row_without_an_owner_launch_reads_equal(direct_row, obse
     assert not result.vector.owner_launched
     assert not any(_OWNER_FAILURE in failure for failure in result.failures)
     assert coordination_reading(result.vector) == "="
+
+
+@pytest.mark.parametrize(("arguments", "runs"), GRAMMAR)
+def test_an_owner_launch_is_read_with_the_interpreters_grammar(arguments, runs):
+    record = {
+        **_owner_event("process.start", in_row=True),
+        "cmdline": ["/venv/bin/python", *_shape(arguments, OWNER_MODULE)],
+    }
+    assert harness.owner_launches([record]) == ([77] if runs else [])
+
+
+@pytest.mark.parametrize(
+    ("arguments", "fails"),
+    [
+        pytest.param(["-Pm", "M"], True, id="clustered-owner"),
+        pytest.param(["-cpass", "-m", "M"], False, id="dash-c-then-owner-words"),
+        pytest.param(["--", "-m", "M"], False, id="double-dash-then-owner-words"),
+    ],
+)
+async def test_the_row_reads_owner_launches_with_the_grammar(
+    direct_row, arguments, fails
+):
+    observed = [
+        {
+            **_owner_event("process.start", in_row=True),
+            "cmdline": ["/venv/bin/python", *_shape(arguments, OWNER_MODULE)],
+        }
+    ]
+    result = await direct_row(observed)
+    assert result.vector is not None
+    assert result.vector.owner_launched is fails
+    assert any(_OWNER_FAILURE in f for f in result.failures) is fails
+
+
+# --- The Windows owner release gate (review e1db, E1DB-02) ----------------------
+
+_NONCE = "ab" * 32
+_OWNER_TARGET = [sys.executable, "-P", "-m", OWNER_MODULE, "--job-name", "Local\\j"]
+
+
+def _gate(**changes: Any) -> list[str]:
+    """What the product's own builder makes for the owner, never executed."""
+    command = process_tree.windows_gate_command(list(_OWNER_TARGET), _NONCE)
+    for index, value in changes.items():
+        command[int(index[1:])] = value
+    return command
+
+
+def _gate_event(cmdline: list[str], *, in_row: bool = True) -> dict[str, Any]:
+    return {
+        "kind": "process.start",
+        "actor": "other",
+        "pid": 88,
+        "start_identity": 4.0,
+        "in_row": in_row,
+        "cmdline": list(cmdline),
+    }
+
+
+_GATE_FAILURE = "started the shared owner's release gate"
+
+
+def test_the_gate_names_this_runtimes_own_script():
+    command = _gate()
+    assert harness.owner_gate(command, [harness.gate_script(harness.REPO_ROOT)])
+    # Another runtime's gate script, at the same shape, is someone else's.
+    assert not harness.owner_gate(command, [harness.gate_script(Path("/elsewhere"))])
+
+
+def test_a_baseline_runtimes_gate_is_recognised_by_its_own_path(tmp_path):
+    checkout = tmp_path / "baseline" / "checkout"
+    script = harness.gate_script(checkout)
+    script.parent.mkdir(parents=True)
+    script.write_text("")
+    command = [sys.executable, "-I", "-S", "-u", str(script), _NONCE, "--"]
+    command += _OWNER_TARGET
+    assert harness.owner_gate(command, [script])
+    assert not harness.owner_gate(command, [harness.gate_script(harness.REPO_ROOT)])
+
+
+async def test_a_gate_alone_is_an_owner_start_attempt(direct_row):
+    # The gate never released its target: no owner process, no descriptor.
+    result = await direct_row([_gate_event(_gate())])
+    assert result.vector is not None
+    assert result.vector.owner_start_attempted
+    assert not result.vector.owner_launched and not result.vector.owner_published
+    assert any(_GATE_FAILURE in f for f in result.failures)
+    assert coordination_reading(result.vector) == "!"
+
+
+async def test_a_released_gate_and_its_owner_both_count(direct_row):
+    owner = {**_owner_event("process.start", in_row=True), "cmdline": _OWNER_TARGET}
+    result = await direct_row([_gate_event(_gate()), owner])
+    assert result.vector is not None
+    assert result.vector.owner_start_attempted and result.vector.owner_launched
+    assert any(_GATE_FAILURE in f for f in result.failures)
+    assert any(_OWNER_FAILURE in f for f in result.failures)
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        pytest.param(
+            _gate_event(_gate(i4=str(Path("/tmp/process_gate.py")))),
+            id="wrong-script-path",
+        ),
+        pytest.param(
+            _gate_event(_gate(i4=str(harness.REPO_ROOT / "process_gate.py"))),
+            id="script-outside-the-package",
+        ),
+        pytest.param(_gate_event(_gate(i5="not-a-nonce")), id="bad-nonce"),
+        pytest.param(_gate_event(_gate(i6="-x")), id="no-separator"),
+        pytest.param(_gate_event(_gate(i1="-E")), id="other-interpreter-flags"),
+        pytest.param(
+            _gate_event(_gate(i9="linkedin_mcp_server")), id="target-not-the-owner"
+        ),
+        pytest.param(
+            _gate_event([*_gate()[:7], sys.executable, "-cpass", "-m", OWNER_MODULE]),
+            id="target-runs-inline-code",
+        ),
+        pytest.param(_gate_event(_gate()[:6]), id="truncated"),
+        pytest.param(_gate_event(_gate(), in_row=False), id="unrelated-gate"),
+        pytest.param(
+            _gate_event(
+                [
+                    sys.executable,
+                    "helper.py",
+                    f"--note={' '.join(_gate())}",
+                ]
+            ),
+            id="gate-named-inside-an-argument",
+        ),
+    ],
+)
+async def test_what_is_not_this_rows_owner_gate_is_no_attempt(direct_row, event):
+    result = await direct_row([event])
+    assert result.vector is not None
+    assert not result.vector.owner_start_attempted
+    assert not any(_GATE_FAILURE in f for f in result.failures)
+    assert coordination_reading(result.vector) == "="
+
+
+def test_k2_counts_a_gate_alone(profile):
+    result = _k2(profile, forwarded=False, owner={})
+    assert result.vector is not None
+    result.vector = dataclasses.replace(result.vector, owner_start_attempted=True)
+    assert _reading(result) == "!"
+    assert k2_r12_verdict(result) == []
+
+
+def test_a_gate_is_never_asked_for_its_environment():
+    table: dict[int, dict[str, Any]] = {
+        1: {"start": 1.0, "ppid": 0, "cmdline": ["pytest"]},
+    }
+    sampler = watcher_tests._sampler(table)
+    sampler.sample()
+    table[2] = {
+        "start": 2.0,
+        "ppid": 1,
+        "cmdline": _gate(),
+        "environ": {"__PYVENV_LAUNCHER__": "/x/.venv/bin/python"},
+    }
+    for _ in range(3):
+        sampler.sample()
+    assert "environ_reads" not in table[2]
 
 
 @pytest.mark.parametrize("kind", ["process.start", "process.update"])

@@ -195,31 +195,69 @@ LAUNCHER_ENV = "__PYVENV_LAUNCHER__"
 SERVER_MODULE = "linkedin_mcp_server"
 OWNER_MODULE = "linkedin_mcp_server.daemon_owner"
 
-#: Interpreter options that take the next argument as their value.
-_OPTIONS_WITH_VALUES = frozenset({"-W", "-X", "--check-hash-based-pycs"})
+#: CPython's short options (``Python/getopt.c``, ``bBc:dEhiIm:OPqRsStuvVW:xX:?``):
+#: flags without a value; ``c``, ``m``, ``W`` and ``X`` take one, from the rest
+#: of their cluster or from the next argument.
+_SHORT_FLAGS = frozenset("bBdEiIOPqRsStuvx")
+_SHORT_WITH_VALUE = frozenset("cmWX")
+#: ``h``, ``V`` and ``?`` print and exit, running no module; they fall under
+#: "anything else" below, with every option the interpreter would reject.
+#: Long options, and whether each takes a value. Every one without a value
+#: (help, version) ends the run without executing anything.
+_LONG_OPTIONS = {
+    "check-hash-based-pycs": True,
+    "help": False,
+    "help-all": False,
+    "help-env": False,
+    "help-xoptions": False,
+    "version": False,
+}
 
 
 def invoked_module(cmdline: Sequence[str]) -> str | None:
     """The module a Python command line runs with ``-m``, or None.
 
-    Read the way the interpreter reads its options: ``-m MODULE`` or
-    ``-mMODULE`` among the options before the first script or ``-c``. A module
-    name that merely appears inside some argument is not an invocation.
+    Parsed with the interpreter's own option grammar: short options clustered
+    character by character, ``m``, ``c``, ``W`` and ``X`` taking the rest of
+    their cluster or the next argument. Execution ends the options: ``-c``
+    (attached, clustered or separate), a script path, ``-`` for stdin, or
+    ``--``, after which the next word is a script. Help, version and any
+    option the interpreter does not know run no module. A module name that
+    appears anywhere else is not an invocation.
     """
     arguments = list(cmdline[1:])
     index = 0
     while index < len(arguments):
         argument = arguments[index]
-        if argument == "-m":
-            return arguments[index + 1] if index + 1 < len(arguments) else None
-        if argument.startswith("-m") and not argument.startswith("--"):
-            return argument[2:] or None
-        if argument in _OPTIONS_WITH_VALUES:
-            index += 2
-            continue
-        if argument == "-c" or argument == "-" or not argument.startswith("-"):
-            return None
         index += 1
+        if argument == "--" or argument == "-" or not argument.startswith("-"):
+            return None
+        if argument.startswith("--"):
+            # Matched whole: ``--check-hash-based-pycs=always`` is rejected.
+            if not _LONG_OPTIONS.get(argument[2:]):
+                return None
+            index += 1
+            continue
+        position = 1
+        while position < len(argument):
+            option = argument[position]
+            position += 1
+            if option in _SHORT_FLAGS:
+                continue
+            if option in _SHORT_WITH_VALUE:
+                value = argument[position:]
+                if not value:
+                    if index >= len(arguments):
+                        return None
+                    value = arguments[index]
+                    index += 1
+                if option == "m":
+                    return value or None
+                if option == "c":
+                    return None
+                break
+            # Help, version, or an option the interpreter would reject.
+            return None
     return None
 
 

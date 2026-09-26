@@ -1172,27 +1172,101 @@ def test_known_limit_a_same_command_reexec_keeps_the_first_launcher():
     assert table[2]["environ_reads"] == 1
 
 
-@pytest.mark.parametrize(
-    ("cmdline", "module"),
-    [
-        (["python", "-m", "linkedin_mcp_server"], "linkedin_mcp_server"),
-        (["python", "-mlinkedin_mcp_server"], "linkedin_mcp_server"),
-        (
-            ["python", "-I", "-P", "-m", "linkedin_mcp_server.daemon_owner"],
-            "linkedin_mcp_server.daemon_owner",
-        ),
-        (["python", "-W", "ignore", "-m", "pkg"], "pkg"),
-        (["python", "-X", "dev", "-u", "-m", "pkg"], "pkg"),
-        (["python", "script.py", "-m", "linkedin_mcp_server"], None),
-        (["python", "-c", "code", "-m", "linkedin_mcp_server"], None),
-        (["python", "--directory=/x/linkedin_mcp_server.daemon_owner"], None),
-        (["python", "-m"], None),
-        (["python"], None),
-        ([], None),
-    ],
-)
-def test_the_module_is_read_as_the_interpreter_reads_its_options(cmdline, module):
-    assert invoked_module(cmdline) == module
+#: Argument shapes after the interpreter, each with whether CPython runs the
+#: module named ``M`` for it (review e1db, E1DB-01). ``M`` stands for a module.
+GRAMMAR = [
+    pytest.param(["-m", "M"], True, id="m-separate"),
+    pytest.param(["-mM"], True, id="m-attached"),
+    pytest.param(["-Bm", "M"], True, id="m-clustered"),
+    pytest.param(["-BmM"], True, id="m-clustered-attached"),
+    pytest.param(["-PIm", "M"], True, id="m-clustered-after-flags"),
+    pytest.param(["-I", "-P", "-m", "M"], True, id="flags-then-m"),
+    pytest.param(["-BW", "ignore", "-m", "M"], True, id="W-clustered"),
+    pytest.param(["-W", "ignore", "-m", "M"], True, id="W-separate"),
+    pytest.param(["-Wignore", "-m", "M"], True, id="W-attached"),
+    pytest.param(["-X", "dev", "-u", "-m", "M"], True, id="X-separate"),
+    pytest.param(["-Xdev", "-m", "M"], True, id="X-attached"),
+    pytest.param(
+        ["--check-hash-based-pycs", "always", "-m", "M"], True, id="long-with-value"
+    ),
+    pytest.param(
+        ["--check-hash-based-pycs=always", "-m", "M"], False, id="long-with-equals"
+    ),
+    pytest.param(["-cprint(1)", "-m", "M"], False, id="c-attached"),
+    pytest.param(["-Bcprint(1)", "-m", "M"], False, id="c-clustered"),
+    pytest.param(["-c", "print(1)", "-m", "M"], False, id="c-separate"),
+    pytest.param(["--", "-m", "M"], False, id="double-dash"),
+    pytest.param(["-", "-m", "M"], False, id="stdin"),
+    pytest.param(["script.py", "-m", "M"], False, id="script"),
+    pytest.param(["-V", "-m", "M"], False, id="V"),
+    pytest.param(["-h", "-m", "M"], False, id="h"),
+    pytest.param(["--version", "-m", "M"], False, id="version"),
+    pytest.param(["--unknown", "-m", "M"], False, id="unknown-long"),
+    pytest.param(["-Z", "-m", "M"], False, id="unknown-short"),
+    pytest.param(["-m"], False, id="m-without-module"),
+]
+
+
+def _shape(arguments: list[str], module: str) -> list[str]:
+    return [
+        module if argument == "M" else argument.replace("mM", "m" + module)
+        for argument in arguments
+    ]
+
+
+@pytest.mark.parametrize(("arguments", "runs"), GRAMMAR)
+def test_the_module_is_read_as_the_interpreter_reads_its_options(arguments, runs):
+    module = "linkedin_mcp_server.daemon_owner"
+    cmdline = ["python", *_shape(arguments, module)]
+    assert invoked_module(cmdline) == (module if runs else None)
+
+
+@pytest.mark.parametrize(("arguments", "runs"), GRAMMAR)
+def test_the_grammar_is_the_interpreters_own(tmp_path, arguments, runs):
+    """What this interpreter actually does with each shape, on a harmless module.
+
+    The module only prints a marker. Under ``-I`` or ``-P`` the working
+    directory is not on the path, so "no module named" also shows the
+    interpreter tried to run it; either way ``-m`` took effect.
+    """
+    module = "e1db_harmless_probe"
+    (tmp_path / f"{module}.py").write_text("print('MODULE-RAN')\n")
+    shape = _shape(arguments, module)
+    result = subprocess.run(
+        [sys.executable, *shape],
+        cwd=tmp_path,
+        env={k: v for k, v in os.environ.items() if not k.startswith("PYTHON")},
+        input="",
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    tried = "MODULE-RAN" in result.stdout or f"No module named {module}" in (
+        result.stderr
+    )
+    assert tried is runs, (shape, result.returncode, result.stderr[-300:])
+    assert (invoked_module([sys.executable, *shape]) == module) is runs
+
+
+def test_a_malformed_command_line_names_no_module():
+    assert invoked_module(["python"]) is None
+    assert invoked_module([]) is None
+    assert invoked_module(["python", "--directory=/x/linkedin_mcp_server"]) is None
+
+
+@pytest.mark.parametrize(("arguments", "runs"), GRAMMAR)
+def test_only_a_real_server_invocation_is_asked_for_its_launcher(arguments, runs):
+    table = _row_table()
+    sampler, tracker = _sampler(table), Tracker()
+    _observe(sampler, tracker, 0.0)
+    table[2] = {
+        "start": 2.0,
+        "ppid": 1,
+        "cmdline": [FRAMEWORK_PYTHON, *_shape(arguments, "linkedin_mcp_server")],
+        "environ": {"__PYVENV_LAUNCHER__": BASELINE_VENV_PYTHON},
+    }
+    _observe(sampler, tracker, 1.0)
+    assert ("environ_reads" in table[2]) is runs
 
 
 def test_an_unreadable_environment_leaves_no_launcher():

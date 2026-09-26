@@ -1331,6 +1331,9 @@ class RowVector:
     cleanup_clean: bool
     #: The watcher saw a row actor start the owner module, published or not.
     owner_launched: bool = False
+    #: The watcher saw a row actor start the owner's release gate, which is an
+    #: attempt to start one whether or not the gate ever released it.
+    owner_start_attempted: bool = False
 
 
 def owner_launches(observed: Iterable[dict[str, Any]]) -> list[int]:
@@ -1349,6 +1352,66 @@ def owner_launches(observed: Iterable[dict[str, Any]]) -> list[int]:
             and record.get("in_row") is True
             and isinstance(record.get("cmdline"), list)
             and invoked_module(record["cmdline"]) == OWNER_MODULE
+        }
+    )
+
+
+#: What ``process_tree.windows_gate_command`` puts before the gate script, and
+#: the separator ``process_gate._arguments`` requires after the nonce.
+_GATE_FLAGS = ["-I", "-S", "-u"]
+_GATE_NONCE_LENGTH = 64
+_HEX = frozenset("0123456789abcdefABCDEF")
+
+
+def gate_script(checkout: Path) -> Path:
+    """The release gate a runtime's own ``windows_gate_command`` names."""
+    return checkout / "linkedin_mcp_server" / "process_gate.py"
+
+
+def _same_file(path: str, expected: Path) -> bool:
+    spelled = os.path.normcase(os.path.realpath(path))
+    return spelled == os.path.normcase(os.path.realpath(expected))
+
+
+def owner_gate(cmdline: Sequence[str], gates: Sequence[Path]) -> bool:
+    """Whether a command line is the product's owner release gate.
+
+    Exactly what ``process_tree.windows_gate_command`` builds around the
+    owner: ``<python> -I -S -u <runtime>/linkedin_mcp_server/process_gate.py
+    <nonce> -- <python> ... -m linkedin_mcp_server.daemon_owner ...``, with
+    the gate one of *gates* after resolution, the nonce the 64 hex digits
+    ``process_gate`` accepts, and the target running the owner module by the
+    interpreter's own option grammar. The gate holds the owner until the
+    frontend releases it, so it shows an owner start was attempted, not that
+    owner code ran.
+    """
+    command = list(cmdline)
+    if len(command) < 8 or command[1:4] != _GATE_FLAGS:
+        return False
+    if not any(_same_file(command[4], gate) for gate in gates):
+        return False
+    nonce = command[5]
+    if len(nonce) != _GATE_NONCE_LENGTH or not set(nonce) <= _HEX:
+        return False
+    if command[6] != "--":
+        return False
+    return invoked_module(command[7:]) == OWNER_MODULE
+
+
+def owner_gates(observed: Iterable[dict[str, Any]], gates: Sequence[Path]) -> list[int]:
+    """The owner release gates the watcher saw this row start.
+
+    Row actors only, as for ``owner_launches``, and never asked for their
+    environment.
+    """
+    return sorted(
+        {
+            record["pid"]
+            for record in observed
+            if record.get("kind") in ("process.start", "process.update")
+            and record.get("in_row") is True
+            and isinstance(record.get("cmdline"), list)
+            and owner_gate(record["cmdline"], gates)
         }
     )
 
@@ -1396,6 +1459,11 @@ def row_expectations(
                 "a row that must stay Direct started a shared owner process "
                 "(the watcher saw it; publication is not required)"
             )
+        if vector.owner_start_attempted:
+            failures.append(
+                "a row that must stay Direct started the shared owner's release "
+                "gate (an attempted owner start, released or not)"
+            )
     return failures
 
 
@@ -1403,12 +1471,17 @@ def coordination_reading(vector: RowVector) -> str:
     """H-R12's reading: ``!`` when a shared owner took part, ``=`` when none did.
 
     An owner published (a descriptor named one, or in a Direct-configured row
-    any sign of one), an owner process the row started, or the frontend
-    forwarding to one. With the daemon enabled, ``fell_back`` false means the
-    frontend forwarded.
+    any sign of one), an owner process or owner release gate the row started,
+    or the frontend forwarding to one. With the daemon enabled, ``fell_back``
+    false means the frontend forwarded.
     """
     forwarded = vector.mode == "daemon" and not vector.fell_back
-    coordinated = vector.owner_published or vector.owner_launched or forwarded
+    coordinated = (
+        vector.owner_published
+        or vector.owner_launched
+        or vector.owner_start_attempted
+        or forwarded
+    )
     return "!" if coordinated else "="
 
 
@@ -1507,6 +1580,8 @@ class Observations:
     daemon_state_existed: bool = False
     #: Owner processes the watcher saw a row actor start (``owner_launches``).
     owner_launches: list[int] = field(default_factory=list)
+    #: Owner release gates the watcher saw a row actor start (``owner_gates``).
+    owner_gates: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -1648,6 +1723,7 @@ def judge_row(observed: Observations) -> tuple[RowVector, list[str]]:
         owner_published=owner_published,
         fell_back=observed.daemon and not forwarded,
         owner_launched=bool(observed.owner_launches),
+        owner_start_attempted=bool(observed.owner_gates),
         host_exit_clean=not host_problems,
         cleanup_clean=cleanup_clean,
     )
@@ -2015,6 +2091,12 @@ async def measure_host_quit_row(
         result.watcher = watcher.stop()
         observed_events = watcher.observed()
         launched = owner_launches(observed_events)
+        # The row's own runtime's gate, and the candidate's: a baseline row
+        # reaching the candidate's gate is an owner start attempt all the same.
+        gated = owner_gates(
+            observed_events,
+            [gate_script(runtime.checkout), gate_script(REPO_ROOT)],
+        )
         if runtime.frozen:
             result.runtime_failures = interpreter_failures(
                 observed_events,
@@ -2116,6 +2198,7 @@ async def measure_host_quit_row(
             expect_owner=expect_owner,
             daemon_state_existed=result.cleanup.existed,
             owner_launches=launched,
+            owner_gates=gated,
         )
     )
     result.failures += result.runtime_failures
