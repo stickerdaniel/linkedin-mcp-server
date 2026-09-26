@@ -338,6 +338,31 @@ jobs:
         timeout-minutes: 20
         run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_host_quit_row.py
 
+      # The frozen baseline (tests/differential/baseline.py): the pinned
+      # pre-default-on revision in a worktree of its own, with its own
+      # `uv sync` venv (runtime dependencies only, from its own lock) and its
+      # own `patchright install` into a browser cache of its own, so none of it
+      # is this checkout's. Refused unless HEAD is the pin and the worktree is
+      # clean. The system libraries `--with-deps` installed above serve its
+      # Chromium too.
+      - name: Prepare the frozen baseline
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+        timeout-minutes: 15
+        run: uv run python tests/differential/baseline.py "$RUNNER_TEMP/differential-baseline"
+
+      # K1 frozen on H-R1, and H-R12 (custom browser) in K1 frozen, K2 and K3.
+      # Its own pytest run, so its packet is its own run directory next to the
+      # H-R1 one in the evidence upload below.
+      - name: Compare the frozen baseline and a custom browser
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 25
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_frozen_rows.py
+
       # The row's evidence packet: events, counts, watcher output, failures
       # and the runtime identity, and nothing else (``events.PUBLISHED_FILES``).
       # The certificates sit in another directory and are never included.
@@ -371,8 +396,11 @@ jobs:
     # and wait on them, so a contract that stops holding turns into a wedged
     # job rather than a red one, and a wedged job reads as work in progress
     # for as long as anyone is willing to wait. Raised from 25 for the
-    # differential row at the end, whose own step bound is 20.
-    timeout-minutes: 45
+    # differential row at the end, whose own step bound is 20, and from 45
+    # for the frozen baseline after it: a second venv and browser download
+    # (bound 15) and five more native rows, three of them with an owner that
+    # leaves through its idle exit (bound 25). Windows is the slowest leg.
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
@@ -418,6 +446,7 @@ jobs:
           tests/differential/test_watcher.py
           tests/differential/test_host_stub.py
           tests/differential/test_preservation_gate.py
+          tests/differential/test_baseline.py
 
       # The identity gate runs on every leg, because every leg's browser is a
       # different one from the Ubuntu job's. macOS is the only platform with a
@@ -591,6 +620,23 @@ jobs:
           LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-evidence
         timeout-minutes: 20
         run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_host_quit_row.py
+
+      # The frozen baseline and its rows, as in the Ubuntu job.
+      - name: Prepare the frozen baseline
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+        timeout-minutes: 15
+        shell: bash
+        run: uv run python tests/differential/baseline.py "$RUNNER_TEMP/differential-baseline"
+
+      - name: Compare the frozen baseline and a custom browser
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 25
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_frozen_rows.py
 
       # The row's evidence packet: events, counts, watcher output, failures
       # and the runtime identity, and nothing else (``events.PUBLISHED_FILES``).

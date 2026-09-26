@@ -36,6 +36,7 @@ ME = "harness-user"
 
 class _Watcher:
     summary: dict = {}
+    records: list = []
 
     def __init__(self, *args, **kwargs):
         pass
@@ -44,7 +45,7 @@ class _Watcher:
         pass
 
     def observed(self):
-        return []
+        return list(self.records)
 
     def stop(self):
         return self.summary
@@ -63,7 +64,7 @@ def row(tmp_path, monkeypatch, profile):
     healthy = _healthy(profile, daemon=True)
     account = harness.ActorAccount(directory)
     preservation = AsyncMock(return_value=PostQuit(valid=True))
-    origin = SimpleNamespace(requests=[])
+    origin = SimpleNamespace(requests=[], accept_session=lambda _value: None)
     proxy = SimpleNamespace(url="http://127.0.0.1:9", decisions=[])
     owner = harness.OwnerIdentity(
         42,
@@ -107,11 +108,18 @@ def row(tmp_path, monkeypatch, profile):
     monkeypatch.setattr(harness, "harness_user", lambda: ME)
     monkeypatch.setattr(harness, "process_user", lambda process: process.user)
 
-    async def run(*, processes, summary):
+    # A frozen runtime's identity, staging and browser, asked of no interpreter.
+    monkeypatch.setattr(harness, "frozen_identity", lambda runtime: {})
+    monkeypatch.setattr(harness, "frozen_refusal", lambda *a: None)
+    monkeypatch.setattr(harness, "stage_frozen_session", lambda *a, **k: None)
+    monkeypatch.setattr(harness, "bundled_executable", lambda runtime: "/b/chrome")
+
+    async def run(*, processes, summary, observed=(), **row):
         monkeypatch.setattr(
             harness.psutil, "process_iter", lambda *a, **k: list(processes)
         )
         _Watcher.summary = {**(healthy.watcher or {}), **summary}
+        _Watcher.records = list(observed)
         result = await measure_host_quit_row(
             profile=directory,
             experiment="K3",
@@ -120,6 +128,7 @@ def row(tmp_path, monkeypatch, profile):
             egress=cast(Any, (origin, proxy)),
             log=EventLog(tmp_path / "evidence", run="gate"),
             work_dir=tmp_path / "row",
+            **row,
         )
         return result, preservation.await_count
 
