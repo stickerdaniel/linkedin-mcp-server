@@ -15,27 +15,35 @@ carries ``--type=`` and is part of its parent's tree, never a root of its own.
 Two roots with the same profile in one sample is the second concurrent browser
 the default-on contract forbids.
 
-**Nothing new is ever settled by age.** A process can exec at any moment of its
-life, and a forked child shows its parent's command line until it does, which
-is how the Node driver starts Chromium on POSIX. So every process that appeared
-after the first sample has its executable and command line read again on every
-sample for as long as it lives, and a change is reported as ``process.update``.
-Only the processes already running at the first sample are read once: they
-existed before any actor, nothing the row starts is among them, and none of
-them was ever told the row's temporary profile, so none can become a browser on
-it. Their identity is still checked on every sample.
+**Nothing a row could still change is settled by age.** A process can exec at
+any moment of its life, and a forked child shows its parent's command line
+until it does, which is how the Node driver starts Chromium on POSIX. So every
+row actor, and every process that appeared after the first sample, has its
+executable and command line read again on every sample for as long as it
+lives, and a change is reported as ``process.update``. Only a process that was
+already running at the first sample *and* does not descend from the harness is
+read once: nothing the row starts is among them. Its identity is still checked
+on every sample.
 
-**Relevant means descended from the harness.** A process is a row actor when its
-parent, at first sight, is the harness (``--root-pid``) or another actor. A
-metadata read that fails for an actor is recorded in the summary with how long
-it lasted, since a command line nobody could read is not a command line without
-the flag; it makes the census uncertain once the actor has stayed alive and
-unreadable past ``--unreadable-bound`` (see ``Sampler``). The same failure for
-an unrelated process, say a protected system service, is not recorded.
+**Relevant means descended from the harness.** A process is a row actor when it
+descends from the harness (``--root-pid``), whether it was already running at
+the first sample, as a staging leftover would be, or appeared later.
+
+**A row actor nobody can identify stays in the census as unknown.** Losing a
+process (``NoSuchProcess``, or a pid whose create time changed) is an exit.
+Being refused a read (``AccessDenied``, ``OSError``) is not: the actor keeps its
+last reading and is counted as unknown, which leaves O1 unestablished, unless
+the same sample read its executable and that executable cannot be the row's
+browser (``--browser-exe``, or anything under ``--browser-dir``). That is how
+the setuid ``/bin/ps`` the product runs on macOS, whose arguments psutil cannot
+read, is told apart from a browser whose arguments are hidden. Every failed
+read is recorded in the summary either way, with the executable, the fields,
+how long it lasted and how it ended.
 
 What sampling cannot see: a process that lives and dies between two samples.
 The summary records when observation began and ended and the largest wall-clock
-gap between two samples, so a claim built on it can state the window it had.
+gap between two samples, so a claim built on it can state the window it had; an
+overlap wholly between samples remains outside this oracle's resolution.
 
 Imports nothing from the repository, so it runs as a plain script:
 ``python watcher.py --out FILE --stop FILE ...``.
@@ -235,22 +243,20 @@ class Tracker:
 _UNREADABLE = (psutil.AccessDenied, OSError)
 
 
+def _real(path: str) -> str:
+    return os.path.normcase(os.path.realpath(path))
+
+
 class Sampler:
     """Reads the process table, re-reading every process that could still change.
 
     *pids*, *open_process* and *clock* are psutil's and the wall clock by
     default, and are replaced in tests to model a process table.
 
-    **A failed read is uncertainty only while it could hide a browser.** Each
-    failed read of a row actor opens an episode for that process and field,
-    which a later successful read or the process's exit closes. An episode
-    counts against the census (``relevant_read_failures``) only once the
-    process has stayed alive and unreadable for longer than *unreadable_bound*:
-    the same argument as the watcher's gap bound, since a hidden second browser
-    is a Chromium launch that outlives its own startup. A short-lived helper
-    whose arguments the operating system withholds, such as the setuid
-    ``/bin/ps`` the product runs on macOS to read process ancestry, closes its
-    episode within a few samples and stays on record as evidence only.
+    *browser_exe* and *browser_dir* name what the row's browser runs: its
+    resolved executable, and the directory the managed browsers are installed
+    in. A row actor whose metadata cannot be read is cleared only by an
+    executable read in the same sample that is neither of those.
     """
 
     def __init__(
@@ -261,116 +267,113 @@ class Sampler:
         pids: Callable[[], Iterable[int]] = psutil.pids,
         open_process: Callable[[int], Any] = psutil.Process,
         clock: Callable[[], float] = time.time,
-        unreadable_bound: float = 1.0,
+        browser_exe: str | None = None,
+        browser_dir: str | None = None,
     ) -> None:
         self.root_pid = root_pid
         self.own_pid = os.getpid() if own_pid is None else own_pid
         self._pids = pids
         self._open = open_process
         self._clock = clock
-        self.unreadable_bound = unreadable_bound
+        self.browser_exe = _real(browser_exe) if browser_exe else None
+        self.browser_dir = _real(browser_dir) if browser_dir else None
         self._known: dict[int, ProcessRecord] = {}
         self._baseline: set[tuple[int, float]] | None = None
         self._row: set[tuple[int, float]] = set()
-        self._episodes: dict[tuple[int, float, str], dict[str, Any]] = {}
+        self._episodes: dict[tuple[int, float], dict[str, Any]] = {}
         self._closed: list[dict[str, Any]] = []
+
+    def possible_browser(self, exe: str | None) -> bool:
+        """Whether an executable could be the row's browser. Unknown is yes."""
+        if not exe:
+            return True
+        real = _real(exe)
+        if self.browser_exe is None and self.browser_dir is None:
+            return True
+        if self.browser_exe is not None and real == self.browser_exe:
+            return True
+        if self.browser_dir is not None:
+            try:
+                if os.path.commonpath([real, self.browser_dir]) == self.browser_dir:
+                    return True
+            except ValueError:
+                pass
+        return False
 
     @property
     def read_failures(self) -> list[dict[str, Any]]:
-        """Every failed-read episode of a row actor, with how long it lasted.
+        """Every failed-read episode of a row actor.
 
         ``resolution`` says how an episode ended: ``readable`` or ``exited``,
         or ``open`` when it was still unreadable at the last sample.
         """
-        return [
-            *self._closed,
-            *(dict(e, resolution="open") for e in self._episodes.values()),
+        open_ = [
+            dict(e, failures=sorted(e["failures"]), resolution="open")
+            for e in self._episodes.values()
         ]
+        return [*self._closed, *open_]
 
     @property
     def relevant_read_failures(self) -> list[dict[str, Any]]:
-        """The episodes long enough to hide a browser root."""
-        return [e for e in self.read_failures if e["seconds"] > self.unreadable_bound]
-
-    def _track_failures(
-        self, sample: dict[int, ProcessRecord], failures: dict[int, list[str]]
-    ) -> None:
-        now = self._clock()
-        failing: set[tuple[int, float, str]] = set()
-        for pid, failed in failures.items():
-            process = sample[pid]
-            if not process.in_row:
-                continue
-            for field in failed:
-                key = (pid, process.start, field)
-                failing.add(key)
-                episode = self._episodes.setdefault(
-                    key,
-                    {
-                        "pid": pid,
-                        "start_identity": process.start,
-                        "failure": field,
-                        "exe": process.exe,
-                        "first": now,
-                        "last": now,
-                        "seconds": 0.0,
-                    },
-                )
-                episode["last"] = now
-                episode["seconds"] = round(now - episode["first"], 4)
-        for key in [key for key in self._episodes if key not in failing]:
-            pid, start, _ = key
-            alive = pid in sample and sample[pid].start == start
-            episode = self._episodes.pop(key)
-            self._closed.append(
-                dict(episode, resolution="readable" if alive else "exited")
-            )
+        """The episodes where the actor could have been a hidden browser root."""
+        return [e for e in self.read_failures if e["possible_browser"]]
 
     def _read(
         self, process: Any, known: ProcessRecord | None
-    ) -> tuple[int, str | None, tuple[str, ...], list[str]]:
+    ) -> tuple[int, str | None, tuple[str, ...], list[str], bool]:
         failures: list[str] = []
         ppid = known.ppid if known is not None else -1
         exe = known.exe if known is not None else None
         cmdline = known.cmdline if known is not None else ()
+        exe_read = False
         try:
             ppid = process.ppid()
         except _UNREADABLE as exc:
             failures.append(f"ppid: {type(exc).__name__}")
         try:
             exe = process.exe()
+            exe_read = True
         except _UNREADABLE as exc:
             failures.append(f"exe: {type(exc).__name__}")
         try:
             cmdline = tuple(process.cmdline())
         except _UNREADABLE as exc:
             failures.append(f"cmdline: {type(exc).__name__}")
-        return ppid, exe, cmdline, failures
+        return ppid, exe, cmdline, failures, exe_read
 
     def sample(self) -> dict[int, ProcessRecord]:
         first = self._baseline is None
         sample: dict[int, ProcessRecord] = {}
-        failures: dict[int, list[str]] = {}
+        # pid -> (failed fields, whether the executable was read this sample)
+        failures: dict[int, tuple[list[str], bool]] = {}
         for pid in self._pids():
+            known = self._known.get(pid)
             try:
                 # Reads the create time, which is what separates a recycled pid
                 # from the process already known under it.
                 process = self._open(pid)
                 start = process.create_time()
-            except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+            except psutil.NoSuchProcess:
                 continue
-            known = self._known.get(pid)
+            except _UNREADABLE as exc:
+                # Present but unidentifiable. A known row actor keeps its last
+                # reading and is unknown; anything else cannot be attributed.
+                if known is not None and known.in_row:
+                    sample[pid] = known
+                    failures[pid] = ([f"identity: {type(exc).__name__}"], False)
+                continue
             if known is not None and known.start != start:
                 known = None
             if (
                 known is not None
+                and not known.in_row
                 and self._baseline is not None
                 and known.identity in self._baseline
             ):
                 sample[pid] = known
                 continue
             try:
-                ppid, exe, cmdline, failed = self._read(process, known)
+                ppid, exe, cmdline, failed, exe_read = self._read(process, known)
             except psutil.NoSuchProcess:
                 continue
             sample[pid] = record(
@@ -382,7 +385,7 @@ class Sampler:
                 in_row=known is not None and known.in_row,
             )
             if failed:
-                failures[pid] = failed
+                failures[pid] = (failed, exe_read)
         if first:
             self._baseline = {process.identity for process in sample.values()}
             root = sample.get(self.root_pid)
@@ -393,8 +396,55 @@ class Sampler:
         self._known = sample
         return sample
 
+    def _track_failures(
+        self,
+        sample: dict[int, ProcessRecord],
+        failures: dict[int, tuple[list[str], bool]],
+    ) -> None:
+        now = self._clock()
+        failing: set[tuple[int, float]] = set()
+        for pid, (failed, exe_read) in failures.items():
+            process = sample[pid]
+            if not process.in_row:
+                continue
+            key = process.identity
+            failing.add(key)
+            episode = self._episodes.setdefault(
+                key,
+                {
+                    "pid": pid,
+                    "start_identity": process.start,
+                    "exe": process.exe,
+                    "failures": set(),
+                    "first": now,
+                    "possible_browser": False,
+                },
+            )
+            episode["failures"].update(failed)
+            episode["exe"] = process.exe
+            episode["last"] = now
+            episode["seconds"] = round(now - episode["first"], 4)
+            # Cleared only by an executable read now that cannot be the browser.
+            if not exe_read or self.possible_browser(process.exe):
+                episode["possible_browser"] = True
+        for key in [key for key in self._episodes if key not in failing]:
+            pid, start = key
+            alive = pid in sample and sample[pid].start == start
+            episode = self._episodes.pop(key)
+            self._closed.append(
+                dict(
+                    episode,
+                    failures=sorted(episode["failures"]),
+                    resolution="readable" if alive else "exited",
+                )
+            )
+
     def _classify(self, sample: dict[int, ProcessRecord]) -> None:
-        """Mark row actors: the harness, and whatever descends from it."""
+        """Mark row actors: the harness, and whatever descends from it.
+
+        At the first sample too: a descendant already running then, such as a
+        staging leftover, is a row actor like any other and is never cached.
+        """
         changed = True
         while changed:
             changed = False
@@ -404,8 +454,6 @@ class Sampler:
                 if process.identity in self._row:
                     sample[pid] = replace(process, in_row=True)
                     changed = True
-                    continue
-                if self._baseline is not None and process.identity in self._baseline:
                     continue
                 parent = sample.get(process.ppid)
                 if parent is not None and (
@@ -431,9 +479,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     # Its own deadline, so a harness that dies without writing the stop file
     # cannot leave this sampling for the rest of the runner's life.
     parser.add_argument("--deadline", type=float, default=900.0)
-    # How long a row actor may stay alive and unreadable before the census is
-    # uncertain. The harness passes the gap bound it judges the row by.
-    parser.add_argument("--unreadable-bound", type=float, default=1.0)
+    # What the row's browser runs: an unreadable actor running either could be
+    # a browser root, and one running neither cannot.
+    parser.add_argument("--browser-exe")
+    parser.add_argument("--browser-dir")
     args = parser.parse_args(argv)
 
     base = {
@@ -443,7 +492,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "platform": args.platform,
     }
     tracker = Tracker()
-    sampler = Sampler(args.root_pid, unreadable_bound=args.unreadable_bound)
+    sampler = Sampler(
+        args.root_pid, browser_exe=args.browser_exe, browser_dir=args.browser_dir
+    )
     began = time.monotonic()
     observation_start: float | None = None
     last_sample: float | None = None
@@ -504,7 +555,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "observation_start": observation_start,
                 "observation_end": last_sample,
                 "max_gap_seconds": round(max_gap, 4),
-                "unreadable_bound_seconds": args.unreadable_bound,
+                "browser_exe": args.browser_exe,
+                "browser_dir": args.browser_dir,
                 "read_failures": sampler.read_failures,
                 "relevant_read_failures": sampler.relevant_read_failures,
                 "max_roots": tracker.max_roots,

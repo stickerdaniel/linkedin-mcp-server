@@ -12,6 +12,7 @@ from __future__ import annotations
 import dataclasses
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import psutil
 import pytest
@@ -26,7 +27,9 @@ from differential.harness import (
     PostQuit,
     PublishedOwner,
     RowResult,
+    identify_owner,
     judge_row,
+    preservation_refusals,
     repeat_verdict,
     retire_daemon_state,
     settle_owner,
@@ -38,6 +41,8 @@ from differential.session import (
     write_synthetic_cookie_file,
 )
 from differential.synthetic_origin import OriginRequest
+from differential.test_watcher import BROWSER_EXE, _sampler
+from differential.watcher import Tracker, canonical_user_data_dir
 from linkedin_mcp_server.session_state import portable_cookie_path, write_source_state
 
 KEY = "/tmp/differential-row-profile"
@@ -127,7 +132,7 @@ def _watcher(profile, **summary):
             lambda p: _watcher(
                 p, relevant_read_failures=[{"pid": 7, "failure": "cmdline"}]
             ),
-            "could not read",
+            "anything but a possible browser",
         ),
         (lambda p: dataclasses.replace(_healthy(p), watcher=None), "no summary"),
     ],
@@ -244,12 +249,35 @@ def test_a_cleanup_intervention_fails_the_row(profile, changes, reported):
 class _Process:
     """A modelled owner process: the handle the row kept when it found it."""
 
-    def __init__(self, *, running=True, stops_on_kill=True):
+    def __init__(
+        self,
+        *,
+        running=True,
+        stops_on_kill=True,
+        created=100.0,
+        liveness_error=None,
+        wait_error=None,
+        cmdline=("python", "-P", "-m", "linkedin_mcp_server.daemon_owner"),
+    ):
         self.running = running
         self.stops_on_kill = stops_on_kill
+        self.created = created
+        self.liveness_error = liveness_error
+        self.wait_error = wait_error
+        self._cmdline = list(cmdline)
         self.kills = 0
 
+    def create_time(self):
+        if isinstance(self.created, BaseException):
+            raise self.created
+        return self.created
+
+    def cmdline(self):
+        return self._cmdline
+
     def is_running(self):
+        if self.liveness_error is not None:
+            raise self.liveness_error
         return self.running
 
     def kill(self):
@@ -258,6 +286,8 @@ class _Process:
             self.running = False
 
     def wait(self, timeout=None):
+        if self.wait_error is not None:
+            raise self.wait_error
         if self.running:
             raise psutil.TimeoutExpired(timeout)
 
@@ -363,6 +393,34 @@ def test_an_owner_that_survives_its_kill_is_not_gone(no_pid_lookup):
     assert "still running" in disposition.failures[0]
 
 
+def test_a_descriptor_naming_another_pid_is_refused(no_pid_lookup):
+    process = _Process()
+    disposition = settle_owner(
+        _owner(process), PublishedOwner(4322, "instance-a"), None, auth_root="/auth"
+    )
+    assert disposition.state == "unknown" and not disposition.gone
+    assert process.kills == 0
+    assert "pid 4322" in disposition.failures[0]
+
+
+def test_liveness_that_cannot_be_read_is_unknown_not_gone(no_pid_lookup):
+    process = _Process(liveness_error=psutil.AccessDenied(4321))
+    disposition = settle_owner(
+        _owner(process), PublishedOwner(4321, "instance-a"), None, auth_root="/auth"
+    )
+    assert disposition.state == "unknown" and not disposition.gone
+    assert process.kills == 0 and "liveness" in disposition.failures[0]
+
+
+def test_an_exit_that_cannot_be_confirmed_is_unknown(no_pid_lookup):
+    process = _Process(stops_on_kill=False, wait_error=psutil.AccessDenied(4321))
+    disposition = settle_owner(
+        _owner(process), PublishedOwner(4321, "instance-a"), None, auth_root="/auth"
+    )
+    assert disposition.state == "unknown" and disposition.signalled
+    assert not disposition.gone
+
+
 def test_nothing_published_and_nothing_identified_is_gone(no_pid_lookup):
     disposition = settle_owner(None, None, None, auth_root="/auth")
     assert (disposition.gone, disposition.signalled, disposition.failures) == (
@@ -417,11 +475,181 @@ def test_cleanup_keeps_the_directory_when_the_owner_is_unconfirmed(row_state, st
     assert any("kept" in failure for failure in cleanup.failures)
 
 
+def test_cleanup_keeps_the_directory_when_liveness_is_unreadable(row_state):
+    directory, published, account = row_state
+    published["descriptor"] = SimpleNamespace(pid=4321, instance_id="instance-a")
+    process = _Process(liveness_error=psutil.AccessDenied(4321))
+    cleanup = retire_daemon_state(account, _owner(process))
+    assert directory.exists() and not cleanup.owner_gone and not cleanup.cleaned
+
+
 def test_cleanup_keeps_the_directory_of_an_unidentified_owner(row_state):
     directory, published, account = row_state
     published["descriptor"] = SimpleNamespace(pid=4321, instance_id="instance-a")
     cleanup = retire_daemon_state(account, None)
     assert directory.exists() and not cleanup.cleaned
+
+
+# --- Owner association -------------------------------------------------------------
+
+
+def _row_account(tmp_path):
+    auth = tmp_path / "auth"
+    (auth / "profile").mkdir(parents=True)
+    return harness.ActorAccount(auth / "profile")
+
+
+def _published(account, *, pid=4321, instance="instance-a", profile=None):
+    return SimpleNamespace(
+        pid=pid,
+        instance_id=instance,
+        profile_path=str(profile if profile is not None else account.profile),
+    )
+
+
+def _observed_owner(pid=4321, start=100.0, *, in_row=True, actor="owner"):
+    return [
+        {
+            "kind": "process.start",
+            "actor": actor,
+            "pid": pid,
+            "start_identity": start,
+            "in_row": in_row,
+        }
+    ]
+
+
+def test_an_owner_the_watcher_saw_this_row_start_is_identified(tmp_path):
+    account = _row_account(tmp_path)
+    process = _Process()
+    identity, problem = identify_owner(
+        _published(account), account, _observed_owner(), open_process=lambda _: process
+    )
+    assert problem is None and identity is not None
+    assert (identity.pid, identity.create_time, identity.instance_id) == (
+        4321,
+        100.0,
+        "instance-a",
+    )
+    assert identity.auth_root == str(account.auth_root)
+
+
+def test_an_owner_first_seen_before_its_exec_is_identified_by_its_update(tmp_path):
+    account = _row_account(tmp_path)
+    observed = [
+        {**_observed_owner()[0], "actor": "frontend"},
+        {**_observed_owner()[0], "kind": "process.update"},
+    ]
+    identity, _ = identify_owner(
+        _published(account), account, observed, open_process=lambda _: _Process()
+    )
+    assert identity is not None
+
+
+def test_a_stale_descriptor_whose_pid_another_roots_owner_took_is_refused(tmp_path):
+    # This row's owner, pid 4321, started at 100.0 and has gone; the pid now
+    # names another auth root's owner, started later.
+    account = _row_account(tmp_path)
+    foreign = _Process(created=250.0)
+    identity, problem = identify_owner(
+        _published(account), account, _observed_owner(), open_process=lambda _: foreign
+    )
+    assert identity is None and problem and "not an owner the watcher saw" in problem
+    disposition = settle_owner(
+        identity,
+        PublishedOwner(4321, "instance-a"),
+        None,
+        auth_root=str(account.auth_root),
+    )
+    assert not disposition.gone and foreign.kills == 0
+
+
+@pytest.mark.parametrize(
+    "observed",
+    [
+        pytest.param([], id="no-observation"),
+        pytest.param(_observed_owner(in_row=False), id="not-this-rows-actor"),
+        pytest.param(_observed_owner(actor="frontend"), id="not-an-owner"),
+        pytest.param(_observed_owner(pid=9999), id="another-pid"),
+    ],
+)
+def test_an_owner_without_evidence_of_this_rows_start_is_refused(tmp_path, observed):
+    account = _row_account(tmp_path)
+    identity, problem = identify_owner(
+        _published(account), account, observed, open_process=lambda _: _Process()
+    )
+    assert identity is None and problem
+
+
+def test_a_descriptor_for_another_profile_is_refused(tmp_path):
+    account = _row_account(tmp_path)
+    identity, problem = identify_owner(
+        _published(account, profile=tmp_path / "other" / "profile"),
+        account,
+        _observed_owner(),
+        open_process=lambda _: _Process(),
+    )
+    assert identity is None and problem and "another profile" in problem
+
+
+def test_an_owner_whose_create_time_cannot_be_read_is_refused(tmp_path):
+    account = _row_account(tmp_path)
+    identity, problem = identify_owner(
+        _published(account),
+        account,
+        _observed_owner(),
+        open_process=lambda _: _Process(created=psutil.AccessDenied(4321)),
+    )
+    assert identity is None and problem and "could not be read" in problem
+
+
+# --- The post-quit gate ----------------------------------------------------------------
+
+
+_SETTLED = DaemonCleanup("dir", True, False, True, True)
+
+
+def test_settled_actors_admit_the_post_quit_session():
+    assert (
+        preservation_refusals(
+            _SETTLED, owner_exit="exited", residual=[], swept=[], remaining=[]
+        )
+        == []
+    )
+
+
+@pytest.mark.parametrize(
+    ("changes", "reported"),
+    [
+        ({"owner_exit": "still running"}, "owner's exit"),
+        ({"owner_exit": "unknown (AccessDenied)"}, "owner's exit"),
+        (
+            {"cleanup": DaemonCleanup("dir", True, False, False, False, ("kept",))},
+            "could not confirm",
+        ),
+        ({"cleanup": DaemonCleanup("dir", True, False, True, False)}, "did not finish"),
+        ({"residual": [7]}, "outlived"),
+        ({"swept": [8]}, "had to kill"),
+        ({"remaining": [9]}, "still run"),
+    ],
+)
+def test_unsettled_actors_refuse_the_post_quit_session(changes, reported):
+    arguments: dict[str, Any] = {
+        "cleanup": _SETTLED,
+        "owner_exit": "exited",
+        "residual": [],
+        "swept": [],
+        "remaining": [],
+        **changes,
+    }
+    refusals = preservation_refusals(
+        arguments["cleanup"],
+        owner_exit=arguments["owner_exit"],
+        residual=arguments["residual"],
+        swept=arguments["swept"],
+        remaining=arguments["remaining"],
+    )
+    assert any(reported in refusal for refusal in refusals), refusals
 
 
 # --- K0, at its call site ------------------------------------------------------------
@@ -474,3 +702,48 @@ async def test_k0_fails_a_repeat_in_another_mode(profile, monkeypatch):
 def test_k0_without_a_valid_reference_fails(profile):
     vector = _valid_vector(profile)
     assert repeat_verdict(None, RowResult("K0", "daemon", vector=vector))
+
+
+# --- The e1cb census model, judged in full -------------------------------------------
+
+
+def _census(unreadable: bool) -> dict:
+    """Two browser roots on the row's profile, the first one's identity denied
+    when *unreadable*; the watcher's own summary of that table."""
+    table: dict[int, dict[str, Any]] = {
+        1: {"start": 1.0, "ppid": 0, "cmdline": ["pytest"]}
+    }
+    sampler, tracker = _sampler(table), Tracker()
+    tracker.observe(sampler.sample(), 0.0)
+    table[2] = {"start": 2.0, "ppid": 1, "cmdline": ["python", "pre-exec"]}
+    tracker.observe(sampler.sample(), 1.0)
+    chrome = [BROWSER_EXE, f"--user-data-dir={KEY}"]
+    table[2].update(cmdline=chrome, exe=BROWSER_EXE)
+    if unreadable:
+        table[2]["start"] = psutil.AccessDenied(2)
+    table[3] = {"start": 3.0, "ppid": 1, "exe": BROWSER_EXE, "cmdline": chrome}
+    tracker.observe(sampler.sample(), 2.0)
+    return {
+        "stopped_by": "stop file",
+        "observation_start": 10.0,
+        "observation_end": 100.0,
+        "max_gap_seconds": 0.2,
+        "max_roots": dict(tracker.max_roots),
+        "read_failures": sampler.read_failures,
+        "relevant_read_failures": sampler.relevant_read_failures,
+    }
+
+
+@pytest.mark.parametrize("unreadable", [True, False])
+def test_two_browser_roots_fail_the_row_whether_or_not_one_is_readable(
+    profile, unreadable
+):
+    vector, failures = judge_row(
+        dataclasses.replace(
+            _healthy(profile),
+            browser_key=canonical_user_data_dir(KEY),
+            watcher=_census(unreadable),
+        )
+    )
+    assert not vector.o1_single_browser
+    assert failures

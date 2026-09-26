@@ -58,7 +58,7 @@ import shutil
 import subprocess
 import sys
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -121,14 +121,11 @@ READ_TOOL_ARGUMENTS = {"num_posts": 1}
 #: owner before the row's one call reached it.
 IDLE_TIMEOUT_SECONDS = 20.0
 
-#: The largest wall-clock gap between two watcher samples a row accepts. O1 is
-#: a sampled claim, and this is its resolution: a second browser on the profile
-#: is a whole Chromium launch, which has to live through its own startup, well
-#: over a second on these runners, before it can exit again, so a gap under a
-#: second cannot hide one that got that far. Twenty times the target interval,
-#: which leaves room for a busy runner without letting a stalled watcher pass.
-#: The same bound limits how long a row actor may stay alive and unreadable
-#: before the census counts as uncertain, for the same reason.
+#: The largest wall-clock gap between two watcher samples a row accepts. The
+#: maximum accepted gap is an observation-quality budget, not proof that every
+#: browser lifetime is sampled. Record the actual gaps; an overlap wholly
+#: between samples remains outside this oracle's resolution. Twenty times the
+#: target interval, so a busy runner passes and a stalled watcher does not.
 MAX_WATCHER_GAP_SECONDS = 1.0
 
 _HOST_EXIT_SECONDS = 90.0
@@ -239,27 +236,18 @@ class ActorAccount:
         return canonical_user_data_dir(str(self.profile))
 
 
-def claim_account(profile: Path) -> ActorAccount:
-    """Refuse the user's own auth root, before anything touches the profile.
+def _refuse_overlap(profile: Path, auth_root: str, reals: list[str]) -> None:
+    """Refuse *auth_root* if it is, holds or sits inside any of *reals*.
 
-    Refused in both directions: an auth root at or inside ``~/.linkedin-mcp``,
-    and one at or above it, such as the home directory itself.
-
-    First as written, as strings, so a profile named inside the real root is
-    refused without a single filesystem call beneath it. Then by the
-    filesystem's identity (device and inode) of the auth root and each of its
-    ancestors against the real root and each of its ancestors. Identity is what
-    the filesystem itself says is the same directory, so a case alias on a
+    As a string first, so a root named inside the real one is refused without a
+    filesystem call beneath it; then by the filesystem's identity (device and
+    inode) of the auth root and each of its ancestors, written and resolved,
+    against the real root and each of its ancestors. Identity is what the
+    filesystem itself says is the same directory, so a case alias on a
     case-insensitive volume and a link are both caught, and two names a
     case-sensitive volume keeps apart stay apart. The auth root has to exist:
     an identity that cannot be read cannot be judged.
     """
-    reals = [
-        os.path.join(os.path.abspath(home), REAL_AUTH_ROOT_NAME)
-        for home in account_homes()
-    ]
-    raw = os.path.abspath(os.path.expanduser(profile))
-    auth_root = os.path.dirname(raw)
     written = os.path.normcase(auth_root)
     for real in reals:
         protected = os.path.normcase(real)
@@ -268,7 +256,6 @@ def claim_account(profile: Path) -> ActorAccount:
                 f"refusing profile {profile}: its auth root {auth_root} "
                 f"overlaps the account's own {real}"
             )
-
     candidate = _identity(auth_root)
     if candidate is None:
         raise ContainmentError(
@@ -288,7 +275,31 @@ def claim_account(profile: Path) -> ActorAccount:
                 f"refusing profile {profile}: its auth root {auth_root} contains "
                 f"the account's own {real}"
             )
-    return ActorAccount(Path(os.path.realpath(raw)))
+
+
+def claim_account(profile: Path) -> ActorAccount:
+    """Refuse the user's own auth root, before anything touches the profile.
+
+    Refused in both directions: an auth root at or inside ``~/.linkedin-mcp``,
+    and one at or above it, such as the home directory itself.
+
+    Two auth roots are judged, completely: the parent of the profile as
+    written, and the parent of the profile once the whole path is resolved.
+    The second is the one every product path acts on, since they resolve the
+    configured profile before taking its parent, and it differs from the first
+    exactly when the profile itself is a link. The account returned carries the
+    resolved profile, which is the path that was checked.
+    """
+    reals = [
+        os.path.join(os.path.abspath(home), REAL_AUTH_ROOT_NAME)
+        for home in account_homes()
+    ]
+    raw = os.path.abspath(os.path.expanduser(profile))
+    # As written first, and before any filesystem call on the profile itself.
+    _refuse_overlap(profile, os.path.dirname(raw), reals)
+    resolved = os.path.realpath(raw)
+    _refuse_overlap(profile, os.path.dirname(resolved), reals)
+    return ActorAccount(Path(resolved))
 
 
 def actor_environment(
@@ -427,9 +438,18 @@ class Watcher:
     """The watcher process, and the events it wrote once it has stopped."""
 
     def __init__(
-        self, directory: Path, log: EventLog, *, experiment: str, row: str
+        self,
+        directory: Path,
+        log: EventLog,
+        *,
+        experiment: str,
+        row: str,
+        browser_exe: str | None = None,
+        browser_dir: Path | None = None,
     ) -> None:
         directory.mkdir(parents=True, exist_ok=True)
+        self.browser_exe = browser_exe
+        self.browser_dir = browser_dir
         self.out = directory / "watcher.jsonl"
         self.stop_file = directory / "watcher.stop"
         self.stderr = directory / "watcher.stderr"
@@ -456,9 +476,11 @@ class Watcher:
             self._log.platform,
             "--root-pid",
             str(os.getpid()),
-            "--unreadable-bound",
-            str(MAX_WATCHER_GAP_SECONDS),
         ]
+        if self.browser_exe:
+            command += ["--browser-exe", self.browser_exe]
+        if self.browser_dir is not None:
+            command += ["--browser-dir", str(self.browser_dir)]
         detach: dict[str, Any] = (
             {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
             if sys.platform == "win32"
@@ -470,7 +492,8 @@ class Watcher:
             )
         self._process = process
         # The first sample is the baseline: a process already running then is
-        # never reported as started. Waiting for it keeps the actors out of it.
+        # never reported as started. Waiting for it means every actor the row
+        # starts afterwards is reported as one.
         deadline = time.monotonic() + ready_seconds
         while time.monotonic() < deadline:
             if any(r.get("kind") == "watcher.ready" for r in read_jsonl(self.out)):
@@ -482,6 +505,10 @@ class Watcher:
             f"the watcher did not take its baseline sample: "
             f"{self.stderr.read_text(errors='replace')[-2000:]}"
         )
+
+    def observed(self) -> list[dict[str, Any]]:
+        """What the watcher has written so far, read while it still runs."""
+        return read_jsonl(self.out)
 
     def stop(self) -> dict[str, Any] | None:
         """Stop sampling, copy its events into the log, return its summary."""
@@ -526,14 +553,14 @@ def watcher_failures(
             f"the watcher's largest gap between samples was {gap}s, over the "
             f"{max_gap}s this row accepts"
         )
-    # Only a read failure that outlived the bound: a shorter one ended before a
-    # hidden browser could have got past its own startup. Every failure stays
-    # in the summary's ``read_failures`` either way.
+    # Only an actor that could have been a browser root: one whose executable
+    # could not be read, or is the row's browser. Every failed read stays in
+    # the summary's ``read_failures`` either way.
     unread = summary.get("relevant_read_failures") or []
     if unread:
         failures.append(
-            f"the watcher could not read {len(unread)} row actors' metadata for "
-            f"longer than {summary.get('unreadable_bound_seconds')}s: {unread[:5]}"
+            f"the watcher could not identify {len(unread)} row actors as "
+            f"anything but a possible browser: {unread[:5]}"
         )
     return failures
 
@@ -875,22 +902,66 @@ class PublishedOwner:
     instance_id: str
 
 
+#: Gone, confirmed: not running before cleanup, or stopped by it and waited for.
+GONE = "gone"
+STOPPED = "stopped"
+#: Anything cleanup could not confirm. Never read as gone.
+UNKNOWN = "unknown"
+
+
 @dataclass(frozen=True)
 class OwnerDisposition:
-    #: The owner this row identified is provably not running, or none was.
-    gone: bool
+    #: ``gone``, ``stopped`` or ``unknown``.
+    state: str
     #: Cleanup sent the owner a signal.
     signalled: bool
     failures: tuple[str, ...] = ()
+
+    @property
+    def gone(self) -> bool:
+        return self.state in (GONE, STOPPED)
+
+
+#: How far apart two readings of one create time may be. Both come from psutil
+#: on the same machine; the tolerance only absorbs float formatting.
+_START_TOLERANCE_SECONDS = 0.01
+
+
+def row_owner_starts(observed: Iterable[dict[str, Any]]) -> list[tuple[int, float]]:
+    """The owners the watcher saw start as this row's actors.
+
+    A ``process.start`` or ``process.update`` it wrote with actor ``owner`` and
+    ``in_row`` set: a process that appeared after its baseline, whose ancestry
+    at first sight led to this row's harness (the frontend spawns the owner),
+    and whose command line was the owner's.
+    """
+    return [
+        (record["pid"], record["start_identity"])
+        for record in observed
+        if record.get("kind") in ("process.start", "process.update")
+        and record.get("actor") == "owner"
+        and record.get("in_row") is True
+        and isinstance(record.get("pid"), int)
+        and isinstance(record.get("start_identity"), (int, float))
+    ]
 
 
 def identify_owner(
     published: Any,
     account: ActorAccount,
+    observed: Iterable[dict[str, Any]],
     *,
     open_process: Callable[[int], Any] = psutil.Process,
 ) -> tuple[OwnerIdentity | None, str | None]:
-    """Bind the descriptor's owner to a live process, or say why it cannot be."""
+    """Bind the descriptor's owner to this row, or say why it cannot be.
+
+    The descriptor says which pid and profile; it cannot say that the process
+    now at that pid is the one this row started. The watcher can: it saw the
+    row's own frontend start an owner, with a pid and a create time. Only a
+    process whose pid and create time match that observation is this row's
+    owner, which is what refuses a stale descriptor whose pid another owner
+    has since taken.
+    """
     try:
         if canonical_user_data_dir(published.profile_path) != account.browser_key:
             return None, "the descriptor serves another profile"
@@ -899,11 +970,17 @@ def identify_owner(
     try:
         process = open_process(published.pid)
         created = process.create_time()
-        cmdline = " ".join(process.cmdline())
     except psutil.Error as exc:
         return None, f"pid {published.pid} could not be read ({type(exc).__name__})"
-    if _OWNER_MODULE not in cmdline:
-        return None, f"pid {published.pid} is not a daemon owner"
+    starts = row_owner_starts(observed)
+    if not any(
+        pid == published.pid and abs(start - created) <= _START_TOLERANCE_SECONDS
+        for pid, start in starts
+    ):
+        return None, (
+            f"pid {published.pid}, created {created}, is not an owner the watcher "
+            f"saw this row start (saw {starts})"
+        )
     return (
         OwnerIdentity(
             pid=published.pid,
@@ -926,67 +1003,65 @@ def settle_owner(
 ) -> OwnerDisposition:
     """Decide whether the row's owner is gone, signalling only that owner.
 
-    Nothing is ever looked up by pid here. The only process that may receive a
-    signal is ``owner.process``, the handle taken when the row identified it,
-    and psutil refuses to signal through it once its pid names a process with
-    another create time. Everything else is refused and reported.
+    Three answers: gone (confirmed), stopped (confirmed same-row live, killed
+    and waited for), or unknown. Every psutil failure along the way is unknown,
+    never gone. Nothing is ever looked up by pid here: the only process that may
+    receive a signal is ``owner.process``, the handle taken when the row
+    identified it, and the descriptor must still name that pid and instance.
     """
+
+    def unknown(reason: str, *, signalled: bool = False) -> OwnerDisposition:
+        return OwnerDisposition(UNKNOWN, signalled, (reason,))
+
     if read_error is not None:
-        return OwnerDisposition(
-            False, False, (f"the row's descriptor could not be read: {read_error}",)
-        )
+        return unknown(f"the row's descriptor could not be read: {read_error}")
     if owner is None:
         if published is None:
-            return OwnerDisposition(True, False)
-        return OwnerDisposition(
-            False,
-            False,
-            (
-                f"the descriptor names pid {published.pid}, instance "
-                f"{published.instance_id}, which this row never identified; "
-                f"not signalled",
-            ),
+            return OwnerDisposition(GONE, False)
+        return unknown(
+            f"the descriptor names pid {published.pid}, instance "
+            f"{published.instance_id}, which this row never identified; "
+            f"not signalled"
         )
     if owner.auth_root != auth_root:
-        return OwnerDisposition(
-            False,
-            False,
-            (f"the identified owner belongs to {owner.auth_root}; not signalled",),
+        return unknown(
+            f"the identified owner belongs to {owner.auth_root}; not signalled"
         )
-    if published is not None and published.instance_id != owner.instance_id:
-        return OwnerDisposition(
-            False,
-            False,
-            (
-                f"the descriptor names instance {published.instance_id}, the row "
-                f"identified {owner.instance_id}; not signalled",
-            ),
+    if published is not None and (
+        published.pid != owner.pid or published.instance_id != owner.instance_id
+    ):
+        return unknown(
+            f"the descriptor names pid {published.pid}, instance "
+            f"{published.instance_id}; the row identified pid {owner.pid}, "
+            f"instance {owner.instance_id}; not signalled"
         )
     try:
         running = owner.process.is_running()
-    except psutil.Error:
-        running = False
+    except psutil.Error as exc:
+        return unknown(f"the owner's liveness could not be read ({type(exc).__name__})")
     if not running:
-        return OwnerDisposition(True, False)
+        return OwnerDisposition(GONE, False)
     try:
         owner.process.kill()
     except psutil.NoSuchProcess:
-        return OwnerDisposition(True, False)
+        return OwnerDisposition(GONE, False)
     except psutil.Error as exc:
-        return OwnerDisposition(
-            False, False, (f"the owner could not be stopped: {type(exc).__name__}",)
-        )
+        return unknown(f"the owner could not be stopped ({type(exc).__name__})")
     try:
         owner.process.wait(timeout=wait_seconds)
-    except psutil.TimeoutExpired:
-        return OwnerDisposition(
-            False,
-            True,
-            (f"the owner was still running {wait_seconds}s after it was killed",),
-        )
     except psutil.NoSuchProcess:
         pass
-    return OwnerDisposition(True, True)
+    except psutil.TimeoutExpired:
+        return unknown(
+            f"the owner was still running {wait_seconds}s after it was killed",
+            signalled=True,
+        )
+    except psutil.Error as exc:
+        return unknown(
+            f"the owner's exit could not be confirmed ({type(exc).__name__})",
+            signalled=True,
+        )
+    return OwnerDisposition(STOPPED, True)
 
 
 @dataclass(frozen=True)
@@ -1308,6 +1383,68 @@ def repeat_verdict(reference: RowVector | None, result: RowResult) -> list[str]:
 # --- Running the row -----------------------------------------------------------
 
 
+def preservation_refusals(
+    cleanup: DaemonCleanup,
+    *,
+    owner_exit: str | None,
+    residual: Sequence[int],
+    swept: Sequence[int],
+    remaining: Sequence[int],
+) -> list[str]:
+    """Why the post-quit session must not start, or nothing when it may.
+
+    It may start only when every actor of the row is settled: the owner, if
+    there was one, observed to exit and confirmed gone by cleanup; the profile's
+    browser census empty and resolved; and cleanup finished without anything
+    kept or killed. Launching another server to find out that authority was
+    uncertain is exactly what this refuses.
+    """
+    reasons = []
+    if owner_exit not in (None, "exited"):
+        reasons.append(f"the owner's exit was {owner_exit!r}")
+    if not cleanup.owner_gone:
+        reasons.append("cleanup could not confirm the owner gone")
+    if not cleanup.cleaned or cleanup.failures:
+        reasons.append(f"cleanup did not finish: {list(cleanup.failures)}")
+    if residual:
+        reasons.append(f"browsers outlived the row: {list(residual)}")
+    if swept:
+        reasons.append(f"cleanup had to kill browsers: {list(swept)}")
+    if remaining:
+        reasons.append(f"browsers still run on the profile: {list(remaining)}")
+    return reasons
+
+
+async def resolved_browser_executable(profile: Path) -> str | None:
+    """The executable the product would launch for this row, or None.
+
+    Asked of the product's own launch path with its configured options, so it
+    names the same binary the actors will run. None if it cannot say; the
+    watcher then still treats anything under the browsers directory as a
+    possible browser.
+    """
+    from patchright.async_api import async_playwright
+
+    from linkedin_mcp_server.browser_launch import build_launch_options
+    from linkedin_mcp_server.config import get_config
+    from linkedin_mcp_server.core.browser import BrowserManager
+
+    try:
+        options, viewport = build_launch_options(get_config().browser)
+        probe = BrowserManager(
+            user_data_dir=profile, headless=True, viewport=viewport, **options
+        )
+        playwright = await async_playwright().start()
+        try:
+            probe._playwright = playwright
+            return probe._executable_about_to_run()
+        finally:
+            probe._playwright = None
+            await playwright.stop()
+    except Exception:  # noqa: BLE001 - the directory rule still covers it
+        return None
+
+
 async def observe_preservation(
     account: ActorAccount,
     origin: SyntheticOrigin,
@@ -1405,7 +1542,16 @@ async def measure_host_quit_row(
         os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or default_browsers_path()
     )
     env = actor_environment(account, proxy.url, daemon=daemon, browsers=browsers)
-    watcher = Watcher(work_dir, log, experiment=experiment, row=row)
+    browser_exe = await resolved_browser_executable(account.profile)
+    emit("harness", "row.identity", browser_exe=browser_exe, browsers=str(browsers))
+    watcher = Watcher(
+        work_dir,
+        log,
+        experiment=experiment,
+        row=row,
+        browser_exe=browser_exe,
+        browser_dir=browsers,
+    )
     watcher.start()
     actors_began = time.time()
 
@@ -1433,7 +1579,7 @@ async def measure_host_quit_row(
             protocol=published.protocol_version,
             log_path=published.log_path,
         )
-        identified, problem = identify_owner(published, account)
+        identified, problem = identify_owner(published, account, watcher.observed())
         if identified is None:
             owner["identify_error"] = problem
         else:
@@ -1480,6 +1626,8 @@ async def measure_host_quit_row(
                 exit_record["seconds_after_quit"] = round(time.monotonic() - began, 3)
             except psutil.TimeoutExpired:
                 exit_record["how"] = "still running"
+            except psutil.Error as exc:
+                exit_record["how"] = f"unknown ({type(exc).__name__})"
             log_path = Path(owner.get("log_path") or "")
             if log_path.is_file():
                 lines = log_path.read_text(errors="replace").splitlines()
@@ -1534,8 +1682,23 @@ async def measure_host_quit_row(
 
     host = result.host
     assert host is not None
-    post_quit: PostQuit | None = None
-    if result.cleanup.owner_gone:
+    refusals = preservation_refusals(
+        result.cleanup,
+        owner_exit=(owner.get("exit") or {}).get("how") if daemon else None,
+        residual=residual,
+        swept=swept,
+        remaining=[process.pid for process in _profile_processes(account)],
+    )
+    if daemon and identified is None:
+        refusals.append("the row's owner was never identified")
+    post_quit: PostQuit | None
+    if refusals:
+        # Nothing is launched. The session's fate after the row is unknown, and
+        # the reasons are the row's failures.
+        post_quit = PostQuit(
+            valid=None, failures=[f"post-quit not run: {r}" for r in refusals]
+        )
+    else:
         post_quit = await observe_preservation(
             account,
             origin,
@@ -1547,14 +1710,14 @@ async def measure_host_quit_row(
                 "frontend", "user.output", stream="stderr", phase="post-quit", line=line
             ),
         )
-        emit(
-            "harness",
-            "tool.result",
-            phase="post-quit",
-            session_valid=post_quit.valid,
-            feed_requests=post_quit.feed_requests,
-            failures=post_quit.failures,
-        )
+    emit(
+        "harness",
+        "tool.result",
+        phase="post-quit",
+        session_valid=post_quit.valid,
+        feed_requests=post_quit.feed_requests,
+        failures=post_quit.failures,
+    )
     result.post_quit = post_quit
     result.owner = owner or None
 
