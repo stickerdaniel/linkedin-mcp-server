@@ -160,6 +160,17 @@ def test_a_fragment_on_a_renovate_pr_must_match_its_title(
         assert "changelog.d/1234.fix.md" in _errors(result)[0]
 
 
+def test_a_fragment_renamed_onto_a_renovate_pr_must_match_its_title(
+    tmp_path: Path,
+) -> None:
+    renamed = _file("changelog.d/1234.feat.md", "renamed")
+    files = [_CODE, renamed]
+    result = _run(tmp_path, _RENOVATE_TITLE, files, pr=_renovate_pr(files))
+
+    assert result.returncode == 1
+    assert "changelog.d/1234.fix.md" in _errors(result)[0]
+
+
 def test_renovate_fragment_is_still_checked(tmp_path: Path) -> None:
     files = [_CODE, _file("changelog.d/1234.fix.md", patch="@@ -0,0 +1 @@\n+")]
     result = _run(tmp_path, _RENOVATE_TITLE, files, pr=_renovate_pr(files))

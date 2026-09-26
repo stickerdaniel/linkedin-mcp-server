@@ -232,7 +232,7 @@ def check(
     # somebody added to an exempt PR still has to match its title.
     own = f"{prefix}{number}."
     if exempt and not any(
-        entry["filename"].startswith(own) and entry["status"] == "added"
+        entry["filename"].startswith(own) and entry["status"] != "removed"
         for entry in files
     ):
         return errors
