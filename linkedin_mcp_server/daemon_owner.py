@@ -502,8 +502,12 @@ def create_owner_server(
             # would lose a call. Nothing awaits from the check to the reply, so a
             # call cannot be admitted between the verdict and the retirement: it
             # is either counted before and makes this busy, or refused after.
-            if not liveness.try_retire(
-                "retire", background_work=browser_setup_in_progress()
+            # Busy is asked first and on its own: an owner already retiring for
+            # another reason still has calls it is draining, and the user agreed
+            # only to retiring an owner nobody is using.
+            setup = browser_setup_in_progress()
+            if liveness.busy(background_work=setup) or not liveness.try_retire(
+                "retire", background_work=setup
             ):
                 return JSONResponse(
                     {"standing_down": False, "busy": True}, status_code=409

@@ -1784,6 +1784,26 @@ class TestTheControlRoutes:
         assert admitted is not None, "a refused retirement closed admission"
         await admitted
 
+    async def test_an_owner_already_draining_calls_still_answers_busy(self):
+        # Retiring for another reason, a turnover here, with a call it is still
+        # draining. The user agreed only to retiring an owner nobody is using,
+        # so this is a refusal, not an acknowledgement of someone else's exit.
+        from linkedin_mcp_server import daemon_liveness
+
+        liveness = daemon_liveness.get_liveness()
+        liveness.serving_as("the-owner")
+        liveness.call_started()
+        liveness.retire("turnover")
+        asked: list[str] = []
+        app = self._app(stand_down=lambda: asked.append("asked"))
+
+        response = await self._stand_down(app, _idle_only_body())
+
+        assert response.status_code == 409
+        assert response.json() == {"standing_down": False, "busy": True}
+        assert asked == []
+        assert liveness.retire_reason == "turnover"
+
     async def test_a_call_cannot_slip_in_between_the_verdict_and_the_retirement(
         self, monkeypatch: pytest.MonkeyPatch
     ):
@@ -1817,7 +1837,8 @@ class TestTheControlRoutes:
 
         assert admitted, "the arriving call never ran"
         assert response.status_code == 200
-        assert admitted == [False], "a call was admitted by an owner that retired"
+        # One arrival per look for work; every one of them must be refused.
+        assert not any(admitted), "a call was admitted by an owner that retired"
 
     async def test_the_body_is_read_whole_before_anything_is_decided(self):
         # The body arrives in two parts with the owner suspended between them,
