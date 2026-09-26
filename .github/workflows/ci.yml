@@ -151,6 +151,7 @@ jobs:
           tests/test_installer_supervisor.py
           tests/test_installer_worker.py
           tests/test_process_tree.py
+          tests/test_daemon_regression_witnesses.py
           tests/test_windows_guardian_probe.py
           tests/test_private_state.py
 
@@ -315,6 +316,7 @@ jobs:
           tests/test_session_state.py::test_the_native_machine_api_answers_on_windows
           tests/test_daemon_lock.py
           tests/test_process_tree.py
+          tests/test_daemon_regression_witnesses.py
           tests/test_greenlet_runtime.py
 
       # The identity gate runs on every leg, because every leg's browser is a
