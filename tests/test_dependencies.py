@@ -52,6 +52,7 @@ class TestHandleAuthError:
             # The generation it observed travels with it, so the rotation
             # downstream can tell the dead session from a peer's repair.
             mock_relogin.assert_awaited_once()
+            assert mock_relogin.await_args is not None
             assert mock_relogin.await_args.args == (None,)
             # The value, not merely the keyword. Asserting only that the argument
             # exists left a mutation passing a hardcoded None green, which is the

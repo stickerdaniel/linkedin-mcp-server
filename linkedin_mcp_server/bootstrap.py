@@ -309,9 +309,9 @@ _MARKER_HELD = "\x00"
 #: and hit Python's 4300-digit integer limit on a long percentage. Bounded here,
 #: neither can be constructed.
 _PATCHRIGHT_PERCENT = re.compile(r"\|\s*(\d{1,3})%\s+of\s+([\d.]{1,15})\s*([KMG]i?B)")
-#: ``Downloading Chrome for Testing 149.0.7827.55 (…) from https://…``
+#: ``Downloading Chrome for Testing 153.0.8010.12 (…) from https://…``
 _PATCHRIGHT_DOWNLOAD = re.compile(r"^Downloading (.+?) from ")
-#: ``Chrome for Testing 149.0.7827.55 (…) downloaded to /…/chromium-1228``. The
+#: ``Chrome for Testing 153.0.8010.12 (…) downloaded to /…/chromium-1243``. The
 #: only completion signal there is when no percentage was ever reported.
 _PATCHRIGHT_DONE = re.compile(r" downloaded to ")
 _BINARY_UNITS = {"KiB": 1024, "MiB": 1024**2, "GiB": 1024**3}
@@ -761,7 +761,9 @@ async def _run_in_daemon_thread(
 
             complete = succeed
         try:
-            loop.call_soon_threadsafe(complete)
+            # A lambda, because ty cannot solve call_soon_threadsafe's *args
+            # against a union of callbacks whose parameters have defaults.
+            loop.call_soon_threadsafe(lambda: complete())
         except RuntimeError:
             if "value" in locals():
                 discard_safely(value)
@@ -3664,9 +3666,9 @@ async def _run_browser_setup(
 
     Those three figures are one revision's *and one platform's*, not a
     constant. The bundled browser moves with the lockfile and is past 148 now,
-    and the sizes differ by platform as well: the arm64 container does not get
-    Chrome for Testing at all, it gets Playwright's own Chromium build. What
-    the argument needs is only that the full browser is substantially larger
+    and the sizes differ by platform as well: through patchright 1.61.2 the
+    arm64 container did not get Chrome for Testing at all, it got Playwright's
+    own Chromium build. What the argument needs is only that the full browser is substantially larger
     than the shell everywhere, which holds; quoting these particular numbers
     anywhere user-facing means re-measuring them for the platform in question.
     """

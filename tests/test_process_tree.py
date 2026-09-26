@@ -1469,7 +1469,7 @@ class TestOneLaunchesResidualBrowser:
 
     Patchright's graceful close waits for the leader it spawned and for its
     temporary directories, and signals the detached group only when that attempt
-    fails (1.61.2, ``packages/utils/processLauncher.ts``). So a close that
+    fails (1.61.2 and 1.63.0, ``packages/utils/processLauncher.ts``). So a close that
     returns cleanly is not evidence, and the drain that supplies it runs while
     the owner keeps living -- which is what makes its aim, rather than its
     reach, the thing worth testing.

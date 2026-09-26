@@ -17,7 +17,7 @@ from linkedin_mcp_server import process_tree
 
 _PROBE = Path(__file__).with_name("windows_guardian_probe.py")
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_EXPECTED_BROWSER = "149.0.7827.55"
+_EXPECTED_BROWSER = "153.0.8010.12"
 
 
 def _without_node_override[T](probe: Callable[[], T]) -> T:
@@ -103,11 +103,11 @@ def test_locked_browser_tree_remains_fenced_until_guardian_proves_zero(
     stack = _locked_stack()
     assert stack == {
         **stack,
-        "patchright": "1.61.2",
-        "core": "1.61.1",
-        "revision": "1228",
+        "patchright": "1.63.0",
+        "core": "1.63.0",
+        "revision": "1243",
         "browser_manifest_version": _EXPECTED_BROWSER,
-        "node": "v24.16.0",
+        "node": "v24.21.0",
         "uv": "1.52.1",
         "browser_exists": "true",
     }
