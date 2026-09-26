@@ -314,6 +314,18 @@ jobs:
         timeout-minutes: 10
         run: uv run pytest -v -s -o faulthandler_timeout=120 tests/differential/test_synthetic_origin.py
 
+      # Row H-R1 of the differential harness: one host starts the server, calls
+      # one read tool and quits, run Direct (K1), through the shared owner (K3),
+      # and through the owner again (K0), then K3 is held to K1 on O1 and O4.
+      # After the feasibility row, whose pass is what says this runner's fence
+      # and trust hold, and opted in the same way.
+      - name: Compare Direct and daemon on one host start and quit
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+        timeout-minutes: 20
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_host_quit_row.py
+
       - run: uv cache prune --ci
 
   # Everything here coordinates, protects or queries state through the operating
@@ -330,8 +342,9 @@ jobs:
     # a job without one is allowed to sit. These tests spawn real processes
     # and wait on them, so a contract that stops holding turns into a wedged
     # job rather than a red one, and a wedged job reads as work in progress
-    # for as long as anyone is willing to wait.
-    timeout-minutes: 25
+    # for as long as anyone is willing to wait. Raised from 25 for the
+    # differential row at the end, whose own step bound is 20.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -374,6 +387,8 @@ jobs:
           tests/test_daemon_regression_witnesses.py
           tests/test_greenlet_runtime.py
           tests/test_storage_class.py
+          tests/differential/test_watcher.py
+          tests/differential/test_host_stub.py
 
       # The identity gate runs on every leg, because every leg's browser is a
       # different one from the Ubuntu job's. macOS is the only platform with a
@@ -538,5 +553,13 @@ jobs:
           LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
         timeout-minutes: 10
         run: uv run pytest -v -s -o faulthandler_timeout=120 tests/differential/test_synthetic_origin.py
+
+      # Row H-R1, as in the Ubuntu job.
+      - name: Compare Direct and daemon on one host start and quit
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+        timeout-minutes: 20
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_host_quit_row.py
 
       - run: uv cache prune --ci

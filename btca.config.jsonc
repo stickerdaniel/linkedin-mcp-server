@@ -183,6 +183,13 @@
       "url": "https://github.com/twisted/towncrier",
       "branch": "trunk",
       "specialNotes": "Builds CHANGELOG.md from changelog.d fragments at release time. Configured in pyproject.toml [tool.towncrier]."
+    },
+    {
+      "type": "git",
+      "name": "psutil",
+      "url": "https://github.com/giampaolo/psutil",
+      "branch": "master",
+      "specialNotes": "Dev only. The differential harness's process watcher samples the process table with it (tests/differential/watcher.py)."
     }
   ]
 }
