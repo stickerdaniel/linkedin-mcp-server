@@ -88,6 +88,10 @@ class TestLinuxMounts:
         assert verdict.storage_class is expected
         assert fstype in verdict.reason
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="mountinfo is Linux-only; Windows decodes filenames as strict UTF-8",
+    )
     def test_an_escaped_byte_names_the_directory_that_byte_names(self):
         # The kernel escapes bytes. /mnt/caf\351 is the directory whose name
         # ends in the byte 0xE9, which is how the path being classified reads
