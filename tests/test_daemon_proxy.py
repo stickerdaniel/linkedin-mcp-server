@@ -3297,6 +3297,9 @@ class _OwnerOverHttp:
     the SDK's streamable HTTP transport and session, FastMCP's client and the
     owner-tagging subclass. The owner is what stands in, and it is small enough
     to fail on command: *fail* maps a JSON-RPC method to the response it gets.
+    No socket is opened and no process dies here: these are fault injections
+    into the SDK's HTTP handling. Losing a real owner process is witnessed by
+    the loopback owners in ``tests/test_daemon_election.py``.
 
     *effects* counts the tool calls this owner ran. *session* decides whether
     the initialize hands out a session id, which is what decides whether the
@@ -3540,7 +3543,7 @@ class TestTheSdksOwnHttpErrors:
 
 
 class TestWhatTheOwnerDidBeforeItWentAway:
-    """Effects counted on both owners, through the whole proxy and real HTTP.
+    """Effects counted on both owners, through the whole proxy and the SDK's HTTP client.
 
     The recovery acts on one question, whether the tool request can have
     reached the owner, and a counter on each owner answers it without trusting

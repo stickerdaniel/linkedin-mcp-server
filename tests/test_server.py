@@ -140,8 +140,18 @@ def _server_for(role: ServerRole) -> FastMCP:
 _TOOL_CONTRACT = Path(__file__).parent / "fixtures" / "tool-contract" / "tools.json"
 
 
+#: Each client mode with the era it must actually negotiate. Written out rather
+#: than read back from the client: an auto client that fell back to the
+#: handshake would otherwise pass as the modern case it is named for.
+_BOTH_ERAS = pytest.mark.parametrize(
+    ("mode", "protocol"),
+    [("legacy", "2025-11-25"), ("auto", "2026-07-28")],
+    ids=["handshake era", "2026-07-28 era"],
+)
+
+
 async def _served_tool_contract(
-    monkeypatch: pytest.MonkeyPatch, role: ServerRole, mode: str
+    monkeypatch: pytest.MonkeyPatch, role: ServerRole, mode: str, protocol: str
 ) -> list[dict[str, Any]]:
     """The tool list a client of *role* receives, in wire form, sorted by name.
 
@@ -152,12 +162,15 @@ async def _served_tool_contract(
     """
     _stand_in_the_lifespan(monkeypatch)
 
-    return await _wire_tools(_server_for(role), mode)
+    return await _wire_tools(_server_for(role), mode, protocol)
 
 
-async def _wire_tools(server: FastMCP, mode: str) -> list[dict[str, Any]]:
-    """*server*'s tool list as a client speaking *mode* receives it."""
+async def _wire_tools(
+    server: FastMCP, mode: str, protocol: str
+) -> list[dict[str, Any]]:
+    """*server*'s tool list as a client speaking *mode* receives it on *protocol*."""
     async with Client(server, mode=mode) as client:
+        assert client.protocol_version == protocol
         tools = await client.list_tools()
     return sorted(
         (
@@ -191,11 +204,13 @@ class TestToolContract:
     @pytest.mark.parametrize(
         "role", [role for role in ServerRole if role.drives_browser]
     )
-    @pytest.mark.parametrize(
-        "mode", ["legacy", "auto"], ids=["handshake era", "2026-07-28 era"]
-    )
+    @_BOTH_ERAS
     async def test_the_served_tools_match_the_recorded_contract(
-        self, monkeypatch: pytest.MonkeyPatch, role: ServerRole, mode: str
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        role: ServerRole,
+        mode: str,
+        protocol: str,
     ):
         # Every field, not a projection of the ones expected to matter: an
         # argument that leaks into `inputSchema`, a lost `outputSchema` or a
@@ -204,13 +219,13 @@ class TestToolContract:
         # era and a current client negotiates the other one.
         recorded = json.loads(_TOOL_CONTRACT.read_text(encoding="utf-8"))
 
-        assert await _served_tool_contract(monkeypatch, role, mode) == recorded
+        assert (
+            await _served_tool_contract(monkeypatch, role, mode, protocol) == recorded
+        )
 
-    @pytest.mark.parametrize(
-        "mode", ["legacy", "auto"], ids=["handshake era", "2026-07-28 era"]
-    )
+    @_BOTH_ERAS
     async def test_a_proxy_serves_the_owners_tools_unchanged(
-        self, monkeypatch: pytest.MonkeyPatch, mode: str
+        self, monkeypatch: pytest.MonkeyPatch, mode: str, protocol: str
     ):
         """The list a client of the frontend sees is the owner's own.
 
@@ -235,7 +250,7 @@ class TestToolContract:
         proxy = create_mcp_server(role=ServerRole.PROXY, proxy_backend=_a_backend())
         recorded = json.loads(_TOOL_CONTRACT.read_text(encoding="utf-8"))
 
-        assert await _wire_tools(proxy, mode) == recorded
+        assert await _wire_tools(proxy, mode, protocol) == recorded
 
 
 class TestServerRoles:
