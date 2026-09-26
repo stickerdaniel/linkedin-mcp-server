@@ -507,6 +507,121 @@ def test_k2_reading_equal_is_a_harness_defect(profile):
     assert "harness defect" in problem
 
 
+def test_k2_counts_an_owner_it_started_even_unpublished(profile):
+    result = _k2(profile, forwarded=False, owner={})
+    assert result.vector is not None
+    result.vector = dataclasses.replace(result.vector, owner_launched=True)
+    assert _reading(result) == "!"
+    assert k2_r12_verdict(result) == []
+
+
+# --- H-R12 through the row entry: an owner the watcher saw start ----------------
+
+_OWNER_ARGV = ["/venv/bin/python", "-P", "-m", "linkedin_mcp_server.daemon_owner"]
+
+
+def _owner_event(kind: str, *, in_row: bool, cmdline=_OWNER_ARGV) -> dict[str, Any]:
+    return {
+        "kind": kind,
+        "actor": "owner",
+        "pid": 77,
+        "start_identity": 5.0,
+        "in_row": in_row,
+        "cmdline": list(cmdline) if in_row else [],
+    }
+
+
+@pytest.fixture
+def direct_row(row, tmp_path, monkeypatch):
+    """The row entry for a row that must stay Direct: no descriptor, no state."""
+    monkeypatch.setattr(
+        harness.daemon_descriptor,
+        "descriptor_path",
+        lambda _root: tmp_path / "never-published.json",
+    )
+    monkeypatch.setattr(
+        harness,
+        "retire_daemon_state",
+        lambda *a: harness.DaemonCleanup("dir", False, False, True, True),
+    )
+    # And a frontend that never logged forwarding.
+    forwarding_host = harness.run_host_session
+
+    async def direct_host(*args, **kwargs):
+        session = await forwarding_host(*args, **kwargs)
+        return dataclasses.replace(session, stderr=[], user_lines=[])
+
+    monkeypatch.setattr(harness, "run_host_session", direct_host)
+
+    async def run(observed):
+        result, _ = await row(
+            processes=[], summary={}, observed=observed, expect_owner=False
+        )
+        return result
+
+    return run
+
+
+_OWNER_FAILURE = "started a shared owner process"
+
+
+@pytest.mark.parametrize(
+    "observed",
+    [
+        pytest.param([], id="no-owner-event"),
+        pytest.param(
+            [
+                _owner_event("process.start", in_row=False),
+                _owner_event("process.exit", in_row=False),
+            ],
+            id="unrelated-owner",
+        ),
+        pytest.param(
+            # Attribution is ancestry, not the watcher's withholding of the
+            # arguments outside the row.
+            [{**_owner_event("process.start", in_row=False), "cmdline": _OWNER_ARGV}],
+            id="unrelated-owner-with-its-arguments",
+        ),
+        pytest.param(
+            [
+                {
+                    **_owner_event("process.start", in_row=True),
+                    # Names the module inside an argument, not as the module.
+                    "cmdline": [
+                        "/venv/bin/python",
+                        "helper.py",
+                        "--log=/tmp/linkedin_mcp_server.daemon_owner.log",
+                    ],
+                    "actor": "owner",
+                }
+            ],
+            id="row-process-merely-naming-the-owner",
+        ),
+    ],
+)
+async def test_a_direct_row_without_an_owner_launch_reads_equal(direct_row, observed):
+    result = await direct_row(observed)
+    assert result.vector is not None
+    assert not result.vector.owner_launched
+    assert not any(_OWNER_FAILURE in failure for failure in result.failures)
+    assert coordination_reading(result.vector) == "="
+
+
+@pytest.mark.parametrize("kind", ["process.start", "process.update"])
+async def test_a_direct_row_that_started_an_unpublished_owner_fails(direct_row, kind):
+    # Started and gone before it published: no descriptor, no forwarding line,
+    # no daemon state left, only the watcher's record of the start.
+    observed = [
+        _owner_event(kind, in_row=True),
+        _owner_event("process.exit", in_row=True),
+    ]
+    result = await direct_row(observed)
+    assert result.vector is not None
+    assert result.vector.owner_launched and not result.vector.owner_published
+    assert any(_OWNER_FAILURE in failure for failure in result.failures)
+    assert coordination_reading(result.vector) == "!"
+
+
 @pytest.mark.parametrize(
     ("changes", "reported"),
     [

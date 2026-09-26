@@ -36,6 +36,7 @@ from differential.watcher import (
     browser_roots,
     canonical_user_data_dir,
     classify,
+    invoked_module,
     record,
     user_data_dir,
 )
@@ -994,14 +995,107 @@ def test_a_server_process_records_the_venv_it_was_launched_as_and_nothing_else()
     assert table[2]["environ_reads"] == 1
 
 
-def test_a_process_that_is_not_a_server_is_never_asked_for_its_environment():
+@pytest.mark.parametrize(
+    ("ppid", "cmdline"),
+    [
+        pytest.param(1, ["node", "run-driver"], id="row-non-server"),
+        pytest.param(
+            1,
+            [FRAMEWORK_PYTHON, "helper.py", "--directory=/tmp/linkedin_mcp_server-x"],
+            id="row-argument-merely-naming-the-module",
+        ),
+        pytest.param(
+            1,
+            [FRAMEWORK_PYTHON, "-c", "import runpy", "-m", "linkedin_mcp_server"],
+            id="row-module-after-dash-c",
+        ),
+        pytest.param(
+            50,
+            [FRAMEWORK_PYTHON, "-m", "linkedin_mcp_server"],
+            id="unrelated-actual-server",
+        ),
+        pytest.param(
+            50,
+            [FRAMEWORK_PYTHON, "-P", "-m", "linkedin_mcp_server.daemon_owner"],
+            id="unrelated-actual-owner",
+        ),
+    ],
+)
+def test_only_a_row_server_or_owner_is_asked_for_its_environment(ppid, cmdline):
     table = _row_table()
     sampler, tracker = _sampler(table), Tracker()
     _observe(sampler, tracker, 0.0)
-    table[2] = {"start": 2.0, "ppid": 1, "cmdline": ["node", "run-driver"]}
-    _observe(sampler, tracker, 1.0)
+    table[2] = {
+        "start": 2.0,
+        "ppid": ppid,
+        "cmdline": cmdline,
+        "environ": {"__PYVENV_LAUNCHER__": BASELINE_VENV_PYTHON},
+    }
+    for tick in (1.0, 2.0):
+        _observe(sampler, tracker, tick)
     assert "environ_reads" not in table[2]
     assert sampler.sample()[2].launcher is None
+
+
+def test_a_row_owner_records_its_launcher():
+    table = _row_table()
+    sampler, tracker = _sampler(table), Tracker()
+    _observe(sampler, tracker, 0.0)
+    table[2] = {
+        "start": 2.0,
+        "ppid": 1,
+        "cmdline": [FRAMEWORK_PYTHON, "-P", "-m", "linkedin_mcp_server.daemon_owner"],
+        "environ": {"__PYVENV_LAUNCHER__": BASELINE_VENV_PYTHON},
+    }
+    _observe(sampler, tracker, 1.0)
+    assert sampler.sample()[2].launcher == BASELINE_VENV_PYTHON
+
+
+def test_known_limit_a_same_command_reexec_keeps_the_first_launcher():
+    """A documented boundary, not a guarantee (review e1da, E1DA-03).
+
+    The launcher is a cached initial-image observation for this PID, create
+    time and command line; same-command re-exec is outside this identity
+    oracle. A re-exec into another venv's framework stub keeps the pid, the
+    create time and the command line, so the first value stays.
+    """
+    table = _row_table()
+    sampler, tracker = _sampler(table), Tracker()
+    _observe(sampler, tracker, 0.0)
+    table[2] = {
+        "start": 2.0,
+        "ppid": 1,
+        "cmdline": [FRAMEWORK_PYTHON, "-m", "linkedin_mcp_server"],
+        "environ": {"__PYVENV_LAUNCHER__": BASELINE_VENV_PYTHON},
+    }
+    _observe(sampler, tracker, 1.0)
+    table[2]["environ"] = {"__PYVENV_LAUNCHER__": "/candidate/.venv/bin/python"}
+    _observe(sampler, tracker, 2.0)
+    assert sampler.sample()[2].launcher == BASELINE_VENV_PYTHON
+    assert table[2]["environ_reads"] == 1
+
+
+@pytest.mark.parametrize(
+    ("cmdline", "module"),
+    [
+        (["python", "-m", "linkedin_mcp_server"], "linkedin_mcp_server"),
+        (["python", "-mlinkedin_mcp_server"], "linkedin_mcp_server"),
+        (
+            ["python", "-I", "-P", "-m", "linkedin_mcp_server.daemon_owner"],
+            "linkedin_mcp_server.daemon_owner",
+        ),
+        (["python", "-W", "ignore", "-m", "pkg"], "pkg"),
+        (["python", "-X", "dev", "-u", "-m", "pkg"], "pkg"),
+        (["python", "script.py", "-m", "linkedin_mcp_server"], None),
+        (["python", "-c", "code", "-m", "linkedin_mcp_server"], None),
+        (["python", "--directory=/x/linkedin_mcp_server.daemon_owner"], None),
+        (["python", "-m"], None),
+        (["python"], None),
+        ([], None),
+    ],
+)
+def test_the_module_is_read_as_the_interpreter_reads_its_options(cmdline, module):
+    assert invoked_module(cmdline) == module
 
 
 def test_an_unreadable_environment_leaves_no_launcher():

@@ -115,10 +115,12 @@ from differential.synthetic_origin import (
 )
 from differential.watcher import (
     LAUNCHER_ENV,
+    OWNER_MODULE,
     USER_DATA_DIR_FLAG,
     another_user,
     canonical_user_data_dir,
     harness_user,
+    invoked_module,
     possible_browser,
     process_user,
 )
@@ -174,7 +176,6 @@ _STDERR_EOF_SECONDS = 10.0
 
 _FORWARDING_LINE = "Forwarding to the shared browser owner"
 _IDLE_EXIT_LINE = "Nothing has needed the browser in"
-_OWNER_MODULE = "linkedin_mcp_server.daemon_owner"
 #: ``__PYVENV_LAUNCHER__`` included: a framework build takes its venv from it,
 #: so the harness's own value would hand a baseline actor the candidate's venv.
 _FOREIGN_CODE = frozenset(
@@ -1328,6 +1329,28 @@ class RowVector:
     host_exit_clean: bool
     #: Cleanup signalled and killed nothing and removed the row's state.
     cleanup_clean: bool
+    #: The watcher saw a row actor start the owner module, published or not.
+    owner_launched: bool = False
+
+
+def owner_launches(observed: Iterable[dict[str, Any]]) -> list[int]:
+    """The owner processes the watcher saw this row start.
+
+    A ``process.start`` or ``process.update`` of a row actor (``in_row``: its
+    ancestry at first sight led to the harness) whose command line runs the
+    owner module with ``-m``. Whether it ever published is not asked: an owner
+    that started and gave up is still a coordination effect.
+    """
+    return sorted(
+        {
+            record["pid"]
+            for record in observed
+            if record.get("kind") in ("process.start", "process.update")
+            and record.get("in_row") is True
+            and isinstance(record.get("cmdline"), list)
+            and invoked_module(record["cmdline"]) == OWNER_MODULE
+        }
+    )
 
 
 def row_expectations(
@@ -1365,8 +1388,14 @@ def row_expectations(
             failures.append("daemon mode published no owner")
         if vector.fell_back:
             failures.append("daemon mode fell back to a Direct server")
-    elif vector.owner_published:
-        failures.append("a row that must stay Direct reached a shared owner")
+    else:
+        if vector.owner_published:
+            failures.append("a row that must stay Direct reached a shared owner")
+        if vector.owner_launched:
+            failures.append(
+                "a row that must stay Direct started a shared owner process "
+                "(the watcher saw it; publication is not required)"
+            )
     return failures
 
 
@@ -1374,11 +1403,13 @@ def coordination_reading(vector: RowVector) -> str:
     """H-R12's reading: ``!`` when a shared owner took part, ``=`` when none did.
 
     An owner published (a descriptor named one, or in a Direct-configured row
-    any sign of one) or the frontend forwarding to one. With the daemon
-    enabled, ``fell_back`` false means the frontend forwarded.
+    any sign of one), an owner process the row started, or the frontend
+    forwarding to one. With the daemon enabled, ``fell_back`` false means the
+    frontend forwarded.
     """
     forwarded = vector.mode == "daemon" and not vector.fell_back
-    return "!" if vector.owner_published or forwarded else "="
+    coordinated = vector.owner_published or vector.owner_launched or forwarded
+    return "!" if coordinated else "="
 
 
 def k2_r12_verdict(result: RowResult) -> list[str]:
@@ -1474,6 +1505,8 @@ class Observations:
     expect_owner: bool | None = None
     #: Daemon state was present for the row's auth root at cleanup.
     daemon_state_existed: bool = False
+    #: Owner processes the watcher saw a row actor start (``owner_launches``).
+    owner_launches: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -1614,6 +1647,7 @@ def judge_row(observed: Observations) -> tuple[RowVector, list[str]]:
         ),
         owner_published=owner_published,
         fell_back=observed.daemon and not forwarded,
+        owner_launched=bool(observed.owner_launches),
         host_exit_clean=not host_problems,
         cleanup_clean=cleanup_clean,
     )
@@ -1979,9 +2013,11 @@ async def measure_host_quit_row(
         # The row's interval ends here: the watcher stops before anything else
         # starts on the profile.
         result.watcher = watcher.stop()
+        observed_events = watcher.observed()
+        launched = owner_launches(observed_events)
         if runtime.frozen:
             result.runtime_failures = interpreter_failures(
-                watcher.observed(),
+                observed_events,
                 runtime,
                 candidate_prefix=sys.prefix,
                 owner_expected=bool(owner.get("pid")),
@@ -2079,6 +2115,7 @@ async def measure_host_quit_row(
             post_quit=post_quit,
             expect_owner=expect_owner,
             daemon_state_existed=result.cleanup.existed,
+            owner_launches=launched,
         )
     )
     result.failures += result.runtime_failures

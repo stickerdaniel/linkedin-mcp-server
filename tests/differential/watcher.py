@@ -130,7 +130,9 @@ class ProcessRecord:
     profile: str | None = None
     #: Descended from the harness, so one of the row's actors.
     in_row: bool = False
-    #: The venv interpreter a framework build was started as (``LAUNCHER_ENV``).
+    #: The venv interpreter a framework build was started as (``LAUNCHER_ENV``):
+    #: a cached initial-image observation for this PID, create time and command
+    #: line; same-command re-exec is outside this identity oracle.
     launcher: str | None = None
 
     @property
@@ -181,15 +183,44 @@ def record(
 #: venv's interpreter, and it is the only place the venv still shows.
 LAUNCHER_ENV = "__PYVENV_LAUNCHER__"
 
-#: Only a server's own processes are asked for it, and only for that variable:
-#: an environment can hold credentials, and nothing else of it is kept.
-_SERVER_MODULE = "linkedin_mcp_server"
+SERVER_MODULE = "linkedin_mcp_server"
+OWNER_MODULE = "linkedin_mcp_server.daemon_owner"
+
+#: Interpreter options that take the next argument as their value.
+_OPTIONS_WITH_VALUES = frozenset({"-W", "-X", "--check-hash-based-pycs"})
 
 
-def read_launcher(process: Any, cmdline: Sequence[str]) -> str | None:
-    """The venv interpreter a server process was started as, if it says so."""
-    if not any(_SERVER_MODULE in argument for argument in cmdline):
-        return None
+def invoked_module(cmdline: Sequence[str]) -> str | None:
+    """The module a Python command line runs with ``-m``, or None.
+
+    Read the way the interpreter reads its options: ``-m MODULE`` or
+    ``-mMODULE`` among the options before the first script or ``-c``. A module
+    name that merely appears inside some argument is not an invocation.
+    """
+    arguments = list(cmdline[1:])
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument == "-m":
+            return arguments[index + 1] if index + 1 < len(arguments) else None
+        if argument.startswith("-m") and not argument.startswith("--"):
+            return argument[2:] or None
+        if argument in _OPTIONS_WITH_VALUES:
+            index += 2
+            continue
+        if argument == "-c" or argument == "-" or not argument.startswith("-"):
+            return None
+        index += 1
+    return None
+
+
+def read_launcher(process: Any) -> str | None:
+    """The venv interpreter a process was started as, if it says so.
+
+    psutil returns the whole environment and only this one value is kept. The
+    sampler asks only row actors that run the server or the owner module,
+    once per PID, create time and command line.
+    """
     try:
         value = process.environ().get(LAUNCHER_ENV)
     except (psutil.Error, OSError, AttributeError):
@@ -401,6 +432,8 @@ class Sampler:
         self._unrelated: set[tuple[int, float]] = set()
         #: First-sample identities whose ancestry could not be completed.
         self._watched: set[tuple[int, float]] = set()
+        #: (pid, create time, command line) whose launcher was already asked.
+        self._launchers_read: set[tuple[int, float, tuple[str, ...]]] = set()
         self._episodes: dict[tuple[int, float | None], dict[str, Any]] = {}
         self._closed: list[dict[str, Any]] = []
 
@@ -513,11 +546,12 @@ class Sampler:
                 ppid, exe, cmdline, failed, exe_read = self._read(process, known)
             except psutil.NoSuchProcess:
                 continue
-            # Read once per lifetime and command line: it is fixed at exec.
+            # Carried while the command line holds; read, if at all, only once
+            # the process is classified (``_read_launchers``).
             launcher = (
                 known.launcher
                 if known is not None and known.cmdline == cmdline
-                else read_launcher(process, cmdline)
+                else None
             )
             sample[pid] = record(
                 pid,
@@ -544,6 +578,7 @@ class Sampler:
             if root is not None:
                 self._row.add(root.identity)
         self._classify(sample)
+        self._read_launchers(sample, identified)
         # Whatever the harness turned out to own is no longer excluded.
         row = {process.identity for process in sample.values() if process.in_row}
         self._unrelated -= row
@@ -565,6 +600,30 @@ class Sampler:
         self._resolve_by_user(sample, identified)
         self._known = sample
         return sample
+
+    def _read_launchers(
+        self, sample: dict[int, ProcessRecord], identified: dict[int, Any]
+    ) -> None:
+        """Record the launcher of the row's server and owner processes.
+
+        Only for a row actor, established by ancestry in this sample, whose
+        command line runs the server or the owner module, and only when this
+        sample read its create time. The launcher is a cached initial-image
+        observation for this PID, create time and command line; same-command
+        re-exec is outside this identity oracle.
+        """
+        for pid, process in list(sample.items()):
+            if not process.in_row or pid not in identified:
+                continue
+            if invoked_module(process.cmdline) not in (SERVER_MODULE, OWNER_MODULE):
+                continue
+            key = (process.pid, process.start, process.cmdline)
+            if key in self._launchers_read:
+                continue
+            self._launchers_read.add(key)
+            launcher = read_launcher(identified[pid])
+            if launcher is not None:
+                sample[pid] = replace(process, launcher=launcher)
 
     def _settled_ancestry(
         self, sample: dict[int, ProcessRecord]
