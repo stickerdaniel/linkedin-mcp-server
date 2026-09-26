@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -32,7 +33,8 @@ validate_title = cast(Callable[[str], str | None], _VALIDATOR.validate_title)
 _CHECK_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "check-pr-title.yml"
 _LABEL_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "label-pr.yml"
 _RELEASE_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "release.yml"
-_CHECKOUT = "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803"
+# A full commit SHA, so a moved tag cannot swap the code these workflows run.
+_CHECKOUT = re.compile(r"uses: actions/checkout@[0-9a-f]{40} ")
 _DERIVED_LABELS = {
     "breaking-change",
     "enhancement",
@@ -469,7 +471,7 @@ def test_pr_title_workflow_is_automatic_required_check() -> None:
     assert "pull-requests: write" not in workflow
     assert "group: pr-title-${{ github.event.pull_request.number }}" in workflow
     assert "cancel-in-progress: true" in workflow
-    assert _CHECKOUT in workflow
+    assert _CHECKOUT.search(workflow)
     assert "ref: ${{ github.workflow_sha }}" in workflow
     assert "persist-credentials: false" in workflow
     assert "github.event.pull_request.head" not in workflow
@@ -612,7 +614,7 @@ def test_label_workflow_uses_trusted_validator_and_current_title() -> None:
     assert "set -euo pipefail" in workflow
     assert "      contents: read\n      pull-requests: write\n" in workflow
     assert "contents: write" not in workflow
-    assert _CHECKOUT in workflow
+    assert _CHECKOUT.search(workflow)
     assert "ref: ${{ github.workflow_sha }}" in workflow
     assert "persist-credentials: false" in workflow
     assert "github.event.pull_request.head" not in workflow
