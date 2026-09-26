@@ -21,6 +21,13 @@ _PYPROJECT = _REPO_ROOT / "pyproject.toml"
 # The fragment directory's own documentation, which towncrier also skips.
 _README = "README.md"
 
+# Renovate's account, which needs no fragment of its own. A `[bot]` login is
+# reserved for GitHub Apps, so no user account can claim it. Renovate cannot
+# write a fragment, and one pushed onto its branch stops it updating the pull
+# request. A dependency update users will notice gets its sentence from
+# whoever merges it. The fragments it does carry are still checked.
+_EXEMPT_AUTHOR = {"login": "renovate[bot]", "type": "Bot"}
+
 INVALID_PR_DATA = "Unable to read current pull request data."
 INVALID_FILES_DATA = "Unable to read the pull request's changed files."
 INVALID_CONFIG = "Unable to read [tool.towncrier] from pyproject.toml."
@@ -59,7 +66,7 @@ def _is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def _load_pr(path: Path) -> tuple[int, str, int]:
+def _load_pr(path: Path) -> tuple[int, str, int, bool]:
     data = _read_json(path)
     if not isinstance(data, dict):
         raise _InputError
@@ -72,7 +79,11 @@ def _load_pr(path: Path) -> tuple[int, str, int]:
         raise _InputError
     if not _is_int(changed_files) or changed_files < 0:
         raise _InputError
-    return number, title, changed_files
+    user = data.get("user")
+    exempt = isinstance(user, dict) and all(
+        user.get(key) == value for key, value in _EXEMPT_AUTHOR.items()
+    )
+    return number, title, changed_files, exempt
 
 
 def _load_files(path: Path) -> list[dict[str, Any]]:
@@ -172,6 +183,8 @@ def check(
     files: list[dict[str, Any]],
     directory: str,
     types: tuple[str, ...],
+    *,
+    exempt: bool = False,
 ) -> list[str]:
     """Return one diagnostic per problem, or an empty list."""
     errors: list[str] = []
@@ -215,6 +228,14 @@ def check(
     required = _required_type(title)
     if required is None:
         return errors
+    # The exemption waives a missing fragment, not a mismatched one: a fragment
+    # somebody added to an exempt PR still has to match its title.
+    own = f"{prefix}{number}."
+    if exempt and not any(
+        entry["filename"].startswith(own) and entry["status"] != "removed"
+        for entry in files
+    ):
+        return errors
 
     # The files API compares against the base, so this PR's own fragment is
     # always "added", even after a rename from one type to another. An empty
@@ -243,7 +264,7 @@ def _parse_args() -> argparse.Namespace:
 def main() -> int:
     args = _parse_args()
     try:
-        number, title, changed_files = _load_pr(args.pr_json)
+        number, title, changed_files, exempt = _load_pr(args.pr_json)
     except _InputError:
         print(f"::error::{INVALID_PR_DATA}")
         return 1
@@ -262,7 +283,7 @@ def main() -> int:
         print(f"::error::{INVALID_CONFIG}")
         return 1
 
-    errors = check(number, title, files, directory, types)
+    errors = check(number, title, files, directory, types, exempt=exempt)
     for error in errors:
         print(f"::error::{error}")
     return 1 if errors else 0

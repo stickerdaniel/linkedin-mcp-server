@@ -183,6 +183,10 @@ Adding or removing the breaking marker means renaming the fragment. Edit an
 existing fragment instead of running `towncrier create` again, which writes a
 second, numbered file that the check rejects.
 
+Renovate's PRs need no fragment, because Renovate cannot write one and stops
+updating a PR once someone else pushes to its branch. When a dependency update
+changes what users see, whoever merges it adds the sentence in a follow-up PR.
+
 ## Scraping Philosophy: Minimize DOM Dependence
 
 Voyager and other LinkedIn private APIs are out of scope. See [Read the rendered page](docs/decisions/2026-09-16-rendered-page.md).
