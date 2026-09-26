@@ -7345,8 +7345,9 @@ class TestPublishingLast:
         assert turnover_sent.is_set(), "the endpoint could not request turnover"
         # Driven through the real `_serve`, so what `_exit_hard` receives here is
         # the owner's own lock and not a value this case handed to the helper.
-        # A reconciliation exit that skipped it would leave the election held for
-        # an unbounded browser drain.
+        # The lock must reach the terminal helper so it can release this owner's
+        # election reference before process exit; the removed owner-side drain is
+        # not part of this path.
         assert exited and all(
             isinstance(candidate, DaemonLock) for candidate in exited
         ), "the uncertain-publication exit did not free the election first"

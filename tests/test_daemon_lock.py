@@ -7,6 +7,8 @@ behaviour that is easy to write correctly and just as easy to break later.
 
 from __future__ import annotations
 
+import contextlib
+import logging
 import os
 import stat
 import subprocess
@@ -14,12 +16,17 @@ import threading
 import sys
 import textwrap
 import time
+from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+from unittest import mock
 
 import pytest
 
 import linkedin_mcp_server.daemon_descriptor as daemon_descriptor_module
 import linkedin_mcp_server.daemon_lock as daemon_lock_module
+from linkedin_mcp_server import daemon_owner
 from linkedin_mcp_server.daemon_descriptor import daemon_dir, daemon_state_root
 from linkedin_mcp_server.daemon_lock import (
     DaemonLock,
@@ -709,7 +716,8 @@ class TestAdoptedDescriptors:
 
 class TestReleaseSemantics:
     @posix_handoff
-    def test_releasing_closes_rather_than_unlocks(self, tmp_path: Path):
+    @pytest.mark.parametrize("release", ["release", "release_for_exit"])
+    def test_releasing_closes_rather_than_unlocks(self, tmp_path: Path, release: str):
         # The measured trap. flock belongs to the open file description, which
         # every inherited copy shares, so unlocking would release the lock for
         # the owner too. Closing drops only this descriptor.
@@ -717,7 +725,7 @@ class TestReleaseSemantics:
         assert lock.try_acquire()
         inherited = lock.inheritable_copy()
 
-        lock.release()
+        getattr(lock, release)()
 
         try:
             # Still held, through the copy. An unlock-then-close release would
@@ -725,6 +733,141 @@ class TestReleaseSemantics:
             assert daemon_is_running(tmp_path)
         finally:
             os.close(inherited)
+
+
+class _Exited(BaseException):
+    """Raised by the ``os._exit`` double, so the test outlives the exit."""
+
+
+class _DiagnosticSink(logging.Handler):
+    """A DEBUG sink that, once armed, fails or stalls on every record.
+
+    The stall is bounded, so a regression costs this test two seconds rather
+    than the suite. Unarmed, it only records, which is how the test proves the
+    sink is reachable before it relies on the sink staying silent.
+    """
+
+    def __init__(self, mode: str) -> None:
+        super().__init__(logging.DEBUG)
+        self.mode = mode
+        self.armed = False
+        self.seen: list[str] = []
+        self.entered: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if not self.armed:
+            self.seen.append(record.getMessage())
+            return
+        self.entered.append(record.getMessage())
+        if self.mode == "raises":
+            raise RuntimeError("the diagnostic sink failed")
+        threading.Event().wait(2.0)
+
+
+@contextlib.contextmanager
+def _debug_sink(mode: str) -> Iterator[_DiagnosticSink]:
+    """Route every DEBUG record from the lock and the owner into one sink."""
+    sink = _DiagnosticSink(mode)
+    root = logging.getLogger()
+    loggers = (root, daemon_lock_module.logger, daemon_owner.logger)
+    saved = [
+        (logger, logger.level, logger.propagate, logger.disabled) for logger in loggers
+    ]
+    disabled = logging.root.manager.disable
+    logging.disable(logging.NOTSET)
+    for logger in loggers:
+        logger.setLevel(logging.DEBUG)
+        logger.propagate = True
+        logger.disabled = False
+    root.addHandler(sink)
+    try:
+        yield sink
+    finally:
+        sink.armed = False
+        root.removeHandler(sink)
+        for logger, level, propagate, was_disabled in saved:
+            logger.setLevel(level)
+            logger.propagate = propagate
+            logger.disabled = was_disabled
+        logging.disable(disabled)
+
+
+def _exit_hard_status(lock: Any) -> int:
+    """Run the real ``_exit_hard`` and return the status it exits with."""
+
+    def exit_now(status: int) -> None:
+        raise _Exited(status)
+
+    # A patch scoped to this call alone. The autouse fixture's isolation must
+    # outlive it: the kernel probe below runs a child against the same home.
+    with (
+        mock.patch.object(daemon_owner.os, "_exit", exit_now),
+        pytest.raises(_Exited) as exited,
+    ):
+        daemon_owner._exit_hard(lock)
+    return exited.value.args[0]
+
+
+class TestTheTerminalRelease:
+    """``_exit_hard`` gives up the election and exits with no diagnostic between.
+
+    A log handler that blocks or raises after the lock is gone would hold the
+    exit, or divert it into ordinary unwinding, while a successor can already
+    take the election. The lock here is real, and whether it is free is asked
+    of the kernel from another process rather than read off ``lock.held``.
+    """
+
+    @pytest.mark.parametrize("mode", ["raises", "blocks"])
+    def test_no_diagnostic_stands_between_release_and_exit(
+        self, tmp_path: Path, mode: str
+    ):
+        with _debug_sink(mode) as sink:
+            lock = DaemonLock(tmp_path)
+            assert lock.try_acquire()
+            if not any("Daemon lock acquired" in line for line in sink.seen):
+                pytest.fail(f"the DEBUG sink never saw the lock: {sink.seen!r}")
+            sink.armed = True
+
+            status = _exit_hard_status(lock)
+
+        assert sink.entered == [], "a diagnostic ran between release and exit"
+        assert status == 1
+        free = _run_child(_TRY_ACQUIRE, str(tmp_path))
+        assert free.stdout.strip() == "ACQUIRED", free.stderr
+
+    def test_a_close_that_fails_still_exits_in_silence(self, tmp_path: Path):
+        lock = DaemonLock(tmp_path)
+        assert lock.try_acquire()
+        descriptor = lock._fd
+        assert descriptor is not None
+        real_close = os.close
+
+        def close(fd: int) -> None:
+            if fd == descriptor:
+                raise OSError("the close did not happen")
+            real_close(fd)
+
+        try:
+            with (
+                _debug_sink("raises") as sink,
+                mock.patch.object(daemon_lock_module.os, "close", close),
+            ):
+                sink.armed = True
+                status = _exit_hard_status(lock)
+        finally:
+            real_close(descriptor)
+
+        assert sink.entered == [], "a failed close was reported before exit"
+        assert status == 1
+        assert not lock.held
+
+    def test_a_release_that_raises_still_exits(self):
+        def release_for_exit() -> None:
+            raise RuntimeError("the release failed")
+
+        lock = SimpleNamespace(release_for_exit=release_for_exit)
+
+        assert _exit_hard_status(lock) == 1
 
 
 class TestLiveness:

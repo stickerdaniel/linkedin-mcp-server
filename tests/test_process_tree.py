@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib
 import io
 import json
@@ -2611,16 +2612,27 @@ def test_adopted_windows_job_revalidates_process_membership(
 
 class TestWindowsJobObject:
     @_WINDOWS_ONLY
-    def test_an_adopted_owner_exit_leaves_its_descendants_to_job_rundown(
+    def test_an_adopted_owner_outlives_the_handoff_and_its_exit_runs_the_job_down(
         self, tmp_path: Path
     ):
-        """The owner terminates nothing on the way out; closing the Job does."""
+        """The owner's adopted handle keeps the Job; its exit is what ends it.
+
+        Two phases, each with its own discriminating failure. Once the frontend
+        closes its handoff handle, the owner's retained handle is the last one,
+        so the owner and its descendant must still be running: an owner that
+        never adopted, or let the handle go, has them killed here instead. Only
+        then is the owner released to take the production terminal path, which
+        sends nothing itself, and kill-on-close must end the descendant: a Job
+        created without it leaves the descendant running. No Job handle stays
+        open in this process across either phase.
+        """
         script = r"""
 import os
 import subprocess
 import sys
-import time
+import threading
 
+from linkedin_mcp_server import daemon_owner
 from linkedin_mcp_server.process_tree import WindowsJob
 
 name = sys.argv[1]
@@ -2632,9 +2644,33 @@ child = subprocess.Popen(
     stdout=subprocess.DEVNULL,
     stderr=subprocess.DEVNULL,
 )
+lines = []
+released = threading.Event()
+
+
+def wait_for_release():
+    lines.append(sys.stdin.readline())
+    released.set()
+
+
+threading.Thread(target=wait_for_release, daemon=True).start()
 print(os.getpid(), child.pid, flush=True)
-os._exit(7)
+if not released.wait(60) or lines != ["exit\n"]:
+    os._exit(3)
+daemon_owner._exit_hard(None)
 """
+
+        def first_line(stream: Any) -> bytes:
+            lines: list[bytes] = []
+            reader = threading.Thread(
+                target=lambda: lines.append(stream.readline()), daemon=True
+            )
+            reader.start()
+            reader.join(60)
+            if not lines:
+                pytest.fail("the owner never reported that it had adopted the Job")
+            return lines[0]
+
         job = process_tree.WindowsJob.named("owner-integration")
         nonce = process_tree.release_nonce()
         process = subprocess.Popen(
@@ -2653,22 +2689,36 @@ os._exit(7)
             assert process.stdin is not None
             process_tree.release_windows_gate(process.stdin, nonce)
             assert process.stdout is not None
-            owner_pid, descendant_pid = map(int, process.stdout.readline().split())
+            owner_pid, descendant_pid = map(int, first_line(process.stdout).split())
 
             job.close()
-            # Not the owner's status. The gate is a member of this Job, so once
-            # the owner's own adopted handle is the last one and the owner
-            # leaves, kill-on-close reaches the gate before it can mirror
-            # anything. What survives that is the containment itself, which is
-            # what this launch is here to prove.
+            # Kill-on-close ends the members after the last handle goes, not
+            # inside CloseHandle, so a single look could come too early.
+            settled = time.monotonic() + 1.0
+            while time.monotonic() < settled:
+                assert _alive(owner_pid) and _alive(descendant_pid), (
+                    "closing the handoff handle ended the adopted owner's Job"
+                )
+                time.sleep(0.05)
+
+            process.stdin.write(b"exit\n")
+            process.stdin.flush()
+            # Not the owner's status. The gate is a member of this Job, so the
+            # rundown that follows the owner's exit can reach it before it
+            # mirrors anything.
             process.wait(timeout=30)
-            assert _wait_gone(owner_pid, descendant_pid)
+            assert _wait_gone(owner_pid, descendant_pid), (
+                "the owner's exit left the Job's members running"
+            )
         finally:
             if not job.closed:
                 job.terminate()
                 process.wait(timeout=30)
                 job.release_popen_handle(process)
                 job.wait_until_empty(timeout=30)
+            if process.stdin is not None:
+                with contextlib.suppress(OSError):
+                    process.stdin.close()
             if process.poll() is None:
                 process.kill()
                 process.wait(timeout=30)

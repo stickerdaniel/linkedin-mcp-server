@@ -223,7 +223,10 @@ async def test_an_owner_exiting_after_an_unconfirmed_close_sends_no_signal(
         pytest.fail("the unconfirmed close did not ask this owner to exit hard")
 
     released: list[str] = []
-    lock = cast(Any, SimpleNamespace(release=lambda: released.append("daemon-lock")))
+    lock = cast(
+        Any,
+        SimpleNamespace(release_for_exit=lambda: released.append("daemon-lock")),
+    )
     serving = asyncio.ensure_future(asyncio.sleep(0))
     await serving
 

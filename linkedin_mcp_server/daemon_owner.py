@@ -1173,15 +1173,19 @@ def _exit_hard(lock: DaemonLock | None) -> NoReturn:
     drain is quiet, and on Windows the per-launch kill-on-close Jobs, which run
     down when this process's handles close.
 
-    The election goes first, so the replacement is elected at once and waits
-    on the profile lease rather than on this process. Nothing runs between the
-    release and the exit: a diagnostic that blocks there would hold the exit.
+    The election reference is released before process exit so a successor can
+    contend for it; browser/profile settlement remains governed by the existing
+    lease, guardian and Job paths. That release is the quiet one, and nothing
+    else runs before the exit: a diagnostic that blocks or raises there would
+    hold the exit, so even a release that raises still ends in ``os._exit``.
 
     Idempotent, so ``main``'s ``finally`` may still release defensively.
     """
-    if lock is not None:
-        lock.release()
-    os._exit(1)
+    try:
+        if lock is not None:
+            lock.release_for_exit()
+    finally:
+        os._exit(1)
 
 
 async def _await_started(

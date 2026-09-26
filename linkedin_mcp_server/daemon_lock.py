@@ -247,6 +247,22 @@ class DaemonLock:
             logger.debug("Closing the daemon lock failed (ignored)", exc_info=True)
         logger.debug("Daemon lock released for %s", self._auth_root)
 
+    def release_for_exit(self) -> None:
+        """Release as :meth:`release` does, for a process about to ``os._exit``.
+
+        Nothing here logs or raises, on any branch. The caller exits next, and a
+        log handler that blocks or fails here would hold that exit after the
+        election is already given up. Closed, not unlocked, for the reason
+        :meth:`release` gives; a descriptor inherited across a fork is closed
+        the same way, which is all :meth:`_discard_if_forked` adds besides its
+        log line.
+        """
+        fd, self._fd, self._owner_pid = self._fd, None, None
+        _held_locks.discard(self)
+        if fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+
     def inheritable_copy(self) -> int:
         """Duplicate the descriptor so a launched owner can inherit it.
 
