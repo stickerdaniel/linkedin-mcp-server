@@ -202,8 +202,15 @@ class TestConnectWithPerson:
         assert "pending" in result["message"]
         mock_sleep.assert_awaited_once()
 
-    async def test_unreadable_settle_retry_keeps_send_failed(self, mock_page):
-        """A retry that reads no state is no evidence the invitation landed."""
+    @pytest.mark.parametrize(
+        "retry_signals",
+        [_signals(), _signals(compose=True, labeled_action=True)],
+        ids=["unreadable", "follow-only"],
+    )
+    async def test_settle_retry_without_pending_keeps_send_failed(
+        self, mock_page, retry_signals
+    ):
+        """Only a pending invitation on the retry is evidence it landed."""
         text = "Jane\n\n· 2nd\n\nEngineer\n\nConnect\nMore\nAbout\n"
         actions = _actions(mock_page, _reads(text, text, ""))
 
@@ -212,7 +219,11 @@ class TestConnectWithPerson:
                 actions,
                 "_read_action_signals",
                 new_callable=AsyncMock,
-                side_effect=[_signals(invite=True), _signals(invite=True), _signals()],
+                side_effect=[
+                    _signals(invite=True),
+                    _signals(invite=True),
+                    retry_signals,
+                ],
             ),
             patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
             patch.object(
