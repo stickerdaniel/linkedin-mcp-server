@@ -859,6 +859,22 @@ class TestForwardingToASharedOwner:
     an owner when there was never any point.
     """
 
+    @pytest.fixture(autouse=True)
+    def _local_storage(self, monkeypatch: pytest.MonkeyPatch) -> list:
+        # Storage is its own refusal, with its own tests below. Everywhere else
+        # in this class it is explicitly local, so the runner's real home can
+        # neither refuse a positive case nor stand in for another refusal.
+        asked: list = []
+
+        def classify(path):
+            from linkedin_mcp_server.storage_class import Classification, StorageClass
+
+            asked.append(path)
+            return Classification(StorageClass.LOCAL, "local test filesystem")
+
+        monkeypatch.setattr("linkedin_mcp_server.storage_class.classify", classify)
+        return asked
+
     @staticmethod
     def _outcome(attachment):
         from linkedin_mcp_server.daemon import OwnerLookup, OwnerState
@@ -914,6 +930,110 @@ class TestForwardingToASharedOwner:
         assert cli_main._obtain_shared_owner(config) is None
         asked.assert_not_called()
         looked_up.assert_not_called()
+
+    @pytest.mark.parametrize("refused", ["non-local", "synced", "unknown"])
+    def test_no_owner_is_sought_on_storage_that_is_not_local(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+        caplog: pytest.LogCaptureFixture,
+        refused: str,
+    ):
+        # Recorded rather than raised: `_obtain_shared_owner` swallows what the
+        # election raises, so a raising sentinel would be caught and missed.
+        from linkedin_mcp_server.storage_class import Classification, StorageClass
+
+        effects = {
+            name: MagicMock(name=name)
+            for name in ("obtain_owner", "prepare", "lock", "read", "backend")
+        }
+        monkeypatch.setattr(
+            "linkedin_mcp_server.daemon_election.obtain_owner",
+            effects["obtain_owner"],
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.daemon_descriptor.prepare_daemon_state",
+            effects["prepare"],
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.daemon_descriptor.read", effects["read"]
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.daemon_lock.DaemonLock.__init__", effects["lock"]
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.daemon_proxy.DaemonProxyBackend.__init__",
+            effects["backend"],
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.storage_class.classify",
+            lambda _path: Classification(StorageClass(refused), "test storage"),
+        )
+        config = self._config(daemon_enabled=True)
+        config.browser.user_data_dir = str(tmp_path / "profile")
+
+        with caplog.at_level(logging.WARNING):
+            assert cli_main._obtain_shared_owner(config) is None
+
+        assert len(caplog.records) == 1
+        assert f"on {refused} storage" in caplog.records[0].getMessage()
+        for effect in effects.values():
+            effect.assert_not_called()
+
+    def test_local_storage_reaches_the_election_for_the_same_root(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path, _local_storage: list
+    ):
+        # The positive control for the refusal above, and the check that the
+        # root classified is the root the election is handed.
+        from linkedin_mcp_server.session_state import canonical
+
+        profile = tmp_path / "profile"
+        elected = MagicMock(return_value=self._outcome(None))
+        monkeypatch.setattr("linkedin_mcp_server.daemon_election.obtain_owner", elected)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.cli_main.get_profile_dir", lambda: profile
+        )
+        config = self._config(daemon_enabled=True)
+        config.browser.user_data_dir = str(profile)
+
+        cli_main._obtain_shared_owner(config)
+
+        elected.assert_called_once()
+        auth_root = elected.call_args.args[0]
+        assert canonical(auth_root) == canonical(_local_storage[0])
+
+    def test_recovery_exists_only_behind_the_startup_verdict(self):
+        """Recovery keeps the admission it started with, and never asks again.
+
+        That is only sound while nothing but the gated startup helper builds a
+        proxy backend or starts an election outside one. Recovery is a method
+        of the backend, so this pins both.
+        """
+        import ast
+        from pathlib import Path
+
+        package = Path(cli_main.__file__).parent
+        constructs: set[str] = set()
+        elects: set[str] = set()
+        for source in package.rglob("*.py"):
+            tree = ast.parse(source.read_text(encoding="utf-8"))
+            for scope in ast.walk(tree):
+                if not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                for node in ast.walk(scope):
+                    if not isinstance(node, ast.Call):
+                        continue
+                    name = getattr(node.func, "id", getattr(node.func, "attr", ""))
+                    where = f"{source.stem}.{scope.name}"
+                    if name == "DaemonProxyBackend":
+                        constructs.add(where)
+                    if name == "obtain_owner" or any(
+                        getattr(arg, "id", None) == "obtain_owner" for arg in node.args
+                    ):
+                        elects.add(where)
+
+        assert constructs == {"cli_main._obtain_shared_owner"}
+        assert elects == {"cli_main._obtain_shared_owner", "daemon_proxy._elect"}
 
     def test_the_elected_owner_is_handed_back_rather_than_discarded(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path

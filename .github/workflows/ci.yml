@@ -154,6 +154,7 @@ jobs:
           tests/test_daemon_regression_witnesses.py
           tests/test_windows_guardian_probe.py
           tests/test_private_state.py
+          tests/test_storage_class.py
 
       # Only on failure, and tolerant of an empty folder: a Python exception
       # fails this job without ever reaching Windows Error Reporting, and that
@@ -319,6 +320,7 @@ jobs:
           tests/test_process_tree.py
           tests/test_daemon_regression_witnesses.py
           tests/test_greenlet_runtime.py
+          tests/test_storage_class.py
 
       # The identity gate runs on every leg, because every leg's browser is a
       # different one from the Ubuntu job's. macOS is the only platform with a

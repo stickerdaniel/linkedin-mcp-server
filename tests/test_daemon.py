@@ -8,14 +8,17 @@ refusing is just as wrong as attaching.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
 import linkedin_mcp_server.daemon as daemon_module
 import linkedin_mcp_server.daemon_descriptor as daemon_descriptor_module
+import linkedin_mcp_server.storage_class as storage_class_module
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon import (
     OwnerState,
@@ -23,6 +26,7 @@ from linkedin_mcp_server.daemon import (
     look_up_owner,
 )
 from linkedin_mcp_server.daemon_descriptor import (
+    DescriptorError,
     build,
     descriptor_path,
     new_instance_id,
@@ -32,6 +36,8 @@ from linkedin_mcp_server.daemon_descriptor import (
     token_path,
 )
 from linkedin_mcp_server.daemon_lock import DaemonLock
+from linkedin_mcp_server.session_state import canonical
+from linkedin_mcp_server.storage_class import Classification, StorageClass
 
 _RUNTIME = "macos-arm64-host"
 
@@ -566,6 +572,7 @@ class TestWhetherTheDaemonAppliesAtAll:
             "linkedin_mcp_server.daemon.get_runtime_id",
             lambda: "linux-amd64-host",
         )
+        _storage_is(monkeypatch, lambda _path: StorageClass.LOCAL)
 
         assert config.server.transport == "stdio"
         assert daemon_would_be_used(config) is True
@@ -601,3 +608,198 @@ class TestWhetherTheDaemonAppliesAtAll:
 
         assert applies is False
         assert caplog.text == ""
+
+
+def _storage_is(
+    monkeypatch: pytest.MonkeyPatch, decide: Callable[[Path], StorageClass]
+) -> list[Path]:
+    """Replace the classifier with *decide*, and record every path it is asked."""
+    asked: list[Path] = []
+
+    def classify(path: Path) -> Classification:
+        asked.append(canonical(path))
+        return Classification(decide(canonical(path)), "test storage")
+
+    monkeypatch.setattr(storage_class_module, "classify", classify)
+    return asked
+
+
+@pytest.fixture
+def coordination(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Every daemon coordination effect, recorded and refused if it runs."""
+    import linkedin_mcp_server.daemon_election as daemon_election_module
+    import linkedin_mcp_server.daemon_lock as daemon_lock_module
+
+    touched: list[str] = []
+
+    def forbid(name: str):
+        def refuse(*_args, **_kwargs):
+            touched.append(name)
+            raise AssertionError(f"{name} ran for an ineligible root")
+
+        return refuse
+
+    for name in ("prepare_daemon_state", "read", "read_token"):
+        monkeypatch.setattr(daemon_descriptor_module, name, forbid(name))
+    monkeypatch.setattr(daemon_lock_module.DaemonLock, "__init__", forbid("lock"))
+    for name in ("obtain_owner", "_spawn"):
+        monkeypatch.setattr(daemon_election_module, name, forbid(name))
+    return touched
+
+
+def _eligible_config(tmp_path: Path) -> AppConfig:
+    config = _config(tmp_path / "auth" / "profile")
+    config.server.daemon_enabled = True
+    return config
+
+
+def _state_dir(tmp_path: Path) -> Path:
+    return tmp_path / daemon_descriptor_module._APPLICATION_STATE_DIR
+
+
+class TestStorageEligibility:
+    """The contract's "Storage" and "Non-local roots" decisions.
+
+    A non-local, synced or unclassifiable auth root or daemon state root runs
+    no daemon, keeps Direct with one warning, and causes no coordination
+    effect on the way there.
+    """
+
+    @pytest.mark.parametrize(
+        "refused", [StorageClass.NONLOCAL, StorageClass.SYNCED, StorageClass.UNKNOWN]
+    )
+    @pytest.mark.parametrize(
+        ("root", "label"),
+        [
+            ("auth", "directory holding the profile"),
+            ("state", "daemon state directory"),
+        ],
+    )
+    def test_an_ineligible_root_keeps_direct_with_one_warning(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+        coordination: list[str],
+        refused: StorageClass,
+        root: str,
+        label: str,
+    ):
+        auth_root = canonical(tmp_path / "auth")
+        state_root = canonical(daemon_descriptor_module.daemon_state_root())
+        target = auth_root if root == "auth" else state_root
+        _storage_is(
+            monkeypatch,
+            lambda path: refused if path == target else StorageClass.LOCAL,
+        )
+
+        with caplog.at_level("DEBUG"):
+            applies = daemon_would_be_used(_eligible_config(tmp_path))
+
+        assert applies is False
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert len(warnings) == 1
+        assert label in warnings[0].getMessage()
+        assert f"on {refused.value} storage" in warnings[0].getMessage()
+        assert coordination == []
+        assert not _state_dir(tmp_path).exists()
+
+    def test_local_roots_are_eligible_and_both_are_asked(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        asked = _storage_is(monkeypatch, lambda _path: StorageClass.LOCAL)
+
+        with caplog.at_level("WARNING"):
+            applies = daemon_would_be_used(_eligible_config(tmp_path))
+
+        assert applies is True
+        assert caplog.records == []
+        # The auth root the election would be given, not the profile beneath it.
+        assert asked == [
+            canonical(tmp_path / "auth"),
+            canonical(daemon_descriptor_module.daemon_state_root()),
+        ]
+        assert not _state_dir(tmp_path).exists()
+
+    def test_a_classifier_that_raises_keeps_direct(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+        coordination: list[str],
+    ):
+        def explode(_path: Path) -> Classification:
+            raise RuntimeError("the classifier broke")
+
+        monkeypatch.setattr(storage_class_module, "classify", explode)
+
+        with caplog.at_level("WARNING"):
+            applies = daemon_would_be_used(_eligible_config(tmp_path))
+
+        assert applies is False
+        assert len(caplog.records) == 1
+        assert coordination == []
+
+    def test_an_unlocatable_state_root_keeps_direct(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+        coordination: list[str],
+    ):
+        _storage_is(monkeypatch, lambda _path: StorageClass.LOCAL)
+
+        def no_home() -> Path:
+            raise DescriptorError("no home")
+
+        monkeypatch.setattr(daemon_descriptor_module, "_account_home", no_home)
+
+        with caplog.at_level("WARNING"):
+            applies = daemon_would_be_used(_eligible_config(tmp_path))
+
+        assert applies is False
+        assert len(caplog.records) == 1
+        assert "daemon state directory" in caplog.records[0].getMessage()
+        assert coordination == []
+
+    def test_a_reader_failure_in_the_real_classifier_keeps_direct(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+        coordination: list[str],
+    ):
+        # Through the real classify(), so its own boundary is what turns the
+        # failure into UNKNOWN; the gate's outer guard would hide a regression
+        # there by answering False for a different reason.
+        def statfs_failed(_existing: Path, _platform: str) -> Classification:
+            raise OSError(5, "Input/output error")
+
+        monkeypatch.setattr(storage_class_module, "_homes", lambda: [tmp_path])
+        monkeypatch.setattr(storage_class_module, "_filesystem_class", statfs_failed)
+
+        with caplog.at_level("WARNING"):
+            applies = daemon_would_be_used(_eligible_config(tmp_path))
+
+        assert applies is False
+        assert len(caplog.records) == 1
+        assert "on unknown storage" in caplog.records[0].getMessage()
+        assert "OSError" in caplog.records[0].getMessage()
+        assert coordination == []
+
+    def test_the_real_classifier_admits_local_roots(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        # The positive control through the real provider checks: a classifier
+        # that refused everything would pass every test above.
+        def local(existing: Path, _platform: str) -> Classification:
+            assert existing.exists()
+            return Classification(StorageClass.LOCAL, "local test filesystem")
+
+        monkeypatch.setattr(storage_class_module, "_homes", lambda: [tmp_path])
+        monkeypatch.setattr(storage_class_module, "_filesystem_class", local)
+
+        assert daemon_would_be_used(_eligible_config(tmp_path)) is True
