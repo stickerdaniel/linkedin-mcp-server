@@ -87,6 +87,7 @@ exclude = ["*.md"]
 dev = [
     "aiohttp>=3.14.3",
     "pre-commit>=4.6.2",
+    "psutil>=7.2.2",
     "pytest>=8.3.5",
     "pytest-asyncio>=1.0.0",
     "pytest-cov>=6.1.1",
