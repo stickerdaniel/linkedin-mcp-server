@@ -124,8 +124,9 @@ _LINE = "Generated with Claude Opus 5.5"
         "marker-quoted-inside",
     ],
 )
-def test_ignores_the_macroscope_summary(body: str) -> None:
-    assert attribution.has_model_attribution(body)
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_ignores_the_macroscope_summary(body: str, newline: str) -> None:
+    assert attribution.has_model_attribution(body.replace("\n", newline))
 
 
 @pytest.mark.parametrize(

@@ -87,7 +87,8 @@ def has_model_attribution(body: str | None) -> bool:
     """Check the final non-empty line of a pull request body."""
     if not body:
         return False
-    body = _MACROSCOPE_BLOCK_RE.sub("", body)
+    # A body edited on the web arrives with CRLF, which `$` does not match.
+    body = _MACROSCOPE_BLOCK_RE.sub("", body.replace("\r\n", "\n"))
     lines = [line.strip() for line in body.splitlines() if line.strip()]
     return bool(lines) and is_valid_attribution(lines[-1])
 
