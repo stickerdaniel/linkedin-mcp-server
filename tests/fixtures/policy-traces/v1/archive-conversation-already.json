@@ -75,6 +75,16 @@
       "program_digest": "a3fa721a9c99"
     },
     {
+      "arg": {
+        "before": null,
+        "mark": "data-mcp-thread-options"
+      },
+      "call": "archive_conversation",
+      "kind": "evaluate",
+      "operation": "thread_menu_survey",
+      "program_digest": "80820d2f0ad2"
+    },
+    {
       "call": "archive_conversation",
       "kind": "locator.create",
       "locator": "thread_options",
