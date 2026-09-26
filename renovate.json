@@ -55,7 +55,7 @@
       "description": "requires-python: bump upper bound to next major.minor only",
       "matchManagers": ["pep621"],
       "matchDepTypes": ["requires-python"],
-      "rangeStrategy": "bump",
+      "rangeStrategy": "widen",
       "extractVersion": "^(?<version>\\d+\\.\\d+)"
     }
   ]
