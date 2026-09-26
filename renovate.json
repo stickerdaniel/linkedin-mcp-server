@@ -2,6 +2,9 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:best-practices", "group:allNonMajor"],
   "schedule": ["before 6am on Monday"],
+  "pre-commit": {
+    "enabled": true
+  },
   "pip-compile": {
     "managerFilePatterns": ["/^build-constraints\\.txt$/"]
   },
@@ -57,6 +60,11 @@
       "matchDepTypes": ["requires-python"],
       "rangeStrategy": "widen",
       "extractVersion": "^(?<version>\\d+\\.\\d+)"
+    },
+    {
+      "description": "Ruff is pinned in pyproject.toml and .pre-commit-config.yaml; tests/test_ruff_toolchain.py requires both to match",
+      "matchPackageNames": ["ruff", "astral-sh/ruff-pre-commit"],
+      "groupName": "ruff"
     }
   ]
 }
