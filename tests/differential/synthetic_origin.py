@@ -35,6 +35,7 @@ Run as a script to issue into a directory: ``python synthetic_origin.py DIR``.
 from __future__ import annotations
 
 import datetime
+import hmac
 import ipaddress
 import select
 import socket
@@ -159,6 +160,18 @@ def cookie_names(header: str | None) -> tuple[str, ...]:
     return tuple(sorted(name for name in names if name))
 
 
+def cookie_values(header: str | None, name: str) -> list[str]:
+    """Every value *header* sends under *name*, for comparison and nothing else."""
+    if not header:
+        return []
+    values = []
+    for part in header.split(";"):
+        key, separator, value = part.partition("=")
+        if separator and key.strip() == name:
+            values.append(value.strip())
+    return values
+
+
 def issue_certificates(
     directory: Path, *, ca_common_name: str = CA_COMMON_NAME
 ) -> None:
@@ -273,6 +286,9 @@ class OriginRequest:
     cookie_names: tuple[str, ...] = ()
     #: Wall-clock arrival, comparable with the harness's event log.
     t: float = 0.0
+    #: Whether the request's ``li_at`` is a session this origin accepts. None
+    #: while it accepts none. The value itself is compared, never recorded.
+    session_valid: bool | None = None
 
 
 class _OriginHandler(BaseHTTPRequestHandler):
@@ -287,6 +303,7 @@ class _OriginHandler(BaseHTTPRequestHandler):
                 path=self.path,
                 cookie_names=cookie_names(self.headers.get("Cookie")),
                 t=time.time(),
+                session_valid=origin.judge_session(self.headers.get("Cookie")),
             )
         )
         if self.path.split("?", 1)[0] == "/feed/":
@@ -316,6 +333,7 @@ class SyntheticOrigin(ThreadingHTTPServer):
         #: that rejects the certificate aborts the handshake, and this is where
         #: that shows up on the server side.
         self.failures: list[str] = []
+        self._sessions: list[bytes] = []
         context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
         context.load_cert_chain(certificates / LEAF_FILE, certificates / LEAF_KEY_FILE)
         context.set_alpn_protocols(["http/1.1"])
@@ -326,6 +344,27 @@ class SyntheticOrigin(ThreadingHTTPServer):
     @property
     def port(self) -> int:
         return self.server_address[1]
+
+    def accept_session(self, li_at: str) -> None:
+        """Treat *li_at* as a session this origin issued.
+
+        Held in memory only. The origin issues no refreshed session of its
+        own, so the staged value is the only one a row's browser may send.
+        """
+        with self._lock:
+            self._sessions.append(li_at.encode())
+
+    def judge_session(self, header: str | None) -> bool | None:
+        with self._lock:
+            sessions = list(self._sessions)
+        if not sessions:
+            return None
+        sent = [value.encode() for value in cookie_values(header, "li_at")]
+        return any(
+            hmac.compare_digest(value, session)
+            for value in sent
+            for session in sessions
+        )
 
     def record(self, request: OriginRequest) -> None:
         with self._lock:

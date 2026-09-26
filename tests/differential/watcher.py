@@ -1,12 +1,12 @@
 """A process watcher that runs outside every actor it observes.
 
 Started by the harness as its own process: its own session on POSIX, its own
-process group on Windows, and never a child of the server, the owner or the
-browser. What it reports therefore does not depend on anything those actors
-say about themselves. It samples the whole process table every 50 ms and
-writes ``process.start`` and ``process.exit`` for every process that appeared
-after its first sample, keyed by pid *and* create time, so a recycled pid reads
-as one exit and one start rather than as the same process.
+process group on Windows, and never a descendant of the server, the owner or
+the browser. What it reports therefore does not depend on anything those actors
+say about themselves. It samples the whole process table and writes
+``process.start`` and ``process.exit`` for every process that appeared after
+its first sample, keyed by pid *and* create time, so a recycled pid reads as
+one exit and one start rather than as the same process.
 
 It also derives O1 on every sample: how many browser tree roots each
 ``--user-data-dir`` has. A browser is found by that flag in its command line,
@@ -15,9 +15,25 @@ carries ``--type=`` and is part of its parent's tree, never a root of its own.
 Two roots with the same profile in one sample is the second concurrent browser
 the default-on contract forbids.
 
+**Nothing new is ever settled by age.** A process can exec at any moment of its
+life, and a forked child shows its parent's command line until it does, which
+is how the Node driver starts Chromium on POSIX. So every process that appeared
+after the first sample has its executable and command line read again on every
+sample for as long as it lives, and a change is reported as ``process.update``.
+Only the processes already running at the first sample are read once: they
+existed before any actor, nothing the row starts is among them, and none of
+them was ever told the row's temporary profile, so none can become a browser on
+it. Their identity is still checked on every sample.
+
+**Relevant means descended from the harness.** A process is a row actor when its
+parent, at first sight, is the harness (``--root-pid``) or another actor. A
+metadata read that fails for an actor is recorded in the summary, since a
+command line nobody could read is not a command line without the flag. The same
+failure for an unrelated process, say a protected system service, is not.
+
 What sampling cannot see: a process that lives and dies between two samples.
-The summary records the slowest sample, so a claim built on it can state the
-window it actually had.
+The summary records when observation began and ended and the largest wall-clock
+gap between two samples, so a claim built on it can state the window it had.
 
 Imports nothing from the repository, so it runs as a plain script:
 ``python watcher.py --out FILE --stop FILE ...``.
@@ -30,8 +46,8 @@ import json
 import os
 import sys
 import time
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -42,11 +58,6 @@ CHILD_TYPE_FLAG = "--type="
 
 #: Target interval between samples.
 SAMPLE_SECONDS = 0.05
-
-#: How long a new process's command line keeps being re-read. A forked child
-#: shows its parent's command line until it execs, which is exactly how the
-#: Node driver starts Chromium on POSIX, so the first reading can be a stale one.
-FRESH_SECONDS = 2.0
 
 
 def canonical_user_data_dir(value: str) -> str:
@@ -84,6 +95,12 @@ class ProcessRecord:
     cmdline: tuple[str, ...]
     #: The canonical profile when this is a browser root, else None.
     profile: str | None = None
+    #: Descended from the harness, so one of the row's actors.
+    in_row: bool = False
+
+    @property
+    def identity(self) -> tuple[int, float]:
+        return (self.pid, self.start)
 
     def as_event_fields(self) -> dict[str, Any]:
         return {
@@ -92,14 +109,21 @@ class ProcessRecord:
             "start_identity": self.start,
             "exe": self.exe,
             "cmdline": list(self.cmdline),
+            "in_row": self.in_row,
         }
 
 
 def record(
-    pid: int, ppid: int, start: float, exe: str | None, cmdline: Sequence[str]
+    pid: int,
+    ppid: int,
+    start: float,
+    exe: str | None,
+    cmdline: Sequence[str],
+    *,
+    in_row: bool = False,
 ) -> ProcessRecord:
     cmdline = tuple(cmdline)
-    return ProcessRecord(pid, ppid, start, exe, cmdline, user_data_dir(cmdline))
+    return ProcessRecord(pid, ppid, start, exe, cmdline, user_data_dir(cmdline), in_row)
 
 
 def classify(process: ProcessRecord) -> str:
@@ -161,6 +185,17 @@ class Tracker:
             for pid, process in sample.items():
                 previous = self._known.get(pid)
                 if previous is not None and previous.start == process.start:
+                    if (previous.exe, previous.cmdline) != (
+                        process.exe,
+                        process.cmdline,
+                    ):
+                        events.append(
+                            (
+                                classify(process),
+                                "process.update",
+                                process.as_event_fields(),
+                            )
+                        )
                     continue
                 if previous is not None:
                     events.append(
@@ -195,54 +230,134 @@ class Tracker:
         return events
 
 
-@dataclass
-class _Seen:
-    record: ProcessRecord
-    first_seen: float
+_UNREADABLE = (psutil.AccessDenied, OSError)
 
 
-def _read(process: psutil.Process) -> tuple[int, str | None, tuple[str, ...]]:
-    with process.oneshot():
-        ppid = process.ppid()
+class Sampler:
+    """Reads the process table, re-reading every process that could still change.
+
+    *pids* and *open_process* are psutil's by default and are replaced in tests
+    to model a process table.
+    """
+
+    def __init__(
+        self,
+        root_pid: int,
+        *,
+        own_pid: int | None = None,
+        pids: Callable[[], Iterable[int]] = psutil.pids,
+        open_process: Callable[[int], Any] = psutil.Process,
+    ) -> None:
+        self.root_pid = root_pid
+        self.own_pid = os.getpid() if own_pid is None else own_pid
+        self._pids = pids
+        self._open = open_process
+        self._known: dict[int, ProcessRecord] = {}
+        self._baseline: set[tuple[int, float]] | None = None
+        self._row: set[tuple[int, float]] = set()
+        self._failed: set[tuple[int, float, str]] = set()
+        #: Failed metadata reads of row actors, once per process and field.
+        self.relevant_read_failures: list[dict[str, Any]] = []
+
+    def _read(
+        self, process: Any, known: ProcessRecord | None
+    ) -> tuple[int, str | None, tuple[str, ...], list[str]]:
+        failures: list[str] = []
+        ppid = known.ppid if known is not None else -1
+        exe = known.exe if known is not None else None
+        cmdline = known.cmdline if known is not None else ()
         try:
-            exe: str | None = process.exe()
-        except (psutil.AccessDenied, OSError):
-            exe = None
+            ppid = process.ppid()
+        except _UNREADABLE as exc:
+            failures.append(f"ppid: {type(exc).__name__}")
+        try:
+            exe = process.exe()
+        except _UNREADABLE as exc:
+            failures.append(f"exe: {type(exc).__name__}")
         try:
             cmdline = tuple(process.cmdline())
-        except (psutil.AccessDenied, OSError):
-            cmdline = ()
-    return ppid, exe, cmdline
+        except _UNREADABLE as exc:
+            failures.append(f"cmdline: {type(exc).__name__}")
+        return ppid, exe, cmdline, failures
 
+    def sample(self) -> dict[int, ProcessRecord]:
+        first = self._baseline is None
+        sample: dict[int, ProcessRecord] = {}
+        failures: dict[int, list[str]] = {}
+        for pid in self._pids():
+            try:
+                # Reads the create time, which is what separates a recycled pid
+                # from the process already known under it.
+                process = self._open(pid)
+                start = process.create_time()
+            except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+                continue
+            known = self._known.get(pid)
+            if known is not None and known.start != start:
+                known = None
+            if (
+                known is not None
+                and self._baseline is not None
+                and known.identity in self._baseline
+            ):
+                sample[pid] = known
+                continue
+            try:
+                ppid, exe, cmdline, failed = self._read(process, known)
+            except psutil.NoSuchProcess:
+                continue
+            sample[pid] = record(
+                pid,
+                ppid,
+                start,
+                exe,
+                cmdline,
+                in_row=known is not None and known.in_row,
+            )
+            if failed:
+                failures[pid] = failed
+        if first:
+            self._baseline = {process.identity for process in sample.values()}
+            root = sample.get(self.root_pid)
+            if root is not None:
+                self._row.add(root.identity)
+        self._classify(sample)
+        for pid, failed in failures.items():
+            process = sample[pid]
+            if not process.in_row:
+                continue
+            for field in failed:
+                key = (pid, process.start, field)
+                if key in self._failed:
+                    continue
+                self._failed.add(key)
+                self.relevant_read_failures.append(
+                    {"pid": pid, "start_identity": process.start, "failure": field}
+                )
+        self._known = sample
+        return sample
 
-def sample_processes(seen: dict[int, _Seen]) -> dict[int, ProcessRecord]:
-    """Read the process table once, reusing what is already known and settled."""
-    now = time.monotonic()
-    sample: dict[int, ProcessRecord] = {}
-    alive: set[int] = set()
-    for pid in psutil.pids():
-        try:
-            # The constructor reads the create time, which is what separates a
-            # recycled pid from the process the cache already holds.
-            process = psutil.Process(pid)
-            start = process.create_time()
-            cached = seen.get(pid)
-            if cached is not None and cached.record.start == start:
-                if now - cached.first_seen < FRESH_SECONDS:
-                    ppid, exe, cmdline = _read(process)
-                    cached.record = record(pid, ppid, start, exe, cmdline)
-            else:
-                ppid, exe, cmdline = _read(process)
-                cached = _Seen(record(pid, ppid, start, exe, cmdline), now)
-                seen[pid] = cached
-        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
-            continue
-        alive.add(pid)
-        sample[pid] = cached.record
-    for pid in list(seen):
-        if pid not in alive:
-            del seen[pid]
-    return sample
+    def _classify(self, sample: dict[int, ProcessRecord]) -> None:
+        """Mark row actors: the harness, and whatever descends from it."""
+        changed = True
+        while changed:
+            changed = False
+            for pid, process in sample.items():
+                if process.in_row or pid == self.own_pid:
+                    continue
+                if process.identity in self._row:
+                    sample[pid] = replace(process, in_row=True)
+                    changed = True
+                    continue
+                if self._baseline is not None and process.identity in self._baseline:
+                    continue
+                parent = sample.get(process.ppid)
+                if parent is not None and (
+                    parent.in_row or parent.identity in self._row
+                ):
+                    self._row.add(process.identity)
+                    sample[pid] = replace(process, in_row=True)
+                    changed = True
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -254,6 +369,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--row", required=True)
     parser.add_argument("--platform", required=True)
     parser.add_argument("--interval", type=float, default=SAMPLE_SECONDS)
+    # The process whose descendants are the row's actors. The harness passes
+    # its own pid; by default, whoever started this watcher.
+    parser.add_argument("--root-pid", type=int, default=os.getppid())
     # Its own deadline, so a harness that dies without writing the stop file
     # cannot leave this sampling for the rest of the runner's life.
     parser.add_argument("--deadline", type=float, default=900.0)
@@ -266,10 +384,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "platform": args.platform,
     }
     tracker = Tracker()
-    seen: dict[int, _Seen] = {}
+    sampler = Sampler(args.root_pid)
     began = time.monotonic()
-    slowest = 0.0
-    late = 0
+    observation_start: float | None = None
+    last_sample: float | None = None
+    max_gap = 0.0
     stopped_by = "deadline"
     with args.out.open("a", encoding="utf-8") as out:
 
@@ -282,16 +401,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 + "\n"
             )
 
-        while time.monotonic() - began < args.deadline:
-            if args.stop.exists():
-                stopped_by = "stop file"
-                break
-            tick = time.monotonic()
-            sample = sample_processes(seen)
+        def take_sample() -> None:
+            nonlocal observation_start, last_sample, max_gap
+            sample = sampler.sample()
             now = time.time()
+            if last_sample is not None:
+                max_gap = max(max_gap, now - last_sample)
+            last_sample = now
             for actor, kind, fields in tracker.observe(sample, now):
                 write(actor, kind, fields, now)
-            if tracker.samples == 1:
+            if observation_start is None:
+                observation_start = now
                 # The baseline is taken. The harness waits for this line before
                 # it starts an actor, so no actor is mistaken for background.
                 write(
@@ -301,10 +421,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                     now,
                 )
             out.flush()
+
+        while time.monotonic() - began < args.deadline:
+            if args.stop.exists():
+                stopped_by = "stop file"
+                # One more sample after the request, so the observation
+                # provably ends after whatever the harness waited for.
+                take_sample()
+                break
+            tick = time.monotonic()
+            take_sample()
             elapsed = time.monotonic() - tick
-            slowest = max(slowest, elapsed)
-            if elapsed > 2 * args.interval:
-                late += 1
             time.sleep(max(0.0, args.interval - elapsed))
 
         write(
@@ -312,10 +439,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             "watcher.summary",
             {
                 "pid": os.getpid(),
+                "root_pid": args.root_pid,
                 "samples": tracker.samples,
                 "interval_seconds": args.interval,
-                "slowest_sample_seconds": round(slowest, 4),
-                "late_samples": late,
+                "observation_start": observation_start,
+                "observation_end": last_sample,
+                "max_gap_seconds": round(max_gap, 4),
+                "relevant_read_failures": sampler.relevant_read_failures,
                 "max_roots": tracker.max_roots,
                 "violations": tracker.violations,
                 "stopped_by": stopped_by,

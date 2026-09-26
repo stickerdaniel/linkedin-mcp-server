@@ -133,3 +133,34 @@ def test_publishing_copies_the_evidence_only_when_asked(tmp_path):
     assert target is not None and target == tmp_path / "out" / "r1"
     assert (target / "events.jsonl").read_text() == log.path.read_text()
     assert (target / COUNTS_FILE).exists()
+
+
+def test_publishing_copies_only_the_evidence_files(tmp_path):
+    run_dir = tmp_path / "run"
+    row = run_dir / "rows" / "K3"
+    row.mkdir(parents=True)
+    for name in ("watcher.jsonl", "watcher.stderr", "identity.json", "failures.json"):
+        (row / name).write_text(name)
+    # What must never leave the runner, even if a later change put it here.
+    for name in ("cookies.json", "leaf-key.pem", "ca.pem", "source-state.json"):
+        (row / name).write_text("secret")
+    (row / "profile").mkdir()
+    (row / "profile" / "Cookies").write_text("secret")
+    EventLog(run_dir, run="r1").emit(
+        experiment="K3", row="H-R1", actor="harness", kind="row.outcome"
+    )
+
+    target = publish(run_dir, str(tmp_path / "out"), "r1")
+    assert target is not None
+    copied = sorted(
+        str(path.relative_to(target)).replace("\\", "/")
+        for path in target.rglob("*")
+        if path.is_file()
+    )
+    assert copied == [
+        "events.jsonl",
+        "rows/K3/failures.json",
+        "rows/K3/identity.json",
+        "rows/K3/watcher.jsonl",
+        "rows/K3/watcher.stderr",
+    ]

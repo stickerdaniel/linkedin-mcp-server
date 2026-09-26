@@ -323,8 +323,22 @@ jobs:
         env:
           LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
           LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-evidence
         timeout-minutes: 20
         run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_host_quit_row.py
+
+      # The row's evidence packet: events, counts, watcher output, failures
+      # and the runtime identity, and nothing else (``events.PUBLISHED_FILES``).
+      # The certificates sit in another directory and are never included.
+      # Always, so a red row keeps what made it red.
+      - name: Keep the differential evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: differential-evidence-ubuntu-latest
+          path: ${{ runner.temp }}/differential-evidence
+          if-no-files-found: warn
+          retention-days: 14
 
       - run: uv cache prune --ci
 
@@ -559,7 +573,21 @@ jobs:
         env:
           LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
           LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-evidence
         timeout-minutes: 20
         run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_host_quit_row.py
+
+      # The row's evidence packet: events, counts, watcher output, failures
+      # and the runtime identity, and nothing else (``events.PUBLISHED_FILES``).
+      # The certificates sit in another directory and are never included.
+      # Always, so a red row keeps what made it red.
+      - name: Keep the differential evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: differential-evidence-${{ matrix.os }}
+          path: ${{ runner.temp }}/differential-evidence
+          if-no-files-found: warn
+          retention-days: 14
 
       - run: uv cache prune --ci

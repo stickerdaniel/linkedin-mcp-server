@@ -9,32 +9,46 @@ is one the product itself accepted as signed in, against the synthetic origin,
 with a ``li_at`` whose value is random and has never been anywhere near
 LinkedIn. The browser install is recorded with the metadata writer the real
 setup calls after it finishes, so a row starts from a finished install rather
-than from the first-run download, which R1 is not about.
+than from the first-run download, which R1 is not about. That is the whole of
+it: this is not a native test of the import command's discovery, rotation or
+lease handling.
 
-**R17 reads five artefacts and never a cookie value.** The source generation,
-the cookie file's hash and the *names* in it, the quarantine directories beside
-the profile, and Chromium's ``Last Version``. From two readings and what the
-user was shown it derives one of five outcomes:
+**The staged value is the session.** ``StagedSession`` holds the ``li_at`` value
+in memory only; the synthetic origin is told it, so it can say per request
+whether the browser sent *this* session, and the snapshot compares the file's
+value against its digest. Neither ever writes the value anywhere. A refresh
+would count only if the origin had issued it, and it issues none, so a
+different value is a different session, not a refreshed one.
 
-* ``retained``: the same generation, a ``li_at`` still on disk, and no new
-  quarantine. A cookie file whose hash changed is still retained, because the
-  close exports the store and a legitimate refresh rewrites it.
+**R17 reads the artefacts and never records a cookie value.** The source
+generation; the cookie file's hash and names; whether it holds a ``li_at`` with
+the staged value, on ``.linkedin.com``, not expired; whether the browser
+profile directory is still there; the quarantine directories; and Chromium's
+``Last Version``. Together with what the user was shown and one post-quit
+observation of the session in use, it derives one of five outcomes:
+
+* ``retained``: the same generation, the staged ``li_at`` still usable on disk,
+  the profile present, no new quarantine, *and* the post-quit observation saw
+  the origin accept the session.
 * ``cleared-by-user``: gone, and the row says the user asked for that.
-* ``lost-announced``: gone, and some line the user saw names the session or the
-  sign-in. Any line is not enough (``announces_session``).
+* ``lost-announced``: gone, and after the last line that reported a successful
+  sign-in, some line told the user the session needs signing in again
+  (``announces_loss``).
 * ``lost-silent``: gone, and nothing said so.
-* ``uncertain``: a reading failed, or there was no session to lose.
+* ``uncertain``: a reading failed or was malformed, there was no session to
+  lose, or the post-quit observation could not be made.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import secrets
 import time
-from collections.abc import Iterable
-from dataclasses import asdict, dataclass
+from collections.abc import Iterable, Sequence
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -58,14 +72,18 @@ OUTCOMES = (RETAINED, CLEARED_BY_USER, LOST_ANNOUNCED, LOST_SILENT, UNCERTAIN)
 #: The ``auth_minimal`` bridge preset, which is also inside ``bridge_core``.
 SYNTHETIC_COOKIE_NAMES = ("li_at", "JSESSIONID", "bcookie", "bscookie", "lidc")
 
+#: The domain the product stores LinkedIn's cookies under
+#: (``BrowserManager._normalize_cookie_domain``).
+SESSION_DOMAIN = ".linkedin.com"
+
 #: Chromium's own record of which version last wrote the profile.
 LAST_VERSION_FILE = "Last Version"
 
-#: What counts as naming the session or the sign-in to the user. English, and
+#: What tells the user the session needs signing in again. English, and
 #: knowingly so: the server's own messages are English, and a row that needs
-#: another language has to extend this table rather than widen it to "any
+#: another language has to extend these tables rather than widen them to "any
 #: line", which would read every log line as an announcement.
-_ANNOUNCEMENT = re.compile(
+_LOSS = re.compile(
     r"--login"
     r"|\bsign(?:ed)?[ -]?in\b"
     r"|\blog(?:ged)?[ -]?in\b"
@@ -74,20 +92,51 @@ _ANNOUNCEMENT = re.compile(
     re.IGNORECASE,
 )
 
+#: A report of a successful sign-in. It matches the loss table's words, and it
+#: is the opposite of a loss notice, so it is judged first.
+_SUCCESS = re.compile(
+    r"\bsuccessfully (?:signed|logged) in\b"
+    r"|\b(?:signed|logged) in successfully\b"
+    r"|\bsession is valid\b"
+    r"|\bimported and validated\b",
+    re.IGNORECASE,
+)
+
 
 class StagingError(RuntimeError):
     """The synthetic session could not be established; the row cannot start."""
 
 
-def synthetic_cookies(*, now: float | None = None) -> list[LinkedInCookie]:
+def digest(value: str) -> str:
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+@dataclass(frozen=True)
+class StagedSession:
+    """The row's session. The value stays in this process's memory."""
+
+    li_at: str = field(repr=False)
+
+    @property
+    def li_at_digest(self) -> str:
+        return digest(self.li_at)
+
+
+def synthetic_cookies(
+    *, now: float | None = None, li_at: str | None = None
+) -> list[LinkedInCookie]:
     """A fresh signed-in cookie set with random values that mean nothing."""
     expires = (time.time() if now is None else now) + 30 * 24 * 60 * 60
     token = secrets.token_urlsafe(24)
     return [
         LinkedInCookie(
             name=name,
-            value=f"synthetic-{name}-{token}",
-            domain=".linkedin.com",
+            value=(
+                li_at
+                if name == "li_at" and li_at is not None
+                else f"synthetic-{name}-{token}"
+            ),
+            domain=SESSION_DOMAIN,
             path="/",
             expires=expires,
             secure=True,
@@ -98,10 +147,13 @@ def synthetic_cookies(*, now: float | None = None) -> list[LinkedInCookie]:
     ]
 
 
-def write_synthetic_cookie_file(cookie_path: Path) -> None:
+def write_synthetic_cookie_file(cookie_path: Path) -> StagedSession:
     """Stage the cookie file the way the import path stages a real one."""
-    payload = json.dumps([c.to_playwright() for c in synthetic_cookies()], indent=2)
+    cookies = synthetic_cookies()
+    payload = json.dumps([c.to_playwright() for c in cookies], indent=2)
     secure_write_text(cookie_path, payload, mode=0o600)
+    (li_at,) = [c.value for c in cookies if c.name == "li_at"]
+    return StagedSession(li_at)
 
 
 def stage_installed_browser() -> Path:
@@ -133,12 +185,16 @@ def stage_installed_browser() -> Path:
     return browsers
 
 
-async def stage_signed_in_session(profile: Path) -> None:
+async def stage_signed_in_session(
+    profile: Path, *, accept: Any | None = None
+) -> StagedSession:
     """Leave *profile* signed in to the synthetic origin, as an import would.
 
     The caller has configured the process: ``USER_DATA_DIR`` naming *profile*,
     ``PROXY_SERVER`` naming the fixture proxy, ``PLAYWRIGHT_BROWSERS_PATH``
-    naming the installed browser.
+    naming the installed browser. *accept*, when given, is called with the
+    staged session before the product validates it, so the origin can judge
+    the staging requests too.
     """
     from linkedin_mcp_server.drivers.browser import (
         get_profile_dir,
@@ -152,41 +208,104 @@ async def stage_signed_in_session(profile: Path) -> None:
         )
     stage_installed_browser()
     cookie_path = portable_cookie_path(profile)
-    write_synthetic_cookie_file(cookie_path)
+    staged = write_synthetic_cookie_file(cookie_path)
+    if accept is not None:
+        accept(staged)
     if not await validate_imported_cookies(cookie_path, profile):
         raise StagingError(
             "the product's own import validation rejected the synthetic "
             "session, so the synthetic /feed/ does not pass its auth check"
         )
     write_source_state(profile)
+    return staged
 
 
 @dataclass(frozen=True)
 class ProfileSnapshot:
     generation: str | None
     cookies_sha256: str | None
-    #: Names only. The values are synthetic, but a reading that never copies a
-    #: cookie value is one that stays safe if it is ever pointed elsewhere.
+    #: Names only. No reading ever copies a cookie value.
     cookie_names: tuple[str, ...]
+    #: A ``li_at`` entry of any kind is in the file.
+    li_at_present: bool
+    #: Some ``li_at`` carries the staged value (by digest); None without one.
+    li_at_staged: bool | None
+    #: Some ``li_at`` is on ``.linkedin.com``.
+    li_at_on_domain: bool
+    #: Some ``li_at`` has an expiry in the future (a session-only one does not).
+    li_at_unexpired: bool
+    #: One ``li_at`` satisfies all three at once.
+    li_at_usable: bool
+    #: The browser profile directory exists and is not empty.
+    profile_present: bool
     quarantine: tuple[str, ...]
     last_version: str | None
-    #: Every artefact that exists but could not be read, and why.
+    #: Every artefact that exists but could not be read or is malformed.
     unreadable: tuple[str, ...] = ()
 
     @property
-    def has_session(self) -> bool:
-        return self.generation is not None and "li_at" in self.cookie_names
+    def usable(self) -> bool:
+        return (
+            self.generation is not None and self.li_at_usable and self.profile_present
+        )
 
     def as_event_fields(self) -> dict[str, Any]:
         fields = asdict(self)
         for name in ("cookie_names", "quarantine", "unreadable"):
             fields[name] = list(fields[name])
+        fields["usable"] = self.usable
         return fields
 
 
-def snapshot(profile: Path) -> ProfileSnapshot:
-    """Read the four R17 artefacts of *profile*. Never raises on their content."""
+def _judge_li_at(
+    entries: Sequence[Any], expected_digest: str | None, now: float
+) -> tuple[dict[str, Any], list[str]]:
+    malformed: list[str] = []
+    found = staged = on_domain = unexpired = usable = False
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("name") != "li_at":
+            continue
+        found = True
+        value, domain, expires = (
+            entry.get("value"),
+            entry.get("domain"),
+            entry.get("expires"),
+        )
+        if (
+            not isinstance(value, str)
+            or not isinstance(domain, str)
+            or isinstance(expires, bool)
+            or not isinstance(expires, (int, float))
+            or not math.isfinite(expires)
+        ):
+            malformed.append("cookies.json: a li_at entry is malformed")
+            continue
+        this_staged = expected_digest is not None and digest(value) == expected_digest
+        this_domain = domain == SESSION_DOMAIN
+        # -1 is Playwright's session-cookie sentinel: gone with the browser.
+        this_unexpired = expires > now
+        staged |= this_staged
+        on_domain |= this_domain
+        unexpired |= this_unexpired
+        usable |= this_staged and this_domain and this_unexpired
+    return (
+        {
+            "li_at_present": found,
+            "li_at_staged": staged if expected_digest is not None else None,
+            "li_at_on_domain": on_domain,
+            "li_at_unexpired": unexpired,
+            "li_at_usable": usable,
+        },
+        malformed,
+    )
+
+
+def snapshot(
+    profile: Path, *, expected_digest: str | None = None, now: float | None = None
+) -> ProfileSnapshot:
+    """Read the R17 artefacts of *profile*. Never raises on their content."""
     unreadable: list[str] = []
+    now = time.time() if now is None else now
 
     generation: str | None = None
     state_file = source_state_path(profile)
@@ -203,6 +322,7 @@ def snapshot(profile: Path) -> ProfileSnapshot:
 
     cookies_sha256: str | None = None
     cookie_names: tuple[str, ...] = ()
+    li_at, _ = _judge_li_at([], expected_digest, now)
     cookie_file = portable_cookie_path(profile)
     if cookie_file.exists():
         try:
@@ -221,13 +341,22 @@ def snapshot(profile: Path) -> ProfileSnapshot:
                     }
                 )
             )
+            li_at, malformed = _judge_li_at(entries, expected_digest, now)
+            unreadable += malformed
         except (OSError, ValueError) as exc:
             unreadable.append(f"{cookie_file.name}: {type(exc).__name__}")
+
+    directory = canonical(profile)
+    try:
+        profile_present = directory.is_dir() and any(directory.iterdir())
+    except OSError as exc:
+        profile_present = False
+        unreadable.append(f"profile: {type(exc).__name__}")
 
     quarantine = tuple(path.name for path in quarantine_dirs(profile))
 
     last_version: str | None = None
-    version_file = canonical(profile) / LAST_VERSION_FILE
+    version_file = directory / LAST_VERSION_FILE
     if version_file.exists():
         try:
             last_version = version_file.read_text(encoding="utf-8").strip() or None
@@ -238,14 +367,27 @@ def snapshot(profile: Path) -> ProfileSnapshot:
         generation=generation,
         cookies_sha256=cookies_sha256,
         cookie_names=cookie_names,
+        profile_present=profile_present,
         quarantine=quarantine,
         last_version=last_version,
         unreadable=tuple(unreadable),
+        **li_at,
     )
 
 
-def announces_session(lines: Iterable[str]) -> bool:
-    return any(_ANNOUNCEMENT.search(line) for line in lines)
+def announces_loss(lines: Iterable[str]) -> bool:
+    """Whether the user was told of a loss after the last reported sign-in.
+
+    Order matters: a notice that was followed by a successful sign-in has been
+    answered, and a success line is never itself a notice of loss.
+    """
+    announced = False
+    for line in lines:
+        if _SUCCESS.search(line):
+            announced = False
+        elif _LOSS.search(line):
+            announced = True
+    return announced
 
 
 def r17_outcome(
@@ -253,18 +395,26 @@ def r17_outcome(
     after: ProfileSnapshot,
     user_output: Iterable[str],
     *,
+    post_quit: bool | None,
     user_cleared: bool = False,
 ) -> str:
-    """What became of the session between two readings. See the module doc."""
-    if before.unreadable or after.unreadable or not before.has_session:
+    """What became of the session between two readings. See the module doc.
+
+    *post_quit* is whether a session started after the row found the origin
+    accepting the staged session: True, False, or None when that observation
+    could not be made.
+    """
+    if before.unreadable or after.unreadable or not before.usable:
         return UNCERTAIN
     kept = (
-        after.has_session
+        after.usable
         and after.generation == before.generation
         and set(after.quarantine) <= set(before.quarantine)
     )
-    if kept:
+    if kept and post_quit is True:
         return RETAINED
+    if kept and post_quit is None:
+        return UNCERTAIN
     if user_cleared:
         return CLEARED_BY_USER
-    return LOST_ANNOUNCED if announces_session(user_output) else LOST_SILENT
+    return LOST_ANNOUNCED if announces_loss(user_output) else LOST_SILENT

@@ -61,6 +61,7 @@ KINDS = frozenset(
     {
         # From the watcher.
         "process.start",
+        "process.update",
         "process.exit",
         "browser.roots",
         "watcher.ready",
@@ -74,6 +75,7 @@ KINDS = frozenset(
         "owner.found",
         "owner.exit",
         "tool.result",
+        "row.identity",
         "row.outcome",
     }
 )
@@ -235,10 +237,36 @@ class Counts:
         return path
 
 
+#: What an evidence packet may contain, by file name. Everything else in the
+#: run directory stays on the runner: the rows keep their profiles, cookie
+#: files and certificates elsewhere, and this list is what keeps a later
+#: addition there from being uploaded by accident.
+PUBLISHED_FILES = frozenset(
+    {
+        EVENTS_FILE,
+        COUNTS_FILE,
+        "identity.json",
+        "failures.json",
+        "watcher.jsonl",
+        "watcher.stderr",
+    }
+)
+
+
 def publish(directory: Path, out: str | None, run: str) -> Path | None:
-    """Copy a run's evidence to *out*, for CI to collect. None when unset."""
+    """Copy a run's evidence to *out*, for CI to collect. None when unset.
+
+    Only files named in ``PUBLISHED_FILES``, wherever they sit in the run
+    directory, and nothing else.
+    """
     if not out:
         return None
     target = Path(out) / run
-    shutil.copytree(directory, target, dirs_exist_ok=True)
+    for path in sorted(directory.rglob("*")):
+        if not path.is_file() or path.name not in PUBLISHED_FILES:
+            continue
+        destination = target / path.relative_to(directory)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(path, destination)
+    target.mkdir(parents=True, exist_ok=True)
     return target
