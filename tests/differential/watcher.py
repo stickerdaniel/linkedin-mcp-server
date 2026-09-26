@@ -32,11 +32,14 @@ process is established as unrelated to the row when
 
 * its owning user can be read and is not the harness's user (the real uid on
   POSIX, the user name on Windows), since no actor runs as anyone else; or
+* it was running at the first sample and was created before the harness, by
+  more than ``CREATE_TIME_MARGIN_SECONDS``, since nothing older than the
+  harness can descend from it; or
 * it was running at the first sample and its whole ancestry, read then, ends
-  at the top of the process tree without passing the harness: every parent
-  present and older than its child, and the last one either the child of pid
-  0 or older than the harness when it is the child of pid 1, since an orphan
-  of the harness is adopted there; or
+  without passing the harness: every parent present and no younger than its
+  child, up to one created before the harness or a child of pid 0. A younger
+  child of pid 1 is not enough, since an orphan of the harness is adopted
+  there; or
 * its executable, read in the same sample, is neither the row's browser
   (``--browser-exe``) nor anything under the managed browsers
   (``--browser-dir``). That is the setuid ``/bin/ps`` the product runs on
@@ -91,6 +94,12 @@ CHILD_TYPE_FLAG = "--type="
 
 #: Target interval between samples.
 SAMPLE_SECONDS = 0.05
+
+#: How much older than the harness a process has to be to count as created
+#: before it. Two create times are compared, both read through psutil on one
+#: machine; the margin absorbs their clock's resolution, which on Windows is
+#: the system timer's (about 15.6 ms by default), with room to spare.
+CREATE_TIME_MARGIN_SECONDS = 0.05
 
 
 def canonical_user_data_dir(value: str) -> str:
@@ -434,8 +443,26 @@ class Sampler:
         self._watched: set[tuple[int, float]] = set()
         #: (pid, create time, command line) whose launcher was already asked.
         self._launchers_read: set[tuple[int, float, tuple[str, ...]]] = set()
+        #: What sampling cost: first-sample outcomes and full reads per sample.
+        self.first_sample_cached = 0
+        self.first_sample_watched = 0
+        self.reads_per_sample: list[int] = []
+        self._reads = 0
         self._episodes: dict[tuple[int, float | None], dict[str, Any]] = {}
         self._closed: list[dict[str, Any]] = []
+
+    def stats(self) -> dict[str, Any]:
+        """What sampling cost, for the summary."""
+        reads = self.reads_per_sample
+        return {
+            "create_time_margin_seconds": CREATE_TIME_MARGIN_SECONDS,
+            "first_sample_cached": self.first_sample_cached,
+            "first_sample_watched": self.first_sample_watched,
+            "reads_per_sample_mean": (
+                round(sum(reads) / len(reads), 1) if reads else None
+            ),
+            "reads_per_sample_max": max(reads) if reads else None,
+        }
 
     def possible_browser(self, exe: str | None) -> bool:
         return possible_browser(exe, self.browser_exe, self.browser_dir)
@@ -465,6 +492,7 @@ class Sampler:
     def _read(
         self, process: Any, known: ProcessRecord | None
     ) -> tuple[int | None, str | None, tuple[str, ...], list[str], bool]:
+        self._reads += 1
         failures: list[str] = []
         ppid = known.ppid if known is not None else None
         exe = known.exe if known is not None else None
@@ -596,6 +624,11 @@ class Sampler:
         # Running before any actor, its whole ancestry read now and not
         # leading to the harness: established unrelated.
         self._unrelated |= settled
+        if first:
+            self.first_sample_cached = len(settled)
+            self.first_sample_watched = len(self._watched)
+        self.reads_per_sample.append(self._reads)
+        self._reads = 0
         self._track(sample, verdicts)
         self._resolve_by_user(sample, identified)
         self._known = sample
@@ -630,12 +663,16 @@ class Sampler:
     ) -> set[tuple[int, float]]:
         """The identities whose ancestry, read in this sample, ends away from the harness.
 
-        Every parent has to be in the sample and no younger than its child: a
+        A process created before the harness cannot descend from it, whatever
+        its ancestry, so one older than the harness by more than
+        ``CREATE_TIME_MARGIN_SECONDS`` ends the walk, itself or as an ancestor.
+        That is what settles most of a Windows process table, where an
+        orphan's parent pid keeps naming a process that is gone. Otherwise
+        every parent has to be in the sample and no younger than its child: a
         parent that could not be read, or a younger process at the parent's
-        pid, leaves the ancestry open. It ends at a child of pid 0 (or a pid
-        that is its own parent), or at a child of pid 1 older than the
-        harness, because pid 1 also adopts every orphan, the harness's
-        included.
+        pid, leaves the ancestry open. It also ends at a child of pid 0 (or a
+        pid that is its own parent); a younger child of pid 1 stays open,
+        because pid 1 adopts every orphan, the harness's included.
         """
         root = sample.get(self.root_pid)
         born = root.start if root is not None else None
@@ -652,11 +689,17 @@ class Sampler:
                     settled = False
                     break
                 chain.append(current)
+                if (
+                    born is not None
+                    and process.start < born - CREATE_TIME_MARGIN_SECONDS
+                ):
+                    settled = True
+                    break
                 if process.ppid in (0, current):
                     settled = True
                     break
                 if process.ppid == 1:
-                    settled = born is not None and process.start <= born
+                    settled = False
                     break
                 parent = sample.get(process.ppid)
                 if parent is None or parent.start > process.start:
@@ -800,6 +843,18 @@ class Sampler:
                     changed = True
 
 
+def duration_stats(durations: Sequence[float]) -> dict[str, float | None]:
+    """Mean and 95th percentile of the sample durations, in seconds."""
+    if not durations:
+        return {"sample_seconds_mean": None, "sample_seconds_p95": None}
+    ordered = sorted(durations)
+    p95 = ordered[min(len(ordered) - 1, int(0.95 * len(ordered)))]
+    return {
+        "sample_seconds_mean": round(sum(ordered) / len(ordered), 4),
+        "sample_seconds_p95": round(p95, 4),
+    }
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", required=True, type=Path)
@@ -835,6 +890,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     observation_start: float | None = None
     last_sample: float | None = None
     max_gap = 0.0
+    #: Wall time of each ``sampler.sample()``, the watcher's own cost.
+    durations: list[float] = []
     stopped_by = "deadline"
     with args.out.open("a", encoding="utf-8") as out:
 
@@ -849,7 +906,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         def take_sample() -> None:
             nonlocal observation_start, last_sample, max_gap
+            began_sample = time.monotonic()
             sample = sampler.sample()
+            durations.append(time.monotonic() - began_sample)
             now = time.time()
             if last_sample is not None:
                 max_gap = max(max_gap, now - last_sample)
@@ -891,6 +950,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "observation_start": observation_start,
                 "observation_end": last_sample,
                 "max_gap_seconds": round(max_gap, 4),
+                **duration_stats(durations),
+                **sampler.stats(),
                 "browser_exe": args.browser_exe,
                 "browser_dir": args.browser_dir,
                 "read_failures": sampler.read_failures,

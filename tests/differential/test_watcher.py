@@ -30,12 +30,14 @@ from differential import harness
 from differential.events import EventLog, read_jsonl
 from differential.harness import watcher_failures
 from differential.watcher import (
+    CREATE_TIME_MARGIN_SECONDS,
     ProcessRecord,
     Sampler,
     Tracker,
     browser_roots,
     canonical_user_data_dir,
     classify,
+    duration_stats,
     invoked_module,
     record,
     user_data_dir,
@@ -337,6 +339,11 @@ def test_a_watcher_stopped_on_request_after_the_actors_is_healthy(tmp_path):
     assert summary["observation_start"] <= began
     assert summary["observation_end"] >= ended
     assert watcher_failures(summary, actors_began=began, actors_ended=ended) == []
+    # The evidence states what sampling cost on this machine.
+    assert summary["sample_seconds_mean"] > 0
+    assert summary["sample_seconds_p95"] >= summary["sample_seconds_mean"] * 0.5
+    assert summary["first_sample_cached"] > 0
+    assert summary["reads_per_sample_max"] >= 1
 
 
 BROWSER_DIR = "/opt/ms-playwright"
@@ -789,7 +796,11 @@ def test_a_baseline_process_with_an_open_ancestry_is_watched(ancestry):
     ],
 )
 def test_a_baseline_process_with_a_complete_ancestry_is_read_once(ancestry):
-    table = {**_baseline_table(), **ancestry}
+    assert _reads_over_five_samples({**_baseline_table(), **ancestry}) == 1
+
+
+def _reads_over_five_samples(table: dict[int, dict[str, Any]]) -> int:
+    """How often pid 60's command line is read over five samples."""
     reads = {"n": 0}
 
     class Counting(dict):
@@ -802,7 +813,93 @@ def test_a_baseline_process_with_a_complete_ancestry_is_read_once(ancestry):
     sampler = _sampler(table, root=10)
     for _ in range(5):
         sampler.sample()
-    assert reads["n"] == 1
+    return reads["n"]
+
+
+# The harness (pid 10) started at 5.0; the margin is CREATE_TIME_MARGIN_SECONDS.
+_OLDER = 5.0 - CREATE_TIME_MARGIN_SECONDS - 0.01
+_WITHIN = 5.0 - CREATE_TIME_MARGIN_SECONDS + 0.01
+
+
+@pytest.mark.parametrize(
+    "parent",
+    [
+        pytest.param({}, id="parent-gone"),
+        pytest.param(
+            {59: {"start": 0.5, "ppid": 1, "open": psutil.AccessDenied(59)}},
+            id="parent-unopenable",
+        ),
+        pytest.param(
+            {59: {"start": 4.99, "ppid": 1, "cmdline": ["younger"]}},
+            id="younger-process-at-the-parent-pid",
+        ),
+    ],
+)
+def test_a_process_older_than_the_harness_is_settled_whatever_its_parent(parent):
+    # Windows keeps a dead parent's pid in its orphans; the age settles it.
+    table = {
+        **_baseline_table(),
+        **parent,
+        60: {"start": _OLDER, "ppid": 59, "cmdline": ["service"]},
+    }
+    assert _reads_over_five_samples(table) == 1
+
+
+def test_a_process_within_the_margin_of_the_harness_is_watched():
+    table = {
+        **_baseline_table(),
+        60: {"start": _WITHIN, "ppid": 59, "cmdline": ["service"]},
+    }
+    assert _reads_over_five_samples(table) == 5
+
+
+def test_a_younger_first_sample_process_with_an_open_ancestry_is_still_caught():
+    # E1CE-01 C with the age rule in place: born after the harness, its parent
+    # gone, it becomes a second browser root and must be counted.
+    profile = "/tmp/e1db-profile"
+    table = {
+        **_baseline_table(),
+        60: {"start": 5.5, "ppid": 59, "cmdline": ["python", "pre-exec"]},
+    }
+    sampler, tracker = _sampler(table, root=10), Tracker()
+    _observe(sampler, tracker, 0.0)
+    assert sampler.first_sample_watched == 1
+    table[60] = {
+        "start": 5.5,
+        "ppid": 1,
+        "exe": BROWSER_EXE,
+        "cmdline": _chrome(profile),
+    }
+    table[70] = {
+        "start": 6.0,
+        "ppid": 10,
+        "exe": BROWSER_EXE,
+        "cmdline": _chrome(profile),
+    }
+    _observe(sampler, tracker, 1.0)
+    assert tracker.max_roots[canonical_user_data_dir(profile)] == 2
+
+
+def test_the_summary_states_what_sampling_cost():
+    table = {
+        **_baseline_table(),
+        60: {"start": _OLDER, "ppid": 59, "cmdline": ["old"]},
+        61: {"start": 5.5, "ppid": 59, "cmdline": ["young"]},
+    }
+    sampler = _sampler(table, root=10)
+    for _ in range(3):
+        sampler.sample()
+    stats = sampler.stats()
+    assert stats["create_time_margin_seconds"] == CREATE_TIME_MARGIN_SECONDS
+    # init and 60 by age, and the harness is the row's; 61 is watched.
+    assert stats["first_sample_cached"] == 2
+    assert stats["first_sample_watched"] == 1
+    # Every process in the first sample, then only the harness and 61.
+    assert sampler.reads_per_sample == [4, 2, 2]
+    assert duration_stats([0.01, 0.02, 0.03]) == {
+        "sample_seconds_mean": 0.02,
+        "sample_seconds_p95": 0.03,
+    }
 
 
 def _watched_baseline_beside_a_browser(
