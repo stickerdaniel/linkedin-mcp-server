@@ -301,10 +301,13 @@ def test_a_process_that_execs_into_a_browser_late_is_still_seen(tmp_path):
     (summary,) = [r for r in records if r["kind"] == "watcher.summary"]
     key = canonical_user_data_dir(str(profile))
     assert summary["max_roots"].get(key) == 1, summary["max_roots"]
+    # On Windows the exec is a new process whose parent is gone before it is
+    # sampled, so it is not tied to the row and its arguments are withheld;
+    # the profile it names is published either way.
     assert any(
         r["kind"] in ("process.update", "process.start")
         and r["actor"] == "browser"
-        and f"--user-data-dir={profile}" in r["cmdline"]
+        and (f"--user-data-dir={profile}" in r["cmdline"] or r.get("profile") == key)
         for r in records
     )
 
