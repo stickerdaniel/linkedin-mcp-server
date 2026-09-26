@@ -4752,6 +4752,360 @@ class TestAtomicStartupCommit:
 
 
 @pytest.mark.slow
+class TestAForwardedCallThroughTheRealOwner:
+    """A forwarded call on the 2026-07-28 era, through the owner's real HTTP server.
+
+    The owner is ``daemon_owner.create_owner_server`` on loopback in this
+    process: its token check, the call admission that wants every call marked,
+    the sequential middleware and the profile lease are all production's. What
+    is stood in is the browser (lifespan and the bookkeeping around a call) and
+    the owner's tools: it gets one synthetic tool, which takes an argument
+    because the owner's own argument check lists its tools before dispatching a
+    2026-07-28 call and skips that for a call with no arguments. The frontend
+    in front of it is the production proxy, over a real socket. No browser, no
+    profile contents and no account state are used; the profile is an empty
+    directory this test claims.
+    """
+
+    @staticmethod
+    @contextlib.asynccontextmanager
+    async def _a_real_owner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        """Serve the owner on loopback and yield what a test observes of it.
+
+        The synthetic tool ``hold_the_browser`` records every body that ran,
+        and the one called with ``"first"`` holds the call, and with it the
+        sequential lock and the profile lease, until *release* is set.
+        """
+        import linkedin_mcp_server.server as server_module
+        from fastmcp.server.dependencies import get_http_headers
+        from fastmcp.server.middleware import Middleware
+
+        from linkedin_mcp_server import update_check
+        from linkedin_mcp_server.config import set_config
+        from linkedin_mcp_server.daemon_liveness import CALL_HEADER, get_liveness
+        from linkedin_mcp_server.daemon_proxy import (
+            FrontendCallHeartbeatMiddleware,
+            _call_being_made,
+        )
+        from linkedin_mcp_server.drivers import browser
+        from linkedin_mcp_server.profile_claim import ensure_profile_claim
+        from linkedin_mcp_server.profile_lease import get_profile_lease
+        from linkedin_mcp_server.server_role import (
+            ServerRole,
+            reset_process_role_for_testing,
+        )
+
+        # Claimed while empty, before anything is created in it: the lease and
+        # the owner refuse an auth root that holds files that are not theirs.
+        auth_root = tmp_path / "auth"
+        auth_root.mkdir()
+        profile = auth_root / "profile"
+        ensure_profile_claim(profile)
+        profile.mkdir(exist_ok=True)
+        config = _config(profile)
+        config.server.tool_timeout_seconds = 10
+        set_config(config)
+
+        async def nothing(*_a: Any, **_k: Any) -> None:
+            return None
+
+        for name in (
+            "initialize_bootstrap",
+            "get_runtime_policy",
+            "report_retained_browser_revisions_if_ready",
+        ):
+            monkeypatch.setattr(server_module, name, lambda *_a, **_k: None)
+        for name in (
+            "start_background_browser_setup_if_needed",
+            "watch_for_handoff_requests",
+            "stop_background_browser_setup",
+            "close_browser",
+        ):
+            monkeypatch.setattr(server_module, name, nothing)
+        monkeypatch.setattr(browser, "note_call_started", lambda: None)
+        monkeypatch.setattr(browser, "note_activity", lambda: None)
+        monkeypatch.setattr(browser, "release_profile_if_idle_or_requested", nothing)
+        monkeypatch.setattr(update_check, "prime_from_cache", lambda: None)
+        monkeypatch.setattr(update_check, "refresh_latest_version", nothing)
+        monkeypatch.setattr(update_check, "pending_update_notice", lambda: None)
+        elections: list[object] = []
+        monkeypatch.setattr(
+            election_module, "obtain_owner", lambda *_a, **_k: elections.append(1)
+        )
+
+        held, release = asyncio.Event(), asyncio.Event()
+        bodies: list[dict[str, Any]] = []
+        listings: list[dict[str, Any]] = []
+
+        class NotesItsListings(Middleware):
+            async def on_list_tools(self, context: Any, call_next: Any) -> Any:
+                headers = get_http_headers()
+                while_held = held.is_set() and not release.is_set()
+                listed = await call_next(context)
+                # Recorded once the listing has completed, not when it began.
+                listings.append(
+                    {"method": headers.get("mcp-method"), "while_held": while_held}
+                )
+                return listed
+
+        build = server_module.create_mcp_server
+
+        def an_owner_with_a_synthetic_tool(*args: Any, **kwargs: Any) -> Any:
+            mcp = build(*args, **kwargs)
+            if kwargs.get("role") is ServerRole.OWNER:
+
+                @mcp.tool(
+                    name="hold_the_browser", annotations={"destructiveHint": True}
+                )
+                async def hold_the_browser(value: str) -> dict[str, str]:
+                    headers = get_http_headers()
+                    bodies.append(
+                        {
+                            "value": value,
+                            "call": headers.get(CALL_HEADER),
+                            "version": headers.get("mcp-protocol-version"),
+                            "method": headers.get("mcp-method"),
+                            "name": headers.get("mcp-name"),
+                            "session": headers.get("mcp-session-id"),
+                        }
+                    )
+                    if value == "first":
+                        held.set()
+                        await release.wait()
+                    return {"value": value}
+
+                mcp.add_middleware(NotesItsListings())
+            return mcp
+
+        monkeypatch.setattr(
+            server_module, "create_mcp_server", an_owner_with_a_synthetic_tool
+        )
+
+        # What the frontend marked each call with, at its preflight and as the
+        # tool request leaves, with the bound call's claim at that moment.
+        preflights: list[str] = []
+        beat = FrontendCallHeartbeatMiddleware._beat
+
+        async def noting_the_preflight(attachment: Attachment, call_id: str) -> Any:
+            preflights.append(call_id)
+            return await beat(attachment, call_id)
+
+        monkeypatch.setattr(
+            FrontendCallHeartbeatMiddleware, "_beat", staticmethod(noting_the_preflight)
+        )
+        leaving: list[tuple[str | None, str | None, bool]] = []
+        direct = daemon_owner.direct_async_http_client
+
+        async def note_a_tool_request(request: Any) -> None:
+            if request.method == "POST" and b'"tools/call"' in request.content:
+                bound = _call_being_made.get()
+                leaving.append(
+                    (
+                        request.headers.get(CALL_HEADER),
+                        None if bound is None else bound.call_id,
+                        bound is not None and bound.dispatch.sent,
+                    )
+                )
+
+        def watched_client(**kwargs: Any) -> Any:
+            client = direct(**kwargs)
+            client.event_hooks["request"].append(note_a_tool_request)
+            return client
+
+        monkeypatch.setattr(daemon_owner, "direct_async_http_client", watched_client)
+
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(64)
+        attachment = _attachment_for(profile, config, listener.getsockname()[1])
+        get_liveness().serving_as(attachment.descriptor.instance_id)
+        server = daemon_owner.create_owner_server(
+            config=config,
+            token=attachment.token,
+            host="127.0.0.1",
+            port=attachment.descriptor.port,
+        )
+        serving = asyncio.create_task(server.serve(sockets=[listener]))
+        calls: list[asyncio.Task[Any]] = []
+        try:
+            await daemon_owner._await_started(server, serving)
+            reset_process_role_for_testing()
+            yield SimpleNamespace(
+                frontend=build(
+                    role=ServerRole.PROXY,
+                    proxy_backend=_proxy_backend_for(attachment),
+                    tool_timeout=10.0,
+                ),
+                attachment=attachment,
+                direct=direct,
+                held=held,
+                release=release,
+                bodies=bodies,
+                listings=listings,
+                preflights=preflights,
+                leaving=leaving,
+                elections=elections,
+                calls=calls,
+                lease=get_profile_lease(),
+            )
+        finally:
+            release.set()
+            for call in calls:
+                if not call.done():
+                    call.cancel()
+            await asyncio.gather(*calls, return_exceptions=True)
+            server.should_exit = True
+            await asyncio.wait_for(serving, timeout=10)
+            listener.close()
+
+    async def test_a_forwarded_call_is_routed_admitted_and_kept_in_turn(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from fastmcp import Client
+        from fastmcp.client.transports import StreamableHttpTransport
+
+        from linkedin_mcp_server.daemon_liveness import (
+            REFUSAL_KEY,
+            UNMARKED_CALL,
+            get_liveness,
+        )
+
+        async with self._a_real_owner(tmp_path, monkeypatch) as owner:
+            async with Client(owner.frontend) as client:
+                first = asyncio.create_task(
+                    client.call_tool("hold_the_browser", {"value": "first"})
+                )
+                owner.calls.append(first)
+                await asyncio.wait_for(owner.held.wait(), timeout=10)
+                second = asyncio.create_task(
+                    client.call_tool("hold_the_browser", {"value": "second"})
+                )
+                owner.calls.append(second)
+                await _until(
+                    lambda: get_liveness().calls_in_flight() == 2 or second.done(),
+                    seconds=10,
+                )
+                # The second call was admitted while the first holds the lease,
+                # after the owner's own schema listing for it had completed, and
+                # its body waits its turn.
+                assert not second.done(), _outcome(second)
+                assert get_liveness().calls_in_flight() == 2
+                assert [body["value"] for body in owner.bodies] == ["first"]
+                assert {"method": "tools/call", "while_held": True} in (
+                    owner.listings
+                ), owner.listings
+                owner.release.set()
+                answers = await asyncio.wait_for(asyncio.gather(first, second), 10)
+
+            # A call without the marker, straight at the owner: refused with the
+            # owner's signed marker before the body could run.
+            unmarked = Client(
+                StreamableHttpTransport(
+                    owner.attachment.descriptor.url,
+                    auth=owner.attachment.token,
+                    httpx_client_factory=owner.direct,
+                ),
+                timeout=10,
+            )
+            async with unmarked:
+                refused = await unmarked.call_tool(
+                    "hold_the_browser", {"value": "unmarked"}, raise_on_error=False
+                )
+
+        assert [answer.structured_content for answer in answers] == [
+            {"value": "first"},
+            {"value": "second"},
+        ]
+        bodies = owner.bodies
+        assert [body["value"] for body in bodies] == ["first", "second"]
+        for body in bodies:
+            assert body["version"] == "2026-07-28", body
+            assert body["method"] == "tools/call", body
+            assert body["name"] == "hold_the_browser", body
+            assert body["session"] is None, body
+        # Each body ran under the call id its own preflight named, two calls
+        # two ids, and each tool request left carrying it, already claimed.
+        first_call, second_call = (body["call"] for body in bodies)
+        assert first_call != second_call
+        assert first_call == owner.preflights[0]
+        assert second_call in owner.preflights
+        assert (first_call, first_call, True) in owner.leaving, owner.leaving
+        assert (second_call, second_call, True) in owner.leaving, owner.leaving
+        assert refused.is_error is True
+        assert refused.meta is not None
+        assert refused.meta[REFUSAL_KEY]["daemon"] == UNMARKED_CALL
+        assert get_liveness().calls_in_flight() == 0
+        assert owner.elections == [], "a healthy owner was replaced"
+
+    async def test_a_queued_call_given_up_is_withdrawn_from_the_owner(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A caller that gives up while its call waits its turn takes it back.
+
+        The second call is admitted at the owner and queued behind the first,
+        which holds the lease. Its caller then cancels. The cancellation has to
+        cross the hop: the owner drops the call from admission well before the
+        heartbeat expiry could have done it, the lease stays with the first
+        call, the cancelled body never runs once the lease is free, and nothing
+        on the frontend reads the cancellation as an owner loss to recover
+        from or a call to send again.
+        """
+        from fastmcp import Client
+
+        from linkedin_mcp_server.daemon_liveness import EXPIRY_SECONDS, get_liveness
+
+        async with self._a_real_owner(tmp_path, monkeypatch) as owner:
+            async with Client(owner.frontend) as client:
+                first = asyncio.create_task(
+                    client.call_tool("hold_the_browser", {"value": "first"})
+                )
+                owner.calls.append(first)
+                await asyncio.wait_for(owner.held.wait(), timeout=10)
+                second = asyncio.create_task(
+                    client.call_tool("hold_the_browser", {"value": "second"})
+                )
+                owner.calls.append(second)
+                await _until(
+                    lambda: get_liveness().calls_in_flight() == 2 or second.done(),
+                    seconds=10,
+                )
+                assert not second.done(), _outcome(second)
+                assert get_liveness().calls_in_flight() == 2
+                assert [body["value"] for body in owner.bodies] == ["first"]
+                assert owner.lease.held
+
+                second.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await asyncio.wait_for(second, timeout=10)
+                # Well inside the expiry, so only a delivered cancellation can
+                # have withdrawn it: a caller's heartbeats stop when it gives
+                # up, and the owner would otherwise cut the call off later.
+                took = await _until(
+                    lambda: get_liveness().calls_in_flight() == 1,
+                    seconds=EXPIRY_SECONDS / 3,
+                )
+                assert get_liveness().calls_in_flight() == 1, (
+                    f"the queued call was still admitted after {took:.1f}s"
+                )
+                assert owner.lease.held, "the first call lost its lease"
+
+                owner.release.set()
+                answer = await asyncio.wait_for(first, timeout=10)
+                await _until(lambda: get_liveness().calls_in_flight() == 0, seconds=10)
+
+        assert answer.structured_content == {"value": "first"}
+        assert [body["value"] for body in owner.bodies] == ["first"], (
+            "the cancelled call ran once the lease was free"
+        )
+        assert get_liveness().calls_in_flight() == 0
+        assert not owner.lease.held
+        # Both tool requests left once each, claimed, and nothing was sent again.
+        sent = [call for call, _bound, _claimed in owner.leaving]
+        assert len(sent) == 2 and len(set(sent)) == 2, owner.leaving
+        assert all(claimed for _call, _bound, claimed in owner.leaving)
+        assert owner.elections == [], "a cancellation was taken for an owner loss"
+
+
 class TestRealOwner:
     """The whole thing, with a real detached process on the other end.
 

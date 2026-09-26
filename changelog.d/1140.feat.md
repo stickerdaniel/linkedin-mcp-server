@@ -1,0 +1,1 @@
+With the opt-in shared browser, a client now reaches the shared browser owner over the 2026-07-28 MCP protocol when the owner offers it, and still over the earlier handshake when it does not, with calls that may already have acted still reported as an unknown outcome rather than repeated.
