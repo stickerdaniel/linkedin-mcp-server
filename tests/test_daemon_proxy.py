@@ -9,7 +9,6 @@ arriving, or a dead owner that looks like a server with no tools.
 from __future__ import annotations
 
 import asyncio
-import datetime
 import inspect
 import threading
 from collections.abc import AsyncIterator, Callable
@@ -20,7 +19,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 from unittest.mock import AsyncMock, MagicMock
 
-import httpx
+import httpx2
 import mcp.types as mt
 import pytest
 from fastmcp import Client, Context, FastMCP
@@ -104,7 +103,7 @@ class _NothingIsListening(ClientTransport):
 
     @asynccontextmanager
     async def connect_session(self, **_kwargs: Any) -> AsyncIterator[Any]:
-        raise httpx.ConnectError(f"nothing is listening on {self.url}")
+        raise httpx2.ConnectError(f"nothing is listening on {self.url}")
         yield  # noqa: W0101 - unreachable, and an async generator needs one
 
 
@@ -127,10 +126,10 @@ class _AnsweredOnceAndStopped:
     Deliberately not the exception a real owner produces, and reality has three
     shapes rather than one. Measured with the client the provider builds: an
     owner already gone at connect time fails in `__aenter__` as `RuntimeError`
-    over `httpx.ConnectError`; one that goes away in this window, after the
+    over `httpx2.ConnectError`; one that goes away in this window, after the
     initialize and before the request on that same session, raises
     `anyio.BrokenResourceError` or `ClosedResourceError` depending on timing; one
-    that goes away with a request outstanding comes back as an `McpError` the
+    that goes away with a request outstanding comes back as an `MCPError` the
     session invented. The first and third have their own tests.
 
     This double stands in for the middle one, and raises something outside all
@@ -146,7 +145,7 @@ class _AnsweredOnceAndStopped:
         return getattr(self._session, name)
 
     async def list_tools(self, *_args: Any, **_kwargs: Any):
-        raise httpx.RemoteProtocolError("the owner closed the connection")
+        raise httpx2.RemoteProtocolError("the owner closed the connection")
 
 
 class _AnswersWhenTold(FastMCPTransport):
@@ -210,12 +209,12 @@ def _reach_owners_in_process(monkeypatch: pytest.MonkeyPatch, owner_at) -> None:
             return reached
         return FastMCPTransport(reached)
 
-    async def beat(attachment: Attachment, _call_id: str) -> httpx.Response:
+    async def beat(attachment: Attachment, _call_id: str) -> httpx2.Response:
         if owner_at(attachment.descriptor.url) is None:
-            raise httpx.ConnectError(
+            raise httpx2.ConnectError(
                 f"nothing is listening on {attachment.descriptor.url}"
             )
-        return httpx.Response(200, json={"watched": False})
+        return httpx2.Response(200, json={"watched": False})
 
     monkeypatch.setattr(transports, "StreamableHttpTransport", transport_for)
     monkeypatch.setattr(FrontendCallHeartbeatMiddleware, "_beat", staticmethod(beat))
@@ -249,7 +248,7 @@ class TestReachingTheOwner:
         attachment = _attachment(tmp_path)
         client = _backend(attachment, tmp_path).open_client(timeout=1.0)
 
-        request = httpx.Request("POST", attachment.descriptor.url)
+        request = httpx2.Request("POST", attachment.descriptor.url)
         assert client.transport.auth is not None
         signed = next(client.transport.auth.auth_flow(request))
 
@@ -299,10 +298,12 @@ class TestCallingTheOwner:
 
         original_monitor = type(client)._await_with_session_monitoring
         monitor_calls = 0
+        claims: list[bool] = []
 
         async def monitor(self: Any, request: Any, **kwargs: Any) -> Any:
             nonlocal monitor_calls
             monitor_calls += 1
+            claims.append(kwargs.get("claims_the_call", False))
             return await original_monitor(self, request, **kwargs)
 
         monkeypatch.setattr(type(client), "_await_with_session_monitoring", monitor)
@@ -315,6 +316,7 @@ class TestCallingTheOwner:
 
         async with client:
             monitor_calls = 0
+            claims.clear()
             result = await client.call_tool_mcp(
                 "report",
                 {},
@@ -323,20 +325,23 @@ class TestCallingTheOwner:
                 meta={"marker": "carried"},
             )
 
-        assert result.isError is False
+        assert result.is_error is False
         assert injected == [{"marker": "carried"}]
         assert transport.request is not None
-        assert isinstance(transport.request.root, mt.CallToolRequest)
-        request_meta = transport.request.root.params.meta
-        assert request_meta is not None
-        assert request_meta.model_dump(exclude_none=True) == {
+        # The bare request, as SDK v2 takes it, and its `_meta` as it goes on
+        # the wire: the caller's marker and the injected trace context together.
+        assert type(transport.request) is mt.CallToolRequest
+        wire = transport.request.model_dump(by_alias=True, exclude_none=True)
+        assert wire["params"]["_meta"] == {
             "marker": "carried",
             "traceparent": "00-trace-span-01",
         }
-        assert transport.timeout == datetime.timedelta(seconds=2.5)
+        assert transport.timeout == 2.5
+        assert type(transport.timeout) is float
         assert transport.progress_callback is record
         assert seen_progress == [(7.0, 10.0, "forwarded")]
         assert monitor_calls == 1
+        assert claims == [True], "the send went out without claiming the call"
 
     async def test_the_clients_progress_handler_reaches_send_request(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -361,7 +366,7 @@ class TestCallingTheOwner:
             client._progress_handler = record
             result = await client.call_tool_mcp("report", {})
 
-        assert result.isError is False
+        assert result.is_error is False
         assert transport.progress_callback is record
         assert seen == [(7.0, 10.0, "forwarded")]
 
@@ -412,7 +417,6 @@ class TestCallingTheOwner:
             None,
             None,
         ]
-        assert mt.ClientRequest.model_fields["root"].annotation is not None
         assert mt.CallToolRequestParams.model_fields["meta"].alias == "_meta"
 
 
@@ -422,7 +426,7 @@ class TestKeepingTheTokenOffTheNetwork:
     def test_the_environment_proxy_is_refused(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        # httpx honours HTTP_PROXY even for 127.0.0.1 unless NO_PROXY happens to
+        # httpx2 honours HTTP_PROXY even for 127.0.0.1 unless NO_PROXY happens to
         # say otherwise. The owner reproduced this against a capture proxy: a
         # loopback request arrived there complete with the bearer token. This
         # server also has a *legitimate* proxy setting for LinkedIn's own
@@ -449,7 +453,7 @@ class TestKeepingTheTokenOffTheNetwork:
             headers={"x": "y"},
             auth=None,
             follow_redirects=True,
-            timeout=httpx.Timeout(5.0),
+            timeout=httpx2.Timeout(5.0),
         )
 
         assert http_client.trust_env is False
@@ -469,8 +473,8 @@ class TestTheForwardingDeadline:
     def _request_deadline(cls, client: ProxyClient) -> float:
         """The timeout the MCP session actually waits on, in seconds."""
         read_timeout = client._session_kwargs["read_timeout_seconds"]
-        assert read_timeout is not None
-        return read_timeout.total_seconds()
+        assert isinstance(read_timeout, float)
+        return read_timeout
 
     def test_it_outlasts_the_owners_own_tool_timeout(self, tmp_path: Path):
         # Equal would race the owner's error response, turning a diagnosable
@@ -501,7 +505,7 @@ class TestTheForwardingDeadline:
             headers=None,
             auth=None,
             follow_redirects=True,
-            timeout=httpx.Timeout(30.0, read=self._request_deadline(client)),
+            timeout=httpx2.Timeout(30.0, read=self._request_deadline(client)),
         )
         assert http_client.timeout.read == 72.0
 
@@ -586,7 +590,7 @@ class TestServingTheOwnersTools:
 
         served = await provider.get_tool("get_person_profile")
         assert served is not None and served.annotations is not None
-        assert served.annotations.readOnlyHint is False, (
+        assert served.annotations.read_only_hint is False, (
             "the departed owner's annotation decided a replay against its successor"
         )
         assert await provider.get_tool("only_the_old_owner_had_this") is None
@@ -629,7 +633,7 @@ class TestServingTheOwnersTools:
 
         served = await provider.get_tool("get_person_profile")
         assert served is not None and served.annotations is not None
-        assert served.annotations.readOnlyHint is False, (
+        assert served.annotations.read_only_hint is False, (
             "a listing that outlived its owner put that owner's components back"
         )
 
@@ -877,7 +881,7 @@ class TestServingTheOwnersTools:
         assert tool.name == "get_person_profile"
         assert tool.title == "Get Person Profile"
         assert tool.annotations is not None
-        assert tool.annotations.readOnlyHint is True
+        assert tool.annotations.read_only_hint is True
 
 
 @dataclass(frozen=True)
@@ -901,15 +905,16 @@ def _fail_the_way_a_real_call_fails(
     Every link is a real one, in the order the installed versions produce it,
     rather than the bare tag a helper can raise but nothing here can deliver:
 
-    * `httpx.ConnectError`, off the socket.
+    * `httpx2.ConnectError`, off the socket.
     * `RuntimeError("Client failed to connect: ...")`, raised `from` it in
-      `fastmcp/client/client.py:622-624` (fastmcp 3.4.7) whenever the session
-      task ended in anything but an `McpError` or an `HTTPStatusError`.
+      `fastmcp/client/client.py:1045-1048` (fastmcp 4.0.10, through
+      `_connection_failure` at 235) whenever the session task ended in anything
+      but an `MCPError` or an `HTTPStatusError`.
     * `OwnerUnreachableError`, raised `from` that by `_saying_which_owner` in
       `daemon_proxy`, which is where the owner's identity and the dispatch
       answer are attached.
     * `ToolError("Error calling tool ...")`, raised `from` that at
-      `fastmcp/server/server.py:1357` under the `mask_error_details=True` this
+      `fastmcp/server/server.py:1564` under the `mask_error_details=True` this
       server switches on, and the outermost thing a middleware is handed.
 
     So the tag sits three links down and finding it is a walk, which is why
@@ -921,8 +926,8 @@ def _fail_the_way_a_real_call_fails(
     try:
         try:
             try:
-                raise httpx.ConnectError("gone as well")
-            except httpx.ConnectError as connect:
+                raise httpx2.ConnectError("gone as well")
+            except httpx2.ConnectError as connect:
                 raise RuntimeError(f"Client failed to connect: {connect}") from connect
         except RuntimeError as connecting:
             raise OwnerUnreachableError(
@@ -962,7 +967,7 @@ class TestRepeatingOnlyWhatIsSafe:
         """
         tool = MagicMock()
         tool.annotations = (
-            None if read_only is None else MagicMock(readOnlyHint=read_only)
+            None if read_only is None else MagicMock(read_only_hint=read_only)
         )
         context = MagicMock()
         context.message.name = "do_the_thing"
@@ -1019,7 +1024,7 @@ class TestRepeatingOnlyWhatIsSafe:
                 raise OwnerUnreachableError(
                     instance_id=instance_id,
                     nothing_was_sent=nothing_was_sent,
-                    cause=httpx.ConnectError("gone"),
+                    cause=httpx2.ConnectError("gone"),
                 )
             if the_repeat_sent_nothing is not None:
                 # The replacement's identity, not the failed owner's: this is a
@@ -1033,7 +1038,7 @@ class TestRepeatingOnlyWhatIsSafe:
                 raise OwnerUnreachableError(
                     instance_id=the_replacement,
                     nothing_was_sent=the_repeat_sent_nothing,
-                    cause=httpx.ConnectError("gone as well"),
+                    cause=httpx2.ConnectError("gone as well"),
                 )
             return "the result"
 
@@ -1203,7 +1208,7 @@ class TestRepeatingOnlyWhatIsSafe:
 
         Masking sits below this middleware, so what comes back from the repeat
         is `ToolError -> OwnerUnreachableError -> RuntimeError('Client failed to
-        connect') -> httpx.ConnectError` and the tag is three links down.
+        connect') -> httpx2.ConnectError` and the tag is three links down.
         Reading the exception's own type instead of walking its causes passes
         every other test here, because every other one raises the tag bare, and
         loses exactly this call: the mutating repeat a replacement may already
@@ -1391,7 +1396,7 @@ class TestRepeatingOnlyWhatIsSafe:
             raise OwnerUnreachableError(
                 instance_id=failed,
                 nothing_was_sent=False,
-                cause=httpx.ConnectError("gone"),
+                cause=httpx2.ConnectError("gone"),
             )
 
         middleware = FrontendOwnerRecoveryMiddleware(backend)
@@ -1461,9 +1466,9 @@ class _FailsOneRequest:
         return getattr(self._session, name)
 
     def _refuse(self):
-        from mcp.shared.exceptions import McpError
+        from mcp import MCPError
 
-        return McpError(mt.ErrorData(code=self._code, message=self._message))
+        return MCPError(code=self._code, message=self._message)
 
     async def list_tools(self, *args: Any, **kwargs: Any):
         if self._fails == "list":
@@ -1471,7 +1476,7 @@ class _FailsOneRequest:
         return await self._session.list_tools(*args, **kwargs)
 
     async def send_request(self, request: Any, *args: Any, **kwargs: Any):
-        if self._fails == "call" and isinstance(request.root, mt.CallToolRequest):
+        if self._fails == "call" and isinstance(request, mt.CallToolRequest):
             raise self._refuse()
         return await self._session.send_request(request, *args, **kwargs)
 
@@ -1509,7 +1514,7 @@ class _DiesAsTheCallsSessionCloses(FastMCPTransport):
             calling = _CallsOnThisSession(session, self._refusing)
             yield calling
         if calling.calls:
-            raise httpx.ReadError("the owner went away as the session closed")
+            raise httpx2.ReadError("the owner went away as the session closed")
 
 
 class _CallsOnThisSession:
@@ -1524,15 +1529,15 @@ class _CallsOnThisSession:
         return getattr(self._session, name)
 
     async def send_request(self, request: Any, *args: Any, **kwargs: Any):
-        from mcp.shared.exceptions import McpError
+        from mcp import MCPError
 
-        if not isinstance(request.root, mt.CallToolRequest):
+        if not isinstance(request, mt.CallToolRequest):
             return await self._session.send_request(request, *args, **kwargs)
         self.calls += 1
         if self._refusing is None:
             return await self._session.send_request(request, *args, **kwargs)
         code, message = self._refusing
-        raise McpError(mt.ErrorData(code=code, message=message))
+        raise MCPError(code=code, message=message)
 
 
 class _DiscoveryFailsAfterMutation(FastMCPTransport):
@@ -1565,7 +1570,7 @@ class _FailsListingAfterMutation:
         return await self._session.call_tool(*args, **kwargs)
 
     async def send_request(self, request: Any, *args: Any, **kwargs: Any):
-        if isinstance(request.root, mt.CallToolRequest):
+        if isinstance(request, mt.CallToolRequest):
             self._called = True
             self._session.list_tools = self.list_tools
         return await self._session.send_request(request, *args, **kwargs)
@@ -1573,7 +1578,7 @@ class _FailsListingAfterMutation:
     async def list_tools(self, *args: Any, **kwargs: Any):
         if self._called and self._transport._ran:
             self._transport.discovery_attempts += 1
-            raise httpx.ConnectError("the owner left after answering the call")
+            raise httpx2.ConnectError("the owner left after answering the call")
         return await self._list_tools(*args, **kwargs)
 
 
@@ -1582,8 +1587,8 @@ class _RecordsCallRequest(FastMCPTransport):
 
     def __init__(self, server: FastMCP) -> None:
         super().__init__(server)
-        self.request: mt.ClientRequest | None = None
-        self.timeout: datetime.timedelta | None = None
+        self.request: mt.CallToolRequest | None = None
+        self.timeout: float | None = None
         self.progress_callback: Any = None
 
     @asynccontextmanager
@@ -1604,7 +1609,7 @@ class _RecordsCallSend:
         self,
         request: Any,
         result_type: Any,
-        request_read_timeout_seconds: datetime.timedelta | None = None,
+        request_read_timeout_seconds: float | None = None,
         metadata: Any = None,
         progress_callback: Any = None,
     ) -> Any:
@@ -1831,14 +1836,12 @@ class TestRecoveringThroughTheWholeProxy:
     @pytest.mark.parametrize(
         ("code", "message"),
         [
-            (
-                httpx.codes.REQUEST_TIMEOUT,
-                "Timed out while waiting for response to ListToolsRequest",
-            ),
+            (mt.REQUEST_TIMEOUT, "Request 'tools/list' timed out"),
             (mt.CONNECTION_CLOSED, "Connection closed"),
-            (32600, "Session terminated"),
+            (mt.CONNECTION_CLOSED, "SSE stream ended without a response"),
+            (mt.INVALID_REQUEST, "Session terminated"),
         ],
-        ids=["timed out", "connection closed", "session terminated"],
+        ids=["timed out", "connection closed", "sse ended", "session terminated"],
     )
     async def test_a_request_that_never_came_back_is_a_departure(
         self, monkeypatch: pytest.MonkeyPatch, _upgraded, code: int, message: str
@@ -1848,14 +1851,15 @@ class TestRecoveringThroughTheWholeProxy:
         An owner killed between requests fails to connect, because streamable
         HTTP opens a fresh connection each time. One that goes away with a
         request outstanding does not: the client session waits, gives up, and
-        writes an `McpError` itself. So "the owner is gone" and "the owner said
+        writes an `MCPError` itself. So "the owner is gone" and "the owner said
         no" arrive as the same type, and reading the type alone leaves the
         frontend attached to a process that is not there.
 
-        Each code here is one the client invents. What this pins is the rule, not
-        its premise: nothing in the protocol reserves these integers, and the
-        reason reading them is safe is that the owner is this same package and
-        constructs no JSON-RPC error at all. That argument lives with the rule.
+        Each pair here is one the client invents, in the words SDK v2 uses.
+        What this pins is the rule, not its premise: nothing in the protocol
+        reserves these codes, and the argument for reading them lives with the
+        rule. The HTTP stand-ins are driven through a real transport in
+        `TestTheSdksOwnHttpErrors`.
         """
         backend, elected, _replacement, elections = _upgraded
         gone = _AnswersWithAnError(self._owner(), code=code, message=message)
@@ -1893,8 +1897,8 @@ class TestRecoveringThroughTheWholeProxy:
         # the call boundary rather than from the lookup in front of it.
         gone = _AnswersWithAnError(
             self._mutating_owner(ran),
-            code=httpx.codes.REQUEST_TIMEOUT,
-            message="Timed out while waiting for response to CallToolRequest",
+            code=mt.REQUEST_TIMEOUT,
+            message="Request 'tools/call' timed out",
             fails="call",
         )
         after = self._mutating_owner(ran)
@@ -1949,8 +1953,8 @@ class TestRecoveringThroughTheWholeProxy:
         gone = _DiesAsTheCallsSessionCloses(
             self._mutating_owner(ran),
             refusing=(
-                httpx.codes.REQUEST_TIMEOUT,
-                "Timed out while waiting for response to CallToolRequest",
+                mt.REQUEST_TIMEOUT,
+                "Request 'tools/call' timed out",
             ),
         )
         after = self._mutating_owner(ran)
@@ -2055,12 +2059,12 @@ class TestRecoveringThroughTheWholeProxy:
 def _answers(**by_instance: Any):
     """A heartbeat preflight that answers per owner, the way each owner would.
 
-    Keyed by instance id. A value is an `httpx.Response` to return or an
+    Keyed by instance id. A value is an `httpx2.Response` to return or an
     exception to raise, so every row of the classification table is the real
     classifier reading a real response object.
     """
 
-    async def beat(attachment: Attachment, _call_id: str) -> httpx.Response:
+    async def beat(attachment: Attachment, _call_id: str) -> httpx2.Response:
         answer = by_instance[attachment.descriptor.instance_id]
         if isinstance(answer, BaseException):
             raise answer
@@ -2069,14 +2073,14 @@ def _answers(**by_instance: Any):
     return beat
 
 
-def _watched() -> httpx.Response:
+def _watched() -> httpx2.Response:
     """What an owner's heartbeat route says about a call it has not seen yet."""
-    return httpx.Response(200, json={"watched": False})
+    return httpx2.Response(200, json={"watched": False})
 
 
-def _retiring(instance_id: str) -> httpx.Response:
+def _retiring(instance_id: str) -> httpx2.Response:
     """What a retiring owner signs, as its own heartbeat route sends it."""
-    return httpx.Response(
+    return httpx2.Response(
         409,
         json={
             "daemon": "retiring",
@@ -2109,19 +2113,24 @@ def _signed_refusal(kind: str, instance_id: str, *, protocol: object = None) -> 
 #: whether the owner is written off for it. An exception is a preflight that
 #: got no answer at all.
 _PREFLIGHT_ROWS: list[tuple[str, Callable[[str], Any], str, bool]] = [
-    ("connect refused", lambda _i: httpx.ConnectError("refused"), "unreachable", False),
-    ("connect timeout", lambda _i: httpx.ConnectTimeout("slow"), "unreachable", False),
-    ("read timeout", lambda _i: httpx.ReadTimeout("silent"), "owner_error", False),
+    (
+        "connect refused",
+        lambda _i: httpx2.ConnectError("refused"),
+        "unreachable",
+        False,
+    ),
+    ("connect timeout", lambda _i: httpx2.ConnectTimeout("slow"), "unreachable", False),
+    ("read timeout", lambda _i: httpx2.ReadTimeout("silent"), "owner_error", False),
     (
         "protocol error",
-        lambda _i: httpx.RemoteProtocolError("garbled"),
+        lambda _i: httpx2.RemoteProtocolError("garbled"),
         "owner_error",
         False,
     ),
-    ("500", lambda _i: httpx.Response(500), "owner_error", False),
-    ("503", lambda _i: httpx.Response(503), "owner_error", False),
-    ("401", lambda _i: httpx.Response(401), "token_rejected", False),
-    ("404", lambda _i: httpx.Response(404), "route_missing", True),
+    ("500", lambda _i: httpx2.Response(500), "owner_error", False),
+    ("503", lambda _i: httpx2.Response(503), "owner_error", False),
+    ("401", lambda _i: httpx2.Response(401), "token_rejected", False),
+    ("404", lambda _i: httpx2.Response(404), "route_missing", True),
     ("409 retiring", _retiring, "retiring", True),
     (
         "409 for another owner",
@@ -2131,34 +2140,34 @@ _PREFLIGHT_ROWS: list[tuple[str, Callable[[str], Any], str, bool]] = [
     ),
     (
         "409 of another protocol",
-        lambda i: httpx.Response(
+        lambda i: httpx2.Response(
             409, json={"daemon": "retiring", "protocol": True, "instance": i}
         ),
         "unexpected_status",
         True,
     ),
-    ("409 unsigned", lambda _i: httpx.Response(409), "unexpected_status", True),
+    ("409 unsigned", lambda _i: httpx2.Response(409), "unexpected_status", True),
     (
         "302",
-        lambda _i: httpx.Response(302, headers={"location": "/"}),
+        lambda _i: httpx2.Response(302, headers={"location": "/"}),
         "unexpected_status",
         True,
     ),
-    ("400", lambda _i: httpx.Response(400), "unexpected_status", True),
-    ("403", lambda _i: httpx.Response(403), "unexpected_status", True),
-    ("405", lambda _i: httpx.Response(405), "unexpected_status", True),
-    ("415", lambda _i: httpx.Response(415), "unexpected_status", True),
-    ("429", lambda _i: httpx.Response(429), "unexpected_status", True),
-    ("418", lambda _i: httpx.Response(418), "unexpected_status", True),
+    ("400", lambda _i: httpx2.Response(400), "unexpected_status", True),
+    ("403", lambda _i: httpx2.Response(403), "unexpected_status", True),
+    ("405", lambda _i: httpx2.Response(405), "unexpected_status", True),
+    ("415", lambda _i: httpx2.Response(415), "unexpected_status", True),
+    ("429", lambda _i: httpx2.Response(429), "unexpected_status", True),
+    ("418", lambda _i: httpx2.Response(418), "unexpected_status", True),
     (
         "200 not JSON",
-        lambda _i: httpx.Response(200, text="<html>hello</html>"),
+        lambda _i: httpx2.Response(200, text="<html>hello</html>"),
         "unexpected_status",
         True,
     ),
     (
         "200 without the heartbeat body",
-        lambda _i: httpx.Response(200, json={"ok": True}),
+        lambda _i: httpx2.Response(200, json={"ok": True}),
         "unexpected_status",
         True,
     ),
@@ -2508,7 +2517,7 @@ class TestWritingAnOwnerOff:
         middleware = FrontendCallHeartbeatMiddleware(backend)
         preflights: list[str] = []
 
-        async def beat(*_args: Any) -> httpx.Response:
+        async def beat(*_args: Any) -> httpx2.Response:
             preflights.append("preflight")
             return _watched()
 
@@ -2644,7 +2653,7 @@ class TestControlOnlyNeverRunsATool:
         middleware = FrontendCallHeartbeatMiddleware(backend)
         preflights: list[str] = []
 
-        async def beat(*_args: Any) -> httpx.Response:
+        async def beat(*_args: Any) -> httpx2.Response:
             preflights.append("preflight")
             return _watched()
 
@@ -2706,7 +2715,7 @@ class TestWhatOneCallCanCost:
 
         preflights: list[str] = []
 
-        async def beat(attachment: Attachment, _call_id: str) -> httpx.Response:
+        async def beat(attachment: Attachment, _call_id: str) -> httpx2.Response:
             preflights.append(attachment.descriptor.instance_id)
             return _watched()
 
@@ -2736,7 +2745,7 @@ class TestWhatOneCallCanCost:
             raise OwnerUnreachableError(
                 instance_id=bound.attachment.descriptor.instance_id,
                 nothing_was_sent=True,
-                cause=httpx.ConnectError("gone"),
+                cause=httpx2.ConnectError("gone"),
             )
 
         recovery = FrontendOwnerRecoveryMiddleware(backend)
@@ -2748,7 +2757,7 @@ class TestWhatOneCallCanCost:
             return await recovery.on_call_tool(context, through_the_heartbeat)
 
         tool = MagicMock()
-        tool.annotations = MagicMock(readOnlyHint=True)
+        tool.annotations = MagicMock(read_only_hint=True)
         context = MagicMock()
         context.message.name = "get_person_profile"
         context.fastmcp_context.fastmcp.get_tool = AsyncMock(return_value=tool)
@@ -2822,7 +2831,7 @@ class TestWhatOneCallCanCost:
         monkeypatch.setattr(daemon_auth, "_repair_auth_locally", repaired)
         preflights: list[str] = []
 
-        async def beat(attachment: Attachment, _call_id: str) -> httpx.Response:
+        async def beat(attachment: Attachment, _call_id: str) -> httpx2.Response:
             preflights.append(attachment.descriptor.instance_id)
             return _watched()
 
@@ -2855,7 +2864,7 @@ class TestWhatOneCallCanCost:
             raise OwnerUnreachableError(
                 instance_id=bound.attachment.descriptor.instance_id,
                 nothing_was_sent=True,
-                cause=httpx.ConnectError("gone"),
+                cause=httpx2.ConnectError("gone"),
             )
 
         recovery = FrontendOwnerRecoveryMiddleware(backend)
@@ -2867,7 +2876,7 @@ class TestWhatOneCallCanCost:
             return await recovery.on_call_tool(context, through_the_heartbeat)
 
         tool = MagicMock()
-        tool.annotations = MagicMock(readOnlyHint=True)
+        tool.annotations = MagicMock(read_only_hint=True)
         context = MagicMock()
         context.message.name = "get_person_profile"
         context.fastmcp_context.fastmcp.get_tool = AsyncMock(return_value=tool)
@@ -2945,7 +2954,7 @@ class TestBurialAfterTheLastCheck:
 
         first = FrontendCallHeartbeatMiddleware(backend)
 
-        async def held_beat(_attachment: Attachment, _call_id: str) -> httpx.Response:
+        async def held_beat(_attachment: Attachment, _call_id: str) -> httpx2.Response:
             waiting.set()
             await release.wait()
             return _watched()
@@ -3058,7 +3067,7 @@ class TestBurialAfterTheLastCheck:
         monkeypatch.setattr("linkedin_mcp_server.daemon_proxy.HEARTBEAT_SECONDS", 0.05)
         beats: list[str] = []
 
-        async def beat(attachment: Attachment, _call_id: str) -> httpx.Response:
+        async def beat(attachment: Attachment, _call_id: str) -> httpx2.Response:
             beats.append(attachment.descriptor.instance_id)
             return _watched()
 
@@ -3083,7 +3092,7 @@ class TestBurialAfterTheLastCheck:
         finish.set()
         result = await asyncio.wait_for(call, timeout=5)
 
-        assert result.isError is False  # ty: ignore[unresolved-attribute]
+        assert result.is_error is False
         assert len(beats) - beats_at_burial >= 2, "the heartbeats stopped"
         assert set(beats) == {old.descriptor.instance_id}
 
@@ -3178,7 +3187,7 @@ class TestTheSendBoundary:
         if not buried:
             result = await heartbeat.on_call_tool(context, dispatch)  # ty: ignore
             assert ran == ["sent"]
-            assert getattr(result, "isError", None) is False
+            assert getattr(result, "is_error", None) is False
             return
 
         with pytest.raises(OwnerUnreachableError) as refused:
@@ -3239,3 +3248,434 @@ class TestTheSendBoundary:
         assert refused.value.nothing_was_sent is True
         assert refused.value.instance_id == attachment.descriptor.instance_id
         assert refused.value.classification is OwnerFailure.RETIRING
+
+
+#: How each SDK-written stand-in is provoked: what the owner's side of the HTTP
+#: exchange sends back. ``mcp/client/streamable_http.py`` at mcp 2.2.0 turns
+#: every one of these into an error it writes itself; none is a JSON-RPC error
+#: the owner sent.
+_STAND_INS: dict[str, Callable[[dict[str, Any]], httpx2.Response]] = {
+    "401": lambda _body: httpx2.Response(401, text="unauthorized"),
+    "500": lambda _body: httpx2.Response(500, text="failed"),
+    "404": lambda _body: httpx2.Response(404, text="missing"),
+    "202": lambda _body: httpx2.Response(202),
+    "malformed json": lambda _body: httpx2.Response(
+        200, content=b"not-json", headers={"content-type": "application/json"}
+    ),
+    "sse ended": lambda _body: httpx2.Response(
+        200, content=b"", headers={"content-type": "text/event-stream"}
+    ),
+}
+
+
+def _a_genuine_refusal(body: dict[str, Any]) -> httpx2.Response:
+    """A real JSON-RPC error body at a non-2xx status, which the SDK forwards.
+
+    ``INVALID_REQUEST``, the code the SDK also writes for "Session terminated",
+    so only the message tells the two apart.
+    """
+    return httpx2.Response(
+        400,
+        json={
+            "jsonrpc": "2.0",
+            "id": body["id"],
+            "error": {"code": mt.INVALID_REQUEST, "message": "Some other refusal"},
+        },
+    )
+
+
+def _refused(_body: dict[str, Any]) -> NoReturn:
+    """An owner whose port no longer accepts connections."""
+    raise httpx2.ConnectError("the owner's port refused the connection")
+
+
+class _OwnerOverHttp:
+    """An owner at the far end of the SDK's own HTTP client, answering by hand.
+
+    Installed as an ``httpx2.MockTransport`` under the production client
+    factory, so everything between ``call_tool_mcp`` and the bytes is real:
+    the SDK's streamable HTTP transport and session, FastMCP's client and the
+    owner-tagging subclass. The owner is what stands in, and it is small enough
+    to fail on command: *fail* maps a JSON-RPC method to the response it gets.
+    No socket is opened and no process dies here: these are fault injections
+    into the SDK's HTTP handling. Losing a real owner process is witnessed by
+    the loopback owners in ``tests/test_daemon_election.py``.
+
+    *effects* counts the tool calls this owner ran. *session* decides whether
+    the initialize hands out a session id, which is what decides whether the
+    SDK reads a 404 as a lost session or as an unknown method.
+    """
+
+    def __init__(
+        self,
+        *,
+        fail: dict[str, Callable[[dict[str, Any]], Any]] | None = None,
+        session: bool = True,
+    ) -> None:
+        self.fail = dict(fail or {})
+        self.session = session
+        self.effects = 0
+        self.requests: list[httpx2.Request] = []
+
+    async def __call__(self, request: httpx2.Request) -> httpx2.Response:
+        import json
+
+        from linkedin_mcp_server.daemon_liveness import HEARTBEAT_PATH
+
+        self.requests.append(request)
+        if request.url.path == HEARTBEAT_PATH:
+            return httpx2.Response(200, json={"watched": False})
+        if request.method != "POST":
+            return httpx2.Response(405)
+        body = json.loads(request.content)
+        if "id" not in body:
+            return httpx2.Response(202)
+        failing = self.fail.get(body["method"])
+        if failing is not None:
+            answer = failing(body)
+            return await answer if inspect.isawaitable(answer) else answer
+        return self.answer(body)
+
+    def answer(self, body: dict[str, Any]) -> httpx2.Response:
+        """What a healthy owner sends back for *body*."""
+        method = body["method"]
+        headers: dict[str, str] = {}
+        if method == "initialize":
+            result: dict[str, Any] = {
+                "protocolVersion": body["params"]["protocolVersion"],
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "owner", "version": "1"},
+            }
+            if self.session:
+                headers["mcp-session-id"] = "owner-session"
+        elif method == "tools/list":
+            tool = {
+                "name": "send_connection_request",
+                "inputSchema": {"type": "object"},
+            }
+            result = {"tools": [tool]}
+        elif method == "tools/call":
+            self.effects += 1
+            result = {"content": [{"type": "text", "text": "sent"}]}
+        else:
+            error = {"code": mt.METHOD_NOT_FOUND, "message": "Method not found"}
+            return httpx2.Response(
+                200, json={"jsonrpc": "2.0", "id": body["id"], "error": error}
+            )
+        return httpx2.Response(
+            200,
+            json={"jsonrpc": "2.0", "id": body["id"], "result": result},
+            headers=headers,
+        )
+
+    def after_running(
+        self, then: Callable[[dict[str, Any]], httpx2.Response]
+    ) -> Callable[[dict[str, Any]], httpx2.Response]:
+        """Run the call, then answer it with *then* instead of its result."""
+
+        def answer(body: dict[str, Any]) -> httpx2.Response:
+            self.effects += 1
+            return then(body)
+
+        return answer
+
+
+def _serve_over_http(
+    monkeypatch: pytest.MonkeyPatch, owner_at: Callable[[str], _OwnerOverHttp]
+) -> None:
+    """Send every loopback request to the owner *owner_at* names for its address.
+
+    Through ``daemon_owner.direct_async_http_client`` itself, wrapped rather
+    than replaced, so its forced ``trust_env=False`` stays on the path. The
+    heartbeat preflight takes the same factory and arrives here too.
+    """
+    from linkedin_mcp_server import daemon_owner
+
+    real = daemon_owner.direct_async_http_client
+
+    async def route(request: httpx2.Request) -> httpx2.Response:
+        return await owner_at(f"{request.url.host}:{request.url.port}")(request)
+
+    def factory(**kwargs: Any) -> httpx2.AsyncClient:
+        return real(transport=httpx2.MockTransport(route), **kwargs)
+
+    monkeypatch.setattr(daemon_owner, "direct_async_http_client", factory)
+
+
+def _address(attachment: Attachment) -> str:
+    return f"{attachment.descriptor.host}:{attachment.descriptor.port}"
+
+
+class TestTheSdksOwnHttpErrors:
+    """SDK v2 answers a failed HTTP exchange with an error it writes itself.
+
+    V1 raised on a non-2xx status and failed the whole transport; v2 turns it
+    into a JSON-RPC error for that one request (SDK ``docs/migration.md:2178``),
+    which reaches this client as the same ``MCPError`` a real answer does.
+    Driven through the real SDK transport, because the stand-in is only ever
+    written there: a hand-made ``MCPError`` would pin the rule and not the
+    provenance it is about.
+
+    Each phase separately. Entry and listing may always be repeated and say
+    so; once the tool request was claimed nothing here proves it did not
+    arrive, so the call says it may have.
+    """
+
+    @staticmethod
+    async def _fail_at(
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        phase: str,
+        respond: Callable[[dict[str, Any]], Any],
+        *,
+        session: bool = True,
+    ) -> tuple[BaseException, _OwnerOverHttp]:
+        method = {"entry": "initialize", "list": "tools/list", "call": "tools/call"}
+        owner = _OwnerOverHttp(fail={method[phase]: respond}, session=session)
+        _serve_over_http(monkeypatch, lambda _address: owner)
+        client = _backend(_attachment(tmp_path), tmp_path).open_client(timeout=2.0)
+        with pytest.raises(Exception) as failed:
+            async with client:
+                if phase == "list":
+                    await client.list_tools_mcp()
+                elif phase == "call":
+                    await client.call_tool_mcp("send_connection_request", {})
+        return failed.value, owner
+
+    @pytest.mark.parametrize("phase", ["entry", "list", "call"])
+    @pytest.mark.parametrize("stand_in", sorted(_STAND_INS))
+    async def test_a_stand_in_is_not_taken_for_the_owners_answer(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        phase: str,
+        stand_in: str,
+    ):
+        from linkedin_mcp_server.daemon_proxy import (
+            OwnerFailure,
+            OwnerUnreachableError,
+        )
+
+        failure, owner = await self._fail_at(
+            tmp_path, monkeypatch, phase, _STAND_INS[stand_in]
+        )
+
+        assert isinstance(failure, OwnerUnreachableError), (
+            f"the SDK's own {stand_in} error passed as the owner's answer: {failure!r}"
+        )
+        assert failure.classification is OwnerFailure.OWNER_ERROR
+        # The boundary answers the dispatch question, never the stand-in: only
+        # the call had claimed a request, and nothing says it did not arrive.
+        assert failure.nothing_was_sent is (phase != "call")
+        assert owner.effects == 0
+
+    @pytest.mark.parametrize("phase", ["list", "call"])
+    @pytest.mark.parametrize(
+        ("session", "written"),
+        [(True, "Session terminated"), (False, "Not Found")],
+        ids=["with a session", "before a session"],
+    )
+    async def test_a_404_is_a_stand_in_with_a_session_and_without(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        phase: str,
+        session: bool,
+        written: str,
+    ):
+        """The same status, two stand-ins, and neither is the owner's answer.
+
+        With a session the SDK writes ``INVALID_REQUEST`` "Session terminated";
+        without one, ``METHOD_NOT_FOUND`` "Not Found", whose code is also how a
+        server says it has no listing of a kind.
+        """
+        from linkedin_mcp_server.daemon_proxy import OwnerUnreachableError
+
+        failure, _owner = await self._fail_at(
+            tmp_path, monkeypatch, phase, _STAND_INS["404"], session=session
+        )
+
+        assert isinstance(failure, OwnerUnreachableError), failure
+        assert str(failure.__cause__) == written
+
+    @pytest.mark.parametrize("phase", ["entry", "list", "call"])
+    async def test_a_real_refusal_in_an_error_status_is_the_owners_answer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str
+    ):
+        """A JSON-RPC error body survives a non-2xx status, and is an answer.
+
+        Its code is the one the SDK writes for a lost session, so what keeps
+        this an answer is the message, compared whole.
+        """
+        from mcp import MCPError
+
+        failure, owner = await self._fail_at(
+            tmp_path, monkeypatch, phase, _a_genuine_refusal
+        )
+
+        assert isinstance(failure, MCPError), (
+            f"a real refusal was retagged: {failure!r}"
+        )
+        assert failure.code == mt.INVALID_REQUEST
+        assert failure.message == "Some other refusal"
+        assert owner.effects == 0
+
+    async def test_a_call_that_outlived_the_deadline_is_not_the_owners_answer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The session's own deadline: ``REQUEST_TIMEOUT``, not HTTP 408."""
+        from linkedin_mcp_server.daemon_proxy import OwnerUnreachableError
+
+        async def never(_body: dict[str, Any]) -> httpx2.Response:
+            await asyncio.sleep(30)
+            raise AssertionError("the call was not given up on")
+
+        owner = _OwnerOverHttp(fail={"tools/call": never})
+        _serve_over_http(monkeypatch, lambda _address: owner)
+        client = _backend(_attachment(tmp_path), tmp_path).open_client(timeout=0.3)
+
+        with pytest.raises(OwnerUnreachableError) as failed:
+            async with client:
+                await client.call_tool_mcp("send_connection_request", {})
+
+        assert getattr(failed.value.__cause__, "code", None) == mt.REQUEST_TIMEOUT
+        assert failed.value.nothing_was_sent is False
+
+
+class TestWhatTheOwnerDidBeforeItWentAway:
+    """Effects counted on both owners, through the whole proxy and the SDK's HTTP client.
+
+    The recovery acts on one question, whether the tool request can have
+    reached the owner, and a counter on each owner answers it without trusting
+    the code under test.
+    """
+
+    @staticmethod
+    def _proxy(backend: DaemonProxyBackend) -> FastMCP:
+        from linkedin_mcp_server.server import create_mcp_server
+        from linkedin_mcp_server.server_role import ServerRole
+
+        return create_mcp_server(
+            role=ServerRole.PROXY, proxy_backend=backend, tool_timeout=1.0
+        )
+
+    @staticmethod
+    def _two_owners(
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        original: _OwnerOverHttp,
+        replacement: _OwnerOverHttp,
+    ) -> DaemonProxyBackend:
+        elected = _attachment(tmp_path)
+        standby = _attachment(tmp_path, port=elected.descriptor.port + 1)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.daemon_election.obtain_owner",
+            lambda *_a, **_k: _elected(standby),
+        )
+        owners = {_address(elected): original, _address(standby): replacement}
+        _serve_over_http(monkeypatch, owners.__getitem__)
+        return _backend(elected, tmp_path)
+
+    async def test_a_call_that_never_left_runs_once_on_the_replacement(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Gone after the lookup, before the call's own client could connect.
+
+        The call's client fails its initialize, before any tool request exists,
+        so the one run the user asked for belongs to the replacement.
+        """
+        original = _OwnerOverHttp()
+        replacement = _OwnerOverHttp()
+
+        def gone_after_the_lookup(body: dict[str, Any]) -> httpx2.Response:
+            del original.fail["tools/list"]
+            original.fail["initialize"] = _refused
+            return original.answer(body)
+
+        original.fail["tools/list"] = gone_after_the_lookup
+        backend = self._two_owners(tmp_path, monkeypatch, original, replacement)
+
+        async with Client(self._proxy(backend)) as client:
+            result = await client.call_tool(
+                "send_connection_request", {}, raise_on_error=False
+            )
+
+        assert result.is_error is False, result
+        assert original.effects == 0
+        assert replacement.effects == 1, "the call that never left was not run"
+
+    @pytest.mark.parametrize("stand_in", ["500", "sse ended"])
+    async def test_a_call_that_ran_is_reported_and_never_repeated(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stand_in: str
+    ):
+        """The owner ran the call, and its answer was lost on the way back."""
+        original = _OwnerOverHttp()
+        original.fail["tools/call"] = original.after_running(_STAND_INS[stand_in])
+        replacement = _OwnerOverHttp()
+        backend = self._two_owners(tmp_path, monkeypatch, original, replacement)
+
+        async with Client(self._proxy(backend)) as client:
+            result = await client.call_tool(
+                "send_connection_request", {}, raise_on_error=False
+            )
+
+        assert original.effects == 1
+        assert replacement.effects == 0, "a call that had run was sent again"
+        assert result.is_error is True
+        assert result.structured_content is not None
+        assert result.structured_content["status"] == "outcome_unknown"
+        assert result.structured_content["retry_safe"] is False
+
+
+class TestTheHeadersTheOwnerReceives:
+    """What actually arrives at the owner, read off the outbound request.
+
+    The frontend is served over HTTP here, so FastMCP forwards the caller's
+    headers onto the owner hop, the frontend's own bearer among them. The
+    owner's bearer and the bound call id have to win on the request itself;
+    the transport's constructor arguments say nothing about that.
+    """
+
+    async def test_the_owners_credential_and_the_bound_call_arrive(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from fastmcp.utilities.tests import asgi_client
+
+        from linkedin_mcp_server.daemon_liveness import CALL_HEADER, HEARTBEAT_PATH
+        from linkedin_mcp_server.server import create_mcp_server
+        from linkedin_mcp_server.server_role import ServerRole
+
+        owner = _OwnerOverHttp()
+        _serve_over_http(monkeypatch, lambda _address: owner)
+        attachment = _attachment(tmp_path)
+        proxy = create_mcp_server(
+            role=ServerRole.PROXY,
+            proxy_backend=_backend(attachment, tmp_path),
+            tool_timeout=1.0,
+        )
+
+        async with asgi_client(
+            proxy,
+            headers={
+                "Authorization": "Bearer frontend-credential",
+                CALL_HEADER: "forged-by-the-caller",
+                "x-caller-note": "forwarded",
+            },
+        ) as client:
+            result = await client.call_tool("send_connection_request", {})
+
+        assert result.is_error is False
+        (call,) = [
+            request
+            for request in owner.requests
+            if request.url.path != HEARTBEAT_PATH and b'"tools/call"' in request.content
+        ]
+        (beat,) = [r for r in owner.requests if r.url.path == HEARTBEAT_PATH]
+        # Forwarding is live on this path, which is what makes the two
+        # absences below mean anything: an ordinary caller header arrives.
+        assert call.headers.get("x-caller-note") == "forwarded"
+        assert call.headers["authorization"] == f"Bearer {attachment.token}"
+        assert call.headers[CALL_HEADER] == beat.headers[CALL_HEADER]
+        assert call.headers[CALL_HEADER] != "forged-by-the-caller"
+        for request in owner.requests:
+            assert "frontend-credential" not in str(request.headers), request.url

@@ -91,6 +91,12 @@ jobs:
   windows-daemon:
     name: Windows daemon (Python ${{ matrix.python-version }})
     runs-on: windows-latest
+    # FastMCP 4's camelCase read shims off for every test run, set before
+    # Python starts so the settings fastmcp reads at import already see it.
+    # tests/conftest.py sets the same for local runs, and
+    # tests/test_fastmcp_compatibility.py fails if it did not take effect.
+    env:
+      FASTMCP_MCP_CAMELCASE_COMPAT: "false"
     strategy:
       fail-fast: false
       matrix:
@@ -181,6 +187,9 @@ jobs:
     needs: [dependency-review, windows-daemon, platform-behaviour]
     if: always()
     runs-on: ubuntu-latest
+    # The camelCase read shims off, for the reason given at `windows-daemon`.
+    env:
+      FASTMCP_MCP_CAMELCASE_COMPAT: "false"
     steps:
       # The review job is intentionally skipped for pushes to main. On pull
       # requests it joins this existing required check instead of adding a new
@@ -326,6 +335,9 @@ jobs:
   platform-behaviour:
     name: Platform behaviour (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # The camelCase read shims off, for the reason given at `windows-daemon`.
+    env:
+      FASTMCP_MCP_CAMELCASE_COMPAT: "false"
     # Long enough for a cold browser download and far short of the six hours
     # a job without one is allowed to sit. These tests spawn real processes
     # and wait on them, so a contract that stops holding turns into a wedged

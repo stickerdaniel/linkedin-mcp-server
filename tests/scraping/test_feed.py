@@ -925,7 +925,7 @@ class TestFeedToolDeadline:
     async def test_the_deadline_fires_without_a_progress_token(self):
         result = await self._call(use_session=True)
 
-        assert result.isError, "expired call returned a feed result"
+        assert result.is_error, "expired call returned a feed result"
         assert "timed out" in str(result.content)
 
     async def test_the_deadline_fires_with_a_progress_token(self):

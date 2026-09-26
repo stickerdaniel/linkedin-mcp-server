@@ -1238,7 +1238,7 @@ class _Owner:
     def __init__(
         self, monkeypatch, home, profile, *, token_seen_by_owner=None, bridged=True
     ):
-        import httpx
+        import httpx2
 
         from linkedin_mcp_server import daemon_descriptor, daemon_liveness
         from linkedin_mcp_server.daemon_owner import create_owner_server
@@ -1288,8 +1288,8 @@ class _Owner:
         ).config.app
         owner = self
 
-        class Bridge(httpx.BaseTransport):
-            def handle_request(self, request: httpx.Request) -> httpx.Response:
+        class Bridge(httpx2.BaseTransport):
+            def handle_request(self, request: httpx2.Request) -> httpx2.Response:
                 body = request.read()
                 owner.events.append(("request",))
                 owner.requests.append((request.method, request.url.path, body))
@@ -1300,7 +1300,7 @@ class _Owner:
         if bridged:
             monkeypatch.setattr(
                 "linkedin_mcp_server.daemon_owner.direct_http_client",
-                lambda *, timeout: httpx.Client(
+                lambda *, timeout: httpx2.Client(
                     transport=Bridge(), trust_env=False, timeout=timeout
                 ),
             )
@@ -1308,11 +1308,11 @@ class _Owner:
     def _through_the_app(self, request, body):
         import asyncio
 
-        import httpx
+        import httpx2
 
         async def forward():
-            async with httpx.AsyncClient(
-                transport=httpx.ASGITransport(app=self.app),
+            async with httpx2.AsyncClient(
+                transport=httpx2.ASGITransport(app=self.app),
                 base_url=f"http://{self.HOST}:{self.port}",
                 trust_env=False,
             ) as client:
@@ -1329,7 +1329,7 @@ class _Owner:
                 return response.status_code, response.headers, response.content
 
         status, headers, content = asyncio.run(forward())
-        return httpx.Response(
+        return httpx2.Response(
             status,
             headers={"content-type": headers.get("content-type", "")},
             content=content,
@@ -1841,7 +1841,7 @@ class TestRetiringASharedBrowser:
         ],
     )
     def test_an_answer_this_build_does_not_recognise(self, status, body, capsys):
-        import httpx
+        import httpx2
 
         self._seed_session()
         owner = self._owner()
@@ -1850,9 +1850,9 @@ class TestRetiringASharedBrowser:
             # "@" is the instance the request named, so a row that fails only
             # on another field is not also refused for naming another owner.
             if not isinstance(body, dict):
-                return httpx.Response(status, content=body)
+                return httpx2.Response(status, content=body)
             named = json.loads(request.content)["instance"]
-            return httpx.Response(
+            return httpx2.Response(
                 status,
                 json={k: named if v == "@" else v for k, v in body.items()},
             )
@@ -1883,7 +1883,7 @@ class TestRetiringASharedBrowser:
         ],
     )
     def test_a_lost_answer_is_never_reported_as_unsent(self, failure, capsys):
-        import httpx
+        import httpx2
 
         self._seed_session()
         owner = self._owner()
@@ -1893,7 +1893,7 @@ class TestRetiringASharedBrowser:
 
         def lost(request):
             forward(request, request.content)
-            raise getattr(httpx, failure)("gone", request=request)
+            raise getattr(httpx2, failure)("gone", request=request)
 
         owner.answer = lost
         self._answers("y", "y")
@@ -1959,13 +1959,13 @@ class TestRetiringASharedBrowser:
         # A connect timeout is not a refusal: something may hold the port and
         # not have answered in time. The wording is only what both establish,
         # that this request was not delivered, and the lease still decides.
-        import httpx
+        import httpx2
 
         self._seed_session()
         owner = self._owner()
 
         def unreachable(request):
-            raise getattr(httpx, failure)("no connection", request=request)
+            raise getattr(httpx2, failure)("no connection", request=request)
 
         owner.answer = unreachable
         self._answers("y", "y")
@@ -2070,7 +2070,7 @@ class TestRetiringASharedBrowser:
         # cancelled the retirement.
         import builtins
 
-        import httpx
+        import httpx2
 
         self._seed_session()
         owner = self._owner()
@@ -2080,7 +2080,7 @@ class TestRetiringASharedBrowser:
             def interrupted_json(self, **kwargs):
                 raise KeyboardInterrupt
 
-            self.monkeypatch.setattr(httpx.Response, "json", interrupted_json)
+            self.monkeypatch.setattr(httpx2.Response, "json", interrupted_json)
         elif moment == "acknowledging it":
             real_print = builtins.print
 

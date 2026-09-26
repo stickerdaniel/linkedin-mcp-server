@@ -264,7 +264,7 @@ def _ask_to_retire(attachment: "Attachment") -> bool:
     """
     from urllib.parse import urlsplit, urlunsplit
 
-    import httpx
+    import httpx2
 
     from linkedin_mcp_server import daemon_owner
 
@@ -278,7 +278,7 @@ def _ask_to_retire(attachment: "Attachment") -> bool:
                 headers={"Authorization": f"Bearer {attachment.token}"},
                 json=daemon_owner.idle_only_request(instance),
             )
-    except (httpx.ConnectError, httpx.ConnectTimeout):
+    except (httpx2.ConnectError, httpx2.ConnectTimeout):
         # No connection was made, so this request was not delivered. That is
         # all it proves: not that the owner is gone, only that it was not asked.
         # Refusing here would refuse every run after an owner exits, since it

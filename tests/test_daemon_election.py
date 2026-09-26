@@ -227,6 +227,86 @@ def _attachment_for(profile: Path, config: AppConfig, port: int) -> Attachment:
     return Attachment(descriptor=descriptor, token=token)
 
 
+@contextlib.contextmanager
+def _a_healthy_owner(profile: Path, config: AppConfig, monkeypatch: pytest.MonkeyPatch):
+    """The owner's real HTTP server, on loopback, inside this process.
+
+    Built by ``daemon_owner.create_owner_server``, so the endpoint, its bearer
+    check and the MCP server behind it are production's, and it speaks whatever
+    protocol era the installed FastMCP does. Only the browser lifespan is stood
+    in, so nothing is installed, launched or closed. Yields the attachment a
+    frontend would read for it.
+    """
+    import linkedin_mcp_server.server as server_module
+
+    for name in (
+        "initialize_bootstrap",
+        "get_runtime_policy",
+        "report_retained_browser_revisions_if_ready",
+    ):
+        monkeypatch.setattr(server_module, name, lambda *_a, **_k: None)
+
+    async def nothing(*_a: Any, **_k: Any) -> None:
+        return None
+
+    for name in (
+        "start_background_browser_setup_if_needed",
+        "watch_for_handoff_requests",
+        "stop_background_browser_setup",
+        "close_browser",
+    ):
+        monkeypatch.setattr(server_module, name, nothing)
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(64)
+    attachment = _attachment_for(profile, config, listener.getsockname()[1])
+    server = daemon_owner.create_owner_server(
+        config=config,
+        token=attachment.token,
+        host="127.0.0.1",
+        port=attachment.descriptor.port,
+    )
+    thread = threading.Thread(
+        target=lambda: asyncio.run(server.serve(sockets=[listener])), daemon=True
+    )
+    thread.start()
+    try:
+        deadline = time.monotonic() + 10
+        while not server.started:
+            assert thread.is_alive(), "the owner's server stopped while starting"
+            assert time.monotonic() < deadline, "the owner's server never started"
+            time.sleep(0.01)
+        yield attachment
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+        listener.close()
+
+
+class TestThePublicationProbe:
+    """What an owner proves about itself before it publishes a descriptor."""
+
+    def test_the_owner_proves_its_own_endpoint(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """An authenticated round trip against the owner's real server.
+
+        Asked with a ping on the era a default client negotiates, a healthy
+        owner fails its own probe and never publishes. The wrong token is the
+        other half: a probe that passed whatever it was told would publish an
+        endpoint nobody can use.
+        """
+        profile = _profile(tmp_path)
+        config = _config(profile)
+
+        with _a_healthy_owner(profile, config, monkeypatch) as attachment:
+            url = attachment.descriptor.url
+            asyncio.run(daemon_owner._probe(url, attachment.token))
+            with pytest.raises(Exception, match="Server returned an error response"):
+                asyncio.run(daemon_owner._probe(url, new_token()))
+
+
 class TestLiveness:
     """A descriptor is a file. Only a request that is answered is a process."""
 
@@ -402,6 +482,32 @@ class TestSilenceIsNotDeath:
         assert silence_took >= election_module._REACHABLE_SECONDS - 0.5, (
             f"the silence took only {silence_took:.2f}s"
         )
+
+    def test_a_healthy_owner_answers(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The third answer, from the owner's own server, unstubbed.
+
+        A default FastMCP 4 client negotiates the 2026-07-28 era with this
+        owner, and that era has no ping: asked with one, a healthy owner came
+        back as ``REFUSED``, which the election reads as a descriptor to bury.
+        The two sockets above cannot show that, because neither ever answers.
+        A token this owner does not accept still reads as a refusal.
+        """
+        profile = _profile(tmp_path)
+        config = _config(profile)
+
+        with _a_healthy_owner(profile, config, monkeypatch) as attachment:
+            answered = election_module._reachable(
+                attachment, election_module._REACHABLE_SECONDS
+            )
+            stranger = election_module._reachable(
+                Attachment(descriptor=attachment.descriptor, token=new_token()),
+                election_module._REACHABLE_SECONDS,
+            )
+
+        assert answered is Reach.ANSWERED, f"a healthy owner read as {answered}"
+        assert stranger is Reach.REFUSED, f"a rejected token read as {stranger}"
 
     def test_an_owner_that_is_slow_twice_is_still_attached_to(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -5280,9 +5386,11 @@ class TestRealOwner:
 
             async def unauthenticated() -> None:
                 async with Client(StreamableHttpTransport(url, auth="wrong")) as client:
-                    await client.ping()
+                    await client.list_tools()
 
-            with pytest.raises(Exception):
+            # Matched on the answer, because a bare `Exception` also passed on
+            # a ping, which the 2026-07-28 era refuses whatever the token.
+            with pytest.raises(Exception, match="Server returned an error response"):
                 asyncio.run(unauthenticated())
         finally:
             _stop(result.get("pid"))
@@ -5525,16 +5633,34 @@ class TestRealOwner:
             )
 
             async def served() -> None:
-                async with Client(proxy) as client:
+                # The handshake era, because only there does the proxy's own
+                # error text reach its client; the 2026-07-28 era answers any
+                # failure that is not an `MCPError` with "Internal server error".
+                async with Client(proxy, mode="legacy") as client:
                     await client.list_tools()
 
-            # Matched on the status rather than catching anything at all. A bare
-            # `Exception` passed on any failure whatsoever, including one raised
-            # before a request ever left this process, so the test would have
-            # gone green without the owner refusing anything. Measured: the real
-            # refusal is `McpError: Client error '401 Unauthorized'`.
-            with pytest.raises(Exception, match="401 Unauthorized"):
+            async def asked_directly() -> int:
+                from linkedin_mcp_server import daemon_owner
+
+                async with daemon_owner.direct_async_http_client() as http:
+                    response = await http.post(
+                        wrong.descriptor.url,
+                        headers={"Authorization": f"Bearer {wrong.token}"},
+                        json={},
+                    )
+                return response.status_code
+
+            # Matched on what came back rather than catching anything at all. A
+            # bare `Exception` passed on any failure whatsoever, including one
+            # raised before a request ever left this process, so the test would
+            # have gone green without the owner refusing anything. SDK v2 no
+            # longer names the status: an HTTP error without a JSON-RPC body
+            # becomes "Server returned an error response", which is written only
+            # once a response of 400 or more has arrived. Which status it was is
+            # asked of the owner directly, with the same token.
+            with pytest.raises(Exception, match="Server returned an error response"):
                 asyncio.run(served())
+            assert asyncio.run(asked_directly()) == 401
         finally:
             _stop(result.get("pid"))
 
@@ -5643,7 +5769,7 @@ class TestVersionSkew:
         import asyncio
         import socket
 
-        import httpx
+        import httpx2
         import uvicorn
 
         from linkedin_mcp_server import config as config_module
@@ -5680,7 +5806,7 @@ class TestVersionSkew:
                 # never ends when startup fails, which is how this test hung
                 # before it was written this way.
                 await daemon_owner._await_started(server, serving)
-                async with httpx.AsyncClient() as client:
+                async with httpx2.AsyncClient() as client:
                     without = await client.post(url)
                     wrong = await client.post(
                         url, headers={"Authorization": "Bearer nope"}
@@ -5708,7 +5834,7 @@ class TestVersionSkew:
     ):
         # Every request the daemon makes carries the bearer token for a server
         # driving a logged-in LinkedIn session, and every one is addressed to
-        # loopback. httpx honours HTTP_PROXY by default and does so even for
+        # loopback. httpx2 honours HTTP_PROXY by default and does so even for
         # 127.0.0.1 unless NO_PROXY happens to say otherwise. This was reproduced
         # against a capture proxy, which received the absolute loopback URL and
         # `Authorization: Bearer <token>` in full.
