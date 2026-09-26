@@ -173,7 +173,7 @@
       "call": "send_message",
       "kind": "wait_for_function",
       "operation": "message_composer_ready",
-      "program_digest": "8dd86933485c",
+      "program_digest": "1e738a03c39b",
       "section": "message",
       "timeout_ms": null
     },
@@ -185,7 +185,7 @@
       "call": "send_message",
       "kind": "evaluate",
       "operation": "message_composer_state",
-      "program_digest": "6d8f09d2e923",
+      "program_digest": "51178a7a46af",
       "section": "message"
     }
   ],

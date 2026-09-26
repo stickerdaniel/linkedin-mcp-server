@@ -46,6 +46,8 @@ TARGET = _ProfileMessageTarget(
     compose_url=COMPOSE_URL,
     display_name=DISPLAY_NAME,
 )
+# Synthetic profile URN of the signed-in member, who sends the message.
+SELF_URN = "ACoAAS"
 
 NOOP_SEND_JS = """
   document.getElementById('send').addEventListener('click', event => {
@@ -215,7 +217,7 @@ SERVER_REPLACEMENT_SEND_JS = """
     composer.textContent = '';
     setTimeout(() => {
       document.getElementById('thread').appendChild(
-        messageItem(text, 'urn:li:msg_message:(self,server-new)'));
+        messageItem(text, 'urn:li:msg_message:(self,server-new)', SELF_URN));
       placeholder.remove();
     }, 50);
   });
@@ -224,27 +226,34 @@ SERVER_REPLACEMENT_SEND_JS = """
 # Measured on LinkedIn in September 2026: the first message of a new thread
 # moves the route to /messaging/thread/<id>/ and remounts the whole
 # conversation pane, composer included, with the message under its server URN.
+# The pane's header links the other participant's profile outside every
+# message item.
 PANE_REMOUNT_SEND_JS = """
-  function remountTo(path, urns) {
+  function remountTo(path, urns, header = '/in/fadi-eliwi/') {
     document.getElementById('send').addEventListener('click', event => {
       event.preventDefault();
       document.body.dataset.clicked = 'true';
+      const conversation = document.getElementById('conversation');
       const text = document.getElementById('composer').innerText;
       setTimeout(() => {
         history.pushState({}, '', path);
         const fresh = document.createElement('section');
         fresh.id = 'conversation-remounted';
-        fresh.setAttribute('role', 'dialog');
-        fresh.innerHTML = '<div id="thread-remounted"></div>'
+        if (conversation.hasAttribute('role')) {
+          fresh.setAttribute('role', conversation.getAttribute('role'));
+        }
+        fresh.innerHTML = '<a id="header">Participant</a>'
+          + '<div id="thread-remounted"></div>'
           + '<form onsubmit="return false"><div role="textbox" '
           + 'contenteditable="true" style="display:block;width:200px;'
           + 'height:30px"></div><button type="submit">Send</button></form>';
+        fresh.querySelector('#header').href = `https://www.linkedin.com${header}`;
         for (const entry of urns) {
           const [urn, otherText] = entry.split('|');
           fresh.querySelector('#thread-remounted').appendChild(
-            messageItem(otherText || text, urn));
+            messageItem(otherText || text, urn, SELF_URN));
         }
-        document.getElementById('conversation').replaceWith(fresh);
+        conversation.replaceWith(fresh);
       }, 30);
     });
   }
@@ -272,6 +281,45 @@ STALE_SERVER_NODE_SEND_JS = """
     entry.remove();
     document.getElementById('thread').appendChild(copy);
     document.getElementById('composer').textContent = '';
+  });
+"""
+
+# A submit LinkedIn ignores, followed by a message from the recipient that
+# happens to carry the same text: in a headed item of its own, or as a
+# follow-up to an earlier headed reply.
+INCOMING_AFTER_NOOP_SEND_JS = """
+  function incoming({headed}) {
+    document.getElementById('send').addEventListener('click', event => {
+      event.preventDefault();
+      document.body.dataset.clicked = 'true';
+      const text = document.getElementById('composer').innerText;
+      setTimeout(() => {
+        const thread = document.getElementById('thread');
+        if (!headed) {
+          thread.appendChild(messageItem(
+            'earlier reply', 'urn:li:msg_message:(other,earlier)', RECIPIENT_URN));
+        }
+        thread.appendChild(messageItem(
+          text, 'urn:li:msg_message:(other,incoming)',
+          headed ? RECIPIENT_URN : undefined));
+      }, 30);
+    });
+  }
+"""
+
+OWN_CONTINUATION_SEND_JS = """
+  document.getElementById('thread').appendChild(messageItem(
+    'earlier message', 'urn:li:msg_message:(self,earlier)', SELF_URN));
+  document.getElementById('send').addEventListener('click', event => {
+    event.preventDefault();
+    document.body.dataset.clicked = 'true';
+    const composer = document.getElementById('composer');
+    const text = composer.innerText;
+    composer.textContent = '';
+    setTimeout(() => {
+      document.getElementById('thread').appendChild(
+        messageItem(text, 'urn:li:msg_message:(self,continued)'));
+    }, 30);
   });
 """
 
@@ -337,11 +385,21 @@ def compose_page(
       </section>
     </main>
     <script>
-      function messageItem(text, eventUrn) {{
+      const SELF_URN = '{SELF_URN}';
+      const RECIPIENT_URN = '{TARGET.profile_urn}';
+      function messageItem(text, eventUrn, sender) {{
         const entry = document.createElement('div');
         entry.className = 'msg';
         entry.dataset.viewName = 'message-list-item';
         entry.dataset.eventUrn = eventUrn;
+        // A sender header links the sender's profile URN twice; a follow-up
+        // from the same sender has none.
+        for (const label of sender ? ['', 'Sender'] : []) {{
+          const link = document.createElement('a');
+          link.href = `https://www.linkedin.com/in/${{sender}}/`;
+          link.textContent = label;
+          entry.appendChild(link);
+        }}
         const unit = document.createElement('span');
         unit.className = 'message-unit';
         unit.textContent = text;
@@ -1141,10 +1199,85 @@ class TestSendConfirmationDom:
         assert result["status"] == "sent"
         assert result["sent"] is True
 
-    async def test_new_thread_pane_remount_is_confirmed(self, dom_page):
+    @pytest.mark.parametrize(
+        ("role", "header"),
+        [(' role="dialog"', PROFILE_PATH), ("", f"/in/{TARGET.profile_urn}/")],
+        ids=["overlay-vanity-header", "full-page-urn-header"],
+    )
+    async def test_new_thread_pane_remount_is_confirmed(self, dom_page, role, header):
         html = compose_page(
             PANE_REMOUNT_SEND_JS + "remountTo('/messaging/thread/2-abc==/', "
-            "['urn:li:msg_message:(self,server-first)']);"
+            f"['urn:li:msg_message:(self,server-first)'], '{header}');"
+        ).replace(
+            '<section id="conversation" role="dialog">',
+            f'<section id="conversation"{role}>',
+        )
+
+        result = await send(dom_page, html)
+
+        assert result["status"] == "sent"
+        assert result["sent"] is True
+
+    async def test_remount_to_a_thread_with_another_header_is_not_confirmed(
+        self, dom_page
+    ):
+        # The submit did nothing and the page moved to a conversation with
+        # someone else, whose only message is ours with the same text. On the
+        # full page the header sits outside the composer's form.
+        html = compose_page(
+            PANE_REMOUNT_SEND_JS + "remountTo('/messaging/thread/2-other==/', "
+            "['urn:li:msg_message:(self,elsewhere)'], '/in/ACoAAC/');"
+        ).replace(
+            '<section id="conversation" role="dialog">', '<section id="conversation">'
+        )
+
+        result = await send(dom_page, html)
+
+        assert result["status"] == "send_unconfirmed"
+        assert result["sent"] is False
+        assert result["retry_safe"] is False
+
+    @pytest.mark.parametrize("headed", [True, False], ids=["headed", "follow-up"])
+    async def test_incoming_message_with_the_same_text_is_not_confirmed(
+        self, dom_page, headed
+    ):
+        """A message from the recipient is no acknowledgement of this submit.
+
+        The fixtures claim the algorithm plus the measured link shape (a sender
+        header linking ``/in/<profile URN>``, and follow-ups without one), not a
+        full copy of LinkedIn's markup.
+        """
+        html = compose_page(
+            INCOMING_AFTER_NOOP_SEND_JS
+            + f"incoming({{headed: {'true' if headed else 'false'}}});"
+        )
+
+        result = await send(dom_page, html)
+
+        assert result["status"] == "send_unconfirmed"
+        assert result["sent"] is False
+        assert result["retry_safe"] is False
+
+    async def test_own_follow_up_without_a_header_is_confirmed(self, dom_page):
+        result = await send(dom_page, compose_page(OWN_CONTINUATION_SEND_JS))
+
+        assert result["status"] == "sent"
+        assert result["sent"] is True
+
+    async def test_hidden_second_editor_in_the_full_page_pane_is_confirmed(
+        self, dom_page
+    ):
+        html = (
+            compose_page(SERVER_REPLACEMENT_SEND_JS)
+            .replace(
+                '<section id="conversation" role="dialog">',
+                '<section id="conversation">',
+            )
+            .replace(
+                '<div id="thread">',
+                '<div role="textbox" contenteditable="true" style="display:none">'
+                '</div><div id="thread">',
+            )
         )
 
         result = await send(dom_page, html)
