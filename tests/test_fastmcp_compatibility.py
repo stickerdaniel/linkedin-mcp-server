@@ -99,5 +99,6 @@ def test_fastmcp_v4_is_excluded_while_the_sdk_v1_boundary_remains() -> None:
         if canonicalize_name(Requirement(raw).name) == "fastmcp"
     )
 
-    assert Version("4.0.0") not in fastmcp.specifier, sorted(remaining)
-    assert Version("4.99.0") not in fastmcp.specifier, sorted(remaining)
+    # The cap itself, not sampled versions: ``==4.0.10`` or ``<4.1`` exclude
+    # both 4.0.0 and 4.99.0 and still install FastMCP 4.
+    assert "<4" in {str(spec) for spec in fastmcp.specifier}, sorted(remaining)
