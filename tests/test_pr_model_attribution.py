@@ -98,8 +98,12 @@ _LINE = "Generated with Claude Opus 5.5"
     [
         f"## Summary\n\nDone.\n\n{_LINE}\n\n{_MACROSCOPE}",
         f"## Summary\n\nDone.\n\n{_MACROSCOPE}\n{_LINE}\n",
+        (
+            "Macroscope opens with `<!-- Macroscope's pull request summary "
+            f"starts here -->`.\n\n{_LINE}\n\n{_MACROSCOPE}"
+        ),
     ],
-    ids=["summary-after", "summary-before"],
+    ids=["summary-after", "summary-before", "marker-quoted-above"],
 )
 def test_ignores_the_macroscope_summary(body: str) -> None:
     assert attribution.has_model_attribution(body)

@@ -20,10 +20,15 @@ _RESERVED_MINIMAL_RE = re.compile(r"\b(?:for|in|and|via)\b")
 # line is read; an attribution inside it does not count. An author can write
 # the markers too, which buys text after the attribution but never a missing
 # one; the two cannot be told apart, and disclosure is what the check guards.
+_MACROSCOPE_START = "<!-- Macroscope's pull request summary starts here -->"
+# No start marker inside the match, so a marker quoted earlier in the body
+# cannot stretch the block back over the author's own text.
 _MACROSCOPE_BLOCK_RE = re.compile(
-    r"<!-- Macroscope's pull request summary starts here -->"
-    r".*?"
-    r"<!-- Macroscope's pull request summary ends here -->",
+    re.escape(_MACROSCOPE_START)
+    + r"(?:(?!"
+    + re.escape(_MACROSCOPE_START)
+    + r").)*?"
+    + re.escape("<!-- Macroscope's pull request summary ends here -->"),
     re.DOTALL,
 )
 _ERROR = (
