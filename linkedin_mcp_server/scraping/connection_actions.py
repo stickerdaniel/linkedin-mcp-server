@@ -351,6 +351,7 @@ class ConnectionActions:
             await locator.fill(value, timeout=timeout)
             return True
         except Exception:
+            logger.debug("Invite note fill failed", exc_info=True)
             return False
 
     async def _dismiss_dialog(self) -> None:
@@ -563,6 +564,22 @@ class ConnectionActions:
 
             note_filled = await self._fill_dialog_textarea(note)
             if not note_filled:
+                # Same gate as the reveal step: the Premium nudge banner sits
+                # beside a live textarea, so a failed fill is a quota block
+                # only once the upsell has replaced the textarea.
+                try:
+                    textarea_mounted = (
+                        await self._session.page.locator(
+                            _DIALOG_TEXTAREA_SELECTOR
+                        ).count()
+                        > 0
+                    )
+                except Exception:
+                    textarea_mounted = False
+                if textarea_mounted:
+                    logger.info("Invite note fill failed beside a mounted textarea")
+                    await self._dismiss_dialog()
+                    return False, False, None
                 note_limit_message = await self._get_premium_upsell_message()
                 if note_limit_message is not None:
                     logger.info("Premium upsell blocked filling invite note")
