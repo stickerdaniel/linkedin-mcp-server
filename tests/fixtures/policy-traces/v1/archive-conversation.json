@@ -77,12 +77,13 @@
     {
       "arg": {
         "before": null,
-        "mark": "data-mcp-thread-options"
+        "mark": "data-mcp-thread-options",
+        "optionSelector": ".msg-thread-actions__dropdown-option"
       },
       "call": "archive_conversation",
       "kind": "evaluate",
       "operation": "thread_menu_survey",
-      "program_digest": "80820d2f0ad2"
+      "program_digest": "7acc4a4518e8"
     },
     {
       "call": "archive_conversation",
@@ -101,12 +102,13 @@
       "arg": {
         "archive": "Archive",
         "mark": "data-mcp-thread-archive",
-        "unarchive": "Unarchive"
+        "optionSelector": ".msg-thread-actions__dropdown-option",
+        "restore": "Restore"
       },
       "call": "archive_conversation",
       "kind": "evaluate",
       "operation": "thread_menu_items",
-      "program_digest": "5ecc19a5b7b5"
+      "program_digest": "974bfe105f02"
     },
     {
       "call": "archive_conversation",
@@ -198,12 +200,13 @@
     {
       "arg": {
         "before": null,
-        "mark": "data-mcp-thread-options"
+        "mark": "data-mcp-thread-options",
+        "optionSelector": ".msg-thread-actions__dropdown-option"
       },
       "call": "archive_conversation",
       "kind": "evaluate",
       "operation": "thread_menu_survey",
-      "program_digest": "80820d2f0ad2"
+      "program_digest": "7acc4a4518e8"
     },
     {
       "call": "archive_conversation",
@@ -222,12 +225,13 @@
       "arg": {
         "archive": "Archive",
         "mark": "data-mcp-thread-archive",
-        "unarchive": "Unarchive"
+        "optionSelector": ".msg-thread-actions__dropdown-option",
+        "restore": "Restore"
       },
       "call": "archive_conversation",
       "kind": "evaluate",
       "operation": "thread_menu_items",
-      "program_digest": "5ecc19a5b7b5"
+      "program_digest": "974bfe105f02"
     },
     {
       "call": "archive_conversation",
