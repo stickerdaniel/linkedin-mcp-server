@@ -43,9 +43,15 @@
     },
     {
       "description": "Group MCP ecosystem packages",
-      "matchPackageNames": ["fastmcp", "mcp"],
+      "matchPackageNames": ["fastmcp", "mcp", "httpx2"],
       "matchUpdateTypes": ["minor", "patch"],
       "groupName": "MCP ecosystem"
+    },
+    {
+      "description": "MCP ecosystem majors move together and apart from other majors: the daemon's owner hop depends on all three at once",
+      "matchPackageNames": ["fastmcp", "mcp", "httpx2"],
+      "matchUpdateTypes": ["major"],
+      "groupName": "MCP ecosystem majors"
     },
     {
       "description": "Python runtime upgrades need manual validation",

@@ -53,7 +53,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NoReturn, Protocol, TextIO
 
-import httpx
+import httpx2
 
 from linkedin_mcp_server import (
     __version__,
@@ -292,12 +292,12 @@ def _endpoint_host(sock: socket.socket) -> str:
     return str(address)
 
 
-def direct_http_client(*, timeout: float) -> httpx.Client:
+def direct_http_client(*, timeout: float) -> httpx2.Client:
     """An HTTP client that talks to this machine and nowhere else.
 
     Every request the daemon makes carries the bearer token for a server driving
     a logged-in LinkedIn session, and every one of them is addressed to
-    loopback. httpx honours ``HTTP_PROXY`` by default, and it does so even for
+    loopback. httpx2 honours ``HTTP_PROXY`` by default, and it does so even for
     ``127.0.0.1`` unless ``NO_PROXY`` happens to say otherwise. Reproduced
     against a capture proxy: a request to ``http://127.0.0.1:9/...`` arrived at
     the proxy complete with ``Authorization: Bearer <token>``.
@@ -310,15 +310,15 @@ def direct_http_client(*, timeout: float) -> httpx.Client:
     user's proxy is for LinkedIn's traffic, not for the server's own
     (``config/schema.py:105-107``).
     """
-    return httpx.Client(trust_env=False, timeout=timeout)
+    return httpx2.Client(trust_env=False, timeout=timeout)
 
 
 def direct_async_http_client(
     headers: dict[str, str] | None = None,
-    timeout: httpx.Timeout | None = None,
-    auth: httpx.Auth | None = None,
+    timeout: httpx2.Timeout | None = None,
+    auth: httpx2.Auth | None = None,
     **extra: Any,
-) -> httpx.AsyncClient:
+) -> httpx2.AsyncClient:
     """The asynchronous counterpart, shaped as FastMCP's client factory.
 
     The three named parameters are the ``McpHttpClientFactory`` protocol
@@ -334,9 +334,9 @@ def direct_async_http_client(
     the passthrough rather than merged into it.
     """
     extra.pop("trust_env", None)
-    return httpx.AsyncClient(
+    return httpx2.AsyncClient(
         headers=headers,
-        timeout=timeout if timeout is not None else httpx.Timeout(30.0),
+        timeout=timeout if timeout is not None else httpx2.Timeout(30.0),
         auth=auth,
         trust_env=False,
         **extra,
@@ -346,11 +346,17 @@ def direct_async_http_client(
 async def _probe(url: str, token: str) -> None:
     """Prove the endpoint answers this token before anything is published.
 
-    An initialize round trip rather than a bare connection. A TCP connect
+    An authenticated MCP round trip rather than a bare connection. A TCP connect
     succeeds the moment the socket is listening, which it is before uvicorn has
     a single route mounted, and a token that is not accepted would then only
     surface at the first real tool call, in a different process, as a failure
     nobody can place.
+
+    A tool listing rather than a ping, because it answers in every protocol era
+    and ping does not: the 2026-07-28 era removed it (SDK
+    ``docs/migration.md:1800``), and a default client negotiates that era with
+    this owner, so a ping would fail against a healthy one. Listing runs no
+    tool and touches no browser.
     """
     from fastmcp import Client
     from fastmcp.client.transports import StreamableHttpTransport
@@ -360,7 +366,7 @@ async def _probe(url: str, token: str) -> None:
             url, auth=token, httpx_client_factory=direct_async_http_client
         )
     ) as client:
-        await client.ping()
+        await client.list_tools()
 
 
 #: The route a newer frontend uses to ask a stale owner to stand down: the

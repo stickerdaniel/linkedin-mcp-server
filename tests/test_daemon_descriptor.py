@@ -831,13 +831,13 @@ class TestEndpointUrl:
         # An IPv6 literal that is accepted but unbracketed parses as a bad
         # port. Measured: a valid ::1 endpoint produced a URL no client could
         # use, so the daemon was unreachable through its own descriptor.
-        import httpx
+        import httpx2
 
         descriptor = _descriptor(tmp_path, new_token(), host=host)
         descriptor.check_endpoint_is_local()
 
         assert descriptor.url == expected
-        httpx.URL(descriptor.url)  # raises if a client could not use it
+        httpx2.URL(descriptor.url)  # raises if a client could not use it
 
 
 class TestStateLocation:
@@ -1596,12 +1596,12 @@ class TestEndpointSpelling:
     ):
         # The other half: tightening this must not refuse an endpoint the
         # daemon itself would write, which is easy to do by accident.
-        import httpx
+        import httpx2
 
         descriptor = _descriptor(tmp_path, new_token(), host=host)
 
         descriptor.check_endpoint_is_local()
-        httpx.URL(descriptor.url)
+        httpx2.URL(descriptor.url)
 
 
 class TestAuthRootShape:

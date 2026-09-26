@@ -165,6 +165,13 @@
     },
     {
       "type": "git",
+      "name": "httpx2",
+      "url": "https://github.com/pydantic/httpx2",
+      "branch": "main",
+      "specialNotes": "HTTP client (fork of httpx) used by MCP SDK v2 and FastMCP 4, and directly by the daemon's loopback clients."
+    },
+    {
+      "type": "git",
       "name": "pydanticSettings",
       "url": "https://github.com/pydantic/pydantic-settings",
       "branch": "main",

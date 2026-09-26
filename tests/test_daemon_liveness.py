@@ -320,15 +320,15 @@ class TestTheFrontendSide:
         the one running the call. Answers with the body the owner's route sends
         for a call it has not registered yet, which every preflight is.
         """
-        import httpx
+        import httpx2
 
         from linkedin_mcp_server.daemon_proxy import FrontendCallHeartbeatMiddleware
 
         middleware = FrontendCallHeartbeatMiddleware(backend)
 
-        async def beat(attachment: Any, call_id: str) -> httpx.Response:
+        async def beat(attachment: Any, call_id: str) -> httpx2.Response:
             beats.append((attachment.descriptor.instance_id, call_id))
-            return httpx.Response(status, json={"watched": False})
+            return httpx2.Response(status, json={"watched": False})
 
         middleware._beat = beat  # ty: ignore[invalid-assignment]
         return middleware
@@ -589,7 +589,7 @@ class TestTheRouteOnARealOwner:
     async def _post(
         app: Any, base: str, *, token: str | None, marker: str | None
     ) -> int:
-        import httpx
+        import httpx2
 
         from linkedin_mcp_server.daemon_liveness import HEARTBEAT_PATH
 
@@ -598,8 +598,8 @@ class TestTheRouteOnARealOwner:
             headers["Authorization"] = f"Bearer {token}"
         if marker is not None:
             headers[CALL_HEADER] = marker
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url=base, trust_env=False
+        async with httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app=app), base_url=base, trust_env=False
         ) as client:
             response = await client.post(HEARTBEAT_PATH, headers=headers)
             return response.status_code
@@ -958,19 +958,19 @@ class TestTheMarkerSurvivesTheRealClient:
         assert client.headers.get(CALL_HEADER) == marker
 
     async def test_the_header_reaches_the_wire(self):
-        import httpx
+        import httpx2
 
         from linkedin_mcp_server.daemon_owner import direct_async_http_client
 
         marker = new_call_id()
         seen: dict[str, str] = {}
 
-        def record(request: httpx.Request) -> httpx.Response:
+        def record(request: httpx2.Request) -> httpx2.Response:
             seen.update(request.headers)
-            return httpx.Response(200)
+            return httpx2.Response(200)
 
         client = direct_async_http_client(headers={CALL_HEADER: marker})
-        client._transport = httpx.MockTransport(record)
+        client._transport = httpx2.MockTransport(record)
         async with client:
             await client.post("http://127.0.0.1:1/mcp")
 
@@ -1598,10 +1598,10 @@ class TestTheControlRoutes:
         ).config.app
 
     def _client(self, app: Any) -> Any:
-        import httpx
+        import httpx2
 
-        return httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app),
+        return httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app=app),
             base_url=f"http://{self.HOST}:51234",
             trust_env=False,
         )

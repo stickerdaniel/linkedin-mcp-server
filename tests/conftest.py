@@ -1,7 +1,15 @@
 import os
 import sys
 
-import pytest
+# FastMCP 4 bridges camelCase reads on MCP SDK models (`result.isError`) with
+# deprecation shims that this switch turns off. The suite runs with them off,
+# so a read the SDK v2 rename left behind fails here instead of passing on a
+# shim. Set before anything imports fastmcp, which reads its settings once at
+# import, and inherited by every process a test starts. CI sets it before
+# Python starts as well; `test_fastmcp_compatibility.py` checks it took effect.
+os.environ["FASTMCP_MCP_CAMELCASE_COMPAT"] = "false"
+
+import pytest  # noqa: E402
 
 pytest_plugins = ("scraping.support.navigation",)
 

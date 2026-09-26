@@ -365,7 +365,9 @@ async def a_repeat_could_change_something(
     silently in the unsafe direction.
 
     Unknown counts as changing something. Only ``readOnlyHint`` says otherwise,
-    and a tool that declares nothing has not promised anything.
+    and a tool that declares nothing has not promised anything. Read under its
+    Python name, ``read_only_hint``: the camelCase attribute is a deprecation
+    shim in FastMCP 4 that a setting can switch off.
     """
     name = getattr(context.message, "name", None)
     fastmcp_context = context.fastmcp_context
@@ -377,7 +379,7 @@ async def a_repeat_could_change_something(
         logger.debug("Could not read the annotations of %s", name, exc_info=True)
         return True
     annotations = getattr(tool, "annotations", None)
-    return not bool(annotations and annotations.readOnlyHint)
+    return getattr(annotations, "read_only_hint", None) is not True
 
 
 def _readable_marker(result: ToolResult) -> dict[str, Any] | None:

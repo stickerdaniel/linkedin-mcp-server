@@ -27,7 +27,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
 
-import httpx
+import httpx2
 import pytest
 from fastmcp.exceptions import ToolError
 from fastmcp.tools import ToolResult
@@ -393,11 +393,11 @@ async def test_a_failed_heartbeat_preflight_dispatches_no_tool_call(
 
     beats: list[str] = []
 
-    async def beat(_attachment: Any, call_id: str) -> httpx.Response:
+    async def beat(_attachment: Any, call_id: str) -> httpx2.Response:
         beats.append(call_id)
         if preflight == "raises":
-            raise httpx.ConnectError("the owner refused the connection")
-        return httpx.Response(404)
+            raise httpx2.ConnectError("the owner refused the connection")
+        return httpx2.Response(404)
 
     middleware._beat = beat  # ty: ignore[invalid-assignment]
     dispatched: list[str] = []

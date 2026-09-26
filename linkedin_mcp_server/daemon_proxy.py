@@ -43,16 +43,16 @@ import logging
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
-import httpx
+import httpx2
 import mcp.types as mt
 from fastmcp.client.progress import ProgressHandler
 from fastmcp.client.telemetry import client_span
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.telemetry import inject_trace_context
 from fastmcp.tools import ToolResult
-from fastmcp.utilities.timeout import normalize_timeout_to_timedelta
+from fastmcp.utilities.timeout import normalize_timeout_to_seconds
 from opentelemetry.trace import Status, StatusCode
 
 from linkedin_mcp_server import daemon_owner
@@ -194,7 +194,7 @@ class OwnerFailure(enum.Enum):
         """Whether this instance must never be dispatched to again.
 
         The failures that say something about the owner rather than about one
-        moment of it. A retiring owner still answers the ping an election
+        moment of it. A retiring owner still answers the listing an election
         probes with, so without this it would be found, attached to, and
         refused again for as long as it took to leave.
         """
@@ -271,7 +271,7 @@ def unreachable_owner_in(exc: BaseException) -> OwnerUnreachableError | None:
     to ``daemon_auth._auth_failure_in``: what reaches a middleware is a wrapper.
     Measured against a dead port with a warm tool cache, the chain the middleware
     sees is ``ToolError -> RuntimeError('Client failed to connect') ->
-    httpx.ConnectError``, because ``FastMCP.call_tool`` masks whatever the tool
+    httpx2.ConnectError``, because ``FastMCP.call_tool`` masks whatever the tool
     raised. A test that lists first is therefore the only one that exercises the
     real shape; a cold lookup can deliver the failure unwrapped and let a broken
     detector pass.
@@ -297,91 +297,127 @@ def _no_connection_was_established(exc: BaseException) -> bool:
     ``ConnectError`` and ``ConnectTimeout`` are the two that mean the connection
     itself was never established, so nothing on it can have been sent.
     """
-    import httpx
+    import httpx2
 
     current: BaseException | None = exc
     while current is not None:
-        if isinstance(current, (httpx.ConnectError, httpx.ConnectTimeout)):
+        if isinstance(current, (httpx2.ConnectError, httpx2.ConnectTimeout)):
             return True
         current = current.__cause__
     return False
 
 
-#: The code the MCP client invents when a POST comes back 404 because the
-#: session is gone. Not exported by the SDK, so it is spelled out here with its
-#: source: ``mcp/client/streamable_http.py``, ``_send_session_terminated_error``.
-_SESSION_TERMINATED = 32600
+#: Errors the MCP client writes itself when an HTTP exchange produced no
+#: JSON-RPC answer. Matched on code *and* message, because each of these codes
+#: is also one a server may send as a real answer. From
+#: ``mcp/client/streamable_http.py`` at mcp 2.2.0:
+#:
+#: * a 404 to a POST with a session, which says the session is gone (line 409).
+#: * a 404 to a POST before any session exists (line 407).
+#: * any other status of 400 or more whose body is not a JSON-RPC error: a 401
+#:   for a token this owner does not accept, a 500 from a process on its way
+#:   down (line 411).
+#: * a 202 answering a request rather than a notification (lines 362-371).
+_SYNTHETIC_ERRORS = frozenset(
+    {
+        (mt.INVALID_REQUEST, "Session terminated"),
+        (mt.METHOD_NOT_FOUND, "Not Found"),
+        (mt.INTERNAL_ERROR, "Server returned an error response"),
+        (mt.INVALID_REQUEST, "server answered a request with 202 Accepted"),
+    }
+)
+
+#: The same, for the ones whose message ends in text the SDK fills in: the
+#: parse error, the content type it saw, or where a redirect pointed. Same file:
+#: a response body that is not JSON-RPC (line 448), an SSE event that is not
+#: (line 209), a content type that is neither (line 429), and a redirect the
+#: transport would not follow (lines 71-83, delivered at 286 and 379).
+_SYNTHETIC_ERROR_PREFIXES = (
+    (mt.PARSE_ERROR, "Failed to parse JSON response: "),
+    (mt.PARSE_ERROR, "Failed to parse SSE message: "),
+    (mt.INVALID_REQUEST, "Unexpected content type: "),
+    (mt.INVALID_REQUEST, "Redirect to "),
+)
 
 
 def _the_owner_answered(exc: BaseException) -> bool:
     """Whether *exc* is the owner speaking, rather than a client that gave up.
 
-    An ``McpError`` looks like an answer and usually is one: a JSON-RPC error
+    An ``MCPError`` looks like an answer and usually is one: a JSON-RPC error
     came off the wire, so a process was there to send it. Treating those as a
     departure would elect a replacement for a healthy owner, repeat a read-only
     call for nothing, and swallow ``ProxyProvider``'s own ``METHOD_NOT_FOUND``
     handling, which turns an unsupported listing into an empty list.
 
-    Three codes are not answers, and they matter more than all the real ones put
+    Some are not answers, and they matter more than all the real ones put
     together, because they are what a departure *during* a request looks like.
     The client invents each of them itself:
 
-    * ``REQUEST_TIMEOUT`` when nothing came back inside the deadline
-      (``mcp/shared/session.py``).
+    * ``REQUEST_TIMEOUT`` (``-32001``) when nothing came back inside the
+      deadline (``mcp/shared/jsonrpc_dispatcher.py:425``). SDK v1 used the HTTP
+      status 408 here, and v2 no longer does (SDK ``docs/migration.md:1933``).
     * ``CONNECTION_CLOSED`` when the read stream closes with requests still
-      pending (same file, the receive loop's ``finally``).
-    * ``32600``/"Session terminated" when a POST is answered with 404 because
-      the session is gone (``mcp/client/streamable_http.py``). Positive rather
-      than in the ``-32xxx`` range, which is what makes it unmistakably local.
+      pending (same file, 400 and 693), and when an SSE response ends without
+      one (``mcp/client/streamable_http.py:502-509``, reached from 498 and 532).
+    * the HTTP stand-ins in :data:`_SYNTHETIC_ERRORS` and
+      :data:`_SYNTHETIC_ERROR_PREFIXES`. SDK v2 turns a failed HTTP exchange
+      into an error for that one request instead of failing the transport
+      (SDK ``docs/migration.md:2178``), and writes one of these whenever the
+      response carried no JSON-RPC error of its own.
 
-    Measured against a real loopback owner killed while a call was in flight:
-    ``McpError: Timed out while waiting for response to CallToolRequest``. Nobody
-    sent that. Passing it through as an answer would leave the frontend attached
-    to a process that is gone, which is the failure this module exists to end.
+    Measured under SDK v1 against a real loopback owner killed while a call was
+    in flight: a timeout error nobody sent. Passing it through as an answer
+    would leave the frontend attached to a process that is gone, which is the
+    failure this module exists to end.
 
-    **Reading the code is a convention here, not a guarantee the protocol
-    makes.** Nothing stops a server from sending any of these three integers as a
-    real JSON-RPC error, and one that did would be called departed while it was
-    answering. Two things make that acceptable. The owner is this same package,
-    and it constructs no ``ErrorData`` and raises no ``McpError`` anywhere: a
-    failing tool comes back as a result with ``isError`` set, so an owner built
-    from this repository cannot send one of these as an answer. And the cost of
-    being wrong is bounded, which is the same reason a merely slow owner is fine:
-    the election probes, finds the same owner still answering, keeps the
-    attachment, and the caller repeats only what was safe to repeat anyway.
+    **The first two are read by code alone and the rest by code and message.**
+    Code alone for the two the SDK reserves for itself, so a reworded message
+    in a future SDK cannot silently stop a real departure from being
+    recognised. Code and message for the rest, because each of their codes is
+    an ordinary answer too. Neither is a guarantee the protocol makes: the SDK
+    forwards a real JSON-RPC error body verbatim, so a server that sends
+    exactly one of these pairs cannot be told from the stand-in, and it is
+    taken for one. That is the cautious direction. It costs an election that
+    finds the same owner still answering, and at worst an ``outcome_unknown``
+    where a plainer error was possible. The owner is this same package and
+    raises no ``MCPError`` of its own: a failing tool comes back as a result
+    with ``is_error`` set.
 
-    Matching the SDK's message text as well was considered and rejected. It would
-    narrow the false positives and widen the dangerous failure: a reworded
-    message in a future SDK would silently stop a real departure from being
-    recognised, and the frontend would go back to sitting on a dead owner. A
-    spurious election is a wasted probe; a missed departure is the bug this
-    module exists to fix.
+    Nothing here says whether the tool request left this process, and nothing
+    may read it that way. That is ``nothing_was_sent``, answered by the
+    boundary or by :func:`_no_connection_was_established`, and an error the
+    client invented after the request went out leaves it false: a call that
+    could change something is then reported as an unknown outcome and never
+    repeated.
 
     A departure has three shapes, all measured with the client the provider
     builds, and only the third reaches this question:
 
     * already gone when the client connects: ``RuntimeError`` over
-      ``httpx.ConnectError``, out of ``__aenter__``.
+      ``httpx2.ConnectError``, out of ``__aenter__``.
     * gone after the initialize and before the request that follows it, which is
       a real window because one operation opens a client, initializes it and then
       sends its request on that same session: ``anyio.BrokenResourceError`` or
       ``ClosedResourceError``, depending on timing.
-    * gone while the request is outstanding: the invented ``McpError`` above.
+    * gone while the request is outstanding: one of the invented errors above.
 
-    The first two are not ``McpError`` and are tagged without consulting any of
-    this.
+    The first two are not ``MCPError`` and are tagged without consulting any of
+    this. Under SDK v2 the second can reach it too: with a transport that
+    refused the connection for one later request of an open session, that
+    request came back as ``CONNECTION_CLOSED``, which is still not an answer.
     """
-    from mcp.shared.exceptions import McpError
+    from mcp import MCPError
 
-    if not isinstance(exc, McpError):
+    if not isinstance(exc, MCPError):
         return False
-
-    import httpx
-
-    return exc.error.code not in (
-        mt.CONNECTION_CLOSED,
-        httpx.codes.REQUEST_TIMEOUT,
-        _SESSION_TERMINATED,
+    code, message = exc.code, exc.message
+    if code in (mt.CONNECTION_CLOSED, mt.REQUEST_TIMEOUT):
+        return False
+    if (code, message) in _SYNTHETIC_ERRORS:
+        return False
+    return not any(
+        code == synthetic and message.startswith(prefix)
+        for synthetic, prefix in _SYNTHETIC_ERROR_PREFIXES
     )
 
 
@@ -644,11 +680,12 @@ def _tells_which_owner_failed() -> type:
                     tool_name=name,
                 ) as span:
                     logger.debug("[%s] called call_tool: %s", self.name, name)
+                    # The injected trace context goes out with the caller's
+                    # own `_meta`, never the caller's alone.
                     propagated_meta = inject_trace_context(meta)
-                    request_meta = (
-                        mt.RequestParams.Meta(**propagated_meta)
-                        if propagated_meta
-                        else None
+                    request_meta = cast(
+                        "mt.RequestParamsMeta | None",
+                        propagated_meta if propagated_meta else None,
                     )
                     # Checked and claimed inside the monitored task, right
                     # before the session takes the request, never out here: the
@@ -656,18 +693,16 @@ def _tells_which_owner_failed() -> type:
                     # runs first (`_check_at_the_session`).
                     result = await self._await_with_session_monitoring(
                         self.session.send_request(
-                            mt.ClientRequest(
-                                mt.CallToolRequest(
-                                    params=mt.CallToolRequestParams(
-                                        name=name,
-                                        arguments=arguments,
-                                        _meta=request_meta,
-                                    )
+                            mt.CallToolRequest(
+                                params=mt.CallToolRequestParams(
+                                    name=name,
+                                    arguments=arguments,
+                                    _meta=request_meta,
                                 )
                             ),
                             mt.CallToolResult,
                             request_read_timeout_seconds=(
-                                normalize_timeout_to_timedelta(timeout)
+                                normalize_timeout_to_seconds(timeout)
                             ),
                             progress_callback=(
                                 progress_handler or self._progress_handler
@@ -675,7 +710,7 @@ def _tells_which_owner_failed() -> type:
                         ),
                         claims_the_call=True,
                     )
-                    if result.isError and span.is_recording():
+                    if result.is_error and span.is_recording():
                         span.set_attribute("error.type", "tool_error")
                         description = ""
                         if result.content and isinstance(
@@ -997,13 +1032,20 @@ class DaemonProxyBackend:
                 # is the form the owner's verifier compares against.
                 auth=token,
                 # The owner's own factory, reused rather than reimplemented. It
-                # forces `trust_env=False`, which is not tidiness: httpx honours
+                # forces `trust_env=False`, which is not tidiness: httpx2 honours
                 # HTTP_PROXY even for 127.0.0.1 unless NO_PROXY happens to say
                 # otherwise, and the owner reproduced a loopback request arriving
                 # at a capture proxy complete with this bearer token. The user's
                 # configured proxy is for LinkedIn's traffic, not for this hop.
                 httpx_client_factory=daemon_owner.direct_async_http_client,
             ),
+            # The handshake era, named even though `ProxyClient` defaults to it
+            # today, so a changed default cannot move this hop. On the
+            # 2026-07-28 era `ProxyTool.run` sends the call through
+            # `session.call_tool` and never reaches `call_tool_mcp` above, so
+            # the send would go out unclaimed. Moving this hop to the new era is
+            # planned separately (#623) and needs that claim first.
+            mode="legacy",
             # Load-bearing rather than tuning. Measured twice against a real
             # owner: with no timeout here, a call that outlives the underlying
             # HTTP read timeout never returns at all — still hanging when an
@@ -1302,7 +1344,7 @@ class _OwnerRefusedTheCall(Exception):
         super().__init__(f"the owner refused the call ({classification.value})")
 
 
-def _json_object(response: httpx.Response) -> dict[str, Any] | None:
+def _json_object(response: httpx2.Response) -> dict[str, Any] | None:
     """The response body as a JSON object, or ``None`` for anything else."""
     try:
         body = response.json()
@@ -1331,7 +1373,7 @@ def _signed_by(marker: object, attachment: Attachment, kind: str) -> bool:
 
 
 def _classify_preflight(
-    response: httpx.Response, attachment: Attachment
+    response: httpx2.Response, attachment: Attachment
 ) -> OwnerFailure | None:
     """What a heartbeat preflight's answer means, or ``None`` to go ahead.
 
@@ -1505,14 +1547,14 @@ class FrontendCallHeartbeatMiddleware(Middleware):
                 logger.debug("A heartbeat did not arrive", exc_info=True)
 
     @staticmethod
-    async def _beat(attachment: Attachment, call_id: str) -> httpx.Response:
+    async def _beat(attachment: Attachment, call_id: str) -> httpx2.Response:
         """One heartbeat, returning the owner's answer with its body read.
 
         The address is the published one with its path replaced, rather than
         rebuilt from host and port: the descriptor's URL already brackets an
         IPv6 literal, and rebuilding is how that bracket gets lost.
 
-        The owner's own client factory, for the reason it exists: httpx honours
+        The owner's own client factory, for the reason it exists: httpx2 honours
         ``HTTP_PROXY`` even for loopback unless ``NO_PROXY`` happens to say
         otherwise, and this request carries the bearer token.
         """
@@ -1525,7 +1567,7 @@ class FrontendCallHeartbeatMiddleware(Middleware):
                 "Authorization": f"Bearer {attachment.token}",
                 CALL_HEADER: call_id,
             },
-            timeout=httpx.Timeout(HEARTBEAT_SECONDS),
+            timeout=httpx2.Timeout(HEARTBEAT_SECONDS),
         ) as client:
             # Not streamed, so the body is read before the client closes and the
             # response stays readable after it.

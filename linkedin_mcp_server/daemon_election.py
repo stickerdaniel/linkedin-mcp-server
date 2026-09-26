@@ -285,7 +285,7 @@ def obtain_owner(
     *buried* names generations the caller has already found unusable, so they
     are never contacted or returned here. A proxy recovering from an owner that
     refused its calls passes them, because a retiring owner still answers the
-    ping this election probes with.
+    listing this election probes with.
 
     Returns at once, with nothing worth connecting to and a ``fallback`` set,
     when an owner of this build with another configuration answers its one
@@ -671,7 +671,7 @@ def _decide_control_only(
 
     Nothing returned here is worth connecting to, whatever happens. The pair
     was proved for its endpoint, profile, runtime and token, and that is enough
-    to send a stand-down request or a ping; it is not enough to forward a call.
+    to send a stand-down request or a probe; it is not enough to forward a call.
 
     **Another protocol.** An older owner is asked to stand down through the
     control floor, the one route every protocol keeps. The same or a newer one
@@ -821,6 +821,13 @@ def _reachable(attachment: Attachment, timeout: float) -> Reach:
     the connection; an owner that is merely stalled holds the port and says
     nothing. Both used to arrive here as ``False``, so a frontend buried a live
     owner it had just started because one ping landed in a scheduler stall.
+
+    The round trip is a tool listing, not a ping, and the difference decides the
+    answer. The 2026-07-28 protocol era removed ping (SDK
+    ``docs/migration.md:1800``) and a default client negotiates that era with a
+    current owner, so a ping came back as an error from a healthy owner and was
+    read here as a refusal. A listing answers in every era, runs no tool and
+    touches no browser.
     """
     import asyncio
 
@@ -838,7 +845,7 @@ def _reachable(attachment: Attachment, timeout: float) -> Reach:
                     httpx_client_factory=daemon_owner.direct_async_http_client,
                 )
             ) as client:
-                await client.ping()
+                await client.list_tools()
         except Exception:
             # Answered, and wrongly: a refused connection, a rejected token, a
             # stranger on the port. All of them say this descriptor is not an
