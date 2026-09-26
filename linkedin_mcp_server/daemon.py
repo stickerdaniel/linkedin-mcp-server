@@ -112,6 +112,22 @@ class Mismatch(enum.Enum):
     CONFIGURATION = "configuration"
 
 
+class DirectFallback(enum.Enum):
+    """Why an election ended at once in this client's own browser.
+
+    Two values because the probe can establish two different things, and the
+    second must not be reported as the first: silence is not proof that the
+    owner is alive, only that it is not one this client can use now.
+    """
+
+    #: The owner answered its probe.
+    LIVE_RIVAL = "a live owner of this build uses a different configuration"
+    #: The owner held its port and did not answer within the probe's budget.
+    SILENT_RIVAL = (
+        "an owner of this build with a different configuration did not answer"
+    )
+
+
 @dataclass(frozen=True)
 class Attachment:
     """An owner worth talking to, and the credential for doing so."""
@@ -144,10 +160,11 @@ class OwnerLookup:
     reason: str = ""
     #: Which check an ``INCOMPATIBLE`` reading failed, where one did.
     mismatch: Mismatch | None = None
-    #: A live owner of this same build with another configuration. Set only by
-    #: the election, which proved it answers; the frontend leaves it alone and
-    #: uses its own browser at once rather than waiting on a lock it holds.
-    live_rival: bool = False
+    #: Set only by the election, and only after its one bounded probe of an
+    #: owner of this same build with another configuration: this client leaves
+    #: that owner alone and drives its own browser now, rather than waiting on a
+    #: lock the owner may hold. Which value says what the probe established.
+    fallback: DirectFallback | None = None
 
     @property
     def worth_connecting(self) -> bool:

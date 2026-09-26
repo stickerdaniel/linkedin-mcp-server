@@ -287,9 +287,10 @@ def obtain_owner(
     refused its calls passes them, because a retiring owner still answers the
     ping this election probes with.
 
-    Returns at once, with nothing worth connecting to, when a live owner of this
-    build uses another configuration: that owner is left alone, and the caller
-    drives its own browser rather than waiting on the lock the owner holds.
+    Returns at once, with nothing worth connecting to and a ``fallback`` set,
+    when an owner of this build with another configuration answers its one
+    probe or stays silent through it: that owner is left alone, and the caller
+    drives its own browser rather than waiting on the lock it may hold.
     """
     entered = time.monotonic()
     active_deadline = entered + max(deadline_seconds, 0.0)
@@ -352,7 +353,7 @@ def obtain_owner(
         if time.monotonic() >= active_deadline:
             return settle()
         lookup = look()
-        if lookup.worth_connecting or lookup.live_rival:
+        if lookup.worth_connecting or lookup.fallback is not None:
             return ElectionOutcome(lookup, started_owner=started)
         if time.monotonic() >= active_deadline:
             return settle()
@@ -402,7 +403,7 @@ def obtain_owner(
         if remaining <= 0:
             return settle()
         lookup = look(min(_RETRY_SECONDS, remaining))
-        if lookup.worth_connecting or lookup.live_rival:
+        if lookup.worth_connecting or lookup.fallback is not None:
             return ElectionOutcome(lookup, started_owner=started)
         if time.monotonic() >= active_deadline:
             return settle()
@@ -438,7 +439,7 @@ def _settle_owner(
         )
         if observed:
             last_lookup = lookup
-        if lookup.worth_connecting or lookup.live_rival:
+        if lookup.worth_connecting or lookup.fallback is not None:
             return ElectionOutcome(lookup, started_owner=started)
 
 
@@ -679,12 +680,12 @@ def _decide_control_only(
     and otherwise it ends in the caller's own browser for as long as that owner
     lives.
 
-    **Same build, another configuration.** Probed, because a descriptor outlives
-    its writer and an owner that went idle leaves one behind on purpose.
-    Alive, it is a rival this frontend leaves alone, falling back at once.
-    Gone, it is buried like any leftovers so the lock can be taken. Silent,
-    nothing is recorded, exactly as for an attachable owner that has not
-    answered yet.
+    **Same build, another configuration.** Probed once, because a descriptor
+    outlives its writer and an owner that went idle leaves one behind on
+    purpose. Refused, it is buried like any leftovers so the lock can be
+    taken. Answering or silent, it is left alone and the election ends in this
+    client's own browser (``OwnerLookup.fallback``), with no turnover request,
+    no owner start and no second probe.
     """
     instance = attachment.descriptor.instance_id
     if lookup.mismatch is daemon_discovery.Mismatch.PROTOCOL:
@@ -730,28 +731,36 @@ def _decide_control_only(
             True,
         )
     verdict = reach(attachment, min(_REACHABLE_SECONDS, remaining))
-    if verdict is Reach.ANSWERED:
-        logger.info(
-            "A shared browser owner with a different configuration is running; "
-            "leaving it alone"
-        )
+    if verdict is Reach.REFUSED:
+        # Nothing usable at that address: leftovers, and the lock decides.
+        buried.add(instance)
         return (
             OwnerLookup(
                 state=OwnerState.INCOMPATIBLE,
-                reason="a live owner of this build uses a different configuration",
+                reason=lookup.reason,
                 mismatch=lookup.mismatch,
-                live_rival=True,
             ),
             False,
             True,
         )
-    if verdict is Reach.REFUSED:
-        buried.add(instance)
+    # Answered or silent, the election ends here. Silence proves nothing about
+    # the owner's life and so authorizes no turnover, but it does not make the
+    # owner usable either: waiting out a whole election for a process that
+    # could never serve this configuration buys nothing, and the profile lease
+    # is what keeps the two browsers apart meanwhile. The two are reported
+    # apart, so a log never calls a silent owner alive.
+    fallback = (
+        daemon_discovery.DirectFallback.LIVE_RIVAL
+        if verdict is Reach.ANSWERED
+        else daemon_discovery.DirectFallback.SILENT_RIVAL
+    )
+    logger.info("Leaving the shared browser owner alone: %s", fallback.value)
     return (
         OwnerLookup(
             state=OwnerState.INCOMPATIBLE,
-            reason=lookup.reason,
+            reason=fallback.value,
             mismatch=lookup.mismatch,
+            fallback=fallback,
         ),
         False,
         True,

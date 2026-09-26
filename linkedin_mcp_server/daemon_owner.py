@@ -637,6 +637,17 @@ def _require_uncertain_endpoint(
     )
 
 
+class _TurnoverDecided(BaseException):
+    """A newer build asked this owner to stand down while it was reconciling.
+
+    Raised by the synchronous maintenance step and handled by its asynchronous
+    caller, because the drain that turnover owes admitted calls has to await.
+    A ``BaseException`` so that no ``except Exception`` on the way out can read
+    it as a failed read or commit and retry publication; every broader handler
+    on the path lets it through by name.
+    """
+
+
 def _maintain_uncertain_publication(
     server: Any,
     serving: asyncio.Task[None],
@@ -644,7 +655,14 @@ def _maintain_uncertain_publication(
     *,
     lock: DaemonLock | None,
 ) -> None:
-    """Keep frontend-visible lifecycle controls active before startup completes."""
+    """Keep frontend-visible lifecycle controls active before startup completes.
+
+    A stopped endpoint and a browser that cannot be driven still end the owner
+    here and now. Turnover does not: the endpoint may already be named by a
+    descriptor this process could not confirm, so calls can have been admitted,
+    and they are owed the same drain the serving loop gives them. It is reported
+    to the caller instead (:class:`_TurnoverDecided`).
+    """
     _require_uncertain_endpoint(server, serving, lock=lock)
     if stand_down_reason() is not None:
         server.should_exit = True
@@ -653,11 +671,7 @@ def _maintain_uncertain_publication(
             lock=lock,
         )
     if turnover:
-        server.should_exit = True
-        _exit_uncertain_publication(
-            "A newer build requested stand-down during publication reconciliation",
-            lock=lock,
-        )
+        raise _TurnoverDecided
     get_liveness().cancel_the_abandoned()
 
 
@@ -732,14 +746,52 @@ async def _reconcile_uncertain_publication(
     Every terminal path out of this loop is a hard exit, so *lock* comes in with
     the call: the exit releases the election before the process ends, and the
     profile lease alone keeps a successor off the browser.
+
+    Turnover is the one terminal decision that waits first. Once it wins, no
+    further publication is attempted for this generation, admission stays
+    closed, and the calls already admitted get the serving loop's own drain
+    (:func:`_turn_over`) while this process still holds the lock. The hard exit
+    follows that, and follows it even if the drain itself is interrupted.
+    """
+    try:
+        await _reconcile_until_published(
+            auth_root,
+            instance_id,
+            server=server,
+            serving=serving,
+            lock=lock,
+            turnover=[] if turnover is None else turnover,
+        )
+    except _TurnoverDecided:
+        try:
+            await _turn_over(server, serving, lock=lock)
+        finally:
+            _exit_uncertain_publication(
+                "A newer build requested stand-down during publication reconciliation",
+                lock=lock,
+            )
+
+
+async def _reconcile_until_published(
+    auth_root: Path,
+    instance_id: str,
+    *,
+    server: Any,
+    serving: asyncio.Task[None],
+    lock: DaemonLock | None,
+    turnover: list[str],
+) -> None:
+    """The retry loop of :func:`_reconcile_uncertain_publication`.
+
+    Raises :class:`_TurnoverDecided` out of every await, past each handler that
+    would otherwise treat an interruption as terminal on its own.
     """
     canonical_read: asyncio.Future[daemon_descriptor.DaemonDescriptor | None] | None = (
         None
     )
-    requests = [] if turnover is None else turnover
 
     def maintenance() -> None:
-        _maintain_uncertain_publication(server, serving, requests, lock=lock)
+        _maintain_uncertain_publication(server, serving, turnover, lock=lock)
 
     while True:
         maintenance()
@@ -762,6 +814,8 @@ async def _reconcile_uncertain_publication(
                 canonical = await _await_uncertain_read_until(
                     canonical_read, deadline, maintenance
                 )
+            except _TurnoverDecided:
+                raise
             except asyncio.CancelledError:
                 _exit_uncertain_publication(
                     "Publication reconciliation was cancelled", lock=lock
@@ -789,6 +843,8 @@ async def _reconcile_uncertain_publication(
             await _commit_prepared_until(
                 auth_root, instance_id, deadline, maintenance=maintenance
             )
+        except _TurnoverDecided:
+            raise
         except asyncio.CancelledError:
             _exit_uncertain_publication(
                 "Publication reconciliation was cancelled", lock=lock
@@ -821,6 +877,8 @@ async def _reconcile_uncertain_publication(
             await _sleep_during_uncertain_publication(
                 _UNCERTAIN_PUBLICATION_RETRY_SECONDS, maintenance
             )
+        except _TurnoverDecided:
+            raise
         except asyncio.CancelledError:
             _exit_uncertain_publication(
                 "Publication reconciliation was cancelled", lock=lock
@@ -1116,25 +1174,7 @@ async def _serve_until_stopped(
             await _stop_within(serving, _STAND_DOWN_SHUTDOWN_SECONDS, lock=lock)
             return
         if turnover:
-            # Already closed by the request itself; closed again here so the
-            # loop does not depend on how the request got in.
-            liveness.retire("turnover")
-            logger.info("A newer build asked for the browser; standing down")
-            await _drain_admitted_calls(liveness, _TURNOVER_DRAIN_SECONDS)
-            server.should_exit = True
-            # Graceful, but not unconditionally. Uvicorn finishes the requests
-            # in flight and runs the lifespan, which closes the browser, and
-            # only then does this process exit and the kernel free the lock.
-            #
-            # Bounded, because that shutdown is not guaranteed to finish:
-            # ``timeout_graceful_shutdown`` bounds the connection tasks and
-            # nothing bounds the lifespan behind them. An owner stuck there
-            # would hold the daemon lock forever, having already promised a
-            # frontend that it was standing down — every later election would
-            # find the position occupied by a process that is no longer serving.
-            # Giving up the wait and exiting is the lesser harm, and that exit
-            # frees the election before it ends the process (`_exit_hard`).
-            await _stop_within(serving, _STAND_DOWN_SHUTDOWN_SECONDS, lock=lock)
+            await _turn_over(server, serving, lock=lock)
             return
         # Cheap enough to do on the same tick as the two questions above: one
         # dictionary scan over the calls in flight, on a process that is already
@@ -1184,6 +1224,38 @@ async def _serve_until_stopped(
                 "profile stays held until the browser is gone"
             )
             _exit_hard(lock)
+
+
+async def _turn_over(
+    server: Any, serving: asyncio.Task[None], *, lock: DaemonLock | None
+) -> None:
+    """Stand down for a newer build: close admission, drain, then stop.
+
+    The one continuation for turnover, whether the request arrived while the
+    owner was serving or while it was still reconciling its publication, so an
+    admitted call gets the same drain and the same unknown-outcome answer on
+    either path.
+    """
+    liveness = get_liveness()
+    # Already closed by the request itself; closed again here so this does not
+    # depend on how the request got in.
+    liveness.retire("turnover")
+    logger.info("A newer build asked for the browser; standing down")
+    await _drain_admitted_calls(liveness, _TURNOVER_DRAIN_SECONDS)
+    server.should_exit = True
+    # Graceful, but not unconditionally. Uvicorn finishes the requests in flight
+    # and runs the lifespan, which closes the browser, and only then does this
+    # process exit and the kernel free the lock.
+    #
+    # Bounded, because that shutdown is not guaranteed to finish:
+    # ``timeout_graceful_shutdown`` bounds the connection tasks and nothing
+    # bounds the lifespan behind them. An owner stuck there would hold the
+    # daemon lock forever, having already promised a frontend that it was
+    # standing down — every later election would find the position occupied by
+    # a process that is no longer serving. Giving up the wait and exiting is the
+    # lesser harm, and that exit frees the election before it ends the process
+    # (`_exit_hard`).
+    await _stop_within(serving, _STAND_DOWN_SHUTDOWN_SECONDS, lock=lock)
 
 
 async def _drain_admitted_calls(liveness: CallLiveness, seconds: float) -> None:

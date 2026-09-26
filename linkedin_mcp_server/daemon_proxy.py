@@ -40,8 +40,8 @@ import contextvars
 import datetime
 import enum
 import logging
-from collections.abc import Awaitable
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
@@ -91,10 +91,24 @@ class _CallBinding:
     user as abandoned. That is reachable, because with no component cache every
     call re-lists first, and a replacement adopted between the two would move
     the backend underneath this call.
+
+    A binding is not yet a call in flight. It is made before the client is
+    built, initialized and asked to send, and an owner written off during any
+    of those awaits must not receive the request. *dispatch* records the one
+    moment the tool request was actually handed to the session; only from then
+    on does the call keep its owner whatever happens to it.
     """
 
     call_id: str
     attachment: Attachment
+    dispatch: _Dispatch = field(default_factory=lambda: _Dispatch())
+
+
+@dataclass
+class _Dispatch:
+    """Whether a bound call's tool request has been handed to its session."""
+
+    sent: bool = False
 
 
 #: The call the current task is making, for the factory to address and stamp.
@@ -411,9 +425,35 @@ def _tells_which_owner_failed() -> type:
         can do is take that answer's place. See its own docstring.
         """
 
-        def __init__(self, *args: Any, instance_id: str, **kwargs: Any) -> None:
+        def __init__(
+            self,
+            *args: Any,
+            instance_id: str,
+            binding: _CallBinding | None = None,
+            still_usable: Callable[[Attachment], None] | None = None,
+            **kwargs: Any,
+        ) -> None:
             super().__init__(*args, **kwargs)
             self._instance_id = instance_id
+            self._binding = binding
+            self._still_usable = still_usable
+
+        def _claim_the_send(self) -> None:
+            """Mark the bound call as sent, unless its owner was written off first.
+
+            The last synchronous step before the tool request is handed to the
+            session, after every await of building and initializing the client.
+            A burial that landed during those awaits refuses the send, and the
+            refusal says nothing was sent, which is exactly true. Once claimed,
+            the call keeps its owner: a request already on its way must stay with
+            the owner whose heartbeats are keeping it alive.
+            """
+            binding = self._binding
+            if binding is None or binding.dispatch.sent:
+                return
+            if self._still_usable is not None:
+                self._still_usable(binding.attachment)
+            binding.dispatch.sent = True
 
         async def _saying_which_owner(
             self, operation: Awaitable[Any], *, nothing_was_sent: bool | None
@@ -568,6 +608,9 @@ def _tells_which_owner_failed() -> type:
                         if propagated_meta
                         else None
                     )
+                    # Nothing awaits between this and the session taking the
+                    # request, so a burial cannot land between check and send.
+                    self._claim_the_send()
                     result = await self._await_with_session_monitoring(
                         self.session.send_request(
                             mt.ClientRequest(
@@ -706,12 +749,24 @@ class DaemonProxyBackend:
             self._unusable[instance_id] = classification
 
     def attachment_for_a_call(self) -> Attachment:
-        """The owner a new call may be dispatched to, or a failure saying why not.
+        """The owner a new call may be dispatched to, or a failure saying why not."""
+        attachment = self._attachment
+        self.refuse_if_written_off(attachment)
+        return attachment
+
+    def refuse_if_written_off(self, attachment: Attachment) -> None:
+        """Raise if a new request may not go to *attachment*, as of right now.
+
+        Asked again at every point a new request could still be stopped: when a
+        call picks its owner, after its preflight returns, when its client is
+        built, and at the send itself. Each of those follows an await during
+        which another call can write the owner off, and a check made before the
+        await says nothing about after it.
 
         The failure says nothing was sent, which is true: nothing was. It names
-        the owner that was written off, so the recovery above elects past it.
+        the owner that was written off, not whichever replacement the backend
+        holds now, because that one has passed no preflight for this call.
         """
-        attachment = self._attachment
         _refuse_control_only(attachment)
         instance = attachment.descriptor.instance_id
         written_off = self._unusable.get(instance)
@@ -722,7 +777,6 @@ class DaemonProxyBackend:
                 cause=_WrittenOff(written_off),
                 classification=written_off,
             )
-        return attachment
 
     async def recover(
         self,
@@ -868,13 +922,20 @@ class DaemonProxyBackend:
         # dialled a replacement while its heartbeats stayed with the departing
         # owner would be cancelled by the owner actually running it.
         bound = _call_being_made.get()
-        # A call keeps the owner it was bound to, which its heartbeat middleware
-        # already checked. Anything else, a listing above all, gets the owner a
-        # new call would get, including the refusal when that one is written off.
-        attachment = (
-            bound.attachment if bound is not None else self.attachment_for_a_call()
-        )
-        _refuse_control_only(attachment)
+        # A bound call is addressed to the owner it was bound to, never to a
+        # replacement that passed no preflight for it. Until its tool request
+        # has actually been sent, that owner is asked about again here and once
+        # more at the send (`_claim_the_send`); after it, the call keeps its
+        # owner whatever happens to it. Anything unbound, a listing above all,
+        # gets the owner a new call would get.
+        if bound is None:
+            attachment = self.attachment_for_a_call()
+        else:
+            attachment = bound.attachment
+            if bound.dispatch.sent:
+                _refuse_control_only(attachment)
+            else:
+                self.refuse_if_written_off(attachment)
         # Verbatim, never rebuilt from host and port: the descriptor's own URL
         # already carries the MCP path and brackets an IPv6 literal, and FastMCP
         # deliberately does not rewrite the path it is given.
@@ -910,6 +971,8 @@ class DaemonProxyBackend:
             # attachment as the URL and the token, so all three describe one owner
             # even while a replacement is being adopted concurrently.
             instance_id=attachment.descriptor.instance_id,
+            binding=bound,
+            still_usable=self.refuse_if_written_off,
         )
 
 
@@ -1312,6 +1375,10 @@ class FrontendCallHeartbeatMiddleware(Middleware):
         refused = await self._preflight(attachment, call_id)
         if refused is not None:
             raise refused
+        # Asked again, because the preflight was an await: another call may have
+        # found this owner retiring and written it off meanwhile. The go-ahead
+        # this preflight got is older than that news.
+        self._backend.refuse_if_written_off(attachment)
 
         beating = asyncio.create_task(self._keep_saying(attachment, call_id))
         marked = _call_being_made.set(_CallBinding(call_id, attachment))
