@@ -3666,9 +3666,9 @@ async def _run_browser_setup(
 
     Those three figures are one revision's *and one platform's*, not a
     constant. The bundled browser moves with the lockfile and is past 148 now,
-    and the sizes differ by platform as well: the arm64 container does not get
-    Chrome for Testing at all, it gets Playwright's own Chromium build. What
-    the argument needs is only that the full browser is substantially larger
+    and the sizes differ by platform as well: through patchright 1.61.2 the
+    arm64 container did not get Chrome for Testing at all, it got Playwright's
+    own Chromium build. What the argument needs is only that the full browser is substantially larger
     than the shell everywhere, which holds; quoting these particular numbers
     anywhere user-facing means re-measuring them for the platform in question.
     """
