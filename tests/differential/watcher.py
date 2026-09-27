@@ -101,6 +101,25 @@ SAMPLE_SECONDS = 0.05
 #: the system timer's (about 15.6 ms by default), with room to spare.
 CREATE_TIME_MARGIN_SECONDS = 0.05
 
+#: How far the calendar clock may have moved against the monotonic clock since
+#: the harness started before age stops being evidence. Half the margin, so a
+#: shift the margin could hide is caught first.
+CLOCK_STEP_TOLERANCE_SECONDS = CREATE_TIME_MARGIN_SECONDS / 2
+
+
+def clock_offset_now() -> float:
+    """The calendar clock's offset from the monotonic clock, in seconds.
+
+    Create times are calendar times. A process born after the harness has a
+    calendar create time no earlier than the harness's unless the calendar
+    clock stepped or slewed backwards since the harness started, and this
+    offset, compared with the one the harness took at its start, measures
+    exactly that movement. On Linux psutil reports boot time plus start ticks,
+    boot-relative rather than read at birth; the same rule is kept for every
+    platform.
+    """
+    return time.time() - time.monotonic()
+
 
 def canonical_user_data_dir(value: str) -> str:
     """One spelling per profile directory, so two routes to it count as one.
@@ -212,6 +231,9 @@ _LONG_OPTIONS = {
     "help-xoptions": False,
     "version": False,
 }
+#: The values the interpreter accepts for ``--check-hash-based-pycs``; any
+#: other one, or none, makes it exit with status 2 before running anything.
+_HASH_CHECK_MODES = frozenset({"default", "always", "never"})
 
 
 def invoked_module(cmdline: Sequence[str]) -> str | None:
@@ -235,6 +257,8 @@ def invoked_module(cmdline: Sequence[str]) -> str | None:
         if argument.startswith("--"):
             # Matched whole: ``--check-hash-based-pycs=always`` is rejected.
             if not _LONG_OPTIONS.get(argument[2:]):
+                return None
+            if index >= len(arguments) or arguments[index] not in _HASH_CHECK_MODES:
                 return None
             index += 1
             continue
@@ -462,8 +486,19 @@ class Sampler:
         user: object | None = None,
         browser_exe: str | None = None,
         browser_dir: str | None = None,
+        clock_offset: float | None = None,
+        offset_now: Callable[[], float] = clock_offset_now,
     ) -> None:
         self.root_pid = root_pid
+        #: The harness's calendar-minus-monotonic offset at its start, or None,
+        #: which leaves age unused: nothing then says the clock held still.
+        self.clock_offset = clock_offset
+        self._offset_now = offset_now
+        #: The largest change of that offset seen, and whether it voided age.
+        self.clock_offset_change = 0.0
+        self.clock_step_detected = False
+        #: Identities cached as unrelated on age alone, void after a step.
+        self._age_only: set[tuple[int, float]] = set()
         self.own_pid = os.getpid() if own_pid is None else own_pid
         self._pids = pids
         self._open = open_process
@@ -494,6 +529,9 @@ class Sampler:
         reads = self.reads_per_sample
         return {
             "create_time_margin_seconds": CREATE_TIME_MARGIN_SECONDS,
+            "clock_offset_at_start": self.clock_offset,
+            "clock_offset_change": round(self.clock_offset_change, 4),
+            "clock_step_detected": self.clock_step_detected,
             "first_sample_cached": self.first_sample_cached,
             "first_sample_watched": self.first_sample_watched,
             "reads_per_sample_mean": (
@@ -552,6 +590,8 @@ class Sampler:
         return ppid, exe, cmdline, failures, exe_read
 
     def sample(self) -> dict[int, ProcessRecord]:
+        # Before anything is read: a step voids age for this sample already.
+        self._check_the_clock()
         first = self._baseline is None
         sample: dict[int, ProcessRecord] = {}
         # pid -> (episode key, failed fields, exe, exe read now, process or None,
@@ -649,6 +689,7 @@ class Sampler:
         row = {process.identity for process in sample.values() if process.in_row}
         self._unrelated -= row
         self._watched -= row
+        self._age_only -= row
         settled: set[tuple[int, float]] = set()
         if first:
             settled = self._settled_ancestry(sample)
@@ -705,7 +746,10 @@ class Sampler:
         its ancestry, so one older than the harness by more than
         ``CREATE_TIME_MARGIN_SECONDS`` ends the walk, itself or as an ancestor.
         That is what settles most of a Windows process table, where an
-        orphan's parent pid keeps naming a process that is gone. Otherwise
+        orphan's parent pid keeps naming a process that is gone. Age is read
+        off calendar create times, so it counts only while the clock is shown
+        not to have moved since the harness began (``_check_the_clock``), and
+        what it alone settled is kept apart so a later step can void it. Otherwise
         every parent has to be in the sample and no younger than its child: a
         parent that could not be read, or a younger process at the parent's
         pid, leaves the ancestry open. It also ends at a child of pid 0 (or a
@@ -714,43 +758,76 @@ class Sampler:
         """
         root = sample.get(self.root_pid)
         born = root.start if root is not None else None
-        memo: dict[int, bool] = {}
+        by_age_allowed = born is not None and self._age_admissible()
+        # pid -> (settled, settled only because some process was old enough)
+        memo: dict[int, tuple[bool, bool]] = {}
         for pid in sample:
             chain: list[int] = []
             current = pid
             while True:
                 if current in memo:
-                    settled = memo[current]
+                    settled, by_age = memo[current]
                     break
                 process = sample[current]
                 if process.in_row or current == self.own_pid or current in chain:
-                    settled = False
+                    settled, by_age = False, False
                     break
                 chain.append(current)
                 if (
-                    born is not None
+                    by_age_allowed
+                    and born is not None
                     and process.start < born - CREATE_TIME_MARGIN_SECONDS
                 ):
-                    settled = True
+                    settled, by_age = True, True
                     break
                 if process.ppid in (0, current):
-                    settled = True
+                    settled, by_age = True, False
                     break
                 if process.ppid == 1:
-                    settled = False
+                    settled, by_age = False, False
                     break
                 parent = sample.get(process.ppid)
                 if parent is None or parent.start > process.start:
-                    settled = False
+                    settled, by_age = False, False
                     break
                 current = process.ppid
             for member in chain:
-                memo[member] = settled
-        return {
+                memo[member] = (settled, by_age)
+        settled_now = {
             process.identity
             for pid, process in sample.items()
-            if memo.get(pid) and pid != self.own_pid
+            if memo.get(pid, (False, False))[0] and pid != self.own_pid
         }
+        self._age_only |= {
+            process.identity
+            for pid, process in sample.items()
+            if memo.get(pid, (False, False)) == (True, True) and pid != self.own_pid
+        }
+        return settled_now
+
+    def _age_admissible(self) -> bool:
+        """Whether age is still evidence: the clock has not moved since the harness began."""
+        return self.clock_offset is not None and not self.clock_step_detected
+
+    def _check_the_clock(self) -> None:
+        """Measure the clock against the harness's start, and void age on a step.
+
+        Once the calendar clock has moved by more than
+        ``CLOCK_STEP_TOLERANCE_SECONDS`` against the monotonic clock, birth
+        order can no longer be read off create times, for the rest of the
+        observation: every lifetime cached on age alone goes back to being
+        watched, and read again from this sample on.
+        """
+        if self.clock_offset is None:
+            return
+        change = abs(self._offset_now() - self.clock_offset)
+        self.clock_offset_change = max(self.clock_offset_change, change)
+        if self.clock_step_detected or change <= CLOCK_STEP_TOLERANCE_SECONDS:
+            return
+        self.clock_step_detected = True
+        self._unrelated -= self._age_only
+        self._watched |= self._age_only
+        self._age_only.clear()
 
     def _resolve_by_user(
         self, sample: dict[int, ProcessRecord], identified: dict[int, Any]
@@ -912,6 +989,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     # a browser root, and one running neither cannot.
     parser.add_argument("--browser-exe")
     parser.add_argument("--browser-dir")
+    # The harness's calendar-minus-monotonic offset, taken when it started.
+    # Without it no process is settled by age.
+    parser.add_argument("--clock-offset", type=float)
     args = parser.parse_args(argv)
 
     base = {
@@ -922,7 +1002,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     }
     tracker = Tracker()
     sampler = Sampler(
-        args.root_pid, browser_exe=args.browser_exe, browser_dir=args.browser_dir
+        args.root_pid,
+        browser_exe=args.browser_exe,
+        browser_dir=args.browser_dir,
+        clock_offset=args.clock_offset,
     )
     began = time.monotonic()
     observation_start: float | None = None

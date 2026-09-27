@@ -29,6 +29,7 @@ import psutil
 from differential import harness
 from differential.events import EventLog, read_jsonl
 from differential.harness import watcher_failures
+from differential import HARNESS_CLOCK_OFFSET
 from differential.watcher import (
     CREATE_TIME_MARGIN_SECONDS,
     ProcessRecord,
@@ -188,6 +189,8 @@ def _start_watcher(tmp_path: Path, *, deadline: float = 60) -> subprocess.Popen:
             # process, such as a parallel test's held /bin/ps, could be one.
             "--browser-dir",
             str(tmp_path / "ms-playwright"),
+            "--clock-offset",
+            repr(HARNESS_CLOCK_OFFSET),
         ]
     )
     limit = time.monotonic() + 15
@@ -344,6 +347,9 @@ def test_a_watcher_stopped_on_request_after_the_actors_is_healthy(tmp_path):
     assert summary["sample_seconds_p95"] >= summary["sample_seconds_mean"] * 0.5
     assert summary["first_sample_cached"] > 0
     assert summary["reads_per_sample_max"] >= 1
+    # The harness's clock reached the watcher, and it held still.
+    assert summary["clock_offset_at_start"] == HARNESS_CLOCK_OFFSET
+    assert summary["clock_step_detected"] is False
 
 
 BROWSER_DIR = "/opt/ms-playwright"
@@ -395,7 +401,17 @@ def _user_of(process) -> object:
     return process._entry.get("user", HARNESS)
 
 
-def _sampler(table, *, root=1, browser_exe=BROWSER_EXE):
+class _Clock:
+    """The modelled calendar-minus-monotonic offset; 0.0 until a test moves it."""
+
+    def __init__(self) -> None:
+        self.offset = 0.0
+
+    def __call__(self) -> float:
+        return self.offset
+
+
+def _sampler(table, *, root=1, browser_exe=BROWSER_EXE, clock=None):
     return Sampler(
         root,
         own_pid=999,
@@ -405,6 +421,9 @@ def _sampler(table, *, root=1, browser_exe=BROWSER_EXE):
         user=HARNESS,
         browser_exe=browser_exe,
         browser_dir=BROWSER_DIR,
+        # The harness's offset at its start, and a clock that has held still.
+        clock_offset=0.0,
+        offset_now=clock or _Clock(),
     )
 
 
@@ -853,6 +872,109 @@ def test_a_process_within_the_margin_of_the_harness_is_watched():
     assert _reads_over_five_samples(table) == 5
 
 
+def _reversed_order_table() -> dict[int, dict[str, Any]]:
+    """The e1dc model: its create time reads older than the harness (5.0), its
+    parent is gone. Only a clock step makes a younger process read like this."""
+    return {
+        **_baseline_table(),
+        60: {"start": 4.9, "ppid": 59, "cmdline": ["python", "pre-exec"]},
+    }
+
+
+def _reads_with(clock: Any, table: dict[int, dict[str, Any]], steps=()) -> int:
+    reads = {"n": 0}
+
+    class Counting(dict):
+        def __getitem__(self, key):
+            if key == "cmdline":
+                reads["n"] += 1
+            return super().__getitem__(key)
+
+    table[60] = Counting(table[60])
+    sampler = _sampler(table, root=10, clock=clock)
+    for index in range(5):
+        if index in steps:
+            clock.offset = steps[index]
+        sampler.sample()
+    return reads["n"]
+
+
+def test_while_the_clock_holds_an_older_create_time_is_trusted():
+    # Pass-through: with the clock unmoved, a process that reads older than the
+    # harness was born before it, and is read once.
+    assert _reads_with(_Clock(), _reversed_order_table()) == 1
+
+
+def test_a_clock_step_before_the_first_sample_leaves_age_unused():
+    clock = _Clock()
+    clock.offset = -0.1
+    assert _reads_with(clock, _reversed_order_table()) == 5
+
+
+def test_a_clock_step_during_the_row_voids_what_age_alone_settled():
+    # Cached at the first sample, then the clock steps: read again from the
+    # sample that measured the step on.
+    clock = _Clock()
+    # Read at the first sample, cached through the second, and read again in
+    # the third, fourth and fifth.
+    assert _reads_with(clock, _reversed_order_table(), steps={2: 0.1}) == 4
+
+
+@pytest.mark.parametrize(
+    ("change", "detected"),
+    [
+        # Literal values, so the test does not move with the constant: the
+        # margin is 0.05 s and a step is anything beyond half of it.
+        (0.02, False),
+        (-0.02, False),
+        (0.03, True),
+        (-0.03, True),
+        # Between half the margin and the margin: a shift the margin could
+        # hide, so already a step.
+        (0.045, True),
+    ],
+)
+def test_a_step_is_a_change_beyond_half_the_margin(change, detected):
+    assert CREATE_TIME_MARGIN_SECONDS == 0.05
+    clock = _Clock()
+    table = _reversed_order_table()
+    sampler = _sampler(table, root=10, clock=clock)
+    sampler.sample()
+    clock.offset = change
+    sampler.sample()
+    stats = sampler.stats()
+    assert stats["clock_step_detected"] is detected
+    assert stats["clock_offset_change"] == round(abs(change), 4)
+    assert stats["clock_offset_at_start"] == 0.0
+
+
+def test_a_process_settled_by_its_ancestry_survives_a_clock_step():
+    # Only age is voided: a complete ancestry to pid 0 still settles.
+    clock = _Clock()
+    table = {
+        **_baseline_table(),
+        60: {"start": 5.5, "ppid": 0, "cmdline": ["d"]},
+    }
+    assert _reads_with(clock, table, steps={2: 0.1}) == 1
+
+
+def test_without_the_harnesss_clock_no_process_is_settled_by_age():
+    table = _reversed_order_table()
+    sampler = Sampler(
+        10,
+        own_pid=999,
+        pids=lambda: list(table),
+        open_process=lambda pid: _FakeProcess(table, pid),
+        user_of=_user_of,
+        user=HARNESS,
+        browser_exe=BROWSER_EXE,
+        browser_dir=BROWSER_DIR,
+    )
+    sampler.sample()
+    assert sampler.first_sample_watched == 1
+    assert sampler.stats()["clock_offset_at_start"] is None
+
+
 def test_a_younger_first_sample_process_with_an_open_ancestry_is_still_caught():
     # E1CE-01 C with the age rule in place: born after the harness, its parent
     # gone, it becomes a second browser root and must be counted.
@@ -1187,8 +1309,25 @@ GRAMMAR = [
     pytest.param(["-X", "dev", "-u", "-m", "M"], True, id="X-separate"),
     pytest.param(["-Xdev", "-m", "M"], True, id="X-attached"),
     pytest.param(
-        ["--check-hash-based-pycs", "always", "-m", "M"], True, id="long-with-value"
+        ["--check-hash-based-pycs", "always", "-m", "M"], True, id="hash-check-always"
     ),
+    pytest.param(
+        ["--check-hash-based-pycs", "never", "-m", "M"], True, id="hash-check-never"
+    ),
+    pytest.param(
+        ["--check-hash-based-pycs", "default", "-m", "M"],
+        True,
+        id="hash-check-default",
+    ),
+    pytest.param(
+        ["--check-hash-based-pycs", "invalid-mode", "-m", "M"],
+        False,
+        id="hash-check-invalid-mode",
+    ),
+    pytest.param(
+        ["--check-hash-based-pycs", "-m", "M"], False, id="hash-check-mode-missing"
+    ),
+    pytest.param(["--check-hash-based-pycs"], False, id="hash-check-alone"),
     pytest.param(
         ["--check-hash-based-pycs=always", "-m", "M"], False, id="long-with-equals"
     ),
@@ -1347,3 +1486,20 @@ def test_a_watcher_that_never_takes_its_baseline_is_stopped(tmp_path, monkeypatc
         watcher.start(ready_seconds=0.5)
     assert watcher._process is not None
     assert watcher._process.poll() is not None
+
+
+def test_the_harness_watcher_carries_the_harnesss_clock(tmp_path):
+    # The real watcher, started the way a row starts it: its summary names
+    # the offset the harness took at its start, so age can be checked at all.
+    watcher = harness.Watcher(
+        tmp_path / "w",
+        EventLog(tmp_path / "log", run="r"),
+        experiment="K1",
+        row="R",
+        browser_dir=tmp_path / "ms-playwright",
+    )
+    watcher.start()
+    summary = watcher.stop()
+    assert summary is not None
+    assert summary["clock_offset_at_start"] == HARNESS_CLOCK_OFFSET
+    assert summary["clock_step_detected"] is False
