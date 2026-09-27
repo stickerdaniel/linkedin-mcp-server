@@ -9371,6 +9371,66 @@ class TestARestrictedAccountOpensNoLoginWindow:
         assert started == []
         assert get_bootstrap_state().login_task is None
 
+    async def test_a_poller_after_a_restricted_import_opens_no_login(
+        self, monkeypatch, _stub_import_env
+    ):
+        # The import's own awaiter is not the only reader: a second poller can
+        # run after the import finished and before that awaiter sees the error.
+        started = self._restricted_login(monkeypatch)
+        _patch_inline_wait(monkeypatch, 0, auto_import=True)
+        other: asyncio.Task[None] | None = None
+
+        async def restricted_import(_ctx=None):
+            nonlocal other
+            other = asyncio.create_task(_start_login_if_needed())
+            raise AccountRestrictedError()
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._try_auto_import_session",
+            restricted_import,
+        )
+
+        # Straight into the login logic, as a readiness check reaches it, so the
+        # second poller is scheduled before the first sees the import's error.
+        with pytest.raises(AccountRestrictedError):
+            await _start_login_if_needed()
+        assert other is not None
+        with pytest.raises(AccountRestrictedError):
+            await other
+
+        assert started == []
+        assert get_bootstrap_state().login_task is None
+
+    async def test_a_cancelled_import_awaiter_leaves_no_login_behind(
+        self, monkeypatch, _stub_import_env
+    ):
+        # If the call that awaited the import is cancelled before it can record
+        # the refusal, the finished import still answers the next call.
+        started = self._restricted_login(monkeypatch)
+        _patch_inline_wait(monkeypatch, 0, auto_import=True)
+        import_done = asyncio.Event()
+
+        async def restricted_import(_ctx=None):
+            import_done.set()
+            raise AccountRestrictedError()
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._try_auto_import_session",
+            restricted_import,
+        )
+
+        first = asyncio.create_task(ensure_tool_ready_or_raise("get_person_profile"))
+        await import_done.wait()
+        first.cancel()
+        with pytest.raises((asyncio.CancelledError, AccountRestrictedError)):
+            await first
+
+        with pytest.raises(AccountRestrictedError):
+            await ensure_tool_ready_or_raise("get_person_profile")
+
+        assert started == []
+        assert get_bootstrap_state().login_task is None
+
     async def test_waiting_for_the_sign_in_ends_with_the_restriction(self, monkeypatch):
         # What the frontend waits on while repairing auth for the shared owner.
         self._restricted_login(monkeypatch)

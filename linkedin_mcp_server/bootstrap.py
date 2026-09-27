@@ -3800,6 +3800,17 @@ async def _refresh_background_task_state() -> None:
             _state.auth_state = AuthState.READY
             _state.auth_completed_at = utcnow_iso()
 
+    # Read from the finished import itself, not only from whichever caller
+    # awaited it: a poller that sees the import done, or runs after that caller
+    # was cancelled, would otherwise take the manual-login branch. Left in place
+    # for its awaiters; a fresh no-session episode clears the task first.
+    import_task = _state.import_task
+    if import_task is not None and import_task.done() and not import_task.cancelled():
+        from linkedin_mcp_server.core.exceptions import AccountRestrictedError
+
+        if isinstance(import_task.exception(), AccountRestrictedError):
+            _state.account_restricted = True
+
 
 def _consume_background_setup_failure() -> str | None:
     if _state.setup_state is not SetupState.FAILED:
@@ -4216,6 +4227,8 @@ async def _start_login_if_needed(
             if _auth_ready():
                 _state.auth_state = AuthState.READY
                 return
+            if _state.account_restricted:
+                raise AccountRestrictedError()
             if _state.login_task is not None and not _state.login_task.done():
                 login_task = _state.login_task
                 prior_error = None
