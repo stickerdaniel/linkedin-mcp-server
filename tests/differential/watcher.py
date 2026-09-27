@@ -117,8 +117,9 @@ that profile, as a root or inside a same-profile parent's tree that is counted,
 so it cannot hide a second root *on that profile*. It says nothing about any
 other: a same-image exec with hidden arguments could have moved it onto one.
 So the failed read is kept in ``read_failures`` as retained history with its
-``retained_profile``, not as a possible browser, and whoever judges a profile
-treats it as unidentified unless that is the profile it names. Every other
+``retained_profile``, one note for each profile the lifetime was retained on,
+not as a possible browser, and whoever judges a profile treats it as
+unidentified unless that is the profile it names. Every other
 failed argument read stays uncertain, including one of a lifetime read before
 as a driver, helper or renderer: an exec since could have made it a root.
 
@@ -694,8 +695,9 @@ class Sampler:
         self.group_read_failure_count = 0
         self._episodes: dict[tuple[int, float | None], dict[str, Any]] = {}
         #: Failed argument reads of lifetimes already counted as a browser
-        #: root, which keep their earlier reading (``_keeps_its_root``).
-        self._retained: dict[tuple[int, float], dict[str, Any]] = {}
+        #: root, which keep their earlier reading (``_keeps_its_root``): one
+        #: note per lifetime and profile retained, never replaced or cleared.
+        self._retained: dict[tuple[int, float, str], dict[str, Any]] = {}
         self._closed: list[dict[str, Any]] = []
 
     def stats(self) -> dict[str, Any]:
@@ -1069,9 +1071,17 @@ class Sampler:
         )
 
     def _note_retained(self, known: ProcessRecord, failed: list[str]) -> None:
-        """Record the failed read of a known root, once per lifetime."""
+        """Record the failed read of a known root, once per lifetime and
+        profile.
+
+        A lifetime read on one profile, then on another, can be retained on
+        each: each note is what the judge of another profile must see, so a
+        later one never stands in for an earlier.
+        """
         now = self._clock()
-        note: dict[str, Any] | None = self._retained.get(known.identity)
+        assert known.profile is not None
+        key = (*known.identity, known.profile)
+        note: dict[str, Any] | None = self._retained.get(key)
         if note is None:
             note = {
                 "pid": known.pid,
@@ -1083,7 +1093,7 @@ class Sampler:
                 "resolution": "a known browser root's earlier reading retained",
                 "retained_profile": known.profile,
             }
-            self._retained[known.identity] = note
+            self._retained[key] = note
         note["failures"].update(failed)
         note["last"] = now
         note["seconds"] = round(now - note["first"], 4)

@@ -1212,3 +1212,69 @@ def test_any_other_refused_arguments_leave_o1_unestablished(profile, case, pid):
     assert [e["pid"] for e in census["relevant_read_failures"]] == [pid]
     assert not vector.o1_single_browser and not vector.watcher_healthy
     assert failures
+
+
+def _moving_root_census(readings: str, *, peer_from: int | None) -> dict:
+    """The e1ej model: pid 70, one lifetime with one executable throughout,
+    sampled once per letter of *readings*: ``A`` or ``B`` its arguments read
+    naming that profile, ``-`` refused. From sample *peer_from* on, pid 60 is
+    a second, readable root on A. Then both are gone.
+    """
+    table: dict[int, dict[str, Any]] = {
+        1: {"start": 0.0, "ppid": 0, "cmdline": ["init"]},
+        10: {"start": 5.0, "ppid": 1, "cmdline": ["pytest"]},
+    }
+    sampler, tracker = _sampler(table, root=10), Tracker()
+    tracker.observe(sampler.sample(), 0.0)
+    table[70] = {"start": 6.0, "ppid": 10, "exe": BROWSER_EXE}
+    for tick, reading in enumerate(readings, start=1):
+        profile = {"A": KEY, "B": OTHER}.get(reading)
+        table[70]["cmdline"] = (
+            _chrome_on(profile) if profile else psutil.AccessDenied(70)
+        )
+        if tick == peer_from:
+            table[60] = {"start": 7.0, "ppid": 10, "exe": BROWSER_EXE}
+            table[60]["cmdline"] = _chrome_on(KEY)
+        tracker.observe(sampler.sample(), float(tick))
+    table.pop(60, None)
+    table.pop(70)
+    tracker.observe(sampler.sample(), float(len(readings) + 1))
+    return {
+        "stopped_by": "stop file",
+        "observation_start": 10.0,
+        "observation_end": 100.0,
+        "max_gap_seconds": 0.2,
+        "max_roots": dict(tracker.max_roots),
+        "read_failures": sampler.read_failures,
+        "relevant_read_failures": sampler.relevant_read_failures,
+    }
+
+
+@pytest.mark.parametrize(
+    ("readings", "peer_from", "established"),
+    [
+        # Retained on A, read on B, retained on B beside a peer on A: the
+        # second refused read could name A again.
+        pytest.param("A-B-", 4, {"A": False, "B": False}, id="A-then-B-hidden"),
+        # Retained on B, read on A, retained on A: the first refused read
+        # could have named A, the second B.
+        pytest.param("B-A-", None, {"A": False, "B": False}, id="B-then-A-hidden"),
+        pytest.param("A-", None, {"A": True, "B": False}, id="retained-on-A-only"),
+        # Nothing of B was hidden: the peer on A overlaps a readable B.
+        pytest.param("A-BB", 3, {"A": True, "B": False}, id="A-then-readable-B"),
+    ],
+)
+def test_every_profile_a_root_was_retained_on_is_seen_by_each_judge(
+    profile, readings, peer_from, established
+):
+    census = _moving_root_census(readings, peer_from=peer_from)
+    for judged, expected in established.items():
+        vector, failures = judge_row(
+            dataclasses.replace(
+                _healthy(profile),
+                browser_key=canonical_user_data_dir({"A": KEY, "B": OTHER}[judged]),
+                watcher=census,
+            )
+        )
+        assert vector.o1_single_browser is expected, judged
+        assert (failures == []) is expected, (judged, failures)
