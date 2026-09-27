@@ -1,9 +1,10 @@
 # LinkedIn auth and restriction routes
 
-Routes the server reads as "not signed in" or "account restricted", and the
-observation behind each. The matching code lives in `core/auth.py`; this file
-records what was seen, so a new route is added here first, with its source and
-date.
+The account-restriction route the server recognizes, and the observation
+behind it. The matching code lives in `core/auth.py`, which also lists the
+older not-signed-in routes (`/login`, `/checkpoint` and others) without a
+recorded observation here. A new restriction route is added here first, with
+its source and date.
 
 Only the path is compared. The pages are localized, so their text says nothing
 reliable about which one is showing.
