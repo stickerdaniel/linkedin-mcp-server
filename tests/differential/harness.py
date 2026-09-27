@@ -635,9 +635,20 @@ def watcher_failures(
         failures.append("the watcher's observation ended before the actors were gone")
     gap = summary.get("max_gap_seconds")
     if not isinstance(gap, (int, float)) or gap > max_gap:
+        # What the slowest samples waited on, so the failure names its cause.
+        slow = sorted(
+            summary.get("slow_samples") or [],
+            key=lambda entry: entry.get("seconds") or 0,
+            reverse=True,
+        )
+        waited_on = [
+            {"sample_seconds": entry.get("seconds"), **(entry.get("slowest") or {})}
+            for entry in slow[:3]
+        ]
         failures.append(
             f"the watcher's largest gap between samples was {gap}s, over the "
-            f"{max_gap}s this row accepts"
+            f"{max_gap}s this row accepts; its slowest samples waited on "
+            f"{waited_on or 'nothing it recorded'}"
         )
     # Only an actor that could have been a browser root: one whose executable
     # could not be read, or is the row's browser. Every failed read stays in

@@ -378,6 +378,10 @@ class _FakeProcess:
         return _field({"exe": self._entry.get("exe", "/usr/bin/python3")}, "exe")
 
     def cmdline(self):
+        self._entry["cmdline_reads"] = self._entry.get("cmdline_reads", 0) + 1
+        if "cmdline_seconds" in self._entry:
+            # A modelled slow read: the sampler's timer moves on by that much.
+            self._entry["clock"]["now"] += self._entry["cmdline_seconds"]
         return _field(self._entry, "cmdline")
 
     def environ(self):
@@ -394,13 +398,22 @@ def _user_of(process) -> object:
     return process._entry.get("user", HARNESS)
 
 
-def _sampler(table, *, root=1, browser_exe=BROWSER_EXE, no_exec=False):
+def _sampler(
+    table,
+    *,
+    root=1,
+    browser_exe=BROWSER_EXE,
+    no_exec=False,
+    user_of=_user_of,
+    timer=time.perf_counter,
+):
     return Sampler(
         root,
         own_pid=999,
         pids=lambda: list(table),
         open_process=lambda pid: _FakeProcess(table, pid),
-        user_of=_user_of,
+        user_of=user_of,
+        timer=timer,
         user=HARNESS,
         browser_exe=browser_exe,
         browser_dir=BROWSER_DIR,
@@ -884,7 +897,11 @@ def test_on_posix_the_same_process_stays_watched():
 def test_on_windows_an_image_not_read_in_full_or_a_browser_stays_watched(change):
     table = _dead_parent_service()
     table[60] = {**table[60], **change}
-    assert _reads_over_five_samples(table, no_exec=True) == 5
+    sampler = _sampler(table, root=10, no_exec=True)
+    samples = [sampler.sample() for _ in range(5)]
+    # Not established unrelated: in every sample, where O1 counts it.
+    assert sampler.stats()["first_sample_watched"] == 1
+    assert all(60 in sample for sample in samples)
 
 
 def test_on_windows_a_browser_started_later_is_a_new_process_and_is_counted():
@@ -960,7 +977,9 @@ def test_the_summary_states_what_sampling_cost(no_exec):
     if no_exec:
         # init and 60 by ancestry, 61 by its image; the harness is the row's.
         assert (stats["first_sample_cached"], stats["first_sample_watched"]) == (3, 0)
-        assert sampler.reads_per_sample == [4, 1, 1]
+        # The harness, read in full once, is carried after that.
+        assert sampler.reads_per_sample == [4, 0, 0]
+        assert sampler.carried_per_sample == [0, 1, 1]
     else:
         # init and 60 by ancestry; 61 is watched.
         assert (stats["first_sample_cached"], stats["first_sample_watched"]) == (2, 1)
@@ -1451,3 +1470,126 @@ def test_the_harness_watcher_trusts_images_only_where_there_is_no_exec(tmp_path)
     assert summary is not None
     assert summary["no_exec"] is (sys.platform == "win32")
     assert "clock_offset_at_start" not in summary
+
+
+# --- What a lifetime costs ---------------------------------------------------------
+
+
+def _row_actor_table() -> dict[int, dict[str, Any]]:
+    """The harness (10) and a server it started after the first sample (70)."""
+    return {
+        **_baseline_table(),
+        70: {"start": 6.0, "ppid": 10, "cmdline": ["python", "-m", "server"]},
+    }
+
+
+@pytest.mark.parametrize(("no_exec", "reads"), [(True, 1), (False, 5)])
+def test_a_row_actor_is_read_once_per_lifetime_only_where_nothing_can_exec(
+    no_exec, reads
+):
+    table = _baseline_table()
+    sampler = _sampler(table, root=10, no_exec=no_exec)
+    sampler.sample()
+    table.update({70: _row_actor_table()[70]})
+    samples = [sampler.sample() for _ in range(5)]
+    assert table[70]["cmdline_reads"] == reads
+    # Carried or read, it is the same record in every sample.
+    assert {sample[70] for sample in samples} == {samples[0][70]}
+    assert samples[0][70].in_row
+
+
+def test_on_windows_a_failed_read_is_read_again_until_it_is_whole():
+    table = _baseline_table()
+    sampler = _sampler(table, root=10, no_exec=True)
+    sampler.sample()
+    table[70] = {**_row_actor_table()[70], "cmdline": psutil.AccessDenied(70)}
+    sampler.sample()
+    sampler.sample()
+    assert table[70]["cmdline_reads"] == 2
+    table[70]["cmdline"] = ["python", "-m", "server"]
+    for _ in range(3):
+        sample = sampler.sample()
+    assert table[70]["cmdline_reads"] == 3
+    assert sample[70].cmdline == ("python", "-m", "server")
+
+
+def test_a_lifetime_found_gone_is_not_read_again_but_its_pids_next_one_is():
+    table = _baseline_table()
+    sampler = _sampler(table, root=10)
+    sampler.sample()
+    # Still listed and still identified, but gone when its arguments are read,
+    # as psutil reports a Windows process whose handle outlives it.
+    table[70] = {**_row_actor_table()[70], "cmdline": psutil.NoSuchProcess(70)}
+    samples = [sampler.sample() for _ in range(4)]
+    assert table[70]["cmdline_reads"] == 1
+    assert all(70 not in sample for sample in samples)
+    assert sampler.stats()["vanished_reads"] == 1
+    table[70] = {"start": 7.0, "ppid": 10, "cmdline": ["python", "-m", "server"]}
+    assert 70 in sampler.sample()
+
+
+def test_a_lifetimes_user_is_read_once():
+    asked: list[int] = []
+
+    def user_of(process):
+        asked.append(process.pid)
+        return _user_of(process)
+
+    table = _baseline_table()
+    sampler = _sampler(table, root=10, user_of=user_of)
+    sampler.sample()
+    # Unreadable arguments on the browser's executable: judged every sample.
+    table[70] = {
+        "start": 6.0,
+        "ppid": 59,
+        "exe": BROWSER_EXE,
+        "cmdline": psutil.AccessDenied(70),
+    }
+    for _ in range(4):
+        sampler.sample()
+    assert asked.count(70) == 1
+    assert sampler.relevant_read_failures
+
+
+def test_a_slow_sample_names_the_read_it_waited_on():
+    clock = {"now": 0.0}
+    table = _baseline_table()
+    sampler = _sampler(table, root=10, timer=lambda: clock["now"])
+    sampler.sample()
+    table[70] = {
+        **_row_actor_table()[70],
+        "exe": "C:/Windows/System32/cmd.exe",
+        "cmdline_seconds": 1.2,
+        "clock": clock,
+    }
+    sampler.sample()
+    table[70]["cmdline_seconds"] = 0.0
+    sampler.sample()
+    stats = sampler.stats()
+    assert stats["slow_sample_count"] == 1
+    (slow,) = stats["slow_samples"]
+    assert slow["seconds"] == 1.2
+    assert (slow["slowest"]["kind"], slow["slowest"]["pid"]) == ("cmdline", 70)
+    assert slow["slowest"]["exe"] == "C:/Windows/System32/cmd.exe"
+    assert stats["slowest_read"]["kind"] == "cmdline"
+
+
+def test_a_gap_over_budget_names_what_the_slowest_samples_waited_on():
+    slow = {
+        "seconds": 1.3,
+        "reads": 55,
+        "slowest": {"kind": "cmdline", "pid": 70, "seconds": 1.2, "exe": "x.exe"},
+    }
+    failures = watcher_failures(
+        {
+            "stopped_by": "stop file",
+            "observation_start": 0.0,
+            "observation_end": 10.0,
+            "max_gap_seconds": 1.38,
+            "slow_samples": [slow],
+        },
+        actors_began=1.0,
+        actors_ended=9.0,
+    )
+    (failure,) = failures
+    assert "1.38s" in failure and "'cmdline'" in failure and "x.exe" in failure
