@@ -619,8 +619,9 @@ class Watcher:
 def _gap_cause(summary: dict[str, Any]) -> str:
     """Where the largest gap went, so the failure names its cause.
 
-    A gap spent waiting to run between two samples names no read: the slowest
-    sample of the run can be the baseline, which no gap is measured across.
+    A gap spent mostly waiting to run between two samples leads with that wait
+    and the sample's own share: the slowest sample of the run can be the
+    baseline, which no gap is measured across.
     """
     widest: tuple[float, float] | None = None
     log = summary.get("sample_log") or []
@@ -634,7 +635,7 @@ def _gap_cause(summary: dict[str, Any]) -> str:
         return (
             f"{widest[1]:.4f}s of it passed between two samples, while the "
             f"watcher waited to run (priority {summary.get('priority')!r}), "
-            f"not in any read"
+            f"and {widest[0] - widest[1]:.4f}s in the sample that closed it"
         )
     slow = sorted(
         summary.get("slow_samples") or [],

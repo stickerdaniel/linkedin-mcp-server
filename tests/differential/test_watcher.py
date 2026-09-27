@@ -1669,6 +1669,7 @@ def test_a_gap_spent_waiting_to_run_names_no_read():
     )
     (failure,) = failures
     assert "1.1660s of it passed between two samples" in failure
+    assert "0.0042s in the sample that closed it" in failure
     assert "NORMAL_PRIORITY_CLASS" in failure
     assert "svchost" not in failure
 
