@@ -46,8 +46,11 @@ process is established as unrelated to the row when
   (``--browser-dir``). That is the setuid ``/bin/ps`` the product runs on
   macOS: psutil cannot read its arguments, and it cannot be a browser.
 
-Wall-clock create times are never a birth-order key: the calendar clock can be
-stepped, and a process born after the harness can then read as older.
+A process is never excluded merely because its calendar creation time precedes
+the harness's: the calendar clock can be stepped, and a process born after the
+harness can then read as older. Creation times still identify sampled lifetimes
+and reject apparently younger parent records; passing that rejection is not an
+independent proof of a historical parent-child relationship.
 
 **An exclusion belongs to one lifetime.** The first three last: they are kept
 by pid *and* create time, and apply only in a sample that read that same create
