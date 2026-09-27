@@ -71,6 +71,10 @@ process is established as unrelated to the row when
   line were both read then, it names no profile and cannot be the browser.
   Windows has no exec, so that image is the process's for its whole lifetime
   (``Sampler.no_exec``); or
+* on Windows, outside the row, its executable was read and cannot be the
+  browser, even if its command line could not be read: that image can never
+  be a browser root. The failed read is recorded once and not repeated (as
+  for ``LsaIso.exe``, whose command line psutil retries for a second); or
 * its executable, read in the same sample, is neither the row's browser
   (``--browser-exe``) nor anything under the managed browsers
   (``--browser-dir``). That is the setuid ``/bin/ps`` the product runs on
@@ -769,8 +773,9 @@ class Sampler:
         return [e for e in self.read_failures if e["possible_browser"]]
 
     def _read(
-        self, process: Any, known: ProcessRecord | None
+        self, process: Any, known: ProcessRecord | None, *, arguments: bool = True
     ) -> tuple[int | None, str | None, tuple[str, ...], list[str], bool]:
+        """Parent, executable and, unless *arguments* is False, command line."""
         self._reads += 1
         failures: list[str] = []
         ppid = known.ppid if known is not None else None
@@ -787,6 +792,8 @@ class Sampler:
             exe_read = True
         except _UNREADABLE as exc:
             failures.append(f"exe: {type(exc).__name__}")
+        if not arguments:
+            return ppid, exe, cmdline, failures, exe_read
         try:
             cmdline = tuple(self._timed("cmdline", pid, process.cmdline))
         except _UNREADABLE as exc:
@@ -875,8 +882,18 @@ class Sampler:
                 )
                 self._carried += 1
             else:
+                # Windows, first sample: another user's process is settled by
+                # its user before its arguments cost a read. Its parent and
+                # executable are still read, for the ancestry of the others.
+                foreign = (
+                    first and self.no_exec and self._another_user(process, (pid, start))
+                )
+                if foreign:
+                    self._unrelated.add((pid, start))
                 try:
-                    ppid, exe, cmdline, failed, exe_read = self._read(process, known)
+                    ppid, exe, cmdline, failed, exe_read = self._read(
+                        process, known, arguments=not foreign
+                    )
                 except psutil.NoSuchProcess:
                     self._vanished.add((pid, start))
                     self.vanished += 1
@@ -1179,6 +1196,36 @@ class Sampler:
                 verdict = _UNRELATED
                 if lifetime is not None:
                     self._unrelated.add(lifetime)
+            elif (
+                self.no_exec
+                and exe_read
+                and not self.possible_browser(exe)
+                and not in_row
+                and parent_read
+                and lifetime is not None
+            ):
+                # Windows: its image, read now, is its own for its lifetime
+                # and cannot be the browser, so it can never be a browser
+                # root, whatever its arguments. Established unrelated for this
+                # lifetime and never read again; the failed read is recorded
+                # once. Like LsaIso.exe, whose arguments psutil retries for a
+                # second before it gives up.
+                verdict = _UNRELATED
+                self._unrelated.add(lifetime)
+                now = self._clock()
+                self._closed.append(
+                    {
+                        "pid": pid,
+                        "start_identity": lifetime[1],
+                        "exe": exe,
+                        "failures": sorted(failed),
+                        "first": now,
+                        "last": now,
+                        "seconds": 0.0,
+                        "possible_browser": False,
+                        "resolution": "settled by its image",
+                    }
+                )
             elif exe_read and not self.possible_browser(exe):
                 # Not a browser, whatever its arguments. Kept as evidence when
                 # it belongs to the row or its ancestry could not be read.

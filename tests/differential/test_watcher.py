@@ -894,7 +894,8 @@ def test_on_posix_the_same_process_stays_watched():
 @pytest.mark.parametrize(
     "change",
     [
-        pytest.param({"cmdline": psutil.AccessDenied(60)}, id="arguments-unread"),
+        # Its arguments unread but its executable no browser: settled, see
+        # test_on_windows_a_non_browser_image_is_settled_by_one_read.
         pytest.param({"exe": psutil.AccessDenied(60)}, id="executable-unread"),
         pytest.param({"exe": ""}, id="executable-empty"),
         pytest.param({"exe": BROWSER_EXE}, id="the-browser"),
@@ -1637,3 +1638,73 @@ def test_a_settled_process_that_joins_a_group_is_reported():
     (update,) = [e for e in _observe(sampler, tracker, 1.0) if e[1] == "process.update"]
     assert (update[2]["pid"], update[2]["pgid"]) == (50, 30)
     assert update[2]["cmdline"] == []  # withheld: it is still no actor
+
+
+# --- Windows: an image that cannot be the browser is read once ---------------------
+
+LSAISO = "C:/Windows/System32/LsaIso.exe"
+
+
+def _slow_unreadable_arguments(exe: str, clock: dict) -> dict[int, dict[str, Any]]:
+    """A first-sample process like LsaIso.exe: its executable reads, its
+    arguments take a second of psutil's retries and then fail."""
+    table = _dead_parent_service()
+    table[60] = {
+        **table[60],
+        "exe": exe,
+        "cmdline": psutil.AccessDenied(60),
+        "cmdline_seconds": 1.0,
+        "clock": clock,
+    }
+    return table
+
+
+def test_on_windows_a_non_browser_image_is_settled_by_one_read():
+    clock = {"now": 0.0}
+    table = _slow_unreadable_arguments(LSAISO, clock)
+    sampler = _sampler(table, root=10, no_exec=True, timer=lambda: clock["now"])
+    before = clock["now"]
+    for _ in range(5):
+        sampler.sample()
+    assert table[60]["cmdline_reads"] == 1
+    # One slow read in all, not one per sample.
+    assert clock["now"] - before == 1.0
+    assert sampler.stats()["slow_sample_count"] == 1
+    (failure,) = sampler.read_failures
+    assert failure["resolution"] == "settled by its image"
+    assert failure["failures"] == ["cmdline: AccessDenied"]
+    assert not failure["possible_browser"] and sampler.relevant_read_failures == []
+
+
+def test_on_windows_an_unreadable_browser_image_stays_uncertain():
+    clock = {"now": 0.0}
+    table = _slow_unreadable_arguments(BROWSER_EXE, clock)
+    sampler = _sampler(table, root=10, no_exec=True, timer=lambda: clock["now"])
+    for _ in range(5):
+        sampler.sample()
+    assert table[60]["cmdline_reads"] == 5
+    assert sampler.relevant_read_failures
+
+
+def test_on_posix_an_unreadable_non_browser_is_still_read_every_sample():
+    clock = {"now": 0.0}
+    table = _slow_unreadable_arguments("/usr/sbin/service", clock)
+    sampler = _sampler(table, root=10, no_exec=False, timer=lambda: clock["now"])
+    for _ in range(5):
+        sampler.sample()
+    assert table[60]["cmdline_reads"] == 5
+    assert all(
+        failure.get("resolution") != "settled by its image"
+        for failure in sampler.read_failures
+    )
+
+
+# POSIX is unchanged: a readable process is read on every sample there.
+@pytest.mark.parametrize(("no_exec", "reads"), [(True, 0), (False, 3)])
+def test_on_windows_another_users_arguments_are_never_read(no_exec, reads):
+    table = _dead_parent_service()
+    table[60] = {**table[60], "user": "NT AUTHORITY\\SYSTEM"}
+    sampler = _sampler(table, root=10, no_exec=no_exec)
+    for _ in range(3):
+        sampler.sample()
+    assert table[60].get("cmdline_reads", 0) == reads
