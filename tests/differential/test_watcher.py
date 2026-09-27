@@ -36,6 +36,8 @@ from differential.watcher import (
     browser_roots,
     canonical_user_data_dir,
     classify,
+    duration_stats,
+    invoked_module,
     record,
     user_data_dir,
 )
@@ -336,6 +338,11 @@ def test_a_watcher_stopped_on_request_after_the_actors_is_healthy(tmp_path):
     assert summary["observation_start"] <= began
     assert summary["observation_end"] >= ended
     assert watcher_failures(summary, actors_began=began, actors_ended=ended) == []
+    # The evidence states what sampling cost on this machine.
+    assert summary["sample_seconds_mean"] > 0
+    assert summary["sample_seconds_p95"] >= summary["sample_seconds_mean"] * 0.5
+    assert summary["first_sample_cached"] > 0
+    assert summary["reads_per_sample_max"] >= 1
 
 
 BROWSER_DIR = "/opt/ms-playwright"
@@ -373,6 +380,11 @@ class _FakeProcess:
     def cmdline(self):
         return _field(self._entry, "cmdline")
 
+    def environ(self):
+        self._entry.setdefault("environ_reads", 0)
+        self._entry["environ_reads"] += 1
+        return _field({"environ": self._entry.get("environ", {})}, "environ")
+
 
 #: The harness's user in the model; a table entry may name another in "user".
 HARNESS = "harness-user"
@@ -382,7 +394,7 @@ def _user_of(process) -> object:
     return process._entry.get("user", HARNESS)
 
 
-def _sampler(table, *, root=1, browser_exe=BROWSER_EXE):
+def _sampler(table, *, root=1, browser_exe=BROWSER_EXE, no_exec=False):
     return Sampler(
         root,
         own_pid=999,
@@ -392,6 +404,9 @@ def _sampler(table, *, root=1, browser_exe=BROWSER_EXE):
         user=HARNESS,
         browser_exe=browser_exe,
         browser_dir=BROWSER_DIR,
+        # A POSIX process table unless a test models Windows: the same on
+        # every host the suite runs on.
+        no_exec=no_exec,
     )
 
 
@@ -771,19 +786,24 @@ def test_a_baseline_process_with_an_open_ancestry_is_watched(ancestry):
 @pytest.mark.parametrize(
     "ancestry",
     [
-        pytest.param({60: {"start": 4.0, "ppid": 1, "cmdline": ["d"]}}, id="init"),
+        pytest.param({60: {"start": 5.5, "ppid": 0, "cmdline": ["d"]}}, id="pid-0"),
         pytest.param(
             {
-                59: {"start": 3.0, "ppid": 1, "cmdline": ["launcher"]},
+                59: {"start": 3.0, "ppid": 0, "cmdline": ["launcher"]},
                 60: {"start": 5.5, "ppid": 59, "cmdline": ["d"]},
             },
-            id="through-an-older-parent",
+            id="through-a-parent-of-pid-0",
         ),
-        pytest.param({60: {"start": 5.5, "ppid": 0, "cmdline": ["d"]}}, id="pid-0"),
     ],
 )
 def test_a_baseline_process_with_a_complete_ancestry_is_read_once(ancestry):
-    table = {**_baseline_table(), **ancestry}
+    assert _reads_over_five_samples({**_baseline_table(), **ancestry}) == 1
+
+
+def _reads_over_five_samples(
+    table: dict[int, dict[str, Any]], *, no_exec: bool = False
+) -> int:
+    """How often pid 60's command line is read over five samples."""
     reads = {"n": 0}
 
     class Counting(dict):
@@ -793,10 +813,159 @@ def test_a_baseline_process_with_a_complete_ancestry_is_read_once(ancestry):
             return super().__getitem__(key)
 
     table[60] = Counting(table[60])
-    sampler = _sampler(table, root=10)
+    sampler = _sampler(table, root=10, no_exec=no_exec)
     for _ in range(5):
         sampler.sample()
-    assert reads["n"] == 1
+    return reads["n"]
+
+
+@pytest.mark.parametrize(
+    "start",
+    [
+        pytest.param(4.0, id="reads-older-than-the-harness"),
+        pytest.param(5.5, id="reads-younger-than-the-harness"),
+    ],
+)
+def test_a_child_of_pid_1_is_watched_whatever_its_create_time_says(start):
+    # pid 1 adopts the harness's orphans too, and a wall-clock create time
+    # cannot show which of its children were born before the harness.
+    table = {
+        **_baseline_table(),
+        60: {"start": start, "ppid": 1, "cmdline": ["service"]},
+    }
+    assert _reads_over_five_samples(table) == 5
+
+
+def _dead_parent_service() -> dict[int, dict[str, Any]]:
+    """A service whose parent pid names a process that is gone, as Windows
+    keeps it for every orphan. Fully readable, and no browser."""
+    return {
+        **_baseline_table(),
+        60: {
+            "start": 5.5,
+            "ppid": 59,
+            "exe": "C:/Windows/System32/svchost.exe",
+            "cmdline": ["svchost.exe", "-k", "netsvcs"],
+        },
+    }
+
+
+def test_on_windows_a_fully_read_non_browser_is_read_once():
+    # Windows has no exec: this image is the process's for its lifetime.
+    assert _reads_over_five_samples(_dead_parent_service(), no_exec=True) == 1
+
+
+def test_on_posix_the_same_process_stays_watched():
+    # It could exec into the browser later, and its ancestry is open.
+    assert _reads_over_five_samples(_dead_parent_service(), no_exec=False) == 5
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        pytest.param({"cmdline": psutil.AccessDenied(60)}, id="arguments-unread"),
+        pytest.param({"exe": psutil.AccessDenied(60)}, id="executable-unread"),
+        pytest.param({"exe": ""}, id="executable-empty"),
+        pytest.param({"exe": BROWSER_EXE}, id="the-browser"),
+        pytest.param(
+            {"exe": f"{BROWSER_DIR}/chromium-1/chrome-linux/chrome_crashpad"},
+            id="under-the-browsers-dir",
+        ),
+        pytest.param(
+            {"cmdline": ["svchost.exe", "--user-data-dir=/tmp/any-profile"]},
+            id="names-a-profile",
+        ),
+    ],
+)
+def test_on_windows_an_image_not_read_in_full_or_a_browser_stays_watched(change):
+    table = _dead_parent_service()
+    table[60] = {**table[60], **change}
+    assert _reads_over_five_samples(table, no_exec=True) == 5
+
+
+def test_on_windows_a_browser_started_later_is_a_new_process_and_is_counted():
+    # The first-sample service is cached; the browser that joins the row is a
+    # new process, read in full as new, beside the row's own.
+    profile = "/tmp/e1dd-profile"
+    table = _dead_parent_service()
+    sampler, tracker = _sampler(table, root=10, no_exec=True), Tracker()
+    _observe(sampler, tracker, 0.0)
+    assert sampler.first_sample_cached >= 1
+    table[61] = {
+        "start": 6.0,
+        "ppid": 59,
+        "exe": BROWSER_EXE,
+        "cmdline": _chrome(profile),
+    }
+    table[70] = {
+        "start": 6.0,
+        "ppid": 10,
+        "exe": BROWSER_EXE,
+        "cmdline": _chrome(profile),
+    }
+    _observe(sampler, tracker, 1.0)
+    assert tracker.max_roots[canonical_user_data_dir(profile)] == 2
+
+
+@pytest.mark.parametrize(
+    "start",
+    [
+        pytest.param(5.5, id="e1ce-c-ordinary-order"),
+        # The e1dc and e1dd models: born after the harness, but its wall-clock
+        # create time reads older, as after a backward clock step.
+        pytest.param(4.9, id="e1dc-e1dd-calendar-reads-older"),
+    ],
+)
+def test_on_posix_a_first_sample_process_with_an_open_ancestry_is_still_caught(start):
+    profile = "/tmp/e1dd-profile"
+    table = {
+        **_baseline_table(),
+        60: {"start": start, "ppid": 59, "cmdline": ["python", "pre-exec"]},
+    }
+    sampler, tracker = _sampler(table, root=10), Tracker()
+    _observe(sampler, tracker, 0.0)
+    assert sampler.first_sample_watched == 1
+    table[60] = {
+        "start": start,
+        "ppid": 1,
+        "exe": BROWSER_EXE,
+        "cmdline": _chrome(profile),
+    }
+    table[70] = {
+        "start": 6.0,
+        "ppid": 10,
+        "exe": BROWSER_EXE,
+        "cmdline": _chrome(profile),
+    }
+    _observe(sampler, tracker, 1.0)
+    assert tracker.max_roots[canonical_user_data_dir(profile)] == 2
+
+
+@pytest.mark.parametrize("no_exec", [False, True])
+def test_the_summary_states_what_sampling_cost(no_exec):
+    table = {
+        **_baseline_table(),
+        60: {"start": 5.5, "ppid": 0, "cmdline": ["settled"]},
+        61: {"start": 5.5, "ppid": 59, "cmdline": ["python", "open"]},
+    }
+    sampler = _sampler(table, root=10, no_exec=no_exec)
+    for _ in range(3):
+        sampler.sample()
+    stats = sampler.stats()
+    assert stats["no_exec"] is no_exec
+    if no_exec:
+        # init and 60 by ancestry, 61 by its image; the harness is the row's.
+        assert (stats["first_sample_cached"], stats["first_sample_watched"]) == (3, 0)
+        assert sampler.reads_per_sample == [4, 1, 1]
+    else:
+        # init and 60 by ancestry; 61 is watched.
+        assert (stats["first_sample_cached"], stats["first_sample_watched"]) == (2, 1)
+        # Every process in the first sample, then only the harness and 61.
+        assert sampler.reads_per_sample == [4, 2, 2]
+    assert duration_stats([0.01, 0.02, 0.03]) == {
+        "sample_seconds_mean": 0.02,
+        "sample_seconds_p95": 0.03,
+    }
 
 
 def _watched_baseline_beside_a_browser(
@@ -956,6 +1125,247 @@ def test_a_real_setuid_ps_held_alive_is_recorded_but_not_counted(tmp_path):
     assert sampler.relevant_read_failures == []
 
 
+# The macOS runner's framework Python, as the E1d packets recorded it: the
+# venv's stub re-executes this, which becomes both exe and argv[0].
+FRAMEWORK_PYTHON = (
+    "/Library/Frameworks/Python.framework/Versions/3.13/Resources/"
+    "Python.app/Contents/MacOS/Python"
+)
+BASELINE_VENV_PYTHON = "/tmp/differential-baseline/checkout/.venv/bin/python"
+
+
+def test_a_server_process_records_the_venv_it_was_launched_as_and_nothing_else():
+    table = _row_table()
+    sampler, tracker = _sampler(table), Tracker()
+    _observe(sampler, tracker, 0.0)
+    table[2] = {
+        "start": 2.0,
+        "ppid": 1,
+        "exe": FRAMEWORK_PYTHON,
+        "cmdline": [FRAMEWORK_PYTHON, "-m", "linkedin_mcp_server"],
+        "environ": {
+            "__PYVENV_LAUNCHER__": BASELINE_VENV_PYTHON,
+            "PROXY_PASSWORD": "synthetic-secret",
+        },
+    }
+    events = _observe(sampler, tracker, 1.0)
+    (start,) = [e[2] for e in events if e[1] == "process.start" and e[2]["pid"] == 2]
+    assert start["launcher"] == BASELINE_VENV_PYTHON
+    assert "synthetic-secret" not in repr(events)
+    for tick in (2.0, 3.0):
+        _observe(sampler, tracker, tick)
+    # Fixed at exec, so read once for as long as the command line holds.
+    assert table[2]["environ_reads"] == 1
+
+
+@pytest.mark.parametrize(
+    ("ppid", "cmdline"),
+    [
+        pytest.param(1, ["node", "run-driver"], id="row-non-server"),
+        pytest.param(
+            1,
+            [FRAMEWORK_PYTHON, "helper.py", "--directory=/tmp/linkedin_mcp_server-x"],
+            id="row-argument-merely-naming-the-module",
+        ),
+        pytest.param(
+            1,
+            [FRAMEWORK_PYTHON, "-c", "import runpy", "-m", "linkedin_mcp_server"],
+            id="row-module-after-dash-c",
+        ),
+        pytest.param(
+            50,
+            [FRAMEWORK_PYTHON, "-m", "linkedin_mcp_server"],
+            id="unrelated-actual-server",
+        ),
+        pytest.param(
+            50,
+            [FRAMEWORK_PYTHON, "-P", "-m", "linkedin_mcp_server.daemon_owner"],
+            id="unrelated-actual-owner",
+        ),
+    ],
+)
+def test_only_a_row_server_or_owner_is_asked_for_its_environment(ppid, cmdline):
+    table = _row_table()
+    sampler, tracker = _sampler(table), Tracker()
+    _observe(sampler, tracker, 0.0)
+    table[2] = {
+        "start": 2.0,
+        "ppid": ppid,
+        "cmdline": cmdline,
+        "environ": {"__PYVENV_LAUNCHER__": BASELINE_VENV_PYTHON},
+    }
+    for tick in (1.0, 2.0):
+        _observe(sampler, tracker, tick)
+    assert "environ_reads" not in table[2]
+    assert sampler.sample()[2].launcher is None
+
+
+def test_a_row_owner_records_its_launcher():
+    table = _row_table()
+    sampler, tracker = _sampler(table), Tracker()
+    _observe(sampler, tracker, 0.0)
+    table[2] = {
+        "start": 2.0,
+        "ppid": 1,
+        "cmdline": [FRAMEWORK_PYTHON, "-P", "-m", "linkedin_mcp_server.daemon_owner"],
+        "environ": {"__PYVENV_LAUNCHER__": BASELINE_VENV_PYTHON},
+    }
+    _observe(sampler, tracker, 1.0)
+    assert sampler.sample()[2].launcher == BASELINE_VENV_PYTHON
+
+
+def test_known_limit_a_same_command_reexec_keeps_the_first_launcher():
+    """A documented boundary, not a guarantee (review e1da, E1DA-03).
+
+    The launcher is a cached initial-image observation for this PID, create
+    time and command line; same-command re-exec is outside this identity
+    oracle. A re-exec into another venv's framework stub keeps the pid, the
+    create time and the command line, so the first value stays.
+    """
+    table = _row_table()
+    sampler, tracker = _sampler(table), Tracker()
+    _observe(sampler, tracker, 0.0)
+    table[2] = {
+        "start": 2.0,
+        "ppid": 1,
+        "cmdline": [FRAMEWORK_PYTHON, "-m", "linkedin_mcp_server"],
+        "environ": {"__PYVENV_LAUNCHER__": BASELINE_VENV_PYTHON},
+    }
+    _observe(sampler, tracker, 1.0)
+    table[2]["environ"] = {"__PYVENV_LAUNCHER__": "/candidate/.venv/bin/python"}
+    _observe(sampler, tracker, 2.0)
+    assert sampler.sample()[2].launcher == BASELINE_VENV_PYTHON
+    assert table[2]["environ_reads"] == 1
+
+
+#: Argument shapes after the interpreter, each with whether CPython runs the
+#: module named ``M`` for it (review e1db, E1DB-01). ``M`` stands for a module.
+GRAMMAR = [
+    pytest.param(["-m", "M"], True, id="m-separate"),
+    pytest.param(["-mM"], True, id="m-attached"),
+    pytest.param(["-Bm", "M"], True, id="m-clustered"),
+    pytest.param(["-BmM"], True, id="m-clustered-attached"),
+    pytest.param(["-PIm", "M"], True, id="m-clustered-after-flags"),
+    pytest.param(["-I", "-P", "-m", "M"], True, id="flags-then-m"),
+    pytest.param(["-BW", "ignore", "-m", "M"], True, id="W-clustered"),
+    pytest.param(["-W", "ignore", "-m", "M"], True, id="W-separate"),
+    pytest.param(["-Wignore", "-m", "M"], True, id="W-attached"),
+    pytest.param(["-X", "dev", "-u", "-m", "M"], True, id="X-separate"),
+    pytest.param(["-Xdev", "-m", "M"], True, id="X-attached"),
+    pytest.param(
+        ["--check-hash-based-pycs", "always", "-m", "M"], True, id="hash-check-always"
+    ),
+    pytest.param(
+        ["--check-hash-based-pycs", "never", "-m", "M"], True, id="hash-check-never"
+    ),
+    pytest.param(
+        ["--check-hash-based-pycs", "default", "-m", "M"],
+        True,
+        id="hash-check-default",
+    ),
+    pytest.param(
+        ["--check-hash-based-pycs", "invalid-mode", "-m", "M"],
+        False,
+        id="hash-check-invalid-mode",
+    ),
+    pytest.param(
+        ["--check-hash-based-pycs", "-m", "M"], False, id="hash-check-mode-missing"
+    ),
+    pytest.param(["--check-hash-based-pycs"], False, id="hash-check-alone"),
+    pytest.param(
+        ["--check-hash-based-pycs=always", "-m", "M"], False, id="long-with-equals"
+    ),
+    pytest.param(["-cprint(1)", "-m", "M"], False, id="c-attached"),
+    pytest.param(["-Bcprint(1)", "-m", "M"], False, id="c-clustered"),
+    pytest.param(["-c", "print(1)", "-m", "M"], False, id="c-separate"),
+    pytest.param(["--", "-m", "M"], False, id="double-dash"),
+    pytest.param(["-", "-m", "M"], False, id="stdin"),
+    pytest.param(["script.py", "-m", "M"], False, id="script"),
+    pytest.param(["-V", "-m", "M"], False, id="V"),
+    pytest.param(["-h", "-m", "M"], False, id="h"),
+    pytest.param(["--version", "-m", "M"], False, id="version"),
+    pytest.param(["--unknown", "-m", "M"], False, id="unknown-long"),
+    pytest.param(["-Z", "-m", "M"], False, id="unknown-short"),
+    pytest.param(["-m"], False, id="m-without-module"),
+]
+
+
+def _shape(arguments: list[str], module: str) -> list[str]:
+    return [
+        module if argument == "M" else argument.replace("mM", "m" + module)
+        for argument in arguments
+    ]
+
+
+@pytest.mark.parametrize(("arguments", "runs"), GRAMMAR)
+def test_the_module_is_read_as_the_interpreter_reads_its_options(arguments, runs):
+    module = "linkedin_mcp_server.daemon_owner"
+    cmdline = ["python", *_shape(arguments, module)]
+    assert invoked_module(cmdline) == (module if runs else None)
+
+
+@pytest.mark.parametrize(("arguments", "runs"), GRAMMAR)
+def test_the_grammar_is_the_interpreters_own(tmp_path, arguments, runs):
+    """What this interpreter actually does with each shape, on a harmless module.
+
+    The module only prints a marker. Under ``-I`` or ``-P`` the working
+    directory is not on the path, so "no module named" also shows the
+    interpreter tried to run it; either way ``-m`` took effect.
+    """
+    module = "e1db_harmless_probe"
+    (tmp_path / f"{module}.py").write_text("print('MODULE-RAN')\n")
+    shape = _shape(arguments, module)
+    result = subprocess.run(
+        [sys.executable, *shape],
+        cwd=tmp_path,
+        env={k: v for k, v in os.environ.items() if not k.startswith("PYTHON")},
+        input="",
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    tried = "MODULE-RAN" in result.stdout or f"No module named {module}" in (
+        result.stderr
+    )
+    assert tried is runs, (shape, result.returncode, result.stderr[-300:])
+    assert (invoked_module([sys.executable, *shape]) == module) is runs
+
+
+def test_a_malformed_command_line_names_no_module():
+    assert invoked_module(["python"]) is None
+    assert invoked_module([]) is None
+    assert invoked_module(["python", "--directory=/x/linkedin_mcp_server"]) is None
+
+
+@pytest.mark.parametrize(("arguments", "runs"), GRAMMAR)
+def test_only_a_real_server_invocation_is_asked_for_its_launcher(arguments, runs):
+    table = _row_table()
+    sampler, tracker = _sampler(table), Tracker()
+    _observe(sampler, tracker, 0.0)
+    table[2] = {
+        "start": 2.0,
+        "ppid": 1,
+        "cmdline": [FRAMEWORK_PYTHON, *_shape(arguments, "linkedin_mcp_server")],
+        "environ": {"__PYVENV_LAUNCHER__": BASELINE_VENV_PYTHON},
+    }
+    _observe(sampler, tracker, 1.0)
+    assert ("environ_reads" in table[2]) is runs
+
+
+def test_an_unreadable_environment_leaves_no_launcher():
+    table = _row_table()
+    sampler, tracker = _sampler(table), Tracker()
+    _observe(sampler, tracker, 0.0)
+    table[2] = {
+        "start": 2.0,
+        "ppid": 1,
+        "cmdline": [FRAMEWORK_PYTHON, "-m", "linkedin_mcp_server"],
+        "environ": psutil.AccessDenied(2),
+    }
+    _observe(sampler, tracker, 1.0)
+    assert sampler.sample()[2].launcher is None
+
+
 def test_actors_descend_from_the_root_and_are_re_read_every_sample():
     table: dict[int, dict[str, Any]] = {
         1: {"start": 1.0, "ppid": 0, "cmdline": ["pytest"]}
@@ -1020,3 +1430,20 @@ def test_a_watcher_that_never_takes_its_baseline_is_stopped(tmp_path, monkeypatc
         watcher.start(ready_seconds=0.5)
     assert watcher._process is not None
     assert watcher._process.poll() is not None
+
+
+def test_the_harness_watcher_trusts_images_only_where_there_is_no_exec(tmp_path):
+    # The real watcher, started the way a row starts it: the image rule is on
+    # exactly on Windows, and its summary says which it applied.
+    watcher = harness.Watcher(
+        tmp_path / "w",
+        EventLog(tmp_path / "log", run="r"),
+        experiment="K1",
+        row="R",
+        browser_dir=tmp_path / "ms-playwright",
+    )
+    watcher.start()
+    summary = watcher.stop()
+    assert summary is not None
+    assert summary["no_exec"] is (sys.platform == "win32")
+    assert "clock_offset_at_start" not in summary

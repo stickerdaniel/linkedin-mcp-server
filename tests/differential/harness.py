@@ -45,8 +45,16 @@ row's interval, one short Direct session on the same profile shows whether the
 origin still accepts the staged session. Before and after, the R17 snapshot.
 
 K1 here is a **same-revision Direct reference**: the server of this checkout
-with the daemon off. The frozen-baseline K1 and K2 of the plan are a later
-stage, and nothing here claims them.
+with the daemon off. The plan's **frozen K1** and **K2** run the pinned baseline
+instead (``baseline.Runtime``), with its own interpreter, staging and browser,
+and are labelled with its short SHA; the two K1 columns are kept apart.
+
+**Row H-R12** (custom browser): the daemon enabled and ``CHROME_PATH`` set to
+the runtime's own bundled Chromium, so the browser is the same binary and only
+the setting differs. The candidate must show no coordination effect (no owner,
+no forwarding, no daemon state) and the O1/O4 of the frozen Direct run with the
+same setting; the baseline, in K2, must be caught coordinating
+(``k2_r12_verdict``).
 """
 
 from __future__ import annotations
@@ -81,6 +89,15 @@ from mcp import ClientSession
 from mcp.shared.message import SessionMessage
 from typing_extensions import Unpack
 
+from differential.baseline import (
+    BaselineRefused,
+    Runtime,
+    bundled_executable,
+    checkout_refusal,
+    frozen_identity,
+    interpreter_failures,
+    stage_frozen_session,
+)
 from differential.events import EventLog, read_jsonl
 from differential.session import (
     RETAINED,
@@ -89,6 +106,7 @@ from differential.session import (
     r17_outcome,
     snapshot,
     stage_signed_in_session,
+    write_synthetic_cookie_file,
 )
 from differential.synthetic_origin import (
     POST_MARKER,
@@ -96,15 +114,19 @@ from differential.synthetic_origin import (
     SyntheticOrigin,
 )
 from differential.watcher import (
+    LAUNCHER_ENV,
+    OWNER_MODULE,
     USER_DATA_DIR_FLAG,
     another_user,
     canonical_user_data_dir,
     harness_user,
+    invoked_module,
     possible_browser,
     process_user,
 )
 from linkedin_mcp_server import daemon_descriptor
 from linkedin_mcp_server.config.loaders import EnvironmentKeys
+from linkedin_mcp_server.session_state import portable_cookie_path
 
 REAL_AUTH_ROOT_NAME = ".linkedin-mcp"
 
@@ -118,6 +140,9 @@ _INHERITED_BROWSERS_PATH = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
 WATCHER_SCRIPT = Path(__file__).with_name("watcher.py")
 
 ROW_H_R1 = "H-R1"
+#: R12, a custom browser: ``CHROME_PATH`` set to the runtime's own bundled
+#: Chromium, so the browser is the same binary and only the setting differs.
+ROW_H_R12 = "H-R12"
 DIRECT_REFERENCE = "same-revision Direct reference"
 #: The read tool H-R1 calls. ``get_feed`` because the product already has to
 #: load ``/feed/`` to sign in, so the synthetic origin serves one page for both
@@ -151,7 +176,11 @@ _STDERR_EOF_SECONDS = 10.0
 
 _FORWARDING_LINE = "Forwarding to the shared browser owner"
 _IDLE_EXIT_LINE = "Nothing has needed the browser in"
-_OWNER_MODULE = "linkedin_mcp_server.daemon_owner"
+#: ``__PYVENV_LAUNCHER__`` included: a framework build takes its venv from it,
+#: so the harness's own value would hand a baseline actor the candidate's venv.
+_FOREIGN_CODE = frozenset(
+    {"PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "VIRTUAL_ENV", LAUNCHER_ENV}
+)
 
 
 class ContainmentError(RuntimeError):
@@ -316,7 +345,12 @@ def claim_account(profile: Path) -> ActorAccount:
 
 
 def actor_environment(
-    account: ActorAccount, proxy_url: str, *, daemon: bool, browsers: Path
+    account: ActorAccount,
+    proxy_url: str,
+    *,
+    daemon: bool,
+    browsers: Path,
+    chrome_path: str | None = None,
 ) -> dict[str, str]:
     """The server's environment: this one, minus every setting, plus the row's."""
     settings = {
@@ -327,7 +361,11 @@ def actor_environment(
     env = {
         key: value
         for key, value in os.environ.items()
-        if key not in settings and not key.startswith("LINKEDIN")
+        if key not in settings
+        and not key.startswith("LINKEDIN")
+        # What could put another checkout's code on the actors' path: a
+        # frozen row's interpreter must import its own package and nothing else.
+        and key not in _FOREIGN_CODE
     }
     env.update(
         {
@@ -341,11 +379,21 @@ def actor_environment(
             "PLAYWRIGHT_BROWSERS_PATH": str(browsers),
         }
     )
+    if chrome_path is not None:
+        env[EnvironmentKeys.CHROME_PATH] = chrome_path
     return env
 
 
 def server_command() -> list[str]:
     return [sys.executable, "-m", "linkedin_mcp_server"]
+
+
+def candidate_runtime() -> Runtime:
+    """This checkout, run from the harness's own interpreter."""
+    browsers = Path(
+        os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or default_browsers_path()
+    )
+    return Runtime(sys.executable, REPO_ROOT, browsers)
 
 
 # --- Runtime identity ----------------------------------------------------------
@@ -442,6 +490,14 @@ def evidence_refusal(identity: dict[str, Any], *, ci: bool) -> str | None:
             f"actors import: {identity.get('dirty_paths')}"
         )
     return None
+
+
+def frozen_refusal(identity: dict[str, Any], runtime: Runtime) -> str | None:
+    """Why a frozen runtime is not its pin, installed from its own checkout."""
+    assert runtime.pinned is not None
+    return checkout_refusal(identity, runtime.pinned) or evidence_refusal(
+        identity, ci=True
+    )
 
 
 # --- Watcher -----------------------------------------------------------------
@@ -1273,10 +1329,104 @@ class RowVector:
     host_exit_clean: bool
     #: Cleanup signalled and killed nothing and removed the row's state.
     cleanup_clean: bool
+    #: The watcher saw a row actor start the owner module, published or not.
+    owner_launched: bool = False
+    #: The watcher saw a row actor start the owner's release gate, which is an
+    #: attempt to start one whether or not the gate ever released it.
+    owner_start_attempted: bool = False
 
 
-def row_expectations(vector: RowVector) -> list[str]:
-    """What H-R1 requires of either mode; each unmet one is a failure."""
+def owner_launches(observed: Iterable[dict[str, Any]]) -> list[int]:
+    """The owner processes the watcher saw this row start.
+
+    A ``process.start`` or ``process.update`` of a row actor (``in_row``: its
+    ancestry at first sight led to the harness) whose command line runs the
+    owner module with ``-m``. Whether it ever published is not asked: an owner
+    that started and gave up is still a coordination effect.
+    """
+    return sorted(
+        {
+            record["pid"]
+            for record in observed
+            if record.get("kind") in ("process.start", "process.update")
+            and record.get("in_row") is True
+            and isinstance(record.get("cmdline"), list)
+            and invoked_module(record["cmdline"]) == OWNER_MODULE
+        }
+    )
+
+
+#: What ``process_tree.windows_gate_command`` puts before the gate script, and
+#: the separator ``process_gate._arguments`` requires after the nonce.
+_GATE_FLAGS = ["-I", "-S", "-u"]
+_GATE_NONCE_LENGTH = 64
+_HEX = frozenset("0123456789abcdefABCDEF")
+
+
+def gate_script(checkout: Path) -> Path:
+    """The release gate a runtime's own ``windows_gate_command`` names."""
+    return checkout / "linkedin_mcp_server" / "process_gate.py"
+
+
+def _same_file(path: str, expected: Path) -> bool:
+    spelled = os.path.normcase(os.path.realpath(path))
+    return spelled == os.path.normcase(os.path.realpath(expected))
+
+
+def owner_gate(cmdline: Sequence[str], gates: Sequence[Path]) -> bool:
+    """Whether a command line is the product's owner release gate.
+
+    Exactly what ``process_tree.windows_gate_command`` builds around the
+    owner: ``<python> -I -S -u <runtime>/linkedin_mcp_server/process_gate.py
+    <nonce> -- <python> ... -m linkedin_mcp_server.daemon_owner ...``, with
+    the gate one of *gates* after resolution, the nonce the 64 hex digits
+    ``process_gate`` accepts, and the target running the owner module by the
+    interpreter's own option grammar. The gate holds the owner until the
+    frontend releases it, so it shows an owner start was attempted, not that
+    owner code ran.
+    """
+    command = list(cmdline)
+    if len(command) < 8 or command[1:4] != _GATE_FLAGS:
+        return False
+    if not any(_same_file(command[4], gate) for gate in gates):
+        return False
+    nonce = command[5]
+    if len(nonce) != _GATE_NONCE_LENGTH or not set(nonce) <= _HEX:
+        return False
+    if command[6] != "--":
+        return False
+    return invoked_module(command[7:]) == OWNER_MODULE
+
+
+def owner_gates(observed: Iterable[dict[str, Any]], gates: Sequence[Path]) -> list[int]:
+    """The owner release gates the watcher saw this row start.
+
+    Row actors only, as for ``owner_launches``, and never asked for their
+    environment.
+    """
+    return sorted(
+        {
+            record["pid"]
+            for record in observed
+            if record.get("kind") in ("process.start", "process.update")
+            and record.get("in_row") is True
+            and isinstance(record.get("cmdline"), list)
+            and owner_gate(record["cmdline"], gates)
+        }
+    )
+
+
+def row_expectations(
+    vector: RowVector, *, expect_owner: bool | None = None
+) -> list[str]:
+    """What a row requires; each unmet one is a failure.
+
+    *expect_owner* says whether the row should reach a shared owner, which is
+    the configured mode unless the row says otherwise: H-R12 enables the
+    daemon with a custom browser and requires the Direct behaviour.
+    """
+    if expect_owner is None:
+        expect_owner = vector.mode == "daemon"
     failures = []
     if not vector.watcher_healthy:
         failures.append("the watcher's observation cannot carry O1")
@@ -1296,14 +1446,72 @@ def row_expectations(vector: RowVector) -> list[str]:
         failures.append("the host quit was not a normal one")
     if not vector.cleanup_clean:
         failures.append("cleanup had to intervene or could not finish")
-    if vector.mode == "daemon":
+    if expect_owner:
         if not vector.owner_published:
             failures.append("daemon mode published no owner")
         if vector.fell_back:
             failures.append("daemon mode fell back to a Direct server")
-    elif vector.owner_published:
-        failures.append("the Direct reference reached a shared owner")
+    else:
+        if vector.owner_published:
+            failures.append("a row that must stay Direct reached a shared owner")
+        if vector.owner_launched:
+            failures.append(
+                "a row that must stay Direct started a shared owner process "
+                "(the watcher saw it; publication is not required)"
+            )
+        if vector.owner_start_attempted:
+            failures.append(
+                "a row that must stay Direct started the shared owner's release "
+                "gate (an attempted owner start, released or not)"
+            )
     return failures
+
+
+def coordination_reading(vector: RowVector) -> str:
+    """H-R12's reading: ``!`` when a shared owner took part, ``=`` when none did.
+
+    An owner published (a descriptor named one, or in a Direct-configured row
+    any sign of one), an owner process or owner release gate the row started,
+    or the frontend forwarding to one. With the daemon enabled, ``fell_back``
+    false means the frontend forwarded.
+    """
+    forwarded = vector.mode == "daemon" and not vector.fell_back
+    coordinated = (
+        vector.owner_published
+        or vector.owner_launched
+        or vector.owner_start_attempted
+        or forwarded
+    )
+    return "!" if coordinated else "="
+
+
+def k2_r12_verdict(result: RowResult) -> list[str]:
+    """K2 on H-R12: the baseline must be caught coordinating despite the setting.
+
+    The baseline elects and uses an owner with a custom browser configured
+    (W-CHROME-PATH). A K2 row reading ``=`` there is the harness failing to see
+    a known ``!``, so it stops the stage; the rest of K2's outcome is evidence
+    of the baseline, not a requirement of it. The reading has to rest on a row
+    that ran: a host that never got to call the tool reads nothing, and a
+    baseline row that ran candidate code measured the wrong thing.
+    """
+    problems = list(result.runtime_failures)
+    host = result.host
+    if result.vector is None or host is None:
+        return [*problems, "K2 produced no vector to read"]
+    if host.error is not None:
+        problems.append(f"K2 could not be read: the host session failed: {host.error}")
+    elif coordination_reading(result.vector) != "!":
+        problems.append(
+            "K2 read '=' on H-R12, where the baseline's '!' is known (it elects "
+            "a shared owner despite CHROME_PATH): a harness defect"
+        )
+    if result.cleanup is not None and result.cleanup.failures:
+        problems.append(
+            f"cleanup could not settle the baseline's owner: "
+            f"{list(result.cleanup.failures)}"
+        )
+    return problems
 
 
 def compare_repeat(first: RowVector, second: RowVector) -> list[str]:
@@ -1366,12 +1574,22 @@ class Observations:
     before: ProfileSnapshot
     after: ProfileSnapshot | None
     post_quit: PostQuit | None
+    #: Whether the row should reach a shared owner; the mode's when None.
+    expect_owner: bool | None = None
+    #: Daemon state was present for the row's auth root at cleanup.
+    daemon_state_existed: bool = False
+    #: Owner processes the watcher saw a row actor start (``owner_launches``).
+    owner_launches: list[int] = field(default_factory=list)
+    #: Owner release gates the watcher saw a row actor start (``owner_gates``).
+    owner_gates: list[int] = field(default_factory=list)
 
 
 @dataclass
 class RowResult:
     experiment: str
     mode: str
+    #: The column this result stands in, when not the mode's default.
+    reference: str | None = None
     vector: RowVector | None = None
     before: ProfileSnapshot | None = None
     after: ProfileSnapshot | None = None
@@ -1381,10 +1599,13 @@ class RowResult:
     cleanup: DaemonCleanup | None = None
     post_quit: PostQuit | None = None
     failures: list[str] = field(default_factory=list)
+    #: A frozen row whose actors could not be shown to run the baseline.
+    runtime_failures: list[str] = field(default_factory=list)
 
     @property
     def label(self) -> str:
-        return f"{self.experiment} ({DIRECT_REFERENCE if self.mode == 'direct' else self.mode})"
+        default = DIRECT_REFERENCE if self.mode == "direct" else self.mode
+        return f"{self.experiment} ({self.reference or default})"
 
     def report(self) -> str:
         lines = [f"{self.label} failures:"]
@@ -1422,7 +1643,18 @@ def judge_row(observed: Observations) -> tuple[RowVector, list[str]]:
 
     forwarded = any(_FORWARDING_LINE in line for line in host.stderr)
     owner = observed.owner
-    if observed.daemon:
+    expect_owner = (
+        observed.daemon if observed.expect_owner is None else observed.expect_owner
+    )
+    if not expect_owner and observed.daemon and observed.daemon_state_existed:
+        # Enabled but ineligible: no coordination effect at all, state included.
+        # The harness only ever tests for this directory and never creates it
+        # on such a row, so an actor of the row did.
+        failures.append(
+            f"a row that must stay Direct left daemon state for its auth root: "
+            f"{observed.cleanup.directory}"
+        )
+    if observed.daemon and expect_owner:
         owner_published = bool(owner.get("pid"))
         if owner.get("identify_error"):
             failures.append(
@@ -1434,7 +1666,9 @@ def judge_row(observed: Observations) -> tuple[RowVector, list[str]]:
                 f"its {IDLE_TIMEOUT_SECONDS}s idle timeout"
             )
     else:
-        owner_published = bool(owner.get("descriptor_present")) or forwarded
+        owner_published = (
+            bool(owner.get("descriptor_present")) or bool(owner.get("pid")) or forwarded
+        )
 
     cleanup = observed.cleanup
     failures += list(cleanup.failures)
@@ -1488,10 +1722,12 @@ def judge_row(observed: Observations) -> tuple[RowVector, list[str]]:
         ),
         owner_published=owner_published,
         fell_back=observed.daemon and not forwarded,
+        owner_launched=bool(observed.owner_launches),
+        owner_start_attempted=bool(observed.owner_gates),
         host_exit_clean=not host_problems,
         cleanup_clean=cleanup_clean,
     )
-    return vector, row_expectations(vector) + failures
+    return vector, row_expectations(vector, expect_owner=expect_owner) + failures
 
 
 def repeat_verdict(reference: RowVector | None, result: RowResult) -> list[str]:
@@ -1598,6 +1834,7 @@ async def observe_preservation(
     browsers: Path,
     work_dir: Path,
     on_stderr: Callable[[str], None],
+    chrome_path: str | None = None,
 ) -> PostQuit:
     """Start one Direct host on the profile and ask the origin about its session.
 
@@ -1608,7 +1845,9 @@ async def observe_preservation(
     mark = len(origin.requests)
     session = await run_host_session(
         command,
-        env=actor_environment(account, proxy.url, daemon=False, browsers=browsers),
+        env=actor_environment(
+            account, proxy.url, daemon=False, browsers=browsers, chrome_path=chrome_path
+        ),
         cwd=work_dir,
         on_stderr=on_stderr,
     )
@@ -1645,31 +1884,63 @@ async def measure_host_quit_row(
     log: EventLog,
     work_dir: Path,
     command: Sequence[str] | None = None,
+    runtime: Runtime | None = None,
+    row: str = ROW_H_R1,
+    custom_browser: bool = False,
+    expect_owner: bool | None = None,
+    reference: str | None = None,
 ) -> RowResult:
-    """Run H-R1 once and return its outcome vector and evidence."""
+    """Run a host-quit row once and return its outcome vector and evidence.
+
+    *runtime* is the code the actors run: this checkout by default, or the
+    frozen baseline, whose actors, staging and browser are all its own.
+    *custom_browser* sets ``CHROME_PATH`` to that runtime's bundled Chromium.
+    """
     # First, before anything reads, launches or spawns.
     account = claim_account(profile)
 
     origin, proxy = egress
-    row = ROW_H_R1
     mode = "daemon" if daemon else "direct"
-    result = RowResult(experiment=experiment, mode=mode)
-    command = list(command or server_command())
+    if expect_owner is None:
+        expect_owner = daemon
+    result = RowResult(experiment=experiment, mode=mode, reference=reference)
+    runtime = runtime or candidate_runtime()
+    command = list(command or runtime.command())
 
     def emit(actor: str, kind: str, **fields: Any) -> None:
         log.emit(experiment=experiment, row=row, actor=actor, kind=kind, **fields)
 
-    identity = row_identity()
-    refusal = evidence_refusal(identity, ci=bool(os.environ.get("CI")))
-    if refusal is not None:
-        raise EvidenceRefused(refusal)
+    if runtime.frozen:
+        identity = frozen_identity(runtime)
+        refusal = frozen_refusal(identity, runtime)
+        if refusal is not None:
+            raise BaselineRefused(refusal)
+    else:
+        identity = row_identity()
+        refusal = evidence_refusal(identity, ci=bool(os.environ.get("CI")))
+        if refusal is not None:
+            raise EvidenceRefused(refusal)
     work_dir.mkdir(parents=True, exist_ok=True)
     (work_dir / "identity.json").write_text(json.dumps(identity, indent=2) + "\n")
     emit("harness", "row.identity", mode=mode, **identity)
 
-    staged = await stage_signed_in_session(
-        account.profile, accept=lambda session: origin.accept_session(session.li_at)
-    )
+    browsers = runtime.browsers
+    if runtime.frozen:
+        # Written here, validated and committed by the baseline's own code and
+        # browser, so the profile never meets a newer Chromium first.
+        staged = write_synthetic_cookie_file(portable_cookie_path(account.profile))
+        origin.accept_session(staged.li_at)
+        await asyncio.to_thread(
+            stage_frozen_session,
+            runtime,
+            account.profile,
+            actor_environment(account, proxy.url, daemon=False, browsers=browsers),
+        )
+    else:
+        staged = await stage_signed_in_session(
+            account.profile,
+            accept=lambda session: origin.accept_session(session.li_at),
+        )
     # The staging browser has confirmed its close, but a root still on the
     # profile when the watcher takes its baseline would count against O1.
     lingering = await asyncio.to_thread(
@@ -1682,12 +1953,29 @@ async def measure_host_quit_row(
     emit("harness", "profile.snapshot", phase="before", **before.as_event_fields())
 
     request_mark, decision_mark = len(origin.requests), len(proxy.decisions)
-    browsers = Path(
-        os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or default_browsers_path()
+    if runtime.frozen:
+        browser_exe: str | None = await asyncio.to_thread(bundled_executable, runtime)
+    else:
+        browser_exe = await resolved_browser_executable(account.profile)
+    chrome_path: str | None = None
+    if custom_browser:
+        if not browser_exe:
+            raise RuntimeError(
+                "the runtime's bundled browser could not be named, so CHROME_PATH "
+                "cannot point at the same binary"
+            )
+        chrome_path = browser_exe
+    env = actor_environment(
+        account, proxy.url, daemon=daemon, browsers=browsers, chrome_path=chrome_path
     )
-    env = actor_environment(account, proxy.url, daemon=daemon, browsers=browsers)
-    browser_exe = await resolved_browser_executable(account.profile)
-    emit("harness", "row.identity", browser_exe=browser_exe, browsers=str(browsers))
+    emit(
+        "harness",
+        "row.identity",
+        browser_exe=browser_exe,
+        browsers=str(browsers),
+        chrome_path=chrome_path,
+        interpreter=runtime.python,
+    )
     watcher = Watcher(
         work_dir,
         log,
@@ -1704,11 +1992,14 @@ async def measure_host_quit_row(
 
     async def find_the_owner() -> None:
         nonlocal identified
-        if not daemon:
-            # A Direct server publishes nothing; a descriptor here would be one.
-            owner["descriptor_present"] = daemon_descriptor.descriptor_path(
-                account.auth_root
-            ).exists()
+        # A Direct server publishes nothing; a descriptor here would be one.
+        # Only looked at, never read into being: ``daemon_descriptor.read``
+        # prepares the daemon directory before it reads, so calling it on a
+        # row that must leave no daemon state would create that state itself.
+        owner["descriptor_present"] = daemon_descriptor.descriptor_path(
+            account.auth_root
+        ).exists()
+        if not daemon or not owner["descriptor_present"]:
             return
         try:
             published = daemon_descriptor.read(account.auth_root)
@@ -1798,6 +2089,21 @@ async def measure_host_quit_row(
         # The row's interval ends here: the watcher stops before anything else
         # starts on the profile.
         result.watcher = watcher.stop()
+        observed_events = watcher.observed()
+        launched = owner_launches(observed_events)
+        # The row's own runtime's gate, and the candidate's: a baseline row
+        # reaching the candidate's gate is an owner start attempt all the same.
+        gated = owner_gates(
+            observed_events,
+            [gate_script(runtime.checkout), gate_script(REPO_ROOT)],
+        )
+        if runtime.frozen:
+            result.runtime_failures = interpreter_failures(
+                observed_events,
+                runtime,
+                candidate_prefix=sys.prefix,
+                owner_expected=bool(owner.get("pid")),
+            )
         row_requests = list(origin.requests[request_mark:])
         row_decisions = list(proxy.decisions[decision_mark:])
         result.cleanup = retire_daemon_state(account, identified)
@@ -1840,7 +2146,7 @@ async def measure_host_quit_row(
             if episode.get("resolution") == "open"
         ],
     )
-    if daemon and identified is None:
+    if expect_owner and identified is None:
         refusals.append("the row's owner was never identified")
     post_quit: PostQuit | None
     if refusals:
@@ -1856,6 +2162,7 @@ async def measure_host_quit_row(
             proxy,
             command=command,
             browsers=browsers,
+            chrome_path=chrome_path,
             work_dir=work_dir,
             on_stderr=lambda line: emit(
                 "frontend", "user.output", stream="stderr", phase="post-quit", line=line
@@ -1888,14 +2195,21 @@ async def measure_host_quit_row(
             before=before,
             after=after,
             post_quit=post_quit,
+            expect_owner=expect_owner,
+            daemon_state_existed=result.cleanup.existed,
+            owner_launches=launched,
+            owner_gates=gated,
         )
     )
+    result.failures += result.runtime_failures
     (work_dir / "failures.json").write_text(
         json.dumps(
             {
                 "label": result.label,
+                "row": row,
                 "vector": asdict(result.vector),
                 "failures": result.failures,
+                "coordination": coordination_reading(result.vector),
             },
             indent=2,
         )
@@ -1905,7 +2219,8 @@ async def measure_host_quit_row(
         "harness",
         "row.outcome",
         mode=mode,
-        reference=DIRECT_REFERENCE if not daemon else None,
+        reference=reference or (DIRECT_REFERENCE if not daemon else None),
+        coordination=coordination_reading(result.vector),
         vector=asdict(result.vector),
         failures=result.failures,
         cleanup=asdict(result.cleanup),

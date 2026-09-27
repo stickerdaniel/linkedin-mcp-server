@@ -872,6 +872,13 @@ def _lifetime_census(case: str) -> dict:
         # A staging leftover whose parent vanished before the first sample.
         table[9] = {"start": 5.1, "ppid": 10, "open": psutil.NoSuchProcess(9)}
         table[2] = {"start": 5.3, "ppid": 9, "cmdline": ["python", "pre-exec"]}
+    if case.startswith("calendar-reads-older"):
+        # The e1dc and e1dd models: a staging leftover born after the harness
+        # whose wall-clock create time reads older, as after a backward clock
+        # step anywhere before the first sample, with its parent already gone
+        # or itself already adopted by init.
+        ppid = 1 if case.endswith("adopted-by-init") else 9
+        table[2] = {"start": 4.9, "ppid": ppid, "cmdline": ["python", "pre-exec"]}
     sampler, tracker = _sampler(table, root=10), Tracker()
     tracker.observe(sampler.sample(), 0.0)
     table[3] = browser(6.0)
@@ -886,6 +893,10 @@ def _lifetime_census(case: str) -> dict:
     elif case == "incomplete-baseline-ancestry":
         table.pop(9)
         table[2] = browser(5.3, ppid=1)
+    elif case.startswith("calendar-reads-older"):
+        # Adopted by init and exec'd into the row's browser: same pid, same
+        # create time, new command line.
+        table[2] = browser(4.9, ppid=1)
     for tick in (1.0, 2.0, 3.0):
         tracker.observe(sampler.sample(), tick)
     for pid in (2, 3):
@@ -926,6 +937,8 @@ def _judged_lifetime(profile, case: str, *, daemon: bool):
         "cached-unrelated-pid-reused-open-denied",
         "cached-unrelated-pid-reused-create-time-denied",
         "incomplete-baseline-ancestry",
+        "calendar-reads-older-parent-gone",
+        "calendar-reads-older-adopted-by-init",
     ],
 )
 def test_an_exclusion_about_another_lifetime_fails_o1_and_the_comparison(profile, case):

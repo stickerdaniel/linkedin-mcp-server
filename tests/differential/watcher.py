@@ -33,23 +33,33 @@ process is established as unrelated to the row when
 * its owning user can be read and is not the harness's user (the real uid on
   POSIX, the user name on Windows), since no actor runs as anyone else; or
 * it was running at the first sample and its whole ancestry, read then, ends
-  at the top of the process tree without passing the harness: every parent
-  present and older than its child, and the last one either the child of pid
-  0 or older than the harness when it is the child of pid 1, since an orphan
-  of the harness is adopted there; or
+  at a child of pid 0 without passing the harness, every parent present and
+  no younger than its child. A child of pid 1 is not enough, since an orphan
+  of the harness is adopted there, and nothing but a wall-clock create time
+  would say it is older than the harness; or
+* on Windows, it was running at the first sample, its executable and command
+  line were both read then, it names no profile and cannot be the browser.
+  Windows has no exec, so that image is the process's for its whole lifetime
+  (``Sampler.no_exec``); or
 * its executable, read in the same sample, is neither the row's browser
   (``--browser-exe``) nor anything under the managed browsers
   (``--browser-dir``). That is the setuid ``/bin/ps`` the product runs on
   macOS: psutil cannot read its arguments, and it cannot be a browser.
 
-**An exclusion belongs to one lifetime.** The first two last: they are kept by
-pid *and* create time, and apply only in a sample that read that same create
+A process is never excluded merely because its calendar creation time precedes
+the harness's: the calendar clock can be stepped, and a process born after the
+harness can then read as older. Creation times still identify sampled lifetimes
+and reject apparently younger parent records; passing that rejection is not an
+independent proof of a historical parent-child relationship.
+
+**An exclusion belongs to one lifetime.** The first three last: they are kept
+by pid *and* create time, and apply only in a sample that read that same create
 time, so a pid that cannot be identified now is not covered by what was
-established about an earlier process there. The third holds for its sample
-only, since the process can exec later. Evidence that ties a kept exclusion to
-the harness withdraws it. A process already running at the first sample whose
-ancestry could not be completed is not excluded but read again on every
-sample, and counts as a possible actor once it shows the browser.
+established about an earlier process there. The last holds for its sample
+only, since a POSIX process can exec later. Evidence that ties a kept exclusion
+to the harness withdraws it. A process already running at the first sample that
+none of these settles is not excluded but read again on every sample, and
+counts as a possible actor once it shows the browser.
 
 Losing a process (``NoSuchProcess``, or a pid whose create time changed) is an
 exit. Any other process whose identity, parent or arguments cannot be read, or
@@ -92,6 +102,14 @@ CHILD_TYPE_FLAG = "--type="
 #: Target interval between samples.
 SAMPLE_SECONDS = 0.05
 
+#: Whether this platform can replace a process's program in place. Windows
+#: cannot: ``CreateProcess`` fixes a process's image and command line for its
+#: whole lifetime, and becoming another program means a new process, which is a
+#: new (pid, create time) the watcher reads in full as new. A process rewriting
+#: its own PEB command line is adversarial and is not a browser launch; it is
+#: outside this oracle.
+NO_EXEC = os.name == "nt"
+
 
 def canonical_user_data_dir(value: str) -> str:
     """One spelling per profile directory, so two routes to it count as one.
@@ -130,6 +148,10 @@ class ProcessRecord:
     profile: str | None = None
     #: Descended from the harness, so one of the row's actors.
     in_row: bool = False
+    #: The venv interpreter a framework build was started as (``LAUNCHER_ENV``):
+    #: a cached initial-image observation for this PID, create time and command
+    #: line; same-command re-exec is outside this identity oracle.
+    launcher: str | None = None
 
     @property
     def identity(self) -> tuple[int, float]:
@@ -144,6 +166,8 @@ class ProcessRecord:
             "cmdline": list(self.cmdline),
             "in_row": self.in_row,
         }
+        if self.launcher is not None:
+            fields["launcher"] = self.launcher
         if not self.in_row:
             # These events are published as CI evidence, and a process that is
             # not the row's own may carry anything in its arguments, credentials
@@ -151,6 +175,7 @@ class ProcessRecord:
             fields["cmdline"] = []
             fields["cmdline_withheld"] = True
             fields["profile"] = self.profile
+            fields.pop("launcher", None)
         return fields
 
 
@@ -162,9 +187,106 @@ def record(
     cmdline: Sequence[str],
     *,
     in_row: bool = False,
+    launcher: str | None = None,
 ) -> ProcessRecord:
     cmdline = tuple(cmdline)
-    return ProcessRecord(pid, ppid, start, exe, cmdline, user_data_dir(cmdline), in_row)
+    return ProcessRecord(
+        pid, ppid, start, exe, cmdline, user_data_dir(cmdline), in_row, launcher
+    )
+
+
+#: Set by a macOS framework build's ``bin/python`` stub to the path it was
+#: started as before it re-executes ``Python.app``, whose binary is then both
+#: the process's executable and its ``argv[0]``. For a venv that path is the
+#: venv's interpreter, and it is the only place the venv still shows.
+LAUNCHER_ENV = "__PYVENV_LAUNCHER__"
+
+SERVER_MODULE = "linkedin_mcp_server"
+OWNER_MODULE = "linkedin_mcp_server.daemon_owner"
+
+#: CPython's short options (``Python/getopt.c``, ``bBc:dEhiIm:OPqRsStuvVW:xX:?``):
+#: flags without a value; ``c``, ``m``, ``W`` and ``X`` take one, from the rest
+#: of their cluster or from the next argument.
+_SHORT_FLAGS = frozenset("bBdEiIOPqRsStuvx")
+_SHORT_WITH_VALUE = frozenset("cmWX")
+#: ``h``, ``V`` and ``?`` print and exit, running no module; they fall under
+#: "anything else" below, with every option the interpreter would reject.
+#: Long options, and whether each takes a value. Every one without a value
+#: (help, version) ends the run without executing anything.
+_LONG_OPTIONS = {
+    "check-hash-based-pycs": True,
+    "help": False,
+    "help-all": False,
+    "help-env": False,
+    "help-xoptions": False,
+    "version": False,
+}
+#: The values the interpreter accepts for ``--check-hash-based-pycs``; any
+#: other one, or none, makes it exit with status 2 before running anything.
+_HASH_CHECK_MODES = frozenset({"default", "always", "never"})
+
+
+def invoked_module(cmdline: Sequence[str]) -> str | None:
+    """The module a Python command line runs with ``-m``, or None.
+
+    Parsed with the interpreter's own option grammar: short options clustered
+    character by character, ``m``, ``c``, ``W`` and ``X`` taking the rest of
+    their cluster or the next argument. Execution ends the options: ``-c``
+    (attached, clustered or separate), a script path, ``-`` for stdin, or
+    ``--``, after which the next word is a script. Help, version and any
+    option the interpreter does not know run no module. A module name that
+    appears anywhere else is not an invocation.
+    """
+    arguments = list(cmdline[1:])
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        index += 1
+        if argument == "--" or argument == "-" or not argument.startswith("-"):
+            return None
+        if argument.startswith("--"):
+            # Matched whole: ``--check-hash-based-pycs=always`` is rejected.
+            if not _LONG_OPTIONS.get(argument[2:]):
+                return None
+            if index >= len(arguments) or arguments[index] not in _HASH_CHECK_MODES:
+                return None
+            index += 1
+            continue
+        position = 1
+        while position < len(argument):
+            option = argument[position]
+            position += 1
+            if option in _SHORT_FLAGS:
+                continue
+            if option in _SHORT_WITH_VALUE:
+                value = argument[position:]
+                if not value:
+                    if index >= len(arguments):
+                        return None
+                    value = arguments[index]
+                    index += 1
+                if option == "m":
+                    return value or None
+                if option == "c":
+                    return None
+                break
+            # Help, version, or an option the interpreter would reject.
+            return None
+    return None
+
+
+def read_launcher(process: Any) -> str | None:
+    """The venv interpreter a process was started as, if it says so.
+
+    psutil returns the whole environment and only this one value is kept. The
+    sampler asks only row actors that run the server or the owner module,
+    once per PID, create time and command line.
+    """
+    try:
+        value = process.environ().get(LAUNCHER_ENV)
+    except (psutil.Error, OSError, AttributeError):
+        return None
+    return value or None
 
 
 def classify(process: ProcessRecord) -> str:
@@ -339,7 +461,9 @@ class Sampler:
     *pids*, *open_process*, *clock* and *user_of* are psutil's, the wall clock
     and ``process_user`` by default, and are replaced in tests to model a
     process table. *browser_exe* and *browser_dir* name what the row's browser
-    runs. *user* is the harness's user, as *user_of* reports it.
+    runs. *user* is the harness's user, as *user_of* reports it. *no_exec*
+    says whether a process's program is fixed for its lifetime, which is
+    Windows's by default and set in tests to model either platform.
     """
 
     def __init__(
@@ -354,8 +478,10 @@ class Sampler:
         user: object | None = None,
         browser_exe: str | None = None,
         browser_dir: str | None = None,
+        no_exec: bool = NO_EXEC,
     ) -> None:
         self.root_pid = root_pid
+        self.no_exec = no_exec
         self.own_pid = os.getpid() if own_pid is None else own_pid
         self._pids = pids
         self._open = open_process
@@ -371,8 +497,28 @@ class Sampler:
         self._unrelated: set[tuple[int, float]] = set()
         #: First-sample identities whose ancestry could not be completed.
         self._watched: set[tuple[int, float]] = set()
+        #: (pid, create time, command line) whose launcher was already asked.
+        self._launchers_read: set[tuple[int, float, tuple[str, ...]]] = set()
+        #: What sampling cost: first-sample outcomes and full reads per sample.
+        self.first_sample_cached = 0
+        self.first_sample_watched = 0
+        self.reads_per_sample: list[int] = []
+        self._reads = 0
         self._episodes: dict[tuple[int, float | None], dict[str, Any]] = {}
         self._closed: list[dict[str, Any]] = []
+
+    def stats(self) -> dict[str, Any]:
+        """What sampling cost, for the summary."""
+        reads = self.reads_per_sample
+        return {
+            "no_exec": self.no_exec,
+            "first_sample_cached": self.first_sample_cached,
+            "first_sample_watched": self.first_sample_watched,
+            "reads_per_sample_mean": (
+                round(sum(reads) / len(reads), 1) if reads else None
+            ),
+            "reads_per_sample_max": max(reads) if reads else None,
+        }
 
     def possible_browser(self, exe: str | None) -> bool:
         return possible_browser(exe, self.browser_exe, self.browser_dir)
@@ -402,6 +548,7 @@ class Sampler:
     def _read(
         self, process: Any, known: ProcessRecord | None
     ) -> tuple[int | None, str | None, tuple[str, ...], list[str], bool]:
+        self._reads += 1
         failures: list[str] = []
         ppid = known.ppid if known is not None else None
         exe = known.exe if known is not None else None
@@ -483,6 +630,13 @@ class Sampler:
                 ppid, exe, cmdline, failed, exe_read = self._read(process, known)
             except psutil.NoSuchProcess:
                 continue
+            # Carried while the command line holds; read, if at all, only once
+            # the process is classified (``_read_launchers``).
+            launcher = (
+                known.launcher
+                if known is not None and known.cmdline == cmdline
+                else None
+            )
             sample[pid] = record(
                 pid,
                 -1 if ppid is None else ppid,
@@ -490,6 +644,7 @@ class Sampler:
                 exe,
                 cmdline,
                 in_row=known is not None and known.in_row,
+                launcher=launcher,
             )
             if failed:
                 parent_read = not any(f.startswith("ppid") for f in failed)
@@ -507,6 +662,7 @@ class Sampler:
             if root is not None:
                 self._row.add(root.identity)
         self._classify(sample)
+        self._read_launchers(sample, identified)
         # Whatever the harness turned out to own is no longer excluded.
         row = {process.identity for process in sample.values() if process.in_row}
         self._unrelated -= row
@@ -514,6 +670,8 @@ class Sampler:
         settled: set[tuple[int, float]] = set()
         if first:
             settled = self._settled_ancestry(sample)
+            if self.no_exec:
+                settled |= self._settled_image(sample, failures)
             for pid in identified:
                 process = sample.get(pid)
                 if process is None or process.in_row or pid == self.own_pid:
@@ -521,13 +679,46 @@ class Sampler:
                 if process.identity not in settled:
                     self._watched.add(process.identity)
         verdicts = self._judge(sample, failures, settled)
-        # Running before any actor, its whole ancestry read now and not
-        # leading to the harness: established unrelated.
+        # Running before any actor, and its whole ancestry read now not leading
+        # to the harness, or on Windows its whole image read now and no
+        # browser: established unrelated.
         self._unrelated |= settled
+        if first:
+            # Everything cached so far was established in this first sample,
+            # by ancestry, image or user.
+            self.first_sample_cached = len(self._unrelated)
+            # Not those another rule established unrelated in the same sample.
+            self.first_sample_watched = len(self._watched - self._unrelated)
+        self.reads_per_sample.append(self._reads)
+        self._reads = 0
         self._track(sample, verdicts)
         self._resolve_by_user(sample, identified)
         self._known = sample
         return sample
+
+    def _read_launchers(
+        self, sample: dict[int, ProcessRecord], identified: dict[int, Any]
+    ) -> None:
+        """Record the launcher of the row's server and owner processes.
+
+        Only for a row actor, established by ancestry in this sample, whose
+        command line runs the server or the owner module, and only when this
+        sample read its create time. The launcher is a cached initial-image
+        observation for this PID, create time and command line; same-command
+        re-exec is outside this identity oracle.
+        """
+        for pid, process in list(sample.items()):
+            if not process.in_row or pid not in identified:
+                continue
+            if invoked_module(process.cmdline) not in (SERVER_MODULE, OWNER_MODULE):
+                continue
+            key = (process.pid, process.start, process.cmdline)
+            if key in self._launchers_read:
+                continue
+            self._launchers_read.add(key)
+            launcher = read_launcher(identified[pid])
+            if launcher is not None:
+                sample[pid] = replace(process, launcher=launcher)
 
     def _settled_ancestry(
         self, sample: dict[int, ProcessRecord]
@@ -537,12 +728,10 @@ class Sampler:
         Every parent has to be in the sample and no younger than its child: a
         parent that could not be read, or a younger process at the parent's
         pid, leaves the ancestry open. It ends at a child of pid 0 (or a pid
-        that is its own parent), or at a child of pid 1 older than the
-        harness, because pid 1 also adopts every orphan, the harness's
-        included.
+        that is its own parent). A child of pid 1 stays open whatever its create
+        time says: pid 1 adopts every orphan, the harness's included, and a
+        wall-clock create time cannot show that it was born before the harness.
         """
-        root = sample.get(self.root_pid)
-        born = root.start if root is not None else None
         memo: dict[int, bool] = {}
         for pid in sample:
             chain: list[int] = []
@@ -560,7 +749,7 @@ class Sampler:
                     settled = True
                     break
                 if process.ppid == 1:
-                    settled = born is not None and process.start <= born
+                    settled = False
                     break
                 parent = sample.get(process.ppid)
                 if parent is None or parent.start > process.start:
@@ -574,6 +763,36 @@ class Sampler:
             for pid, process in sample.items()
             if memo.get(pid) and pid != self.own_pid
         }
+
+    def _settled_image(
+        self,
+        sample: dict[int, ProcessRecord],
+        failures: dict[int, tuple[Any, list[str], str | None, bool, Any, bool]],
+    ) -> set[tuple[int, float]]:
+        """First-sample processes whose whole image is read now and is no browser.
+
+        Only where a process cannot exec (``no_exec``, Windows): its executable
+        and command line, both read in this sample, are then its own for the
+        rest of its lifetime, so one that names no profile and cannot be the
+        browser never will, whatever its ancestry says. A process whose
+        executable or arguments could not be read is not judged here.
+        """
+        settled = set()
+        for pid, process in sample.items():
+            if process.in_row or pid == self.own_pid:
+                continue
+            if pid in failures:
+                fields = {failure.split(":", 1)[0] for failure in failures[pid][1]}
+                if fields & {"open", "identity", "exe", "cmdline"}:
+                    continue
+            if not process.exe or self.possible_browser(process.exe):
+                continue
+            if process.profile is not None or any(
+                argument.startswith(USER_DATA_DIR_FLAG) for argument in process.cmdline
+            ):
+                continue
+            settled.add(process.identity)
+        return settled
 
     def _resolve_by_user(
         self, sample: dict[int, ProcessRecord], identified: dict[int, Any]
@@ -704,6 +923,18 @@ class Sampler:
                     changed = True
 
 
+def duration_stats(durations: Sequence[float]) -> dict[str, float | None]:
+    """Mean and 95th percentile of the sample durations, in seconds."""
+    if not durations:
+        return {"sample_seconds_mean": None, "sample_seconds_p95": None}
+    ordered = sorted(durations)
+    p95 = ordered[min(len(ordered) - 1, int(0.95 * len(ordered)))]
+    return {
+        "sample_seconds_mean": round(sum(ordered) / len(ordered), 4),
+        "sample_seconds_p95": round(p95, 4),
+    }
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", required=True, type=Path)
@@ -733,12 +964,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     }
     tracker = Tracker()
     sampler = Sampler(
-        args.root_pid, browser_exe=args.browser_exe, browser_dir=args.browser_dir
+        args.root_pid,
+        browser_exe=args.browser_exe,
+        browser_dir=args.browser_dir,
     )
     began = time.monotonic()
     observation_start: float | None = None
     last_sample: float | None = None
     max_gap = 0.0
+    #: Wall time of each ``sampler.sample()``, the watcher's own cost.
+    durations: list[float] = []
     stopped_by = "deadline"
     with args.out.open("a", encoding="utf-8") as out:
 
@@ -753,7 +988,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         def take_sample() -> None:
             nonlocal observation_start, last_sample, max_gap
+            began_sample = time.monotonic()
             sample = sampler.sample()
+            durations.append(time.monotonic() - began_sample)
             now = time.time()
             if last_sample is not None:
                 max_gap = max(max_gap, now - last_sample)
@@ -795,6 +1032,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "observation_start": observation_start,
                 "observation_end": last_sample,
                 "max_gap_seconds": round(max_gap, 4),
+                **duration_stats(durations),
+                **sampler.stats(),
                 "browser_exe": args.browser_exe,
                 "browser_dir": args.browser_dir,
                 "read_failures": sampler.read_failures,
