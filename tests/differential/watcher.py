@@ -838,6 +838,8 @@ class Sampler:
         # pid -> (episode key, failed fields, exe, exe read now, process or None,
         #         parent read)
         failures: dict[int, tuple[Any, list[str], str | None, bool, Any, bool]] = {}
+        # pid -> the known root whose failed read may keep its reading.
+        retaining: dict[int, tuple[ProcessRecord, list[str]]] = {}
         # pid -> the process whose create time this sample read.
         identified: dict[int, Any] = {}
         for pid in self._pids():
@@ -951,14 +953,10 @@ class Sampler:
                 browser_marker=known.browser_marker if known is not None else None,
             )
             if failed and self._keeps_its_root(known, failed, exe):
-                # Already counted as this profile's browser root: the record
-                # keeps that reading, with the profile it named rather than
-                # one the old arguments resolve to now, and the failure is
-                # kept as an audit note.
+                # Decided once the sample is complete: whether it parents
+                # another browser record is known only then.
                 assert known is not None
-                sample[pid] = replace(sample[pid], profile=known.profile)
-                self._note_retained(known, failed)
-                failed = []
+                retaining[pid] = (known, failed)
             if failed:
                 parent_read = not any(f.startswith("ppid") for f in failed)
                 failures[pid] = (
@@ -969,6 +967,17 @@ class Sampler:
                     process,
                     parent_read,
                 )
+        # Already counted as its profile's browser root: the record keeps that
+        # reading, with the profile it named rather than one the old arguments
+        # resolve to now, and the failure is kept as an audit note. Not for a
+        # parent of another browser record (``_keeps_its_root``).
+        parents = {p.ppid for p in sample.values() if p.profile is not None}
+        for pid, (known, failed) in retaining.items():
+            if pid in parents:
+                continue
+            sample[pid] = replace(sample[pid], profile=known.profile)
+            self._note_retained(known, failed)
+            del failures[pid]
         if first:
             self._baseline = {process.identity for process in sample.values()}
             self.baseline_pgids = sorted(
@@ -1062,6 +1071,11 @@ class Sampler:
         judge of that profile see. Anything else, a helper or driver read
         before included, stays a failure: an exec since the last reading
         could have made it a root.
+
+        Nor in a sample where it is the parent of another record with a
+        profile: pinned, it would fold those roots into its tree, while its
+        hidden arguments may name another profile and leave each of them a
+        root of its own.
         """
         return (
             known is not None

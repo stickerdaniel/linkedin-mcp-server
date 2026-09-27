@@ -1077,9 +1077,20 @@ def _failed_read_census(
     }
     for tick in (1.0, 2.0):
         tracker.observe(sampler.sample(), tick)
-    if case in ("known-root", "peer", "other-profile-hidden", "alias-retarget"):
+    if case in ("known-root", "peer", "other-profile-hidden", "alias-retarget") or (
+        case.startswith("parent-of")
+    ):
         # The packet: read with its profile, one refused read, then gone.
         table[70]["cmdline"] = psutil.AccessDenied(70)
+    children = {
+        # Two processes with root arguments on the row's profile under pid 70:
+        # if 70 now runs on another profile, they are two roots.
+        "parent-of-roots": [_chrome_on(row), _chrome_on(row)],
+        "parent-of-roots-later": [_chrome_on(row), _chrome_on(row)],
+        "parent-of-a-renderer": [
+            [BROWSER_EXE, "--type=renderer", f"--user-data-dir={row}"]
+        ],
+    }.get(case, [])
     if case in ("peer", "alias-retarget"):
         table[60] = {"start": 7.0, "ppid": 10, "exe": BROWSER_EXE}
         table[60]["cmdline"] = _chrome_on(row)
@@ -1107,8 +1118,14 @@ def _failed_read_census(
         }
     elif case == "renderer":
         table[71]["cmdline"] = psutil.AccessDenied(71)
+    if not case.endswith("-later"):
+        _add_children(table, children)
     tracker.observe(sampler.sample(), 3.0)
-    for pid in (60, 70, 71, 72, 73):
+    if case.endswith("-later"):
+        # Retained alone first, then a parent while still refused.
+        _add_children(table, children)
+        tracker.observe(sampler.sample(), 3.5)
+    for pid in (60, 70, 71, 72, 73, 74, 75):
         table.pop(pid, None)
     tracker.observe(sampler.sample(), 4.0)
     return {
@@ -1120,6 +1137,16 @@ def _failed_read_census(
         "read_failures": sampler.read_failures,
         "relevant_read_failures": sampler.relevant_read_failures,
     }
+
+
+def _add_children(table: dict[int, dict[str, Any]], cmdlines: list) -> None:
+    for offset, cmdline in enumerate(cmdlines):
+        table[74 + offset] = {
+            "start": 7.0 + offset,
+            "ppid": 70,
+            "exe": BROWSER_EXE,
+            "cmdline": cmdline,
+        }
 
 
 def _judged_failed_read(
@@ -1173,6 +1200,28 @@ def test_the_same_move_read_in_full_counts_two_roots(profile):
     assert census["max_roots"][canonical_user_data_dir(KEY)] == 2
     assert not vector.o1_single_browser
     assert failures
+
+
+@pytest.mark.parametrize("case", ["parent-of-roots", "parent-of-roots-later"])
+def test_a_refused_root_that_parents_roots_is_not_retained(profile, case):
+    # Pinned, it would fold both into its tree and the row would count one.
+    census, vector, failures = _judged_failed_read(profile, case)
+    assert [e["pid"] for e in census["relevant_read_failures"]] == [70]
+    assert not vector.o1_single_browser and not vector.watcher_healthy
+    assert failures
+    # A note from a sample in which it parented nothing stays.
+    notes = [e for e in census["read_failures"] if "retained_profile" in e]
+    assert len(notes) == (1 if case.endswith("-later") else 0)
+
+
+def test_a_retained_root_may_parent_a_renderer(profile):
+    census, vector, failures = _judged_failed_read(profile, "parent-of-a-renderer")
+    assert failures == []
+    assert vector.o1_single_browser and vector.watcher_healthy
+    (note,) = census["read_failures"]
+    assert note["pid"] == 70 and note["retained_profile"] == canonical_user_data_dir(
+        KEY
+    )
 
 
 def test_a_retained_root_keeps_the_profile_it_was_read_on(profile, tmp_path):
