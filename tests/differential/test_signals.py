@@ -1720,3 +1720,135 @@ def test_a_later_observation_does_not_change_an_earlier_class(
     # The same call once the exec was on record names what it had become.
     late = _o2(line.replace(" 6.1 ", " 7.5 "), [*_row(), _DRIVER_40, future])
     assert late.classes == (f"guardian:{after_exec}",)
+
+
+# --- E1ED-01: a birth confirms what was seen of its id, the census by its time ------
+
+_CHILD_EXITED = "23  6.1 +++ exited with 0 +++\n"
+
+
+@pytest.mark.parametrize(
+    ("trace", "stderr"),
+    [
+        pytest.param(
+            "21  6.0 vfork( <unfinished ...>\n"
+            + _CHILD_EXITED
+            + "21  6.2 <... vfork resumed>) = 23\n",
+            "",
+            id="vfork-child-ends-before-the-return",
+        ),
+        pytest.param(
+            "21  6.0 vfork( <unfinished ...>\n"
+            + _CHILD_EXITED
+            + "21  6.2 <... vfork resumed>) = 23\n",
+            "strace: Process 23 attached\n",
+            id="vfork-announced",
+        ),
+        pytest.param(
+            "21  6.0 clone(child_stack=NULL, flags=CLONE_VM|CLONE_VFORK|SIGCHLD"
+            " <unfinished ...>\n"
+            + _CHILD_EXITED
+            + "21  6.2 <... clone resumed>) = 23\n",
+            "",
+            id="clone-vfork",
+        ),
+        pytest.param(
+            "21  6.0 vfork() = 23\n" + _CHILD_EXITED, "", id="return-before-end"
+        ),
+    ],
+)
+def test_a_child_that_ended_during_its_parents_call_is_that_child(
+    tmp_path, trace, stderr
+):
+    outcome = _attached(tmp_path, trace + _ENDS, stderr=stderr).stop()
+    assert outcome.status == COMPLETE, outcome.reasons
+    assert outcome.cohort[23]["kind"] == "child"
+    assert outcome.cohort[23]["lifetimes"] == 1
+    assert outcome.cohort[23]["end"] == "its exit line"
+
+
+def test_an_id_that_ended_before_the_call_began_is_an_earlier_lifetime(tmp_path):
+    trace = (
+        "23  5.0 +++ exited with 0 +++\n"
+        "21  6.0 vfork( <unfinished ...>\n"
+        "21  6.2 <... vfork resumed>) = 23\n"
+    )
+    outcome = _attached(tmp_path, trace + _ENDS).stop()
+    assert outcome.status == INCOMPLETE
+    assert any("before its birth" in reason for reason in outcome.reasons)
+
+
+_THREAD_24 = (
+    "20  5.1 clone(child_stack=0x1, flags=CLONE_VM|CLONE_SIGHAND|CLONE_THREAD) = 24\n"
+    "24  8.0 +++ exited with 0 +++\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("trace", "census", "census_at", "status", "reason"),
+    [
+        pytest.param(_THREAD_24, {}, None, COMPLETE, None, id="trace-only"),
+        pytest.param(
+            "24  8.0 +++ exited with 0 +++\n",
+            {24: 20},
+            5.2,
+            COMPLETE,
+            None,
+            id="census-only",
+        ),
+        # Born after the attach, before the census read it: one thread.
+        pytest.param(_THREAD_24, {24: 20}, 5.2, COMPLETE, None, id="overlapping"),
+        pytest.param(
+            _THREAD_24, {24: 20}, 5.0, INCOMPLETE, "predates", id="census-before-birth"
+        ),
+        pytest.param(
+            _THREAD_24,
+            {24: 21},
+            5.2,
+            INCOMPLETE,
+            "the census had it in 21",
+            id="census-names-another-process",
+        ),
+        pytest.param(
+            "20  5.1 clone(child_stack=NULL, flags=SIGCHLD) = 24\n"
+            "24  8.0 +++ exited with 0 +++\n",
+            {24: 20},
+            5.2,
+            INCOMPLETE,
+            "a process born",
+            id="census-thread-born-a-process",
+        ),
+        pytest.param(
+            _THREAD_24,
+            {24: 20},
+            None,
+            INCOMPLETE,
+            "time is unknown",
+            id="census-untimed",
+        ),
+        pytest.param(
+            "24  5.1 +++ exited with 0 +++\n"
+            "21  5.5 clone(child_stack=NULL, flags=SIGCHLD) = 24\n"
+            "24  6.5 +++ exited with 0 +++\n",
+            {24: 20},
+            5.0,
+            INCOMPLETE,
+            "reused id",
+            id="actual-reuse",
+        ),
+    ],
+)
+def test_the_thread_census_is_reconciled_with_traced_births(
+    tmp_path, trace, census, census_at, status, reason
+):
+    oracle = _attached(tmp_path, trace + _ENDS)
+    oracle.threads = dict(census)
+    oracle.census_at = census_at
+    outcome = oracle.stop()
+    assert outcome.status == status, outcome.reasons
+    if reason is None:
+        assert outcome.cohort[24]["lifetimes"] == 1
+        assert outcome.threads[24] == 20
+    else:
+        assert any(reason in line for line in outcome.reasons), outcome.reasons
+        assert 24 not in outcome.threads
