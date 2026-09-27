@@ -497,6 +497,7 @@ def test_the_oracle_traces_every_signal_syscall_of_the_pids_given(tmp_path):
     command = SignalOracle(tmp_path).command([20, 21])
     assert command[:3] == ["sudo", "-n", "strace"]
     assert "-yy" in command and "-f" in command and "-ttt" in command
+    assert "-T" in command
     assert (
         "trace=kill,tkill,tgkill,pidfd_send_signal,rt_sigqueueinfo,"
         "rt_tgsigqueueinfo,clone,clone3,fork,vfork" in command
@@ -1812,6 +1813,13 @@ _THREAD_24 = (
     "20  5.1 clone(child_stack=0x1, flags=CLONE_VM|CLONE_SIGHAND|CLONE_THREAD) = 24\n"
     "24  8.0 +++ exited with 0 +++\n"
 )
+#: The same unsplit birth, bounded by another line at 5.15 before the census.
+_THREAD_24_BOUNDED = (
+    "20  5.1 clone(child_stack=0x1, flags=CLONE_VM|CLONE_SIGHAND|CLONE_THREAD)"
+    " = 24 <0.000050>\n"
+    "21  5.15 kill(21, 0) = 0 <0.000004>\n"
+    "24  8.0 +++ exited with 0 +++\n"
+)
 #: A thread-creation call that runs from 6.0 to 6.2, returning 24.
 _THREAD_24_CALL = (
     "20  6.0 clone(child_stack=0x1, flags=CLONE_VM|CLONE_SIGHAND|CLONE_THREAD"
@@ -1835,7 +1843,12 @@ _THREAD_24_CALL = (
         ),
         # Born after the attach, read after its creation call returned.
         pytest.param(
-            _THREAD_24, {24: 20}, {24: (5.2, 5.3)}, COMPLETE, None, id="read-after"
+            _THREAD_24_BOUNDED,
+            {24: 20},
+            {24: (5.2, 5.3)},
+            COMPLETE,
+            None,
+            id="read-after",
         ),
         pytest.param(
             _THREAD_24_CALL,
@@ -1867,7 +1880,7 @@ _THREAD_24_CALL = (
             id="listing-spans-the-call",
         ),
         pytest.param(
-            _THREAD_24,
+            _THREAD_24_BOUNDED,
             {24: 21},
             {24: (5.2, 5.3)},
             INCOMPLETE,
@@ -1927,3 +1940,130 @@ def test_each_census_entry_keeps_when_its_task_directory_was_read(
     oracle.read_threads()
     assert oracle.threads == {20: 20, 24: 20, 21: 21}
     assert oracle.census_times == {20: (1.0, 2.0), 24: (1.0, 2.0), 21: (3.0, 4.0)}
+
+
+# --- E1EF-01: a creation call's return is bounded only by what strace wrote after --
+
+_CLONE_24 = "20  6.0 clone(child_stack=0x1, flags=CLONE_VM|CLONE_SIGHAND|CLONE_THREAD"
+
+
+@pytest.mark.parametrize(
+    ("trace", "times", "status", "reason"),
+    [
+        # e1ef's models. Unsplit: its prefix is its entry; the next line, at
+        # 8.0, is all that bounds its return.
+        pytest.param(
+            _CLONE_24 + ") = 24\n24  8.0 +++ exited with 0 +++\n",
+            {24: (6.10, 6.15)},
+            INCOMPLETE,
+            "while its creation call ran",
+            id="unsplit-census-possibly-mid-call",
+        ),
+        pytest.param(
+            _CLONE_24 + " <unfinished ...>\n"
+            "21  6.05 kill(21, 0) = 0\n"
+            "20  6.2 <... clone resumed>) = 24\n"
+            "24  8.0 +++ exited with 0 +++\n",
+            {24: (6.10, 6.15)},
+            INCOMPLETE,
+            "while its creation call ran",
+            id="resumed-return-after-the-census",
+        ),
+        pytest.param(
+            _CLONE_24 + " <unfinished ...>\n"
+            "21  6.05 kill(21, 0) = 0\n"
+            "20  6.2 <... clone resumed>) = 24\n"
+            "24  8.0 +++ exited with 0 +++\n",
+            {24: (6.3, 6.4)},
+            COMPLETE,
+            None,
+            id="census-after-the-resumed-return",
+        ),
+        pytest.param(
+            _CLONE_24 + ") = 24\n24  8.0 +++ exited with 0 +++\n",
+            {},
+            COMPLETE,
+            None,
+            id="unsplit-without-a-census",
+        ),
+        pytest.param(
+            _CLONE_24 + ") = 24\n24  8.0 +++ exited with 0 +++\n",
+            {24: (5.9, 5.9)},
+            INCOMPLETE,
+            "before its creation call began",
+            id="census-before-entry",
+        ),
+        # strace -T: entry plus the call's time is no bound (its source takes
+        # the -T start after printing the entry prefix); the next line is.
+        pytest.param(
+            _CLONE_24 + ") = 24 <0.000100>\n"
+            "21  6.5 kill(21, 0) = 0 <0.000003>\n"
+            "24  8.0 +++ exited with 0 +++\n",
+            {24: (6.2, 6.3)},
+            INCOMPLETE,
+            "while its creation call ran",
+            id="census-after-entry-plus-duration-before-the-next-line",
+        ),
+        pytest.param(
+            _CLONE_24 + ") = 24 <0.000100>\n"
+            "21  6.5 kill(21, 0) = 0 <0.000003>\n"
+            "24  8.0 +++ exited with 0 +++\n",
+            {24: (6.6, 6.7)},
+            COMPLETE,
+            None,
+            id="census-after-the-next-line",
+        ),
+    ],
+)
+def test_a_census_is_placed_only_after_a_bounded_return(
+    tmp_path, trace, times, status, reason
+):
+    oracle = _attached(tmp_path, trace + _ENDS)
+    oracle.threads = {tid: 20 for tid in times}
+    oracle.census_times = dict(times)
+    outcome = oracle.stop()
+    assert outcome.status == status, outcome.reasons
+    if reason is not None:
+        assert any(reason in line for line in outcome.reasons), outcome.reasons
+
+
+def test_a_creation_call_with_nothing_after_it_has_no_known_return(tmp_path):
+    # The traced root 20 was killed by the harness and wrote no end; its
+    # clone is the last line, so nothing bounds when it returned.
+    trace = (
+        "21  9.5 +++ exited with 0 +++\n"
+        "20  9.6 clone(child_stack=0x1, flags=CLONE_VM|CLONE_SIGHAND|CLONE_THREAD)"
+        " = 24 <0.000020>\n"
+    )
+    (birth,) = read_trace(trace).births
+    assert birth.returned is None and birth.duration == 0.00002
+    oracle = _attached(tmp_path, trace)
+    oracle.threads = {24: 20}
+    oracle.census_times = {24: (9.7, 9.8)}
+    outcome = oracle.stop(confirmed_dead=[20])
+    assert outcome.status == INCOMPLETE
+    assert any("return time is unknown" in line for line in outcome.reasons)
+
+
+@pytest.mark.parametrize(
+    ("line", "returned"),
+    [
+        pytest.param(_CLONE_24 + ") = 24 <0.2>\n", 7.0, id="unsplit-bounded-next"),
+        pytest.param(
+            _CLONE_24 + " <unfinished ...>\n20  6.2 <... clone resumed>) = 24 <0.2>\n",
+            6.2,
+            id="resumed",
+        ),
+    ],
+)
+def test_the_return_bound_and_duration_are_read_from_the_trace(line, returned):
+    (birth,) = read_trace(line + "21  7.0 +++ exited with 0 +++\n").births
+    assert (birth.returned, birth.duration) == (returned, 0.2)
+
+
+def test_a_duration_is_not_part_of_a_calls_result():
+    (call,) = parse_strace(
+        "21  6.0 kill(95, SIGTERM) = -1 EPERM (Operation not permitted) <0.000010>\n"
+    )
+    assert call.result == "-1 EPERM (Operation not permitted)"
+    assert call.rejected

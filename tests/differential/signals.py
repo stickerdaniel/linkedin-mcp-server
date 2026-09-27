@@ -187,6 +187,16 @@ _ENDED = re.compile(
     r"^\+\+\+ (exited with -?\d+|killed by \S+( \(core dumped\))?) \+\+\+$"
 )
 _RETURNED = re.compile(r"^(?P<value>\d+)\b")
+#: The ``-T`` time strace appends to a finished call's result.
+_DURATION = re.compile(r"\s+<(?P<secs>\d+\.\d+)>$")
+
+
+def _split_duration(ret: str) -> tuple[str, float | None]:
+    """A result without its ``-T`` time, and that time if there was one."""
+    found = _DURATION.search(ret)
+    if found is None:
+        return ret, None
+    return ret[: found.start()], float(found["secs"])
 
 
 @dataclass(frozen=True)
@@ -345,7 +355,7 @@ def _call(tid: int, t: float, name: str, args: str, ret: str, raw: str) -> Signa
     )
 
 
-@dataclass(frozen=True)
+@dataclass(eq=False)
 class Birth:
     """A tracee a traced thread started, which strace then follows."""
 
@@ -353,11 +363,18 @@ class Birth:
     child: int
     #: ``CLONE_THREAD``: a thread of the parent's process, not a process.
     thread: bool
-    #: When the parent's call began: the child exists from no earlier.
+    #: The call's line prefix, printed at syscall entry: the child's id was
+    #: allocated no earlier.
     began: float = 0.0
-    #: When it returned the child's id: what was seen of that id in between
-    #: was this child, however far it had got, exit included.
-    returned: float = 0.0
+    #: A time the call had certainly returned by, or None when the trace gives
+    #: none. A split call's ``<... resumed>`` line has its own prefix, printed
+    #: at syscall exit. An unsplit line's prefix is its entry, and strace's
+    #: ``-T`` time is no upper bound either (see ``read_trace``); what bounds
+    #: it is the next line strace wrote, since strace finishes a line before it
+    #: starts another.
+    returned: float | None = None
+    #: The ``-T`` time strace reported for the call, as evidence only.
+    duration: float | None = None
 
 
 @dataclass
@@ -385,7 +402,9 @@ def _record(
     ret: str,
     raw: str,
     returned: float | None = None,
-):
+) -> Birth | None:
+    """Record one finished call; the birth it reports, if it reports one."""
+    ret, duration = _split_duration(ret)
     if name in FOLLOWED_SYSCALLS:
         found = _RETURNED.match(ret.strip())
         if found is not None and int(found["value"]) > 0:
@@ -394,12 +413,15 @@ def _record(
                 int(found["value"]),
                 "CLONE_THREAD" in args,
                 t,
-                t if returned is None else returned,
+                returned,
+                duration,
             )
             trace.births.append(birth)
             trace.events.append(("birth", birth))
-        return
+            return birth
+        return None
     trace.calls.append(_call(tid, t, name, args, ret, raw))
+    return None
 
 
 def read_trace(text: str) -> Trace:
@@ -409,9 +431,24 @@ def read_trace(text: str) -> Trace:
     is joined. Signal lines (``---``) are skipped. A line that is not strace's,
     a call that cannot be read, a resumed call without its start and a call
     still unfinished at the end are problems: evidence lost, never no call.
+
+    When a creation call returned is bounded from strace's own order, as its
+    v6.11 source has it. ``syscall_entering_trace`` calls ``printleader``,
+    which reads ``CLOCK_REALTIME`` for the prefix, at entry; only then does
+    ``syscall_entering_finish`` take the ``-T`` start time, and
+    ``syscall_exiting_decode`` takes its end once strace handles the exit
+    stop. So entry plus ``-T`` falls short of that handling by the time spent
+    printing the arguments, and can fall short of the exit itself: it bounds
+    nothing. What does: ``print_syscall_resume`` prints a fresh prefix at
+    exit for a split call, and ``printleader`` ends any unfinished line with
+    ``<unfinished ...>`` before it starts another, so an unsplit call's result
+    was written before the next line's prefix was read. That next prefix, or
+    the resumed line's own, is a time the call had returned by.
     """
     trace = Trace()
     pending: dict[tuple[int, str], tuple[float, str]] = {}
+    #: Unsplit births still waiting for the next line to bound their return.
+    unbounded: list[Birth] = []
     for raw in text.splitlines():
         if not raw.strip():
             continue
@@ -421,6 +458,9 @@ def read_trace(text: str) -> Trace:
             continue
         tid, t, rest = int(line["tid"]), float(line["t"]), line["rest"]
         trace.tids.add(tid)
+        for birth in unbounded:
+            birth.returned = t
+        unbounded.clear()
         try:
             if rest.startswith("+++"):
                 if _ENDED.match(rest) is None:
@@ -432,7 +472,11 @@ def read_trace(text: str) -> Trace:
             if rest.startswith("---"):
                 continue
             elif (found := _COMPLETE.match(rest)) is not None:
-                _record(trace, tid, t, found["name"], found["args"], found["ret"], raw)
+                birth = _record(
+                    trace, tid, t, found["name"], found["args"], found["ret"], raw
+                )
+                if birth is not None:
+                    unbounded.append(birth)
             elif (found := _UNFINISHED.match(rest)) is not None:
                 pending[(tid, found["name"])] = (t, found["args"])
             elif (found := _RESUMED.match(rest)) is not None:
@@ -1183,7 +1227,10 @@ def _confirms(
     """
     if known.first is not None and known.first < birth.began:
         return f"it was seen at {known.first}, before its creation call began"
-    if known.ended and known.ended_at is not None and known.ended_at <= birth.returned:
+    if known.ended and (
+        birth.returned is None
+        or (known.ended_at is not None and known.ended_at <= birth.returned)
+    ):
         return (
             f"child id {birth.child} ended before its creation call returned; "
             f"confirmation and reuse are indistinguishable"
@@ -1197,6 +1244,8 @@ def _confirms(
         read_from, read_to = times
         if read_to < birth.began:
             return f"the census read it at {read_to}, before its creation call began"
+        if birth.returned is None:
+            return "its creation call's return time is unknown, so its order is too"
         if read_from <= birth.returned:
             return (
                 f"the census read it between {read_from} and {read_to}, while "
@@ -1340,6 +1389,7 @@ class SignalOracle:
             "-f",
             "-ttt",
             "-yy",
+            "-T",
             "-e",
             "trace=" + ",".join(TRACED_SYSCALLS + FOLLOWED_SYSCALLS),
             "-o",
