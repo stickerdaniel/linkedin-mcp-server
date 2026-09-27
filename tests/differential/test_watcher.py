@@ -343,6 +343,16 @@ def test_a_watcher_stopped_on_request_after_the_actors_is_healthy(tmp_path):
     assert summary["sample_seconds_p95"] >= summary["sample_seconds_mean"] * 0.5
     assert summary["first_sample_cached"] > 0
     assert summary["reads_per_sample_max"] >= 1
+    # Every sample is logged, and each event's time is a logged sample's end.
+    log = summary["sample_log"]
+    assert len(log) == summary["samples"]
+    assert all(began <= ended for began, ended, _ in log)
+    ends = {ended for _, ended, _ in log}
+    assert all(r["t"] in ends for r in records if r["kind"].startswith("process."))
+    (ready,) = [r for r in records if r["kind"] == "watcher.ready"]
+    assert ready["baseline_pgids"] or os.name == "nt"
+    if sys.platform.startswith("linux"):
+        assert all(isinstance(last, int) for _, _, last in log)
 
 
 BROWSER_DIR = "/opt/ms-playwright"
@@ -406,6 +416,7 @@ def _sampler(
     no_exec=False,
     user_of=_user_of,
     timer=time.perf_counter,
+    last_pid_of=lambda: None,
 ):
     return Sampler(
         root,
@@ -414,6 +425,7 @@ def _sampler(
         open_process=lambda pid: _FakeProcess(table, pid),
         user_of=user_of,
         timer=timer,
+        last_pid_of=last_pid_of,
         user=HARNESS,
         browser_exe=browser_exe,
         browser_dir=BROWSER_DIR,
@@ -1593,3 +1605,33 @@ def test_a_gap_over_budget_names_what_the_slowest_samples_waited_on():
     )
     (failure,) = failures
     assert "1.38s" in failure and "'cmdline'" in failure and "x.exe" in failure
+
+
+# --- What O2 reads from the samples ----------------------------------------------
+
+
+def test_a_sample_records_when_it_began_and_the_kernels_last_pid():
+    table = _baseline_table()
+    table[1]["pgid"] = 1
+    last = iter([700, 705])
+    sampler = _sampler(table, root=10, last_pid_of=lambda: next(last))
+    sampler.sample()
+    assert sampler.last_pid_at_begin == 700 and sampler.baseline_pgids == [1]
+    began = sampler.began_at
+    sampler.sample()
+    assert sampler.last_pid_at_begin == 705
+    assert began is not None and sampler.began_at is not None
+    assert sampler.began_at >= began
+
+
+def test_a_settled_process_that_joins_a_group_is_reported():
+    # 50 is settled unrelated at the first sample; its group is still read.
+    table = {**_baseline_table(), 50: {"start": 1.0, "ppid": 0, "cmdline": ["svc"]}}
+    table[50]["pgid"] = 50
+    sampler, tracker = _sampler(table, root=10), Tracker()
+    _observe(sampler, tracker, 0.0)
+    assert sampler.first_sample_cached >= 1
+    table[50]["pgid"] = 30
+    (update,) = [e for e in _observe(sampler, tracker, 1.0) if e[1] == "process.update"]
+    assert (update[2]["pid"], update[2]["pgid"]) == (50, 30)
+    assert update[2]["cmdline"] == []  # withheld: it is still no actor

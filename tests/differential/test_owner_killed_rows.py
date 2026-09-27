@@ -123,7 +123,8 @@ async def _run(
     print(
         f"{ROW_H_R6} {result.label}: {result.vector} "
         f"r6={r6_reading(result)} killed={result.killed} "
-        f"o2={result.o2.state if result.o2 else None}"
+        f"o2={result.o2.row if result.o2 else None} "
+        f"o2_traced={result.o2.state if result.o2 else None}"
     )
     return result
 

@@ -41,6 +41,14 @@ read once per pid and create time, and a lifetime a full read found gone
 Every read is timed: the summary names the slowest, and every sample of at
 least ``SLOW_SAMPLE_SECONDS`` with the read it waited on longest.
 
+**When each sample was taken is part of the evidence.** The summary's
+``sample_log`` gives every sample's start, its end (the time its events
+carry) and, on Linux, the last pid the kernel had allocated as it began; the
+ready line lists the process groups of the first sample. A process settled as
+unrelated still has its group read on every sample, and a change is reported.
+That is what lets O2 say which process held a pid, or was in a group, at a
+signal's send time, and when it cannot.
+
 **Relevant means descended from the harness.** A process is a row actor when it
 descends from the harness (``--root-pid``), whether it was already running at
 the first sample, as a staging leftover would be, or appeared later.
@@ -252,6 +260,18 @@ def record(
     )
 
 
+#: The last pid the kernel allocated in this pid namespace (Linux).
+NS_LAST_PID = Path("/proc/sys/kernel/ns_last_pid")
+
+
+def read_last_pid() -> int | None:
+    """The kernel's last allocated pid, or None off Linux or if unreadable."""
+    try:
+        return int(NS_LAST_PID.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
 def posix_pgid(pid: int) -> int | None:
     """A process's group on POSIX, or None on Windows or if it cannot be read."""
     if os.name == "nt":
@@ -429,10 +449,16 @@ class Tracker:
             for pid, process in sample.items():
                 previous = self._known.get(pid)
                 if previous is not None and previous.start == process.start:
-                    if (previous.exe, previous.cmdline, previous.pgid) != (
+                    if (
+                        previous.exe,
+                        previous.cmdline,
+                        previous.pgid,
+                        previous.browser_marker,
+                    ) != (
                         process.exe,
                         process.cmdline,
                         process.pgid,
+                        process.browser_marker,
                     ):
                         events.append(
                             (
@@ -548,7 +574,8 @@ class Sampler:
     Windows's by default and set in tests to model either platform. *pgid_of*
     reads a process's group, ``os.getpgid`` by default. *read_markers* says
     whether browser markers are read (``READ_MARKERS``). *timer* times each
-    read, ``time.perf_counter`` by default.
+    read, ``time.perf_counter`` by default. *last_pid_of* reads the kernel's
+    last allocated pid as each sample begins (``read_last_pid``).
     """
 
     def __init__(
@@ -567,9 +594,16 @@ class Sampler:
         pgid_of: Callable[[int], int | None] = posix_pgid,
         read_markers: bool = READ_MARKERS,
         timer: Callable[[], float] = time.perf_counter,
+        last_pid_of: Callable[[], int | None] = read_last_pid,
     ) -> None:
         self.root_pid = root_pid
         self._timer = timer
+        self._last_pid = last_pid_of
+        #: When the sample in progress began, and the kernel's last pid then.
+        self.began_at: float | None = None
+        self.last_pid_at_begin: int | None = None
+        #: The process groups at the first sample.
+        self.baseline_pgids: list[int] = []
         self.no_exec = no_exec
         self._pgid_of = pgid_of
         self.read_markers = read_markers
@@ -711,6 +745,8 @@ class Sampler:
 
     def sample(self) -> dict[int, ProcessRecord]:
         began = self._timer()
+        self.began_at = self._clock()
+        self.last_pid_at_begin = self._last_pid()
         self._slowest = None
         first = self._baseline is None
         sample: dict[int, ProcessRecord] = {}
@@ -766,6 +802,13 @@ class Sampler:
             if known is not None and known.start != start:
                 known = None
             if known is not None and known.identity in self._unrelated:
+                # Settled as unrelated, but a group can still be joined, and a
+                # group signal's members must include it if it did.
+                group = self._pgid_of(pid)
+                # None is a process gone since it was opened: it is reported
+                # as an exit on the next sample, not as a change of group.
+                if group is not None and group != known.pgid:
+                    known = replace(known, pgid=group)
                 sample[pid] = known
                 continue
             if (pid, start) in self._vanished:
@@ -819,6 +862,9 @@ class Sampler:
                 )
         if first:
             self._baseline = {process.identity for process in sample.values()}
+            self.baseline_pgids = sorted(
+                {p.pgid for p in sample.values() if p.pgid is not None}
+            )
             root = sample.get(self.root_pid)
             if root is not None:
                 self._row.add(root.identity)
@@ -1207,6 +1253,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     max_gap = 0.0
     #: Wall time of each ``sampler.sample()``, the watcher's own cost.
     durations: list[float] = []
+    #: ``[began, ended, kernel's last pid as it began]`` for every sample;
+    #: ``ended`` is the time every event of that sample carries.
+    sample_log: list[list[Any]] = []
     stopped_by = "deadline"
     with args.out.open("a", encoding="utf-8") as out:
 
@@ -1228,6 +1277,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if last_sample is not None:
                 max_gap = max(max_gap, now - last_sample)
             last_sample = now
+            sample_log.append([sampler.began_at, now, sampler.last_pid_at_begin])
             for actor, kind, fields in tracker.observe(sample, now):
                 write(actor, kind, fields, now)
             if observation_start is None:
@@ -1237,7 +1287,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 write(
                     "watcher",
                     "watcher.ready",
-                    {"pid": os.getpid(), "baseline_processes": len(sample)},
+                    {
+                        "pid": os.getpid(),
+                        "baseline_processes": len(sample),
+                        "baseline_pgids": sampler.baseline_pgids,
+                    },
                     now,
                 )
             out.flush()
@@ -1267,6 +1321,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "max_gap_seconds": round(max_gap, 4),
                 **duration_stats(durations),
                 **sampler.stats(),
+                "sample_log": sample_log,
                 "browser_exe": args.browser_exe,
                 "browser_dir": args.browser_dir,
                 "read_failures": sampler.read_failures,

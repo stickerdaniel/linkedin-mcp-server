@@ -78,7 +78,9 @@ KINDS = frozenset(
         "row.identity",
         "row.outcome",
         # O2: the signal oracle, the canaries and what the harness killed.
-        "signal.sent",
+        "signal.call",
+        "signal.resolved",
+        "signal.violation",
         "signal.oracle",
         "process.death_unattributed",
         "canary.start",

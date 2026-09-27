@@ -108,12 +108,15 @@ from differential.session import (
     stage_signed_in_session,
     write_synthetic_cookie_file,
 )
+from differential.signals import INCOMPLETE as O2_INCOMPLETE
 from differential.signals import UNKNOWN as O2_UNKNOWN
 from differential.signals import UNOBSERVED as O2_UNOBSERVED
 from differential.signals import VIOLATED as O2_VIOLATED
 from differential.signals import (
+    ORACLE_REQUIRED,
     Canaries,
     O2Result,
+    OracleOutcome,
     ProcessHistory,
     SignalOracle,
     classes_direct_would_not_send,
@@ -1230,6 +1233,7 @@ def settle_owner(
     *,
     auth_root: str,
     wait_seconds: float = _OWNER_KILL_WAIT_SECONDS,
+    linux: bool | None = None,
 ) -> OwnerDisposition:
     """Decide whether the row's owner is gone, signalling only that owner.
 
@@ -1238,6 +1242,7 @@ def settle_owner(
     never gone. Nothing is ever looked up by pid here: the only process that may
     receive a signal is ``owner.process``, the handle taken when the row
     identified it, and the descriptor must still name that pid and instance.
+    A zombie is gone only once the whole process has exited (``is_dead``).
     """
 
     def unknown(reason: str, *, signalled: bool = False) -> OwnerDisposition:
@@ -1271,7 +1276,7 @@ def settle_owner(
         return unknown(f"the owner's liveness could not be read ({type(exc).__name__})")
     try:
         # H-R6 kills the owner, and its parent may not have reaped it yet.
-        if not running or is_dead(owner.process):
+        if not running or is_dead(owner.process, linux=linux):
             return OwnerDisposition(GONE, False)
     except psutil.Error as exc:
         return unknown(f"the owner's liveness could not be read ({type(exc).__name__})")
@@ -1282,7 +1287,7 @@ def settle_owner(
     except psutil.Error as exc:
         return unknown(f"the owner could not be stopped ({type(exc).__name__})")
     try:
-        dead = wait_until_dead(owner.process, wait_seconds)
+        dead = wait_until_dead(owner.process, wait_seconds, linux=linux)
     except psutil.Error as exc:
         return unknown(
             f"the owner's exit could not be confirmed ({type(exc).__name__})",
@@ -1307,7 +1312,11 @@ class DaemonCleanup:
 
 
 def retire_daemon_state(
-    account: ActorAccount, owner: OwnerIdentity | None
+    account: ActorAccount,
+    owner: OwnerIdentity | None,
+    *,
+    linux: bool | None = None,
+    wait_seconds: float = _OWNER_KILL_WAIT_SECONDS,
 ) -> DaemonCleanup:
     """Settle the row's owner, then remove the row's daemon directory.
 
@@ -1327,7 +1336,12 @@ def retire_daemon_state(
             if descriptor is not None:
                 published = PublishedOwner(descriptor.pid, descriptor.instance_id)
     disposition = settle_owner(
-        owner, published, read_error, auth_root=str(account.auth_root)
+        owner,
+        published,
+        read_error,
+        auth_root=str(account.auth_root),
+        linux=linux,
+        wait_seconds=wait_seconds,
     )
     failures = list(disposition.failures)
     if disposition.gone and existed:
@@ -1382,10 +1396,17 @@ class RowVector:
     #: The watcher saw a row actor start the owner's release gate, which is an
     #: attempt to start one whether or not the gate ever released it.
     owner_start_attempted: bool = False
-    #: O2 for this row (``signals.derive_o2``): held, violated, unknown, or
-    #: unobserved where no signal oracle ran.
+    #: O2 for every actor of the row: ``violated`` on evidence (a traced
+    #: violation, a dead canary), otherwise ``unobserved``. Never ``held``:
+    #: nothing observes the senders outside the traced scope.
     o2: str = O2_UNOBSERVED
-    #: Every class of signal the oracle saw delivered, ``role:target kind``.
+    #: O2 for the traced scope only (``signals.derive_o2``): the killed actor
+    #: and its guardian from the attach on. ``held``, ``violated``,
+    #: ``unknown``, ``incomplete``, or ``unobserved`` where no oracle ran.
+    o2_traced: str = O2_UNOBSERVED
+    #: The oracle was required here (native Linux CI, a row that kills).
+    o2_required: bool = False
+    #: Every class of signal the oracle resolved, ``role:target kind``.
     signal_classes: tuple[str, ...] = ()
     #: H-R6: the group the killed actor's guardian was told to kill, from its
     #: argv; None where no guardian was seen (Windows has none).
@@ -1398,21 +1419,29 @@ class RowVector:
 _ASSOCIATE_SECONDS = 5.0
 
 
-def is_dead(process: Any) -> bool:
-    """Whether *process* has ended, a zombie included.
+def is_dead(
+    process: Any,
+    *,
+    linux: bool | None = None,
+    threads_of: Callable[[Any], int | None] = thread_count,
+) -> bool:
+    """Whether *process* has ended as a whole, an unreaped one included.
 
     An owner is not the harness's child, so once killed it stays a zombie
     until its own parent reaps it, and ``psutil`` reads a zombie as running.
-    A read that fails for any other reason than the process being gone
-    raises: that is not knowing, never dead.
+    A zombie counts as dead only under ``exited_zombie``'s contract: on Linux
+    the status is the leader thread's, and other threads may run on. A read
+    that fails for any other reason than the process being gone raises: that
+    is not knowing, never dead.
     """
     try:
-        return process.status() == psutil.STATUS_ZOMBIE
+        zombie = process.status() == psutil.STATUS_ZOMBIE
     except psutil.NoSuchProcess:
         return True
+    return zombie and exited_zombie(process, linux=linux, threads_of=threads_of)
 
 
-def wait_until_dead(process: Any, seconds: float) -> bool:
+def wait_until_dead(process: Any, seconds: float, *, linux: bool | None = None) -> bool:
     """Whether *process* is dead within *seconds*; ``psutil.Error`` is unknown.
 
     On Windows, where nothing lingers as a zombie, the handle is waited on.
@@ -1426,7 +1455,7 @@ def wait_until_dead(process: Any, seconds: float) -> bool:
             pass
         return True
     deadline = time.monotonic() + seconds
-    while not is_dead(process):
+    while not is_dead(process, linux=linux):
         if time.monotonic() >= deadline:
             return False
         time.sleep(0.02)
@@ -1627,9 +1656,11 @@ def row_expectations(
     if not vector.cleanup_clean:
         failures.append("cleanup had to intervene or could not finish")
     if vector.o2 == O2_VIOLATED:
-        failures.append("O2: a signal reached a wrong target, or a canary died")
-    elif vector.o2 == O2_UNKNOWN:
+        failures.append("O2: a signal was aimed at a wrong target, or a canary died")
+    if vector.o2_traced == O2_UNKNOWN:
         failures.append("O2: a traced signal's sender or target could not be placed")
+    elif vector.o2_traced == O2_INCOMPLETE and vector.o2_required:
+        failures.append("O2: the required signal oracle's evidence is incomplete")
     if expect_owner:
         if not vector.owner_published:
             failures.append("daemon mode published no owner")
@@ -1730,20 +1761,21 @@ def r6_verdict(result: RowResult, *, experiment: str, windows: bool) -> list[str
     is the harness missing a known difference. K3 (candidate daemon) must read
     ``=`` and have recovered on the second call. K1 (Direct killed) reads ``=``
     as the non-leader server a host starts. On Windows there is no guardian, so
-    the reading is not applicable and nothing is required of it.
+    the reading is not applicable; the kill and K3's recovery still are.
     """
     problems = list(result.runtime_failures)
     killed = result.killed or {}
+    vector = result.vector
     if killed.get("exit") != "killed":
         problems.append(f"the harness did not kill the actor: {killed}")
+    if experiment == "K3" and (vector is None or vector.recovered is not True):
+        problems.append("the frontend did not recover on the call after the kill")
     if windows:
         return problems
     reading = r6_reading(result)
-    vector = result.vector
     if reading is None:
         return [*problems, "the killed actor's guardian was never seen"]
     assert vector is not None
-    oracle = killed.get("oracle") or {}
     group_kill_seen = GUARDIAN_OWNER_GROUP_KILL in vector.signal_classes
     if experiment == "K2":
         if reading != "!":
@@ -1751,7 +1783,10 @@ def r6_verdict(result: RowResult, *, experiment: str, windows: bool) -> list[str
                 "K2 read '=' on H-R6, where the baseline's '!' is known (its "
                 "owner's guardian gets the owner's group): a harness defect"
             )
-        elif oracle.get("attached") and not group_kill_seen:
+        elif (
+            vector.o2_traced not in (O2_UNOBSERVED, O2_INCOMPLETE)
+            and not group_kill_seen
+        ):
             problems.append(
                 "K2's guardian had a group to kill, but the signal oracle saw no "
                 "kill of the owner's group: a harness defect"
@@ -1762,8 +1797,6 @@ def r6_verdict(result: RowResult, *, experiment: str, windows: bool) -> list[str
             f"{experiment} read '!' on H-R6: the killed actor's guardian was told "
             f"to kill group {vector.guardian_owner_group}, or the oracle saw it do so"
         )
-    if experiment == "K3" and vector.recovered is not True:
-        problems.append("the frontend did not recover on the call after the kill")
     return problems
 
 
@@ -1780,12 +1813,13 @@ def compare_repeat(first: RowVector, second: RowVector) -> list[str]:
 def compare_to_direct(direct: RowVector, daemon: RowVector) -> list[str]:
     """K3 against a Direct reference: O1, O2 and O4 must be ``=``.
 
-    O2 is ``=`` when the per-row state is the same and the daemon row sent no
-    class of signal that neither Direct's construction nor the reference's run
-    sends. Two rows without an oracle compare as equal and unobserved.
+    O2 is ``=`` when the row's and the traced scope's states are the same and
+    the daemon row sent no class of signal that neither Direct's construction
+    nor the reference's run sends. Two unobserved states compare equal as
+    labels, which says nothing of what either row's unobserved actors sent.
     """
     differences = []
-    for name in ("o1_single_browser", "o2", "o4_session"):
+    for name in ("o1_single_browser", "o2", "o2_traced", "o4_session"):
         if getattr(direct, name) != getattr(daemon, name):
             differences.append(
                 f"{name}: Direct {getattr(direct, name)!r}, daemon "
@@ -1910,7 +1944,10 @@ def judge_row(observed: Observations) -> tuple[RowVector, list[str]]:
     o2 = observed.o2
     if o2 is not None:
         failures += [f"O2 violation: {line}" for line in o2.violations]
+        failures += [f"O2 violation: {line}" for line in o2.canary_deaths]
         failures += [f"O2 unknown: {line}" for line in o2.unknowns]
+        if o2.required:
+            failures += [f"O2 incomplete: {line}" for line in o2.incomplete]
 
     watcher_problems = watcher_failures(
         observed.watcher,
@@ -2006,7 +2043,9 @@ def judge_row(observed: Observations) -> tuple[RowVector, list[str]]:
         owner_start_attempted=bool(observed.owner_gates),
         host_exit_clean=not host_problems,
         cleanup_clean=cleanup_clean,
-        o2=o2.state if o2 is not None else O2_UNOBSERVED,
+        o2=o2.row if o2 is not None else O2_UNOBSERVED,
+        o2_traced=o2.state if o2 is not None else O2_UNOBSERVED,
+        o2_required=o2.required if o2 is not None else False,
         signal_classes=o2.classes if o2 is not None else (),
         guardian_owner_group=killed.get("guardian_owner_group"),
         recovered=_recovered(host) if killed and observed.daemon else None,
@@ -2280,22 +2319,11 @@ async def measure_host_quit_row(
         browser_exe=browser_exe,
         browser_dir=browsers,
     )
-    watcher.start()
-    # After the watcher's baseline, so it reports the canaries' starts and a
-    # signal aimed at one resolves to it.
+    # Constructed here, started inside the row's try: whatever fails from the
+    # watcher's start on, its ``finally`` ends every helper already started.
     canaries = Canaries()
-    for canary in canaries.start():
-        emit("canary", "canary.start", **canary.as_event_fields())
-    canary_problems = canaries.outside_the_harness()
-    oracle = SignalOracle(work_dir)
-    emit(
-        "harness",
-        "signal.oracle",
-        phase="setup",
-        available=oracle.available,
-        reason=oracle.unavailable,
-        ptrace_scope=oracle.scope,
-    )
+    canary_problems: list[str] = []
+    oracle = SignalOracle(work_dir, required=kill_actor and ORACLE_REQUIRED)
     actors_began = time.time()
 
     owner: dict[str, Any] = {}
@@ -2336,6 +2364,7 @@ async def measure_host_quit_row(
             "attached": oracle.available and reason is None,
             "reason": reason,
             "ptrace_scope": oracle.scope,
+            "required": oracle.required,
         }
         try:
             # SIGKILL on POSIX, TerminateProcess on Windows: psutil's kill().
@@ -2400,8 +2429,24 @@ async def measure_host_quit_row(
     after: ProfileSnapshot | None = None
     actors_ended: float | None = None
     residual: list[int] = []
-    calls: list[Any] = []
+    teardown: list[str] = []
     try:
+        watcher.start()
+        # After the watcher's baseline, so it reports the canaries' starts and
+        # a signal aimed at one resolves to it.
+        for canary in canaries.start():
+            emit("canary", "canary.start", **canary.as_event_fields())
+        canary_problems = canaries.outside_the_harness()
+        emit(
+            "harness",
+            "signal.oracle",
+            phase="setup",
+            available=oracle.available,
+            reason=oracle.unavailable,
+            ptrace_scope=oracle.scope,
+            required=oracle.required,
+        )
+        actors_began = time.time()
         host = await run_host_session(
             command,
             env=env,
@@ -2488,29 +2533,46 @@ async def measure_host_quit_row(
     finally:
         if actors_ended is None:
             actors_ended = time.time()
-        # Once its tracees have exited, strace has seen every signal they sent.
-        calls = await asyncio.to_thread(oracle.stop)
-        # The row's interval ends here: the watcher stops before anything else
-        # starts on the profile.
-        result.watcher = watcher.stop()
+        # Each helper is ended whatever the one before it did; a failure is
+        # the row's to report.
+        confirmed = [killed["pid"]] if killed.get("exit") == "killed" else []
+        try:
+            # Once its tracees have exited, strace has seen every signal they
+            # sent.
+            outcome = await asyncio.to_thread(oracle.stop, confirmed_dead=confirmed)
+        except Exception as exc:  # noqa: BLE001 - reported, the teardown goes on
+            teardown.append(f"the signal oracle could not be stopped: {exc!r}")
+            outcome = OracleOutcome(
+                status=O2_INCOMPLETE,
+                required=oracle.required,
+                reasons=[f"the oracle could not be stopped: {exc!r}"],
+            )
+        try:
+            # The row's interval ends here: the watcher stops before anything
+            # else starts on the profile.
+            result.watcher = watcher.stop()
+        except Exception as exc:  # noqa: BLE001 - reported, the teardown goes on
+            teardown.append(f"the watcher could not be stopped: {exc!r}")
+        canary_deaths: list[dict[str, Any]] = []
+        try:
+            canary_deaths = canaries.deaths()
+        finally:
+            canaries.stop()
         observed_events = watcher.observed()
-        canary_deaths = canaries.deaths()
-        canaries.stop()
         o2 = derive_o2(
-            calls,
+            outcome,
             ProcessHistory(observed_events, outside=[os.getpid()]),
-            threads=oracle.threads,
-            oracle_available=bool((killed.get("oracle") or {}).get("attached")),
             canary_deaths=canary_deaths,
         )
-        for call in calls:
-            emit("harness", "signal.sent", **call.as_event_fields())
+        emit("harness", "signal.oracle", phase="stop", **outcome.as_event_fields())
+        for call in outcome.calls:
+            emit("harness", "signal.call", **call.as_event_fields())
         for resolved in o2.resolved:
-            emit("harness", "signal.sent", resolution=resolved)
+            emit("harness", "signal.resolved", **resolved)
         for death in canary_deaths:
             emit("canary", "process.death_unattributed", **death)
         for violation in o2.violations:
-            emit("watcher", "process.death_unattributed", wrong_target=violation)
+            emit("harness", "signal.violation", violation=violation)
         launched = owner_launches(observed_events)
         # The row's own runtime's gate, and the candidate's: a baseline row
         # reaching the candidate's gate is an owner start attempt all the same.
@@ -2628,6 +2690,7 @@ async def measure_host_quit_row(
     result.o2 = o2
     result.failures += result.runtime_failures
     result.failures += [f"canary placement: {problem}" for problem in canary_problems]
+    result.failures += [f"teardown: {problem}" for problem in teardown]
     (work_dir / "failures.json").write_text(
         json.dumps(
             {
@@ -2653,6 +2716,7 @@ async def measure_host_quit_row(
         failures=result.failures,
         cleanup=asdict(result.cleanup),
         killed=result.killed,
-        o2_state=o2.state,
+        o2_state=o2.row,
+        o2_traced=o2.state,
     )
     return result

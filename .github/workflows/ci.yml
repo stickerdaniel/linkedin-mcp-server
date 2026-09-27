@@ -368,6 +368,7 @@ jobs:
       # default kernel.yama.ptrace_scope is 1, which lets a tracer attach only
       # to its descendants, and strace is not an ancestor of the owner, so the
       # oracle runs `sudo -n strace`. Only here, behind the trust step's guard.
+      # H-R6 requires it on Linux: an oracle that cannot attach fails the row.
       - name: Install the signal oracle
         timeout-minutes: 5
         run: |
@@ -675,7 +676,8 @@ jobs:
         run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_frozen_rows.py
 
       # The signal oracle and row H-R6, as in the Ubuntu job. The oracle runs
-      # on Linux only; macOS and Windows record it as unavailable.
+      # on Linux only, where H-R6 requires it; macOS and Windows record it as
+      # unavailable.
       - name: Install the signal oracle
         if: runner.os == 'Linux'
         timeout-minutes: 5

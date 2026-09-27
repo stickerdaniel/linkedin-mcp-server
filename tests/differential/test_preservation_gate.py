@@ -12,6 +12,7 @@ post-quit session was started.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import functools
 import os
 import subprocess
@@ -28,6 +29,12 @@ from differential import harness
 from differential.events import EventLog
 from differential.harness import DaemonCleanup, PostQuit, measure_host_quit_row
 from differential.session import LAST_VERSION_FILE, write_synthetic_cookie_file
+from differential.signals import (
+    COMPLETE,
+    UNAVAILABLE,
+    OracleOutcome,
+    parse_strace,
+)
 from differential.test_row_judgement import _healthy
 from linkedin_mcp_server.session_state import portable_cookie_path, write_source_state
 
@@ -70,25 +77,33 @@ class _Actor:
             return psutil.STATUS_ZOMBIE
         raise psutil.NoSuchProcess(self.pid)
 
+    def num_threads(self):
+        # SIGKILL ended every thread: the dead leader is all that is left.
+        return 1
+
     def wait(self, timeout=None):
         return None
 
 
-class _NoOracle:
-    """No strace: the unit rows never attach anything to a modelled pid."""
+class _Oracle:
+    """No strace: the unit rows never attach anything to a modelled pid.
+
+    ``stop`` returns ``outcome``, unavailable unless a test sets another.
+    """
 
     available = False
     unavailable = "modelled"
     scope = None
+    outcome = OracleOutcome(status=UNAVAILABLE, reasons=["modelled"])
 
-    def __init__(self, *args):
-        self.threads: dict[int, int] = {}
+    def __init__(self, directory, *, required=False):
+        self.required = required
 
     def start(self, pids):
         raise AssertionError("the oracle is not available")
 
-    def stop(self):
-        return []
+    def stop(self, *, confirmed_dead=()):
+        return dataclasses.replace(self.outcome, required=self.required)
 
 
 class _Row:
@@ -152,7 +167,8 @@ def row(tmp_path, monkeypatch, profile):
     monkeypatch.setattr(harness, "Watcher", _Watcher)
     monkeypatch.setattr(harness, "run_host_session", host)
     monkeypatch.setattr(harness, "identify_owner", identify)
-    monkeypatch.setattr(harness, "SignalOracle", _NoOracle)
+    monkeypatch.setattr(harness, "SignalOracle", _Oracle)
+    monkeypatch.setattr(_Oracle, "outcome", _Oracle.outcome)
     # A published descriptor, which is what the row looks for before reading.
     published = tmp_path / "descriptor.json"
     published.write_text("{}")
@@ -564,3 +580,111 @@ async def test_the_direct_rows_kill_reaches_the_associated_server(row, monkeypat
     assert result.killed is not None and result.killed["exit"] == "killed"
     (event,) = _killed_events(row)
     assert (event["role"], event["pid"]) == ("frontend", 4242)
+
+
+# --- O2 through the row entry ---------------------------------------------------
+
+
+def _timeline(*records: dict, ends=(1.0, 2.0, 5.0, 6.0, 6.5, 7.0)) -> list[dict]:
+    """Watcher records with the ready line and a summary that logs its samples."""
+    return [
+        {"kind": "watcher.ready", "t": 0.5, "baseline_pgids": [1]},
+        *records,
+        {
+            "kind": "watcher.summary",
+            "t": ends[-1],
+            "sample_log": [[end - 0.01, end, 100000] for end in ends],
+            "read_failures": [],
+        },
+    ]
+
+
+def _started(pid, ppid, t, actor, *, in_row=True):
+    return {
+        "kind": "process.start",
+        "t": t,
+        "pid": pid,
+        "ppid": ppid,
+        "pgid": pid,
+        "start_identity": t,
+        "in_row": in_row,
+        "actor": actor,
+    }
+
+
+async def test_a_signal_is_reported_as_a_signal_and_never_as_a_death(row, monkeypatch):
+    # The traced owner sent a SIGTERM outside its launched set. That fails
+    # O2, as a delivered signal: nothing observed a death.
+    monkeypatch.setattr(
+        _Oracle,
+        "outcome",
+        OracleOutcome(
+            status=COMPLETE,
+            traced=[42],
+            attached_at=5.0,
+            calls=parse_strace("42  6.0 kill(95, SIGTERM) = 0\n"),
+        ),
+    )
+    result, _ = await row(
+        processes=[],
+        summary={},
+        observed=_timeline(
+            _started(42, 1, 1.0, "owner"), _started(95, 7, 2.0, "other", in_row=False)
+        ),
+    )
+    assert result.vector is not None and result.vector.o2 == "violated"
+    kinds = [r["kind"] for r in row.log.records()]
+    assert "process.death_unattributed" not in kinds
+    (violation,) = [r for r in row.log.records() if r["kind"] == "signal.violation"]
+    assert "delivered SIGTERM" in violation["violation"]
+    assert any(f.startswith("O2 violation") for f in result.failures)
+
+
+class _Helpers:
+    """Canaries that record their own teardown."""
+
+    stopped = 0
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def start(self):
+        return []
+
+    def outside_the_harness(self):
+        return []
+
+    def deaths(self):
+        return []
+
+    def stop(self):
+        _Helpers.stopped += 1
+
+
+async def test_a_helper_that_fails_to_stop_skips_no_other_teardown(row, monkeypatch):
+    class Stuck(_Watcher):
+        def stop(self):
+            raise RuntimeError("the watcher would not stop")
+
+    monkeypatch.setattr(harness, "Watcher", Stuck)
+    monkeypatch.setattr(harness, "Canaries", _Helpers)
+    monkeypatch.setattr(_Helpers, "stopped", 0)
+    result, _ = await row(processes=[], summary={})
+    assert _Helpers.stopped == 1
+    assert any("the watcher could not be stopped" in f for f in result.failures)
+    assert row.cleaned, "the owner's cleanup still ran"
+
+
+async def test_a_watcher_that_never_started_still_has_its_helpers_ended(
+    row, monkeypatch
+):
+    class Failing(_Watcher):
+        def start(self):
+            raise RuntimeError("no baseline")
+
+    monkeypatch.setattr(harness, "Watcher", Failing)
+    monkeypatch.setattr(harness, "Canaries", _Helpers)
+    monkeypatch.setattr(_Helpers, "stopped", 0)
+    with pytest.raises(RuntimeError, match="no baseline"):
+        await row(processes=[], summary={})
+    assert _Helpers.stopped == 1

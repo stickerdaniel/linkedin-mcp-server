@@ -259,10 +259,14 @@ class _Process:
         liveness_error=None,
         wait_error=None,
         zombie=False,
+        threads=1,
         cmdline=("python", "-P", "-m", "linkedin_mcp_server.daemon_owner"),
     ):
         self.running = running
         self.zombie = zombie
+        self.threads = threads
+        # Only ``thread_count``'s fallback reads it: a pid no process has.
+        self.pid = -1
         self.stops_on_kill = stops_on_kill
         self.created = created
         self.liveness_error = liveness_error
@@ -293,6 +297,11 @@ class _Process:
             raise self.wait_error
         if self.running:
             raise psutil.TimeoutExpired(timeout)
+
+    def num_threads(self):
+        if self.threads is None:
+            raise psutil.AccessDenied(4321)
+        return self.threads
 
     def status(self):
         if self.kills and self.wait_error is not None:
@@ -342,13 +351,50 @@ def test_an_owner_that_already_exited_is_not_signalled(no_pid_lookup):
 
 
 def test_a_killed_owner_its_parent_has_not_reaped_is_gone(no_pid_lookup):
-    # H-R6 killed it; a zombie still reads as running, but has ended.
-    process = _Process(zombie=True)
+    # H-R6 killed it; a zombie still reads as running, but has ended: on
+    # Linux its dead leader is the only thread left.
+    process = _Process(zombie=True, threads=1)
     disposition = settle_owner(
-        _owner(process), PublishedOwner(4321, "instance-a"), None, auth_root="/auth"
+        _owner(process),
+        PublishedOwner(4321, "instance-a"),
+        None,
+        auth_root="/auth",
+        linux=True,
     )
     assert (disposition.gone, disposition.signalled) == (True, False)
     assert process.kills == 0
+
+
+@pytest.mark.parametrize(
+    "threads",
+    [pytest.param(2, id="live-threads"), pytest.param(None, id="count-unreadable")],
+)
+def test_a_zombie_leader_that_may_have_live_threads_is_not_gone(no_pid_lookup, threads):
+    # ``exited_zombie``'s contract: on Linux only the dead leader alone is an
+    # exited process. Such an owner is killed and waited for like a live one.
+    process = _Process(zombie=True, threads=threads, stops_on_kill=False)
+    disposition = settle_owner(
+        _owner(process),
+        PublishedOwner(4321, "instance-a"),
+        None,
+        auth_root="/auth",
+        wait_seconds=0.05,
+        linux=True,
+    )
+    assert not disposition.gone and disposition.signalled
+    assert process.kills == 1
+
+
+def test_on_macos_and_windows_a_zombie_is_the_whole_process(no_pid_lookup):
+    process = _Process(zombie=True, threads=2)
+    disposition = settle_owner(
+        _owner(process),
+        PublishedOwner(4321, "instance-a"),
+        None,
+        auth_root="/auth",
+        linux=False,
+    )
+    assert disposition.gone and process.kills == 0
 
 
 def test_a_stale_pid_now_naming_another_owner_is_never_signalled(no_pid_lookup):
@@ -500,6 +546,18 @@ def test_cleanup_keeps_the_directory_when_liveness_is_unreadable(row_state):
     published["descriptor"] = SimpleNamespace(pid=4321, instance_id="instance-a")
     process = _Process(liveness_error=psutil.AccessDenied(4321))
     cleanup = retire_daemon_state(account, _owner(process))
+    assert directory.exists() and not cleanup.owner_gone and not cleanup.cleaned
+
+
+def test_cleanup_keeps_the_directory_of_a_zombie_leader_with_live_threads(
+    row_state,
+):
+    directory, published, account = row_state
+    published["descriptor"] = SimpleNamespace(pid=4321, instance_id="instance-a")
+    process = _Process(zombie=True, threads=2, stops_on_kill=False)
+    cleanup = retire_daemon_state(
+        account, _owner(process), linux=True, wait_seconds=0.05
+    )
     assert directory.exists() and not cleanup.owner_gone and not cleanup.cleaned
 
 

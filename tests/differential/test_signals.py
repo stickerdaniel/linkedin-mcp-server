@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import dataclasses
 import os
-from typing import Any
+import subprocess
+from types import SimpleNamespace
+from typing import Any, cast
 
 import psutil
 import pytest
@@ -29,19 +31,26 @@ from differential.harness import (
     r6_reading,
     r6_verdict,
 )
+from differential import signals
 from differential.signals import (
+    COMPLETE,
     HELD,
+    INCOMPLETE,
+    UNAVAILABLE,
     UNKNOWN,
     UNOBSERVED,
     VIOLATED,
     Canaries,
     O2Result,
+    OracleOutcome,
     ProcessHistory,
     SignalOracle,
     classes_direct_would_not_send,
     derive_o2,
+    oracle_required,
     oracle_unavailable,
     parse_strace,
+    read_trace,
 )
 from differential.test_row_judgement import _healthy
 from differential.test_watcher import (
@@ -83,7 +92,7 @@ def test_captured_strace_lines_parse_to_their_targets():
     assert calls[0].probe and not calls[1].probe
 
 
-def test_a_call_split_by_another_thread_is_joined_and_other_lines_skipped():
+def test_a_call_split_by_another_thread_is_joined_and_signal_lines_skipped():
     text = (
         "300  10.000001 kill(400, SIGKILL <unfinished ...>\n"
         "301  10.000002 --- SIGCHLD {si_signo=SIGCHLD} ---\n"
@@ -92,10 +101,11 @@ def test_a_call_split_by_another_thread_is_joined_and_other_lines_skipped():
         "300  10.000005 kill(-1, SIGKILL) = 0\n"
         "300  10.000006 tkill(401, SIGUSR1) = 0\n"
         "300  10.000007 pidfd_send_signal(5<anon_inode:[pidfd]>, SIGKILL, NULL, 0) = 0\n"
-        "strace: Process 300 attached\n"
         "300  10.000008 +++ killed by SIGKILL +++\n"
     )
-    calls = parse_strace(text)
+    trace = read_trace(text)
+    assert trace.problems == [] and trace.ended == {300}
+    calls = trace.calls
     assert [(c.syscall, c.target_pid, c.target_group, c.everyone) for c in calls] == [
         ("kill", 400, None, False),
         ("kill", None, 0, False),
@@ -146,15 +156,45 @@ def _row() -> list[dict[str, Any]]:
     ]
 
 
-def _o2(text: str, records=None, **kwargs) -> O2Result:
-    history = ProcessHistory(records or _row(), outside=[HARNESS])
-    return derive_o2(
-        parse_strace(text),
-        history,
-        threads=kwargs.pop("threads", {}),
-        oracle_available=kwargs.pop("oracle_available", True),
-        **kwargs,
+def _timeline(
+    records,
+    *,
+    baseline=(1, 5, 7),
+    last_pid=lambda end: 100000,
+    failures=(),
+    extra=(),
+) -> list[dict[str, Any]]:
+    """*records* as the watcher publishes them: a ready line naming the first
+    sample's groups, and a summary logging every sample. A sample ends at
+    every event's time and every quarter second; each began 0.01 earlier."""
+    ends = sorted(
+        {float(r["t"]) for r in records}
+        | {round(0.25 * i, 2) for i in range(1, 60)}
+        | set(extra)
     )
+    return [
+        {"kind": "watcher.ready", "t": 0.1, "baseline_pgids": list(baseline)},
+        *records,
+        {
+            "kind": "watcher.summary",
+            "t": ends[-1],
+            "sample_log": [[end - 0.01, end, last_pid(end)] for end in ends],
+            "read_failures": list(failures),
+        },
+    ]
+
+
+def _outcome(text: str, **fields) -> OracleOutcome:
+    return OracleOutcome(status=COMPLETE, calls=parse_strace(text), **fields)
+
+
+def _o2(text: str, records=None, **kwargs) -> O2Result:
+    history = ProcessHistory(_timeline(records or _row()), outside=[HARNESS])
+    available = kwargs.pop("oracle_available", True)
+    outcome = _outcome(text, threads=kwargs.pop("threads", {}))
+    if not available:
+        outcome = OracleOutcome(status=UNAVAILABLE)
+    return derive_o2(outcome, history, **kwargs)
 
 
 def test_the_guardians_drain_of_its_browser_group_holds():
@@ -195,6 +235,9 @@ def test_a_group_with_a_member_outside_the_set_violates_o2():
         pytest.param(
             "21  6.0 kill(-7, SIGKILL) = 0\n", id="group-led-before-the-watcher"
         ),
+        # The frontend's group existed at the first sample: members the
+        # watcher never reported may be in it beside the one it did.
+        pytest.param("21  6.0 kill(-5, SIGKILL) = 0\n", id="group-in-the-baseline"),
         pytest.param("21  6.0 kill(4242, SIGKILL) = 0\n", id="pid-never-reported"),
         pytest.param("777  6.0 kill(-30, SIGKILL) = 0\n", id="sender-unknown"),
         pytest.param(
@@ -240,9 +283,11 @@ def test_a_crashpad_handler_is_in_its_browsers_launched_set():
         pytest.param("m-other", id="another-launchs-marker"),
     ],
 )
-def test_a_leaderless_group_without_the_rows_marker_stays_unknown(marker):
+def test_a_group_of_a_process_without_the_rows_marker_is_outside(marker):
+    # The samples say who was in group 40; its member is no launch of the
+    # row's, whatever the group's leader was.
     result = _o2("21  6.0 kill(-40, SIGKILL) = 0\n", _crashpad(marker))
-    assert result.state == UNKNOWN, result
+    assert result.state == VIOLATED, result
 
 
 def test_a_process_outside_the_tree_without_the_rows_marker_is_outside():
@@ -334,12 +379,13 @@ _K1_FROZEN_TRACE = """\
     ],
 )
 def test_a_guardian_is_judged_by_its_role_when_it_signalled(records):
-    history = ProcessHistory(records, outside=[9157])
+    history = ProcessHistory(
+        _timeline(records, baseline=(1, 1889), last_pid=lambda end: 9455),
+        outside=[9157],
+    )
     result = derive_o2(
-        parse_strace(_K1_FROZEN_TRACE),
+        _outcome(_K1_FROZEN_TRACE, traced=[9327, 9333], attached_at=10.9),
         history,
-        threads={},
-        oracle_available=True,
     )
     assert result.state == HELD, result
     assert result.classes == ("guardian:browser-group",)
@@ -360,6 +406,10 @@ def test_a_group_is_resolved_with_the_members_it_had_when_signalled():
     assert result.resolved[0]["targets"] == [[30, 4.0], [31, 4.0]]
     later = _o2("21  8.0 kill(-30, SIGKILL) = 0\n", records)
     assert later.resolved[0]["targets"] == [[30, 4.0]]
+    # Between the sample that saw it in 30 and the one that saw it in 31,
+    # where it was at the send is not known: neither is the group.
+    between = _o2("21  6.9 kill(-30, SIGKILL) = 0\n", records)
+    assert between.state == UNKNOWN and "changed group" in between.unknowns[0]
 
 
 def test_a_thread_of_a_traced_process_is_attributed_through_the_map():
@@ -382,11 +432,13 @@ def test_a_signal_to_a_target_that_already_exited_is_not_resolved_to_it():
     assert _o2("21  6.0 kill(30, SIGKILL) = 0\n", records).state == UNKNOWN
 
 
-def test_a_canary_death_violates_o2_even_without_an_oracle():
+def test_a_canary_death_violates_the_rows_o2_even_without_an_oracle():
     death = [{"pid": 90}]
-    assert _o2("", oracle_available=False).state == UNOBSERVED
-    assert _o2("", oracle_available=False, canary_deaths=death).state == VIOLATED
-    assert _o2("", canary_deaths=death).state == VIOLATED
+    unobserved = _o2("", oracle_available=False)
+    assert (unobserved.state, unobserved.row) == (UNOBSERVED, UNOBSERVED)
+    dead = _o2("", oracle_available=False, canary_deaths=death)
+    assert (dead.state, dead.row) == (UNOBSERVED, VIOLATED)
+    assert _o2("", canary_deaths=death).row == VIOLATED
 
 
 def test_the_pre_path_a_guardian_kill_is_a_signal_direct_would_not_send():
@@ -445,16 +497,33 @@ def test_the_oracle_traces_every_signal_syscall_of_the_pids_given(tmp_path):
     command = SignalOracle(tmp_path).command([20, 21])
     assert command[:3] == ["sudo", "-n", "strace"]
     assert "-yy" in command and "-f" in command and "-ttt" in command
-    assert "trace=kill,tkill,tgkill,pidfd_send_signal" in command
-    assert "signal=none" in command
+    assert (
+        "trace=kill,tkill,tgkill,pidfd_send_signal,rt_sigqueueinfo,"
+        "rt_tgsigqueueinfo" in command
+    )
+    # Every end of a tracee is written, one a signal caused included.
+    assert not any(part.startswith("signal=") for part in command)
     assert command[-4:] == ["-p", "20", "-p", "21"]
 
 
-def test_an_unavailable_oracle_attaches_nothing_and_reads_nothing(tmp_path):
-    oracle = SignalOracle(tmp_path)
+@pytest.mark.parametrize(
+    ("required", "status"), [(False, UNAVAILABLE), (True, INCOMPLETE)]
+)
+def test_an_unavailable_oracle_attaches_nothing(tmp_path, required, status):
+    oracle = SignalOracle(tmp_path, required=required)
     oracle.unavailable = "modelled"
     assert oracle.start([1]) == "modelled"
-    assert oracle.stop() == []
+    outcome = oracle.stop()
+    assert outcome.status == status and outcome.calls == []
+    assert outcome.reasons == ["modelled"]
+
+
+def test_the_oracle_is_required_only_in_native_linux_ci():
+    ci = {**RUNNER, "LINKEDIN_MCP_DIFFERENTIAL_CI": "1"}
+    assert oracle_required(platform="linux", environ=ci)
+    assert not oracle_required(platform="linux", environ=RUNNER)
+    assert not oracle_required(platform="darwin", environ=ci)
+    assert not oracle_required(platform="linux", environ={**ci, "ACT": "true"})
 
 
 # --- Canaries -----------------------------------------------------------------------
@@ -569,7 +638,7 @@ def _r6(
         fell_back=False,
         host_exit_clean=True,
         cleanup_clean=True,
-        o2=HELD if attached else UNOBSERVED,
+        o2_traced=HELD if attached else UNOBSERVED,
         signal_classes=tuple(classes),
         guardian_owner_group=group,
         recovered=recovered if daemon else None,
@@ -628,9 +697,21 @@ def test_h_r6_needs_the_kill_and_on_posix_the_guardian():
     assert r6_verdict(_r6(group=None), experiment="K2", windows=True) == []
 
 
+def test_on_windows_the_candidate_must_still_recover():
+    assert r6_verdict(_r6(group=None), experiment="K3", windows=True) == []
+    (problem,) = r6_verdict(
+        _r6(group=None, recovered=False), experiment="K3", windows=True
+    )
+    assert "did not recover" in problem
+
+
 def test_a_row_that_violated_o2_fails_and_differs_from_direct(profile_pair):
     healthy = _healthy(profile_pair, daemon=True)
-    violated = O2Result(state=VIOLATED, violations=["canary 90 died during the row"])
+    violated = O2Result(
+        state=UNOBSERVED,
+        row=VIOLATED,
+        canary_deaths=["canary 90 died during the row"],
+    )
     vector, failures = judge_row(dataclasses.replace(healthy, o2=violated))
     assert vector.o2 == VIOLATED
     assert any("O2" in failure for failure in failures)
@@ -745,7 +826,7 @@ def test_the_watcher_ties_a_crashpad_handler_to_its_browser_by_marker():
     history = ProcessHistory(records)
     (browser,) = [life for life in history.lifetimes if life.pid == 2]
     (crashpad,) = [life for life in history.lifetimes if life.pid == 60]
-    assert history.descends(crashpad, browser) is True
+    assert history.descends(crashpad, browser, 1.0) is True
 
 
 def test_a_marker_is_read_once_per_lifetime_and_again_after_a_failed_read():
@@ -774,3 +855,401 @@ def test_only_a_possible_browser_started_after_the_baseline_is_asked():
     _observe(sampler, tracker, 1.0)
     assert "environ_reads" not in table[60]  # running before any actor
     assert "environ_reads" not in table[62]  # cannot be the browser
+
+
+# --- E1EA-01: what the traced O2 covers --------------------------------------------
+
+
+def test_the_traced_o2_never_speaks_for_the_row():
+    result = _o2("21  6.0 kill(-30, SIGKILL) = 0\n")
+    assert (result.state, result.row) == (HELD, UNOBSERVED)
+    assert result.scope["syscalls"][-2:] == ["rt_sigqueueinfo", "rt_tgsigqueueinfo"]
+
+
+def test_a_sender_outside_the_traced_scope_is_not_placed():
+    history = ProcessHistory(_timeline(_row()), outside=[HARNESS])
+    scoped = _outcome("30  6.0 kill(31, SIGTERM) = 0\n", traced=[21], attached_at=5.0)
+    result = derive_o2(scoped, history)
+    assert result.state == UNKNOWN and "outside the traced scope" in result.unknowns[0]
+    assert result.scope["senders"] == [[21, 3.0]]
+    traced = _outcome("21  6.0 kill(-30, SIGKILL) = 0\n", traced=[21], attached_at=5.0)
+    assert derive_o2(traced, history).state == HELD
+
+
+def test_a_row_that_traced_held_still_reads_unobserved(profile_pair):
+    held = _o2("21  6.0 kill(-30, SIGKILL) = 0\n")
+    vector, failures = judge_row(
+        dataclasses.replace(_healthy(profile_pair, daemon=True), o2=held)
+    )
+    assert (vector.o2, vector.o2_traced) == (UNOBSERVED, HELD)
+    assert not any("O2" in failure for failure in failures)
+
+
+# --- E1EA-02: missing evidence is never an empty trace ------------------------------
+
+
+class _Strace:
+    """The oracle's helper as a double: nothing is started, traced or signalled."""
+
+    def __init__(self, returncode=0, *, hangs=0):
+        self.pid = 777777
+        self.returncode = returncode
+        #: How many waits time out before it exits.
+        self.hangs = hangs
+
+    def wait(self, timeout=None):
+        if self.hangs:
+            self.hangs -= 1
+            raise subprocess.TimeoutExpired("strace", timeout or 0.0)
+        return self.returncode
+
+    def poll(self):
+        return None if self.hangs else self.returncode
+
+
+_ENDS = "20  9.0 +++ killed by SIGKILL +++\n21  9.5 +++ exited with 0 +++\n"
+
+
+def _attached(tmp_path, trace, *, process=None, stderr="", run=None):
+    oracle = SignalOracle(
+        tmp_path,
+        required=True,
+        run=run or (lambda *a, **k: SimpleNamespace(returncode=0)),
+    )
+    oracle.unavailable = None
+    oracle.pids = [20, 21]
+    oracle.attached_at = 5.0
+    oracle._process = cast(Any, process or _Strace())
+    if trace is not None:
+        oracle.out.write_text(trace)
+    oracle.err.write_text(stderr)
+    return oracle
+
+
+def test_a_complete_empty_trace_holds(tmp_path):
+    outcome = _attached(tmp_path, _ENDS).stop()
+    assert (outcome.status, outcome.calls, outcome.reasons) == (COMPLETE, [], [])
+    history = ProcessHistory(_timeline(_row()), outside=[HARNESS])
+    assert derive_o2(outcome, history).state == HELD
+
+
+@pytest.mark.parametrize(
+    ("trace", "process", "reason"),
+    [
+        pytest.param(None, None, "could not be read", id="no-trace-file"),
+        pytest.param(_ENDS, _Strace(1), "status 1", id="strace-failed"),
+        pytest.param(
+            _ENDS + "21  6.1 kill(95, SIGTERM <unfinished ...>\n",
+            None,
+            "never finished",
+            id="unfinished-at-the-end",
+        ),
+        pytest.param(
+            _ENDS + "21  6.1 <... kill resumed>) = 0\n",
+            None,
+            "resumed without its start",
+            id="resumed-without-start",
+        ),
+        pytest.param(
+            _ENDS + "21  6.0 kill(95, SIG", None, "not a traced call", id="truncated"
+        ),
+        pytest.param(
+            _ENDS + "strace: something else\n", None, "not a trace line", id="stray"
+        ),
+        pytest.param(
+            "21  9.5 +++ exited with 0 +++\n",
+            None,
+            "stopped following 20",
+            id="a-tracee-without-an-end",
+        ),
+    ],
+)
+def test_lost_evidence_makes_the_oracle_incomplete(tmp_path, trace, process, reason):
+    outcome = _attached(tmp_path, trace, process=process).stop()
+    assert outcome.status == INCOMPLETE
+    assert any(reason in line for line in outcome.reasons), outcome.reasons
+    history = ProcessHistory(_timeline(_row()), outside=[HARNESS])
+    assert derive_o2(outcome, history).state == INCOMPLETE
+
+
+def test_a_tracee_the_harness_killed_ends_there_unless_strace_let_it_go(tmp_path):
+    trace = "21  9.5 +++ exited with 0 +++\n"
+    ended = _attached(tmp_path, trace).stop(confirmed_dead=[20])
+    assert ended.status == COMPLETE
+    lost = _attached(tmp_path, trace, stderr="strace: Process 20 detached\n")
+    assert lost.stop(confirmed_dead=[20]).status == INCOMPLETE
+
+
+def test_a_stop_that_cannot_end_strace_is_incomplete(tmp_path):
+    sent: list[list[str]] = []
+
+    def run(command, **kwargs):
+        sent.append(command)
+        return SimpleNamespace(returncode=1)
+
+    oracle = _attached(tmp_path, _ENDS, process=_Strace(hangs=5), run=run)
+    outcome = oracle.stop(seconds=0.01)
+    assert outcome.status == INCOMPLETE
+    assert any("could not be interrupted" in line for line in outcome.reasons)
+    assert any("still running" in line for line in outcome.reasons)
+    # Only the oracle's own helper was ever signalled, and bounded.
+    assert [command[-2:] for command in sent] == [
+        ["-INT", "777777"],
+        ["-KILL", "777777"],
+    ]
+
+
+def test_an_interrupt_that_detaches_ends_the_interval_there(tmp_path):
+    trace = "21  6.0 kill(-30, SIGKILL) = 0\n"
+    outcome = _attached(tmp_path, trace, process=_Strace(hangs=1)).stop(seconds=0.01)
+    assert outcome.status == COMPLETE and len(outcome.calls) == 1
+
+
+def test_an_oracle_that_never_attached_is_incomplete(tmp_path):
+    oracle = _attached(tmp_path, None)
+    oracle._process = None
+    oracle.attach_failure = "strace did not attach to [20, 21]"
+    outcome = oracle.stop()
+    assert outcome.status == INCOMPLETE and outcome.reasons == [oracle.attach_failure]
+
+
+@pytest.mark.parametrize("required", [True, False])
+def test_incomplete_evidence_fails_the_row_only_where_required(profile_pair, required):
+    history = ProcessHistory(_timeline(_row()), outside=[HARNESS])
+    outcome = OracleOutcome(
+        status=INCOMPLETE, required=required, reasons=["strace exited with status 1"]
+    )
+    o2 = derive_o2(outcome, history)
+    vector, failures = judge_row(
+        dataclasses.replace(_healthy(profile_pair, daemon=True), o2=o2)
+    )
+    assert vector.o2_traced == INCOMPLETE and vector.o2_required is required
+    required_line = "the required signal oracle's evidence is incomplete"
+    assert any(required_line in failure for failure in failures) is required
+    assert any("strace exited" in failure for failure in failures) is required
+
+
+# --- E1EA-03: a recipient is what the samples pin down ------------------------------
+
+
+def test_a_pid_reused_between_samples_is_not_the_old_process():
+    # The browser at 30 exits at 6.01; an unrelated process takes pid 30 at
+    # 6.02; the next sample, at 6.05, sees the new one.
+    reused = [
+        *_row(),
+        _exit(30, 6.05, 4.0),
+        _start(30, 7, 6.05, start=6.02, pgid=30, in_row=False),
+    ]
+    assert _o2("21  6.03 kill(30, SIGTERM) = 0\n", reused).state == UNKNOWN
+    assert _o2("21  6.06 kill(30, SIGTERM) = 0\n", reused).state == VIOLATED
+
+
+@pytest.mark.parametrize(
+    ("last_pid", "state"),
+    [
+        pytest.param(lambda end: 100000, HELD, id="pid-not-reallocated"),
+        pytest.param(
+            lambda end: 20 if end < 6.02 else 40, UNKNOWN, id="pid-reallocated"
+        ),
+        pytest.param(
+            lambda end: 100000 if end < 6.02 else 5, UNKNOWN, id="allocation-wrapped"
+        ),
+    ],
+)
+def test_a_target_that_exited_between_the_samples(last_pid, state):
+    # Seen before the send, gone in the sample after it: the recipient only if
+    # the kernel gave its pid to nobody in between.
+    records = [*_row(), _exit(30, 6.25, 4.0)]
+    history = ProcessHistory(_timeline(records, last_pid=last_pid), outside=[HARNESS])
+    result = derive_o2(_outcome("21  6.1 kill(30, SIGKILL) = 0\n"), history)
+    assert result.state == state, result
+
+
+def test_a_member_that_joined_between_the_samples_leaves_the_group_unknown():
+    records = [*_row(), _start(92, 30, 6.25, pgid=30)]
+    result = _o2("21  6.1 kill(-30, SIGKILL) = 0\n", records)
+    assert result.state == UNKNOWN and "joined" in result.unknowns[0]
+
+
+@pytest.mark.parametrize(
+    ("failures", "state"),
+    [
+        pytest.param(["open: AccessDenied"], UNKNOWN, id="unopenable"),
+        pytest.param(["identity: AccessDenied"], UNKNOWN, id="unidentified"),
+        # As ``sudo -n strace`` on every native Linux row: its executable is
+        # root's to read, its group is not hidden.
+        pytest.param(["exe: AccessDenied"], HELD, id="executable-only"),
+    ],
+)
+def test_a_process_that_could_not_be_identified_leaves_the_group_unknown(
+    failures, state
+):
+    failure = {"pid": 93, "first": 5.9, "last": 6.3, "failures": failures}
+    history = ProcessHistory(_timeline(_row(), failures=[failure]), outside=[HARNESS])
+    result = derive_o2(_outcome("21  6.1 kill(-30, SIGKILL) = 0\n"), history)
+    assert result.state == state, result
+
+
+def test_a_member_whose_group_was_not_read_leaves_the_group_unknown():
+    records = [*_row(), {**_start(94, 30, 5.0), "pgid": None}]
+    result = _o2("21  6.1 kill(-30, SIGKILL) = 0\n", records)
+    assert result.state == UNKNOWN and "group was not read" in result.unknowns[0]
+
+
+def test_a_send_after_the_last_sample_is_unknown():
+    assert _o2("21  99.0 kill(30, SIGKILL) = 0\n").state == UNKNOWN
+
+
+# --- E1EA-04: pidfd scope ----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("flags", "state", "targets"),
+    [
+        pytest.param("0", HELD, [[30, 4.0]], id="the-process"),
+        pytest.param("PIDFD_SIGNAL_THREAD_GROUP", HELD, [[30, 4.0]], id="thread-group"),
+        pytest.param(
+            "PIDFD_SIGNAL_PROCESS_GROUP",
+            VIOLATED,
+            [[30, 4.0], [31, 4.0], [91, 4.5]],
+            id="process-group",
+        ),
+        pytest.param(
+            "0x4", VIOLATED, [[30, 4.0], [31, 4.0], [91, 4.5]], id="numeric-group"
+        ),
+        pytest.param("PIDFD_SIGNAL_THREAD", UNKNOWN, None, id="one-thread"),
+        pytest.param("PIDFD_SIGNAL_THREAD|0x4", UNKNOWN, None, id="combined"),
+        pytest.param("PIDFD_SOMETHING_NEW", UNKNOWN, None, id="unknown-flag"),
+    ],
+)
+def test_a_pidfd_signal_reaches_the_scope_its_flags_name(flags, state, targets):
+    # An outside process (91) is in Chromium's group.
+    records = [*_row(), _start(91, HARNESS, 4.5, pgid=30)]
+    line = f"21  6.0 pidfd_send_signal(5<pid:30>, SIGTERM, NULL, {flags}) = 0\n"
+    result = _o2(line, records)
+    assert result.state == state, result
+    if targets is not None:
+        assert result.resolved[0]["targets"] == targets
+
+
+def test_a_queued_signal_is_a_signal():
+    line = (
+        "21  6.0 rt_sigqueueinfo(95, SIGUSR1, {si_signo=SIGUSR1, "
+        "si_code=SI_QUEUE, si_pid=21, si_uid=1000, si_int=7}) = 0\n"
+    )
+    (call,) = parse_strace(line)
+    assert (call.target_pid, call.signal) == (95, "SIGUSR1")
+    assert _o2(line).state == VIOLATED
+
+
+# --- E1EA-07: a marker read later reaches O2, from then on --------------------------
+
+
+def test_a_marker_read_on_retry_is_published_and_used_from_then_on():
+    table = _row_table()
+    sampler, tracker = _sampler(table), Tracker()
+    records = []
+
+    def observe(t):
+        records.extend(
+            {"t": t, "actor": actor, "kind": kind, **fields}
+            for actor, kind, fields in _observe(sampler, tracker, t)
+        )
+
+    observe(0.0)
+    marker = {BROWSER_MARKER_ENV: "z" * 64}
+    table[2] = {
+        "start": 2.0,
+        "ppid": 1,
+        "cmdline": [BROWSER_EXE, "--user-data-dir=/p"],
+        "exe": BROWSER_EXE,
+        "environ": marker,
+    }
+    table[60] = {**_crashpad_table(psutil.AccessDenied(60))[60]}
+    observe(1.0)
+    table[60]["environ"] = marker
+    observe(2.0)
+    (update,) = [r for r in records if r["kind"] == "process.update"]
+    assert update["pid"] == 60 and update["t"] == 2.0 and update["browser_marker"]
+    history = ProcessHistory(records)
+    (browser,) = [life for life in history.lifetimes if life.pid == 2]
+    (crashpad,) = [life for life in history.lifetimes if life.pid == 60]
+    assert history.descends(crashpad, browser, 2.5) is True
+    # Before the watcher had it, the marker is no evidence.
+    assert history.descends(crashpad, browser, 1.5) is False
+
+
+# --- E1EA-08: attempts, deliveries and deaths --------------------------------------
+
+
+@pytest.mark.parametrize("error", ["EPERM (Operation not permitted)", "EINVAL (x)"])
+def test_a_refused_call_is_an_attempt_not_a_delivery(error):
+    result = _o2(f"21  6.0 kill(95, SIGKILL) = -1 {error}\n")
+    assert result.state == VIOLATED
+    assert result.violations[0].startswith("attempted (refused: -1 E")
+    assert result.resolved[0]["outcome"] == "rejected"
+
+
+def test_a_nonfatal_delivery_is_a_delivered_signal():
+    result = _o2("21  6.0 kill(95, SIGTERM) = 0\n")
+    assert result.violations[0].startswith("delivered SIGTERM to")
+    assert result.canary_deaths == []
+
+
+# --- E1EA-09: canaries that fail to start ------------------------------------------
+
+
+class _Child:
+    def __init__(self, pid):
+        self.pid = pid
+        self.killed = False
+
+    def poll(self):
+        return -9 if self.killed else None
+
+    def kill(self):
+        self.killed = True
+
+    def wait(self, timeout=None):
+        return self.poll()
+
+
+def _spawns(monkeypatch, *, fail_at: int | None = None):
+    children: list[_Child] = []
+
+    def popen(*args, **kwargs):
+        if fail_at is not None and len(children) == fail_at:
+            raise OSError("modelled spawn failure")
+        children.append(_Child(900000 + len(children)))
+        return children[-1]
+
+    monkeypatch.setattr(signals.subprocess, "Popen", popen)
+    monkeypatch.setattr(signals.os, "getsid", lambda pid: pid, raising=False)
+    monkeypatch.setattr(signals.os, "getpgid", lambda pid: pid, raising=False)
+    monkeypatch.setattr(signals, "_in_any_job", lambda pid: None)
+    return children
+
+
+def test_a_failed_second_spawn_ends_the_first_canary(monkeypatch):
+    children = _spawns(monkeypatch, fail_at=1)
+    monkeypatch.setattr(
+        psutil, "Process", lambda pid: SimpleNamespace(create_time=lambda: 1.0)
+    )
+    canaries = Canaries(count=2)
+    with pytest.raises(OSError, match="modelled spawn failure"):
+        canaries.start()
+    assert [child.killed for child in children] == [True]
+    assert canaries.canaries == []
+
+
+def test_a_canary_whose_identity_cannot_be_read_is_ended(monkeypatch):
+    children = _spawns(monkeypatch)
+
+    def unreadable(pid):
+        raise psutil.NoSuchProcess(pid)
+
+    monkeypatch.setattr(psutil, "Process", unreadable)
+    canaries = Canaries(count=2)
+    with pytest.raises(psutil.NoSuchProcess):
+        canaries.start()
+    assert [child.killed for child in children] == [True]
