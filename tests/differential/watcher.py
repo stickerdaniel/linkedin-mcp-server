@@ -15,6 +15,12 @@ carries ``--type=`` and is part of its parent's tree, never a root of its own.
 Two roots with the same profile in one sample is the second concurrent browser
 the default-on contract forbids.
 
+For O2 it records each process's group and, on POSIX, a digest of the browser
+marker the product sets per launch, read once from every process started after
+the first sample that could be the row's browser. That marker is what ties
+Chromium's crashpad handler, which leaves the browser's tree for a session of
+its own, to the browser that started it.
+
 **Nothing a row could still change is settled by age.** A process can exec at
 any moment of its life, and a forked child shows its parent's command line
 until it does, which is how the Node driver starts Chromium on POSIX. So every
@@ -22,6 +28,30 @@ row actor, and every process not established as unrelated, has its executable
 and command line read again on every sample for as long as it lives, and a
 change is reported as
 ``process.update``. Its identity is checked on every sample either way.
+Windows differs: nothing there can exec, and the parent pid a process records
+at creation never changes, so once its parent, executable and command
+line have all been read they are carried for the rest of that lifetime rather
+than read again (``Sampler.no_exec``). What stays is the per-sample identity
+check, which is also what reports its exit. A field that could not be read is
+read again on every sample, as anywhere else.
+
+**What a lifetime is cannot change, so it is asked once.** Its owning user is
+read once per pid and create time, and a lifetime a full read found gone
+(``NoSuchProcess``) is not read again, however long its pid stays listed.
+Every read is timed: the summary names the slowest, and every sample of at
+least ``SLOW_SAMPLE_SECONDS`` with the read it waited on longest.
+
+**When each sample was taken is part of the evidence.** The summary's
+``sample_log`` gives every sample's start, its end (the time its events
+carry) and, on Linux, the last pid the kernel had allocated as it began; the
+ready line lists the process groups of the first sample. A process settled as
+unrelated still has its group read on every sample, and a change is reported.
+A group that could not be read is published as unread (``pgid`` None, with
+``pgid_error``) and listed in the summary; the last group read never stands in
+for it. A process whose group read finds it gone is an exit. Group membership
+is what the samples saw at their ends, not a continuous record: a process that
+joined and left a group between two samples is not seen. The kernel's last
+pid is a diagnostic only.
 
 **Relevant means descended from the harness.** A process is a row actor when it
 descends from the harness (``--root-pid``), whether it was already running at
@@ -41,6 +71,10 @@ process is established as unrelated to the row when
   line were both read then, it names no profile and cannot be the browser.
   Windows has no exec, so that image is the process's for its whole lifetime
   (``Sampler.no_exec``); or
+* on Windows, outside the row, its executable was read and cannot be the
+  browser, even if its command line could not be read: that image can never
+  be a browser root. The failed read is recorded once and not repeated (as
+  for ``LsaIso.exe``, whose command line psutil retries for a second); or
 * its executable, read in the same sample, is neither the row's browser
   (``--browser-exe``) nor anything under the managed browsers
   (``--browser-dir``). That is the setuid ``/bin/ps`` the product runs on
@@ -85,6 +119,7 @@ Imports nothing from the repository, so it runs as a plain script:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -109,6 +144,25 @@ SAMPLE_SECONDS = 0.05
 #: its own PEB command line is adversarial and is not a browser launch; it is
 #: outside this oracle.
 NO_EXEC = os.name == "nt"
+
+#: A sample at least this long is recorded with its slowest single read, so a
+#: stall names the call and the process it waited on. A quarter of the gap
+#: budget the rows accept (``harness.MAX_WATCHER_GAP_SECONDS``).
+SLOW_SAMPLE_SECONDS = 0.25
+#: At most this many slow samples are kept, the first ones.
+_SLOW_SAMPLES_KEPT = 100
+#: At most this many failed group reads are kept, the first ones.
+_GROUP_FAILURES_KEPT = 200
+
+#: What the product sets in the environment of every browser it launches, a
+#: random value per launch, and what its guardian drains browser groups by.
+#: The same name at the frozen baseline.
+BROWSER_MARKER_ENV = "LINKEDIN_MCP_BROWSER_PROCESS_MARKER"
+
+#: Whether markers are read: on POSIX, where the guardian drains by them and
+#: where Chromium's crashpad handler leaves the row's tree for a session of its
+#: own. Windows starts no guardian.
+READ_MARKERS = os.name != "nt"
 
 
 def canonical_user_data_dir(value: str) -> str:
@@ -152,6 +206,16 @@ class ProcessRecord:
     #: a cached initial-image observation for this PID, create time and command
     #: line; same-command re-exec is outside this identity oracle.
     launcher: str | None = None
+    #: POSIX process group, read on every sample; None on Windows, or when it
+    #: could not be read, which ``pgid_error`` then says. Never the last
+    #: group read in place of one that failed.
+    pgid: int | None = None
+    #: A digest of the process's browser marker (``BROWSER_MARKER_ENV``), read
+    #: once per lifetime for a process that could be the row's browser. What
+    #: ties a crashpad handler, which leaves the row's tree, to its browser.
+    browser_marker: str | None = None
+    #: Why this sample could not read the group, when it could not.
+    pgid_error: str | None = None
 
     @property
     def identity(self) -> tuple[int, float]:
@@ -161,6 +225,7 @@ class ProcessRecord:
         fields: dict[str, Any] = {
             "pid": self.pid,
             "ppid": self.ppid,
+            "pgid": self.pgid,
             "start_identity": self.start,
             "exe": self.exe,
             "cmdline": list(self.cmdline),
@@ -168,6 +233,10 @@ class ProcessRecord:
         }
         if self.launcher is not None:
             fields["launcher"] = self.launcher
+        if self.browser_marker is not None:
+            fields["browser_marker"] = self.browser_marker
+        if self.pgid_error is not None:
+            fields["pgid_error"] = self.pgid_error
         if not self.in_row:
             # These events are published as CI evidence, and a process that is
             # not the row's own may carry anything in its arguments, credentials
@@ -188,11 +257,53 @@ def record(
     *,
     in_row: bool = False,
     launcher: str | None = None,
+    pgid: int | None = None,
+    browser_marker: str | None = None,
+    pgid_error: str | None = None,
 ) -> ProcessRecord:
     cmdline = tuple(cmdline)
     return ProcessRecord(
-        pid, ppid, start, exe, cmdline, user_data_dir(cmdline), in_row, launcher
+        pid,
+        ppid,
+        start,
+        exe,
+        cmdline,
+        user_data_dir(cmdline),
+        in_row,
+        launcher,
+        pgid,
+        browser_marker,
+        pgid_error,
     )
+
+
+#: The last pid the kernel allocated in this pid namespace (Linux). Logged as
+#: a diagnostic only: the allocator's cursor can wrap past occupied pids and
+#: come back higher, so two readings prove nothing about reuse in between.
+NS_LAST_PID = Path("/proc/sys/kernel/ns_last_pid")
+
+
+def read_last_pid() -> int | None:
+    """The kernel's last allocated pid, or None off Linux or if unreadable."""
+    try:
+        return int(NS_LAST_PID.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+#: What ``Sampler`` records for a group read that found the process gone.
+GONE = "gone"
+
+
+def posix_pgid(pid: int) -> int | None:
+    """A process's group on POSIX, or None on Windows, which has none.
+
+    Raises ``ProcessLookupError`` for a process that is gone, and any other
+    ``OSError`` for one whose group could not be read: neither is a group.
+    """
+    if os.name == "nt":
+        return None
+    return os.getpgid(pid)
 
 
 #: Set by a macOS framework build's ``bin/python`` stub to the path it was
@@ -289,6 +400,20 @@ def read_launcher(process: Any) -> str | None:
     return value or None
 
 
+def read_browser_marker(process: Any) -> str | None:
+    """A digest of the process's browser marker, if it carries one.
+
+    Only the digest is kept: it matches the same marker in another process,
+    which is all it is for, and the published evidence holds no value the
+    product's guardian acts on. A failed read raises ``psutil.Error`` or
+    ``OSError``: that is not knowing, and the caller asks again.
+    """
+    value = process.environ().get(BROWSER_MARKER_ENV)
+    if not value:
+        return None
+    return hashlib.sha256(value.encode()).hexdigest()[:16]
+
+
 def classify(process: ProcessRecord) -> str:
     """Which actor a process is, from its command line alone."""
     joined = " ".join(process.cmdline)
@@ -348,9 +473,18 @@ class Tracker:
             for pid, process in sample.items():
                 previous = self._known.get(pid)
                 if previous is not None and previous.start == process.start:
-                    if (previous.exe, previous.cmdline) != (
+                    if (
+                        previous.exe,
+                        previous.cmdline,
+                        previous.pgid,
+                        previous.pgid_error,
+                        previous.browser_marker,
+                    ) != (
                         process.exe,
                         process.cmdline,
+                        process.pgid,
+                        process.pgid_error,
+                        process.browser_marker,
                     ):
                         events.append(
                             (
@@ -463,7 +597,11 @@ class Sampler:
     process table. *browser_exe* and *browser_dir* name what the row's browser
     runs. *user* is the harness's user, as *user_of* reports it. *no_exec*
     says whether a process's program is fixed for its lifetime, which is
-    Windows's by default and set in tests to model either platform.
+    Windows's by default and set in tests to model either platform. *pgid_of*
+    reads a process's group, ``os.getpgid`` by default. *read_markers* says
+    whether browser markers are read (``READ_MARKERS``). *timer* times each
+    read, ``time.perf_counter`` by default. *last_pid_of* reads the kernel's
+    last allocated pid as each sample begins (``read_last_pid``).
     """
 
     def __init__(
@@ -479,9 +617,22 @@ class Sampler:
         browser_exe: str | None = None,
         browser_dir: str | None = None,
         no_exec: bool = NO_EXEC,
+        pgid_of: Callable[[int], int | None] = posix_pgid,
+        read_markers: bool = READ_MARKERS,
+        timer: Callable[[], float] = time.perf_counter,
+        last_pid_of: Callable[[], int | None] = read_last_pid,
     ) -> None:
         self.root_pid = root_pid
+        self._timer = timer
+        self._last_pid = last_pid_of
+        #: When the sample in progress began, and the kernel's last pid then.
+        self.began_at: float | None = None
+        self.last_pid_at_begin: int | None = None
+        #: The process groups at the first sample.
+        self.baseline_pgids: list[int] = []
         self.no_exec = no_exec
+        self._pgid_of = pgid_of
+        self.read_markers = read_markers
         self.own_pid = os.getpid() if own_pid is None else own_pid
         self._pids = pids
         self._open = open_process
@@ -499,11 +650,33 @@ class Sampler:
         self._watched: set[tuple[int, float]] = set()
         #: (pid, create time, command line) whose launcher was already asked.
         self._launchers_read: set[tuple[int, float, tuple[str, ...]]] = set()
+        #: Lifetimes whose browser marker was already asked.
+        self._markers_read: set[tuple[int, float]] = set()
         #: What sampling cost: first-sample outcomes and full reads per sample.
         self.first_sample_cached = 0
         self.first_sample_watched = 0
         self.reads_per_sample: list[int] = []
         self._reads = 0
+        #: Lifetimes whose parent, executable and command line were all read,
+        #: carried rather than read again where nothing can exec (``no_exec``).
+        self._complete: set[tuple[int, float]] = set()
+        self.carried_per_sample: list[int] = []
+        self._carried = 0
+        #: Lifetimes a full read found gone: a pid and create time do not come
+        #: back, however long the pid stays listed.
+        self._vanished: set[tuple[int, float]] = set()
+        self.vanished = 0
+        #: Each lifetime's owning user, once read: a process cannot change it.
+        self._users: dict[tuple[int, float], object] = {}
+        #: The slowest single read of the sample in progress, and of the run.
+        self._slowest: dict[str, Any] | None = None
+        self.slowest_read: dict[str, Any] | None = None
+        #: Every sample of at least ``SLOW_SAMPLE_SECONDS``, up to a bound.
+        self.slow_samples: list[dict[str, Any]] = []
+        self.slow_sample_count = 0
+        #: Every group read that failed for a process still there.
+        self.group_read_failures: list[dict[str, Any]] = []
+        self.group_read_failure_count = 0
         self._episodes: dict[tuple[int, float | None], dict[str, Any]] = {}
         self._closed: list[dict[str, Any]] = []
 
@@ -518,13 +691,67 @@ class Sampler:
                 round(sum(reads) / len(reads), 1) if reads else None
             ),
             "reads_per_sample_max": max(reads) if reads else None,
+            "carried_per_sample_mean": (
+                round(sum(self.carried_per_sample) / len(self.carried_per_sample), 1)
+                if self.carried_per_sample
+                else None
+            ),
+            "vanished_reads": self.vanished,
+            "slowest_read": self.slowest_read,
+            "slow_sample_count": self.slow_sample_count,
+            "slow_samples": self.slow_samples,
+            "group_read_failure_count": self.group_read_failure_count,
+            "group_read_failures": self.group_read_failures,
         }
 
     def possible_browser(self, exe: str | None) -> bool:
         return possible_browser(exe, self.browser_exe, self.browser_dir)
 
-    def _another_user(self, process: Any) -> bool:
-        return another_user(self._user_of(process), self.user)
+    def _group(self, pid: int, start: float) -> tuple[int | None, str | None]:
+        """The process's group now, or None and why not: ``GONE``, or unread.
+
+        An unread group is recorded, and is never the last one read.
+        """
+        try:
+            return self._timed("pgid", pid, lambda: self._pgid_of(pid)), None
+        except ProcessLookupError:
+            return None, GONE
+        except OSError as exc:
+            error = f"unread: {type(exc).__name__}"
+            if len(self.group_read_failures) < _GROUP_FAILURES_KEPT:
+                self.group_read_failures.append(
+                    {
+                        "pid": pid,
+                        "start_identity": start,
+                        "t": self._clock(),
+                        "error": error,
+                    }
+                )
+            self.group_read_failure_count += 1
+            return None, error
+
+    def _timed(self, kind: str, pid: int, call: Callable[[], Any]) -> Any:
+        """Run one read, keeping the sample's slowest with its kind and pid."""
+        began = self._timer()
+        try:
+            return call()
+        finally:
+            seconds = self._timer() - began
+            if self._slowest is None or seconds > self._slowest["seconds"]:
+                self._slowest = {"kind": kind, "pid": pid, "seconds": seconds}
+
+    def _another_user(
+        self, process: Any, lifetime: tuple[int, float] | None = None
+    ) -> bool:
+        """Whether *process* is another user's; read once per *lifetime*."""
+        found = self._users.get(lifetime) if lifetime is not None else None
+        if found is None:
+            found = self._timed(
+                "username", getattr(process, "pid", -1), lambda: self._user_of(process)
+            )
+            if found is not None and lifetime is not None:
+                self._users[lifetime] = found
+        return another_user(found, self.user)
 
     @property
     def read_failures(self) -> list[dict[str, Any]]:
@@ -546,30 +773,38 @@ class Sampler:
         return [e for e in self.read_failures if e["possible_browser"]]
 
     def _read(
-        self, process: Any, known: ProcessRecord | None
+        self, process: Any, known: ProcessRecord | None, *, arguments: bool = True
     ) -> tuple[int | None, str | None, tuple[str, ...], list[str], bool]:
+        """Parent, executable and, unless *arguments* is False, command line."""
         self._reads += 1
         failures: list[str] = []
         ppid = known.ppid if known is not None else None
         exe = known.exe if known is not None else None
         cmdline = known.cmdline if known is not None else ()
         exe_read = False
+        pid = process.pid
         try:
-            ppid = process.ppid()
+            ppid = self._timed("ppid", pid, process.ppid)
         except _UNREADABLE as exc:
             failures.append(f"ppid: {type(exc).__name__}")
         try:
-            exe = process.exe()
+            exe = self._timed("exe", pid, process.exe)
             exe_read = True
         except _UNREADABLE as exc:
             failures.append(f"exe: {type(exc).__name__}")
+        if not arguments:
+            return ppid, exe, cmdline, failures, exe_read
         try:
-            cmdline = tuple(process.cmdline())
+            cmdline = tuple(self._timed("cmdline", pid, process.cmdline))
         except _UNREADABLE as exc:
             failures.append(f"cmdline: {type(exc).__name__}")
         return ppid, exe, cmdline, failures, exe_read
 
     def sample(self) -> dict[int, ProcessRecord]:
+        began = self._timer()
+        self.began_at = self._clock()
+        self.last_pid_at_begin = self._last_pid()
+        self._slowest = None
         first = self._baseline is None
         sample: dict[int, ProcessRecord] = {}
         # pid -> (episode key, failed fields, exe, exe read now, process or None,
@@ -583,7 +818,7 @@ class Sampler:
             # unverified: the failure is keyed without a create time, and no
             # exclusion established for an earlier process there applies.
             try:
-                process = self._open(pid)
+                process = self._timed("open", pid, lambda: self._open(pid))
             except psutil.NoSuchProcess:
                 continue
             except _UNREADABLE as exc:
@@ -601,7 +836,7 @@ class Sampler:
             try:
                 # The create time is what separates a recycled pid from the
                 # process already known under it.
-                start = process.create_time()
+                start = self._timed("create_time", pid, process.create_time)
             except psutil.NoSuchProcess:
                 continue
             except _UNREADABLE as exc:
@@ -624,11 +859,49 @@ class Sampler:
             if known is not None and known.start != start:
                 known = None
             if known is not None and known.identity in self._unrelated:
+                # Settled as unrelated, but a group can still be joined, and a
+                # group signal's members must include it if it did.
+                group, error = self._group(pid, start)
+                if error == GONE:
+                    # Gone since it was opened: an exit, not a change of group.
+                    continue
+                if (group, error) != (known.pgid, known.pgid_error):
+                    known = replace(known, pgid=group, pgid_error=error)
                 sample[pid] = known
                 continue
-            try:
-                ppid, exe, cmdline, failed, exe_read = self._read(process, known)
-            except psutil.NoSuchProcess:
+            if (pid, start) in self._vanished:
+                continue
+            if self.no_exec and known is not None and known.identity in self._complete:
+                # Its image, command line and parent are its own for good.
+                ppid, exe, cmdline, failed, exe_read = (
+                    known.ppid,
+                    known.exe,
+                    known.cmdline,
+                    [],
+                    True,
+                )
+                self._carried += 1
+            else:
+                # Windows, first sample: another user's process is settled by
+                # its user before its arguments cost a read. Its parent and
+                # executable are still read, for the ancestry of the others.
+                foreign = (
+                    first and self.no_exec and self._another_user(process, (pid, start))
+                )
+                if foreign:
+                    self._unrelated.add((pid, start))
+                try:
+                    ppid, exe, cmdline, failed, exe_read = self._read(
+                        process, known, arguments=not foreign
+                    )
+                except psutil.NoSuchProcess:
+                    self._vanished.add((pid, start))
+                    self.vanished += 1
+                    continue
+                if not failed:
+                    self._complete.add((pid, start))
+            group, error = self._group(pid, start)
+            if error == GONE:
                 continue
             # Carried while the command line holds; read, if at all, only once
             # the process is classified (``_read_launchers``).
@@ -645,6 +918,9 @@ class Sampler:
                 cmdline,
                 in_row=known is not None and known.in_row,
                 launcher=launcher,
+                pgid=group,
+                pgid_error=error,
+                browser_marker=known.browser_marker if known is not None else None,
             )
             if failed:
                 parent_read = not any(f.startswith("ppid") for f in failed)
@@ -658,11 +934,16 @@ class Sampler:
                 )
         if first:
             self._baseline = {process.identity for process in sample.values()}
+            self.baseline_pgids = sorted(
+                {p.pgid for p in sample.values() if p.pgid is not None}
+            )
             root = sample.get(self.root_pid)
             if root is not None:
                 self._row.add(root.identity)
         self._classify(sample)
         self._read_launchers(sample, identified)
+        if not first:
+            self._read_markers(sample, identified)
         # Whatever the harness turned out to own is no longer excluded.
         row = {process.identity for process in sample.values() if process.in_row}
         self._unrelated -= row
@@ -691,10 +972,43 @@ class Sampler:
             self.first_sample_watched = len(self._watched - self._unrelated)
         self.reads_per_sample.append(self._reads)
         self._reads = 0
+        self.carried_per_sample.append(self._carried)
+        self._carried = 0
         self._track(sample, verdicts)
         self._resolve_by_user(sample, identified)
         self._known = sample
+        self._record_cost(sample, self._timer() - began)
         return sample
+
+    def _record_cost(self, sample: dict[int, ProcessRecord], seconds: float) -> None:
+        """Keep the slowest read, and every slow sample with its slowest read."""
+        slowest = self._slowest
+        if slowest is None:
+            return
+        known = sample.get(slowest["pid"])
+        slowest = dict(
+            slowest,
+            seconds=round(slowest["seconds"], 4),
+            exe=known.exe if known is not None else None,
+            t=self._clock(),
+        )
+        if (
+            self.slowest_read is None
+            or slowest["seconds"] > self.slowest_read["seconds"]
+        ):
+            self.slowest_read = slowest
+        if seconds < SLOW_SAMPLE_SECONDS:
+            return
+        self.slow_sample_count += 1
+        if len(self.slow_samples) < _SLOW_SAMPLES_KEPT:
+            self.slow_samples.append(
+                {
+                    "t": slowest["t"],
+                    "seconds": round(seconds, 4),
+                    "reads": self.reads_per_sample[-1],
+                    "slowest": slowest,
+                }
+            )
 
     def _read_launchers(
         self, sample: dict[int, ProcessRecord], identified: dict[int, Any]
@@ -716,9 +1030,46 @@ class Sampler:
             if key in self._launchers_read:
                 continue
             self._launchers_read.add(key)
-            launcher = read_launcher(identified[pid])
+            launcher = self._timed(
+                "environ", pid, lambda: read_launcher(identified[pid])
+            )
             if launcher is not None:
                 sample[pid] = replace(process, launcher=launcher)
+
+    def _read_markers(
+        self, sample: dict[int, ProcessRecord], identified: dict[int, Any]
+    ) -> None:
+        """Record the browser marker of a process that could be the browser.
+
+        Once per lifetime, when a sample after the first read its create time
+        and its executable could be the row's browser, whether or not it is in
+        the row's tree: Chromium's crashpad handler is started by the browser
+        and then leaves it, parented to pid 1 in a session of its own, carrying
+        the browser's environment. The first sample's processes predate every
+        actor and are not asked. A marker is set before the browser starts, so
+        a process that shows none when first read has none.
+        """
+        if not self.read_markers:
+            return
+        for pid, process in list(sample.items()):
+            if pid not in identified or process.identity in self._markers_read:
+                continue
+            if pid == self.own_pid or process.identity in (self._baseline or ()):
+                continue
+            if not process.exe or not self.possible_browser(process.exe):
+                continue
+            try:
+                marker = self._timed(
+                    "environ", pid, lambda: read_browser_marker(identified[pid])
+                )
+            except psutil.NoSuchProcess:
+                continue
+            except _UNREADABLE:
+                # Asked again on the next sample, for as long as it lives.
+                continue
+            self._markers_read.add(process.identity)
+            if marker is not None:
+                sample[pid] = replace(process, browser_marker=marker)
 
     def _settled_ancestry(
         self, sample: dict[int, ProcessRecord]
@@ -817,7 +1168,7 @@ class Sampler:
             current = sample.get(pid)
             if process is None or current is None or current.start != start:
                 continue
-            if self._another_user(process):
+            if self._another_user(process, current.identity):
                 episode["possible_browser"] = False
                 episode["resolved_by"] = "another user"
                 self._unrelated.add(current.identity)
@@ -841,10 +1192,40 @@ class Sampler:
             # reason to discount what cannot be seen.
             if lifetime is not None and lifetime in settled:
                 verdict = _UNRELATED
-            elif process is not None and self._another_user(process):
+            elif process is not None and self._another_user(process, lifetime):
                 verdict = _UNRELATED
                 if lifetime is not None:
                     self._unrelated.add(lifetime)
+            elif (
+                self.no_exec
+                and exe_read
+                and not self.possible_browser(exe)
+                and not in_row
+                and parent_read
+                and lifetime is not None
+            ):
+                # Windows: its image, read now, is its own for its lifetime
+                # and cannot be the browser, so it can never be a browser
+                # root, whatever its arguments. Established unrelated for this
+                # lifetime and never read again; the failed read is recorded
+                # once. Like LsaIso.exe, whose arguments psutil retries for a
+                # second before it gives up.
+                verdict = _UNRELATED
+                self._unrelated.add(lifetime)
+                now = self._clock()
+                self._closed.append(
+                    {
+                        "pid": pid,
+                        "start_identity": lifetime[1],
+                        "exe": exe,
+                        "failures": sorted(failed),
+                        "first": now,
+                        "last": now,
+                        "seconds": 0.0,
+                        "possible_browser": False,
+                        "resolution": "settled by its image",
+                    }
+                )
             elif exe_read and not self.possible_browser(exe):
                 # Not a browser, whatever its arguments. Kept as evidence when
                 # it belongs to the row or its ancestry could not be read.
@@ -974,6 +1355,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     max_gap = 0.0
     #: Wall time of each ``sampler.sample()``, the watcher's own cost.
     durations: list[float] = []
+    #: ``[began, ended, kernel's last pid as it began]`` for every sample;
+    #: ``ended`` is the time every event of that sample carries.
+    sample_log: list[list[Any]] = []
     stopped_by = "deadline"
     with args.out.open("a", encoding="utf-8") as out:
 
@@ -995,6 +1379,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if last_sample is not None:
                 max_gap = max(max_gap, now - last_sample)
             last_sample = now
+            sample_log.append([sampler.began_at, now, sampler.last_pid_at_begin])
             for actor, kind, fields in tracker.observe(sample, now):
                 write(actor, kind, fields, now)
             if observation_start is None:
@@ -1004,7 +1389,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 write(
                     "watcher",
                     "watcher.ready",
-                    {"pid": os.getpid(), "baseline_processes": len(sample)},
+                    {
+                        "pid": os.getpid(),
+                        "baseline_processes": len(sample),
+                        "baseline_pgids": sampler.baseline_pgids,
+                    },
                     now,
                 )
             out.flush()
@@ -1034,6 +1423,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "max_gap_seconds": round(max_gap, 4),
                 **duration_stats(durations),
                 **sampler.stats(),
+                "sample_log": sample_log,
                 "browser_exe": args.browser_exe,
                 "browser_dir": args.browser_dir,
                 "read_failures": sampler.read_failures,

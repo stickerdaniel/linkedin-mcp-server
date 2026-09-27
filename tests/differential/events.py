@@ -77,6 +77,14 @@ KINDS = frozenset(
         "tool.result",
         "row.identity",
         "row.outcome",
+        # O2: the signal oracle, the canaries and what the harness killed.
+        "signal.call",
+        "signal.resolved",
+        "signal.violation",
+        "signal.oracle",
+        "process.death_unattributed",
+        "canary.start",
+        "actor.killed",
     }
 )
 
@@ -249,6 +257,9 @@ PUBLISHED_FILES = frozenset(
         "failures.json",
         "watcher.jsonl",
         "watcher.stderr",
+        # The signal oracle's own output: syscalls and targets, no environment.
+        "strace.txt",
+        "strace.stderr",
     }
 )
 
