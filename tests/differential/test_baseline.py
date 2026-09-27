@@ -187,8 +187,8 @@ def test_a_frozen_runtime_that_is_not_its_pin_is_refused(tmp_path, changes, repo
     assert refusal is not None and reported in refusal
 
 
-def test_checkout_refusal_names_the_state():
-    assert checkout_refusal({"head": PIN, "porcelain_empty": True}, PIN) is None
+def test_a_checkout_whose_status_could_not_be_read_is_refused():
+    # Unknown is not clean: a status that could not be read refuses the pin.
     assert checkout_refusal({"head": PIN, "porcelain_empty": None}, PIN)
 
 

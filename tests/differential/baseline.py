@@ -180,7 +180,9 @@ def prepare_baseline(
 
     ``directory/checkout`` is a detached worktree of this repository at the
     pin, fetched first when a shallow clone lacks it; ``directory/ms-playwright``
-    is its browser cache. A second call verifies and returns what is there.
+    is its browser cache. A second call adds no worktree and downloads nothing:
+    it re-runs the frozen ``uv sync`` and the browser install, which find
+    everything in place and so verify it, then checks the checkout again.
     """
     timings = {} if timings is None else timings
     directory.mkdir(parents=True, exist_ok=True)
