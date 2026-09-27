@@ -107,6 +107,15 @@ stays. Every failed read is recorded in the summary, with the executable when
 known, the fields, how long it lasted, how it ended and whether it could have
 been a browser.
 
+**A known browser root stays one root.** A lifetime read before as a browser
+root on a profile, which O1 therefore already counts, keeps that reading when
+a later read of its arguments fails while its executable, read in the same
+sample, is unchanged: one process cannot become a second root, and macOS
+refuses the arguments of a process on its way out. The failed read is kept in
+``read_failures`` as retained history, not as a possible browser. Every other
+failed argument read stays uncertain, including one of a lifetime read before
+as a driver, helper or renderer: an exec since could have made it a root.
+
 What sampling cannot see: a process that lives and dies between two samples.
 The summary records when observation began and ended and the largest wall-clock
 gap between two samples, so a claim built on it can state the window it had; an
@@ -678,6 +687,9 @@ class Sampler:
         self.group_read_failures: list[dict[str, Any]] = []
         self.group_read_failure_count = 0
         self._episodes: dict[tuple[int, float | None], dict[str, Any]] = {}
+        #: Failed argument reads of lifetimes already counted as a browser
+        #: root, which keep their earlier reading (``_keeps_its_root``).
+        self._retained: dict[tuple[int, float], dict[str, Any]] = {}
         self._closed: list[dict[str, Any]] = []
 
     def stats(self) -> dict[str, Any]:
@@ -758,14 +770,20 @@ class Sampler:
         """Every failed-read episode that was not established as unrelated.
 
         ``resolution`` says how an episode ended: ``readable``, ``exited``, or
-        ``open`` when it was still unreadable at the last sample.
+        ``open`` when it was still unreadable at the last sample. A failed
+        argument read of a known browser root (``_keeps_its_root``) is listed
+        as retained history instead, with the profile its earlier reading
+        named, never as a fresh reading.
         ``possible_browser`` says whether it leaves O1 unestablished.
         """
         open_ = [
             dict(e, failures=sorted(e["failures"]), resolution="open")
             for e in self._episodes.values()
         ]
-        return [*self._closed, *open_]
+        retained = [
+            dict(e, failures=sorted(e["failures"])) for e in self._retained.values()
+        ]
+        return [*self._closed, *open_, *retained]
 
     @property
     def relevant_read_failures(self) -> list[dict[str, Any]]:
@@ -922,6 +940,12 @@ class Sampler:
                 pgid_error=error,
                 browser_marker=known.browser_marker if known is not None else None,
             )
+            if failed and self._keeps_its_root(known, failed, exe):
+                # Already counted as this profile's browser root: the record
+                # keeps that reading, and the failure is kept as an audit note.
+                assert known is not None
+                self._note_retained(known, failed)
+                failed = []
             if failed:
                 parent_read = not any(f.startswith("ppid") for f in failed)
                 failures[pid] = (
@@ -1009,6 +1033,47 @@ class Sampler:
                     "slowest": slowest,
                 }
             )
+
+    @staticmethod
+    def _keeps_its_root(
+        known: ProcessRecord | None, failed: list[str], exe: str | None
+    ) -> bool:
+        """Whether a failed read leaves a known browser root's reading standing.
+
+        Only when this lifetime was read before as a browser root (a profile,
+        no ``--type=``), so O1 already counts it; only its arguments failed,
+        so its executable was read in this sample; and that executable is the
+        one it had. The process is one root either way: a failed read of it
+        cannot make it a second. Anything else, a helper or driver read
+        before included, stays a failure: an exec since the last reading
+        could have made it a root.
+        """
+        return (
+            known is not None
+            and known.profile is not None
+            and {failure.split(":", 1)[0] for failure in failed} == {"cmdline"}
+            and exe == known.exe
+        )
+
+    def _note_retained(self, known: ProcessRecord, failed: list[str]) -> None:
+        """Record the failed read of a known root, once per lifetime."""
+        now = self._clock()
+        note: dict[str, Any] | None = self._retained.get(known.identity)
+        if note is None:
+            note = {
+                "pid": known.pid,
+                "start_identity": known.start,
+                "exe": known.exe,
+                "failures": set(),
+                "first": now,
+                "possible_browser": False,
+                "resolution": "a known browser root's earlier reading retained",
+                "retained_profile": known.profile,
+            }
+            self._retained[known.identity] = note
+        note["failures"].update(failed)
+        note["last"] = now
+        note["seconds"] = round(now - note["first"], 4)
 
     def _read_launchers(
         self, sample: dict[int, ProcessRecord], identified: dict[int, Any]

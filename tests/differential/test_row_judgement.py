@@ -1025,3 +1025,114 @@ def test_an_exclusion_about_another_lifetime_fails_o1_and_the_comparison(profile
     assert not vector.o1_single_browser
     assert failures
     assert compare_to_direct(direct, vector)
+
+
+# --- A known root's failed read, judged in full ----------------------------------
+
+
+def _failed_read_census(case: str) -> dict:
+    """The e1eh model: pid 70 is the row's browser root and pid 71 its
+    renderer, both readable for two samples; pid 72 is a driver. At the third
+    sample one lifetime's arguments are refused, as *case* says, and at the
+    fourth everything is gone. pid 1 is init and pid 10 the harness.
+    """
+    chrome = [BROWSER_EXE, f"--user-data-dir={KEY}"]
+    table: dict[int, dict[str, Any]] = {
+        1: {"start": 0.0, "ppid": 0, "cmdline": ["init"]},
+        10: {"start": 5.0, "ppid": 1, "cmdline": ["pytest"]},
+    }
+    sampler, tracker = _sampler(table, root=10), Tracker()
+    tracker.observe(sampler.sample(), 0.0)
+    table[70] = {"start": 6.0, "ppid": 10, "exe": BROWSER_EXE, "cmdline": chrome}
+    table[71] = {
+        "start": 6.1,
+        "ppid": 70,
+        "exe": BROWSER_EXE,
+        "cmdline": [BROWSER_EXE, "--type=renderer", f"--user-data-dir={KEY}"],
+    }
+    table[72] = {
+        "start": 6.2,
+        "ppid": 10,
+        "exe": "/usr/bin/node",
+        "cmdline": ["node", "driver"],
+    }
+    for tick in (1.0, 2.0):
+        tracker.observe(sampler.sample(), tick)
+    if case == "known-root":
+        # The packet: read with its profile, one refused read, then gone.
+        table[70]["cmdline"] = psutil.AccessDenied(70)
+    elif case == "known-root-exe-changed":
+        table[70].update(
+            exe=f"{BROWSER_EXE}_crashpad_handler", cmdline=psutil.AccessDenied(70)
+        )
+    elif case == "known-root-parent-unread":
+        table[70].update(ppid=psutil.AccessDenied(70), cmdline=psutil.AccessDenied(70))
+    elif case == "driver-now-the-browser":
+        table[72].update(exe=BROWSER_EXE, cmdline=psutil.AccessDenied(72))
+    elif case == "never-read":
+        table[73] = {
+            "start": 7.0,
+            "ppid": 10,
+            "exe": BROWSER_EXE,
+            "cmdline": psutil.AccessDenied(73),
+        }
+    elif case == "renderer":
+        table[71]["cmdline"] = psutil.AccessDenied(71)
+    tracker.observe(sampler.sample(), 3.0)
+    for pid in (70, 71, 72, 73):
+        table.pop(pid, None)
+    tracker.observe(sampler.sample(), 4.0)
+    return {
+        "stopped_by": "stop file",
+        "observation_start": 10.0,
+        "observation_end": 100.0,
+        "max_gap_seconds": 0.2,
+        "max_roots": dict(tracker.max_roots),
+        "read_failures": sampler.read_failures,
+        "relevant_read_failures": sampler.relevant_read_failures,
+    }
+
+
+def _judged_failed_read(profile, case: str):
+    census = _failed_read_census(case)
+    vector, failures = judge_row(
+        dataclasses.replace(
+            _healthy(profile),
+            browser_key=canonical_user_data_dir(KEY),
+            watcher=census,
+        )
+    )
+    return census, vector, failures
+
+
+def test_a_known_roots_refused_arguments_leave_it_one_root(profile):
+    census, vector, failures = _judged_failed_read(profile, "known-root")
+    assert failures == []
+    assert vector.o1_single_browser and vector.watcher_healthy
+    # The failed read is kept, marked as the earlier reading retained.
+    (note,) = census["read_failures"]
+    assert note["pid"] == 70 and note["failures"] == ["cmdline: AccessDenied"]
+    assert note["resolution"] == "a known browser root's earlier reading retained"
+    assert note["retained_profile"] == canonical_user_data_dir(KEY)
+    assert not note["possible_browser"]
+
+
+@pytest.mark.parametrize(
+    ("case", "pid"),
+    [
+        # Read before as a driver: an exec since could have made it a root.
+        ("driver-now-the-browser", 72),
+        ("never-read", 73),
+        # Chromium starts its helpers from its own executable, so an
+        # unchanged image says nothing about whether a helper became a root.
+        ("renderer", 71),
+        # Neither is the reading it was counted by.
+        ("known-root-exe-changed", 70),
+        ("known-root-parent-unread", 70),
+    ],
+)
+def test_any_other_refused_arguments_leave_o1_unestablished(profile, case, pid):
+    census, vector, failures = _judged_failed_read(profile, case)
+    assert [e["pid"] for e in census["relevant_read_failures"]] == [pid]
+    assert not vector.o1_single_browser and not vector.watcher_healthy
+    assert failures
