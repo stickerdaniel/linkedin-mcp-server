@@ -1,0 +1,16 @@
+# Read by .github/workflows/check-unicode.yml, always from the base commit.
+# Only the Unicode rules stay on. Attribution is checked by
+# check-attribution.yml, and ai-footer would reject the "Generated with" line
+# the PR template requires.
+fail-on = "error"
+
+[rules]
+ai-trailer = "off"
+ai-identity = "off"
+ai-footer = "off"
+ai-tag = "off"
+ai-emoji = "off"
+ai-session-link = "off"
+ai-branch = "off"
+ai-metadata = "off"
+c2pa-manifest = "off"

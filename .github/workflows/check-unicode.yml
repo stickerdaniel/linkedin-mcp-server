@@ -1,0 +1,43 @@
+name: Check Unicode
+
+# Invisible and look-alike characters make text read differently from what it
+# does: a bidi override reorders code on screen (Trojan Source), a zero-width
+# or tag character hides text, and a Cyrillic "a" inside a Latin word defeats a
+# string comparison. None of them shows up in review, and nothing else here
+# looks for them: the Ruff rule set selected in pyproject.toml has none of
+# its Unicode rules. The PR body counts as well, because it becomes the squash
+# commit message.
+#
+# no-ai-marks does the scanning. Its AI attribution rules are switched off in
+# .github/no-ai-marks.toml: attribution is Check Attribution's job, and its
+# footer rule would reject the "Generated with" line this repository requires.
+on:
+  # Every pull request, as in CI. "edited" re-checks a changed description.
+  # This is pull_request, not pull_request_target, on purpose: the action only
+  # reads git objects and takes its config from the base commit, so it needs
+  # neither a write token nor the base branch's copy of this file.
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check-unicode:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The commit range and the merge base need history.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Scan commits, PR text and added lines
+        uses: mishan/no-ai-marks@747c07a76d2ad6471fa73779dc8de97fbcb4aefe # v0.1.1
+        with:
+          checks: commits,pr,files
