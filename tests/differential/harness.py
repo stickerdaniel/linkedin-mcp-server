@@ -108,7 +108,9 @@ from differential.session import (
     stage_signed_in_session,
     write_synthetic_cookie_file,
 )
+from differential.signals import COMPLETE as ORACLE_COMPLETE
 from differential.signals import INCOMPLETE as O2_INCOMPLETE
+from differential.signals import UNAVAILABLE as ORACLE_UNAVAILABLE
 from differential.signals import UNOBSERVED as O2_UNOBSERVED
 from differential.signals import VIOLATED as O2_VIOLATED
 from differential.signals import (
@@ -1405,6 +1407,9 @@ class RowVector:
     o2_traced: str = O2_UNOBSERVED
     #: The oracle was required here (native Linux CI, a row that kills).
     o2_required: bool = False
+    #: The oracle's collection, apart from what it showed: ``complete``,
+    #: ``incomplete`` or ``unavailable``. What every required-oracle check reads.
+    oracle_collection: str = ORACLE_UNAVAILABLE
     #: Every class of signal the oracle resolved, ``role:target kind``.
     signal_classes: tuple[str, ...] = ()
     #: H-R6: the group the killed actor's guardian was told to kill, from its
@@ -1660,8 +1665,11 @@ def row_expectations(
     # SIGKILL reached is gone by the next sample. It is recorded, not failed.
     if vector.o2_traced == O2_VIOLATED:
         failures.append("O2: a traced signal reached a process outside its set")
-    if vector.o2_traced == O2_INCOMPLETE and vector.o2_required:
-        failures.append("O2: the required signal oracle's evidence is incomplete")
+    if vector.o2_required and vector.oracle_collection != ORACLE_COMPLETE:
+        failures.append(
+            f"O2: the required signal oracle's evidence is "
+            f"{vector.oracle_collection}, not complete"
+        )
     if expect_owner:
         if not vector.owner_published:
             failures.append("daemon mode published no owner")
@@ -1790,14 +1798,12 @@ def r6_verdict(
         return [*problems, "the killed actor's guardian was never seen"]
     assert vector is not None
     group_kill_seen = GUARDIAN_OWNER_GROUP_KILL in vector.signal_classes
-    traced = vector.o2_required and vector.o2_traced not in (
-        O2_UNOBSERVED,
-        O2_INCOMPLETE,
-    )
+    traced = vector.o2_required and vector.oracle_collection == ORACLE_COMPLETE
     if linux and not traced:
         problems.append(
             f"the required signal oracle did not deliver a complete trace "
-            f"(required={vector.o2_required}, traced O2 {vector.o2_traced!r})"
+            f"(required={vector.o2_required}, collection "
+            f"{vector.oracle_collection!r})"
         )
     if experiment == "K2":
         if reading != "!":
@@ -1847,11 +1853,15 @@ def compare_to_direct(direct: RowVector, daemon: RowVector) -> list[str]:
                 f"{name}: Direct {getattr(direct, name)!r}, daemon "
                 f"{getattr(daemon, name)!r}"
             )
-    for state in (O2_VIOLATED, O2_INCOMPLETE):
-        if (direct.o2_traced == state) != (daemon.o2_traced == state):
-            differences.append(
-                f"o2_traced: Direct {direct.o2_traced!r}, daemon {daemon.o2_traced!r}"
-            )
+    if (direct.o2_traced == O2_VIOLATED) != (daemon.o2_traced == O2_VIOLATED):
+        differences.append(
+            f"o2_traced: Direct {direct.o2_traced!r}, daemon {daemon.o2_traced!r}"
+        )
+    if direct.oracle_collection != daemon.oracle_collection:
+        differences.append(
+            f"oracle_collection: Direct {direct.oracle_collection!r}, daemon "
+            f"{daemon.oracle_collection!r}"
+        )
     extra = classes_direct_would_not_send(daemon.signal_classes, direct.signal_classes)
     if extra:
         differences.append(f"o2: signals Direct would not send: {extra}")
@@ -2072,6 +2082,7 @@ def judge_row(observed: Observations) -> tuple[RowVector, list[str]]:
         o2=o2.row if o2 is not None else O2_UNOBSERVED,
         o2_traced=o2.state if o2 is not None else O2_UNOBSERVED,
         o2_required=o2.required if o2 is not None else False,
+        oracle_collection=o2.collection if o2 is not None else ORACLE_UNAVAILABLE,
         signal_classes=o2.classes if o2 is not None else (),
         guardian_owner_group=killed.get("guardian_owner_group"),
         recovered=_recovered(host) if killed and observed.daemon else None,

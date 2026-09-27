@@ -640,6 +640,7 @@ def _r6(
         cleanup_clean=True,
         o2_traced=HELD if attached else UNOBSERVED,
         o2_required=attached,
+        oracle_collection=COMPLETE if attached else UNAVAILABLE,
         signal_classes=tuple(classes),
         guardian_owner_group=group,
         recovered=recovered if daemon else None,
@@ -1409,6 +1410,12 @@ def test_a_settled_process_found_gone_is_an_exit_not_a_group():
 # --- E1EB-03: K2's Linux witness needs the complete required oracle -----------------
 
 
+#: The baseline guardian's group kill, and a signal outside its launched set.
+_WITNESS_AND_OUTSIDER = (
+    "21  6.0 kill(-20, SIGKILL) = 0\n21  6.1 kill(95, SIGTERM) = 0\n"
+)
+
+
 def _k2(profile_pair, outcome):
     """A K2 row as its native test judges it: ``r6_verdict`` alone."""
     history = ProcessHistory(_timeline(_row()), outside=[HARNESS])
@@ -1454,6 +1461,27 @@ def _k2(profile_pair, outcome):
             True,
             False,
             id="linux-complete-without-the-class",
+        ),
+        pytest.param(
+            OracleOutcome(
+                status=INCOMPLETE,
+                required=True,
+                reasons=["strace let 23 go before it ended"],
+                calls=parse_strace(_WITNESS_AND_OUTSIDER),
+            ),
+            True,
+            False,
+            id="linux-incomplete-plus-violation",
+        ),
+        pytest.param(
+            OracleOutcome(
+                status=COMPLETE,
+                required=True,
+                calls=parse_strace(_WITNESS_AND_OUTSIDER),
+            ),
+            True,
+            True,
+            id="linux-complete-with-violation-is-baseline-evidence",
         ),
         pytest.param(
             OracleOutcome(status=UNAVAILABLE, reasons=["no strace on darwin"]),
@@ -1556,3 +1584,139 @@ def test_a_deliberate_stop_is_each_remaining_tracees_boundary(tmp_path):
     assert outcome.status == COMPLETE, outcome.reasons
     assert outcome.cohort[21]["end"].startswith("detached at the stop")
     assert outcome.cohort[20]["end"] == "its exit line"
+
+
+def test_a_violation_does_not_hide_an_incomplete_collection(profile_pair):
+    outcome = OracleOutcome(
+        status=INCOMPLETE,
+        required=True,
+        reasons=["strace let 23 go before it ended"],
+        calls=parse_strace(_WITNESS_AND_OUTSIDER),
+    )
+    result = _k2(profile_pair, outcome)
+    vector = result.vector
+    assert vector is not None
+    assert (vector.o2_traced, vector.oracle_collection) == (VIOLATED, INCOMPLETE)
+    # Both are on record: the violation, and the collection the row requires.
+    assert any("outside the launched set" in f for f in result.failures)
+    required = "the required signal oracle's evidence is incomplete"
+    assert any(required in f for f in result.failures)
+
+
+# --- E1EC-02: a tracee is a lifetime, and the trace's order is not the parent's ------
+
+#: e1ec's model: tid 24 was a thread of the owner (20) at the attach, ended,
+#: and the guardian (21) then started a process that got 24 again.
+_REUSED = (
+    "24  5.1 +++ exited with 0 +++\n"
+    "21  5.5 clone(child_stack=NULL, flags=SIGCHLD) = 24\n"
+    "24  6.0 kill(30, SIGTERM) = 0\n"
+    "24  6.5 +++ exited with 0 +++\n"
+)
+
+
+@pytest.mark.parametrize(
+    "trace",
+    [
+        pytest.param(_REUSED + _ENDS, id="every-end-present"),
+        pytest.param(
+            _REUSED.replace("24  6.5 +++ exited with 0 +++\n", "") + _ENDS,
+            id="the-new-lifetime-without-its-end",
+        ),
+    ],
+)
+def test_a_reused_tid_leaves_the_collection_incomplete(tmp_path, trace):
+    oracle = _attached(tmp_path, trace)
+    oracle.threads = {24: 20}
+    outcome = oracle.stop()
+    assert outcome.status == INCOMPLETE
+    assert any("reused id" in reason for reason in outcome.reasons)
+    # The stale association is dropped, not applied to the new process.
+    assert 24 not in outcome.threads
+    records = [*_row(), _start(24, 21, 5.6, start=5.5, pgid=24)]
+    history = ProcessHistory(_timeline(records), outside=[HARNESS])
+    result = derive_o2(outcome, history)
+    assert result.state != HELD
+    assert result.resolved[0]["sender"] == [24, 5.5]
+
+
+def test_a_tid_that_writes_after_its_end_is_reused(tmp_path):
+    trace = "23  6.0 +++ exited with 0 +++\n23  6.1 kill(30, SIGTERM) = 0\n" + _ENDS
+    outcome = _attached(tmp_path, trace).stop()
+    assert outcome.status == INCOMPLETE and outcome.cohort[23]["reused"]
+
+
+_PARENT_FIRST = (
+    "20  5.5 clone(child_stack=NULL, flags=SIGCHLD) = 23\n"
+    "23  5.6 clone(child_stack=0x1, flags=CLONE_VM|CLONE_SIGHAND|CLONE_THREAD) = 24\n"
+)
+#: The child starts its thread before its parent's clone has returned.
+_CHILD_FIRST = (
+    "20  5.5 clone(child_stack=NULL, flags=SIGCHLD <unfinished ...>\n"
+    "23  5.6 clone(child_stack=0x1, flags=CLONE_VM|CLONE_SIGHAND|CLONE_THREAD) = 24\n"
+    "20  5.7 <... clone resumed>) = 23\n"
+)
+
+
+@pytest.mark.parametrize(
+    "births",
+    [
+        pytest.param(_PARENT_FIRST, id="parent-first"),
+        pytest.param(_CHILD_FIRST, id="child-first"),
+    ],
+)
+def test_a_thread_is_placed_whatever_order_the_returns_came_in(tmp_path, births):
+    trace = (
+        births
+        + "24  6.0 kill(25, SIGTERM) = 0\n"
+        + "24  6.2 +++ exited with 0 +++\n"
+        + "23  6.5 +++ exited with 0 +++\n"
+        + _ENDS
+    )
+    outcome = _attached(tmp_path, trace).stop()
+    assert outcome.status == COMPLETE, outcome.reasons
+    assert outcome.threads[24] == 23
+    assert outcome.cohort[23]["kind"] == "child"
+    records = [
+        *_row(),
+        _start(23, 20, 5.6, start=5.5, pgid=23),
+        _start(25, 23, 5.9, start=5.8, pgid=25),
+    ]
+    history = ProcessHistory(_timeline(records), outside=[HARNESS])
+    result = derive_o2(outcome, history)
+    assert result.resolved[0]["sender"] == [23, 5.5]
+    assert result.state == HELD, result
+
+
+# --- E1EC-03: a class is read from evidence at or before the send -------------------
+
+#: e1ec's model: 40, a driver in group 40 when the guardian signals that group,
+#: is only later seen as a browser.
+_DRIVER_40 = _start(40, 22, 4.5, start=4.4, actor="driver", pgid=40)
+
+
+@pytest.mark.parametrize(
+    ("later", "target", "named", "after_exec"),
+    [
+        pytest.param(40, "-40", "other-group", "browser-group", id="same-group"),
+        # It execs into a browser in another group: its old group never was a
+        # browser's, and its new one was not one yet at the send.
+        pytest.param(41, "-40", "other-group", "other-group", id="exec-regroup-old"),
+        pytest.param(41, "-41", "other-group", "browser-group", id="exec-regroup-new"),
+        pytest.param(40, "40", "other", "browser", id="pid"),
+    ],
+)
+def test_a_later_observation_does_not_change_an_earlier_class(
+    later, target, named, after_exec
+):
+    line = f"21  6.1 kill({target}, SIGCONT) = 0\n"
+    before = _o2(line, [*_row(), _DRIVER_40])
+    future = {
+        **_start(40, 22, 7.0, start=4.4, actor="browser", pgid=later),
+        "kind": "process.update",
+    }
+    after = _o2(line, [*_row(), _DRIVER_40, future])
+    assert before.classes == after.classes == (f"guardian:{named}",)
+    # The same call once the exec was on record names what it had become.
+    late = _o2(line.replace(" 6.1 ", " 7.5 "), [*_row(), _DRIVER_40, future])
+    assert late.classes == (f"guardian:{after_exec}",)

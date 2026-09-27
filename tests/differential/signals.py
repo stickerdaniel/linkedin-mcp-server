@@ -27,13 +27,24 @@ threads, and every thread or child their ``clone``, ``fork`` and ``vfork``
 calls started. Each needs its own end (an exit line, or the harness's own
 confirmed kill of a root), or for a thread its process's end, or the
 deliberate stop's detach, which is then that tracee's boundary. A tracee strace
-let go on its own, or one with no end, leaves it ``incomplete``.
+let go on its own, or one with no end, leaves it ``incomplete``. A tracee is a
+lifetime, not a number: an end satisfies only the lifetime it follows, and a
+thread id that turns up again (born anew, or writing after its end) is a
+reused id the trace cannot place, so it too leaves the collection
+``incomplete`` and its old association is dropped. A child that runs before
+its parent's ``clone`` has returned is placed like one reported in order.
+Whether the collection is complete is kept apart from what it showed:
+``OracleOutcome.status`` is the collection, ``O2Result.state`` the verdict.
 
 **What a signal was aimed at is what the call names.** Its class is the
 sender's role and the kind of target the call names, read against the
-watcher's records: the principal's own group, a group or pid the watcher
-recorded for one of the row's browsers (or for a process carrying such a
-browser's marker), the sender itself, or anything else. That is the Path A
+watcher's records up to the send and never after it: a group number the
+watcher had recorded for the principal (``principal-group``), a group or pid it
+had recorded for one of the row's browsers while it was one, or for a process
+by then known to carry such a browser's marker, the sender itself, or anything
+else. ``principal-group`` means the call named a previously recorded
+principal-group number: it is not proof that the group still belonged to the
+principal, nor of the sender's intent, nor of any death. That is the Path A
 witness, and it rests on the call alone: which processes a signal then reached
 is a separate question.
 
@@ -45,7 +56,9 @@ every process in that group in either sample is seen in both, in that group
 both times, the group did not exist at the watcher's first sample, and no
 process could not be identified, and no member's group could not be read,
 around the send. That is endpoint membership, not a continuous record: a
-process that joined and left the group between the two samples is not seen.
+process that joined and left the group between the two samples is not seen,
+so a ``held`` group under this rule is not an atomic census of every process
+the signal reached.
 A process a SIGKILL reached is gone by the next sample, so it can almost never
 be pinned, and the traced O2 of a row whose guardian drained its browser groups
 usually reads ``unknown``. That is the oracle's stated limit, not a pass: the
@@ -328,6 +341,8 @@ class Birth:
     child: int
     #: ``CLONE_THREAD``: a thread of the parent's process, not a process.
     thread: bool
+    #: When the parent's call began: the child exists from no earlier.
+    began: float = 0.0
 
 
 @dataclass
@@ -341,13 +356,18 @@ class Trace:
     #: Every tid a line was written for.
     tids: set[int] = field(default_factory=set)
     problems: list[str] = field(default_factory=list)
+    #: ``("line", tid, t)``, ``("end", tid, t)`` and ``("birth", Birth)``, in
+    #: the order strace wrote them: what the cohort is rebuilt from.
+    events: list[tuple[Any, ...]] = field(default_factory=list)
 
 
 def _record(trace: Trace, tid: int, t: float, name: str, args: str, ret: str, raw: str):
     if name in FOLLOWED_SYSCALLS:
         found = _RETURNED.match(ret.strip())
         if found is not None and int(found["value"]) > 0:
-            trace.births.append(Birth(tid, int(found["value"]), "CLONE_THREAD" in args))
+            birth = Birth(tid, int(found["value"]), "CLONE_THREAD" in args, t)
+            trace.births.append(birth)
+            trace.events.append(("birth", birth))
         return
     trace.calls.append(_call(tid, t, name, args, ret, raw))
 
@@ -372,12 +392,15 @@ def read_trace(text: str) -> Trace:
         tid, t, rest = int(line["tid"]), float(line["t"]), line["rest"]
         trace.tids.add(tid)
         try:
-            if rest.startswith("---"):
-                continue
             if rest.startswith("+++"):
                 if _ENDED.match(rest) is None:
                     raise ValueError("an unreadable exit line")
                 trace.ended.add(tid)
+                trace.events.append(("end", tid, t))
+                continue
+            trace.events.append(("line", tid, t))
+            if rest.startswith("---"):
+                continue
             elif (found := _COMPLETE.match(rest)) is not None:
                 _record(trace, tid, t, found["name"], found["args"], found["ret"], raw)
             elif (found := _UNFINISHED.match(rest)) is not None:
@@ -481,6 +504,18 @@ class Lifetime:
         """Whether any reading of it showed *actor*."""
         return any(reading[1] == actor for reading in self.readings)
 
+    def was_by(self, actor: str, t: float) -> bool:
+        """Whether a reading taken by *t* showed *actor*."""
+        return any(when <= t and role == actor for when, role, _ in self.readings)
+
+    def groups_as(self, actor: str, t: float) -> set[int]:
+        """The groups of the readings taken by *t* that showed *actor*."""
+        return {
+            group
+            for when, role, group in self.readings
+            if when <= t and role == actor and group is not None
+        }
+
     def groups_by(self, t: float) -> set[int]:
         """Every group the watcher read for it by *t*."""
         return {g for when, _, g in self.readings if when <= t and g is not None}
@@ -581,22 +616,41 @@ class ProcessHistory:
         return seen[0] if seen else None
 
     def is_browser(self, life: Lifetime, t: float) -> bool:
-        """One of the row's browsers, or a process carrying one's marker."""
-        return (life.in_row and life.was("browser")) or self.marked(life, t)
+        """By *t*: one of the row's browsers, or carrying one's marker.
+
+        Only readings taken by *t* count. A later reading can neither make it a
+        browser then nor, as an exiting image does, unmake one it already was.
+        """
+        return (life.in_row and life.was_by("browser", t)) or self.marked(life, t)
 
     def names_a_browser(self, pid: int, t: float) -> bool:
-        """Whether the watcher recorded *pid*, by *t*, for a row browser."""
+        """Whether the watcher had recorded *pid*, by *t*, for a row browser."""
         return any(
             life.pid == pid and life.first_t <= t and self.is_browser(life, t)
             for life in self.lifetimes
         )
 
+    def browser_groups(self, life: Lifetime, t: float) -> set[int]:
+        """The groups the watcher had read, by *t*, for *life* as a browser.
+
+        A row browser's groups from the readings that showed it as one; a
+        marked process's from its readings once its marker was known.
+        """
+        groups: set[int] = set()
+        if life.in_row:
+            groups |= life.groups_as("browser", t)
+        marker_t = life.marker_t
+        if self.marked(life, t) and marker_t is not None:
+            groups |= {
+                group
+                for when, _, group in life.readings
+                if marker_t <= when <= t and group is not None
+            }
+        return groups
+
     def names_a_browser_group(self, pgid: int, t: float) -> bool:
-        """Whether the watcher recorded *pgid*, by *t*, as a row browser's group."""
-        return any(
-            pgid in life.groups_by(t) and self.is_browser(life, t)
-            for life in self.lifetimes
-        )
+        """Whether the watcher had recorded *pgid*, by *t*, as a row browser's group."""
+        return any(pgid in self.browser_groups(life, t) for life in self.lifetimes)
 
     # --- by samples, for recipients
 
@@ -684,7 +738,7 @@ class ProcessHistory:
         return [
             life
             for life in self.lifetimes
-            if life.in_row and life.was("browser") and life.marker_by(t) == marker
+            if life.in_row and life.was_by("browser", t) and life.marker_by(t) == marker
         ]
 
     def marked(self, life: Lifetime, t: float) -> bool:
@@ -765,6 +819,9 @@ class O2Result:
     #: The whole row's: violated on evidence, otherwise unobserved.
     row: str = UNOBSERVED
     required: bool = False
+    #: The oracle's collection: complete, incomplete or unavailable. Kept apart
+    #: from ``state``: a violation found in an incomplete trace is both.
+    collection: str = UNAVAILABLE
     #: ``sender role:target kind`` of every call, from what the call named.
     classes: tuple[str, ...] = ()
     violations: list[str] = field(default_factory=list)
@@ -851,7 +908,7 @@ def derive_o2(
     canary_deaths: Sequence[Mapping[str, Any]] = (),
 ) -> O2Result:
     """O2 for one row: the traced scope's, from the oracle, and the row's."""
-    result = O2Result(state=HELD, required=outcome.required)
+    result = O2Result(state=HELD, required=outcome.required, collection=outcome.status)
     result.canary_deaths = [
         f"canary {death.get('pid')} died during the row" for death in canary_deaths
     ]
@@ -1030,35 +1087,118 @@ _ATTACHED = re.compile(r"Process (\d+) attached")
 _DETACHED = re.compile(r"Process (\d+) detached")
 
 
+@dataclass(eq=False)
+class Tracee:
+    """One lifetime of a tid strace covered."""
+
+    tid: int
+    #: ``root``, ``thread``, ``child``, ``attached`` or ``unaccounted``.
+    kind: str
+    #: When it was first on record: its birth, or its first line; None when
+    #: it was there at the attach.
+    first: float | None = None
+    #: A thread started in the trace: the lifetime that started it.
+    parent: Tracee | None = None
+    #: The process it belongs to, when that is its own or known at the attach.
+    process_pid: int | None = None
+    ended: bool = False
+    end: str | None = None
+
+    def process(self, seen: frozenset[int] = frozenset()) -> int | None:
+        """The process this lifetime belongs to, however late that was learnt."""
+        if self.process_pid is not None:
+            return self.process_pid
+        if self.kind == "thread" and self.parent is not None and id(self) not in seen:
+            return self.parent.process(seen | {id(self)})
+        return None
+
+
+@dataclass
+class Cohort:
+    """Every lifetime strace covered, and the ids it could not keep apart."""
+
+    lifetimes: list[Tracee] = field(default_factory=list)
+    #: The latest lifetime of each tid.
+    current: dict[int, Tracee] = field(default_factory=dict)
+    #: Tids that turned up again, as a new birth or after their end.
+    reused: dict[int, str] = field(default_factory=dict)
+
+    def add(self, tracee: Tracee) -> Tracee:
+        self.lifetimes.append(tracee)
+        self.current[tracee.tid] = tracee
+        return tracee
+
+
 def cohort(
     roots: Sequence[int],
     threads: Mapping[int, int],
     trace: Trace,
     attached: Iterable[int] = (),
-) -> dict[int, dict[str, Any]]:
-    """Every tracee strace covered: tid -> kind and the process it belongs to.
+) -> Cohort:
+    """Every tracee strace covered, as lifetimes, from the trace in order.
 
     The roots strace was attached to, their threads at the attach, every tid
     a traced ``clone``, ``fork`` or ``vfork`` returned (a thread of its
     parent's process with ``CLONE_THREAD``, a process of its own without),
     every pid strace reported attaching, and every tid a line was written for.
-    A tid that none of these accounts for belongs to no known process.
+    A child that wrote before its parent's call returned is that birth's
+    lifetime, not a second one; which process a thread belongs to is resolved
+    once the whole trace is read, whatever order the returns came in. A tid
+    that turns up again, born anew or writing after its end, is reused: it is
+    recorded, and no lifetime of it is trusted.
     """
-    members: dict[int, dict[str, Any]] = {}
+    members = Cohort()
     for pid in roots:
-        members[pid] = {"kind": "root", "process": pid}
+        members.add(Tracee(pid, "root", process_pid=pid))
     for tid, pid in threads.items():
-        members.setdefault(tid, {"kind": "thread", "process": pid})
-    for birth in trace.births:
-        parent = members.get(birth.parent, {}).get("process")
-        if birth.thread:
-            members.setdefault(birth.child, {"kind": "thread", "process": parent})
-        else:
-            members.setdefault(birth.child, {"kind": "child", "process": birth.child})
+        if tid not in members.current:
+            members.add(Tracee(tid, "thread", process_pid=pid))
     for pid in attached:
-        members.setdefault(pid, {"kind": "attached", "process": pid})
-    for tid in trace.tids:
-        members.setdefault(tid, {"kind": "unaccounted", "process": None})
+        if pid not in members.current:
+            members.add(Tracee(pid, "attached", process_pid=pid))
+    for event in trace.events:
+        if event[0] == "birth":
+            birth: Birth = event[1]
+            parent = members.current.get(birth.parent)
+            known = members.current.get(birth.child)
+            if known is None:
+                members.add(
+                    Tracee(
+                        birth.child,
+                        "thread" if birth.thread else "child",
+                        first=birth.began,
+                        parent=parent if birth.thread else None,
+                        process_pid=None if birth.thread else birth.child,
+                    )
+                )
+            elif not known.ended and (
+                (
+                    known.kind == "unaccounted"
+                    and known.first is not None
+                    and known.first >= birth.began
+                )
+                or known.kind == "attached"
+            ):
+                # It ran before its parent's call returned, or strace reported
+                # attaching to it as it followed it: the same lifetime.
+                known.kind = "thread" if birth.thread else "child"
+                known.parent = parent if birth.thread else None
+                known.process_pid = None if birth.thread else birth.child
+            else:
+                members.reused[birth.child] = (
+                    f"tid {birth.child} was born at {birth.began} while an earlier "
+                    f"lifetime of it ({known.kind}) is on record"
+                )
+            continue
+        _, tid, t = event
+        tracee = members.current.get(tid)
+        if tracee is None:
+            tracee = members.add(Tracee(tid, "unaccounted", first=t))
+        elif tracee.ended:
+            members.reused[tid] = f"tid {tid} wrote at {t} after its end"
+            continue
+        if event[0] == "end":
+            tracee.ended = True
     return members
 
 
@@ -1236,7 +1376,7 @@ class SignalOracle:
                 trace,
                 {int(pid) for pid in _ATTACHED.findall(stderr)},
             )
-            self._account(outcome, members, trace, let_go, set(confirmed_dead), stopped)
+            self._account(outcome, members, let_go, set(confirmed_dead), stopped)
         if outcome.reasons:
             outcome.status = INCOMPLETE
         return outcome
@@ -1244,39 +1384,59 @@ class SignalOracle:
     def _account(
         self,
         outcome: OracleOutcome,
-        members: dict[int, dict[str, Any]],
-        trace: Trace,
+        members: Cohort,
         let_go: set[int],
         dead: set[int],
         stopped: bool,
     ) -> None:
-        """How each tracee's coverage ended; a reason for each that did not."""
+        """How each tracee lifetime's coverage ended; a reason for each that did not.
 
-        def process_ended(pid: int | None) -> bool:
-            if pid is None or pid in let_go:
+        A reused tid is a reason of its own, and none of its lifetimes speaks
+        for a thread's process: its association from ``/proc`` is dropped.
+        """
+        for tid, reason in members.reused.items():
+            outcome.reasons.append(f"{reason}: a reused id the trace cannot place")
+            outcome.threads.pop(tid, None)
+
+        def ended(tracee: Tracee | None) -> bool:
+            if tracee is None or tracee.tid in let_go or tracee.tid in members.reused:
                 return False
-            return pid in trace.ended or (pid in dead and pid in self.pids)
+            return tracee.ended or (tracee.kind == "root" and tracee.tid in dead)
 
-        for tid, entry in members.items():
-            if entry["kind"] == "thread" and entry["process"] is not None:
-                outcome.threads[tid] = entry["process"]
+        for tracee in members.lifetimes:
+            tid = tracee.tid
+            process = tracee.process()
+            if tid in members.reused:
+                tracee.end = None
+                continue
+            if tracee.kind == "thread" and process is not None:
+                outcome.threads[tid] = process
             if tid in let_go:
-                entry["end"] = None
+                tracee.end = None
                 outcome.reasons.append(f"strace let {tid} go before it ended")
-            elif tid in trace.ended:
-                entry["end"] = "its exit line"
-            elif tid in dead and tid in self.pids:
-                entry["end"] = "killed by the harness"
-            elif entry["kind"] == "thread" and process_ended(entry["process"]):
-                entry["end"] = "its process ended"
+            elif tracee.ended:
+                tracee.end = "its exit line"
+            elif tracee.kind == "root" and tid in dead:
+                tracee.end = "killed by the harness"
+            elif tracee.kind == "thread" and ended(members.current.get(process or -1)):
+                tracee.end = "its process ended"
             elif stopped:
-                entry["end"] = f"detached at the stop, {outcome.stopped_at}"
+                tracee.end = f"detached at the stop, {outcome.stopped_at}"
             else:
-                entry["end"] = None
+                tracee.end = None
                 outcome.reasons.append(
-                    f"strace stopped following {tid} ({entry['kind']}) before it ended"
+                    f"strace stopped following {tid} ({tracee.kind}) before it ended"
                 )
-        outcome.cohort = members
+        outcome.cohort = {
+            tid: {
+                "kind": tracee.kind,
+                "process": tracee.process(),
+                "end": tracee.end,
+                "lifetimes": sum(1 for x in members.lifetimes if x.tid == tid),
+                "reused": tid in members.reused,
+            }
+            for tid, tracee in members.current.items()
+        }
 
     def _end(self, process: subprocess.Popen[Any], outcome: OracleOutcome) -> None:
         """Bounded cleanup of the oracle's own helper, whatever state it is in."""
