@@ -43,9 +43,10 @@ from linkedin_mcp_server.bootstrap import (
     RuntimePolicy,
     SetupState,
     start_background_browser_setup_if_needed,
+    wait_for_login_to_finish,
 )
 from linkedin_mcp_server.config.schema import AppConfig
-from linkedin_mcp_server.core.exceptions import NetworkError
+from linkedin_mcp_server.core.exceptions import AccountRestrictedError, NetworkError
 from linkedin_mcp_server.exceptions import (
     AuthenticationBootstrapFailedError,
     AuthenticationInProgressError,
@@ -9293,6 +9294,181 @@ class TestProxyErrorSurvivesTheImportTask:
 
         # No login task started: the proxy has to be fixed first.
         assert get_bootstrap_state().login_task is None
+
+
+class TestARestrictedAccountOpensNoLoginWindow:
+    """LinkedIn's restriction ends the login, and no retry reopens one.
+
+    Nothing a person types into a new window can lift it, so each window after
+    the first would only land on the same page.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_session(self, isolate_profile_dir, monkeypatch):
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap.browser_setup_ready", lambda: True
+        )
+        monkeypatch.setattr("linkedin_mcp_server.bootstrap._auth_ready", lambda: False)
+        initialize_bootstrap("managed")
+
+    def _restricted_login(self, monkeypatch) -> list[int]:
+        started: list[int] = []
+
+        async def fake_login_flow() -> None:
+            started.append(1)
+            raise AccountRestrictedError()
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._run_login_flow", fake_login_flow
+        )
+        return started
+
+    async def test_the_next_call_reports_it_instead_of_logging_in_again(
+        self, monkeypatch
+    ):
+        started = self._restricted_login(monkeypatch)
+        _patch_inline_wait(monkeypatch, 0)
+
+        with pytest.raises(AuthenticationInProgressError):
+            await ensure_tool_ready_or_raise("get_person_profile")
+        login_task = get_bootstrap_state().login_task
+        assert login_task is not None
+        await asyncio.wait({login_task})
+
+        with pytest.raises(AccountRestrictedError, match="identity verification"):
+            await ensure_tool_ready_or_raise("get_person_profile")
+
+        assert started == [1]
+        assert get_bootstrap_state().login_task is None
+
+    async def test_the_inline_wait_reports_it(self, monkeypatch):
+        started = self._restricted_login(monkeypatch)
+        _patch_inline_wait(monkeypatch, 5)
+
+        with pytest.raises(AccountRestrictedError, match="identity verification"):
+            await ensure_tool_ready_or_raise("get_person_profile")
+
+        assert started == [1]
+
+    async def test_a_restricted_import_is_not_followed_by_a_manual_login(
+        self, monkeypatch, _stub_import_env
+    ):
+        started = self._restricted_login(monkeypatch)
+        _patch_inline_wait(monkeypatch, 5, auto_import=True)
+
+        async def restricted_import(_ctx=None):
+            raise AccountRestrictedError()
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._try_auto_import_session",
+            restricted_import,
+        )
+
+        for _ in range(2):
+            with pytest.raises(AccountRestrictedError):
+                await ensure_tool_ready_or_raise("get_person_profile")
+
+        assert started == []
+        assert get_bootstrap_state().login_task is None
+
+    async def test_a_poller_after_a_restricted_import_opens_no_login(
+        self, monkeypatch, _stub_import_env
+    ):
+        # The import's own awaiter is not the only reader: a second poller can
+        # run after the import finished and before that awaiter sees the error.
+        started = self._restricted_login(monkeypatch)
+        _patch_inline_wait(monkeypatch, 0, auto_import=True)
+        other: asyncio.Task[None] | None = None
+
+        async def restricted_import(_ctx=None):
+            nonlocal other
+            other = asyncio.create_task(_start_login_if_needed())
+            raise AccountRestrictedError()
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._try_auto_import_session",
+            restricted_import,
+        )
+
+        # Straight into the login logic, as a readiness check reaches it, so the
+        # second poller is scheduled before the first sees the import's error.
+        with pytest.raises(AccountRestrictedError):
+            await _start_login_if_needed()
+        assert other is not None
+        with pytest.raises(AccountRestrictedError):
+            await other
+
+        assert started == []
+        assert get_bootstrap_state().login_task is None
+
+    async def test_a_cancelled_import_awaiter_leaves_no_login_behind(
+        self, monkeypatch, _stub_import_env
+    ):
+        # If the call that awaited the import is cancelled before it can record
+        # the refusal, the finished import still answers the next call.
+        started = self._restricted_login(monkeypatch)
+        _patch_inline_wait(monkeypatch, 0, auto_import=True)
+        import_done = asyncio.Event()
+
+        async def restricted_import(_ctx=None):
+            import_done.set()
+            raise AccountRestrictedError()
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._try_auto_import_session",
+            restricted_import,
+        )
+
+        first = asyncio.create_task(ensure_tool_ready_or_raise("get_person_profile"))
+        await import_done.wait()
+        first.cancel()
+        with pytest.raises((asyncio.CancelledError, AccountRestrictedError)):
+            await first
+
+        with pytest.raises(AccountRestrictedError):
+            await ensure_tool_ready_or_raise("get_person_profile")
+
+        assert started == []
+        assert get_bootstrap_state().login_task is None
+
+    async def test_waiting_for_the_sign_in_ends_with_the_restriction(self, monkeypatch):
+        # What the frontend waits on while repairing auth for the shared owner.
+        self._restricted_login(monkeypatch)
+        _patch_inline_wait(monkeypatch, 0)
+        with pytest.raises(AuthenticationInProgressError):
+            await ensure_tool_ready_or_raise("get_person_profile")
+
+        with pytest.raises(AccountRestrictedError):
+            await asyncio.wait_for(wait_for_login_to_finish(5), timeout=10)
+
+    async def test_a_retired_stale_session_gets_a_login_of_its_own(self, monkeypatch):
+        # A session on disk that failed is retired for a fresh login, and that
+        # login's own outcome is the answer, not the earlier refusal.
+        get_bootstrap_state().account_restricted = True
+        never_done = asyncio.Event()
+
+        async def pending_login() -> None:
+            await never_done.wait()
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._run_login_flow", pending_login
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._force_move_auth_state_aside",
+            lambda *_args: None,
+        )
+        _patch_inline_wait(monkeypatch, 0)
+
+        try:
+            with pytest.raises(AuthenticationStartedError):
+                await invalidate_auth_and_trigger_relogin()
+            with pytest.raises(AuthenticationInProgressError):
+                await ensure_tool_ready_or_raise("get_person_profile")
+        finally:
+            never_done.set()
+            login_task = get_bootstrap_state().login_task
+            if login_task is not None:
+                login_task.cancel()
 
 
 class TestAnOwnerNeverSignsInItself:
