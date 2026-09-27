@@ -664,7 +664,7 @@ def test_k2_reads_bang_from_the_guardians_group():
 @pytest.mark.parametrize("attached", [True, False])
 def test_k2_reading_equal_is_a_harness_defect(attached):
     (problem,) = r6_verdict(
-        _r6(group=0, attached=attached), experiment="K2", windows=False
+        _r6(group=0, attached=attached), experiment="K2", windows=False, linux=False
     )
     assert "K2 read '='" in problem and "harness defect" in problem
 
@@ -681,29 +681,33 @@ def test_k3_must_read_equal_and_recover():
         _r6(group=0, classes=[GUARDIAN_OWNER_GROUP_KILL]),
         experiment="K3",
         windows=False,
+        linux=False,
     )
     (problem,) = r6_verdict(
-        _r6(group=0, recovered=False), experiment="K3", windows=False
+        _r6(group=0, recovered=False), experiment="K3", windows=False, linux=False
     )
     assert "did not recover" in problem
 
 
 def test_h_r6_needs_the_kill_and_on_posix_the_guardian():
     assert r6_verdict(
-        _r6(group=0, exit="gone before the kill"), experiment="K3", windows=False
+        _r6(group=0, exit="gone before the kill"),
+        experiment="K3",
+        windows=False,
+        linux=False,
     )
     (problem,) = r6_verdict(
         _r6(group=None), experiment="K3", windows=False, linux=False
     )
     assert "never seen" in problem
     # Windows starts no guardian: nothing to read, nothing required of it.
-    assert r6_verdict(_r6(group=None), experiment="K2", windows=True) == []
+    assert r6_verdict(_r6(group=None), experiment="K2", windows=True, linux=False) == []
 
 
 def test_on_windows_the_candidate_must_still_recover():
-    assert r6_verdict(_r6(group=None), experiment="K3", windows=True) == []
+    assert r6_verdict(_r6(group=None), experiment="K3", windows=True, linux=False) == []
     (problem,) = r6_verdict(
-        _r6(group=None, recovered=False), experiment="K3", windows=True
+        _r6(group=None, recovered=False), experiment="K3", windows=True, linux=False
     )
     assert "did not recover" in problem
 
