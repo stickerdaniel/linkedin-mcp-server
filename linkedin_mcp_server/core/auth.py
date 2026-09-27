@@ -15,11 +15,10 @@ from .exceptions import AccountRestrictedError, AuthenticationError
 
 logger = logging.getLogger(__name__)
 
-# LinkedIn's account-restriction route, /flagship-web/login/login-restriction/,
-# which a restricted account reaches right after its credentials are accepted.
-# The page is localized, so only the path is read, as its final segments so the
-# route without the flagship-web prefix counts too. Add another route only once
-# it has been seen, never by guessing.
+# LinkedIn's account-restriction route. The page is localized, so only the path
+# is read, as its final segments so the route without the flagship-web prefix
+# counts too. Observations, and any new route, go in
+# docs/linkedin-auth-routes.md first; nothing here is guessed.
 _ACCOUNT_RESTRICTION_PATH_TAIL = ("login", "login-restriction")
 _AUTH_BLOCKER_URL_PATTERNS = (
     "/login",
