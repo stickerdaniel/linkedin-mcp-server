@@ -1789,6 +1789,10 @@ def r6_verdict(
     vector = result.vector
     if killed.get("exit") != "killed":
         problems.append(f"the harness did not kill the actor: {killed}")
+    # Every experiment's kill follows a first call that read the synthetic
+    # post; one that failed before reading is not the row this measures.
+    if vector is None or not vector.tool_succeeded:
+        problems.append("the first call did not read the synthetic post")
     if experiment == "K3" and (vector is None or vector.recovered is not True):
         problems.append("the frontend did not recover on the call after the kill")
     if windows:
@@ -2507,10 +2511,17 @@ async def measure_host_quit_row(
             owner.clear()
             identified = None
             await find_the_owner()
-            replaced = identified is not None or owner.get("pid") not in (
-                None,
-                killed_record.get("pid"),
+            # A stale descriptor can still name the killed owner while it is
+            # an unreaped zombie, and identifying it again is not a successor.
+            again = (
+                identified is not None
+                and killed_owner is not None
+                and (identified.pid, identified.create_time)
+                == (killed_owner.pid, killed_owner.create_time)
             )
+            replaced = (identified is not None and not again) or owner.get(
+                "pid"
+            ) not in (None, killed_record.get("pid"))
             if not replaced:
                 identified = killed_owner
                 owner.clear()

@@ -625,6 +625,7 @@ def _r6(
     exit="killed",
     attached=True,
     daemon=True,
+    read=True,
 ) -> RowResult:
     vector = harness.RowVector(
         mode="daemon" if daemon else "direct",
@@ -634,7 +635,7 @@ def _r6(
         o4_session="retained",
         origin_saw_feed=True,
         feed_carried_session=True,
-        tool_succeeded=True,
+        tool_succeeded=read,
         owner_published=daemon,
         fell_back=False,
         host_exit_clean=True,
@@ -652,6 +653,18 @@ def _r6(
         vector=vector,
         killed={"exit": exit, "oracle": {"attached": attached}},
     )
+
+
+@pytest.mark.parametrize("experiment", ["K1", "K2", "K3"])
+@pytest.mark.parametrize("windows", [False, True])
+def test_a_kill_after_a_first_call_that_read_nothing_does_not_count(
+    experiment, windows
+):
+    # The group kill alone would carry K2's reading; the row still needs the
+    # first call to have read the synthetic post before the kill.
+    result = _r6(group=4321, classes=[GUARDIAN_OWNER_GROUP_KILL], read=False)
+    problems = r6_verdict(result, experiment=experiment, windows=windows, linux=False)
+    assert "the first call did not read the synthetic post" in problems
 
 
 def test_k2_reads_bang_from_the_guardians_group():

@@ -560,6 +560,21 @@ async def test_an_owner_nobody_replaced_is_still_handed_to_cleanup(row):
     assert result.owner["exit"]["how"] == "exited"
 
 
+async def test_the_killed_zombie_found_again_is_no_successor(row, monkeypatch):
+    # The stale descriptor still names the killed owner, unreaped, with its
+    # own create time: identifying that lifetime again replaces nothing.
+    monkeypatch.setattr(harness, "identify_owner", lambda *a, **k: (row.owner, None))
+    result, _ = await row(
+        processes=[],
+        summary={},
+        observed=[_guardian(42, 0)],
+        kill_actor=True,
+        row="H-R6",
+    )
+    assert result.owner is not None
+    assert result.owner["replaced_after_kill"] is False
+
+
 async def test_the_direct_rows_kill_reaches_the_associated_server(row, monkeypatch):
     server = _Actor(4242)
     monkeypatch.setattr(
