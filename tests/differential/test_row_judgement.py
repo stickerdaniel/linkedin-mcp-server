@@ -1029,26 +1029,45 @@ def test_an_exclusion_about_another_lifetime_fails_o1_and_the_comparison(profile
 
 # --- A known root's failed read, judged in full ----------------------------------
 
+OTHER = "/tmp/differential-other-profile"
 
-def _failed_read_census(case: str) -> dict:
-    """The e1eh model: pid 70 is the row's browser root and pid 71 its
-    renderer, both readable for two samples; pid 72 is a driver. At the third
-    sample one lifetime's arguments are refused, as *case* says, and at the
-    fourth everything is gone. pid 1 is init and pid 10 the harness.
+
+def _chrome_on(profile: object) -> list[str]:
+    return [BROWSER_EXE, f"--user-data-dir={profile}"]
+
+
+def _failed_read_census(
+    case: str, *, row: str = KEY, alias: tuple[Path, Path] | None = None
+) -> dict:
+    """The e1eh model: pid 70 is a browser root and pid 71 its renderer, both
+    readable for two samples; pid 72 is a driver. At the third sample one
+    lifetime's arguments are refused, as *case* says, and at the fourth
+    everything is gone. pid 1 is init and pid 10 the harness.
+
+    pid 70 runs on the row's profile *row*, on ``OTHER`` for the
+    ``other-profile`` cases, or through the link of *alias*, which points at
+    *row* until the refused read and at its second path from then on. pid 60,
+    where a case has it, is a second root on *row*, always readable.
     """
-    chrome = [BROWSER_EXE, f"--user-data-dir={KEY}"]
     table: dict[int, dict[str, Any]] = {
         1: {"start": 0.0, "ppid": 0, "cmdline": ["init"]},
         10: {"start": 5.0, "ppid": 1, "cmdline": ["pytest"]},
     }
     sampler, tracker = _sampler(table, root=10), Tracker()
     tracker.observe(sampler.sample(), 0.0)
-    table[70] = {"start": 6.0, "ppid": 10, "exe": BROWSER_EXE, "cmdline": chrome}
+    if case.startswith("other-profile"):
+        first: object = OTHER
+        table[60] = {"start": 5.5, "ppid": 10, "exe": BROWSER_EXE}
+        table[60]["cmdline"] = _chrome_on(row)
+    else:
+        first = alias[0] if alias is not None else row
+    table[70] = {"start": 6.0, "ppid": 10, "exe": BROWSER_EXE}
+    table[70]["cmdline"] = _chrome_on(first)
     table[71] = {
         "start": 6.1,
         "ppid": 70,
         "exe": BROWSER_EXE,
-        "cmdline": [BROWSER_EXE, "--type=renderer", f"--user-data-dir={KEY}"],
+        "cmdline": [BROWSER_EXE, "--type=renderer", f"--user-data-dir={row}"],
     }
     table[72] = {
         "start": 6.2,
@@ -1058,9 +1077,19 @@ def _failed_read_census(case: str) -> dict:
     }
     for tick in (1.0, 2.0):
         tracker.observe(sampler.sample(), tick)
-    if case == "known-root":
+    if case in ("known-root", "peer", "other-profile-hidden", "alias-retarget"):
         # The packet: read with its profile, one refused read, then gone.
         table[70]["cmdline"] = psutil.AccessDenied(70)
+    if case in ("peer", "alias-retarget"):
+        table[60] = {"start": 7.0, "ppid": 10, "exe": BROWSER_EXE}
+        table[60]["cmdline"] = _chrome_on(row)
+    if case == "alias-retarget":
+        assert alias is not None
+        link, elsewhere = alias
+        link.unlink()
+        link.symlink_to(elsewhere, target_is_directory=True)
+    elif case == "other-profile-readable":
+        table[70]["cmdline"] = _chrome_on(row)
     elif case == "known-root-exe-changed":
         table[70].update(
             exe=f"{BROWSER_EXE}_crashpad_handler", cmdline=psutil.AccessDenied(70)
@@ -1079,7 +1108,7 @@ def _failed_read_census(case: str) -> dict:
     elif case == "renderer":
         table[71]["cmdline"] = psutil.AccessDenied(71)
     tracker.observe(sampler.sample(), 3.0)
-    for pid in (70, 71, 72, 73):
+    for pid in (60, 70, 71, 72, 73):
         table.pop(pid, None)
     tracker.observe(sampler.sample(), 4.0)
     return {
@@ -1093,12 +1122,14 @@ def _failed_read_census(case: str) -> dict:
     }
 
 
-def _judged_failed_read(profile, case: str):
-    census = _failed_read_census(case)
+def _judged_failed_read(
+    profile, case: str, *, row: str = KEY, alias: tuple[Path, Path] | None = None
+):
+    census = _failed_read_census(case, row=row, alias=alias)
     vector, failures = judge_row(
         dataclasses.replace(
             _healthy(profile),
-            browser_key=canonical_user_data_dir(KEY),
+            browser_key=canonical_user_data_dir(row),
             watcher=census,
         )
     )
@@ -1115,6 +1146,51 @@ def test_a_known_roots_refused_arguments_leave_it_one_root(profile):
     assert note["resolution"] == "a known browser root's earlier reading retained"
     assert note["retained_profile"] == canonical_user_data_dir(KEY)
     assert not note["possible_browser"]
+
+
+def test_a_retained_root_still_counts_beside_a_new_peer(profile):
+    census, vector, failures = _judged_failed_read(profile, "peer")
+    assert census["relevant_read_failures"] == []
+    assert census["max_roots"][canonical_user_data_dir(KEY)] == 2
+    assert not vector.o1_single_browser
+    assert failures
+
+
+def test_a_retained_root_on_another_profile_stays_unidentified_for_the_row(profile):
+    # Unchanged image, parent and lifetime; the arguments that would say
+    # whether it re-executed onto the row's profile are hidden.
+    census, vector, failures = _judged_failed_read(profile, "other-profile-hidden")
+    (note,) = census["read_failures"]
+    assert note["retained_profile"] == canonical_user_data_dir(OTHER)
+    assert census["max_roots"][canonical_user_data_dir(KEY)] == 1
+    assert not vector.o1_single_browser and not vector.watcher_healthy
+    assert any("possible browser" in failure for failure in failures)
+
+
+def test_the_same_move_read_in_full_counts_two_roots(profile):
+    census, vector, failures = _judged_failed_read(profile, "other-profile-readable")
+    assert census["read_failures"] == []
+    assert census["max_roots"][canonical_user_data_dir(KEY)] == 2
+    assert not vector.o1_single_browser
+    assert failures
+
+
+def test_a_retained_root_keeps_the_profile_it_was_read_on(profile, tmp_path):
+    # Its arguments name a link, retargeted while they cannot be read: the
+    # old arguments now resolve elsewhere, the reading does not.
+    row, elsewhere, link = tmp_path / "row", tmp_path / "elsewhere", tmp_path / "link"
+    row.mkdir()
+    elsewhere.mkdir()
+    link.symlink_to(row, target_is_directory=True)
+    census, vector, failures = _judged_failed_read(
+        profile, "alias-retarget", row=str(row), alias=(link, elsewhere)
+    )
+    (note,) = census["read_failures"]
+    assert note["retained_profile"] == canonical_user_data_dir(str(row))
+    assert census["max_roots"][canonical_user_data_dir(str(row))] == 2
+    assert canonical_user_data_dir(str(elsewhere)) not in census["max_roots"]
+    assert not vector.o1_single_browser
+    assert failures
 
 
 @pytest.mark.parametrize(

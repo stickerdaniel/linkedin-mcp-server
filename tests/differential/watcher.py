@@ -107,12 +107,18 @@ stays. Every failed read is recorded in the summary, with the executable when
 known, the fields, how long it lasted, how it ended and whether it could have
 been a browser.
 
-**A known browser root stays one root.** A lifetime read before as a browser
-root on a profile, which O1 therefore already counts, keeps that reading when
-a later read of its arguments fails while its executable, read in the same
-sample, is unchanged: one process cannot become a second root, and macOS
-refuses the arguments of a process on its way out. The failed read is kept in
-``read_failures`` as retained history, not as a possible browser. Every other
+**A known browser root stays in its profile's count.** A lifetime read before
+as a browser root on a profile keeps that reading, profile included, when a
+later read of its arguments fails while its executable, read in the same
+sample, is unchanged; macOS refuses the arguments of a process on its way out.
+The profile is pinned rather than derived again from the old arguments, which
+could now resolve elsewhere. Pinned there, the lifetime still counts toward
+that profile, as a root or inside a same-profile parent's tree that is counted,
+so it cannot hide a second root *on that profile*. It says nothing about any
+other: a same-image exec with hidden arguments could have moved it onto one.
+So the failed read is kept in ``read_failures`` as retained history with its
+``retained_profile``, not as a possible browser, and whoever judges a profile
+treats it as unidentified unless that is the profile it names. Every other
 failed argument read stays uncertain, including one of a lifetime read before
 as a driver, helper or renderer: an exec since could have made it a root.
 
@@ -774,7 +780,9 @@ class Sampler:
         argument read of a known browser root (``_keeps_its_root``) is listed
         as retained history instead, with the profile its earlier reading
         named, never as a fresh reading.
-        ``possible_browser`` says whether it leaves O1 unestablished.
+        ``possible_browser`` says whether it leaves O1 unestablished; for a
+        retained note it is False, and only for ``retained_profile`` is that
+        true.
         """
         open_ = [
             dict(e, failures=sorted(e["failures"]), resolution="open")
@@ -942,8 +950,11 @@ class Sampler:
             )
             if failed and self._keeps_its_root(known, failed, exe):
                 # Already counted as this profile's browser root: the record
-                # keeps that reading, and the failure is kept as an audit note.
+                # keeps that reading, with the profile it named rather than
+                # one the old arguments resolve to now, and the failure is
+                # kept as an audit note.
                 assert known is not None
+                sample[pid] = replace(sample[pid], profile=known.profile)
                 self._note_retained(known, failed)
                 failed = []
             if failed:
@@ -1041,10 +1052,12 @@ class Sampler:
         """Whether a failed read leaves a known browser root's reading standing.
 
         Only when this lifetime was read before as a browser root (a profile,
-        no ``--type=``), so O1 already counts it; only its arguments failed,
-        so its executable was read in this sample; and that executable is the
-        one it had. The process is one root either way: a failed read of it
-        cannot make it a second. Anything else, a helper or driver read
+        no ``--type=``), so that profile's count already includes it; only
+        its arguments failed, so its executable was read in this sample; and
+        that executable is the one it had. Pinned to that profile, a failed
+        read of it cannot hide a second root there. For any other profile it
+        stays unidentified, which the note's ``retained_profile`` lets the
+        judge of that profile see. Anything else, a helper or driver read
         before included, stays a failure: an exec since the last reading
         could have made it a root.
         """
