@@ -39,7 +39,8 @@ class AccountRestrictedError(LinkedInScraperException):
             or (
                 "LinkedIn has restricted access to this account and asks for "
                 "identity verification. Resolve it on linkedin.com in your own "
-                "browser. The server will not open a login window or retry."
+                "browser. The server will not open a login window or retry; "
+                "once LinkedIn lifts the restriction, run --login."
             )
         )
 
