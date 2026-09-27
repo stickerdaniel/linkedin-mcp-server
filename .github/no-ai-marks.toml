@@ -1,7 +1,11 @@
-# Read by .github/workflows/check-unicode.yml, always from the base commit.
-# Only the Unicode rules stay on. Attribution is checked by
-# check-attribution.yml, and ai-footer would reject the "Generated with" line
-# the PR template requires.
+# Config for the no-ai-marks action that .github/workflows/check-unicode.yml
+# runs. The action reads this file from the PR's base commit, never from the
+# PR itself, so a change here takes effect only after it merges.
+#
+# Only the Unicode rules stay on. Attribution is check-attribution.yml's job,
+# and ai-footer would reject the "Generated with" line the PR template
+# requires. A no-ai-marks update can add AI rules that are on by default;
+# switch each one off here when Renovate brings it in.
 fail-on = "error"
 
 [rules]

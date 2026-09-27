@@ -40,4 +40,5 @@ jobs:
       - name: Scan commits, PR text and added lines
         uses: mishan/no-ai-marks@747c07a76d2ad6471fa73779dc8de97fbcb4aefe # v0.1.1
         with:
+          config: .github/no-ai-marks.toml
           checks: commits,pr,files
