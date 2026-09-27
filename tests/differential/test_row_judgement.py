@@ -258,9 +258,11 @@ class _Process:
         created=100.0,
         liveness_error=None,
         wait_error=None,
+        zombie=False,
         cmdline=("python", "-P", "-m", "linkedin_mcp_server.daemon_owner"),
     ):
         self.running = running
+        self.zombie = zombie
         self.stops_on_kill = stops_on_kill
         self.created = created
         self.liveness_error = liveness_error
@@ -291,6 +293,13 @@ class _Process:
             raise self.wait_error
         if self.running:
             raise psutil.TimeoutExpired(timeout)
+
+    def status(self):
+        if self.kills and self.wait_error is not None:
+            raise self.wait_error
+        if not self.running:
+            raise psutil.NoSuchProcess(4321)
+        return psutil.STATUS_ZOMBIE if self.zombie else psutil.STATUS_SLEEPING
 
 
 @pytest.fixture
@@ -325,6 +334,16 @@ def test_the_same_rows_live_owner_is_stopped_through_its_handle(no_pid_lookup):
 
 def test_an_owner_that_already_exited_is_not_signalled(no_pid_lookup):
     process = _Process(running=False)
+    disposition = settle_owner(
+        _owner(process), PublishedOwner(4321, "instance-a"), None, auth_root="/auth"
+    )
+    assert (disposition.gone, disposition.signalled) == (True, False)
+    assert process.kills == 0
+
+
+def test_a_killed_owner_its_parent_has_not_reaped_is_gone(no_pid_lookup):
+    # H-R6 killed it; a zombie still reads as running, but has ended.
+    process = _Process(zombie=True)
     disposition = settle_owner(
         _owner(process), PublishedOwner(4321, "instance-a"), None, auth_root="/auth"
     )

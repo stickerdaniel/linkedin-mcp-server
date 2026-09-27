@@ -18,6 +18,16 @@ whose leader the watcher saw start: a group that already existed at its first
 sample may hold processes it never reported. What cannot be resolved makes O2
 *unknown*, never *held*.
 
+**A browser's marker is its launch.** On Linux, Chromium's crashpad handler
+double-forks out of the browser's tree: parented to pid 1, in a group and
+session of its own whose leader exits before the watcher sees it. It carries
+the browser's environment, and with it the random marker the product sets per
+launch, which is what the guardian drains by. So a process carrying the marker
+of one of the row's browsers is in that browser's launched set, and a group
+whose leader was never seen is resolved when every member seen in it carries
+such a marker: a new session was started by a marked process, and only
+processes of that session can join its groups.
+
 **O2 per row** holds when every delivered signal reached only the sender's
 launched set (its principal, the server or owner it belongs to, and that
 principal's descendants, at the identity recorded when the watcher first saw
@@ -223,6 +233,8 @@ class Lifetime:
     #: The sample that first reported it, and the one that reported its exit.
     first_t: float
     exit_t: float | None = None
+    #: The watcher's digest of its browser marker, if it carried one.
+    marker: str | None = None
 
     @property
     def identity(self) -> tuple[int, float]:
@@ -271,6 +283,7 @@ class ProcessHistory:
                     in_row=entry.get("in_row") is True,
                     actor=str(entry.get("actor", "other")),
                     first_t=t,
+                    marker=entry.get("browser_marker"),
                 )
                 current[key] = known
                 self.lifetimes.append(known)
@@ -279,6 +292,7 @@ class ProcessHistory:
                 known.pgid = entry.get("pgid", known.pgid)
                 known.actor = str(entry.get("actor", known.actor))
                 known.in_row = known.in_row or entry.get("in_row") is True
+                known.marker = known.marker or entry.get("browser_marker")
 
     def at(self, pid: int, t: float) -> Lifetime | None:
         """The lifetime at *pid* at time *t*, or None if the watcher cannot say."""
@@ -294,14 +308,31 @@ class ProcessHistory:
     def group(self, pgid: int, t: float) -> list[Lifetime] | None:
         """The lifetimes in group *pgid* at *t*, or None when that is unknowable.
 
-        Knowable only for a group whose leader the watcher saw start: every
-        member of it was then born or moved into it while the watcher looked.
+        Knowable for a group whose leader the watcher saw start: every member
+        of it was then born or moved into it while the watcher looked. And for
+        one whose every member seen carries a row browser's marker: its leader
+        was one of that browser's own.
         """
-        if self.leader(pgid, t) is None:
-            return None
-        return [
+        members = [
             life for life in self.lifetimes if life.pgid == pgid and life.alive_at(t)
         ]
+        if self.leader(pgid, t) is not None:
+            return members
+        if members and all(self.marked(life) for life in members):
+            return members
+        return None
+
+    def browsers(self, marker: str) -> list[Lifetime]:
+        """The row's browser processes that carried *marker*."""
+        return [
+            life
+            for life in self.lifetimes
+            if life.in_row and life.actor == "browser" and life.marker == marker
+        ]
+
+    def marked(self, life: Lifetime) -> bool:
+        """Whether *life* carries the marker of one of the row's browsers."""
+        return life.marker is not None and bool(self.browsers(life.marker))
 
     def leader(self, pgid: int, t: float) -> Lifetime | None:
         """The last lifetime at pid *pgid* the watcher saw start by *t*."""
@@ -321,6 +352,14 @@ class ProcessHistory:
                 return None
             seen.add(current.identity)
             if not current.in_row:
+                if current.marker is not None:
+                    # Out of the tree, but launched with a row browser.
+                    carriers = self.browsers(current.marker)
+                    if carriers:
+                        found = [self.descends(b, ancestor) for b in carriers]
+                        if any(found):
+                            return True
+                        return None if None in found else False
                 # Outside the row: not the launch of any row actor.
                 return False
             if current.ppid in self.outside:
@@ -359,6 +398,7 @@ def _target_kind(
     principal: Lifetime,
     pgid: int | None,
     leader: Lifetime | None,
+    history: ProcessHistory,
 ) -> str:
     """What a signal was aimed at, in the terms Direct's construction uses.
 
@@ -366,17 +406,24 @@ def _target_kind(
     principal leads is its own group whatever is left in it: that is the
     pre-Path-A guardian's ``killpg(owner_group)``. A group a browser leads is a
     browser group, whatever helpers such as crashpad it also holds: the driver
-    starts Chromium in a group of its own.
+    starts Chromium in a group of its own. So is a leaderless group of
+    processes carrying a row browser's marker: crashpad's own.
     """
+
+    def browser(life: Lifetime) -> bool:
+        return life.actor == "browser" or history.marked(life)
+
     if pgid is not None:
         if pgid == principal.pid:
             return "principal-group"
         if leader is not None and leader.actor == "browser":
             return "browser-group"
+        if leader is None and targets and all(browser(life) for life in targets):
+            return "browser-group"
         return "descendant-group"
     if len(targets) == 1 and targets[0].identity == sender.identity:
         return "self"
-    if targets and all(life.actor == "browser" for life in targets):
+    if targets and all(browser(life) for life in targets):
         return "browser"
     return "descendant"
 
@@ -439,7 +486,8 @@ def derive_o2(
                 undecided.append(target)
         leader = history.leader(pgid, call.t) if pgid is not None else None
         kind = (
-            f"{sender.actor}:{_target_kind(targets, sender, principal, pgid, leader)}"
+            f"{sender.actor}:"
+            f"{_target_kind(targets, sender, principal, pgid, leader, history)}"
         )
         classes.add(kind)
         result.resolved.append(

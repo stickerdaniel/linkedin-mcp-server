@@ -409,6 +409,8 @@ def _sampler(table, *, root=1, browser_exe=BROWSER_EXE, no_exec=False):
         no_exec=no_exec,
         # The modelled group, never the real one of a real pid.
         pgid_of=lambda pid: (table.get(pid) or {}).get("pgid"),
+        # Markers are read wherever a guardian drains by them: POSIX.
+        read_markers=not no_exec,
     )
 
 

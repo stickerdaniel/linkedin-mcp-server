@@ -15,6 +15,7 @@ import dataclasses
 import os
 from typing import Any
 
+import psutil
 import pytest
 
 from differential import harness
@@ -43,8 +44,14 @@ from differential.signals import (
     parse_strace,
 )
 from differential.test_row_judgement import _healthy
-from differential.test_watcher import _observe, _row_table, _sampler
-from differential.watcher import Tracker
+from differential.test_watcher import (
+    BROWSER_DIR,
+    BROWSER_EXE,
+    _observe,
+    _row_table,
+    _sampler,
+)
+from differential.watcher import BROWSER_MARKER_ENV, Tracker
 
 # --- The parser ------------------------------------------------------------------
 
@@ -198,6 +205,49 @@ def test_a_group_with_a_member_outside_the_set_violates_o2():
 )
 def test_what_cannot_be_resolved_makes_o2_unknown(line):
     assert _o2(line).state == UNKNOWN
+
+
+def _crashpad(marker: str | None, *, pid: int = 41, group: int = 40) -> list[dict]:
+    """The row's browser (30) with its marker, and a crashpad handler it
+    double-forked: parented to pid 1, leading nothing, in a group whose leader
+    (*group*) exited before the watcher saw it. Its record is the shape the
+    watcher writes for a process outside the row's tree."""
+    records = _row()
+    records[4] = {**records[4], "browser_marker": "m-row"}
+    handler = _start(pid, 1, 4.1, pgid=group, in_row=False)
+    if marker is not None:
+        handler["browser_marker"] = marker
+    return [*records, handler]
+
+
+def test_the_guardians_drain_of_a_crashpad_group_holds():
+    # As on the arm64 runner: kill(-9330) and kill(-9332) from the guardian.
+    result = _o2("21  6.0 kill(-40, SIGKILL) = 0\n", _crashpad("m-row"))
+    assert result.state == HELD, result
+    assert result.classes == ("guardian:browser-group",)
+    assert result.resolved[0]["targets"] == [[41, 4.1]]
+
+
+def test_a_crashpad_handler_is_in_its_browsers_launched_set():
+    result = _o2("21  6.0 kill(41, SIGKILL) = 0\n", _crashpad("m-row"))
+    assert result.state == HELD and result.classes == ("guardian:browser",)
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        pytest.param(None, id="no-marker"),
+        pytest.param("m-other", id="another-launchs-marker"),
+    ],
+)
+def test_a_leaderless_group_without_the_rows_marker_stays_unknown(marker):
+    result = _o2("21  6.0 kill(-40, SIGKILL) = 0\n", _crashpad(marker))
+    assert result.state == UNKNOWN, result
+
+
+def test_a_process_outside_the_tree_without_the_rows_marker_is_outside():
+    result = _o2("21  6.0 kill(41, SIGKILL) = 0\n", _crashpad("m-other"))
+    assert result.state == VIOLATED, result
 
 
 def test_a_thread_of_a_traced_process_is_attributed_through_the_map():
@@ -540,3 +590,75 @@ def test_the_watcher_records_a_process_group_and_reports_a_change_of_it():
     table[2]["pgid"] = 2
     (update,) = [e for e in _observe(sampler, tracker, 2.0) if e[1] == "process.update"]
     assert update[2]["pgid"] == 2
+
+
+# --- The watcher reads browser markers -------------------------------------------------
+
+
+def _crashpad_table(environ) -> dict[int, dict[str, Any]]:
+    table = _row_table()
+    # Adopted by init; in this table pid 1 is the harness, so 50 stands in.
+    table[60] = {
+        "start": 3.0,
+        "ppid": 50,
+        "cmdline": ["chrome_crashpad_handler", "--database=/root/.config/x"],
+        "exe": f"{BROWSER_DIR}/chromium-1/chrome-linux/chrome_crashpad_handler",
+        "environ": environ,
+    }
+    return table
+
+
+def test_the_watcher_ties_a_crashpad_handler_to_its_browser_by_marker():
+    table = _row_table()
+    sampler, tracker = _sampler(table), Tracker()
+    _observe(sampler, tracker, 0.0)
+    marker = {BROWSER_MARKER_ENV: "a" * 64}
+    table[2] = {
+        "start": 2.0,
+        "ppid": 1,
+        "cmdline": [BROWSER_EXE, "--user-data-dir=/p"],
+        "exe": BROWSER_EXE,
+        "environ": marker,
+    }
+    table.update({60: _crashpad_table(marker)[60]})
+    # The records as the watcher writes them, and O2 read from them.
+    records = [
+        {"t": 1.0, "actor": actor, "kind": kind, **fields}
+        for actor, kind, fields in _observe(sampler, tracker, 1.0)
+    ]
+    handler = next(r for r in records if r.get("pid") == 60)
+    assert handler["in_row"] is False and "browser_marker" in handler
+    # A digest: the value the guardian acts on is not in the evidence.
+    assert "a" * 64 not in str(records)
+    history = ProcessHistory(records)
+    (browser,) = [life for life in history.lifetimes if life.pid == 2]
+    (crashpad,) = [life for life in history.lifetimes if life.pid == 60]
+    assert history.descends(crashpad, browser) is True
+
+
+def test_a_marker_is_read_once_per_lifetime_and_again_after_a_failed_read():
+    table = _row_table()
+    sampler, tracker = _sampler(table), Tracker()
+    _observe(sampler, tracker, 0.0)
+    table.update(_crashpad_table(psutil.AccessDenied(60)))
+    _observe(sampler, tracker, 1.0)
+    assert sampler.sample()[60].browser_marker is None
+    table[60]["environ"] = {BROWSER_MARKER_ENV: "b" * 64}
+    reads = table[60]["environ_reads"]
+    assert sampler.sample()[60].browser_marker is not None
+    sampler.sample()
+    assert table[60]["environ_reads"] == reads + 1
+
+
+def test_only_a_possible_browser_started_after_the_baseline_is_asked():
+    table = _crashpad_table({BROWSER_MARKER_ENV: "c" * 64})
+    # Its parent is not in the table, so its ancestry is never settled and it
+    # stays watched: only having run before any actor keeps it from being asked.
+    table[60]["ppid"] = 70
+    table[61] = {"start": 3.0, "ppid": 1, "cmdline": ["python"], "environ": {}}
+    sampler, tracker = _sampler(table), Tracker()
+    _observe(sampler, tracker, 0.0)
+    table[62] = {"start": 4.0, "ppid": 1, "cmdline": ["node"], "environ": {}}
+    _observe(sampler, tracker, 1.0)
+    assert "environ_reads" not in table[60]  # running before any actor
+    assert "environ_reads" not in table[62]  # cannot be the browser

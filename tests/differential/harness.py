@@ -1258,8 +1258,12 @@ def settle_owner(
         running = owner.process.is_running()
     except psutil.Error as exc:
         return unknown(f"the owner's liveness could not be read ({type(exc).__name__})")
-    if not running:
-        return OwnerDisposition(GONE, False)
+    try:
+        # H-R6 kills the owner, and its parent may not have reaped it yet.
+        if not running or is_dead(owner.process):
+            return OwnerDisposition(GONE, False)
+    except psutil.Error as exc:
+        return unknown(f"the owner's liveness could not be read ({type(exc).__name__})")
     try:
         owner.process.kill()
     except psutil.NoSuchProcess:
@@ -1267,17 +1271,15 @@ def settle_owner(
     except psutil.Error as exc:
         return unknown(f"the owner could not be stopped ({type(exc).__name__})")
     try:
-        owner.process.wait(timeout=wait_seconds)
-    except psutil.NoSuchProcess:
-        pass
-    except psutil.TimeoutExpired:
-        return unknown(
-            f"the owner was still running {wait_seconds}s after it was killed",
-            signalled=True,
-        )
+        dead = wait_until_dead(owner.process, wait_seconds)
     except psutil.Error as exc:
         return unknown(
             f"the owner's exit could not be confirmed ({type(exc).__name__})",
+            signalled=True,
+        )
+    if not dead:
+        return unknown(
+            f"the owner was still running {wait_seconds}s after it was killed",
             signalled=True,
         )
     return OwnerDisposition(STOPPED, True)
@@ -1383,6 +1385,41 @@ class RowVector:
 
 
 _ASSOCIATE_SECONDS = 5.0
+
+
+def is_dead(process: Any) -> bool:
+    """Whether *process* has ended, a zombie included.
+
+    An owner is not the harness's child, so once killed it stays a zombie
+    until its own parent reaps it, and ``psutil`` reads a zombie as running.
+    A read that fails for any other reason than the process being gone
+    raises: that is not knowing, never dead.
+    """
+    try:
+        return process.status() == psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return True
+
+
+def wait_until_dead(process: Any, seconds: float) -> bool:
+    """Whether *process* is dead within *seconds*; ``psutil.Error`` is unknown.
+
+    On Windows, where nothing lingers as a zombie, the handle is waited on.
+    """
+    if os.name == "nt":
+        try:
+            process.wait(timeout=seconds)
+        except psutil.TimeoutExpired:
+            return False
+        except psutil.NoSuchProcess:
+            pass
+        return True
+    deadline = time.monotonic() + seconds
+    while not is_dead(process):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.02)
+    return True
 
 
 def associate_server(
@@ -2292,15 +2329,26 @@ async def measure_host_quit_row(
         try:
             # SIGKILL on POSIX, TerminateProcess on Windows: psutil's kill().
             victim.kill()
-            await asyncio.to_thread(victim.wait, _OWNER_KILL_WAIT_SECONDS)
-            killed["exit"] = "killed"
         except psutil.NoSuchProcess:
             killed["exit"] = "gone before the kill"
-        except psutil.TimeoutExpired:
-            killed["exit"] = "still running after the kill"
         except psutil.Error as exc:
             killed["exit"] = f"not killed ({type(exc).__name__})"
-        emit("harness", "actor.killed", **killed)
+        else:
+            try:
+                dead = await asyncio.to_thread(
+                    wait_until_dead, victim, _OWNER_KILL_WAIT_SECONDS
+                )
+            except psutil.Error as exc:
+                killed["exit"] = f"killed, death unconfirmed ({type(exc).__name__})"
+            else:
+                killed["exit"] = "killed" if dead else "still running after the kill"
+        # ``actor`` is the event's own field: the killed role goes as ``role``.
+        emit(
+            "harness",
+            "actor.killed",
+            role=killed.get("actor"),
+            **{name: value for name, value in killed.items() if name != "actor"},
+        )
 
     async def find_the_owner() -> None:
         nonlocal identified
@@ -2357,10 +2405,24 @@ async def measure_host_quit_row(
         result.host = host
         if kill_actor and daemon:
             # The owner the frontend recovered to is the one that now has to
-            # leave through its idle exit and be cleaned up.
+            # leave through its idle exit and be cleaned up. If nothing else
+            # was published since, the killed owner's own handle stays, so
+            # cleanup settles it as gone rather than meeting its descriptor as
+            # one it never identified. A different owner that could not be
+            # identified keeps its own record: that is the row's finding.
+            killed_owner, killed_record = identified, dict(owner)
             owner.clear()
             identified = None
             await find_the_owner()
+            replaced = identified is not None or owner.get("pid") not in (
+                None,
+                killed_record.get("pid"),
+            )
+            if not replaced:
+                identified = killed_owner
+                owner.clear()
+                owner.update(killed_record)
+            owner["replaced_after_kill"] = replaced
         if host.tool is not None:
             emit("host_stub", "tool.result", tool=READ_TOOL, **host.tool)
         emit(
@@ -2379,16 +2441,19 @@ async def measure_host_quit_row(
             exit_record: dict[str, Any] = {}
             owner["exit"] = exit_record
             try:
-                await asyncio.to_thread(
-                    identified.process.wait,
+                exited = await asyncio.to_thread(
+                    wait_until_dead,
+                    identified.process,
                     IDLE_TIMEOUT_SECONDS + _OWNER_EXIT_SLACK_SECONDS,
                 )
-                exit_record["how"] = "exited"
-                exit_record["seconds_after_quit"] = round(time.monotonic() - began, 3)
-            except psutil.TimeoutExpired:
-                exit_record["how"] = "still running"
             except psutil.Error as exc:
                 exit_record["how"] = f"unknown ({type(exc).__name__})"
+            else:
+                exit_record["how"] = "exited" if exited else "still running"
+                if exited:
+                    exit_record["seconds_after_quit"] = round(
+                        time.monotonic() - began, 3
+                    )
             log_path = Path(owner.get("log_path") or "")
             if log_path.is_file():
                 lines = log_path.read_text(errors="replace").splitlines()

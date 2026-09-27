@@ -15,6 +15,12 @@ carries ``--type=`` and is part of its parent's tree, never a root of its own.
 Two roots with the same profile in one sample is the second concurrent browser
 the default-on contract forbids.
 
+For O2 it records each process's group and, on POSIX, a digest of the browser
+marker the product sets per launch, read once from every process started after
+the first sample that could be the row's browser. That marker is what ties
+Chromium's crashpad handler, which leaves the browser's tree for a session of
+its own, to the browser that started it.
+
 **Nothing a row could still change is settled by age.** A process can exec at
 any moment of its life, and a forked child shows its parent's command line
 until it does, which is how the Node driver starts Chromium on POSIX. So every
@@ -85,6 +91,7 @@ Imports nothing from the repository, so it runs as a plain script:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -109,6 +116,16 @@ SAMPLE_SECONDS = 0.05
 #: its own PEB command line is adversarial and is not a browser launch; it is
 #: outside this oracle.
 NO_EXEC = os.name == "nt"
+
+#: What the product sets in the environment of every browser it launches, a
+#: random value per launch, and what its guardian drains browser groups by.
+#: The same name at the frozen baseline.
+BROWSER_MARKER_ENV = "LINKEDIN_MCP_BROWSER_PROCESS_MARKER"
+
+#: Whether markers are read: on POSIX, where the guardian drains by them and
+#: where Chromium's crashpad handler leaves the row's tree for a session of its
+#: own. Windows starts no guardian.
+READ_MARKERS = os.name != "nt"
 
 
 def canonical_user_data_dir(value: str) -> str:
@@ -155,6 +172,10 @@ class ProcessRecord:
     #: POSIX process group, read on every full read; None on Windows or when
     #: it could not be read. What a group signal's members are resolved from.
     pgid: int | None = None
+    #: A digest of the process's browser marker (``BROWSER_MARKER_ENV``), read
+    #: once per lifetime for a process that could be the row's browser. What
+    #: ties a crashpad handler, which leaves the row's tree, to its browser.
+    browser_marker: str | None = None
 
     @property
     def identity(self) -> tuple[int, float]:
@@ -172,6 +193,8 @@ class ProcessRecord:
         }
         if self.launcher is not None:
             fields["launcher"] = self.launcher
+        if self.browser_marker is not None:
+            fields["browser_marker"] = self.browser_marker
         if not self.in_row:
             # These events are published as CI evidence, and a process that is
             # not the row's own may carry anything in its arguments, credentials
@@ -193,10 +216,20 @@ def record(
     in_row: bool = False,
     launcher: str | None = None,
     pgid: int | None = None,
+    browser_marker: str | None = None,
 ) -> ProcessRecord:
     cmdline = tuple(cmdline)
     return ProcessRecord(
-        pid, ppid, start, exe, cmdline, user_data_dir(cmdline), in_row, launcher, pgid
+        pid,
+        ppid,
+        start,
+        exe,
+        cmdline,
+        user_data_dir(cmdline),
+        in_row,
+        launcher,
+        pgid,
+        browser_marker,
     )
 
 
@@ -302,6 +335,20 @@ def read_launcher(process: Any) -> str | None:
     except (psutil.Error, OSError, AttributeError):
         return None
     return value or None
+
+
+def read_browser_marker(process: Any) -> str | None:
+    """A digest of the process's browser marker, if it carries one.
+
+    Only the digest is kept: it matches the same marker in another process,
+    which is all it is for, and the published evidence holds no value the
+    product's guardian acts on. A failed read raises ``psutil.Error`` or
+    ``OSError``: that is not knowing, and the caller asks again.
+    """
+    value = process.environ().get(BROWSER_MARKER_ENV)
+    if not value:
+        return None
+    return hashlib.sha256(value.encode()).hexdigest()[:16]
 
 
 def classify(process: ProcessRecord) -> str:
@@ -480,7 +527,8 @@ class Sampler:
     runs. *user* is the harness's user, as *user_of* reports it. *no_exec*
     says whether a process's program is fixed for its lifetime, which is
     Windows's by default and set in tests to model either platform. *pgid_of*
-    reads a process's group, ``os.getpgid`` by default.
+    reads a process's group, ``os.getpgid`` by default. *read_markers* says
+    whether browser markers are read (``READ_MARKERS``).
     """
 
     def __init__(
@@ -497,10 +545,12 @@ class Sampler:
         browser_dir: str | None = None,
         no_exec: bool = NO_EXEC,
         pgid_of: Callable[[int], int | None] = posix_pgid,
+        read_markers: bool = READ_MARKERS,
     ) -> None:
         self.root_pid = root_pid
         self.no_exec = no_exec
         self._pgid_of = pgid_of
+        self.read_markers = read_markers
         self.own_pid = os.getpid() if own_pid is None else own_pid
         self._pids = pids
         self._open = open_process
@@ -518,6 +568,8 @@ class Sampler:
         self._watched: set[tuple[int, float]] = set()
         #: (pid, create time, command line) whose launcher was already asked.
         self._launchers_read: set[tuple[int, float, tuple[str, ...]]] = set()
+        #: Lifetimes whose browser marker was already asked.
+        self._markers_read: set[tuple[int, float]] = set()
         #: What sampling cost: first-sample outcomes and full reads per sample.
         self.first_sample_cached = 0
         self.first_sample_watched = 0
@@ -665,6 +717,7 @@ class Sampler:
                 in_row=known is not None and known.in_row,
                 launcher=launcher,
                 pgid=self._pgid_of(pid),
+                browser_marker=known.browser_marker if known is not None else None,
             )
             if failed:
                 parent_read = not any(f.startswith("ppid") for f in failed)
@@ -683,6 +736,8 @@ class Sampler:
                 self._row.add(root.identity)
         self._classify(sample)
         self._read_launchers(sample, identified)
+        if not first:
+            self._read_markers(sample, identified)
         # Whatever the harness turned out to own is no longer excluded.
         row = {process.identity for process in sample.values() if process.in_row}
         self._unrelated -= row
@@ -739,6 +794,39 @@ class Sampler:
             launcher = read_launcher(identified[pid])
             if launcher is not None:
                 sample[pid] = replace(process, launcher=launcher)
+
+    def _read_markers(
+        self, sample: dict[int, ProcessRecord], identified: dict[int, Any]
+    ) -> None:
+        """Record the browser marker of a process that could be the browser.
+
+        Once per lifetime, when a sample after the first read its create time
+        and its executable could be the row's browser, whether or not it is in
+        the row's tree: Chromium's crashpad handler is started by the browser
+        and then leaves it, parented to pid 1 in a session of its own, carrying
+        the browser's environment. The first sample's processes predate every
+        actor and are not asked. A marker is set before the browser starts, so
+        a process that shows none when first read has none.
+        """
+        if not self.read_markers:
+            return
+        for pid, process in list(sample.items()):
+            if pid not in identified or process.identity in self._markers_read:
+                continue
+            if pid == self.own_pid or process.identity in (self._baseline or ()):
+                continue
+            if not process.exe or not self.possible_browser(process.exe):
+                continue
+            try:
+                marker = read_browser_marker(identified[pid])
+            except psutil.NoSuchProcess:
+                continue
+            except _UNREADABLE:
+                # Asked again on the next sample, for as long as it lives.
+                continue
+            self._markers_read.add(process.identity)
+            if marker is not None:
+                sample[pid] = replace(process, browser_marker=marker)
 
     def _settled_ancestry(
         self, sample: dict[int, ProcessRecord]
