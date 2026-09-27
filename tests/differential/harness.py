@@ -622,8 +622,10 @@ def watcher_failures(
     actors_began: float,
     actors_ended: float,
     max_gap: float = MAX_WATCHER_GAP_SECONDS,
+    browser_key: str | None = None,
 ) -> list[str]:
-    """Why this observation cannot carry O1, or nothing when it can."""
+    """Why this observation cannot carry O1 for the profile *browser_key*, or
+    nothing when it can. Without one, no retained reading is credited."""
     if not summary:
         return ["the watcher wrote no summary"]
     failures = []
@@ -656,8 +658,18 @@ def watcher_failures(
         )
     # Only an actor that could have been a browser root: one whose executable
     # could not be read, or is the row's browser. Every failed read stays in
-    # the summary's ``read_failures`` either way.
-    unread = summary.get("relevant_read_failures") or []
+    # the summary's ``read_failures`` either way. A known root whose later
+    # argument read failed kept its earlier reading, and that reading keeps
+    # it counted only on the profile it named: for any other, a same-image
+    # exec with hidden arguments could have moved it onto the one judged.
+    unread = [
+        *(summary.get("relevant_read_failures") or []),
+        *(
+            entry
+            for entry in summary.get("read_failures") or []
+            if "retained_profile" in entry and entry["retained_profile"] != browser_key
+        ),
+    ]
     if unread:
         failures.append(
             f"the watcher could not identify {len(unread)} row actors as "
@@ -1993,6 +2005,7 @@ def judge_row(observed: Observations) -> tuple[RowVector, list[str]]:
         observed.watcher,
         actors_began=observed.actors_began,
         actors_ended=observed.actors_ended,
+        browser_key=observed.browser_key,
     )
     failures += watcher_problems
     summary = observed.watcher or {}

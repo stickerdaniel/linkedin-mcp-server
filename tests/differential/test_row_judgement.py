@@ -1025,3 +1025,305 @@ def test_an_exclusion_about_another_lifetime_fails_o1_and_the_comparison(profile
     assert not vector.o1_single_browser
     assert failures
     assert compare_to_direct(direct, vector)
+
+
+# --- A known root's failed read, judged in full ----------------------------------
+
+OTHER = "/tmp/differential-other-profile"
+
+
+def _chrome_on(profile: object) -> list[str]:
+    return [BROWSER_EXE, f"--user-data-dir={profile}"]
+
+
+def _failed_read_census(
+    case: str, *, row: str = KEY, alias: tuple[Path, Path] | None = None
+) -> dict:
+    """The e1eh model: pid 70 is a browser root and pid 71 its renderer, both
+    readable for two samples; pid 72 is a driver. At the third sample one
+    lifetime's arguments are refused, as *case* says, and at the fourth
+    everything is gone. pid 1 is init and pid 10 the harness.
+
+    pid 70 runs on the row's profile *row*, on ``OTHER`` for the
+    ``other-profile`` cases, or through the link of *alias*, which points at
+    *row* until the refused read and at its second path from then on. pid 60,
+    where a case has it, is a second root on *row*, always readable.
+    """
+    table: dict[int, dict[str, Any]] = {
+        1: {"start": 0.0, "ppid": 0, "cmdline": ["init"]},
+        10: {"start": 5.0, "ppid": 1, "cmdline": ["pytest"]},
+    }
+    sampler, tracker = _sampler(table, root=10), Tracker()
+    tracker.observe(sampler.sample(), 0.0)
+    if case.startswith("other-profile"):
+        first: object = OTHER
+        table[60] = {"start": 5.5, "ppid": 10, "exe": BROWSER_EXE}
+        table[60]["cmdline"] = _chrome_on(row)
+    else:
+        first = alias[0] if alias is not None else row
+    table[70] = {"start": 6.0, "ppid": 10, "exe": BROWSER_EXE}
+    table[70]["cmdline"] = _chrome_on(first)
+    table[71] = {
+        "start": 6.1,
+        "ppid": 70,
+        "exe": BROWSER_EXE,
+        "cmdline": [BROWSER_EXE, "--type=renderer", f"--user-data-dir={row}"],
+    }
+    table[72] = {
+        "start": 6.2,
+        "ppid": 10,
+        "exe": "/usr/bin/node",
+        "cmdline": ["node", "driver"],
+    }
+    for tick in (1.0, 2.0):
+        tracker.observe(sampler.sample(), tick)
+    if case in ("known-root", "peer", "other-profile-hidden", "alias-retarget") or (
+        case.startswith("parent-of")
+    ):
+        # The packet: read with its profile, one refused read, then gone.
+        table[70]["cmdline"] = psutil.AccessDenied(70)
+    children = {
+        # Two processes with root arguments on the row's profile under pid 70:
+        # if 70 now runs on another profile, they are two roots.
+        "parent-of-roots": [_chrome_on(row), _chrome_on(row)],
+        "parent-of-roots-later": [_chrome_on(row), _chrome_on(row)],
+        "parent-of-a-renderer": [
+            [BROWSER_EXE, "--type=renderer", f"--user-data-dir={row}"]
+        ],
+    }.get(case, [])
+    if case in ("peer", "alias-retarget"):
+        table[60] = {"start": 7.0, "ppid": 10, "exe": BROWSER_EXE}
+        table[60]["cmdline"] = _chrome_on(row)
+    if case == "alias-retarget":
+        assert alias is not None
+        link, elsewhere = alias
+        link.unlink()
+        link.symlink_to(elsewhere, target_is_directory=True)
+    elif case == "other-profile-readable":
+        table[70]["cmdline"] = _chrome_on(row)
+    elif case == "known-root-exe-changed":
+        table[70].update(
+            exe=f"{BROWSER_EXE}_crashpad_handler", cmdline=psutil.AccessDenied(70)
+        )
+    elif case == "known-root-parent-unread":
+        table[70].update(ppid=psutil.AccessDenied(70), cmdline=psutil.AccessDenied(70))
+    elif case == "driver-now-the-browser":
+        table[72].update(exe=BROWSER_EXE, cmdline=psutil.AccessDenied(72))
+    elif case == "never-read":
+        table[73] = {
+            "start": 7.0,
+            "ppid": 10,
+            "exe": BROWSER_EXE,
+            "cmdline": psutil.AccessDenied(73),
+        }
+    elif case == "renderer":
+        table[71]["cmdline"] = psutil.AccessDenied(71)
+    if not case.endswith("-later"):
+        _add_children(table, children)
+    tracker.observe(sampler.sample(), 3.0)
+    if case.endswith("-later"):
+        # Retained alone first, then a parent while still refused.
+        _add_children(table, children)
+        tracker.observe(sampler.sample(), 3.5)
+    for pid in (60, 70, 71, 72, 73, 74, 75):
+        table.pop(pid, None)
+    tracker.observe(sampler.sample(), 4.0)
+    return {
+        "stopped_by": "stop file",
+        "observation_start": 10.0,
+        "observation_end": 100.0,
+        "max_gap_seconds": 0.2,
+        "max_roots": dict(tracker.max_roots),
+        "read_failures": sampler.read_failures,
+        "relevant_read_failures": sampler.relevant_read_failures,
+    }
+
+
+def _add_children(table: dict[int, dict[str, Any]], cmdlines: list) -> None:
+    for offset, cmdline in enumerate(cmdlines):
+        table[74 + offset] = {
+            "start": 7.0 + offset,
+            "ppid": 70,
+            "exe": BROWSER_EXE,
+            "cmdline": cmdline,
+        }
+
+
+def _judged_failed_read(
+    profile, case: str, *, row: str = KEY, alias: tuple[Path, Path] | None = None
+):
+    census = _failed_read_census(case, row=row, alias=alias)
+    vector, failures = judge_row(
+        dataclasses.replace(
+            _healthy(profile),
+            browser_key=canonical_user_data_dir(row),
+            watcher=census,
+        )
+    )
+    return census, vector, failures
+
+
+def test_a_known_roots_refused_arguments_leave_it_one_root(profile):
+    census, vector, failures = _judged_failed_read(profile, "known-root")
+    assert failures == []
+    assert vector.o1_single_browser and vector.watcher_healthy
+    # The failed read is kept, marked as the earlier reading retained.
+    (note,) = census["read_failures"]
+    assert note["pid"] == 70 and note["failures"] == ["cmdline: AccessDenied"]
+    assert note["resolution"] == "a known browser root's earlier reading retained"
+    assert note["retained_profile"] == canonical_user_data_dir(KEY)
+    assert not note["possible_browser"]
+
+
+def test_a_retained_root_still_counts_beside_a_new_peer(profile):
+    census, vector, failures = _judged_failed_read(profile, "peer")
+    assert census["relevant_read_failures"] == []
+    assert census["max_roots"][canonical_user_data_dir(KEY)] == 2
+    assert not vector.o1_single_browser
+    assert failures
+
+
+def test_a_retained_root_on_another_profile_stays_unidentified_for_the_row(profile):
+    # Unchanged image, parent and lifetime; the arguments that would say
+    # whether it re-executed onto the row's profile are hidden.
+    census, vector, failures = _judged_failed_read(profile, "other-profile-hidden")
+    (note,) = census["read_failures"]
+    assert note["retained_profile"] == canonical_user_data_dir(OTHER)
+    assert census["max_roots"][canonical_user_data_dir(KEY)] == 1
+    assert not vector.o1_single_browser and not vector.watcher_healthy
+    assert any("possible browser" in failure for failure in failures)
+
+
+def test_the_same_move_read_in_full_counts_two_roots(profile):
+    census, vector, failures = _judged_failed_read(profile, "other-profile-readable")
+    assert census["read_failures"] == []
+    assert census["max_roots"][canonical_user_data_dir(KEY)] == 2
+    assert not vector.o1_single_browser
+    assert failures
+
+
+@pytest.mark.parametrize("case", ["parent-of-roots", "parent-of-roots-later"])
+def test_a_refused_root_that_parents_roots_is_not_retained(profile, case):
+    # Pinned, it would fold both into its tree and the row would count one.
+    census, vector, failures = _judged_failed_read(profile, case)
+    assert [e["pid"] for e in census["relevant_read_failures"]] == [70]
+    assert not vector.o1_single_browser and not vector.watcher_healthy
+    assert failures
+    # A note from a sample in which it parented nothing stays.
+    notes = [e for e in census["read_failures"] if "retained_profile" in e]
+    assert len(notes) == (1 if case.endswith("-later") else 0)
+
+
+def test_a_retained_root_may_parent_a_renderer(profile):
+    census, vector, failures = _judged_failed_read(profile, "parent-of-a-renderer")
+    assert failures == []
+    assert vector.o1_single_browser and vector.watcher_healthy
+    (note,) = census["read_failures"]
+    assert note["pid"] == 70 and note["retained_profile"] == canonical_user_data_dir(
+        KEY
+    )
+
+
+def test_a_retained_root_keeps_the_profile_it_was_read_on(profile, tmp_path):
+    # Its arguments name a link, retargeted while they cannot be read: the
+    # old arguments now resolve elsewhere, the reading does not.
+    row, elsewhere, link = tmp_path / "row", tmp_path / "elsewhere", tmp_path / "link"
+    row.mkdir()
+    elsewhere.mkdir()
+    link.symlink_to(row, target_is_directory=True)
+    census, vector, failures = _judged_failed_read(
+        profile, "alias-retarget", row=str(row), alias=(link, elsewhere)
+    )
+    (note,) = census["read_failures"]
+    assert note["retained_profile"] == canonical_user_data_dir(str(row))
+    assert census["max_roots"][canonical_user_data_dir(str(row))] == 2
+    assert canonical_user_data_dir(str(elsewhere)) not in census["max_roots"]
+    assert not vector.o1_single_browser
+    assert failures
+
+
+@pytest.mark.parametrize(
+    ("case", "pid"),
+    [
+        # Read before as a driver: an exec since could have made it a root.
+        ("driver-now-the-browser", 72),
+        ("never-read", 73),
+        # Chromium starts its helpers from its own executable, so an
+        # unchanged image says nothing about whether a helper became a root.
+        ("renderer", 71),
+        # Neither is the reading it was counted by.
+        ("known-root-exe-changed", 70),
+        ("known-root-parent-unread", 70),
+    ],
+)
+def test_any_other_refused_arguments_leave_o1_unestablished(profile, case, pid):
+    census, vector, failures = _judged_failed_read(profile, case)
+    assert [e["pid"] for e in census["relevant_read_failures"]] == [pid]
+    assert not vector.o1_single_browser and not vector.watcher_healthy
+    assert failures
+
+
+def _moving_root_census(readings: str, *, peer_from: int | None) -> dict:
+    """The e1ej model: pid 70, one lifetime with one executable throughout,
+    sampled once per letter of *readings*: ``A`` or ``B`` its arguments read
+    naming that profile, ``-`` refused. From sample *peer_from* on, pid 60 is
+    a second, readable root on A. Then both are gone.
+    """
+    table: dict[int, dict[str, Any]] = {
+        1: {"start": 0.0, "ppid": 0, "cmdline": ["init"]},
+        10: {"start": 5.0, "ppid": 1, "cmdline": ["pytest"]},
+    }
+    sampler, tracker = _sampler(table, root=10), Tracker()
+    tracker.observe(sampler.sample(), 0.0)
+    table[70] = {"start": 6.0, "ppid": 10, "exe": BROWSER_EXE}
+    for tick, reading in enumerate(readings, start=1):
+        profile = {"A": KEY, "B": OTHER}.get(reading)
+        table[70]["cmdline"] = (
+            _chrome_on(profile) if profile else psutil.AccessDenied(70)
+        )
+        if tick == peer_from:
+            table[60] = {"start": 7.0, "ppid": 10, "exe": BROWSER_EXE}
+            table[60]["cmdline"] = _chrome_on(KEY)
+        tracker.observe(sampler.sample(), float(tick))
+    table.pop(60, None)
+    table.pop(70)
+    tracker.observe(sampler.sample(), float(len(readings) + 1))
+    return {
+        "stopped_by": "stop file",
+        "observation_start": 10.0,
+        "observation_end": 100.0,
+        "max_gap_seconds": 0.2,
+        "max_roots": dict(tracker.max_roots),
+        "read_failures": sampler.read_failures,
+        "relevant_read_failures": sampler.relevant_read_failures,
+    }
+
+
+@pytest.mark.parametrize(
+    ("readings", "peer_from", "established"),
+    [
+        # Retained on A, read on B, retained on B beside a peer on A: the
+        # second refused read could name A again.
+        pytest.param("A-B-", 4, {"A": False, "B": False}, id="A-then-B-hidden"),
+        # Retained on B, read on A, retained on A: the first refused read
+        # could have named A, the second B.
+        pytest.param("B-A-", None, {"A": False, "B": False}, id="B-then-A-hidden"),
+        pytest.param("A-", None, {"A": True, "B": False}, id="retained-on-A-only"),
+        # Nothing of B was hidden: the peer on A overlaps a readable B.
+        pytest.param("A-BB", 3, {"A": True, "B": False}, id="A-then-readable-B"),
+    ],
+)
+def test_every_profile_a_root_was_retained_on_is_seen_by_each_judge(
+    profile, readings, peer_from, established
+):
+    census = _moving_root_census(readings, peer_from=peer_from)
+    for judged, expected in established.items():
+        vector, failures = judge_row(
+            dataclasses.replace(
+                _healthy(profile),
+                browser_key=canonical_user_data_dir({"A": KEY, "B": OTHER}[judged]),
+                watcher=census,
+            )
+        )
+        assert vector.o1_single_browser is expected, judged
+        assert (failures == []) is expected, (judged, failures)

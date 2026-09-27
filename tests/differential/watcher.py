@@ -107,6 +107,22 @@ stays. Every failed read is recorded in the summary, with the executable when
 known, the fields, how long it lasted, how it ended and whether it could have
 been a browser.
 
+**A known browser root stays in its profile's count.** A lifetime read before
+as a browser root on a profile keeps that reading, profile included, when a
+later read of its arguments fails while its executable, read in the same
+sample, is unchanged; macOS refuses the arguments of a process on its way out.
+The profile is pinned rather than derived again from the old arguments, which
+could now resolve elsewhere. Pinned there, the lifetime still counts toward
+that profile, as a root or inside a same-profile parent's tree that is counted,
+so it cannot hide a second root *on that profile*. It says nothing about any
+other: a same-image exec with hidden arguments could have moved it onto one.
+So the failed read is kept in ``read_failures`` as retained history with its
+``retained_profile``, one note for each profile the lifetime was retained on,
+not as a possible browser, and whoever judges a profile treats it as
+unidentified unless that is the profile it names. Every other
+failed argument read stays uncertain, including one of a lifetime read before
+as a driver, helper or renderer: an exec since could have made it a root.
+
 What sampling cannot see: a process that lives and dies between two samples.
 The summary records when observation began and ended and the largest wall-clock
 gap between two samples, so a claim built on it can state the window it had; an
@@ -678,6 +694,10 @@ class Sampler:
         self.group_read_failures: list[dict[str, Any]] = []
         self.group_read_failure_count = 0
         self._episodes: dict[tuple[int, float | None], dict[str, Any]] = {}
+        #: Failed argument reads of lifetimes already counted as a browser
+        #: root, which keep their earlier reading (``_keeps_its_root``): one
+        #: note per lifetime and profile retained, never replaced or cleared.
+        self._retained: dict[tuple[int, float, str], dict[str, Any]] = {}
         self._closed: list[dict[str, Any]] = []
 
     def stats(self) -> dict[str, Any]:
@@ -758,14 +778,22 @@ class Sampler:
         """Every failed-read episode that was not established as unrelated.
 
         ``resolution`` says how an episode ended: ``readable``, ``exited``, or
-        ``open`` when it was still unreadable at the last sample.
-        ``possible_browser`` says whether it leaves O1 unestablished.
+        ``open`` when it was still unreadable at the last sample. A failed
+        argument read of a known browser root (``_keeps_its_root``) is listed
+        as retained history instead, with the profile its earlier reading
+        named, never as a fresh reading.
+        ``possible_browser`` says whether it leaves O1 unestablished; for a
+        retained note it is False, and only for ``retained_profile`` is that
+        true.
         """
         open_ = [
             dict(e, failures=sorted(e["failures"]), resolution="open")
             for e in self._episodes.values()
         ]
-        return [*self._closed, *open_]
+        retained = [
+            dict(e, failures=sorted(e["failures"])) for e in self._retained.values()
+        ]
+        return [*self._closed, *open_, *retained]
 
     @property
     def relevant_read_failures(self) -> list[dict[str, Any]]:
@@ -810,6 +838,8 @@ class Sampler:
         # pid -> (episode key, failed fields, exe, exe read now, process or None,
         #         parent read)
         failures: dict[int, tuple[Any, list[str], str | None, bool, Any, bool]] = {}
+        # pid -> the known root whose failed read may keep its reading.
+        retaining: dict[int, tuple[ProcessRecord, list[str]]] = {}
         # pid -> the process whose create time this sample read.
         identified: dict[int, Any] = {}
         for pid in self._pids():
@@ -922,6 +952,11 @@ class Sampler:
                 pgid_error=error,
                 browser_marker=known.browser_marker if known is not None else None,
             )
+            if failed and self._keeps_its_root(known, failed, exe):
+                # Decided once the sample is complete: whether it parents
+                # another browser record is known only then.
+                assert known is not None
+                retaining[pid] = (known, failed)
             if failed:
                 parent_read = not any(f.startswith("ppid") for f in failed)
                 failures[pid] = (
@@ -932,6 +967,17 @@ class Sampler:
                     process,
                     parent_read,
                 )
+        # Already counted as its profile's browser root: the record keeps that
+        # reading, with the profile it named rather than one the old arguments
+        # resolve to now, and the failure is kept as an audit note. Not for a
+        # parent of another browser record (``_keeps_its_root``).
+        parents = {p.ppid for p in sample.values() if p.profile is not None}
+        for pid, (known, failed) in retaining.items():
+            if pid in parents:
+                continue
+            sample[pid] = replace(sample[pid], profile=known.profile)
+            self._note_retained(known, failed)
+            del failures[pid]
         if first:
             self._baseline = {process.identity for process in sample.values()}
             self.baseline_pgids = sorted(
@@ -1009,6 +1055,62 @@ class Sampler:
                     "slowest": slowest,
                 }
             )
+
+    @staticmethod
+    def _keeps_its_root(
+        known: ProcessRecord | None, failed: list[str], exe: str | None
+    ) -> bool:
+        """Whether a failed read leaves a known browser root's reading standing.
+
+        Only when this lifetime was read before as a browser root (a profile,
+        no ``--type=``), so that profile's count already includes it; only
+        its arguments failed, so its executable was read in this sample; and
+        that executable is the one it had. Pinned to that profile, a failed
+        read of it cannot hide a second root there. For any other profile it
+        stays unidentified, which the note's ``retained_profile`` lets the
+        judge of that profile see. Anything else, a helper or driver read
+        before included, stays a failure: an exec since the last reading
+        could have made it a root.
+
+        Nor in a sample where it is the parent of another record with a
+        profile: pinned, it would fold those roots into its tree, while its
+        hidden arguments may name another profile and leave each of them a
+        root of its own.
+        """
+        return (
+            known is not None
+            and known.profile is not None
+            and {failure.split(":", 1)[0] for failure in failed} == {"cmdline"}
+            and exe == known.exe
+        )
+
+    def _note_retained(self, known: ProcessRecord, failed: list[str]) -> None:
+        """Record the failed read of a known root, once per lifetime and
+        profile.
+
+        A lifetime read on one profile, then on another, can be retained on
+        each: each note is what the judge of another profile must see, so a
+        later one never stands in for an earlier.
+        """
+        now = self._clock()
+        assert known.profile is not None
+        key = (*known.identity, known.profile)
+        note: dict[str, Any] | None = self._retained.get(key)
+        if note is None:
+            note = {
+                "pid": known.pid,
+                "start_identity": known.start,
+                "exe": known.exe,
+                "failures": set(),
+                "first": now,
+                "possible_browser": False,
+                "resolution": "a known browser root's earlier reading retained",
+                "retained_profile": known.profile,
+            }
+            self._retained[key] = note
+        note["failures"].update(failed)
+        note["last"] = now
+        note["seconds"] = round(now - note["first"], 4)
 
     def _read_launchers(
         self, sample: dict[int, ProcessRecord], identified: dict[int, Any]

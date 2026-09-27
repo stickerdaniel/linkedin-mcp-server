@@ -293,6 +293,61 @@ async def test_an_unsettled_census_starts_nothing(row, processes, summary, repor
     assert any("post-quit not run" in failure for failure in result.failures)
 
 
+def _retained(profile: str) -> dict:
+    """The watcher's note of a known root whose later argument read failed."""
+    return {
+        "pid": 777,
+        "start_identity": 6.0,
+        "exe": "/b/chrome",
+        "first": 1.0,
+        "last": 2.0,
+        "failures": ["cmdline: AccessDenied"],
+        "possible_browser": False,
+        "resolution": "a known browser root's earlier reading retained",
+        "retained_profile": profile,
+    }
+
+
+def _retained_summary(key: str, retained_profile: str) -> dict:
+    return {
+        "read_failures": [_retained(retained_profile)],
+        "relevant_read_failures": [],
+        "observation_start": 0.0,
+        "observation_end": time.time() + 60.0,
+        "max_roots": {key: 1},
+    }
+
+
+async def test_a_retained_row_root_does_not_settle_a_census_that_cannot_read_it(
+    row, profile
+):
+    # The watcher's retained reading is history; the launch waits on what the
+    # census reads now, and it cannot read the browser's arguments.
+    key = harness.ActorAccount(profile[0]).browser_key
+    result, calls = await row(
+        processes=[_process(777, cmdline=None, exe="/b/chrome")],
+        summary=_retained_summary(key, key),
+    )
+    assert calls == 0
+    assert result.post_quit is not None and result.post_quit.valid is None
+    assert any("incomplete" in failure for failure in result.post_quit.failures)
+
+
+async def test_an_empty_profile_permits_the_session_and_keeps_o1_open(
+    row, profile, tmp_path
+):
+    # A root retained on another profile: nothing is on the row's profile now,
+    # so the session may start, but the row's O1 stays unestablished.
+    key = harness.ActorAccount(profile[0]).browser_key
+    result, calls = await row(
+        processes=[], summary=_retained_summary(key, str(tmp_path / "elsewhere"))
+    )
+    assert calls == 1
+    assert result.post_quit is not None and result.post_quit.valid is True
+    assert result.vector is not None and not result.vector.o1_single_browser
+    assert any("possible browser" in failure for failure in result.failures)
+
+
 def test_the_census_keeps_a_denied_reading_apart_from_an_empty_one(
     tmp_path, monkeypatch
 ):
