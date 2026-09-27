@@ -363,6 +363,39 @@ jobs:
         timeout-minutes: 25
         run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_frozen_rows.py
 
+      # The signal oracle for H-R6 (tests/differential/signals.py): strace,
+      # attached to the killed server or owner and its guardian. Ubuntu's
+      # default kernel.yama.ptrace_scope is 1, which lets a tracer attach only
+      # to its descendants, and strace is not an ancestor of the owner, so the
+      # oracle runs `sudo -n strace`. Only here, behind the trust step's guard.
+      - name: Install the signal oracle
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_ACTIONS:-}" != true ] || [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ] || [ -n "${ACT:-}" ]; then
+            echo "Refusing to trace processes outside a disposable GitHub-hosted runner" >&2
+            exit 1
+          fi
+          if ! command -v strace >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq strace
+          fi
+          strace -V | head -1
+          echo "kernel.yama.ptrace_scope: $(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo absent)"
+          sudo -n true
+
+      # Row H-R6, owner killed: K1 frozen (the Direct server killed), K2 (the
+      # baseline owner killed, whose guardian must be seen killing the owner's
+      # group) and K3 (the candidate owner killed, drained and recovered).
+      - name: Kill the owner and the Direct server
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 25
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_owner_killed_rows.py
+
       # The row's evidence packet: events, counts, watcher output, failures
       # and the runtime identity, and nothing else (``events.PUBLISHED_FILES``).
       # The certificates sit in another directory and are never included.
@@ -399,8 +432,10 @@ jobs:
     # differential row at the end, whose own step bound is 20, and from 45
     # for the frozen baseline after it: a second venv and browser download
     # (bound 15) and five more native rows, three of them with an owner that
-    # leaves through its idle exit (bound 25). Windows is the slowest leg.
-    timeout-minutes: 75
+    # leaves through its idle exit (bound 25), and from 75 for H-R6 after
+    # them: three more rows, two of them waiting out a recovered owner's idle
+    # exit (bound 25). Windows is the slowest leg.
+    timeout-minutes: 100
     strategy:
       fail-fast: false
       matrix:
@@ -447,6 +482,7 @@ jobs:
           tests/differential/test_host_stub.py
           tests/differential/test_preservation_gate.py
           tests/differential/test_baseline.py
+          tests/differential/test_signals.py
 
       # The identity gate runs on every leg, because every leg's browser is a
       # different one from the Ubuntu job's. macOS is the only platform with a
@@ -637,6 +673,35 @@ jobs:
           LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
         timeout-minutes: 25
         run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_frozen_rows.py
+
+      # The signal oracle and row H-R6, as in the Ubuntu job. The oracle runs
+      # on Linux only; macOS and Windows record it as unavailable.
+      - name: Install the signal oracle
+        if: runner.os == 'Linux'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_ACTIONS:-}" != true ] || [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ] || [ -n "${ACT:-}" ]; then
+            echo "Refusing to trace processes outside a disposable GitHub-hosted runner" >&2
+            exit 1
+          fi
+          if ! command -v strace >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq strace
+          fi
+          strace -V | head -1
+          echo "kernel.yama.ptrace_scope: $(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo absent)"
+          sudo -n true
+
+      - name: Kill the owner and the Direct server
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 25
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_owner_killed_rows.py
 
       # The row's evidence packet: events, counts, watcher output, failures
       # and the runtime identity, and nothing else (``events.PUBLISHED_FILES``).

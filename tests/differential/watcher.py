@@ -152,6 +152,9 @@ class ProcessRecord:
     #: a cached initial-image observation for this PID, create time and command
     #: line; same-command re-exec is outside this identity oracle.
     launcher: str | None = None
+    #: POSIX process group, read on every full read; None on Windows or when
+    #: it could not be read. What a group signal's members are resolved from.
+    pgid: int | None = None
 
     @property
     def identity(self) -> tuple[int, float]:
@@ -161,6 +164,7 @@ class ProcessRecord:
         fields: dict[str, Any] = {
             "pid": self.pid,
             "ppid": self.ppid,
+            "pgid": self.pgid,
             "start_identity": self.start,
             "exe": self.exe,
             "cmdline": list(self.cmdline),
@@ -188,11 +192,22 @@ def record(
     *,
     in_row: bool = False,
     launcher: str | None = None,
+    pgid: int | None = None,
 ) -> ProcessRecord:
     cmdline = tuple(cmdline)
     return ProcessRecord(
-        pid, ppid, start, exe, cmdline, user_data_dir(cmdline), in_row, launcher
+        pid, ppid, start, exe, cmdline, user_data_dir(cmdline), in_row, launcher, pgid
     )
+
+
+def posix_pgid(pid: int) -> int | None:
+    """A process's group on POSIX, or None on Windows or if it cannot be read."""
+    if os.name == "nt":
+        return None
+    try:
+        return os.getpgid(pid)
+    except OSError:
+        return None
 
 
 #: Set by a macOS framework build's ``bin/python`` stub to the path it was
@@ -348,9 +363,10 @@ class Tracker:
             for pid, process in sample.items():
                 previous = self._known.get(pid)
                 if previous is not None and previous.start == process.start:
-                    if (previous.exe, previous.cmdline) != (
+                    if (previous.exe, previous.cmdline, previous.pgid) != (
                         process.exe,
                         process.cmdline,
+                        process.pgid,
                     ):
                         events.append(
                             (
@@ -463,7 +479,8 @@ class Sampler:
     process table. *browser_exe* and *browser_dir* name what the row's browser
     runs. *user* is the harness's user, as *user_of* reports it. *no_exec*
     says whether a process's program is fixed for its lifetime, which is
-    Windows's by default and set in tests to model either platform.
+    Windows's by default and set in tests to model either platform. *pgid_of*
+    reads a process's group, ``os.getpgid`` by default.
     """
 
     def __init__(
@@ -479,9 +496,11 @@ class Sampler:
         browser_exe: str | None = None,
         browser_dir: str | None = None,
         no_exec: bool = NO_EXEC,
+        pgid_of: Callable[[int], int | None] = posix_pgid,
     ) -> None:
         self.root_pid = root_pid
         self.no_exec = no_exec
+        self._pgid_of = pgid_of
         self.own_pid = os.getpid() if own_pid is None else own_pid
         self._pids = pids
         self._open = open_process
@@ -645,6 +664,7 @@ class Sampler:
                 cmdline,
                 in_row=known is not None and known.in_row,
                 launcher=launcher,
+                pgid=self._pgid_of(pid),
             )
             if failed:
                 parent_read = not any(f.startswith("ppid") for f in failed)
