@@ -250,6 +250,118 @@ def test_a_process_outside_the_tree_without_the_rows_marker_is_outside():
     assert result.state == VIOLATED, result
 
 
+def _packet(kind, t, pid, ppid, pgid, start, actor, *, in_row=True, marker=None):
+    record = {
+        "kind": kind,
+        "t": t,
+        "pid": pid,
+        "ppid": ppid,
+        "pgid": pgid,
+        "start_identity": start,
+        "in_row": in_row,
+        "actor": actor,
+    }
+    if marker is not None:
+        record["browser_marker"] = marker
+    return record
+
+
+#: Run 36294934506, ubuntu-24.04-arm, H-R6 K1 frozen, as the watcher wrote it
+#: (times less 1790484300, the harness at 9157). The frozen Direct server
+#: (9327) was killed at 10.95; its guardian (9333) then drained the browser's
+#: group and both crashpad groups, exited at 12.004, and one sample (12.005)
+#: caught it between its exit and its reaping: reparented to pid 1, no
+#: command line, so it read as ``other``.
+_MARK = "48d804df7f802656"
+_K1_FROZEN = [
+    _packet("process.start", 5.714, 9327, 9157, 1889, 5.14, "frontend"),
+    _packet("process.start", 6.669, 9333, 9327, 9333, 6.05, "guardian"),
+    _packet("process.start", 6.669, 9334, 9327, 1889, 6.08, "driver"),
+    _packet("process.start", 6.971, 9348, 9334, 9348, 6.39, "browser", marker=_MARK),
+    _packet(
+        "process.start", 7.026, 9350, 1, 9349, 6.41, "other", in_row=False, marker=_MARK
+    ),
+    _packet(
+        "process.start", 7.026, 9352, 1, 9351, 6.41, "other", in_row=False, marker=_MARK
+    ),
+    _packet("process.start", 7.026, 9355, 9348, 9348, 6.42, "browser"),
+    _packet("process.start", 7.026, 9356, 9348, 9348, 6.42, "browser"),
+    _packet("process.start", 7.026, 9376, 9355, 9348, 6.45, "browser"),
+    _packet("process.start", 7.071, 9379, 9348, 9348, 6.45, "browser"),
+    _packet("process.start", 7.071, 9391, 9356, 9348, 6.47, "browser"),
+    _packet("process.exit", 10.955, 9327, 9157, 1889, 5.14, "frontend"),
+    *[
+        _packet("process.exit", 11.002, pid, ppid, pgid, start, actor, in_row=row)
+        for pid, ppid, pgid, start, actor, row in [
+            (9334, 1, 1889, 6.08, "driver", True),
+            (9348, 9334, 9348, 6.39, "browser", True),
+            (9350, 1, 9349, 6.41, "other", False),
+            (9352, 1, 9351, 6.41, "other", False),
+            (9355, 9348, 9348, 6.42, "browser", True),
+            (9356, 9348, 9348, 6.42, "browser", True),
+            (9376, 9355, 9348, 6.45, "browser", True),
+            (9379, 9348, 9348, 6.45, "browser", True),
+            (9391, 9356, 9348, 6.47, "browser", True),
+        ]
+    ],
+    _packet("process.update", 12.005, 9333, 1, 9333, 6.05, "other"),
+    _packet("process.exit", 12.054, 9333, 1, 9333, 6.05, "other"),
+]
+_K1_FROZEN_TRACE = """\
+9333  10.962584 kill(-9348, SIGKILL) = 0
+9333  10.967286 kill(-9349, SIGKILL) = 0
+9333  10.967993 kill(-9351, SIGKILL) = 0
+9333  12.004077 +++ exited with 0 +++
+"""
+
+
+@pytest.mark.parametrize(
+    "records",
+    [
+        pytest.param(_K1_FROZEN, id="exiting-guardian-sampled"),
+        pytest.param(
+            [r for r in _K1_FROZEN if r["kind"] != "process.update"],
+            id="exiting-guardian-missed",
+        ),
+        pytest.param(
+            # The same race on the browser, whose marker ties crashpad to it.
+            [
+                *_K1_FROZEN,
+                _packet("process.update", 10.99, 9348, 1, 9348, 6.39, "other"),
+            ],
+            id="exiting-browser-sampled",
+        ),
+    ],
+)
+def test_a_guardian_is_judged_by_its_role_when_it_signalled(records):
+    history = ProcessHistory(records, outside=[9157])
+    result = derive_o2(
+        parse_strace(_K1_FROZEN_TRACE),
+        history,
+        threads={},
+        oracle_available=True,
+    )
+    assert result.state == HELD, result
+    assert result.classes == ("guardian:browser-group",)
+    assert [r["principal"] for r in result.resolved] == [[9327, 5.14]] * 3
+
+
+def test_a_group_is_resolved_with_the_members_it_had_when_signalled():
+    # 31 leaves Chromium's group (30) after the signal: it was still reached.
+    records = [
+        *_row(),
+        {
+            **_start(31, 30, 7.0, pgid=31),
+            "kind": "process.update",
+            "start_identity": 4.0,
+        },
+    ]
+    result = _o2("21  6.0 kill(-30, SIGKILL) = 0\n", records)
+    assert result.resolved[0]["targets"] == [[30, 4.0], [31, 4.0]]
+    later = _o2("21  8.0 kill(-30, SIGKILL) = 0\n", records)
+    assert later.resolved[0]["targets"] == [[30, 4.0]]
+
+
 def test_a_thread_of_a_traced_process_is_attributed_through_the_map():
     line = "2001  6.0 kill(-30, SIGKILL) = 0\n"
     assert _o2(line).state == UNKNOWN

@@ -222,19 +222,29 @@ def parse_strace(text: str) -> list[SignalCall]:
 
 @dataclass
 class Lifetime:
-    """One process lifetime, from the watcher's records."""
+    """One process lifetime, from the watcher's records.
+
+    Its role and group are what the watcher read at each sample, since both
+    change: an exec turns the driver's fork into the browser, and a process
+    the watcher catches between its exit and its reaping shows no command line
+    at all, so it reads as ``other``. A question about a signal is answered by
+    the reading in effect when it was sent: the last one the watcher took at or
+    before that moment, or the first one if none was.
+    """
 
     pid: int
     start: float
+    #: The parent at the first reading. Not updated: a reparenting to pid 1
+    #: says nothing about who launched it.
     ppid: int
-    pgid: int | None
     in_row: bool
-    actor: str
     #: The sample that first reported it, and the one that reported its exit.
     first_t: float
     exit_t: float | None = None
     #: The watcher's digest of its browser marker, if it carried one.
     marker: str | None = None
+    #: ``(sample time, actor, group)`` for each reading, in order.
+    readings: list[tuple[float, str, int | None]] = field(default_factory=list)
 
     @property
     def identity(self) -> tuple[int, float]:
@@ -242,6 +252,22 @@ class Lifetime:
 
     def alive_at(self, t: float) -> bool:
         return self.first_t <= t and (self.exit_t is None or t < self.exit_t)
+
+    def _reading(self, t: float) -> tuple[float, str, int | None]:
+        in_effect = [reading for reading in self.readings if reading[0] <= t]
+        return in_effect[-1] if in_effect else self.readings[0]
+
+    def actor_at(self, t: float) -> str:
+        """The role the watcher read for it at *t*."""
+        return self._reading(t)[1]
+
+    def pgid_at(self, t: float) -> int | None:
+        """The group the watcher read for it at *t*."""
+        return self._reading(t)[2]
+
+    def was(self, actor: str) -> bool:
+        """Whether any reading of it showed *actor*."""
+        return any(reading[1] == actor for reading in self.readings)
 
 
 class ProcessHistory:
@@ -279,20 +305,19 @@ class ProcessHistory:
                     pid=pid,
                     start=float(start),
                     ppid=int(entry.get("ppid", -1)),
-                    pgid=entry.get("pgid"),
                     in_row=entry.get("in_row") is True,
-                    actor=str(entry.get("actor", "other")),
                     first_t=t,
                     marker=entry.get("browser_marker"),
                 )
                 current[key] = known
                 self.lifetimes.append(known)
             else:
-                # An update: exec or a new group. The newest reading holds.
-                known.pgid = entry.get("pgid", known.pgid)
-                known.actor = str(entry.get("actor", known.actor))
                 known.in_row = known.in_row or entry.get("in_row") is True
                 known.marker = known.marker or entry.get("browser_marker")
+            # A start or an update: exec, a new group, or an exiting image.
+            known.readings.append(
+                (t, str(entry.get("actor", "other")), entry.get("pgid"))
+            )
 
     def at(self, pid: int, t: float) -> Lifetime | None:
         """The lifetime at *pid* at time *t*, or None if the watcher cannot say."""
@@ -314,7 +339,9 @@ class ProcessHistory:
         was one of that browser's own.
         """
         members = [
-            life for life in self.lifetimes if life.pgid == pgid and life.alive_at(t)
+            life
+            for life in self.lifetimes
+            if life.alive_at(t) and life.pgid_at(t) == pgid
         ]
         if self.leader(pgid, t) is not None:
             return members
@@ -327,7 +354,7 @@ class ProcessHistory:
         return [
             life
             for life in self.lifetimes
-            if life.in_row and life.actor == "browser" and life.marker == marker
+            if life.in_row and life.was("browser") and life.marker == marker
         ]
 
     def marked(self, life: Lifetime) -> bool:
@@ -385,9 +412,9 @@ class O2Result:
     resolved: list[dict[str, Any]] = field(default_factory=list)
 
 
-def _principal(sender: Lifetime, history: ProcessHistory) -> Lifetime | None:
-    """Whom a sender acts for: a guardian for the process that started it."""
-    if sender.actor == "guardian":
+def _principal(sender: Lifetime, history: ProcessHistory, t: float) -> Lifetime | None:
+    """Whom a sender acts for at *t*: a guardian for the process that started it."""
+    if sender.actor_at(t) == "guardian":
         return history.at(sender.ppid, sender.first_t)
     return sender
 
@@ -399,6 +426,7 @@ def _target_kind(
     pgid: int | None,
     leader: Lifetime | None,
     history: ProcessHistory,
+    t: float,
 ) -> str:
     """What a signal was aimed at, in the terms Direct's construction uses.
 
@@ -411,12 +439,12 @@ def _target_kind(
     """
 
     def browser(life: Lifetime) -> bool:
-        return life.actor == "browser" or history.marked(life)
+        return life.actor_at(t) == "browser" or history.marked(life)
 
     if pgid is not None:
         if pgid == principal.pid:
             return "principal-group"
-        if leader is not None and leader.actor == "browser":
+        if leader is not None and leader.actor_at(t) == "browser":
             return "browser-group"
         if leader is None and targets and all(browser(life) for life in targets):
             return "browser-group"
@@ -455,7 +483,7 @@ def derive_o2(
         if sender is None:
             result.unknowns.append(f"sender {call.tid} unknown: {where}")
             continue
-        principal = _principal(sender, history)
+        principal = _principal(sender, history, call.t)
         if principal is None:
             result.unknowns.append(f"whom {sender.pid} acts for is unknown: {where}")
             continue
@@ -465,7 +493,7 @@ def derive_o2(
         pgid: int | None = None
         if call.target_group is not None:
             # ``kill(0, ...)`` is the sender's own group.
-            pgid = call.target_group or sender.pgid
+            pgid = call.target_group or sender.pgid_at(call.t)
             targets = history.group(pgid, call.t) if pgid else None
         elif call.target_pid is not None:
             one = history.at(call.target_pid, call.t)
@@ -486,8 +514,8 @@ def derive_o2(
                 undecided.append(target)
         leader = history.leader(pgid, call.t) if pgid is not None else None
         kind = (
-            f"{sender.actor}:"
-            f"{_target_kind(targets, sender, principal, pgid, leader, history)}"
+            f"{sender.actor_at(call.t)}:"
+            f"{_target_kind(targets, sender, principal, pgid, leader, history, call.t)}"
         )
         classes.add(kind)
         result.resolved.append(
